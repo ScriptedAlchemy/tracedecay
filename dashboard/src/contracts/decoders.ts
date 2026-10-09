@@ -966,11 +966,11 @@ import { z } from "zod";
 export const AcceptWorkProposalDispositionV1Schema: z.ZodLiteral<"accepted"> = z.literal("accepted");
 
 export const AcceptWorkProposalRequestV1Schema: z.ZodObject<{
-  disposition: z.ZodType<AcceptWorkProposalDispositionV1, z.ZodTypeDef, unknown>;
-  mutation: z.ZodType<WorkProductMutationIdentityV1, z.ZodTypeDef, unknown>;
-  proposal: z.ZodType<WorkProposalV1, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  disposition: z.ZodType<AcceptWorkProposalDispositionV1, unknown>;
+  mutation: z.ZodType<WorkProductMutationIdentityV1, unknown>;
+  proposal: z.ZodType<WorkProposalV1, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+}, z.core.$strict> = z.object({
   disposition: z.lazy(() => AcceptWorkProposalDispositionV1Schema),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   proposal: z.lazy(() => WorkProposalV1Schema),
@@ -978,37 +978,37 @@ export const AcceptWorkProposalRequestV1Schema: z.ZodObject<{
 }).strict();
 
 export const AcceptWorkTaskRequestV1Schema: z.ZodObject<{
-  evidence_by_criterion: z.ZodType<Record<string, string>, z.ZodTypeDef, unknown>;
-  mutation: z.ZodType<WorkProductMutationIdentityV1, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
-  evidence_by_criterion: z.record(z.string()),
+  evidence_by_criterion: z.ZodType<Record<string, string>, unknown>;
+  mutation: z.ZodType<WorkProductMutationIdentityV1, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
+  evidence_by_criterion: z.record(z.string(), z.string()),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 
 /** Strongly typed canonical identity: `ActorId`. */
-export const ActorIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const ActorIdSchema: z.ZodType<string, unknown> = z.string();
 
 export const AddWorkTaskRequestV1Schema: z.ZodObject<{
-  item: z.ZodType<WorkItemV1, z.ZodTypeDef, unknown>;
-  mutation: z.ZodType<WorkProductMutationIdentityV1, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  item: z.ZodType<WorkItemV1, unknown>;
+  mutation: z.ZodType<WorkProductMutationIdentityV1, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+}, z.core.$strict> = z.object({
   item: z.lazy(() => WorkItemV1Schema),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
 }).strict();
 
 export const AdjudicateWorkLeakCommandV1Schema: z.ZodObject<{
-  adjudication_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  attempt: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  command_id: z.ZodType<WorkCommandId, z.ZodTypeDef, unknown>;
-  detection_horizon_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  expected_revision: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  adjudication_id: z.ZodType<string, unknown>;
+  attempt: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  command_id: z.ZodType<WorkCommandId, unknown>;
+  detection_horizon_micros: z.ZodType<number, unknown>;
+  expected_revision: z.ZodType<number | null, unknown>;
+}, z.core.$strict> = z.object({
   adjudication_id: z.string(),
   attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
   command_id: z.lazy(() => WorkCommandIdSchema),
@@ -1019,19 +1019,19 @@ export const AdjudicateWorkLeakCommandV1Schema: z.ZodObject<{
 /** Execution admission together with the immutable provider snapshot licensed
 by the accepted proposal and current configuration authority. */
 export const AdmittedWorkExecutionV1Schema: z.ZodObject<{
-  execution_snapshot: z.ZodType<WorkExecutionSnapshot, z.ZodTypeDef, unknown>;
-  mutation: z.ZodType<WorkProductMutationReceiptV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  execution_snapshot: z.ZodType<WorkExecutionSnapshot, unknown>;
+  mutation: z.ZodType<WorkProductMutationReceiptV1, unknown>;
+}, z.core.$strict> = z.object({
   execution_snapshot: z.lazy(() => WorkExecutionSnapshotSchema),
   mutation: z.lazy(() => WorkProductMutationReceiptV1Schema),
 }).strict();
 
 export const AdmitWorkExecutionRequestV1Schema: z.ZodObject<{
-  based_on_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  mutation: z.ZodType<WorkProductMutationIdentityV1, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  based_on_version: z.ZodType<number, unknown>;
+  mutation: z.ZodType<WorkProductMutationIdentityV1, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   based_on_version: z.number().int().safe().min(0),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
@@ -1039,12 +1039,12 @@ export const AdmitWorkExecutionRequestV1Schema: z.ZodObject<{
 }).strict();
 
 export const AdmitWorkPlacementCommandSchema: z.ZodObject<{
-  occurred_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  retention_eligible_at: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  target: z.ZodType<WorkPlacementTargetV1, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  occurred_at: z.ZodType<UtcMicros, unknown>;
+  retention_eligible_at: z.ZodType<UtcMicros | null, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  target: z.ZodType<WorkPlacementTargetV1, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   occurred_at: z.lazy(() => UtcMicrosSchema),
   retention_eligible_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   run_id: z.lazy(() => RunIdSchema),
@@ -1054,27 +1054,27 @@ export const AdmitWorkPlacementCommandSchema: z.ZodObject<{
 
 /** Admits one synthesis attempt over an ordered set of sibling sources. */
 export const AdmitWorkSynthesisCommandSchema: z.ZodObject<{
-  output_name: z.ZodType<WorkflowOutputName, z.ZodTypeDef, unknown>;
-  sources: z.ZodType<Array<WorkAttemptIdentityV1>, z.ZodTypeDef, unknown>;
-  start: z.ZodType<StartWorkAttemptCommand, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  output_name: z.ZodType<WorkflowOutputName, unknown>;
+  sources: z.ZodType<Array<WorkAttemptIdentityV1>, unknown>;
+  start: z.ZodType<StartWorkAttemptCommand, unknown>;
+}, z.core.$strict> = z.object({
   output_name: z.lazy(() => WorkflowOutputNameSchema),
   sources: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
   start: z.lazy(() => StartWorkAttemptCommandSchema),
 }).strict();
 
 /** Strongly typed canonical identity: `AgentInstanceId`. */
-export const AgentInstanceIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const AgentInstanceIdSchema: z.ZodType<string, unknown> = z.string();
 
-export const AgentTaskFailureClassSchema: z.ZodType<"denied" | "disconnected" | "malformed_output" | "permanent" | "retryable" | "timeout" | "unavailable" | "input_too_large", z.ZodTypeDef, unknown> = z.union([z.enum(["denied", "disconnected", "malformed_output", "permanent", "retryable", "timeout", "unavailable"]), z.literal("input_too_large")]);
+export const AgentTaskFailureClassSchema: z.ZodType<"denied" | "disconnected" | "malformed_output" | "permanent" | "retryable" | "timeout" | "unavailable" | "input_too_large", unknown> = z.union([z.enum(["denied", "disconnected", "malformed_output", "permanent", "retryable", "timeout", "unavailable"]), z.literal("input_too_large")]);
 
-export const AgentTaskKindSchema: z.ZodEnum<["combined_review", "memory_curator", "session_reflector", "skill_writer", "user_job"]> = z.enum(["combined_review", "memory_curator", "session_reflector", "skill_writer", "user_job"]);
+export const AgentTaskKindSchema: z.ZodEnum<{ "combined_review": "combined_review"; "memory_curator": "memory_curator"; "session_reflector": "session_reflector"; "skill_writer": "skill_writer"; "user_job": "user_job" }> = z.enum(["combined_review", "memory_curator", "session_reflector", "skill_writer", "user_job"]);
 
 export const AgentTaskRetryAttemptSchema: z.ZodObject<{
-  attempt: z.ZodType<number, z.ZodTypeDef, unknown>;
-  backoff_millis: z.ZodType<number, z.ZodTypeDef, unknown>;
-  failure_classification: z.ZodOptional<z.ZodType<AgentTaskFailureClass | null, z.ZodTypeDef, unknown>>;
-  succeeded: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  attempt: z.ZodType<number, unknown>;
+  backoff_millis: z.ZodType<number, unknown>;
+  failure_classification: z.ZodOptional<z.ZodType<AgentTaskFailureClass | null, unknown>>;
+  succeeded: z.ZodType<boolean, unknown>;
 }> = z.object({
   attempt: z.number().int().min(0),
   backoff_millis: z.number().int().safe().min(0),
@@ -1083,12 +1083,12 @@ export const AgentTaskRetryAttemptSchema: z.ZodObject<{
 });
 
 export const AggregatedProviderUsageCountersV1Schema: z.ZodObject<{
-  cache_read_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  cache_write_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  input_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  output_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  reasoning_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  total_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  cache_read_tokens: z.ZodType<number | null, unknown>;
+  cache_write_tokens: z.ZodType<number | null, unknown>;
+  input_tokens: z.ZodType<number | null, unknown>;
+  output_tokens: z.ZodType<number | null, unknown>;
+  reasoning_tokens: z.ZodType<number | null, unknown>;
+  total_tokens: z.ZodType<number | null, unknown>;
 }> = z.object({
   cache_read_tokens: z.number().int().safe().min(0).nullable(),
   cache_write_tokens: z.number().int().safe().min(0).nullable(),
@@ -1099,9 +1099,9 @@ export const AggregatedProviderUsageCountersV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsAgentsPayloadV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  by_agent: z.ZodType<Array<AnalyticsAgentUsageV1>, z.ZodTypeDef, unknown>;
-  source: z.ZodType<string, z.ZodTypeDef, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  by_agent: z.ZodType<Array<AnalyticsAgentUsageV1>, unknown>;
+  source: z.ZodType<string, unknown>;
 }> = z.object({
   available: z.boolean(),
   by_agent: z.array(z.lazy(() => AnalyticsAgentUsageV1Schema)),
@@ -1109,37 +1109,37 @@ export const AnalyticsAgentsPayloadV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsAgentUsageV1Schema: z.ZodObject<{
-  agent: z.ZodType<string, z.ZodTypeDef, unknown>;
-  sessions: z.ZodType<number, z.ZodTypeDef, unknown>;
+  agent: z.ZodType<string, unknown>;
+  sessions: z.ZodType<number, unknown>;
 }> = z.object({
   agent: z.string(),
   sessions: z.number().int().safe(),
 });
 
 export const AnalyticsDiagnosticsPayloadV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  by_event_kind: z.ZodType<Array<AnalyticsEventKindCountV1>, z.ZodTypeDef, unknown>;
-  by_hook: z.ZodType<Array<AnalyticsHookNameCountV1>, z.ZodTypeDef, unknown>;
-  by_mcp_tool: z.ZodType<Array<AnalyticsToolCountV1>, z.ZodTypeDef, unknown>;
-  by_outcome: z.ZodType<Array<AnalyticsOutcomeCountV1>, z.ZodTypeDef, unknown>;
-  by_prompt_category: z.ZodType<Array<AnalyticsPromptCategoryCountV1>, z.ZodTypeDef, unknown>;
-  by_tool: z.ZodType<Array<AnalyticsToolCountV1>, z.ZodTypeDef, unknown>;
-  by_tool_category: z.ZodType<Array<AnalyticsToolCategoryCountV1>, z.ZodTypeDef, unknown>;
-  event_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  events_per_hour: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  hint_efficacy: z.ZodType<AnalyticsHintEfficacyV1, z.ZodTypeDef, unknown>;
-  hook_call_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  hook_readiness: z.ZodType<unknown, z.ZodTypeDef, unknown>;
-  hook_sources: z.ZodType<Array<unknown>, z.ZodTypeDef, unknown>;
-  hook_window: z.ZodType<AnalyticsHookWindowV1, z.ZodTypeDef, unknown>;
-  mcp_tool_call_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  message_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  ratios: z.ZodType<AnalyticsDiagnosticsRatiosV1, z.ZodTypeDef, unknown>;
-  recent_events: z.ZodType<Array<AnalyticsRecentEventV1>, z.ZodTypeDef, unknown>;
-  recent_hooks: z.ZodType<Array<AnalyticsRecentHookV1>, z.ZodTypeDef, unknown>;
-  source: z.ZodType<string, z.ZodTypeDef, unknown>;
-  tool_call_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  tracedecay_call_count: z.ZodType<number, z.ZodTypeDef, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  by_event_kind: z.ZodType<Array<AnalyticsEventKindCountV1>, unknown>;
+  by_hook: z.ZodType<Array<AnalyticsHookNameCountV1>, unknown>;
+  by_mcp_tool: z.ZodType<Array<AnalyticsToolCountV1>, unknown>;
+  by_outcome: z.ZodType<Array<AnalyticsOutcomeCountV1>, unknown>;
+  by_prompt_category: z.ZodType<Array<AnalyticsPromptCategoryCountV1>, unknown>;
+  by_tool: z.ZodType<Array<AnalyticsToolCountV1>, unknown>;
+  by_tool_category: z.ZodType<Array<AnalyticsToolCategoryCountV1>, unknown>;
+  event_count: z.ZodType<number, unknown>;
+  events_per_hour: z.ZodType<number | null, unknown>;
+  hint_efficacy: z.ZodType<AnalyticsHintEfficacyV1, unknown>;
+  hook_call_count: z.ZodType<number, unknown>;
+  hook_readiness: z.ZodType<unknown, unknown>;
+  hook_sources: z.ZodType<Array<unknown>, unknown>;
+  hook_window: z.ZodType<AnalyticsHookWindowV1, unknown>;
+  mcp_tool_call_count: z.ZodType<number, unknown>;
+  message_count: z.ZodType<number, unknown>;
+  ratios: z.ZodType<AnalyticsDiagnosticsRatiosV1, unknown>;
+  recent_events: z.ZodType<Array<AnalyticsRecentEventV1>, unknown>;
+  recent_hooks: z.ZodType<Array<AnalyticsRecentHookV1>, unknown>;
+  source: z.ZodType<string, unknown>;
+  tool_call_count: z.ZodType<number, unknown>;
+  tracedecay_call_count: z.ZodType<number, unknown>;
 }> = z.object({
   available: z.boolean(),
   by_event_kind: z.array(z.lazy(() => AnalyticsEventKindCountV1Schema)),
@@ -1167,10 +1167,10 @@ export const AnalyticsDiagnosticsPayloadV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsDiagnosticsRatiosV1Schema: z.ZodObject<{
-  events_per_message: z.ZodType<number, z.ZodTypeDef, unknown>;
-  hook_calls_per_message: z.ZodType<number, z.ZodTypeDef, unknown>;
-  mcp_tool_calls_per_message: z.ZodType<number, z.ZodTypeDef, unknown>;
-  tool_calls_per_message: z.ZodType<number, z.ZodTypeDef, unknown>;
+  events_per_message: z.ZodType<number, unknown>;
+  hook_calls_per_message: z.ZodType<number, unknown>;
+  mcp_tool_calls_per_message: z.ZodType<number, unknown>;
+  tool_calls_per_message: z.ZodType<number, unknown>;
 }> = z.object({
   events_per_message: z.number(),
   hook_calls_per_message: z.number(),
@@ -1179,19 +1179,19 @@ export const AnalyticsDiagnosticsRatiosV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsEventKindCountV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  event_kind: z.ZodType<string, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  event_kind: z.ZodType<string, unknown>;
 }> = z.object({
   count: z.number().int().safe(),
   event_kind: z.string(),
 });
 
 export const AnalyticsHintCategoryV1Schema: z.ZodObject<{
-  category: z.ZodType<string, z.ZodTypeDef, unknown>;
-  emitted: z.ZodType<number, z.ZodTypeDef, unknown>;
-  followed: z.ZodType<number, z.ZodTypeDef, unknown>;
-  ignored: z.ZodType<number, z.ZodTypeDef, unknown>;
-  suppressed: z.ZodType<number, z.ZodTypeDef, unknown>;
+  category: z.ZodType<string, unknown>;
+  emitted: z.ZodType<number, unknown>;
+  followed: z.ZodType<number, unknown>;
+  ignored: z.ZodType<number, unknown>;
+  suppressed: z.ZodType<number, unknown>;
 }> = z.object({
   category: z.string(),
   emitted: z.number().int().safe(),
@@ -1201,11 +1201,11 @@ export const AnalyticsHintCategoryV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsHintEfficacyCategoryV1Schema: z.ZodObject<{
-  acted: z.ZodType<number, z.ZodTypeDef, unknown>;
-  category: z.ZodType<string, z.ZodTypeDef, unknown>;
-  emitted: z.ZodType<number, z.ZodTypeDef, unknown>;
-  ignored: z.ZodType<number, z.ZodTypeDef, unknown>;
-  unresolved: z.ZodType<number, z.ZodTypeDef, unknown>;
+  acted: z.ZodType<number, unknown>;
+  category: z.ZodType<string, unknown>;
+  emitted: z.ZodType<number, unknown>;
+  ignored: z.ZodType<number, unknown>;
+  unresolved: z.ZodType<number, unknown>;
 }> = z.object({
   acted: z.number().int().safe(),
   category: z.string(),
@@ -1215,10 +1215,10 @@ export const AnalyticsHintEfficacyCategoryV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsHintEfficacyTotalsV1Schema: z.ZodObject<{
-  acted: z.ZodType<number, z.ZodTypeDef, unknown>;
-  emitted: z.ZodType<number, z.ZodTypeDef, unknown>;
-  ignored: z.ZodType<number, z.ZodTypeDef, unknown>;
-  unresolved: z.ZodType<number, z.ZodTypeDef, unknown>;
+  acted: z.ZodType<number, unknown>;
+  emitted: z.ZodType<number, unknown>;
+  ignored: z.ZodType<number, unknown>;
+  unresolved: z.ZodType<number, unknown>;
 }> = z.object({
   acted: z.number().int().safe(),
   emitted: z.number().int().safe(),
@@ -1227,10 +1227,10 @@ export const AnalyticsHintEfficacyTotalsV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsHintEfficacyV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  by_category: z.ZodType<Array<AnalyticsHintEfficacyCategoryV1>, z.ZodTypeDef, unknown>;
-  source: z.ZodType<string, z.ZodTypeDef, unknown>;
-  totals: z.ZodType<AnalyticsHintEfficacyTotalsV1, z.ZodTypeDef, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  by_category: z.ZodType<Array<AnalyticsHintEfficacyCategoryV1>, unknown>;
+  source: z.ZodType<string, unknown>;
+  totals: z.ZodType<AnalyticsHintEfficacyTotalsV1, unknown>;
 }> = z.object({
   available: z.boolean(),
   by_category: z.array(z.lazy(() => AnalyticsHintEfficacyCategoryV1Schema)),
@@ -1239,10 +1239,10 @@ export const AnalyticsHintEfficacyV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsHintsPayloadV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  by_category: z.ZodType<Array<AnalyticsHintCategoryV1>, z.ZodTypeDef, unknown>;
-  error: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  source: z.ZodType<string, z.ZodTypeDef, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  by_category: z.ZodType<Array<AnalyticsHintCategoryV1>, unknown>;
+  error: z.ZodType<string | null, unknown>;
+  source: z.ZodType<string, unknown>;
 }> = z.object({
   available: z.boolean(),
   by_category: z.array(z.lazy(() => AnalyticsHintCategoryV1Schema)),
@@ -1251,21 +1251,21 @@ export const AnalyticsHintsPayloadV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsHookNameCountV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  hook_name: z.ZodType<string, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  hook_name: z.ZodType<string, unknown>;
 }> = z.object({
   count: z.number().int().safe(),
   hook_name: z.string(),
 });
 
 export const AnalyticsHookWindowV1Schema: z.ZodObject<{
-  newest_ts_unix_ms: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  oldest_ts_unix_ms: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  rows_included: z.ZodType<number, z.ZodTypeDef, unknown>;
-  rows_scanned: z.ZodType<number, z.ZodTypeDef, unknown>;
-  total_rows_known: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  window_rows: z.ZodType<number, z.ZodTypeDef, unknown>;
+  newest_ts_unix_ms: z.ZodType<number | null, unknown>;
+  oldest_ts_unix_ms: z.ZodType<number | null, unknown>;
+  rows_included: z.ZodType<number, unknown>;
+  rows_scanned: z.ZodType<number, unknown>;
+  total_rows_known: z.ZodType<boolean, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
+  window_rows: z.ZodType<number, unknown>;
 }> = z.object({
   newest_ts_unix_ms: z.number().int().safe().nullable(),
   oldest_ts_unix_ms: z.number().int().safe().nullable(),
@@ -1277,10 +1277,10 @@ export const AnalyticsHookWindowV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsModeReadModelV1Schema: z.ZodObject<{
-  coverage: z.ZodType<MetricCoverageV1, z.ZodTypeDef, unknown>;
-  current: z.ZodType<AnalyticsModeV1 | null, z.ZodTypeDef, unknown>;
-  transition_watermark: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  unavailable_reason: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  coverage: z.ZodType<MetricCoverageV1, unknown>;
+  current: z.ZodType<AnalyticsModeV1 | null, unknown>;
+  transition_watermark: z.ZodType<string | null, unknown>;
+  unavailable_reason: z.ZodType<string | null, unknown>;
 }> = z.object({
   coverage: z.lazy(() => MetricCoverageV1Schema),
   current: z.union([z.lazy(() => AnalyticsModeV1Schema), z.null()]),
@@ -1288,26 +1288,26 @@ export const AnalyticsModeReadModelV1Schema: z.ZodObject<{
   unavailable_reason: z.string().nullable(),
 });
 
-export const AnalyticsModeV1Schema: z.ZodEnum<["aggregate_share", "local_only", "off"]> = z.enum(["aggregate_share", "local_only", "off"]);
+export const AnalyticsModeV1Schema: z.ZodEnum<{ "aggregate_share": "aggregate_share"; "local_only": "local_only"; "off": "off" }> = z.enum(["aggregate_share", "local_only", "off"]);
 
 export const AnalyticsOutcomeCountV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  outcome: z.ZodType<string, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  outcome: z.ZodType<string, unknown>;
 }> = z.object({
   count: z.number().int().safe(),
   outcome: z.string(),
 });
 
 export const AnalyticsOverviewPayloadV1Schema: z.ZodObject<{
-  agents: z.ZodType<AnalyticsAgentsPayloadV1, z.ZodTypeDef, unknown>;
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  db: z.ZodType<string, z.ZodTypeDef, unknown>;
-  diagnostics: z.ZodType<AnalyticsDiagnosticsPayloadV1, z.ZodTypeDef, unknown>;
-  hints: z.ZodType<AnalyticsHintsPayloadV1, z.ZodTypeDef, unknown>;
-  observatory: z.ZodType<ObservatoryReadModelV1 | null, z.ZodTypeDef, unknown>;
-  scope: z.ZodType<string, z.ZodTypeDef, unknown>;
-  underused_tool_families: z.ZodType<Array<AnalyticsUnderusedFamilyV1>, z.ZodTypeDef, unknown>;
-  usage: z.ZodType<AnalyticsUsageSummaryV1, z.ZodTypeDef, unknown>;
+  agents: z.ZodType<AnalyticsAgentsPayloadV1, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  db: z.ZodType<string, unknown>;
+  diagnostics: z.ZodType<AnalyticsDiagnosticsPayloadV1, unknown>;
+  hints: z.ZodType<AnalyticsHintsPayloadV1, unknown>;
+  observatory: z.ZodType<ObservatoryReadModelV1 | null, unknown>;
+  scope: z.ZodType<string, unknown>;
+  underused_tool_families: z.ZodType<Array<AnalyticsUnderusedFamilyV1>, unknown>;
+  usage: z.ZodType<AnalyticsUsageSummaryV1, unknown>;
 }> = z.object({
   agents: z.lazy(() => AnalyticsAgentsPayloadV1Schema),
   available: z.boolean(),
@@ -1321,20 +1321,20 @@ export const AnalyticsOverviewPayloadV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsPromptCategoryCountV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  prompt_category: z.ZodType<string, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  prompt_category: z.ZodType<string, unknown>;
 }> = z.object({
   count: z.number().int().safe(),
   prompt_category: z.string(),
 });
 
 export const AnalyticsRecentEventV1Schema: z.ZodObject<{
-  cost: z.ZodOptional<z.ZodType<RequestCostReceiptV1 | null, z.ZodTypeDef, unknown>>;
-  event_kind: z.ZodType<string, z.ZodTypeDef, unknown>;
-  hook_name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  outcome: z.ZodType<string, z.ZodTypeDef, unknown>;
-  timestamp: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  tool_name: z.ZodType<string, z.ZodTypeDef, unknown>;
+  cost: z.ZodOptional<z.ZodType<RequestCostReceiptV1 | null, unknown>>;
+  event_kind: z.ZodType<string, unknown>;
+  hook_name: z.ZodType<string, unknown>;
+  outcome: z.ZodType<string, unknown>;
+  timestamp: z.ZodType<number | null, unknown>;
+  tool_name: z.ZodType<string, unknown>;
 }> = z.object({
   cost: z.union([z.lazy(() => RequestCostReceiptV1Schema), z.null()]).optional(),
   event_kind: z.string(),
@@ -1345,12 +1345,12 @@ export const AnalyticsRecentEventV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsRecentHookV1Schema: z.ZodObject<{
-  agent: z.ZodType<string, z.ZodTypeDef, unknown>;
-  hook_name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  prompt_category: z.ZodType<string, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  tool_name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  ts_unix_ms: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  agent: z.ZodType<string, unknown>;
+  hook_name: z.ZodType<string, unknown>;
+  prompt_category: z.ZodType<string, unknown>;
+  session_id: z.ZodType<string, unknown>;
+  tool_name: z.ZodType<string, unknown>;
+  ts_unix_ms: z.ZodType<number | null, unknown>;
 }> = z.object({
   agent: z.string(),
   hook_name: z.string(),
@@ -1371,19 +1371,19 @@ export const AnalyticsSubagentLinkV1Schema: z.ZodUnion<[z.ZodLiteral<"root">, z.
 
 /** One session in the subagent delegation tree. */
 export const AnalyticsSubagentNodeV1Schema: z.ZodObject<{
-  agent: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  depth: z.ZodType<number, z.ZodTypeDef, unknown>;
-  descendants: z.ZodType<number, z.ZodTypeDef, unknown>;
-  ended_at: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  is_subagent: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  link: z.ZodType<AnalyticsSubagentLinkV1, z.ZodTypeDef, unknown>;
-  parent_session_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  parent_tool_use_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  provider: z.ZodType<string, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  started_at: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  title: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  usage: z.ZodOptional<z.ZodType<ProviderUsageSessionTotalsV1 | null, z.ZodTypeDef, unknown>>;
+  agent: z.ZodType<string | null, unknown>;
+  depth: z.ZodType<number, unknown>;
+  descendants: z.ZodType<number, unknown>;
+  ended_at: z.ZodType<number | null, unknown>;
+  is_subagent: z.ZodType<boolean, unknown>;
+  link: z.ZodType<AnalyticsSubagentLinkV1, unknown>;
+  parent_session_id: z.ZodType<string | null, unknown>;
+  parent_tool_use_id: z.ZodType<string | null, unknown>;
+  provider: z.ZodType<string, unknown>;
+  session_id: z.ZodType<string, unknown>;
+  started_at: z.ZodType<number | null, unknown>;
+  title: z.ZodType<string | null, unknown>;
+  usage: z.ZodOptional<z.ZodType<ProviderUsageSessionTotalsV1 | null, unknown>>;
 }> = z.object({
   agent: z.string().nullable(),
   depth: z.number().int().safe(),
@@ -1406,18 +1406,18 @@ export const AnalyticsSubagentNodeV1Schema: z.ZodObject<{
 and before that parent's later siblings, so a reader can draw the tree from
 `depth` alone without reassembling edges client-side. */
 export const AnalyticsSubagentTreePayloadV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  cycle_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  edge_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  error: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  max_depth: z.ZodType<number, z.ZodTypeDef, unknown>;
-  missing_parent_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  nodes: z.ZodType<Array<AnalyticsSubagentNodeV1>, z.ZodTypeDef, unknown>;
-  root_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  sessions_read: z.ZodType<number, z.ZodTypeDef, unknown>;
-  source: z.ZodType<string, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  usage_coverage: z.ZodOptional<z.ZodType<ProviderUsageCoverageV1 | null, z.ZodTypeDef, unknown>>;
+  available: z.ZodType<boolean, unknown>;
+  cycle_count: z.ZodType<number, unknown>;
+  edge_count: z.ZodType<number, unknown>;
+  error: z.ZodType<string | null, unknown>;
+  max_depth: z.ZodType<number, unknown>;
+  missing_parent_count: z.ZodType<number, unknown>;
+  nodes: z.ZodType<Array<AnalyticsSubagentNodeV1>, unknown>;
+  root_count: z.ZodType<number, unknown>;
+  sessions_read: z.ZodType<number, unknown>;
+  source: z.ZodType<string, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
+  usage_coverage: z.ZodOptional<z.ZodType<ProviderUsageCoverageV1 | null, unknown>>;
 }> = z.object({
   available: z.boolean(),
   cycle_count: z.number().int().safe(),
@@ -1434,27 +1434,27 @@ export const AnalyticsSubagentTreePayloadV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsToolCategoryCountV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  tool_category: z.ZodType<string, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  tool_category: z.ZodType<string, unknown>;
 }> = z.object({
   count: z.number().int().safe(),
   tool_category: z.string(),
 });
 
 export const AnalyticsToolCountV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  tool_name: z.ZodType<string, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  tool_name: z.ZodType<string, unknown>;
 }> = z.object({
   count: z.number().int().safe(),
   tool_name: z.string(),
 });
 
 export const AnalyticsUnderusedFamilyV1Schema: z.ZodObject<{
-  family: z.ZodType<string, z.ZodTypeDef, unknown>;
-  missed_events: z.ZodType<number, z.ZodTypeDef, unknown>;
-  relevant_events: z.ZodType<number, z.ZodTypeDef, unknown>;
-  underused: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  usage_events: z.ZodType<number, z.ZodTypeDef, unknown>;
+  family: z.ZodType<string, unknown>;
+  missed_events: z.ZodType<number, unknown>;
+  relevant_events: z.ZodType<number, unknown>;
+  underused: z.ZodType<boolean, unknown>;
+  usage_events: z.ZodType<number, unknown>;
 }> = z.object({
   family: z.string(),
   missed_events: z.number().int().safe(),
@@ -1464,9 +1464,9 @@ export const AnalyticsUnderusedFamilyV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsUnderusedPayloadV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  db: z.ZodType<string, z.ZodTypeDef, unknown>;
-  families: z.ZodType<Array<AnalyticsUnderusedFamilyV1>, z.ZodTypeDef, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  db: z.ZodType<string, unknown>;
+  families: z.ZodType<Array<AnalyticsUnderusedFamilyV1>, unknown>;
 }> = z.object({
   available: z.boolean(),
   db: z.string(),
@@ -1474,9 +1474,9 @@ export const AnalyticsUnderusedPayloadV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsUsageCategoryV1Schema: z.ZodObject<{
-  category: z.ZodType<string, z.ZodTypeDef, unknown>;
-  events: z.ZodType<number, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<string, z.ZodTypeDef, unknown>;
+  category: z.ZodType<string, unknown>;
+  events: z.ZodType<number, unknown>;
+  kind: z.ZodType<string, unknown>;
 }> = z.object({
   category: z.string(),
   events: z.number().int().safe(),
@@ -1484,11 +1484,11 @@ export const AnalyticsUsageCategoryV1Schema: z.ZodObject<{
 });
 
 export const AnalyticsUsageSummaryV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  by_category: z.ZodType<Array<AnalyticsUsageCategoryV1>, z.ZodTypeDef, unknown>;
-  event_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  message_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  source: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  by_category: z.ZodType<Array<AnalyticsUsageCategoryV1>, unknown>;
+  event_count: z.ZodType<number | null, unknown>;
+  message_count: z.ZodType<number, unknown>;
+  source: z.ZodType<string | null, unknown>;
 }> = z.object({
   available: z.boolean(),
   by_category: z.array(z.lazy(() => AnalyticsUsageCategoryV1Schema)),
@@ -1498,11 +1498,11 @@ export const AnalyticsUsageSummaryV1Schema: z.ZodObject<{
 });
 
 /** Stable non-retryable class for an admitted execution failure. */
-export const ApplicationExecutionFailureClassV1Schema: z.ZodEnum<["denied", "malformed_output", "permanent"]> = z.enum(["denied", "malformed_output", "permanent"]);
+export const ApplicationExecutionFailureClassV1Schema: z.ZodEnum<{ "denied": "denied"; "malformed_output": "malformed_output"; "permanent": "permanent" }> = z.enum(["denied", "malformed_output", "permanent"]);
 
 /** The structured facts behind a problem. Adapters read these fields; the
 problem's `message` is only their one human rendering. */
-export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetailV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetailV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("code_graph_rewarming"),
   retry_after_millis: z.number().int().safe().min(0),
 }).strict(), z.object({
@@ -1554,42 +1554,42 @@ export const ApplicationProblemDetailV1Schema: z.ZodType<ApplicationProblemDetai
 states are admitted terminals; partial effects carry their committed
 receipt directly while reset-required states carry an explicit action. */
 export const ApplicationProblemEnvelopeSchema: z.ZodObject<{
-  contract: z.ZodType<ResultContractRef, z.ZodTypeDef, unknown>;
-  problem: z.ZodType<ApplicationProblemRecord, z.ZodTypeDef, unknown>;
-  request_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  contract: z.ZodType<ResultContractRef, unknown>;
+  problem: z.ZodType<ApplicationProblemRecord, unknown>;
+  request_id: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   contract: z.lazy(() => ResultContractRefSchema),
   problem: z.lazy(() => ApplicationProblemRecordSchema),
   request_id: z.string(),
 }).strict();
 
 /** Stable problem-code taxonomy for request failures and admitted terminals. */
-export const ApplicationProblemKindSchema: z.ZodEnum<["cancelled", "conflict", "execution_failed", "invalid_request", "not_found_or_not_authorized", "partial_effect", "reset_required", "saturated", "stale", "timed_out", "unavailable", "unsupported"]> = z.enum(["cancelled", "conflict", "execution_failed", "invalid_request", "not_found_or_not_authorized", "partial_effect", "reset_required", "saturated", "stale", "timed_out", "unavailable", "unsupported"]);
+export const ApplicationProblemKindSchema: z.ZodEnum<{ "cancelled": "cancelled"; "conflict": "conflict"; "execution_failed": "execution_failed"; "invalid_request": "invalid_request"; "not_found_or_not_authorized": "not_found_or_not_authorized"; "partial_effect": "partial_effect"; "reset_required": "reset_required"; "saturated": "saturated"; "stale": "stale"; "timed_out": "timed_out"; "unavailable": "unavailable"; "unsupported": "unsupported" }> = z.enum(["cancelled", "conflict", "execution_failed", "invalid_request", "not_found_or_not_authorized", "partial_effect", "reset_required", "saturated", "stale", "timed_out", "unavailable", "unsupported"]);
 
 /** Stable application problem record shared verbatim by every adapter. */
 export const ApplicationProblemRecordSchema: z.ZodObject<{
-  cancellation_stage: z.ZodType<RequiredNullable3, z.ZodTypeDef, unknown>;
-  code: z.ZodType<string, z.ZodTypeDef, unknown>;
-  committed_receipt: z.ZodType<RequiredNullable2, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<EvidenceCoverage | null, z.ZodTypeDef, unknown>;
-  detail: z.ZodType<RequiredNullable, z.ZodTypeDef, unknown>;
-  details: z.ZodType<Array<SafeDiagnostic>, z.ZodTypeDef, unknown>;
-  diagnostic: z.ZodType<SafeDiagnostic | null, z.ZodTypeDef, unknown>;
-  execution_failure_classification: z.ZodType<RequiredNullable5, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<ApplicationProblemKind, z.ZodTypeDef, unknown>;
-  legal_actions: z.ZodType<Array<LegalAction>, z.ZodTypeDef, unknown>;
-  message: z.ZodType<string, z.ZodTypeDef, unknown>;
-  owning_layer: z.ZodType<ProblemOwningLayer, z.ZodTypeDef, unknown>;
-  request_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  retry: z.ZodType<RetryDirective, z.ZodTypeDef, unknown>;
-  retry_after_millis: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  retry_scope: z.ZodType<RetryScope | null, z.ZodTypeDef, unknown>;
-  retryable: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-  terminality: z.ZodType<ProblemTerminality, z.ZodTypeDef, unknown>;
-  trace_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  unavailable_classification: z.ZodType<RequiredNullable4, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cancellation_stage: z.ZodType<RequiredNullable3, unknown>;
+  code: z.ZodType<string, unknown>;
+  committed_receipt: z.ZodType<RequiredNullable2, unknown>;
+  coverage: z.ZodType<EvidenceCoverage | null, unknown>;
+  detail: z.ZodType<RequiredNullable, unknown>;
+  details: z.ZodType<Array<SafeDiagnostic>, unknown>;
+  diagnostic: z.ZodType<SafeDiagnostic | null, unknown>;
+  execution_failure_classification: z.ZodType<RequiredNullable5, unknown>;
+  kind: z.ZodType<ApplicationProblemKind, unknown>;
+  legal_actions: z.ZodType<Array<LegalAction>, unknown>;
+  message: z.ZodType<string, unknown>;
+  owning_layer: z.ZodType<ProblemOwningLayer, unknown>;
+  request_id: z.ZodType<string, unknown>;
+  retry: z.ZodType<RetryDirective, unknown>;
+  retry_after_millis: z.ZodType<number | null, unknown>;
+  retry_scope: z.ZodType<RetryScope | null, unknown>;
+  retryable: z.ZodType<boolean, unknown>;
+  revision: z.ZodType<number, unknown>;
+  terminality: z.ZodType<ProblemTerminality, unknown>;
+  trace_id: z.ZodType<string, unknown>;
+  unavailable_classification: z.ZodType<RequiredNullable4, unknown>;
+}, z.core.$strict> = z.object({
   cancellation_stage: z.lazy(() => RequiredNullable3Schema),
   code: z.string(),
   committed_receipt: z.lazy(() => RequiredNullable2Schema),
@@ -1614,20 +1614,20 @@ export const ApplicationProblemRecordSchema: z.ZodObject<{
 }).strict();
 
 /** Stable reason an application authority is unavailable. */
-export const ApplicationUnavailableClassV1Schema: z.ZodEnum<["authority", "backend_disconnected", "backend_retryable", "backend_unavailable"]> = z.enum(["authority", "backend_disconnected", "backend_retryable", "backend_unavailable"]);
+export const ApplicationUnavailableClassV1Schema: z.ZodEnum<{ "authority": "authority"; "backend_disconnected": "backend_disconnected"; "backend_retryable": "backend_retryable"; "backend_unavailable": "backend_unavailable" }> = z.enum(["authority", "backend_disconnected", "backend_retryable", "backend_unavailable"]);
 
 export const ApplyWorkRelationReplanRequestV1Schema: z.ZodObject<{
-  mutation: z.ZodType<WorkProductMutationIdentityV1, z.ZodTypeDef, unknown>;
-  proposal_id: z.ZodType<ProposalId, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  mutation: z.ZodType<WorkProductMutationIdentityV1, unknown>;
+  proposal_id: z.ZodType<ProposalId, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+}, z.core.$strict> = z.object({
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   proposal_id: z.lazy(() => ProposalIdSchema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
 }).strict();
 
 /** Strongly typed canonical identity: `AttemptId`. */
-export const AttemptIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const AttemptIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** One exact application scope paired with its registered physical locator.
 
@@ -1635,9 +1635,9 @@ The scope remains the identity authority. The locator is retained only so
 a later read or restart can reopen the exact registered root without an
 active-graph or CWD fallback. */
 export const AuthorizedRootSchema: z.ZodObject<{
-  locator: z.ZodType<RegisteredRootLocatorV1 | null, z.ZodTypeDef, unknown>;
-  scope: z.ZodType<ResolvedScope, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  locator: z.ZodType<RegisteredRootLocatorV1 | null, unknown>;
+  scope: z.ZodType<ResolvedScope, unknown>;
+}, z.core.$strict> = z.object({
   locator: z.union([z.lazy(() => RegisteredRootLocatorV1Schema), z.null()]),
   scope: z.lazy(() => ResolvedScopeSchema),
 }).strict();
@@ -1647,12 +1647,12 @@ contexts. A registered locator participates only as frozen reopening
 evidence; its paired [`ResolvedScope`](crate::context::ResolvedScope) remains
 the root identity authority. */
 export const AuthorizedScopeSetSchema: z.ZodObject<{
-  actor_id: z.ZodType<ActorId, z.ZodTypeDef, unknown>;
-  digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  revision: z.ZodType<ScopeSetRevision, z.ZodTypeDef, unknown>;
-  roots: z.ZodType<Array<AuthorizedRoot>, z.ZodTypeDef, unknown>;
-  scope_set_id: z.ZodType<ScopeSetId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  actor_id: z.ZodType<ActorId, unknown>;
+  digest: z.ZodType<ManifestDigest, unknown>;
+  revision: z.ZodType<ScopeSetRevision, unknown>;
+  roots: z.ZodType<Array<AuthorizedRoot>, unknown>;
+  scope_set_id: z.ZodType<ScopeSetId, unknown>;
+}, z.core.$strict> = z.object({
   actor_id: z.lazy(() => ActorIdSchema),
   digest: z.lazy(() => ManifestDigestSchema),
   revision: z.lazy(() => ScopeSetRevisionSchema),
@@ -1663,28 +1663,28 @@ export const AuthorizedScopeSetSchema: z.ZodObject<{
 /** Owner identity resolved by the registered profile authority. It is never
 accepted from a Work request. */
 export const AuthorizedWorkProductScopeV1Schema: z.ZodObject<{
-  owner_brain_id: z.ZodType<BrainId, z.ZodTypeDef, unknown>;
-  owner_profile_id: z.ZodType<UserProfileId, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  owner_brain_id: z.ZodType<BrainId, unknown>;
+  owner_profile_id: z.ZodType<UserProfileId, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+}, z.core.$strict> = z.object({
   owner_brain_id: z.lazy(() => BrainIdSchema),
   owner_profile_id: z.lazy(() => UserProfileIdSchema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
 }).strict();
 
 export const AutomaticFactReceiptSchema: z.ZodObject<{
-  add_fact_request: z.ZodType<ProjectMemoryFactAddRequest, z.ZodTypeDef, unknown>;
-  applied_fact_id: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  apply_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  evidence_hash: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  item: z.ZodOptional<z.ZodType<unknown, z.ZodTypeDef, unknown>>;
-  quarantine_reason: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  recorded_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  schema_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  state: z.ZodType<AutomaticFactState, z.ZodTypeDef, unknown>;
-  validation: z.ZodOptional<z.ZodType<unknown, z.ZodTypeDef, unknown>>;
-}, "strict"> = z.object({
+  add_fact_request: z.ZodType<ProjectMemoryFactAddRequest, unknown>;
+  applied_fact_id: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  apply_id: z.ZodType<string, unknown>;
+  evidence_hash: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  item: z.ZodOptional<z.ZodType<unknown, unknown>>;
+  quarantine_reason: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  recorded_at_micros: z.ZodType<number, unknown>;
+  run_id: z.ZodType<string, unknown>;
+  schema_version: z.ZodType<number, unknown>;
+  state: z.ZodType<AutomaticFactState, unknown>;
+  validation: z.ZodOptional<z.ZodType<unknown, unknown>>;
+}, z.core.$strict> = z.object({
   add_fact_request: z.lazy(() => ProjectMemoryFactAddRequestSchema),
   applied_fact_id: z.string().nullable().optional(),
   apply_id: z.string(),
@@ -1700,18 +1700,18 @@ export const AutomaticFactReceiptSchema: z.ZodObject<{
 
 /** `GET /api/automation/automatic-fact-receipts`, newest first under `limit`. */
 export const AutomaticFactReceiptsPayloadV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  receipts: z.ZodType<Array<AutomaticFactReceipt>, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  limit: z.ZodType<number, unknown>;
+  receipts: z.ZodType<Array<AutomaticFactReceipt>, unknown>;
 }> = z.object({
   count: z.number().int().safe().min(0),
   limit: z.number().int().safe().min(0),
   receipts: z.array(z.lazy(() => AutomaticFactReceiptSchema)),
 });
 
-export const AutomaticFactStateSchema: z.ZodEnum<["applied", "quarantined"]> = z.enum(["applied", "quarantined"]);
+export const AutomaticFactStateSchema: z.ZodEnum<{ "applied": "applied"; "quarantined": "quarantined" }> = z.enum(["applied", "quarantined"]);
 
-export const AutomaticWorktreeGcV1Schema: z.ZodType<AutomaticWorktreeGcV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const AutomaticWorktreeGcV1Schema: z.ZodType<AutomaticWorktreeGcV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("disabled"),
 }), z.object({
   kind: z.literal("eligible_only"),
@@ -1719,7 +1719,7 @@ export const AutomaticWorktreeGcV1Schema: z.ZodType<AutomaticWorktreeGcV1, z.Zod
   minimum_idle_seconds: z.number().int().safe().min(1),
 })]);
 
-export const AutomationCommittedReceiptV1Schema: z.ZodType<AutomationCommittedReceiptV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const AutomationCommittedReceiptV1Schema: z.ZodType<AutomationCommittedReceiptV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("automatic_fact"),
   receipt: z.lazy(() => MemoryAutomationFactReceiptV1Schema),
 }).strict(), z.object({
@@ -1735,28 +1735,28 @@ export const AutomationCommittedReceiptV1Schema: z.ZodType<AutomationCommittedRe
 
 /** Payload-free identity of one committed non-memory automation effect. */
 export const AutomationExternalEffectReceiptV1Schema: z.ZodObject<{
-  manifest_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  task_key: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  manifest_digest: z.ZodType<ManifestDigest, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  task_key: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   manifest_digest: z.lazy(() => ManifestDigestSchema),
   run_id: z.lazy(() => RunIdSchema),
   task_key: z.string(),
 }).strict();
 
 export const AutomationJobSchema: z.ZodObject<{
-  cooldown_secs: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  created_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  delivery: z.ZodType<JobDelivery, z.ZodTypeDef, unknown>;
-  enabled: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  interval_secs: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  pre_run_command: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  prompt: z.ZodType<string, z.ZodTypeDef, unknown>;
-  schedule: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  skill_ids: z.ZodOptional<z.ZodType<Array<string>, z.ZodTypeDef, unknown>>;
-  updated_at: z.ZodType<number, z.ZodTypeDef, unknown>;
+  cooldown_secs: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  created_at: z.ZodType<number, unknown>;
+  delivery: z.ZodType<JobDelivery, unknown>;
+  enabled: z.ZodType<boolean, unknown>;
+  id: z.ZodType<string, unknown>;
+  interval_secs: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  name: z.ZodType<string, unknown>;
+  pre_run_command: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  prompt: z.ZodType<string, unknown>;
+  schedule: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  skill_ids: z.ZodOptional<z.ZodType<Array<string>, unknown>>;
+  updated_at: z.ZodType<number, unknown>;
 }> = z.object({
   cooldown_secs: z.number().int().safe().min(0).nullable().optional(),
   created_at: z.number().int().safe(),
@@ -1774,8 +1774,8 @@ export const AutomationJobSchema: z.ZodObject<{
 
 /** `GET /api/automation/jobs`. */
 export const AutomationJobsPayloadV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  jobs: z.ZodType<Array<AutomationJob>, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  jobs: z.ZodType<Array<AutomationJob>, unknown>;
 }> = z.object({
   count: z.number().int().safe().min(0),
   jobs: z.array(z.lazy(() => AutomationJobSchema)),
@@ -1783,11 +1783,11 @@ export const AutomationJobsPayloadV1Schema: z.ZodObject<{
 
 /** `GET /api/automation/outcomes`. */
 export const AutomationOutcomesPayloadV1Schema: z.ZodObject<{
-  error: z.ZodType<string, z.ZodTypeDef, unknown>;
-  facts: z.ZodType<Array<FactOutcomeRecord>, z.ZodTypeDef, unknown>;
-  generated_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  skills: z.ZodType<Array<SkillOutcomeRecord>, z.ZodTypeDef, unknown>;
-  snapshot: z.ZodType<AutomationOutcomesSnapshotStatusV1, z.ZodTypeDef, unknown>;
+  error: z.ZodType<string, unknown>;
+  facts: z.ZodType<Array<FactOutcomeRecord>, unknown>;
+  generated_at: z.ZodType<number, unknown>;
+  skills: z.ZodType<Array<SkillOutcomeRecord>, unknown>;
+  snapshot: z.ZodType<AutomationOutcomesSnapshotStatusV1, unknown>;
 }> = z.object({
   error: z.string(),
   facts: z.array(z.lazy(() => FactOutcomeRecordSchema)),
@@ -1800,9 +1800,9 @@ export const AutomationOutcomesPayloadV1Schema: z.ZodObject<{
 false when the snapshot could not be read, which differs from a snapshot
 that was never refreshed. */
 export const AutomationOutcomesSnapshotStatusV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  facts_refreshed_at: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  skills_refreshed_at: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  facts_refreshed_at: z.ZodType<number | null, unknown>;
+  skills_refreshed_at: z.ZodType<number | null, unknown>;
 }> = z.object({
   available: z.boolean(),
   facts_refreshed_at: z.number().int().safe().nullable(),
@@ -1810,12 +1810,12 @@ export const AutomationOutcomesSnapshotStatusV1Schema: z.ZodObject<{
 });
 
 export const AutomationRunArtifactSchema: z.ZodObject<{
-  created_at: z.ZodType<string, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<string, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  schema_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  sha256: z.ZodType<string, z.ZodTypeDef, unknown>;
-  summary: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
+  created_at: z.ZodType<string, unknown>;
+  kind: z.ZodType<string, unknown>;
+  path: z.ZodType<string, unknown>;
+  schema_version: z.ZodType<number, unknown>;
+  sha256: z.ZodType<string, unknown>;
+  summary: z.ZodOptional<z.ZodType<string | null, unknown>>;
 }> = z.object({
   created_at: z.string(),
   kind: z.string(),
@@ -1826,11 +1826,11 @@ export const AutomationRunArtifactSchema: z.ZodObject<{
 });
 
 export const AutomationRunArtifactChainV1Schema: z.ZodObject<{
-  complete: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  expected_kinds: z.ZodType<Array<AutomationRunArtifactKind>, z.ZodTypeDef, unknown>;
-  integrity_status: z.ZodType<AutomationRunArtifactIntegrityV1, z.ZodTypeDef, unknown>;
-  metadata_complete: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  present_kinds: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
+  complete: z.ZodType<boolean, unknown>;
+  expected_kinds: z.ZodType<Array<AutomationRunArtifactKind>, unknown>;
+  integrity_status: z.ZodType<AutomationRunArtifactIntegrityV1, unknown>;
+  metadata_complete: z.ZodType<boolean, unknown>;
+  present_kinds: z.ZodType<Array<string>, unknown>;
 }> = z.object({
   complete: z.boolean(),
   expected_kinds: z.array(z.lazy(() => AutomationRunArtifactKindSchema)),
@@ -1840,16 +1840,16 @@ export const AutomationRunArtifactChainV1Schema: z.ZodObject<{
 });
 
 /** Whether the ledger's artifact list matches the published artifact chain. */
-export const AutomationRunArtifactIntegrityV1Schema: z.ZodEnum<["ledger_publication_mismatch", "publication_unavailable", "verification_failed", "verified"]> = z.enum(["ledger_publication_mismatch", "publication_unavailable", "verification_failed", "verified"]);
+export const AutomationRunArtifactIntegrityV1Schema: z.ZodEnum<{ "ledger_publication_mismatch": "ledger_publication_mismatch"; "publication_unavailable": "publication_unavailable"; "verification_failed": "verification_failed"; "verified": "verified" }> = z.enum(["ledger_publication_mismatch", "publication_unavailable", "verification_failed", "verified"]);
 
-export const AutomationRunArtifactKindSchema: z.ZodEnum<["codex_handoff", "feedback", "generated_evals", "optimizer_diagnosis", "traces", "validation_gate"]> = z.enum(["codex_handoff", "feedback", "generated_evals", "optimizer_diagnosis", "traces", "validation_gate"]);
+export const AutomationRunArtifactKindSchema: z.ZodEnum<{ "codex_handoff": "codex_handoff"; "feedback": "feedback"; "generated_evals": "generated_evals"; "optimizer_diagnosis": "optimizer_diagnosis"; "traces": "traces"; "validation_gate": "validation_gate" }> = z.enum(["codex_handoff", "feedback", "generated_evals", "optimizer_diagnosis", "traces", "validation_gate"]);
 
 /** `GET /api/automation/runs/{id}/artifacts/{kind}`. The artifact kind owns its
 payload shape, so it is served as opaque JSON. */
 export const AutomationRunArtifactPayloadV1Schema: z.ZodObject<{
-  artifact: z.ZodType<AutomationRunArtifact, z.ZodTypeDef, unknown>;
-  payload: z.ZodType<unknown, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  artifact: z.ZodType<AutomationRunArtifact, unknown>;
+  payload: z.ZodType<unknown, unknown>;
+  run_id: z.ZodType<string, unknown>;
 }> = z.object({
   artifact: z.lazy(() => AutomationRunArtifactSchema),
   payload: z.unknown(),
@@ -1858,10 +1858,10 @@ export const AutomationRunArtifactPayloadV1Schema: z.ZodObject<{
 
 /** `GET /api/automation/runs/{id}/artifacts`. */
 export const AutomationRunArtifactsPayloadV1Schema: z.ZodObject<{
-  artifact_chain: z.ZodType<AutomationRunArtifactChainV1, z.ZodTypeDef, unknown>;
-  artifacts: z.ZodType<Array<AutomationRunArtifact>, z.ZodTypeDef, unknown>;
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  artifact_chain: z.ZodType<AutomationRunArtifactChainV1, unknown>;
+  artifacts: z.ZodType<Array<AutomationRunArtifact>, unknown>;
+  count: z.ZodType<number, unknown>;
+  run_id: z.ZodType<string, unknown>;
 }> = z.object({
   artifact_chain: z.lazy(() => AutomationRunArtifactChainV1Schema),
   artifacts: z.array(z.lazy(() => AutomationRunArtifactSchema)),
@@ -1870,45 +1870,45 @@ export const AutomationRunArtifactsPayloadV1Schema: z.ZodObject<{
 });
 
 /** `known` only when the ledger page holds every row and none was malformed. */
-export const AutomationRunLedgerCompletenessV1Schema: z.ZodEnum<["known", "partial"]> = z.enum(["known", "partial"]);
+export const AutomationRunLedgerCompletenessV1Schema: z.ZodEnum<{ "known": "known"; "partial": "partial" }> = z.enum(["known", "partial"]);
 
 export const AutomationRunLedgerRecordSchema: z.ZodObject<{
-  accepted_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  applied_ops: z.ZodOptional<z.ZodType<unknown, z.ZodTypeDef, unknown>>;
-  artifacts: z.ZodOptional<z.ZodType<Array<AutomationRunArtifact>, z.ZodTypeDef, unknown>>;
-  backend: z.ZodType<string, z.ZodTypeDef, unknown>;
-  backend_attempt_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  backend_attempts: z.ZodOptional<z.ZodType<Array<AgentTaskRetryAttempt>, z.ZodTypeDef, unknown>>;
-  backend_identity: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  completed_at: z.ZodType<string, z.ZodTypeDef, unknown>;
-  completed_at_micros: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  error: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  error_classification: z.ZodOptional<z.ZodType<AgentTaskFailureClass | null, z.ZodTypeDef, unknown>>;
-  error_retryable: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  evidence_hash: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  fallback_status: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  host_mode: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  input_hash: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  model: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  output_hash: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  prompt_version: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  proposed_ops: z.ZodOptional<z.ZodType<unknown, z.ZodTypeDef, unknown>>;
-  rejected_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  rejected_ops: z.ZodOptional<z.ZodType<unknown, z.ZodTypeDef, unknown>>;
-  report_ref: z.ZodOptional<z.ZodType<unknown, z.ZodTypeDef, unknown>>;
-  response_schema: z.ZodOptional<z.ZodType<unknown, z.ZodTypeDef, unknown>>;
-  reviewed_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  schema_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  session_evidence_budget_stage: z.ZodOptional<z.ZodType<SessionRetrievalBudgetStageV1 | null, z.ZodTypeDef, unknown>>;
-  skipped_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  started_at: z.ZodType<string, z.ZodTypeDef, unknown>;
-  status: z.ZodType<AutomationRunStatus, z.ZodTypeDef, unknown>;
-  strict_json: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  task: z.ZodType<AgentTaskKind, z.ZodTypeDef, unknown>;
-  task_key: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  trigger: z.ZodType<AutomationTrigger, z.ZodTypeDef, unknown>;
-  validation_report: z.ZodOptional<z.ZodType<unknown, z.ZodTypeDef, unknown>>;
+  accepted_count: z.ZodType<number, unknown>;
+  applied_ops: z.ZodOptional<z.ZodType<unknown, unknown>>;
+  artifacts: z.ZodOptional<z.ZodType<Array<AutomationRunArtifact>, unknown>>;
+  backend: z.ZodType<string, unknown>;
+  backend_attempt_count: z.ZodType<number, unknown>;
+  backend_attempts: z.ZodOptional<z.ZodType<Array<AgentTaskRetryAttempt>, unknown>>;
+  backend_identity: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  completed_at: z.ZodType<string, unknown>;
+  completed_at_micros: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  error: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  error_classification: z.ZodOptional<z.ZodType<AgentTaskFailureClass | null, unknown>>;
+  error_retryable: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+  evidence_hash: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  fallback_status: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  host_mode: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  input_hash: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  model: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  output_hash: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  prompt_version: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  proposed_ops: z.ZodOptional<z.ZodType<unknown, unknown>>;
+  rejected_count: z.ZodType<number, unknown>;
+  rejected_ops: z.ZodOptional<z.ZodType<unknown, unknown>>;
+  report_ref: z.ZodOptional<z.ZodType<unknown, unknown>>;
+  response_schema: z.ZodOptional<z.ZodType<unknown, unknown>>;
+  reviewed_count: z.ZodType<number, unknown>;
+  run_id: z.ZodType<string, unknown>;
+  schema_version: z.ZodType<number, unknown>;
+  session_evidence_budget_stage: z.ZodOptional<z.ZodType<SessionRetrievalBudgetStageV1 | null, unknown>>;
+  skipped_count: z.ZodType<number, unknown>;
+  started_at: z.ZodType<string, unknown>;
+  status: z.ZodType<AutomationRunStatus, unknown>;
+  strict_json: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+  task: z.ZodType<AgentTaskKind, unknown>;
+  task_key: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  trigger: z.ZodType<AutomationTrigger, unknown>;
+  validation_report: z.ZodOptional<z.ZodType<unknown, unknown>>;
 }> = z.object({
   accepted_count: z.number().int().safe().min(0),
   applied_ops: z.unknown().optional(),
@@ -1954,14 +1954,14 @@ The generic application receipt binds the outer operation. The ordered
 receipts retain the exact canonical memory effects needed to reconcile a
 partial terminal without inventing an endpoint-specific payload. */
 export const AutomationRunProblemV1Schema: z.ZodObject<{
-  committed_outer_result: z.ZodOptional<z.ZodType<AutomationRunResultV1 | null, z.ZodTypeDef, unknown>>;
-  committed_receipts: z.ZodType<Array<AutomationCommittedReceiptV1>, z.ZodTypeDef, unknown>;
-  problem: z.ZodType<ApplicationProblemEnvelope, z.ZodTypeDef, unknown>;
-  request_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  scope: z.ZodType<ResolvedScope, z.ZodTypeDef, unknown>;
-  task: z.ZodType<AutomationTaskV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  committed_outer_result: z.ZodOptional<z.ZodType<AutomationRunResultV1 | null, unknown>>;
+  committed_receipts: z.ZodType<Array<AutomationCommittedReceiptV1>, unknown>;
+  problem: z.ZodType<ApplicationProblemEnvelope, unknown>;
+  request_digest: z.ZodType<ManifestDigest, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  scope: z.ZodType<ResolvedScope, unknown>;
+  task: z.ZodType<AutomationTaskV1, unknown>;
+}, z.core.$strict> = z.object({
   committed_outer_result: z.union([z.lazy(() => AutomationRunResultV1Schema), z.null()]).optional(),
   committed_receipts: z.array(z.lazy(() => AutomationCommittedReceiptV1Schema)),
   problem: z.lazy(() => ApplicationProblemEnvelopeSchema),
@@ -1977,12 +1977,12 @@ An empty receipt list is valid for completed or skipped zero-effect runs.
 Partial effects are represented only by an application problem carrying a
 non-empty committed effect receipt. */
 export const AutomationRunResultV1Schema: z.ZodObject<{
-  committed_receipts: z.ZodType<Array<AutomationCommittedReceiptV1>, z.ZodTypeDef, unknown>;
-  request_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  task: z.ZodType<AutomationTaskV1, z.ZodTypeDef, unknown>;
-  terminal: z.ZodType<AutomationRunTerminalV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  committed_receipts: z.ZodType<Array<AutomationCommittedReceiptV1>, unknown>;
+  request_digest: z.ZodType<ManifestDigest, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  task: z.ZodType<AutomationTaskV1, unknown>;
+  terminal: z.ZodType<AutomationRunTerminalV1, unknown>;
+}, z.core.$strict> = z.object({
   committed_receipts: z.array(z.lazy(() => AutomationCommittedReceiptV1Schema)),
   request_digest: z.lazy(() => ManifestDigestSchema),
   run_id: z.lazy(() => RunIdSchema),
@@ -1994,24 +1994,24 @@ export const AutomationRunResultV1Schema: z.ZodObject<{
 identity (`user_job:<id>`); rows written before it existed carry `null` and
 cannot be joined to a job. */
 export const AutomationRunRowV1Schema: z.ZodObject<{
-  accepted_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  artifact_kinds: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  backend: z.ZodType<string, z.ZodTypeDef, unknown>;
-  backend_attempt_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  completed_at: z.ZodType<string, z.ZodTypeDef, unknown>;
-  error: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  error_classification: z.ZodType<AgentTaskFailureClass | null, z.ZodTypeDef, unknown>;
-  error_retryable: z.ZodType<boolean | null, z.ZodTypeDef, unknown>;
-  model: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  rejected_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  reviewed_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  skipped_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  started_at: z.ZodType<string, z.ZodTypeDef, unknown>;
-  status: z.ZodType<AutomationRunStatus, z.ZodTypeDef, unknown>;
-  task: z.ZodType<AgentTaskKind, z.ZodTypeDef, unknown>;
-  task_key: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  trigger: z.ZodType<AutomationTrigger, z.ZodTypeDef, unknown>;
+  accepted_count: z.ZodType<number, unknown>;
+  artifact_kinds: z.ZodType<Array<string>, unknown>;
+  backend: z.ZodType<string, unknown>;
+  backend_attempt_count: z.ZodType<number, unknown>;
+  completed_at: z.ZodType<string, unknown>;
+  error: z.ZodType<string | null, unknown>;
+  error_classification: z.ZodType<AgentTaskFailureClass | null, unknown>;
+  error_retryable: z.ZodType<boolean | null, unknown>;
+  model: z.ZodType<string | null, unknown>;
+  rejected_count: z.ZodType<number, unknown>;
+  reviewed_count: z.ZodType<number, unknown>;
+  run_id: z.ZodType<string, unknown>;
+  skipped_count: z.ZodType<number, unknown>;
+  started_at: z.ZodType<string, unknown>;
+  status: z.ZodType<AutomationRunStatus, unknown>;
+  task: z.ZodType<AgentTaskKind, unknown>;
+  task_key: z.ZodType<string | null, unknown>;
+  trigger: z.ZodType<AutomationTrigger, unknown>;
 }> = z.object({
   accepted_count: z.number().int().safe().min(0),
   artifact_kinds: z.array(z.string()),
@@ -2035,12 +2035,12 @@ export const AutomationRunRowV1Schema: z.ZodObject<{
 
 /** `GET /api/automation/runs`, newest first under `limit`. */
 export const AutomationRunsPayloadV1Schema: z.ZodObject<{
-  completeness: z.ZodType<AutomationRunLedgerCompletenessV1, z.ZodTypeDef, unknown>;
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  has_more: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  malformed_row_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  runs: z.ZodType<Array<AutomationRunRowV1>, z.ZodTypeDef, unknown>;
+  completeness: z.ZodType<AutomationRunLedgerCompletenessV1, unknown>;
+  count: z.ZodType<number, unknown>;
+  has_more: z.ZodType<boolean, unknown>;
+  limit: z.ZodType<number, unknown>;
+  malformed_row_count: z.ZodType<number, unknown>;
+  runs: z.ZodType<Array<AutomationRunRowV1>, unknown>;
 }> = z.object({
   completeness: z.lazy(() => AutomationRunLedgerCompletenessV1Schema),
   count: z.number().int().safe().min(0),
@@ -2050,21 +2050,21 @@ export const AutomationRunsPayloadV1Schema: z.ZodObject<{
   runs: z.array(z.lazy(() => AutomationRunRowV1Schema)),
 });
 
-export const AutomationRunStatusSchema: z.ZodEnum<["failed", "queued", "running", "skipped", "succeeded"]> = z.enum(["failed", "queued", "running", "skipped", "succeeded"]);
+export const AutomationRunStatusSchema: z.ZodEnum<{ "failed": "failed"; "queued": "queued"; "running": "running"; "skipped": "skipped"; "succeeded": "succeeded" }> = z.enum(["failed", "queued", "running", "skipped", "succeeded"]);
 
 export const AutomationRunSummaryV1Schema: z.ZodObject<{
-  accepted_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  rejected_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  reviewed_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  skipped_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  accepted_count: z.ZodType<number, unknown>;
+  rejected_count: z.ZodType<number, unknown>;
+  reviewed_count: z.ZodType<number, unknown>;
+  skipped_count: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   accepted_count: z.number().int().safe().min(0),
   rejected_count: z.number().int().safe().min(0),
   reviewed_count: z.number().int().safe().min(0),
   skipped_count: z.number().int().safe().min(0),
 }).strict();
 
-export const AutomationRunTerminalV1Schema: z.ZodType<AutomationRunTerminalV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("status", [z.object({
+export const AutomationRunTerminalV1Schema: z.ZodType<AutomationRunTerminalV1, unknown> = z.discriminatedUnion("status", [z.object({
   status: z.literal("completed"),
   summary: z.lazy(() => AutomationRunSummaryV1Schema),
 }).strict(), z.object({
@@ -2077,7 +2077,7 @@ export const AutomationRunTerminalV1Schema: z.ZodType<AutomationRunTerminalV1, z
 
 Wire tokens stay the historical labels. A new state is a compile error in
 [`scheduler_status_label`] until this enum gains a variant. */
-export const AutomationSchedulerAvailabilityV1Schema: z.ZodEnum<["automation_disabled", "backend_disabled", "configured", "delegated_host", "paused"]> = z.enum(["automation_disabled", "backend_disabled", "configured", "delegated_host", "paused"]);
+export const AutomationSchedulerAvailabilityV1Schema: z.ZodEnum<{ "automation_disabled": "automation_disabled"; "backend_disabled": "backend_disabled"; "configured": "configured"; "delegated_host": "delegated_host"; "paused": "paused" }> = z.enum(["automation_disabled", "backend_disabled", "configured", "delegated_host", "paused"]);
 
 /** The scheduler reading served by `status`, `pause`, and `resume`.
 
@@ -2085,16 +2085,16 @@ Automation is autonomous: the status has no pending-review counters. The
 last run record carries the validation, repair, application, quarantine,
 and deployment receipts that describe what actually happened. */
 export const AutomationSchedulerStatusV1Schema: z.ZodObject<{
-  configuration_revision_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  control_path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  enabled: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  last_session_activity: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  now: z.ZodType<number, z.ZodTypeDef, unknown>;
-  paused: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  scheduler_tick_secs: z.ZodType<number, z.ZodTypeDef, unknown>;
-  status: z.ZodType<AutomationSchedulerAvailabilityV1, z.ZodTypeDef, unknown>;
-  tasks: z.ZodType<Array<AutomationTaskStatusV1>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  configuration_revision_id: z.ZodType<string, unknown>;
+  control_path: z.ZodType<string, unknown>;
+  enabled: z.ZodType<boolean, unknown>;
+  last_session_activity: z.ZodType<number | null, unknown>;
+  now: z.ZodType<number, unknown>;
+  paused: z.ZodType<boolean, unknown>;
+  scheduler_tick_secs: z.ZodType<number, unknown>;
+  status: z.ZodType<AutomationSchedulerAvailabilityV1, unknown>;
+  tasks: z.ZodType<Array<AutomationTaskStatusV1>, unknown>;
+}, z.core.$strict> = z.object({
   configuration_revision_id: z.string(),
   control_path: z.string(),
   enabled: z.boolean(),
@@ -2107,12 +2107,12 @@ export const AutomationSchedulerStatusV1Schema: z.ZodObject<{
 }).strict();
 
 export const AutomationSettingsPayloadV1Schema: z.ZodObject<{
-  availability: z.ZodType<SettingsAvailabilityV1, z.ZodTypeDef, unknown>;
-  backend: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  config_endpoint: z.ZodType<string, z.ZodTypeDef, unknown>;
-  configuration_revision_id: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  enabled: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  host_mode: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
+  availability: z.ZodType<SettingsAvailabilityV1, unknown>;
+  backend: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  config_endpoint: z.ZodType<string, unknown>;
+  configuration_revision_id: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  enabled: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+  host_mode: z.ZodOptional<z.ZodType<string | null, unknown>>;
 }> = z.object({
   availability: z.lazy(() => SettingsAvailabilityV1Schema),
   backend: z.string().nullable().optional(),
@@ -2124,20 +2124,20 @@ export const AutomationSettingsPayloadV1Schema: z.ZodObject<{
 
 /** `GET /api/automation/skills`. */
 export const AutomationSkillsPayloadV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  skills: z.ZodType<Array<ManagedSkill>, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  skills: z.ZodType<Array<ManagedSkill>, unknown>;
 }> = z.object({
   count: z.number().int().safe().min(0),
   skills: z.array(z.lazy(() => ManagedSkillSchema)),
 });
 
-export const AutomationSkipReasonV1Schema: z.ZodEnum<["automation_disabled", "backend_disabled", "backend_identity_suppressed", "combined_review_disabled", "delegated_host_mode", "job_commands_disabled", "job_lock_active", "memory_curator_disabled", "no_new_session_activity", "no_session_evidence", "nothing_to_review", "partial_coverage_no_candidates", "scheduler_cooldown_active", "scheduler_cron_not_due", "scheduler_history_invalid", "scheduler_idle_window_active", "scheduler_interval_not_elapsed", "scheduler_lock_active", "scheduler_non_retryable_failure", "scheduler_paused", "scheduler_schedule_invalid", "scheduler_schedule_manual", "session_cursor_manifest_limit_exceeded", "session_evidence_budget_exhausted", "session_evidence_budget_suppressed", "session_evidence_cancelled", "session_evidence_denied", "session_evidence_filter_unavailable", "session_evidence_locked", "session_evidence_partial", "session_evidence_reset_required", "session_evidence_retrieval_unavailable", "session_evidence_stale", "session_evidence_timed_out", "session_evidence_unavailable", "session_reflector_disabled", "similarity_authority_unavailable", "skill_writer_disabled", "task_not_schedulable", "user_job_disabled"]> = z.enum(["automation_disabled", "backend_disabled", "backend_identity_suppressed", "combined_review_disabled", "delegated_host_mode", "job_commands_disabled", "job_lock_active", "memory_curator_disabled", "no_new_session_activity", "no_session_evidence", "nothing_to_review", "partial_coverage_no_candidates", "scheduler_cooldown_active", "scheduler_cron_not_due", "scheduler_history_invalid", "scheduler_idle_window_active", "scheduler_interval_not_elapsed", "scheduler_lock_active", "scheduler_non_retryable_failure", "scheduler_paused", "scheduler_schedule_invalid", "scheduler_schedule_manual", "session_cursor_manifest_limit_exceeded", "session_evidence_budget_exhausted", "session_evidence_budget_suppressed", "session_evidence_cancelled", "session_evidence_denied", "session_evidence_filter_unavailable", "session_evidence_locked", "session_evidence_partial", "session_evidence_reset_required", "session_evidence_retrieval_unavailable", "session_evidence_stale", "session_evidence_timed_out", "session_evidence_unavailable", "session_reflector_disabled", "similarity_authority_unavailable", "skill_writer_disabled", "task_not_schedulable", "user_job_disabled"]);
+export const AutomationSkipReasonV1Schema: z.ZodEnum<{ "automation_disabled": "automation_disabled"; "backend_disabled": "backend_disabled"; "backend_identity_suppressed": "backend_identity_suppressed"; "combined_review_disabled": "combined_review_disabled"; "delegated_host_mode": "delegated_host_mode"; "job_commands_disabled": "job_commands_disabled"; "job_lock_active": "job_lock_active"; "memory_curator_disabled": "memory_curator_disabled"; "no_new_session_activity": "no_new_session_activity"; "no_session_evidence": "no_session_evidence"; "nothing_to_review": "nothing_to_review"; "partial_coverage_no_candidates": "partial_coverage_no_candidates"; "scheduler_cooldown_active": "scheduler_cooldown_active"; "scheduler_cron_not_due": "scheduler_cron_not_due"; "scheduler_history_invalid": "scheduler_history_invalid"; "scheduler_idle_window_active": "scheduler_idle_window_active"; "scheduler_interval_not_elapsed": "scheduler_interval_not_elapsed"; "scheduler_lock_active": "scheduler_lock_active"; "scheduler_non_retryable_failure": "scheduler_non_retryable_failure"; "scheduler_paused": "scheduler_paused"; "scheduler_schedule_invalid": "scheduler_schedule_invalid"; "scheduler_schedule_manual": "scheduler_schedule_manual"; "session_cursor_manifest_limit_exceeded": "session_cursor_manifest_limit_exceeded"; "session_evidence_budget_exhausted": "session_evidence_budget_exhausted"; "session_evidence_budget_suppressed": "session_evidence_budget_suppressed"; "session_evidence_cancelled": "session_evidence_cancelled"; "session_evidence_denied": "session_evidence_denied"; "session_evidence_filter_unavailable": "session_evidence_filter_unavailable"; "session_evidence_locked": "session_evidence_locked"; "session_evidence_partial": "session_evidence_partial"; "session_evidence_reset_required": "session_evidence_reset_required"; "session_evidence_retrieval_unavailable": "session_evidence_retrieval_unavailable"; "session_evidence_stale": "session_evidence_stale"; "session_evidence_timed_out": "session_evidence_timed_out"; "session_evidence_unavailable": "session_evidence_unavailable"; "session_reflector_disabled": "session_reflector_disabled"; "similarity_authority_unavailable": "similarity_authority_unavailable"; "skill_writer_disabled": "skill_writer_disabled"; "task_not_schedulable": "task_not_schedulable"; "user_job_disabled": "user_job_disabled" }> = z.enum(["automation_disabled", "backend_disabled", "backend_identity_suppressed", "combined_review_disabled", "delegated_host_mode", "job_commands_disabled", "job_lock_active", "memory_curator_disabled", "no_new_session_activity", "no_session_evidence", "nothing_to_review", "partial_coverage_no_candidates", "scheduler_cooldown_active", "scheduler_cron_not_due", "scheduler_history_invalid", "scheduler_idle_window_active", "scheduler_interval_not_elapsed", "scheduler_lock_active", "scheduler_non_retryable_failure", "scheduler_paused", "scheduler_schedule_invalid", "scheduler_schedule_manual", "session_cursor_manifest_limit_exceeded", "session_evidence_budget_exhausted", "session_evidence_budget_suppressed", "session_evidence_cancelled", "session_evidence_denied", "session_evidence_filter_unavailable", "session_evidence_locked", "session_evidence_partial", "session_evidence_reset_required", "session_evidence_retrieval_unavailable", "session_evidence_stale", "session_evidence_timed_out", "session_evidence_unavailable", "session_reflector_disabled", "similarity_authority_unavailable", "skill_writer_disabled", "task_not_schedulable", "user_job_disabled"]);
 
 export const AutomationTaskStatusV1Schema: z.ZodObject<{
-  due: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  last_scheduler_run: z.ZodType<AutomationRunLedgerRecord | null, z.ZodTypeDef, unknown>;
-  skip_reason: z.ZodType<AutomationSkipReasonV1 | null, z.ZodTypeDef, unknown>;
-  task: z.ZodType<string, z.ZodTypeDef, unknown>;
+  due: z.ZodType<boolean, unknown>;
+  last_scheduler_run: z.ZodType<AutomationRunLedgerRecord | null, unknown>;
+  skip_reason: z.ZodType<AutomationSkipReasonV1 | null, unknown>;
+  task: z.ZodType<string, unknown>;
 }> = z.object({
   due: z.boolean(),
   last_scheduler_run: z.union([z.lazy(() => AutomationRunLedgerRecordSchema), z.null()]),
@@ -2146,21 +2146,21 @@ export const AutomationTaskStatusV1Schema: z.ZodObject<{
 });
 
 /** Automation capability selected after one registered application admission. */
-export const AutomationTaskV1Schema: z.ZodEnum<["combined_review", "memory_curator", "session_reflector", "skill_writer", "user_job"]> = z.enum(["combined_review", "memory_curator", "session_reflector", "skill_writer", "user_job"]);
+export const AutomationTaskV1Schema: z.ZodEnum<{ "combined_review": "combined_review"; "memory_curator": "memory_curator"; "session_reflector": "session_reflector"; "skill_writer": "skill_writer"; "user_job": "user_job" }> = z.enum(["combined_review", "memory_curator", "session_reflector", "skill_writer", "user_job"]);
 
-export const AutomationTriggerSchema: z.ZodEnum<["application", "dashboard", "host_receipt", "manual_cli", "manual_mcp", "scheduler"]> = z.enum(["application", "dashboard", "host_receipt", "manual_cli", "manual_mcp", "scheduler"]);
+export const AutomationTriggerSchema: z.ZodEnum<{ "application": "application"; "dashboard": "dashboard"; "host_receipt": "host_receipt"; "manual_cli": "manual_cli"; "manual_mcp": "manual_mcp"; "scheduler": "scheduler" }> = z.enum(["application", "dashboard", "host_receipt", "manual_cli", "manual_mcp", "scheduler"]);
 
 /** Strongly typed canonical identity: `BrainId`. */
-export const BrainIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const BrainIdSchema: z.ZodType<string, unknown> = z.string();
 
-export const BranchCollisionPolicyV1Schema: z.ZodType<BranchCollisionPolicyV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const BranchCollisionPolicyV1Schema: z.ZodType<BranchCollisionPolicyV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("append_monotonic_ordinal"),
   maximum_attempts: z.number().int().min(1).max(65535),
 }), z.object({
   kind: z.literal("reject"),
 })]);
 
-export const BranchNameComponentV1Schema: z.ZodType<BranchNameComponentV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const BranchNameComponentV1Schema: z.ZodType<BranchNameComponentV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("monotonic_collision_ordinal"),
 }), z.object({
   kind: z.literal("repository_slug"),
@@ -2171,15 +2171,15 @@ export const BranchNameComponentV1Schema: z.ZodType<BranchNameComponentV1, z.Zod
   kind: z.literal("work_class"),
 })]);
 
-export const BranchNameSeparatorV1Schema: z.ZodEnum<["hyphen", "slash", "underscore"]> = z.enum(["hyphen", "slash", "underscore"]);
+export const BranchNameSeparatorV1Schema: z.ZodEnum<{ "hyphen": "hyphen"; "slash": "slash"; "underscore": "underscore" }> = z.enum(["hyphen", "slash", "underscore"]);
 
 export const BranchNamingPolicyV1Schema: z.ZodObject<{
-  collision: z.ZodType<BranchCollisionPolicyV1, z.ZodTypeDef, unknown>;
-  components: z.ZodType<Array<BranchNameComponentV1>, z.ZodTypeDef, unknown>;
-  maximum_bytes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  prefix: z.ZodType<CanonicalGitRefPrefix, z.ZodTypeDef, unknown>;
-  separator: z.ZodType<BranchNameSeparatorV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  collision: z.ZodType<BranchCollisionPolicyV1, unknown>;
+  components: z.ZodType<Array<BranchNameComponentV1>, unknown>;
+  maximum_bytes: z.ZodType<number, unknown>;
+  prefix: z.ZodType<CanonicalGitRefPrefix, unknown>;
+  separator: z.ZodType<BranchNameSeparatorV1, unknown>;
+}, z.core.$strict> = z.object({
   collision: z.lazy(() => BranchCollisionPolicyV1Schema),
   components: z.array(z.lazy(() => BranchNameComponentV1Schema)),
   maximum_bytes: z.number().int().min(1).max(65535),
@@ -2187,25 +2187,25 @@ export const BranchNamingPolicyV1Schema: z.ZodObject<{
   separator: z.lazy(() => BranchNameSeparatorV1Schema),
 }).strict();
 
-export const BranchTopologyKindV1Schema: z.ZodEnum<["independent_branches", "local_stack", "no_branches", "unbranched"]> = z.enum(["independent_branches", "local_stack", "no_branches", "unbranched"]);
+export const BranchTopologyKindV1Schema: z.ZodEnum<{ "independent_branches": "independent_branches"; "local_stack": "local_stack"; "no_branches": "no_branches"; "unbranched": "unbranched" }> = z.enum(["independent_branches", "local_stack", "no_branches", "unbranched"]);
 
 export const BranchTopologyPolicyV1Schema: z.ZodObject<{
-  allowed: z.ZodType<Array<BranchTopologyKindV1>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  allowed: z.ZodType<Array<BranchTopologyKindV1>, unknown>;
+}, z.core.$strict> = z.object({
   allowed: z.array(z.lazy(() => BranchTopologyKindV1Schema)),
 }).strict();
 
 export const CallChainMeasurementV1Schema: z.ZodObject<{
-  complete: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  directed: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  edge_kind: z.ZodType<string, z.ZodTypeDef, unknown>;
-  found: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  from_node_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  hop_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  max_depth: z.ZodType<number, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<string, z.ZodTypeDef, unknown>;
-  steps: z.ZodType<Array<CallChainStepV1>, z.ZodTypeDef, unknown>;
-  to_node_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  complete: z.ZodType<boolean, unknown>;
+  directed: z.ZodType<boolean, unknown>;
+  edge_kind: z.ZodType<string, unknown>;
+  found: z.ZodType<boolean, unknown>;
+  from_node_id: z.ZodType<string, unknown>;
+  hop_count: z.ZodType<number | null, unknown>;
+  max_depth: z.ZodType<number, unknown>;
+  selection: z.ZodType<string, unknown>;
+  steps: z.ZodType<Array<CallChainStepV1>, unknown>;
+  to_node_id: z.ZodType<string, unknown>;
 }> = z.object({
   complete: z.boolean(),
   directed: z.boolean(),
@@ -2220,23 +2220,23 @@ export const CallChainMeasurementV1Schema: z.ZodObject<{
 });
 
 export const CallChainStepV1Schema: z.ZodObject<{
-  incoming_edge: z.ZodType<IncomingCallEdgeV1 | null, z.ZodTypeDef, unknown>;
-  node: z.ZodType<NodeRefV1, z.ZodTypeDef, unknown>;
+  incoming_edge: z.ZodType<IncomingCallEdgeV1 | null, unknown>;
+  node: z.ZodType<NodeRefV1, unknown>;
 }> = z.object({
   incoming_edge: z.union([z.lazy(() => IncomingCallEdgeV1Schema), z.null()]),
   node: z.lazy(() => NodeRefV1Schema),
 });
 
 /** Exact stage at which cancellation or deadline state was observed. */
-export const CancellationStageSchema: z.ZodEnum<["after_commit", "before_admission", "before_effect", "before_read", "during_read", "effect_in_flight", "reconciling"]> = z.enum(["after_commit", "before_admission", "before_effect", "before_read", "during_read", "effect_in_flight", "reconciling"]);
+export const CancellationStageSchema: z.ZodEnum<{ "after_commit": "after_commit"; "before_admission": "before_admission"; "before_effect": "before_effect"; "before_read": "before_read"; "during_read": "during_read"; "effect_in_flight": "effect_in_flight"; "reconciling": "reconciling" }> = z.enum(["after_commit", "before_admission", "before_effect", "before_read", "during_read", "effect_in_flight", "reconciling"]);
 
 export const CancelWorkAttemptCommandSchema: z.ZodObject<{
-  attempt_id: z.ZodType<AttemptId, z.ZodTypeDef, unknown>;
-  occurred_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  request_id: z.ZodType<WorkCancellationRequestId, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  attempt_id: z.ZodType<AttemptId, unknown>;
+  occurred_at: z.ZodType<UtcMicros, unknown>;
+  request_id: z.ZodType<WorkCancellationRequestId, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   attempt_id: z.lazy(() => AttemptIdSchema),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   request_id: z.lazy(() => WorkCancellationRequestIdSchema),
@@ -2245,28 +2245,28 @@ export const CancelWorkAttemptCommandSchema: z.ZodObject<{
 }).strict();
 
 /** A validated full native Git ref name, such as `refs/heads/main`. */
-export const CanonicalGitRefNameV1Schema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const CanonicalGitRefNameV1Schema: z.ZodType<string, unknown> = z.string();
 
 /** A validated ref/branch prefix. Branch naming accepts a short branch prefix
 (for example `tracedecay/`) while protected-ref selectors use full
 `refs/.../` prefixes. */
-export const CanonicalGitRefPrefixSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const CanonicalGitRefPrefixSchema: z.ZodType<string, unknown> = z.string();
 
 /** Strongly typed canonical identity: `CapabilityId`. */
-export const CapabilityIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const CapabilityIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Strongly typed canonical identity: `CatalogGenerationId`. */
-export const CatalogGenerationIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const CatalogGenerationIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Fixed per-request clone candidate and verification budgets. */
 export const CodeCloneIndexBudgetsV1Schema: z.ZodObject<{
-  candidate_bodies: z.ZodType<number, z.ZodTypeDef, unknown>;
-  hot_posting_rows: z.ZodType<number, z.ZodTypeDef, unknown>;
-  minimum_body_tokens: z.ZodType<number, z.ZodTypeDef, unknown>;
-  minimum_directional_coverage_millionths: z.ZodType<number, z.ZodTypeDef, unknown>;
-  posting_rows: z.ZodType<number, z.ZodTypeDef, unknown>;
-  verification_bodies: z.ZodType<number, z.ZodTypeDef, unknown>;
-  verification_token_work: z.ZodType<number, z.ZodTypeDef, unknown>;
+  candidate_bodies: z.ZodType<number, unknown>;
+  hot_posting_rows: z.ZodType<number, unknown>;
+  minimum_body_tokens: z.ZodType<number, unknown>;
+  minimum_directional_coverage_millionths: z.ZodType<number, unknown>;
+  posting_rows: z.ZodType<number, unknown>;
+  verification_bodies: z.ZodType<number, unknown>;
+  verification_token_work: z.ZodType<number, unknown>;
 }> = z.object({
   candidate_bodies: z.number().int().safe().min(0),
   hot_posting_rows: z.number().int().safe().min(0),
@@ -2283,22 +2283,22 @@ Counts are `None` until the clone artifact has observed the corresponding
 denominator. A complete empty repository reports `Some(0)`, which keeps a
 designed zero distinct from unavailable coverage. */
 export const CodeCloneIndexCoverageV1Schema: z.ZodObject<{
-  conservative_normalized_bodies: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  eligible_source_bodies: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  exact_postings: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  excluded_incomplete_tokenization_bodies: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  excluded_too_large_bodies: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  excluded_too_small_bodies: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  hot_posting_rows_skipped: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  hot_postings_skipped: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  near_fingerprint_bodies: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  near_fingerprint_postings: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  payloads_reused: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  rename_normalized_bodies: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  rename_partial_bodies: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  rename_unsupported_bodies: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  source_bodies: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  unique_payloads: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  conservative_normalized_bodies: z.ZodType<number | null, unknown>;
+  eligible_source_bodies: z.ZodType<number | null, unknown>;
+  exact_postings: z.ZodType<number | null, unknown>;
+  excluded_incomplete_tokenization_bodies: z.ZodType<number | null, unknown>;
+  excluded_too_large_bodies: z.ZodType<number | null, unknown>;
+  excluded_too_small_bodies: z.ZodType<number | null, unknown>;
+  hot_posting_rows_skipped: z.ZodType<number | null, unknown>;
+  hot_postings_skipped: z.ZodType<number | null, unknown>;
+  near_fingerprint_bodies: z.ZodType<number | null, unknown>;
+  near_fingerprint_postings: z.ZodType<number | null, unknown>;
+  payloads_reused: z.ZodType<number | null, unknown>;
+  rename_normalized_bodies: z.ZodType<number | null, unknown>;
+  rename_partial_bodies: z.ZodType<number | null, unknown>;
+  rename_unsupported_bodies: z.ZodType<number | null, unknown>;
+  source_bodies: z.ZodType<number | null, unknown>;
+  unique_payloads: z.ZodType<number | null, unknown>;
 }> = z.object({
   conservative_normalized_bodies: z.number().int().safe().min(0).nullable(),
   eligible_source_bodies: z.number().int().safe().min(0).nullable(),
@@ -2320,14 +2320,14 @@ export const CodeCloneIndexCoverageV1Schema: z.ZodObject<{
 
 /** Generation-pinned clone-index evidence shared by non-error readiness states. */
 export const CodeCloneIndexObservationV1Schema: z.ZodObject<{
-  artifact_format_revision: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  budgets: z.ZodType<CodeCloneIndexBudgetsV1, z.ZodTypeDef, unknown>;
-  conservative_normalization_revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<CodeCloneIndexCoverageV1, z.ZodTypeDef, unknown>;
-  generation_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  rename_normalization_revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-  resources: z.ZodType<CodeCloneIndexResourcesV1, z.ZodTypeDef, unknown>;
-  source_revision: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  artifact_format_revision: z.ZodType<number | null, unknown>;
+  budgets: z.ZodType<CodeCloneIndexBudgetsV1, unknown>;
+  conservative_normalization_revision: z.ZodType<number, unknown>;
+  coverage: z.ZodType<CodeCloneIndexCoverageV1, unknown>;
+  generation_id: z.ZodType<string, unknown>;
+  rename_normalization_revision: z.ZodType<number, unknown>;
+  resources: z.ZodType<CodeCloneIndexResourcesV1, unknown>;
+  source_revision: z.ZodType<string | null, unknown>;
 }> = z.object({
   artifact_format_revision: z.number().int().min(0).nullable(),
   budgets: z.lazy(() => CodeCloneIndexBudgetsV1Schema),
@@ -2341,10 +2341,10 @@ export const CodeCloneIndexObservationV1Schema: z.ZodObject<{
 
 /** Measured resources and update accounting for one clone-index generation. */
 export const CodeCloneIndexResourcesV1Schema: z.ZodObject<{
-  bytes_on_disk: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  changed_symbol_update_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  peak_scratch_memory_bytes: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  stale_invalidations: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  bytes_on_disk: z.ZodType<number | null, unknown>;
+  changed_symbol_update_micros: z.ZodType<number | null, unknown>;
+  peak_scratch_memory_bytes: z.ZodType<number | null, unknown>;
+  stale_invalidations: z.ZodType<number | null, unknown>;
 }> = z.object({
   bytes_on_disk: z.number().int().safe().min(0).nullable(),
   changed_symbol_update_micros: z.number().int().safe().min(0).nullable(),
@@ -2353,7 +2353,7 @@ export const CodeCloneIndexResourcesV1Schema: z.ZodObject<{
 });
 
 /** Clone readiness, independent from lexical and graph serving. */
-export const CodeCloneIndexStatusV1Schema: z.ZodType<CodeCloneIndexStatusV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const CodeCloneIndexStatusV1Schema: z.ZodType<CodeCloneIndexStatusV1, unknown> = z.discriminatedUnion("state", [z.object({
   observation: z.lazy(() => CodeCloneIndexObservationV1Schema),
   omission_reasons: z.array(z.string()),
   state: z.literal("partial"),
@@ -2370,13 +2370,13 @@ export const CodeCloneIndexStatusV1Schema: z.ZodType<CodeCloneIndexStatusV1, z.Z
 })]);
 
 /** Strongly typed canonical identity: `CodeGenerationId`. */
-export const CodeGenerationIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const CodeGenerationIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Interactive graph-serving state for the latest sealed generation.
 
 A sealed generation can expose truthful census statistics before its graph
 projection is ready to serve queries, so readiness is reported separately. */
-export const CodeGraphServingReadinessV1Schema: z.ZodType<CodeGraphServingReadinessV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const CodeGraphServingReadinessV1Schema: z.ZodType<CodeGraphServingReadinessV1, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("pending"),
 }), z.object({
   state: z.literal("ready"),
@@ -2392,42 +2392,42 @@ export const CodeGraphServingReadinessV1Schema: z.ZodType<CodeGraphServingReadin
 })]);
 
 /** A typed reason an otherwise active generation cannot make durable progress. */
-export const CodeIndexBuildBlockedReasonV1Schema: z.ZodEnum<["artifact_store_unavailable", "publication_authority_corrupt", "resident_memory", "retry_backoff", "source_unavailable"]> = z.enum(["artifact_store_unavailable", "publication_authority_corrupt", "resident_memory", "retry_backoff", "source_unavailable"]);
+export const CodeIndexBuildBlockedReasonV1Schema: z.ZodEnum<{ "artifact_store_unavailable": "artifact_store_unavailable"; "publication_authority_corrupt": "publication_authority_corrupt"; "resident_memory": "resident_memory"; "retry_backoff": "retry_backoff"; "source_unavailable": "source_unavailable" }> = z.enum(["artifact_store_unavailable", "publication_authority_corrupt", "resident_memory", "retry_backoff", "source_unavailable"]);
 
 /** The durable build phase whose committed boundary the dashboard is reading.
 
 A phase is not inferred from scheduler state. The mounted registry publishes
 the exact phase that owns the active generation. */
-export const CodeIndexBuildPhaseV1Schema: z.ZodType<"bulk_commit" | "index_build" | "ready" | "relational_preparation" | "source_scan" | "verification" | "graph_publication", z.ZodTypeDef, unknown> = z.union([z.enum(["bulk_commit", "index_build", "ready", "relational_preparation", "source_scan", "verification"]), z.literal("graph_publication")]);
+export const CodeIndexBuildPhaseV1Schema: z.ZodType<"bulk_commit" | "index_build" | "ready" | "relational_preparation" | "source_scan" | "verification" | "graph_publication", unknown> = z.union([z.enum(["bulk_commit", "index_build", "ready", "relational_preparation", "source_scan", "verification"]), z.literal("graph_publication")]);
 
 /** The latest committed progress boundary for one active code-index generation.
 
 Every count is scoped to `generation_id`. The snapshot never includes a
 staged page: work is reported only after the batch that owns it commits. */
 export const CodeIndexBuildProgressV1Schema: z.ZodObject<{
-  blocked_reason: z.ZodType<CodeIndexBuildBlockedReasonV1 | null, z.ZodTypeDef, unknown>;
-  committed_chunks: z.ZodType<number, z.ZodTypeDef, unknown>;
-  committed_imports: z.ZodType<number, z.ZodTypeDef, unknown>;
-  committed_pages: z.ZodType<number, z.ZodTypeDef, unknown>;
-  committed_payload_bytes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  completed_files: z.ZodType<number, z.ZodTypeDef, unknown>;
-  completed_lexical_units: z.ZodType<number, z.ZodTypeDef, unknown>;
-  current_batch_pages: z.ZodType<number, z.ZodTypeDef, unknown>;
-  current_batch_payload_bytes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  daemon_incarnation: z.ZodType<number, z.ZodTypeDef, unknown>;
-  elapsed_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  estimated_remaining_seconds: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  files_per_second: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  generation_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  last_commit_latency_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  last_progress_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  lexical_units_per_second: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  phase: z.ZodType<CodeIndexBuildPhaseV1, z.ZodTypeDef, unknown>;
-  producer_incarnation: z.ZodType<number, z.ZodTypeDef, unknown>;
-  progress_epoch: z.ZodType<number, z.ZodTypeDef, unknown>;
-  sealed_source_digest: z.ZodType<string, z.ZodTypeDef, unknown>;
-  total_files: z.ZodType<number, z.ZodTypeDef, unknown>;
-  total_lexical_units: z.ZodType<number, z.ZodTypeDef, unknown>;
+  blocked_reason: z.ZodType<CodeIndexBuildBlockedReasonV1 | null, unknown>;
+  committed_chunks: z.ZodType<number, unknown>;
+  committed_imports: z.ZodType<number, unknown>;
+  committed_pages: z.ZodType<number, unknown>;
+  committed_payload_bytes: z.ZodType<number, unknown>;
+  completed_files: z.ZodType<number, unknown>;
+  completed_lexical_units: z.ZodType<number, unknown>;
+  current_batch_pages: z.ZodType<number, unknown>;
+  current_batch_payload_bytes: z.ZodType<number, unknown>;
+  daemon_incarnation: z.ZodType<number, unknown>;
+  elapsed_micros: z.ZodType<number, unknown>;
+  estimated_remaining_seconds: z.ZodType<number | null, unknown>;
+  files_per_second: z.ZodType<number | null, unknown>;
+  generation_id: z.ZodType<string, unknown>;
+  last_commit_latency_micros: z.ZodType<number | null, unknown>;
+  last_progress_micros: z.ZodType<number, unknown>;
+  lexical_units_per_second: z.ZodType<number | null, unknown>;
+  phase: z.ZodType<CodeIndexBuildPhaseV1, unknown>;
+  producer_incarnation: z.ZodType<number, unknown>;
+  progress_epoch: z.ZodType<number, unknown>;
+  sealed_source_digest: z.ZodType<string, unknown>;
+  total_files: z.ZodType<number, unknown>;
+  total_lexical_units: z.ZodType<number, unknown>;
 }> = z.object({
   blocked_reason: z.union([z.lazy(() => CodeIndexBuildBlockedReasonV1Schema), z.null()]),
   committed_chunks: z.number().int().safe().min(0),
@@ -2462,12 +2462,12 @@ owner-private mode) is picked up on the next wake without a restart. The
 state exists so `status`, doctor, and the dashboard report the violation
 typed instead of an indefinite "warming". */
 export const CodeIndexConvergenceParkedV1Schema: z.ZodObject<{
-  blocked_reason: z.ZodOptional<z.ZodType<CodeIndexBuildBlockedReasonV1 | null, z.ZodTypeDef, unknown>>;
-  observed_passes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  parked_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  reason: z.ZodType<string, z.ZodTypeDef, unknown>;
-  remediation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  retries_on_wake: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  blocked_reason: z.ZodOptional<z.ZodType<CodeIndexBuildBlockedReasonV1 | null, unknown>>;
+  observed_passes: z.ZodType<number, unknown>;
+  parked_at_micros: z.ZodType<number, unknown>;
+  reason: z.ZodType<string, unknown>;
+  remediation: z.ZodType<string, unknown>;
+  retries_on_wake: z.ZodType<boolean, unknown>;
 }> = z.object({
   blocked_reason: z.union([z.lazy(() => CodeIndexBuildBlockedReasonV1Schema), z.null()]).optional(),
   observed_passes: z.number().int().safe().min(0),
@@ -2483,12 +2483,12 @@ while the ladder would otherwise say ready.
 
 `Unobserved` is only the constructed default. A projected read never emits
 it, so an absent observation cannot be mistaken for `complete`. */
-export const CodeIndexFreshnessCoverageV1Schema: z.ZodType<"complete" | "partial_artifact_restore" | "partial_hook_hint_overflow" | "partial_refresh_in_progress" | "partial_source_verification" | "partial_unverified_restore" | "unobserved" | "partial_omitted_sources", z.ZodTypeDef, unknown> = z.union([z.enum(["complete", "partial_artifact_restore", "partial_hook_hint_overflow", "partial_refresh_in_progress", "partial_source_verification", "partial_unverified_restore", "unobserved"]), z.literal("partial_omitted_sources")]);
+export const CodeIndexFreshnessCoverageV1Schema: z.ZodType<"complete" | "partial_artifact_restore" | "partial_hook_hint_overflow" | "partial_refresh_in_progress" | "partial_source_verification" | "partial_unverified_restore" | "unobserved" | "partial_omitted_sources", unknown> = z.union([z.enum(["complete", "partial_artifact_restore", "partial_hook_hint_overflow", "partial_refresh_in_progress", "partial_source_verification", "partial_unverified_restore", "unobserved"]), z.literal("partial_omitted_sources")]);
 
 export const CodeIndexFreshnessPayloadV1Schema: z.ZodObject<{
-  mount_failure: z.ZodOptional<z.ZodType<CodeIndexMountFailureV1 | null, z.ZodTypeDef, unknown>>;
-  note: z.ZodType<string, z.ZodTypeDef, unknown>;
-  worktrees: z.ZodType<Array<CodeIndexWorktreeFreshnessV1>, z.ZodTypeDef, unknown>;
+  mount_failure: z.ZodOptional<z.ZodType<CodeIndexMountFailureV1 | null, unknown>>;
+  note: z.ZodType<string, unknown>;
+  worktrees: z.ZodType<Array<CodeIndexWorktreeFreshnessV1>, unknown>;
 }> = z.object({
   mount_failure: z.union([z.lazy(() => CodeIndexMountFailureV1Schema), z.null()]).optional(),
   note: z.string(),
@@ -2496,14 +2496,14 @@ export const CodeIndexFreshnessPayloadV1Schema: z.ZodObject<{
 });
 
 /** Serving disposition of an incompatible generation during recovery. */
-export const CodeIndexGenerationRecoveryServingV1Schema: z.ZodEnum<["preserved", "refused"]> = z.enum(["preserved", "refused"]);
+export const CodeIndexGenerationRecoveryServingV1Schema: z.ZodEnum<{ "preserved": "preserved"; "refused": "refused" }> = z.enum(["preserved", "refused"]);
 
 /** Recovery state for a durable generation sealed under a different production
 owner configuration. */
 export const CodeIndexGenerationRecoveryV1Schema: z.ZodObject<{
-  incompatibilities: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  incompatible_generation_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  serving: z.ZodType<CodeIndexGenerationRecoveryServingV1, z.ZodTypeDef, unknown>;
+  incompatibilities: z.ZodType<Array<string>, unknown>;
+  incompatible_generation_id: z.ZodType<string, unknown>;
+  serving: z.ZodType<CodeIndexGenerationRecoveryServingV1, unknown>;
 }> = z.object({
   incompatibilities: z.array(z.string()),
   incompatible_generation_id: z.string(),
@@ -2512,8 +2512,8 @@ export const CodeIndexGenerationRecoveryV1Schema: z.ZodObject<{
 
 /** Safe operator-facing status for a failed code-index mount. */
 export const CodeIndexMountFailureV1Schema: z.ZodObject<{
-  message: z.ZodType<string, z.ZodTypeDef, unknown>;
-  remediation: z.ZodType<string, z.ZodTypeDef, unknown>;
+  message: z.ZodType<string, unknown>;
+  remediation: z.ZodType<string, unknown>;
 }> = z.object({
   message: z.string(),
   remediation: z.string(),
@@ -2521,17 +2521,17 @@ export const CodeIndexMountFailureV1Schema: z.ZodObject<{
 
 /** Sources a sealed snapshot captured but does not index. */
 export const CodeIndexOmittedSourcesV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  sources: z.ZodType<Array<CodeIndexOmittedSourceV1>, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  sources: z.ZodType<Array<CodeIndexOmittedSourceV1>, unknown>;
 }> = z.object({
   count: z.number().int().safe().min(0),
   sources: z.array(z.lazy(() => CodeIndexOmittedSourceV1Schema)),
 });
 
 export const CodeIndexOmittedSourceV1Schema: z.ZodObject<{
-  display_path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  git_path_bytes: z.ZodType<Array<number>, z.ZodTypeDef, unknown>;
-  reason: z.ZodType<CodeIndexSourceOmissionReasonV1, z.ZodTypeDef, unknown>;
+  display_path: z.ZodType<string, unknown>;
+  git_path_bytes: z.ZodType<Array<number>, unknown>;
+  reason: z.ZodType<CodeIndexSourceOmissionReasonV1, unknown>;
 }> = z.object({
   display_path: z.string(),
   git_path_bytes: z.array(z.number().int().min(0).max(255)),
@@ -2546,11 +2546,11 @@ checks are published only after they pass. `authenticated_remaining` is
 always `authenticated_total - authenticated_completed`, so a caller can
 distinguish bounded cold restore from an unbounded rebuild. */
 export const CodeIndexRestoreProgressV1Schema: z.ZodObject<{
-  artifact_digest: z.ZodType<string, z.ZodTypeDef, unknown>;
-  authenticated_completed: z.ZodType<number, z.ZodTypeDef, unknown>;
-  authenticated_remaining: z.ZodType<number, z.ZodTypeDef, unknown>;
-  authenticated_total: z.ZodType<number, z.ZodTypeDef, unknown>;
-  generation_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  artifact_digest: z.ZodType<string, unknown>;
+  authenticated_completed: z.ZodType<number, unknown>;
+  authenticated_remaining: z.ZodType<number, unknown>;
+  authenticated_total: z.ZodType<number, unknown>;
+  generation_id: z.ZodType<string, unknown>;
 }> = z.object({
   artifact_digest: z.string(),
   authenticated_completed: z.number().int().safe().min(0),
@@ -2559,7 +2559,7 @@ export const CodeIndexRestoreProgressV1Schema: z.ZodObject<{
   generation_id: z.string(),
 });
 
-export const CodeIndexSourceOmissionReasonV1Schema: z.ZodType<CodeIndexSourceOmissionReasonV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const CodeIndexSourceOmissionReasonV1Schema: z.ZodType<CodeIndexSourceOmissionReasonV1, unknown> = z.discriminatedUnion("kind", [z.object({
   detail: z.string(),
   kind: z.literal("privacy_withheld"),
 }), z.object({
@@ -2571,14 +2571,14 @@ export const CodeIndexSourceOmissionReasonV1Schema: z.ZodType<CodeIndexSourceOmi
 The scheduler publishes one of these tokens. MCP, the dashboard, and the
 CLI must match the variant, not a hand-copied string, so a new ladder
 state cannot appear at one caller and be missed at the others. */
-export const CodeIndexStalenessStateV1Schema: z.ZodEnum<["fresh", "indexing", "parked", "refreshing", "restoring", "stale", "verifying"]> = z.enum(["fresh", "indexing", "parked", "refreshing", "restoring", "stale", "verifying"]);
+export const CodeIndexStalenessStateV1Schema: z.ZodEnum<{ "fresh": "fresh"; "indexing": "indexing"; "parked": "parked"; "refreshing": "refreshing"; "restoring": "restoring"; "stale": "stale"; "verifying": "verifying" }> = z.enum(["fresh", "indexing", "parked", "refreshing", "restoring", "stale", "verifying"]);
 
-export const CodeIndexWorkerLimitingReasonV1Schema: z.ZodEnum<["automatic_all_cores", "automatic_half_cores", "configured_exact", "environment_override", "resident_memory"]> = z.enum(["automatic_all_cores", "automatic_half_cores", "configured_exact", "environment_override", "resident_memory"]);
+export const CodeIndexWorkerLimitingReasonV1Schema: z.ZodEnum<{ "automatic_all_cores": "automatic_all_cores"; "automatic_half_cores": "automatic_half_cores"; "configured_exact": "configured_exact"; "environment_override": "environment_override"; "resident_memory": "resident_memory" }> = z.enum(["automatic_all_cores", "automatic_half_cores", "configured_exact", "environment_override", "resident_memory"]);
 
 /** Profile-level worker-count intent for the process-wide code-index pool.
 `Automatic` delegates the concrete count to runtime resource admission;
 `Exact` persists an operator-requested positive worker count. */
-export const CodeIndexWorkerSelectionV1Schema: z.ZodType<CodeIndexWorkerSelectionV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("mode", [z.object({
+export const CodeIndexWorkerSelectionV1Schema: z.ZodType<CodeIndexWorkerSelectionV1, unknown> = z.discriminatedUnion("mode", [z.object({
   mode: z.literal("automatic"),
 }).strict(), z.object({
   mode: z.literal("exact"),
@@ -2588,23 +2588,23 @@ export const CodeIndexWorkerSelectionV1Schema: z.ZodType<CodeIndexWorkerSelectio
 /** Dedicated profile-session worker patch. Its CAS token is never a project
 configuration revision, so it cannot be mixed with [`UserSettingsPatch`]. */
 export const CodeIndexWorkerSettingsPatchSchema: z.ZodObject<{
-  code_index_workers: z.ZodType<CodeIndexWorkerSelectionV1, z.ZodTypeDef, unknown>;
-  expected_revision_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  idempotency_key: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  code_index_workers: z.ZodType<CodeIndexWorkerSelectionV1, unknown>;
+  expected_revision_id: z.ZodType<string, unknown>;
+  idempotency_key: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   code_index_workers: z.lazy(() => CodeIndexWorkerSelectionV1Schema),
   expected_revision_id: z.string(),
   idempotency_key: z.string(),
 }).strict();
 
 export const CodeIndexWorkerStatusV1Schema: z.ZodObject<{
-  available_logical_cpus: z.ZodType<number, z.ZodTypeDef, unknown>;
-  configured: z.ZodType<CodeIndexWorkerSelectionV1, z.ZodTypeDef, unknown>;
-  effective_workers: z.ZodType<number, z.ZodTypeDef, unknown>;
-  environment_override_workers: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  limiting_reason: z.ZodType<CodeIndexWorkerLimitingReasonV1, z.ZodTypeDef, unknown>;
-  memory_safe_workers: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  available_logical_cpus: z.ZodType<number, unknown>;
+  configured: z.ZodType<CodeIndexWorkerSelectionV1, unknown>;
+  effective_workers: z.ZodType<number, unknown>;
+  environment_override_workers: z.ZodType<number | null, unknown>;
+  limiting_reason: z.ZodType<CodeIndexWorkerLimitingReasonV1, unknown>;
+  memory_safe_workers: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   available_logical_cpus: z.number().int().min(0).max(65535),
   configured: z.lazy(() => CodeIndexWorkerSelectionV1Schema),
   effective_workers: z.number().int().min(0).max(65535),
@@ -2619,26 +2619,26 @@ export const CodeIndexWorkerStatusV1Schema: z.ZodObject<{
 exactly this type back out of the daemon's `tracedecay_status` response,
 keeping one authority for the freshness shape. */
 export const CodeIndexWorktreeFreshnessV1Schema: z.ZodObject<{
-  clone_index: z.ZodOptional<z.ZodType<CodeCloneIndexStatusV1 | null, z.ZodTypeDef, unknown>>;
-  code_graph_serving: z.ZodOptional<z.ZodType<CodeGraphServingReadinessV1 | null, z.ZodTypeDef, unknown>>;
-  coverage: z.ZodType<CodeIndexFreshnessCoverageV1, z.ZodTypeDef, unknown>;
-  generation_recovery: z.ZodOptional<z.ZodType<CodeIndexGenerationRecoveryV1 | null, z.ZodTypeDef, unknown>>;
-  hook_hint_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  last_reconcile_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  latest_generation_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  omitted_sources: z.ZodOptional<z.ZodType<CodeIndexOmittedSourcesV1 | null, z.ZodTypeDef, unknown>>;
-  parked: z.ZodType<CodeIndexConvergenceParkedV1 | null, z.ZodTypeDef, unknown>;
-  progress: z.ZodType<CodeIndexBuildProgressV1 | null, z.ZodTypeDef, unknown>;
-  rebuild_in_flight: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  repository_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  restore_progress: z.ZodOptional<z.ZodType<CodeIndexRestoreProgressV1 | null, z.ZodTypeDef, unknown>>;
-  sealed_at_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  snapshot_content_identity: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  source_reference: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  source_revision: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  staleness_state: z.ZodType<CodeIndexStalenessStateV1 | null, z.ZodTypeDef, unknown>;
-  worktree_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  worktree_root: z.ZodType<string, z.ZodTypeDef, unknown>;
+  clone_index: z.ZodOptional<z.ZodType<CodeCloneIndexStatusV1 | null, unknown>>;
+  code_graph_serving: z.ZodOptional<z.ZodType<CodeGraphServingReadinessV1 | null, unknown>>;
+  coverage: z.ZodType<CodeIndexFreshnessCoverageV1, unknown>;
+  generation_recovery: z.ZodOptional<z.ZodType<CodeIndexGenerationRecoveryV1 | null, unknown>>;
+  hook_hint_count: z.ZodType<number | null, unknown>;
+  last_reconcile_micros: z.ZodType<number | null, unknown>;
+  latest_generation_id: z.ZodType<string | null, unknown>;
+  omitted_sources: z.ZodOptional<z.ZodType<CodeIndexOmittedSourcesV1 | null, unknown>>;
+  parked: z.ZodType<CodeIndexConvergenceParkedV1 | null, unknown>;
+  progress: z.ZodType<CodeIndexBuildProgressV1 | null, unknown>;
+  rebuild_in_flight: z.ZodType<boolean, unknown>;
+  repository_id: z.ZodType<string | null, unknown>;
+  restore_progress: z.ZodOptional<z.ZodType<CodeIndexRestoreProgressV1 | null, unknown>>;
+  sealed_at_micros: z.ZodType<number | null, unknown>;
+  snapshot_content_identity: z.ZodType<string | null, unknown>;
+  source_reference: z.ZodType<string | null, unknown>;
+  source_revision: z.ZodType<string | null, unknown>;
+  staleness_state: z.ZodType<CodeIndexStalenessStateV1 | null, unknown>;
+  worktree_id: z.ZodType<string | null, unknown>;
+  worktree_root: z.ZodType<string, unknown>;
 }> = z.object({
   clone_index: z.union([z.lazy(() => CodeCloneIndexStatusV1Schema), z.null()]).optional(),
   code_graph_serving: z.union([z.lazy(() => CodeGraphServingReadinessV1Schema), z.null()]).optional(),
@@ -2663,9 +2663,9 @@ export const CodeIndexWorktreeFreshnessV1Schema: z.ZodObject<{
 });
 
 /** Strongly typed canonical identity: `CommitId`. */
-export const CommitIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const CommitIdSchema: z.ZodType<string, unknown> = z.string();
 
-export const ComparisonDispositionV1Schema: z.ZodEnum<["insufficient_evidence", "promote", "reject"]> = z.enum(["insufficient_evidence", "promote", "reject"]);
+export const ComparisonDispositionV1Schema: z.ZodEnum<{ "insufficient_evidence": "insufficient_evidence"; "promote": "promote"; "reject": "reject" }> = z.enum(["insufficient_evidence", "promote", "reject"]);
 
 /** Whether the bounded complexity walk over a symbol's body ran to the end.
 
@@ -2677,27 +2677,27 @@ counters as exact. */
 export const ComplexityAnalysisV1Schema: z.ZodUnion<[z.ZodLiteral<"complete">, z.ZodLiteral<"traversal_budget_exhausted">]> = z.union([z.literal("complete"), z.literal("traversal_budget_exhausted")]);
 
 /** Strongly typed canonical identity: `ComponentVersion`. */
-export const ComponentVersionSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const ComponentVersionSchema: z.ZodType<string, unknown> = z.string();
 
 /** Strongly typed canonical identity: `ConfigurationRevisionId`. */
-export const ConfigurationRevisionIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const ConfigurationRevisionIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Strongly typed canonical identity: `ConfigurationSnapshotId`. */
-export const ConfigurationSnapshotIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const ConfigurationSnapshotIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Strongly typed algorithm-tagged integrity digest: `ContentDigest`. */
-export const ContentDigestSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const ContentDigestSchema: z.ZodType<string, unknown> = z.string();
 
 export const CostsReadModelV1Schema: z.ZodObject<{
-  authorized_scope_ref: z.ZodType<string, z.ZodTypeDef, unknown>;
-  current: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  estimated_cost: z.ZodType<Array<MetricValueV1>, z.ZodTypeDef, unknown>;
-  horizon: z.ZodType<ObservabilityHorizonV1, z.ZodTypeDef, unknown>;
-  latency: z.ZodType<Array<ProviderLatencyReadModelV1>, z.ZodTypeDef, unknown>;
-  observed_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  pricing_revision: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  usage: z.ZodType<Array<MetricValueV1>, z.ZodTypeDef, unknown>;
-  watermark: z.ZodType<string, z.ZodTypeDef, unknown>;
+  authorized_scope_ref: z.ZodType<string, unknown>;
+  current: z.ZodType<boolean, unknown>;
+  estimated_cost: z.ZodType<Array<MetricValueV1>, unknown>;
+  horizon: z.ZodType<ObservabilityHorizonV1, unknown>;
+  latency: z.ZodType<Array<ProviderLatencyReadModelV1>, unknown>;
+  observed_at_micros: z.ZodType<number, unknown>;
+  pricing_revision: z.ZodType<string | null, unknown>;
+  usage: z.ZodType<Array<MetricValueV1>, unknown>;
+  watermark: z.ZodType<string, unknown>;
 }> = z.object({
   authorized_scope_ref: z.string(),
   current: z.boolean(),
@@ -2711,24 +2711,24 @@ export const CostsReadModelV1Schema: z.ZodObject<{
 });
 
 /** Completeness is explicit; unknown never renders as clean. */
-export const CoverageCompletenessSchema: z.ZodEnum<["complete", "partial", "unknown"]> = z.enum(["complete", "partial", "unknown"]);
+export const CoverageCompletenessSchema: z.ZodEnum<{ "complete": "complete"; "partial": "partial"; "unknown": "unknown" }> = z.enum(["complete", "partial", "unknown"]);
 
 export const CoverageDomainStateSchema: z.ZodObject<{
-  completeness: z.ZodType<CoverageCompleteness, z.ZodTypeDef, unknown>;
-  domain: z.ZodType<EvidenceDomain, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  completeness: z.ZodType<CoverageCompleteness, unknown>;
+  domain: z.ZodType<EvidenceDomain, unknown>;
+}, z.core.$strict> = z.object({
   completeness: z.lazy(() => CoverageCompletenessSchema),
   domain: z.lazy(() => EvidenceDomainSchema),
 }).strict();
 
-export const CoverageStateV1Schema: z.ZodEnum<["capped", "known", "partial", "sampled", "stale", "unknown"]> = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
+export const CoverageStateV1Schema: z.ZodEnum<{ "capped": "capped"; "known": "known"; "partial": "partial"; "sampled": "sampled"; "stale": "stale"; "unknown": "unknown" }> = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
 
 export const CoveringTestV1Schema: z.ZodObject<{
-  file_path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  qualification: z.ZodType<string, z.ZodTypeDef, unknown>;
-  start_line: z.ZodType<number, z.ZodTypeDef, unknown>;
+  file_path: z.ZodType<string, unknown>;
+  id: z.ZodType<string, unknown>;
+  name: z.ZodType<string, unknown>;
+  qualification: z.ZodType<string, unknown>;
+  start_line: z.ZodType<number, unknown>;
 }> = z.object({
   file_path: z.string(),
   id: z.string(),
@@ -2738,23 +2738,23 @@ export const CoveringTestV1Schema: z.ZodObject<{
 });
 
 export const CreateWorkProductRequestV1Schema: z.ZodObject<{
-  initial_graph: z.ZodType<WorkProductGraphV1, z.ZodTypeDef, unknown>;
-  mutation: z.ZodType<WorkProductMutationIdentityV1, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  initial_graph: z.ZodType<WorkProductGraphV1, unknown>;
+  mutation: z.ZodType<WorkProductMutationIdentityV1, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+}, z.core.$strict> = z.object({
   initial_graph: z.lazy(() => WorkProductGraphV1Schema),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
 }).strict();
 
 export const CreateWorkTaskRequestV1Schema: z.ZodObject<{
-  initiative: z.ZodType<WorkInitiativeV1, z.ZodTypeDef, unknown>;
-  item: z.ZodType<WorkItemV1, z.ZodTypeDef, unknown>;
-  milestone: z.ZodType<WorkMilestoneV1, z.ZodTypeDef, unknown>;
-  mutation: z.ZodType<WorkProductMutationIdentityV1, z.ZodTypeDef, unknown>;
-  plan: z.ZodType<WorkPlanV1, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  initiative: z.ZodType<WorkInitiativeV1, unknown>;
+  item: z.ZodType<WorkItemV1, unknown>;
+  milestone: z.ZodType<WorkMilestoneV1, unknown>;
+  mutation: z.ZodType<WorkProductMutationIdentityV1, unknown>;
+  plan: z.ZodType<WorkPlanV1, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+}, z.core.$strict> = z.object({
   initiative: z.lazy(() => WorkInitiativeV1Schema),
   item: z.lazy(() => WorkItemV1Schema),
   milestone: z.lazy(() => WorkMilestoneV1Schema),
@@ -2764,15 +2764,15 @@ export const CreateWorkTaskRequestV1Schema: z.ZodObject<{
 }).strict();
 
 /** Strongly typed canonical identity: `CredentialReferenceId`. */
-export const CredentialReferenceIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const CredentialReferenceIdSchema: z.ZodType<string, unknown> = z.string();
 
-export const CrossMergeModeV1Schema: z.ZodEnum<["cherry_pick_exact_commits", "disabled", "fast_forward_only", "manual_receipt_only", "merge_commit"]> = z.enum(["cherry_pick_exact_commits", "disabled", "fast_forward_only", "manual_receipt_only", "merge_commit"]);
+export const CrossMergeModeV1Schema: z.ZodEnum<{ "cherry_pick_exact_commits": "cherry_pick_exact_commits"; "disabled": "disabled"; "fast_forward_only": "fast_forward_only"; "manual_receipt_only": "manual_receipt_only"; "merge_commit": "merge_commit" }> = z.enum(["cherry_pick_exact_commits", "disabled", "fast_forward_only", "manual_receipt_only", "merge_commit"]);
 
 export const CrossMergePolicyV1Schema: z.ZodObject<{
-  allow_cross_repository: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  allowed_modes: z.ZodType<Array<CrossMergeModeV1>, z.ZodTypeDef, unknown>;
-  default_mode: z.ZodType<CrossMergeModeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  allow_cross_repository: z.ZodType<boolean, unknown>;
+  allowed_modes: z.ZodType<Array<CrossMergeModeV1>, unknown>;
+  default_mode: z.ZodType<CrossMergeModeV1, unknown>;
+}, z.core.$strict> = z.object({
   allow_cross_repository: z.boolean(),
   allowed_modes: z.array(z.lazy(() => CrossMergeModeV1Schema)),
   default_mode: z.lazy(() => CrossMergeModeV1Schema),
@@ -2780,7 +2780,7 @@ export const CrossMergePolicyV1Schema: z.ZodObject<{
 
 /** The managed daemon service unit as a client observed it, from the unit
 file alone. */
-export const DaemonServiceUnitObservationV1Schema: z.ZodType<DaemonServiceUnitObservationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const DaemonServiceUnitObservationV1Schema: z.ZodType<DaemonServiceUnitObservationV1, unknown> = z.discriminatedUnion("state", [z.object({
   path: z.string(),
   serves: z.string(),
   state: z.literal("installed"),
@@ -2796,7 +2796,7 @@ legal local read is [`Self::Authorized`]; the other variants are retained so
 the contract can express `unauthorized` (identity absent/expired), `denied`
 (known identity lacks permission), and `redacted` reads without a schema
 change. */
-export const DashboardAuthorizationV1Schema: z.ZodType<DashboardAuthorizationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("outcome", [z.object({
+export const DashboardAuthorizationV1Schema: z.ZodType<DashboardAuthorizationV1, unknown> = z.discriminatedUnion("outcome", [z.object({
   outcome: z.literal("authorized"),
 }), z.object({
   outcome: z.literal("denied"),
@@ -2809,22 +2809,22 @@ export const DashboardAuthorizationV1Schema: z.ZodType<DashboardAuthorizationV1,
 /** Coverage completeness axis. `Unsupported` distinguishes "the source that
 would establish coverage is not wired" from `Unknown` ("coverage could not
 be determined"). */
-export const DashboardCoverageCompletenessV1Schema: z.ZodEnum<["complete", "partial", "unknown", "unsupported"]> = z.enum(["complete", "partial", "unknown", "unsupported"]);
+export const DashboardCoverageCompletenessV1Schema: z.ZodEnum<{ "complete": "complete"; "partial": "partial"; "unknown": "unknown"; "unsupported": "unsupported" }> = z.enum(["complete", "partial", "unknown", "unsupported"]);
 
 /** Coverage statement. Counts are optional; an unknown denominator is `None`,
 never a fabricated `0`/`100%`. The completeness axis is authoritative, the
 frontend never derives `complete` from a `matched == eligible` coincidence. */
 export const DashboardCoverageV1Schema: z.ZodObject<{
-  completeness: z.ZodType<DashboardCoverageCompletenessV1, z.ZodTypeDef, unknown>;
-  denominator: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  eligible: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  examined: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  excluded: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  matched: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  omission_reasons: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  omitted: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  unit: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  unknown: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  completeness: z.ZodType<DashboardCoverageCompletenessV1, unknown>;
+  denominator: z.ZodType<number | null, unknown>;
+  eligible: z.ZodType<number | null, unknown>;
+  examined: z.ZodType<number | null, unknown>;
+  excluded: z.ZodType<number | null, unknown>;
+  matched: z.ZodType<number | null, unknown>;
+  omission_reasons: z.ZodType<Array<string>, unknown>;
+  omitted: z.ZodType<number | null, unknown>;
+  unit: z.ZodType<string | null, unknown>;
+  unknown: z.ZodType<number | null, unknown>;
 }> = z.object({
   completeness: z.lazy(() => DashboardCoverageCompletenessV1Schema),
   denominator: z.number().int().safe().min(0).nullable(),
@@ -2846,11 +2846,11 @@ state: the read model's HTTP surface exists, but its live producer/source is
 not yet wired server-side. It is never healthy or empty, the frontend
 renders a distinct "not yet available" state, and it is deliberately
 separate from [`Self::UnsupportedSchema`] (an undecodable schema/variant). */
-export const DashboardDomainStateV1Schema: z.ZodType<DashboardDomainStateV1, z.ZodTypeDef, unknown> = z.union([z.enum(["cancelled", "complete_zero_findings", "conflicting", "denied", "error", "loading", "locked", "offline", "partial", "ready", "redacted", "stale", "timed_out", "unauthorized", "unknown", "unsupported_schema"]), z.literal("unsupported")]).catch("unsupported_schema");
+export const DashboardDomainStateV1Schema: z.ZodType<DashboardDomainStateV1, unknown> = z.union([z.enum(["cancelled", "complete_zero_findings", "conflicting", "denied", "error", "loading", "locked", "offline", "partial", "ready", "redacted", "stale", "timed_out", "unauthorized", "unknown", "unsupported_schema"]), z.literal("unsupported")]).catch("unsupported_schema");
 
 export function DashboardEnvelopeV1Schema<TPayload>(
-  payloadSchema: z.ZodType<TPayload, z.ZodTypeDef, unknown>,
-): z.ZodType<DashboardEnvelopeV1<TPayload>, z.ZodTypeDef, unknown> {
+  payloadSchema: z.ZodType<TPayload, unknown>,
+): z.ZodType<DashboardEnvelopeV1<TPayload>, unknown> {
   return z.object({
     authorization: z.lazy(() => DashboardAuthorizationV1Schema),
     coverage: z.lazy(() => DashboardCoverageV1Schema),
@@ -2863,20 +2863,20 @@ export function DashboardEnvelopeV1Schema<TPayload>(
     source_watermark: z.union([z.lazy(() => DashboardWatermarkV1Schema), z.null()]),
     time: z.lazy(() => DashboardTimeV1Schema),
     version: z.lazy(() => DashboardVersionV1Schema),
-  }) as unknown as z.ZodType<DashboardEnvelopeV1<TPayload>, z.ZodTypeDef, unknown>;
+  }) as unknown as z.ZodType<DashboardEnvelopeV1<TPayload>, unknown>;
 }
 
 /** Freshness of the observed state relative to its live source watermark.
 `Absent` (no source produced anything) and `Unsupported` (no source wired)
 are distinct from `Stale` (behind the watermark) and `Unknown`. */
-export const DashboardFreshnessStateV1Schema: z.ZodEnum<["absent", "fresh", "stale", "unknown", "unsupported"]> = z.enum(["absent", "fresh", "stale", "unknown", "unsupported"]);
+export const DashboardFreshnessStateV1Schema: z.ZodEnum<{ "absent": "absent"; "fresh": "fresh"; "stale": "stale"; "unknown": "unknown"; "unsupported": "unsupported" }> = z.enum(["absent", "fresh", "stale", "unknown", "unsupported"]);
 
 /** Freshness statement plus the optional observation stamp/watermark it was
 judged against. */
 export const DashboardFreshnessV1Schema: z.ZodObject<{
-  observed_at_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  state: z.ZodType<DashboardFreshnessStateV1, z.ZodTypeDef, unknown>;
-  watermark: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  observed_at_micros: z.ZodType<number | null, unknown>;
+  state: z.ZodType<DashboardFreshnessStateV1, unknown>;
+  watermark: z.ZodType<string | null, unknown>;
 }> = z.object({
   observed_at_micros: z.number().int().safe().nullable(),
   state: z.lazy(() => DashboardFreshnessStateV1Schema),
@@ -2887,14 +2887,14 @@ export const DashboardFreshnessV1Schema: z.ZodObject<{
 plan's action vocabulary reduced to the read surface: the dashboard only
 renders these references and submits them through the owning application
 operation; it never constructs an effect inline. */
-export const DashboardLegalActionKindV1Schema: z.ZodEnum<["expand_evidence", "inspect", "refresh", "request_apply", "request_cancel", "request_dry_run"]> = z.enum(["expand_evidence", "inspect", "refresh", "request_apply", "request_cancel", "request_dry_run"]);
+export const DashboardLegalActionKindV1Schema: z.ZodEnum<{ "expand_evidence": "expand_evidence"; "inspect": "inspect"; "refresh": "refresh"; "request_apply": "request_apply"; "request_cancel": "request_cancel"; "request_dry_run": "request_dry_run" }> = z.enum(["expand_evidence", "inspect", "refresh", "request_apply", "request_cancel", "request_dry_run"]);
 
 /** A reference to one owner-supplied legal action. `operation` names the owning
 application operation; the dashboard never embeds argv, a path, or an inline
 effect. */
 export const DashboardLegalActionRefV1Schema: z.ZodObject<{
-  kind: z.ZodType<DashboardLegalActionKindV1, z.ZodTypeDef, unknown>;
-  operation: z.ZodType<string, z.ZodTypeDef, unknown>;
+  kind: z.ZodType<DashboardLegalActionKindV1, unknown>;
+  operation: z.ZodType<string, unknown>;
 }> = z.object({
   kind: z.lazy(() => DashboardLegalActionKindV1Schema),
   operation: z.string(),
@@ -2903,9 +2903,9 @@ export const DashboardLegalActionRefV1Schema: z.ZodObject<{
 /** Exact scope the envelope was resolved for. A deep link/query never falls
 back to a title, path, or latest version to recover scope. */
 export const DashboardScopeV1Schema: z.ZodObject<{
-  project_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  storage_mode: z.ZodType<string, z.ZodTypeDef, unknown>;
-  store_root: z.ZodType<string, z.ZodTypeDef, unknown>;
+  project_id: z.ZodType<string | null, unknown>;
+  storage_mode: z.ZodType<string, unknown>;
+  store_root: z.ZodType<string, unknown>;
 }> = z.object({
   project_id: z.string().nullable(),
   storage_mode: z.string(),
@@ -2916,8 +2916,8 @@ export const DashboardScopeV1Schema: z.ZodObject<{
 the daemon observed the state; `valid_time` is when the state was true in the
 modelled domain (absent when a read model has no distinct valid time). */
 export const DashboardTimeV1Schema: z.ZodObject<{
-  observation_time_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  valid_time_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  observation_time_micros: z.ZodType<number, unknown>;
+  valid_time_micros: z.ZodType<number | null, unknown>;
 }> = z.object({
   observation_time_micros: z.number().int().safe(),
   valid_time_micros: z.number().int().safe().nullable(),
@@ -2927,8 +2927,8 @@ export const DashboardTimeV1Schema: z.ZodObject<{
 optional: a read model with no versioned graph state leaves them absent
 rather than inventing `0`/`latest`. */
 export const DashboardVersionV1Schema: z.ZodObject<{
-  entity_version: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  graph_version: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  entity_version: z.ZodType<string | null, unknown>;
+  graph_version: z.ZodType<string | null, unknown>;
 }> = z.object({
   entity_version: z.string().nullable(),
   graph_version: z.string().nullable(),
@@ -2937,19 +2937,19 @@ export const DashboardVersionV1Schema: z.ZodObject<{
 /** Opaque monotone source watermark. The frontend compares watermarks for
 staleness but never parses their internal structure. */
 export const DashboardWatermarkV1Schema: z.ZodObject<{
-  source: z.ZodType<string, z.ZodTypeDef, unknown>;
-  watermark: z.ZodType<string, z.ZodTypeDef, unknown>;
+  source: z.ZodType<string, unknown>;
+  watermark: z.ZodType<string, unknown>;
 }> = z.object({
   source: z.string(),
   watermark: z.string(),
 });
 
 export const DecideWorkProposalRequestV1Schema: z.ZodObject<{
-  disposition: z.ZodType<WorkProposalDispositionV12, z.ZodTypeDef, unknown>;
-  mutation: z.ZodType<WorkProductMutationIdentityV1, z.ZodTypeDef, unknown>;
-  proposal: z.ZodType<WorkProposalV1, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  disposition: z.ZodType<WorkProposalDispositionV12, unknown>;
+  mutation: z.ZodType<WorkProductMutationIdentityV1, unknown>;
+  proposal: z.ZodType<WorkProposalV1, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+}, z.core.$strict> = z.object({
   disposition: z.lazy(() => WorkProposalDispositionV12Schema),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   proposal: z.lazy(() => WorkProposalV1Schema),
@@ -2957,11 +2957,11 @@ export const DecideWorkProposalRequestV1Schema: z.ZodObject<{
 }).strict();
 
 export const DecideWorkRelationReplanRequestV1Schema: z.ZodObject<{
-  disposition: z.ZodType<WorkProposalDispositionV12, z.ZodTypeDef, unknown>;
-  mutation: z.ZodType<WorkProductMutationIdentityV1, z.ZodTypeDef, unknown>;
-  proposal: z.ZodType<WorkRelationReplanProposalV1, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  disposition: z.ZodType<WorkProposalDispositionV12, unknown>;
+  mutation: z.ZodType<WorkProductMutationIdentityV1, unknown>;
+  proposal: z.ZodType<WorkRelationReplanProposalV1, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+}, z.core.$strict> = z.object({
   disposition: z.lazy(() => WorkProposalDispositionV12Schema),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   proposal: z.lazy(() => WorkRelationReplanProposalV1Schema),
@@ -2969,13 +2969,13 @@ export const DecideWorkRelationReplanRequestV1Schema: z.ZodObject<{
 }).strict();
 
 export const DeliveryAgentUsageRowV1Schema: z.ZodObject<{
-  agent: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  counters: z.ZodType<AggregatedProviderUsageCountersV1, z.ZodTypeDef, unknown>;
-  provider: z.ZodType<string, z.ZodTypeDef, unknown>;
-  sessions: z.ZodType<number, z.ZodTypeDef, unknown>;
-  sessions_with_usage: z.ZodType<number, z.ZodTypeDef, unknown>;
-  tool_calls: z.ZodType<number, z.ZodTypeDef, unknown>;
-  usage_complete: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  agent: z.ZodType<string | null, unknown>;
+  counters: z.ZodType<AggregatedProviderUsageCountersV1, unknown>;
+  provider: z.ZodType<string, unknown>;
+  sessions: z.ZodType<number, unknown>;
+  sessions_with_usage: z.ZodType<number, unknown>;
+  tool_calls: z.ZodType<number, unknown>;
+  usage_complete: z.ZodType<boolean, unknown>;
 }> = z.object({
   agent: z.string().nullable(),
   counters: z.lazy(() => AggregatedProviderUsageCountersV1Schema),
@@ -2988,11 +2988,11 @@ export const DeliveryAgentUsageRowV1Schema: z.ZodObject<{
 
 /** The agents whose sessions the correlation index places on `branch`. */
 export const DeliveryAgentUsageV1Schema: z.ZodObject<{
-  agents: z.ZodType<Array<DeliveryAgentUsageRowV1>, z.ZodTypeDef, unknown>;
-  branch: z.ZodType<string, z.ZodTypeDef, unknown>;
-  sessions: z.ZodType<number, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  usage_coverage: z.ZodType<ProviderUsageCoverageV1, z.ZodTypeDef, unknown>;
+  agents: z.ZodType<Array<DeliveryAgentUsageRowV1>, unknown>;
+  branch: z.ZodType<string, unknown>;
+  sessions: z.ZodType<number, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
+  usage_coverage: z.ZodType<ProviderUsageCoverageV1, unknown>;
 }> = z.object({
   agents: z.array(z.lazy(() => DeliveryAgentUsageRowV1Schema)),
   branch: z.string(),
@@ -3001,7 +3001,7 @@ export const DeliveryAgentUsageV1Schema: z.ZodObject<{
   usage_coverage: z.lazy(() => ProviderUsageCoverageV1Schema),
 });
 
-export const DeliveryAttentionEvidenceV1Schema: z.ZodType<DeliveryAttentionEvidenceV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const DeliveryAttentionEvidenceV1Schema: z.ZodType<DeliveryAttentionEvidenceV1, unknown> = z.discriminatedUnion("kind", [z.object({
   failure_anchor: z.string(),
   kind: z.literal("ci_failure"),
 }), z.object({
@@ -3022,14 +3022,14 @@ export const DeliveryAttentionEvidenceV1Schema: z.ZodType<DeliveryAttentionEvide
 })]);
 
 export const DeliveryAttentionItemV1Schema: z.ZodObject<{
-  coverage: z.ZodType<DeliveryInboxCoverageV1, z.ZodTypeDef, unknown>;
-  evidence: z.ZodType<Array<DeliveryAttentionEvidenceV1>, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  observed_at_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  pull_request_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  source: z.ZodType<DeliveryAttentionSourceV1, z.ZodTypeDef, unknown>;
-  state: z.ZodType<DeliveryAttentionStateV1, z.ZodTypeDef, unknown>;
+  coverage: z.ZodType<DeliveryInboxCoverageV1, unknown>;
+  evidence: z.ZodType<Array<DeliveryAttentionEvidenceV1>, unknown>;
+  id: z.ZodType<string, unknown>;
+  observed_at_micros: z.ZodType<number | null, unknown>;
+  project_id: z.ZodType<string, unknown>;
+  pull_request_id: z.ZodType<string, unknown>;
+  source: z.ZodType<DeliveryAttentionSourceV1, unknown>;
+  state: z.ZodType<DeliveryAttentionStateV1, unknown>;
 }> = z.object({
   coverage: z.lazy(() => DeliveryInboxCoverageV1Schema),
   evidence: z.array(z.lazy(() => DeliveryAttentionEvidenceV1Schema)),
@@ -3041,18 +3041,18 @@ export const DeliveryAttentionItemV1Schema: z.ZodObject<{
   state: z.lazy(() => DeliveryAttentionStateV1Schema),
 });
 
-export const DeliveryAttentionSourceV1Schema: z.ZodEnum<["ci_failure", "confirmed_conflict", "contradiction", "divergent_shared_implementation", "evidence_gap", "new_review_comment", "overlapping_edit", "stale_provider_state", "test_risk", "unresolved_review", "unreviewed_changed_code", "unsafe_pattern", "weak_evidence"]> = z.enum(["ci_failure", "confirmed_conflict", "contradiction", "divergent_shared_implementation", "evidence_gap", "new_review_comment", "overlapping_edit", "stale_provider_state", "test_risk", "unresolved_review", "unreviewed_changed_code", "unsafe_pattern", "weak_evidence"]);
+export const DeliveryAttentionSourceV1Schema: z.ZodEnum<{ "ci_failure": "ci_failure"; "confirmed_conflict": "confirmed_conflict"; "contradiction": "contradiction"; "divergent_shared_implementation": "divergent_shared_implementation"; "evidence_gap": "evidence_gap"; "new_review_comment": "new_review_comment"; "overlapping_edit": "overlapping_edit"; "stale_provider_state": "stale_provider_state"; "test_risk": "test_risk"; "unresolved_review": "unresolved_review"; "unreviewed_changed_code": "unreviewed_changed_code"; "unsafe_pattern": "unsafe_pattern"; "weak_evidence": "weak_evidence" }> = z.enum(["ci_failure", "confirmed_conflict", "contradiction", "divergent_shared_implementation", "evidence_gap", "new_review_comment", "overlapping_edit", "stale_provider_state", "test_risk", "unresolved_review", "unreviewed_changed_code", "unsafe_pattern", "weak_evidence"]);
 
-export const DeliveryAttentionStateV1Schema: z.ZodEnum<["active", "clear", "denied", "unavailable"]> = z.enum(["active", "clear", "denied", "unavailable"]);
+export const DeliveryAttentionStateV1Schema: z.ZodEnum<{ "active": "active"; "clear": "clear"; "denied": "denied"; "unavailable": "unavailable" }> = z.enum(["active", "clear", "denied", "unavailable"]);
 
-export const DeliveryCiAnnotationLevelV1Schema: z.ZodEnum<["failure", "notice", "warning"]> = z.enum(["failure", "notice", "warning"]);
+export const DeliveryCiAnnotationLevelV1Schema: z.ZodEnum<{ "failure": "failure"; "notice": "notice"; "warning": "warning" }> = z.enum(["failure", "notice", "warning"]);
 
 export const DeliveryCiAnnotationV1Schema: z.ZodObject<{
-  end_line: z.ZodType<number, z.ZodTypeDef, unknown>;
-  level: z.ZodType<DeliveryCiAnnotationLevelV1, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  start_line: z.ZodType<number, z.ZodTypeDef, unknown>;
-  title: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  end_line: z.ZodType<number, unknown>;
+  level: z.ZodType<DeliveryCiAnnotationLevelV1, unknown>;
+  path: z.ZodType<string, unknown>;
+  start_line: z.ZodType<number, unknown>;
+  title: z.ZodType<string | null, unknown>;
 }> = z.object({
   end_line: z.number().int().min(0),
   level: z.lazy(() => DeliveryCiAnnotationLevelV1Schema),
@@ -3062,23 +3062,23 @@ export const DeliveryCiAnnotationV1Schema: z.ZodObject<{
 });
 
 export const DeliveryCiCheckV1Schema: z.ZodObject<{
-  annotation_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  annotations: z.ZodType<Array<DeliveryCiAnnotationV1>, z.ZodTypeDef, unknown>;
-  check_conclusion: z.ZodType<DeliveryCiConclusionV1 | null, z.ZodTypeDef, unknown>;
-  check_status: z.ZodType<DeliveryCiStatusV1, z.ZodTypeDef, unknown>;
-  failed_step: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  failure_kind: z.ZodType<DeliveryCiFailureKindV1, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  job_conclusion: z.ZodType<DeliveryCiConclusionV1 | null, z.ZodTypeDef, unknown>;
-  job_status: z.ZodType<DeliveryCiStatusV1, z.ZodTypeDef, unknown>;
-  label: z.ZodType<string, z.ZodTypeDef, unknown>;
-  observation_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  observed_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  provider_head_commit: z.ZodType<string, z.ZodTypeDef, unknown>;
-  run: z.ZodType<DeliveryCiRunIdentityV1, z.ZodTypeDef, unknown>;
-  workflow_conclusion: z.ZodType<DeliveryCiConclusionV1 | null, z.ZodTypeDef, unknown>;
-  workflow_path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  workflow_status: z.ZodType<DeliveryCiStatusV1, z.ZodTypeDef, unknown>;
+  annotation_count: z.ZodType<number, unknown>;
+  annotations: z.ZodType<Array<DeliveryCiAnnotationV1>, unknown>;
+  check_conclusion: z.ZodType<DeliveryCiConclusionV1 | null, unknown>;
+  check_status: z.ZodType<DeliveryCiStatusV1, unknown>;
+  failed_step: z.ZodType<string | null, unknown>;
+  failure_kind: z.ZodType<DeliveryCiFailureKindV1, unknown>;
+  id: z.ZodType<string, unknown>;
+  job_conclusion: z.ZodType<DeliveryCiConclusionV1 | null, unknown>;
+  job_status: z.ZodType<DeliveryCiStatusV1, unknown>;
+  label: z.ZodType<string, unknown>;
+  observation_id: z.ZodType<string, unknown>;
+  observed_at_micros: z.ZodType<number, unknown>;
+  provider_head_commit: z.ZodType<string, unknown>;
+  run: z.ZodType<DeliveryCiRunIdentityV1, unknown>;
+  workflow_conclusion: z.ZodType<DeliveryCiConclusionV1 | null, unknown>;
+  workflow_path: z.ZodType<string, unknown>;
+  workflow_status: z.ZodType<DeliveryCiStatusV1, unknown>;
 }> = z.object({
   annotation_count: z.number().int().safe().min(0),
   annotations: z.array(z.lazy(() => DeliveryCiAnnotationV1Schema)),
@@ -3099,17 +3099,17 @@ export const DeliveryCiCheckV1Schema: z.ZodObject<{
   workflow_status: z.lazy(() => DeliveryCiStatusV1Schema),
 });
 
-export const DeliveryCiConclusionV1Schema: z.ZodEnum<["action_required", "cancelled", "failure", "neutral", "skipped", "success", "timed_out"]> = z.enum(["action_required", "cancelled", "failure", "neutral", "skipped", "success", "timed_out"]);
+export const DeliveryCiConclusionV1Schema: z.ZodEnum<{ "action_required": "action_required"; "cancelled": "cancelled"; "failure": "failure"; "neutral": "neutral"; "skipped": "skipped"; "success": "success"; "timed_out": "timed_out" }> = z.enum(["action_required", "cancelled", "failure", "neutral", "skipped", "success", "timed_out"]);
 
-export const DeliveryCiFailureKindV1Schema: z.ZodEnum<["compile_failure", "infrastructure_failure", "lint_failure", "test_failure", "unknown"]> = z.enum(["compile_failure", "infrastructure_failure", "lint_failure", "test_failure", "unknown"]);
+export const DeliveryCiFailureKindV1Schema: z.ZodEnum<{ "compile_failure": "compile_failure"; "infrastructure_failure": "infrastructure_failure"; "lint_failure": "lint_failure"; "test_failure": "test_failure"; "unknown": "unknown" }> = z.enum(["compile_failure", "infrastructure_failure", "lint_failure", "test_failure", "unknown"]);
 
 export const DeliveryCiRunIdentityV1Schema: z.ZodObject<{
-  attempt_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  check_run_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  check_suite_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  job_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  workflow_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  attempt_id: z.ZodType<string, unknown>;
+  check_run_id: z.ZodType<string, unknown>;
+  check_suite_id: z.ZodType<string, unknown>;
+  job_id: z.ZodType<string, unknown>;
+  run_id: z.ZodType<string, unknown>;
+  workflow_id: z.ZodType<string, unknown>;
 }> = z.object({
   attempt_id: z.string(),
   check_run_id: z.string(),
@@ -3119,14 +3119,14 @@ export const DeliveryCiRunIdentityV1Schema: z.ZodObject<{
   workflow_id: z.string(),
 });
 
-export const DeliveryCiStatusV1Schema: z.ZodEnum<["completed", "failed", "in_progress", "pending", "queued", "waiting"]> = z.enum(["completed", "failed", "in_progress", "pending", "queued", "waiting"]);
+export const DeliveryCiStatusV1Schema: z.ZodEnum<{ "completed": "completed"; "failed": "failed"; "in_progress": "in_progress"; "pending": "pending"; "queued": "queued"; "waiting": "waiting" }> = z.enum(["completed", "failed", "in_progress", "pending", "queued", "waiting"]);
 
 export const DeliveryCiTimelineV1Schema: z.ZodObject<{
-  expected_head_commit: z.ZodType<string, z.ZodTypeDef, unknown>;
-  items: z.ZodType<Array<DeliveryCiCheckV1>, z.ZodTypeDef, unknown>;
-  retained_head_commit: z.ZodType<string, z.ZodTypeDef, unknown>;
-  total_retained: z.ZodType<number, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  expected_head_commit: z.ZodType<string, unknown>;
+  items: z.ZodType<Array<DeliveryCiCheckV1>, unknown>;
+  retained_head_commit: z.ZodType<string, unknown>;
+  total_retained: z.ZodType<number, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
 }> = z.object({
   expected_head_commit: z.string(),
   items: z.array(z.lazy(() => DeliveryCiCheckV1Schema)),
@@ -3136,20 +3136,20 @@ export const DeliveryCiTimelineV1Schema: z.ZodObject<{
 });
 
 export const DeliveryCommitTimelineV1Schema: z.ZodObject<{
-  items: z.ZodType<Array<DeliveryCommitV1>, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  items: z.ZodType<Array<DeliveryCommitV1>, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
 }> = z.object({
   items: z.array(z.lazy(() => DeliveryCommitV1Schema)),
   truncated: z.boolean(),
 });
 
 export const DeliveryCommitV1Schema: z.ZodObject<{
-  author_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  author_email: z.ZodType<string, z.ZodTypeDef, unknown>;
-  author_name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  commit: z.ZodType<string, z.ZodTypeDef, unknown>;
-  committer_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  subject: z.ZodType<string, z.ZodTypeDef, unknown>;
+  author_at_micros: z.ZodType<number, unknown>;
+  author_email: z.ZodType<string, unknown>;
+  author_name: z.ZodType<string, unknown>;
+  commit: z.ZodType<string, unknown>;
+  committer_at_micros: z.ZodType<number, unknown>;
+  subject: z.ZodType<string, unknown>;
 }> = z.object({
   author_at_micros: z.number().int().safe(),
   author_email: z.string(),
@@ -3160,34 +3160,34 @@ export const DeliveryCommitV1Schema: z.ZodObject<{
 });
 
 export const DeliveryFailureLocalizationTimelineV1Schema: z.ZodObject<{
-  items: z.ZodType<Array<DeliveryFailureLocalizationV1>, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  items: z.ZodType<Array<DeliveryFailureLocalizationV1>, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
 }> = z.object({
   items: z.array(z.lazy(() => DeliveryFailureLocalizationV1Schema)),
   truncated: z.boolean(),
 });
 
 export const DeliveryFailureLocalizationV1Schema: z.ZodObject<{
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  label: z.ZodType<string, z.ZodTypeDef, unknown>;
+  id: z.ZodType<string, unknown>;
+  label: z.ZodType<string, unknown>;
 }> = z.object({
   id: z.string(),
   label: z.string(),
 });
 
-export const DeliveryGenerationComparisonV1Schema: z.ZodEnum<["current", "mismatch"]> = z.enum(["current", "mismatch"]);
+export const DeliveryGenerationComparisonV1Schema: z.ZodEnum<{ "current": "current"; "mismatch": "mismatch" }> = z.enum(["current", "mismatch"]);
 
 export const DeliveryGenerationFreshnessV1Schema: z.ZodObject<{
-  comparison: z.ZodType<DeliveryGenerationComparisonV1, z.ZodTypeDef, unknown>;
-  head_commit: z.ZodType<string, z.ZodTypeDef, unknown>;
-  indexed_commit: z.ZodType<string, z.ZodTypeDef, unknown>;
+  comparison: z.ZodType<DeliveryGenerationComparisonV1, unknown>;
+  head_commit: z.ZodType<string, unknown>;
+  indexed_commit: z.ZodType<string, unknown>;
 }> = z.object({
   comparison: z.lazy(() => DeliveryGenerationComparisonV1Schema),
   head_commit: z.string(),
   indexed_commit: z.string(),
 });
 
-export const DeliveryGitHeadV1Schema: z.ZodType<DeliveryGitHeadV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const DeliveryGitHeadV1Schema: z.ZodType<DeliveryGitHeadV1, unknown> = z.discriminatedUnion("state", [z.object({
   branch: z.string(),
   commit: z.string(),
   state: z.literal("attached"),
@@ -3199,16 +3199,16 @@ export const DeliveryGitHeadV1Schema: z.ZodType<DeliveryGitHeadV1, z.ZodTypeDef,
   state: z.literal("unborn"),
 })]);
 
-export const DeliveryGitHubCoverageV1Schema: z.ZodEnum<["complete", "denied", "partial", "stale", "unavailable"]> = z.enum(["complete", "denied", "partial", "stale", "unavailable"]);
+export const DeliveryGitHubCoverageV1Schema: z.ZodEnum<{ "complete": "complete"; "denied": "denied"; "partial": "partial"; "stale": "stale"; "unavailable": "unavailable" }> = z.enum(["complete", "denied", "partial", "stale", "unavailable"]);
 
 export const DeliveryGitHubOperationSnapshotV1Schema: z.ZodObject<{
-  coverage: z.ZodType<DeliveryGitHubCoverageV1, z.ZodTypeDef, unknown>;
-  fetched_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  merge_base_commit_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  outcome: z.ZodType<DeliveryGitHubOutcomeV1, z.ZodTypeDef, unknown>;
-  provider_base_commit_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  provider_head_commit_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  quarantined: z.ZodType<Array<DeliveryGitHubQuarantinedCommentV1>, z.ZodTypeDef, unknown>;
+  coverage: z.ZodType<DeliveryGitHubCoverageV1, unknown>;
+  fetched_at_micros: z.ZodType<number, unknown>;
+  merge_base_commit_id: z.ZodType<string, unknown>;
+  outcome: z.ZodType<DeliveryGitHubOutcomeV1, unknown>;
+  provider_base_commit_id: z.ZodType<string, unknown>;
+  provider_head_commit_id: z.ZodType<string, unknown>;
+  quarantined: z.ZodType<Array<DeliveryGitHubQuarantinedCommentV1>, unknown>;
 }> = z.object({
   coverage: z.lazy(() => DeliveryGitHubCoverageV1Schema),
   fetched_at_micros: z.number().int().safe(),
@@ -3219,31 +3219,31 @@ export const DeliveryGitHubOperationSnapshotV1Schema: z.ZodObject<{
   quarantined: z.array(z.lazy(() => DeliveryGitHubQuarantinedCommentV1Schema)),
 });
 
-export const DeliveryGitHubOutcomeV1Schema: z.ZodEnum<["complete", "denied", "failed", "partial", "rate_limited", "stale", "unavailable"]> = z.enum(["complete", "denied", "failed", "partial", "rate_limited", "stale", "unavailable"]);
+export const DeliveryGitHubOutcomeV1Schema: z.ZodEnum<{ "complete": "complete"; "denied": "denied"; "failed": "failed"; "partial": "partial"; "rate_limited": "rate_limited"; "stale": "stale"; "unavailable": "unavailable" }> = z.enum(["complete", "denied", "failed", "partial", "rate_limited", "stale", "unavailable"]);
 
 export const DeliveryGitHubQuarantinedCommentV1Schema: z.ZodObject<{
-  comment_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  reason: z.ZodType<DeliveryGitHubQuarantineReasonV1, z.ZodTypeDef, unknown>;
+  comment_id: z.ZodType<string, unknown>;
+  reason: z.ZodType<DeliveryGitHubQuarantineReasonV1, unknown>;
 }> = z.object({
   comment_id: z.string(),
   reason: z.lazy(() => DeliveryGitHubQuarantineReasonV1Schema),
 });
 
-export const DeliveryGitHubQuarantineReasonV1Schema: z.ZodEnum<["body_out_of_bounds", "privacy_sanitizer"]> = z.enum(["body_out_of_bounds", "privacy_sanitizer"]);
+export const DeliveryGitHubQuarantineReasonV1Schema: z.ZodEnum<{ "body_out_of_bounds": "body_out_of_bounds"; "privacy_sanitizer": "privacy_sanitizer" }> = z.enum(["body_out_of_bounds", "privacy_sanitizer"]);
 
-export const DeliveryGitHubReadOperationV1Schema: z.ZodEnum<["pull_request", "review_comments", "review_threads", "reviews"]> = z.enum(["pull_request", "review_comments", "review_threads", "reviews"]);
+export const DeliveryGitHubReadOperationV1Schema: z.ZodEnum<{ "pull_request": "pull_request"; "review_comments": "review_comments"; "review_threads": "review_threads"; "reviews": "reviews" }> = z.enum(["pull_request", "review_comments", "review_threads", "reviews"]);
 
 export const DeliveryGitStatusV1Schema: z.ZodObject<{
-  changed_paths: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  conflicted: z.ZodType<number, z.ZodTypeDef, unknown>;
-  head: z.ZodType<DeliveryGitHeadV1, z.ZodTypeDef, unknown>;
-  ignored: z.ZodType<number, z.ZodTypeDef, unknown>;
-  operation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  repository: z.ZodType<string, z.ZodTypeDef, unknown>;
-  schema_version: z.ZodType<string, z.ZodTypeDef, unknown>;
-  staged: z.ZodType<number, z.ZodTypeDef, unknown>;
-  unstaged: z.ZodType<number, z.ZodTypeDef, unknown>;
-  untracked: z.ZodType<number, z.ZodTypeDef, unknown>;
+  changed_paths: z.ZodType<Array<string>, unknown>;
+  conflicted: z.ZodType<number, unknown>;
+  head: z.ZodType<DeliveryGitHeadV1, unknown>;
+  ignored: z.ZodType<number, unknown>;
+  operation: z.ZodType<string, unknown>;
+  repository: z.ZodType<string, unknown>;
+  schema_version: z.ZodType<string, unknown>;
+  staged: z.ZodType<number, unknown>;
+  unstaged: z.ZodType<number, unknown>;
+  untracked: z.ZodType<number, unknown>;
 }> = z.object({
   changed_paths: z.array(z.string()),
   conflicted: z.number().int().min(0),
@@ -3257,19 +3257,19 @@ export const DeliveryGitStatusV1Schema: z.ZodObject<{
   untracked: z.number().int().min(0),
 });
 
-export const DeliveryInboxCoverageV1Schema: z.ZodEnum<["complete", "denied", "partial", "stale", "unavailable", "unsupported"]> = z.enum(["complete", "denied", "partial", "stale", "unavailable", "unsupported"]);
+export const DeliveryInboxCoverageV1Schema: z.ZodEnum<{ "complete": "complete"; "denied": "denied"; "partial": "partial"; "stale": "stale"; "unavailable": "unavailable"; "unsupported": "unsupported" }> = z.enum(["complete", "denied", "partial", "stale", "unavailable", "unsupported"]);
 
 export const DeliveryInboxProjectV1Schema: z.ZodObject<{
-  branch_ref: z.ZodType<string, z.ZodTypeDef, unknown>;
-  git_common_dir: z.ZodType<string, z.ZodTypeDef, unknown>;
-  indexed_generation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  indexed_head_commit_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  label: z.ZodType<string, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  project_root: z.ZodType<string, z.ZodTypeDef, unknown>;
-  provider_state: z.ZodType<DeliveryProviderStateV1, z.ZodTypeDef, unknown>;
-  repository_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  worktree_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  branch_ref: z.ZodType<string, unknown>;
+  git_common_dir: z.ZodType<string, unknown>;
+  indexed_generation: z.ZodType<string, unknown>;
+  indexed_head_commit_id: z.ZodType<string, unknown>;
+  label: z.ZodType<string, unknown>;
+  project_id: z.ZodType<string, unknown>;
+  project_root: z.ZodType<string, unknown>;
+  provider_state: z.ZodType<DeliveryProviderStateV1, unknown>;
+  repository_id: z.ZodType<string, unknown>;
+  worktree_id: z.ZodType<string, unknown>;
 }> = z.object({
   branch_ref: z.string(),
   git_common_dir: z.string(),
@@ -3283,20 +3283,20 @@ export const DeliveryInboxProjectV1Schema: z.ZodObject<{
   worktree_id: z.string(),
 });
 
-export const DeliveryInboxPullRequestStateV1Schema: z.ZodEnum<["current", "partial", "stale"]> = z.enum(["current", "partial", "stale"]);
+export const DeliveryInboxPullRequestStateV1Schema: z.ZodEnum<{ "current": "current"; "partial": "partial"; "stale": "stale" }> = z.enum(["current", "partial", "stale"]);
 
 export const DeliveryInboxPullRequestV1Schema: z.ZodObject<{
-  attention: z.ZodType<Array<DeliveryAttentionItemV1>, z.ZodTypeDef, unknown>;
-  branch_ref: z.ZodType<string, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  indexed_generation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  indexed_head_commit_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  pull_request: z.ZodType<DeliveryPullRequestV1, z.ZodTypeDef, unknown>;
-  repository_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  shared_code: z.ZodType<Array<DeliverySharedCodeRefV1>, z.ZodTypeDef, unknown>;
-  state: z.ZodType<DeliveryInboxPullRequestStateV1, z.ZodTypeDef, unknown>;
-  worktree_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  attention: z.ZodType<Array<DeliveryAttentionItemV1>, unknown>;
+  branch_ref: z.ZodType<string, unknown>;
+  id: z.ZodType<string, unknown>;
+  indexed_generation: z.ZodType<string, unknown>;
+  indexed_head_commit_id: z.ZodType<string, unknown>;
+  project_id: z.ZodType<string, unknown>;
+  pull_request: z.ZodType<DeliveryPullRequestV1, unknown>;
+  repository_id: z.ZodType<string, unknown>;
+  shared_code: z.ZodType<Array<DeliverySharedCodeRefV1>, unknown>;
+  state: z.ZodType<DeliveryInboxPullRequestStateV1, unknown>;
+  worktree_id: z.ZodType<string, unknown>;
 }> = z.object({
   attention: z.array(z.lazy(() => DeliveryAttentionItemV1Schema)),
   branch_ref: z.string(),
@@ -3312,12 +3312,12 @@ export const DeliveryInboxPullRequestV1Schema: z.ZodObject<{
 });
 
 export const DeliveryInboxV1Schema: z.ZodObject<{
-  excluded_pull_requests: z.ZodType<number, z.ZodTypeDef, unknown>;
-  membership_edges: z.ZodType<Array<DeliveryMembershipEdgeV1>, z.ZodTypeDef, unknown>;
-  omitted_projects: z.ZodType<number, z.ZodTypeDef, unknown>;
-  projects: z.ZodType<Array<DeliveryInboxProjectV1>, z.ZodTypeDef, unknown>;
-  pull_requests: z.ZodType<Array<DeliveryInboxPullRequestV1>, z.ZodTypeDef, unknown>;
-  registry_state: z.ZodType<DeliveryRegistryStateV1, z.ZodTypeDef, unknown>;
+  excluded_pull_requests: z.ZodType<number, unknown>;
+  membership_edges: z.ZodType<Array<DeliveryMembershipEdgeV1>, unknown>;
+  omitted_projects: z.ZodType<number, unknown>;
+  projects: z.ZodType<Array<DeliveryInboxProjectV1>, unknown>;
+  pull_requests: z.ZodType<Array<DeliveryInboxPullRequestV1>, unknown>;
+  registry_state: z.ZodType<DeliveryRegistryStateV1, unknown>;
 }> = z.object({
   excluded_pull_requests: z.number().int().safe().min(0),
   membership_edges: z.array(z.lazy(() => DeliveryMembershipEdgeV1Schema)),
@@ -3327,7 +3327,7 @@ export const DeliveryInboxV1Schema: z.ZodObject<{
   registry_state: z.lazy(() => DeliveryRegistryStateV1Schema),
 });
 
-export const DeliveryMembershipBasisV1Schema: z.ZodType<DeliveryMembershipBasisV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const DeliveryMembershipBasisV1Schema: z.ZodType<DeliveryMembershipBasisV1, unknown> = z.discriminatedUnion("kind", [z.object({
   branch_ref: z.string(),
   head_commit_id: z.string(),
   kind: z.literal("branch_pull_request_reference"),
@@ -3347,10 +3347,10 @@ export const DeliveryMembershipBasisV1Schema: z.ZodType<DeliveryMembershipBasisV
 })]);
 
 export const DeliveryMembershipEdgeV1Schema: z.ZodObject<{
-  basis: z.ZodType<DeliveryMembershipBasisV1, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  pull_request_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  basis: z.ZodType<DeliveryMembershipBasisV1, unknown>;
+  id: z.ZodType<string, unknown>;
+  project_id: z.ZodType<string, unknown>;
+  pull_request_id: z.ZodType<string, unknown>;
 }> = z.object({
   basis: z.lazy(() => DeliveryMembershipBasisV1Schema),
   id: z.string(),
@@ -3359,15 +3359,15 @@ export const DeliveryMembershipEdgeV1Schema: z.ZodObject<{
 });
 
 export const DeliveryOverviewV1Schema: z.ZodObject<{
-  agent_usage: z.ZodType<DeliveryProjectionV19, z.ZodTypeDef, unknown>;
-  changes: z.ZodType<DeliveryProjectionV1, z.ZodTypeDef, unknown>;
-  ci_checks: z.ZodType<DeliveryProjectionV15, z.ZodTypeDef, unknown>;
-  commits: z.ZodType<DeliveryProjectionV12, z.ZodTypeDef, unknown>;
-  failure_localization: z.ZodType<DeliveryProjectionV16, z.ZodTypeDef, unknown>;
-  generation_freshness: z.ZodType<DeliveryProjectionV18, z.ZodTypeDef, unknown>;
-  pull_requests: z.ZodType<DeliveryProjectionV13, z.ZodTypeDef, unknown>;
-  releases: z.ZodType<DeliveryProjectionV17, z.ZodTypeDef, unknown>;
-  review_comments: z.ZodType<DeliveryProjectionV14, z.ZodTypeDef, unknown>;
+  agent_usage: z.ZodType<DeliveryProjectionV19, unknown>;
+  changes: z.ZodType<DeliveryProjectionV1, unknown>;
+  ci_checks: z.ZodType<DeliveryProjectionV15, unknown>;
+  commits: z.ZodType<DeliveryProjectionV12, unknown>;
+  failure_localization: z.ZodType<DeliveryProjectionV16, unknown>;
+  generation_freshness: z.ZodType<DeliveryProjectionV18, unknown>;
+  pull_requests: z.ZodType<DeliveryProjectionV13, unknown>;
+  releases: z.ZodType<DeliveryProjectionV17, unknown>;
+  review_comments: z.ZodType<DeliveryProjectionV14, unknown>;
 }> = z.object({
   agent_usage: z.lazy(() => DeliveryProjectionV19Schema),
   changes: z.lazy(() => DeliveryProjectionV1Schema),
@@ -3380,7 +3380,7 @@ export const DeliveryOverviewV1Schema: z.ZodObject<{
   review_comments: z.lazy(() => DeliveryProjectionV14Schema),
 });
 
-export const DeliveryProjectionV1Schema: z.ZodType<DeliveryProjectionV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const DeliveryProjectionV1Schema: z.ZodType<DeliveryProjectionV1, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("denied"),
   value: z.union([z.lazy(() => DeliveryGitStatusV1Schema), z.null()]),
 }), z.object({
@@ -3414,7 +3414,7 @@ export const DeliveryProjectionV1Schema: z.ZodType<DeliveryProjectionV1, z.ZodTy
   value: z.union([z.lazy(() => DeliveryGitStatusV1Schema), z.null()]),
 })]);
 
-export const DeliveryProjectionV12Schema: z.ZodType<DeliveryProjectionV12, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const DeliveryProjectionV12Schema: z.ZodType<DeliveryProjectionV12, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("denied"),
   value: z.union([z.lazy(() => DeliveryCommitTimelineV1Schema), z.null()]),
 }), z.object({
@@ -3448,7 +3448,7 @@ export const DeliveryProjectionV12Schema: z.ZodType<DeliveryProjectionV12, z.Zod
   value: z.union([z.lazy(() => DeliveryCommitTimelineV1Schema), z.null()]),
 })]);
 
-export const DeliveryProjectionV13Schema: z.ZodType<DeliveryProjectionV13, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const DeliveryProjectionV13Schema: z.ZodType<DeliveryProjectionV13, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("denied"),
   value: z.union([z.lazy(() => DeliveryPullRequestTimelineV1Schema), z.null()]),
 }), z.object({
@@ -3482,7 +3482,7 @@ export const DeliveryProjectionV13Schema: z.ZodType<DeliveryProjectionV13, z.Zod
   value: z.union([z.lazy(() => DeliveryPullRequestTimelineV1Schema), z.null()]),
 })]);
 
-export const DeliveryProjectionV14Schema: z.ZodType<DeliveryProjectionV14, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const DeliveryProjectionV14Schema: z.ZodType<DeliveryProjectionV14, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("denied"),
   value: z.union([z.lazy(() => DeliveryReviewTimelineV1Schema), z.null()]),
 }), z.object({
@@ -3516,7 +3516,7 @@ export const DeliveryProjectionV14Schema: z.ZodType<DeliveryProjectionV14, z.Zod
   value: z.union([z.lazy(() => DeliveryReviewTimelineV1Schema), z.null()]),
 })]);
 
-export const DeliveryProjectionV15Schema: z.ZodType<DeliveryProjectionV15, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const DeliveryProjectionV15Schema: z.ZodType<DeliveryProjectionV15, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("denied"),
   value: z.union([z.lazy(() => DeliveryCiTimelineV1Schema), z.null()]),
 }), z.object({
@@ -3550,7 +3550,7 @@ export const DeliveryProjectionV15Schema: z.ZodType<DeliveryProjectionV15, z.Zod
   value: z.union([z.lazy(() => DeliveryCiTimelineV1Schema), z.null()]),
 })]);
 
-export const DeliveryProjectionV16Schema: z.ZodType<DeliveryProjectionV16, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const DeliveryProjectionV16Schema: z.ZodType<DeliveryProjectionV16, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("denied"),
   value: z.union([z.lazy(() => DeliveryFailureLocalizationTimelineV1Schema), z.null()]),
 }), z.object({
@@ -3584,7 +3584,7 @@ export const DeliveryProjectionV16Schema: z.ZodType<DeliveryProjectionV16, z.Zod
   value: z.union([z.lazy(() => DeliveryFailureLocalizationTimelineV1Schema), z.null()]),
 })]);
 
-export const DeliveryProjectionV17Schema: z.ZodType<DeliveryProjectionV17, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const DeliveryProjectionV17Schema: z.ZodType<DeliveryProjectionV17, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("denied"),
   value: z.union([z.lazy(() => DeliveryReleaseTimelineV1Schema), z.null()]),
 }), z.object({
@@ -3618,7 +3618,7 @@ export const DeliveryProjectionV17Schema: z.ZodType<DeliveryProjectionV17, z.Zod
   value: z.union([z.lazy(() => DeliveryReleaseTimelineV1Schema), z.null()]),
 })]);
 
-export const DeliveryProjectionV18Schema: z.ZodType<DeliveryProjectionV18, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const DeliveryProjectionV18Schema: z.ZodType<DeliveryProjectionV18, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("denied"),
   value: z.union([z.lazy(() => DeliveryGenerationFreshnessV1Schema), z.null()]),
 }), z.object({
@@ -3652,7 +3652,7 @@ export const DeliveryProjectionV18Schema: z.ZodType<DeliveryProjectionV18, z.Zod
   value: z.union([z.lazy(() => DeliveryGenerationFreshnessV1Schema), z.null()]),
 })]);
 
-export const DeliveryProjectionV19Schema: z.ZodType<DeliveryProjectionV19, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const DeliveryProjectionV19Schema: z.ZodType<DeliveryProjectionV19, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("denied"),
   value: z.union([z.lazy(() => DeliveryAgentUsageV1Schema), z.null()]),
 }), z.object({
@@ -3686,18 +3686,18 @@ export const DeliveryProjectionV19Schema: z.ZodType<DeliveryProjectionV19, z.Zod
   value: z.union([z.lazy(() => DeliveryAgentUsageV1Schema), z.null()]),
 })]);
 
-export const DeliveryProviderStateV1Schema: z.ZodEnum<["denied", "failed", "not_configured", "not_published", "partial", "rate_limited", "ready", "stale", "unavailable"]> = z.enum(["denied", "failed", "not_configured", "not_published", "partial", "rate_limited", "ready", "stale", "unavailable"]);
+export const DeliveryProviderStateV1Schema: z.ZodEnum<{ "denied": "denied"; "failed": "failed"; "not_configured": "not_configured"; "not_published": "not_published"; "partial": "partial"; "rate_limited": "rate_limited"; "ready": "ready"; "stale": "stale"; "unavailable": "unavailable" }> = z.enum(["denied", "failed", "not_configured", "not_published", "partial", "rate_limited", "ready", "stale", "unavailable"]);
 
-export const DeliveryProximityRelationV1Schema: z.ZodEnum<["code_neighborhood_candidate", "confirmed_conflict", "overlapping_edit", "shared_code_candidate"]> = z.enum(["code_neighborhood_candidate", "confirmed_conflict", "overlapping_edit", "shared_code_candidate"]);
+export const DeliveryProximityRelationV1Schema: z.ZodEnum<{ "code_neighborhood_candidate": "code_neighborhood_candidate"; "confirmed_conflict": "confirmed_conflict"; "overlapping_edit": "overlapping_edit"; "shared_code_candidate": "shared_code_candidate" }> = z.enum(["code_neighborhood_candidate", "confirmed_conflict", "overlapping_edit", "shared_code_candidate"]);
 
 export const DeliveryPullRequestIdentityV1Schema: z.ZodObject<{
-  additions: z.ZodType<number, z.ZodTypeDef, unknown>;
-  changed_files: z.ZodType<number, z.ZodTypeDef, unknown>;
-  deletions: z.ZodType<number, z.ZodTypeDef, unknown>;
-  draft: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  number: z.ZodType<number, z.ZodTypeDef, unknown>;
-  state: z.ZodType<DeliveryPullRequestStateV1, z.ZodTypeDef, unknown>;
-  title: z.ZodType<string, z.ZodTypeDef, unknown>;
+  additions: z.ZodType<number, unknown>;
+  changed_files: z.ZodType<number, unknown>;
+  deletions: z.ZodType<number, unknown>;
+  draft: z.ZodType<boolean, unknown>;
+  number: z.ZodType<number, unknown>;
+  state: z.ZodType<DeliveryPullRequestStateV1, unknown>;
+  title: z.ZodType<string, unknown>;
 }> = z.object({
   additions: z.number().int().safe().min(0),
   changed_files: z.number().int().safe().min(0),
@@ -3709,23 +3709,23 @@ export const DeliveryPullRequestIdentityV1Schema: z.ZodObject<{
 });
 
 export const DeliveryPullRequestOperationV1Schema: z.ZodObject<{
-  last_complete: z.ZodType<DeliveryGitHubOperationSnapshotV1 | null, z.ZodTypeDef, unknown>;
-  latest_attempt: z.ZodType<DeliveryGitHubOperationSnapshotV1 | null, z.ZodTypeDef, unknown>;
-  operation: z.ZodType<DeliveryGitHubReadOperationV1, z.ZodTypeDef, unknown>;
+  last_complete: z.ZodType<DeliveryGitHubOperationSnapshotV1 | null, unknown>;
+  latest_attempt: z.ZodType<DeliveryGitHubOperationSnapshotV1 | null, unknown>;
+  operation: z.ZodType<DeliveryGitHubReadOperationV1, unknown>;
 }> = z.object({
   last_complete: z.union([z.lazy(() => DeliveryGitHubOperationSnapshotV1Schema), z.null()]),
   latest_attempt: z.union([z.lazy(() => DeliveryGitHubOperationSnapshotV1Schema), z.null()]),
   operation: z.lazy(() => DeliveryGitHubReadOperationV1Schema),
 });
 
-export const DeliveryPullRequestStateV1Schema: z.ZodEnum<["closed", "merged", "open"]> = z.enum(["closed", "merged", "open"]);
+export const DeliveryPullRequestStateV1Schema: z.ZodEnum<{ "closed": "closed"; "merged": "merged"; "open": "open" }> = z.enum(["closed", "merged", "open"]);
 
 export const DeliveryPullRequestTimelineV1Schema: z.ZodObject<{
-  expected_head_commit: z.ZodType<string, z.ZodTypeDef, unknown>;
-  items: z.ZodType<Array<DeliveryPullRequestV1>, z.ZodTypeDef, unknown>;
-  retained_head_commit: z.ZodType<string, z.ZodTypeDef, unknown>;
-  total_retained: z.ZodType<number, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  expected_head_commit: z.ZodType<string, unknown>;
+  items: z.ZodType<Array<DeliveryPullRequestV1>, unknown>;
+  retained_head_commit: z.ZodType<string, unknown>;
+  total_retained: z.ZodType<number, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
 }> = z.object({
   expected_head_commit: z.string(),
   items: z.array(z.lazy(() => DeliveryPullRequestV1Schema)),
@@ -3735,12 +3735,12 @@ export const DeliveryPullRequestTimelineV1Schema: z.ZodObject<{
 });
 
 export const DeliveryPullRequestV1Schema: z.ZodObject<{
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  identity: z.ZodType<DeliveryPullRequestIdentityV1 | null, z.ZodTypeDef, unknown>;
-  label: z.ZodType<string, z.ZodTypeDef, unknown>;
-  operations: z.ZodType<Array<DeliveryPullRequestOperationV1>, z.ZodTypeDef, unknown>;
-  provider: z.ZodType<string, z.ZodTypeDef, unknown>;
-  pull_request_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  id: z.ZodType<string, unknown>;
+  identity: z.ZodType<DeliveryPullRequestIdentityV1 | null, unknown>;
+  label: z.ZodType<string, unknown>;
+  operations: z.ZodType<Array<DeliveryPullRequestOperationV1>, unknown>;
+  provider: z.ZodType<string, unknown>;
+  pull_request_id: z.ZodType<string, unknown>;
 }> = z.object({
   id: z.string(),
   identity: z.union([z.lazy(() => DeliveryPullRequestIdentityV1Schema), z.null()]),
@@ -3751,28 +3751,28 @@ export const DeliveryPullRequestV1Schema: z.ZodObject<{
 });
 
 export const DeliveryRateLimitCheckpointV1Schema: z.ZodObject<{
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  remaining: z.ZodType<number, z.ZodTypeDef, unknown>;
-  reset_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
+  limit: z.ZodType<number, unknown>;
+  remaining: z.ZodType<number, unknown>;
+  reset_at_micros: z.ZodType<number, unknown>;
 }> = z.object({
   limit: z.number().int().min(0),
   remaining: z.number().int().min(0),
   reset_at_micros: z.number().int().safe(),
 });
 
-export const DeliveryRegistryStateV1Schema: z.ZodEnum<["partial", "ready", "unavailable"]> = z.enum(["partial", "ready", "unavailable"]);
+export const DeliveryRegistryStateV1Schema: z.ZodEnum<{ "partial": "partial"; "ready": "ready"; "unavailable": "unavailable" }> = z.enum(["partial", "ready", "unavailable"]);
 
 export const DeliveryReleaseAssetV1Schema: z.ZodObject<{
-  asset_id: z.ZodType<number, z.ZodTypeDef, unknown>;
-  content_type: z.ZodType<string, z.ZodTypeDef, unknown>;
-  created_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  digest: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  download_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  download_url: z.ZodType<string, z.ZodTypeDef, unknown>;
-  label: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  size_bytes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  updated_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
+  asset_id: z.ZodType<number, unknown>;
+  content_type: z.ZodType<string, unknown>;
+  created_at_micros: z.ZodType<number, unknown>;
+  digest: z.ZodType<string | null, unknown>;
+  download_count: z.ZodType<number, unknown>;
+  download_url: z.ZodType<string, unknown>;
+  label: z.ZodType<string | null, unknown>;
+  name: z.ZodType<string, unknown>;
+  size_bytes: z.ZodType<number, unknown>;
+  updated_at_micros: z.ZodType<number, unknown>;
 }> = z.object({
   asset_id: z.number().int().safe().min(0),
   content_type: z.string(),
@@ -3787,25 +3787,25 @@ export const DeliveryReleaseAssetV1Schema: z.ZodObject<{
 });
 
 export const DeliveryReleaseTimelineV1Schema: z.ZodObject<{
-  items: z.ZodType<Array<DeliveryReleaseV1>, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  items: z.ZodType<Array<DeliveryReleaseV1>, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
 }> = z.object({
   items: z.array(z.lazy(() => DeliveryReleaseV1Schema)),
   truncated: z.boolean(),
 });
 
 export const DeliveryReleaseV1Schema: z.ZodObject<{
-  assets: z.ZodType<Array<DeliveryReleaseAssetV1>, z.ZodTypeDef, unknown>;
-  created_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  draft: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  label: z.ZodType<string, z.ZodTypeDef, unknown>;
-  name: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  prerelease: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  published_at_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  release_id: z.ZodType<number, z.ZodTypeDef, unknown>;
-  source_url: z.ZodType<string, z.ZodTypeDef, unknown>;
-  tag: z.ZodType<string, z.ZodTypeDef, unknown>;
+  assets: z.ZodType<Array<DeliveryReleaseAssetV1>, unknown>;
+  created_at_micros: z.ZodType<number, unknown>;
+  draft: z.ZodType<boolean, unknown>;
+  id: z.ZodType<string, unknown>;
+  label: z.ZodType<string, unknown>;
+  name: z.ZodType<string | null, unknown>;
+  prerelease: z.ZodType<boolean, unknown>;
+  published_at_micros: z.ZodType<number | null, unknown>;
+  release_id: z.ZodType<number, unknown>;
+  source_url: z.ZodType<string, unknown>;
+  tag: z.ZodType<string, unknown>;
 }> = z.object({
   assets: z.array(z.lazy(() => DeliveryReleaseAssetV1Schema)),
   created_at_micros: z.number().int().safe(),
@@ -3820,23 +3820,23 @@ export const DeliveryReleaseV1Schema: z.ZodObject<{
   tag: z.string(),
 });
 
-export const DeliveryReviewAuthorClassV1Schema: z.ZodEnum<["bot", "maintainer", "other_observed_role"]> = z.enum(["bot", "maintainer", "other_observed_role"]);
+export const DeliveryReviewAuthorClassV1Schema: z.ZodEnum<{ "bot": "bot"; "maintainer": "maintainer"; "other_observed_role": "other_observed_role" }> = z.enum(["bot", "maintainer", "other_observed_role"]);
 
 export const DeliveryReviewBodyPreviewV1Schema: z.ZodObject<{
-  text: z.ZodType<string, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  text: z.ZodType<string, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
 }> = z.object({
   text: z.string(),
   truncated: z.boolean(),
 });
 
 export const DeliveryReviewItemV1Schema: z.ZodObject<{
-  comment_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  label: z.ZodType<string, z.ZodTypeDef, unknown>;
-  observations: z.ZodType<Array<DeliveryReviewObservationV1>, z.ZodTypeDef, unknown>;
-  provider: z.ZodType<string, z.ZodTypeDef, unknown>;
-  pull_request_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  comment_id: z.ZodType<string, unknown>;
+  id: z.ZodType<string, unknown>;
+  label: z.ZodType<string, unknown>;
+  observations: z.ZodType<Array<DeliveryReviewObservationV1>, unknown>;
+  provider: z.ZodType<string, unknown>;
+  pull_request_id: z.ZodType<string, unknown>;
 }> = z.object({
   comment_id: z.string(),
   id: z.string(),
@@ -3846,28 +3846,28 @@ export const DeliveryReviewItemV1Schema: z.ZodObject<{
   pull_request_id: z.string(),
 });
 
-export const DeliveryReviewLifecycleV1Schema: z.ZodEnum<["current", "deleted", "edited", "outdated", "resolved"]> = z.enum(["current", "deleted", "edited", "outdated", "resolved"]);
+export const DeliveryReviewLifecycleV1Schema: z.ZodEnum<{ "current": "current"; "deleted": "deleted"; "edited": "edited"; "outdated": "outdated"; "resolved": "resolved" }> = z.enum(["current", "deleted", "edited", "outdated", "resolved"]);
 
-export const DeliveryReviewObservationKindV1Schema: z.ZodEnum<["last_complete", "latest_attempt"]> = z.enum(["last_complete", "latest_attempt"]);
+export const DeliveryReviewObservationKindV1Schema: z.ZodEnum<{ "last_complete": "last_complete"; "latest_attempt": "latest_attempt" }> = z.enum(["last_complete", "latest_attempt"]);
 
 export const DeliveryReviewObservationV1Schema: z.ZodObject<{
-  author_class: z.ZodType<DeliveryReviewAuthorClassV1, z.ZodTypeDef, unknown>;
-  body_preview: z.ZodType<DeliveryReviewBodyPreviewV1 | null, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<DeliveryReviewObservationKindV1, z.ZodTypeDef, unknown>;
-  lifecycle: z.ZodType<DeliveryReviewLifecycleV1, z.ZodTypeDef, unknown>;
-  line: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  observed_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  operation: z.ZodType<DeliveryGitHubReadOperationV1, z.ZodTypeDef, unknown>;
-  original_line: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  provider_outcome: z.ZodType<DeliveryGitHubOutcomeV1, z.ZodTypeDef, unknown>;
-  reply_to_comment_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  repository_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  review_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  review_state: z.ZodType<DeliveryReviewStateV1, z.ZodTypeDef, unknown>;
-  source_url: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  thread_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  version_digest: z.ZodType<string, z.ZodTypeDef, unknown>;
+  author_class: z.ZodType<DeliveryReviewAuthorClassV1, unknown>;
+  body_preview: z.ZodType<DeliveryReviewBodyPreviewV1 | null, unknown>;
+  kind: z.ZodType<DeliveryReviewObservationKindV1, unknown>;
+  lifecycle: z.ZodType<DeliveryReviewLifecycleV1, unknown>;
+  line: z.ZodType<number | null, unknown>;
+  observed_at_micros: z.ZodType<number, unknown>;
+  operation: z.ZodType<DeliveryGitHubReadOperationV1, unknown>;
+  original_line: z.ZodType<number | null, unknown>;
+  path: z.ZodType<string, unknown>;
+  provider_outcome: z.ZodType<DeliveryGitHubOutcomeV1, unknown>;
+  reply_to_comment_id: z.ZodType<string | null, unknown>;
+  repository_id: z.ZodType<string, unknown>;
+  review_id: z.ZodType<string | null, unknown>;
+  review_state: z.ZodType<DeliveryReviewStateV1, unknown>;
+  source_url: z.ZodType<string | null, unknown>;
+  thread_id: z.ZodType<string | null, unknown>;
+  version_digest: z.ZodType<string, unknown>;
 }> = z.object({
   author_class: z.lazy(() => DeliveryReviewAuthorClassV1Schema),
   body_preview: z.union([z.lazy(() => DeliveryReviewBodyPreviewV1Schema), z.null()]),
@@ -3888,14 +3888,14 @@ export const DeliveryReviewObservationV1Schema: z.ZodObject<{
   version_digest: z.string(),
 });
 
-export const DeliveryReviewStateV1Schema: z.ZodEnum<["approved", "changes_requested", "commented", "dismissed", "pending", "unknown"]> = z.enum(["approved", "changes_requested", "commented", "dismissed", "pending", "unknown"]);
+export const DeliveryReviewStateV1Schema: z.ZodEnum<{ "approved": "approved"; "changes_requested": "changes_requested"; "commented": "commented"; "dismissed": "dismissed"; "pending": "pending"; "unknown": "unknown" }> = z.enum(["approved", "changes_requested", "commented", "dismissed", "pending", "unknown"]);
 
 export const DeliveryReviewTimelineV1Schema: z.ZodObject<{
-  expected_head_commit: z.ZodType<string, z.ZodTypeDef, unknown>;
-  items: z.ZodType<Array<DeliveryReviewItemV1>, z.ZodTypeDef, unknown>;
-  retained_head_commit: z.ZodType<string, z.ZodTypeDef, unknown>;
-  total_retained: z.ZodType<number, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  expected_head_commit: z.ZodType<string, unknown>;
+  items: z.ZodType<Array<DeliveryReviewItemV1>, unknown>;
+  retained_head_commit: z.ZodType<string, unknown>;
+  total_retained: z.ZodType<number, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
 }> = z.object({
   expected_head_commit: z.string(),
   items: z.array(z.lazy(() => DeliveryReviewItemV1Schema)),
@@ -3904,15 +3904,15 @@ export const DeliveryReviewTimelineV1Schema: z.ZodObject<{
   truncated: z.boolean(),
 });
 
-export const DeliverySharedCodeRefKindV1Schema: z.ZodEnum<["compare", "shared_code"]> = z.enum(["compare", "shared_code"]);
+export const DeliverySharedCodeRefKindV1Schema: z.ZodEnum<{ "compare": "compare"; "shared_code": "shared_code" }> = z.enum(["compare", "shared_code"]);
 
 export const DeliverySharedCodeRefStateV1Schema: z.ZodLiteral<"requires_selection"> = z.literal("requires_selection");
 
 export const DeliverySharedCodeRefV1Schema: z.ZodObject<{
-  href: z.ZodType<string, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<DeliverySharedCodeRefKindV1, z.ZodTypeDef, unknown>;
-  source_generation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  state: z.ZodType<DeliverySharedCodeRefStateV1, z.ZodTypeDef, unknown>;
+  href: z.ZodType<string, unknown>;
+  kind: z.ZodType<DeliverySharedCodeRefKindV1, unknown>;
+  source_generation: z.ZodType<string, unknown>;
+  state: z.ZodType<DeliverySharedCodeRefStateV1, unknown>;
 }> = z.object({
   href: z.string(),
   kind: z.lazy(() => DeliverySharedCodeRefKindV1Schema),
@@ -3922,9 +3922,9 @@ export const DeliverySharedCodeRefV1Schema: z.ZodObject<{
 
 /** One tsconfig location the diagnostics owner search checked. */
 export const DiagnosticsSearchedTsconfigV1Schema: z.ZodObject<{
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  present: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  path: z.ZodType<string, unknown>;
+  present: z.ZodType<boolean, unknown>;
+}, z.core.$strict> = z.object({
   path: z.string(),
   present: z.boolean(),
 }).strict();
@@ -3934,8 +3934,8 @@ export const DoctorCoverageCompletenessV1Schema: z.ZodUnion<[z.ZodLiteral<"compl
 
 /** A bounded, human-readable coverage statement plus its completeness. */
 export const DoctorCoverageStatementV1Schema: z.ZodObject<{
-  completeness: z.ZodType<DoctorCoverageCompletenessV1, z.ZodTypeDef, unknown>;
-  statement: z.ZodType<string, z.ZodTypeDef, unknown>;
+  completeness: z.ZodType<DoctorCoverageCompletenessV1, unknown>;
+  statement: z.ZodType<string, unknown>;
 }> = z.object({
   completeness: z.lazy(() => DoctorCoverageCompletenessV1Schema),
   statement: z.string(),
@@ -3945,7 +3945,7 @@ export const DoctorCoverageStatementV1Schema: z.ZodObject<{
 record (for example a `FeedbackFindingId`, configuration revision, or
 runtime read coverage anchor). Doctor stores the reference only; the
 owning authority remains the single source of the record. */
-export const DoctorEvidenceReferenceV1Schema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const DoctorEvidenceReferenceV1Schema: z.ZodType<string, unknown> = z.string();
 
 /** A typed reference to one piece of evidence Doctor composed into a finding.
 
@@ -3953,8 +3953,8 @@ The `family` records which audited input surface produced the evidence, so
 a finding may cross-cite evidence from more than one family without losing
 provenance. */
 export const DoctorEvidenceRefV1Schema: z.ZodObject<{
-  family: z.ZodType<DoctorFindingFamilyV1, z.ZodTypeDef, unknown>;
-  reference: z.ZodType<DoctorEvidenceReferenceV1, z.ZodTypeDef, unknown>;
+  family: z.ZodType<DoctorFindingFamilyV1, unknown>;
+  reference: z.ZodType<DoctorEvidenceReferenceV1, unknown>;
 }> = z.object({
   family: z.lazy(() => DoctorFindingFamilyV1Schema),
   reference: z.lazy(() => DoctorEvidenceReferenceV1Schema),
@@ -3969,7 +3969,7 @@ and only when its finding carries complete coverage (see
 export const DoctorEvidenceStateV1Schema: z.ZodUnion<[z.ZodLiteral<"unsupported">, z.ZodLiteral<"absent">, z.ZodLiteral<"stale">, z.ZodLiteral<"degraded">, z.ZodLiteral<"partial">, z.ZodLiteral<"unknown">, z.ZodLiteral<"denied">, z.ZodLiteral<"healthy_complete_coverage">]> = z.union([z.literal("unsupported"), z.literal("absent"), z.literal("stale"), z.literal("degraded"), z.literal("partial"), z.literal("unknown"), z.literal("denied"), z.literal("healthy_complete_coverage")]);
 
 /** Whether a family was consulted from an observed source or is unavailable. */
-export const DoctorFamilyConsultationV1Schema: z.ZodType<DoctorFamilyConsultationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("status", [z.object({
+export const DoctorFamilyConsultationV1Schema: z.ZodType<DoctorFamilyConsultationV1, unknown> = z.discriminatedUnion("status", [z.object({
   status: z.literal("consulted"),
 }), z.object({
   reason: z.lazy(() => DoctorFamilyUnavailableReasonV1Schema),
@@ -3978,8 +3978,8 @@ export const DoctorFamilyConsultationV1Schema: z.ZodType<DoctorFamilyConsultatio
 
 /** The consultation status of one finding family within a report. */
 export const DoctorFamilyCoverageV1Schema: z.ZodObject<{
-  consultation: z.ZodType<DoctorFamilyConsultationV1, z.ZodTypeDef, unknown>;
-  family: z.ZodType<DoctorFindingFamilyV1, z.ZodTypeDef, unknown>;
+  consultation: z.ZodType<DoctorFamilyConsultationV1, unknown>;
+  family: z.ZodType<DoctorFindingFamilyV1, unknown>;
 }> = z.object({
   consultation: z.lazy(() => DoctorFamilyConsultationV1Schema),
   family: z.lazy(() => DoctorFindingFamilyV1Schema),
@@ -4001,13 +4001,13 @@ export const DoctorFindingFamilyV1Schema: z.ZodUnion<[z.ZodLiteral<"advisory">, 
 
 /** The canonical Doctor report projection for the read-only dashboard. */
 export const DoctorFindingsPayloadV1Schema: z.ZodObject<{
-  entries: z.ZodType<Array<DoctorReportEntryV1>, z.ZodTypeDef, unknown>;
-  family_filter: z.ZodType<DoctorFindingFamilyV1 | null, z.ZodTypeDef, unknown>;
-  known_families: z.ZodType<Array<DoctorFindingFamilyV1>, z.ZodTypeDef, unknown>;
-  note: z.ZodType<string, z.ZodTypeDef, unknown>;
-  report_coverage: z.ZodType<DoctorReportCoverageV1 | null, z.ZodTypeDef, unknown>;
-  schema_convergences: z.ZodType<Array<SchemaConvergenceFindingV1>, z.ZodTypeDef, unknown>;
-  storage_kind_statuses: z.ZodType<Array<StorageFindingKindStatusV1>, z.ZodTypeDef, unknown>;
+  entries: z.ZodType<Array<DoctorReportEntryV1>, unknown>;
+  family_filter: z.ZodType<DoctorFindingFamilyV1 | null, unknown>;
+  known_families: z.ZodType<Array<DoctorFindingFamilyV1>, unknown>;
+  note: z.ZodType<string, unknown>;
+  report_coverage: z.ZodType<DoctorReportCoverageV1 | null, unknown>;
+  schema_convergences: z.ZodType<Array<SchemaConvergenceFindingV1>, unknown>;
+  storage_kind_statuses: z.ZodType<Array<StorageFindingKindStatusV1>, unknown>;
 }> = z.object({
   entries: z.array(z.lazy(() => DoctorReportEntryV1Schema)),
   family_filter: z.union([z.lazy(() => DoctorFindingFamilyV1Schema), z.null()]),
@@ -4025,10 +4025,10 @@ evidence it composed, and a coverage statement. Construction enforces the
 invariants that keep unknown/partial evidence from collapsing into a
 healthy or clean result. */
 export const DoctorFindingV1Schema: z.ZodObject<{
-  coverage: z.ZodType<DoctorCoverageStatementV1, z.ZodTypeDef, unknown>;
-  evidence: z.ZodType<Array<DoctorEvidenceRefV1>, z.ZodTypeDef, unknown>;
-  family: z.ZodType<DoctorFindingFamilyV1, z.ZodTypeDef, unknown>;
-  state: z.ZodType<DoctorEvidenceStateV1, z.ZodTypeDef, unknown>;
+  coverage: z.ZodType<DoctorCoverageStatementV1, unknown>;
+  evidence: z.ZodType<Array<DoctorEvidenceRefV1>, unknown>;
+  family: z.ZodType<DoctorFindingFamilyV1, unknown>;
+  state: z.ZodType<DoctorEvidenceStateV1, unknown>;
 }> = z.object({
   coverage: z.lazy(() => DoctorCoverageStatementV1Schema),
   evidence: z.array(z.lazy(() => DoctorEvidenceRefV1Schema)),
@@ -4039,9 +4039,9 @@ export const DoctorFindingV1Schema: z.ZodObject<{
 /** The report-wide coverage statement: which families were consulted versus
 unavailable, plus an overall completeness and a bounded human statement. */
 export const DoctorReportCoverageV1Schema: z.ZodObject<{
-  completeness: z.ZodType<DoctorCoverageCompletenessV1, z.ZodTypeDef, unknown>;
-  families: z.ZodType<Array<DoctorFamilyCoverageV1>, z.ZodTypeDef, unknown>;
-  statement: z.ZodType<DoctorCoverageStatementV1, z.ZodTypeDef, unknown>;
+  completeness: z.ZodType<DoctorCoverageCompletenessV1, unknown>;
+  families: z.ZodType<Array<DoctorFamilyCoverageV1>, unknown>;
+  statement: z.ZodType<DoctorCoverageStatementV1, unknown>;
 }> = z.object({
   completeness: z.lazy(() => DoctorCoverageCompletenessV1Schema),
   families: z.array(z.lazy(() => DoctorFamilyCoverageV1Schema)),
@@ -4052,8 +4052,8 @@ export const DoctorReportCoverageV1Schema: z.ZodObject<{
 family, its typed subclass. The subclass is present only for storage findings
 (a non-storage entry never carries one). */
 export const DoctorReportEntryV1Schema: z.ZodObject<{
-  finding: z.ZodType<DoctorFindingV1, z.ZodTypeDef, unknown>;
-  storage_kind: z.ZodType<DoctorStorageFindingKindV1 | null, z.ZodTypeDef, unknown>;
+  finding: z.ZodType<DoctorFindingV1, unknown>;
+  storage_kind: z.ZodType<DoctorStorageFindingKindV1 | null, unknown>;
 }> = z.object({
   finding: z.lazy(() => DoctorFindingV1Schema),
   storage_kind: z.union([z.lazy(() => DoctorStorageFindingKindV1Schema), z.null()]),
@@ -4067,35 +4067,35 @@ observability read models. The set is closed and grows only through a future
 versioned enum, never by widening an existing subclass. */
 export const DoctorStorageFindingKindV1Schema: z.ZodUnion<[z.ZodLiteral<"over_budget_store">, z.ZodLiteral<"orphan_store">, z.ZodLiteral<"incident_debris_present">, z.ZodLiteral<"retention_backlog">, z.ZodLiteral<"table_growth">, z.ZodLiteral<"pending_schema_migration">]> = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("incident_debris_present"), z.literal("retention_backlog"), z.literal("table_growth"), z.literal("pending_schema_migration")]);
 
-export const DuplicateEffectOutcomeV1Schema: z.ZodEnum<["committed", "not_applicable", "prevented", "unknown"]> = z.enum(["committed", "not_applicable", "prevented", "unknown"]);
+export const DuplicateEffectOutcomeV1Schema: z.ZodEnum<{ "committed": "committed"; "not_applicable": "not_applicable"; "prevented": "prevented"; "unknown": "unknown" }> = z.enum(["committed", "not_applicable", "prevented", "unknown"]);
 
-export const DuplicateEffortKindV1Schema: z.ZodEnum<["censored", "duplicate_effect", "exact_duplicate", "not_duplicate", "repeated_investigation", "superseded_overlap", "unknown"]> = z.enum(["censored", "duplicate_effect", "exact_duplicate", "not_duplicate", "repeated_investigation", "superseded_overlap", "unknown"]);
+export const DuplicateEffortKindV1Schema: z.ZodEnum<{ "censored": "censored"; "duplicate_effect": "duplicate_effect"; "exact_duplicate": "exact_duplicate"; "not_duplicate": "not_duplicate"; "repeated_investigation": "repeated_investigation"; "superseded_overlap": "superseded_overlap"; "unknown": "unknown" }> = z.enum(["censored", "duplicate_effect", "exact_duplicate", "not_duplicate", "repeated_investigation", "superseded_overlap", "unknown"]);
 
 /** The stable effect classification of one application operation.
 
 Git index writes remain separate classes so policy cannot accidentally
 substitute one index mutation for another. */
-export const EffectClassSchema: z.ZodType<"administrative" | "configuration_write" | "git_index_stage" | "git_index_unstage" | "preview" | "read" | "source_edit" | "spawns_process" | "binds_server" | "schedules_work" | "maintains_owner_state" | "maintains_profile_state" | "records_host_evidence", z.ZodTypeDef, unknown> = z.union([z.enum(["administrative", "configuration_write", "git_index_stage", "git_index_unstage", "preview", "read", "source_edit"]), z.literal("spawns_process"), z.literal("binds_server"), z.literal("schedules_work"), z.literal("maintains_owner_state"), z.literal("maintains_profile_state"), z.literal("records_host_evidence")]);
+export const EffectClassSchema: z.ZodType<"administrative" | "configuration_write" | "git_index_stage" | "git_index_unstage" | "preview" | "read" | "source_edit" | "spawns_process" | "binds_server" | "schedules_work" | "maintains_owner_state" | "maintains_profile_state" | "records_host_evidence", unknown> = z.union([z.enum(["administrative", "configuration_write", "git_index_stage", "git_index_unstage", "preview", "read", "source_edit"]), z.literal("spawns_process"), z.literal("binds_server"), z.literal("schedules_work"), z.literal("maintains_owner_state"), z.literal("maintains_profile_state"), z.literal("records_host_evidence")]);
 
 /** Durable effect proof. It records identities and receipts, never credentials
 or arbitrary command text. */
 export const EffectReceiptSchema: z.ZodObject<{
-  actor: z.ZodType<ActorId, z.ZodTypeDef, unknown>;
-  catalog_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  committed_state: z.ZodType<ManifestDigest | null, z.ZodTypeDef, unknown>;
-  configuration_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  effect_class: z.ZodType<EffectClass, z.ZodTypeDef, unknown>;
-  expected_state: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  external_proof: z.ZodType<RetrievalAnchorId | null, z.ZodTypeDef, unknown>;
-  idempotency_key: z.ZodType<string, z.ZodTypeDef, unknown>;
-  input_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  operation: z.ZodType<UseCaseId, z.ZodTypeDef, unknown>;
-  outcome: z.ZodType<EffectTermination, z.ZodTypeDef, unknown>;
-  policy_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  privacy_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  request_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  scope: z.ZodType<ResolvedScope, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  actor: z.ZodType<ActorId, unknown>;
+  catalog_digest: z.ZodType<ManifestDigest, unknown>;
+  committed_state: z.ZodType<ManifestDigest | null, unknown>;
+  configuration_digest: z.ZodType<ManifestDigest, unknown>;
+  effect_class: z.ZodType<EffectClass, unknown>;
+  expected_state: z.ZodType<ManifestDigest, unknown>;
+  external_proof: z.ZodType<RetrievalAnchorId | null, unknown>;
+  idempotency_key: z.ZodType<string, unknown>;
+  input_digest: z.ZodType<ManifestDigest, unknown>;
+  operation: z.ZodType<UseCaseId, unknown>;
+  outcome: z.ZodType<EffectTermination, unknown>;
+  policy_digest: z.ZodType<ManifestDigest, unknown>;
+  privacy_digest: z.ZodType<ManifestDigest, unknown>;
+  request_id: z.ZodType<string, unknown>;
+  scope: z.ZodType<ResolvedScope, unknown>;
+}, z.core.$strict> = z.object({
   actor: z.lazy(() => ActorIdSchema),
   catalog_digest: z.lazy(() => ManifestDigestSchema),
   committed_state: z.union([z.lazy(() => ManifestDigestSchema), z.null()]),
@@ -4114,13 +4114,13 @@ export const EffectReceiptSchema: z.ZodObject<{
 }).strict();
 
 /** Durable effect receipt terminal state. */
-export const EffectTerminationSchema: z.ZodEnum<["cancelled", "completed", "effect_unknown", "failed", "partial", "timed_out"]> = z.enum(["cancelled", "completed", "effect_unknown", "failed", "partial", "timed_out"]);
+export const EffectTerminationSchema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed"; "effect_unknown": "effect_unknown"; "failed": "failed"; "partial": "partial"; "timed_out": "timed_out" }> = z.enum(["cancelled", "completed", "effect_unknown", "failed", "partial", "timed_out"]);
 
 export const EnvironmentSettingsPayloadV1Schema: z.ZodObject<{
-  global_accounting_enabled: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  global_accounting_mode: z.ZodType<string, z.ZodTypeDef, unknown>;
-  pricing_offline: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  variables: z.ZodType<Array<EnvironmentVariableV1>, z.ZodTypeDef, unknown>;
+  global_accounting_enabled: z.ZodType<boolean, unknown>;
+  global_accounting_mode: z.ZodType<string, unknown>;
+  pricing_offline: z.ZodType<boolean, unknown>;
+  variables: z.ZodType<Array<EnvironmentVariableV1>, unknown>;
 }> = z.object({
   global_accounting_enabled: z.boolean(),
   global_accounting_mode: z.string(),
@@ -4129,10 +4129,10 @@ export const EnvironmentSettingsPayloadV1Schema: z.ZodObject<{
 });
 
 export const EnvironmentVariableV1Schema: z.ZodObject<{
-  active: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  description: z.ZodType<string, z.ZodTypeDef, unknown>;
-  name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  value: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  active: z.ZodType<boolean, unknown>;
+  description: z.ZodType<string, unknown>;
+  name: z.ZodType<string, unknown>;
+  value: z.ZodType<string | null, unknown>;
 }> = z.object({
   active: z.boolean(),
   description: z.string(),
@@ -4142,13 +4142,13 @@ export const EnvironmentVariableV1Schema: z.ZodObject<{
 
 /** Deterministic coverage fold input for an evidence packet. */
 export const EvidenceCoverageSchema: z.ZodObject<{
-  completeness: z.ZodType<CoverageCompleteness, z.ZodTypeDef, unknown>;
-  domains: z.ZodType<Array<CoverageDomainState>, z.ZodTypeDef, unknown>;
-  eligible: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  requested_domains: z.ZodType<Array<EvidenceDomain>, z.ZodTypeDef, unknown>;
-  returned: z.ZodType<number, z.ZodTypeDef, unknown>;
-  visited: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  completeness: z.ZodType<CoverageCompleteness, unknown>;
+  domains: z.ZodType<Array<CoverageDomainState>, unknown>;
+  eligible: z.ZodType<number | null, unknown>;
+  requested_domains: z.ZodType<Array<EvidenceDomain>, unknown>;
+  returned: z.ZodType<number, unknown>;
+  visited: z.ZodType<number | null, unknown>;
+}, z.core.$strict> = z.object({
   completeness: z.lazy(() => CoverageCompletenessSchema),
   domains: z.array(z.lazy(() => CoverageDomainStateSchema)),
   eligible: z.number().int().safe().min(0).nullable(),
@@ -4158,55 +4158,55 @@ export const EvidenceCoverageSchema: z.ZodObject<{
 }).strict();
 
 /** Requested evidence domain for bounded coverage and omissions. */
-export const EvidenceDomainSchema: z.ZodEnum<["anchor", "diagnostic", "graph", "operational", "source", "symbol", "temporal", "test"]> = z.enum(["anchor", "diagnostic", "graph", "operational", "source", "symbol", "temporal", "test"]);
+export const EvidenceDomainSchema: z.ZodEnum<{ "anchor": "anchor"; "diagnostic": "diagnostic"; "graph": "graph"; "operational": "operational"; "source": "source"; "symbol": "symbol"; "temporal": "temporal"; "test": "test" }> = z.enum(["anchor", "diagnostic", "graph", "operational", "source", "symbol", "temporal", "test"]);
 
 /** Cause a work item was blocked for. */
-export const ExecutionBlockedCauseV1Schema: z.ZodEnum<["backpressure", "capability", "ci", "conflict", "dependency", "effect_unknown", "lease", "needs_input", "other", "policy", "review", "scope", "test", "unknown"]> = z.enum(["backpressure", "capability", "ci", "conflict", "dependency", "effect_unknown", "lease", "needs_input", "other", "policy", "review", "scope", "test", "unknown"]);
+export const ExecutionBlockedCauseV1Schema: z.ZodEnum<{ "backpressure": "backpressure"; "capability": "capability"; "ci": "ci"; "conflict": "conflict"; "dependency": "dependency"; "effect_unknown": "effect_unknown"; "lease": "lease"; "needs_input": "needs_input"; "other": "other"; "policy": "policy"; "review": "review"; "scope": "scope"; "test": "test"; "unknown": "unknown" }> = z.enum(["backpressure", "capability", "ci", "conflict", "dependency", "effect_unknown", "lease", "needs_input", "other", "policy", "review", "scope", "test", "unknown"]);
 
 /** Concurrency-width phase. `Useful` counts only distinct admitted
 attempts that advanced a committed progress frontier; heartbeats,
 queued work, child processes, and transport fanout never reach it. */
-export const ExecutionConcurrencyPhaseV1Schema: z.ZodEnum<["accepted", "active", "admitted", "requested", "useful"]> = z.enum(["accepted", "active", "admitted", "requested", "useful"]);
+export const ExecutionConcurrencyPhaseV1Schema: z.ZodEnum<{ "accepted": "accepted"; "active": "active"; "admitted": "admitted"; "requested": "requested"; "useful": "useful" }> = z.enum(["accepted", "active", "admitted", "requested", "useful"]);
 
 /** Conflict prediction kind. Mechanical and semantic keep separate
 denominators because their adjudicators are not interchangeable. */
-export const ExecutionConflictKindV1Schema: z.ZodEnum<["combined", "mechanical", "semantic"]> = z.enum(["combined", "mechanical", "semantic"]);
+export const ExecutionConflictKindV1Schema: z.ZodEnum<{ "combined": "combined"; "mechanical": "mechanical"; "semantic": "semantic" }> = z.enum(["combined", "mechanical", "semantic"]);
 
 /** Independently observed conflict outcome. `Censored` and `Unknown`
 never enter a confusion-matrix denominator. */
-export const ExecutionConflictOutcomeV1Schema: z.ZodEnum<["censored", "conflict", "no_conflict", "unknown"]> = z.enum(["censored", "conflict", "no_conflict", "unknown"]);
+export const ExecutionConflictOutcomeV1Schema: z.ZodEnum<{ "censored": "censored"; "conflict": "conflict"; "no_conflict": "no_conflict"; "unknown": "unknown" }> = z.enum(["censored", "conflict", "no_conflict", "unknown"]);
 
 /** Per-surface delivery outcome. A multi-surface delivery is never a
 duplicate of product work; only `Deduplicated` is. */
-export const ExecutionDeliveryOutcomeV1Schema: z.ZodEnum<["deduplicated", "delivered", "dropped", "unknown"]> = z.enum(["deduplicated", "delivered", "dropped", "unknown"]);
+export const ExecutionDeliveryOutcomeV1Schema: z.ZodEnum<{ "deduplicated": "deduplicated"; "delivered": "delivered"; "dropped": "dropped"; "unknown": "unknown" }> = z.enum(["deduplicated", "delivered", "dropped", "unknown"]);
 
 /** Adjudicated duplicate-work relation. Similarity, proximity, shared
 paths, and concurrency never produce one of these. */
-export const ExecutionDuplicateKindV1Schema: z.ZodEnum<["censored", "duplicate_effect", "exact_duplicate", "not_duplicate", "repeated_investigation", "superseded_overlap", "unknown"]> = z.enum(["censored", "duplicate_effect", "exact_duplicate", "not_duplicate", "repeated_investigation", "superseded_overlap", "unknown"]);
+export const ExecutionDuplicateKindV1Schema: z.ZodEnum<{ "censored": "censored"; "duplicate_effect": "duplicate_effect"; "exact_duplicate": "exact_duplicate"; "not_duplicate": "not_duplicate"; "repeated_investigation": "repeated_investigation"; "superseded_overlap": "superseded_overlap"; "unknown": "unknown" }> = z.enum(["censored", "duplicate_effect", "exact_duplicate", "not_duplicate", "repeated_investigation", "superseded_overlap", "unknown"]);
 
 /** Whether a duplicate effect was prevented or actually committed. The
 two never collapse into one count. */
-export const ExecutionDuplicateOutcomeV1Schema: z.ZodEnum<["committed", "not_applicable", "prevented", "unknown"]> = z.enum(["committed", "not_applicable", "prevented", "unknown"]);
+export const ExecutionDuplicateOutcomeV1Schema: z.ZodEnum<{ "committed": "committed"; "not_applicable": "not_applicable"; "prevented": "prevented"; "unknown": "unknown" }> = z.enum(["committed", "not_applicable", "prevented", "unknown"]);
 
 /** Fixed duration buckets shared by stale stack age, blocked time, and
 rerun latency. Raw timestamps and exact durations stay authorized
 local detail. */
-export const ExecutionDurationBucketV1Schema: z.ZodEnum<["from15m_to1h", "from1d_to7d", "from1h_to4h", "from1m_to5m", "from4h_to24h", "from5m_to15m", "over7d", "under1m"]> = z.enum(["from15m_to1h", "from1d_to7d", "from1h_to4h", "from1m_to5m", "from4h_to24h", "from5m_to15m", "over7d", "under1m"]);
+export const ExecutionDurationBucketV1Schema: z.ZodEnum<{ "from15m_to1h": "from15m_to1h"; "from1d_to7d": "from1d_to7d"; "from1h_to4h": "from1h_to4h"; "from1m_to5m": "from1m_to5m"; "from4h_to24h": "from4h_to24h"; "from5m_to15m": "from5m_to15m"; "over7d": "over7d"; "under1m": "under1m" }> = z.enum(["from15m_to1h", "from1d_to7d", "from1h_to4h", "from1m_to5m", "from4h_to24h", "from5m_to15m", "over7d", "under1m"]);
 
 /** Fan-out width phase. `PeakActive` is the sampled active width; the
 fan-out distribution is unweighted so serialized and blocked samples,
 which carry no interval, are preserved rather than dropped. */
-export const ExecutionFanoutPhaseV1Schema: z.ZodEnum<["accepted", "admitted", "peak_active", "requested", "useful"]> = z.enum(["accepted", "admitted", "peak_active", "requested", "useful"]);
+export const ExecutionFanoutPhaseV1Schema: z.ZodEnum<{ "accepted": "accepted"; "admitted": "admitted"; "peak_active": "peak_active"; "requested": "requested"; "useful": "useful" }> = z.enum(["accepted", "admitted", "peak_active", "requested", "useful"]);
 
 /** Latest trustworthy GitHub stacked-PR capability observation in the
 horizon. It is a typed operational state, not a metric or success claim. */
 export const ExecutionGitHubStackCapabilityReadingV1Schema: z.ZodObject<{
-  capability: z.ZodType<ExecutionGitHubStackCapabilityV1 | null, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<MetricCoverageV1, z.ZodTypeDef, unknown>;
-  other_forge_fallback_available: z.ZodType<boolean | null, z.ZodTypeDef, unknown>;
-  standard_git_fallback_available: z.ZodType<boolean | null, z.ZodTypeDef, unknown>;
-  unavailable: z.ZodType<ExecutionMetricUnavailableV1 | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  capability: z.ZodType<ExecutionGitHubStackCapabilityV1 | null, unknown>;
+  coverage: z.ZodType<MetricCoverageV1, unknown>;
+  other_forge_fallback_available: z.ZodType<boolean | null, unknown>;
+  standard_git_fallback_available: z.ZodType<boolean | null, unknown>;
+  unavailable: z.ZodType<ExecutionMetricUnavailableV1 | null, unknown>;
+}, z.core.$strict> = z.object({
   capability: z.union([z.lazy(() => ExecutionGitHubStackCapabilityV1Schema), z.null()]),
   coverage: z.lazy(() => MetricCoverageV1Schema),
   other_forge_fallback_available: z.boolean().nullable(),
@@ -4216,22 +4216,22 @@ export const ExecutionGitHubStackCapabilityReadingV1Schema: z.ZodObject<{
 
 /** Last bounded GitHub stacked-PR capability state observed in the
 horizon. This remains orthogonal to GitHub ingress and item lifecycle. */
-export const ExecutionGitHubStackCapabilityV1Schema: z.ZodEnum<["degraded", "enabled", "private_preview_disabled", "unavailable"]> = z.enum(["degraded", "enabled", "private_preview_disabled", "unavailable"]);
+export const ExecutionGitHubStackCapabilityV1Schema: z.ZodEnum<{ "degraded": "degraded"; "enabled": "enabled"; "private_preview_disabled": "private_preview_disabled"; "unavailable": "unavailable" }> = z.enum(["degraded", "enabled", "private_preview_disabled", "unavailable"]);
 
 /** Integration operation kind. Rebase remains external observation only. */
-export const ExecutionIntegrationKindV1Schema: z.ZodEnum<["cherry_pick", "external_observed", "fast_forward", "graph_only", "merge_commit", "rebase", "stack_retarget", "unknown"]> = z.enum(["cherry_pick", "external_observed", "fast_forward", "graph_only", "merge_commit", "rebase", "stack_retarget", "unknown"]);
+export const ExecutionIntegrationKindV1Schema: z.ZodEnum<{ "cherry_pick": "cherry_pick"; "external_observed": "external_observed"; "fast_forward": "fast_forward"; "graph_only": "graph_only"; "merge_commit": "merge_commit"; "rebase": "rebase"; "stack_retarget": "stack_retarget"; "unknown": "unknown" }> = z.enum(["cherry_pick", "external_observed", "fast_forward", "graph_only", "merge_commit", "rebase", "stack_retarget", "unknown"]);
 
 /** Terminal result of an observed native integration. */
-export const ExecutionIntegrationOutcomeV1Schema: z.ZodEnum<["cancelled", "conflicted", "denied", "effect_unknown", "failed", "locked", "partial", "rejected", "stale", "succeeded", "timed_out", "unknown", "unsupported"]> = z.enum(["cancelled", "conflicted", "denied", "effect_unknown", "failed", "locked", "partial", "rejected", "stale", "succeeded", "timed_out", "unknown", "unsupported"]);
+export const ExecutionIntegrationOutcomeV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "conflicted": "conflicted"; "denied": "denied"; "effect_unknown": "effect_unknown"; "failed": "failed"; "locked": "locked"; "partial": "partial"; "rejected": "rejected"; "stale": "stale"; "succeeded": "succeeded"; "timed_out": "timed_out"; "unknown": "unknown"; "unsupported": "unsupported" }> = z.enum(["cancelled", "conflicted", "denied", "effect_unknown", "failed", "locked", "partial", "rejected", "stale", "succeeded", "timed_out", "unknown", "unsupported"]);
 
 /** Whether the owning drift interval is still open or exactly closed. */
-export const ExecutionIntervalStateV1Schema: z.ZodEnum<["closed", "open"]> = z.enum(["closed", "open"]);
+export const ExecutionIntervalStateV1Schema: z.ZodEnum<{ "closed": "closed"; "open": "open" }> = z.enum(["closed", "open"]);
 
 /** Independently proved execution-leak class. */
-export const ExecutionLeakKindV1Schema: z.ZodEnum<["attempt_without_live_owner", "effect_unknown_past_deadline", "lease_after_terminal", "missing_worktree_binding", "none", "unbounded_delivery", "unknown"]> = z.enum(["attempt_without_live_owner", "effect_unknown_past_deadline", "lease_after_terminal", "missing_worktree_binding", "none", "unbounded_delivery", "unknown"]);
+export const ExecutionLeakKindV1Schema: z.ZodEnum<{ "attempt_without_live_owner": "attempt_without_live_owner"; "effect_unknown_past_deadline": "effect_unknown_past_deadline"; "lease_after_terminal": "lease_after_terminal"; "missing_worktree_binding": "missing_worktree_binding"; "none": "none"; "unbounded_delivery": "unbounded_delivery"; "unknown": "unknown" }> = z.enum(["attempt_without_live_owner", "effect_unknown_past_deadline", "lease_after_terminal", "missing_worktree_binding", "none", "unbounded_delivery", "unknown"]);
 
 /** Recovery state a proved leak reached. */
-export const ExecutionLeakOutcomeV1Schema: z.ZodEnum<["failed", "not_required", "pending", "recovered", "unknown"]> = z.enum(["failed", "not_required", "pending", "recovered", "unknown"]);
+export const ExecutionLeakOutcomeV1Schema: z.ZodEnum<{ "failed": "failed"; "not_required": "not_required"; "pending": "pending"; "recovered": "recovered"; "unknown": "unknown" }> = z.enum(["failed", "not_required", "pending", "recovered", "unknown"]);
 
 /** Why a measurement carries no value. Absence is always one of these typed
 reasons; it is never an empty string, a zero, or a silently dropped row. */
@@ -4240,28 +4240,28 @@ export const ExecutionMetricUnavailableV1Schema: z.ZodUnion<[z.ZodLiteral<"store
 /** Quantity unit for duplicate-effort accounting. Each unit is reported
 separately: wall time, tokens, cost, tests, and effects are never
 summed into one number. */
-export const ExecutionQuantityUnitV1Schema: z.ZodEnum<["cost_micros", "effects", "tests", "tokens", "wall_micros"]> = z.enum(["cost_micros", "effects", "tests", "tokens", "wall_micros"]);
+export const ExecutionQuantityUnitV1Schema: z.ZodEnum<{ "cost_micros": "cost_micros"; "effects": "effects"; "tests": "tests"; "tokens": "tokens"; "wall_micros": "wall_micros" }> = z.enum(["cost_micros", "effects", "tests", "tokens", "wall_micros"]);
 
 /** Typed rerun cause. Repeated logs and transport redelivery are not
 reruns and never carry one of these. */
-export const ExecutionRerunCauseV1Schema: z.ZodEnum<["ci_rerun", "human_requested", "recovery", "runtime_fallback", "runtime_retry", "test_rerun", "unknown"]> = z.enum(["ci_rerun", "human_requested", "recovery", "runtime_fallback", "runtime_retry", "test_rerun", "unknown"]);
+export const ExecutionRerunCauseV1Schema: z.ZodEnum<{ "ci_rerun": "ci_rerun"; "human_requested": "human_requested"; "recovery": "recovery"; "runtime_fallback": "runtime_fallback"; "runtime_retry": "runtime_retry"; "test_rerun": "test_rerun"; "unknown": "unknown" }> = z.enum(["ci_rerun", "human_requested", "recovery", "runtime_fallback", "runtime_retry", "test_rerun", "unknown"]);
 
 /** Which independent system observed the rerun. */
-export const ExecutionRerunSourceV1Schema: z.ZodEnum<["ci", "runtime", "test"]> = z.enum(["ci", "runtime", "test"]);
+export const ExecutionRerunSourceV1Schema: z.ZodEnum<{ "ci": "ci"; "runtime": "runtime"; "test": "test" }> = z.enum(["ci", "runtime", "test"]);
 
 /** Exact reason a stack became stale. The enum is bounded and never
 carries a branch, ref, worktree, repository, or provider identity. */
-export const ExecutionStackDriftKindV1Schema: z.ZodEnum<["base_advanced", "head_advanced", "merge_base_changed", "retargeted", "superseded"]> = z.enum(["base_advanced", "head_advanced", "merge_base_changed", "retargeted", "superseded"]);
+export const ExecutionStackDriftKindV1Schema: z.ZodEnum<{ "base_advanced": "base_advanced"; "head_advanced": "head_advanced"; "merge_base_changed": "merge_base_changed"; "retargeted": "retargeted"; "superseded": "superseded" }> = z.enum(["base_advanced", "head_advanced", "merge_base_changed", "retargeted", "superseded"]);
 
 /** Delivery surface family. Addresses, payloads, principals, and
 recipients are never observed, so the family is the whole label. */
-export const ExecutionSurfaceFamilyV1Schema: z.ZodEnum<["cli", "dashboard", "hook", "lsp", "mcp", "other"]> = z.enum(["cli", "dashboard", "hook", "lsp", "mcp", "other"]);
+export const ExecutionSurfaceFamilyV1Schema: z.ZodEnum<{ "cli": "cli"; "dashboard": "dashboard"; "hook": "hook"; "lsp": "lsp"; "mcp": "mcp"; "other": "other" }> = z.enum(["cli", "dashboard", "hook", "lsp", "mcp", "other"]);
 
 /** One allowed local grouping dimension. The set is closed by construction:
 every value is produced by an exhaustive match over a bounded domain class,
 so no person, agent, task, project, repository, worktree, branch, ref,
 commit, model version, or route can ever appear as a label. */
-export const ExecutionTopologyDimensionV1Schema: z.ZodType<ExecutionTopologyDimensionV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("dimension", [z.object({
+export const ExecutionTopologyDimensionV1Schema: z.ZodType<ExecutionTopologyDimensionV1, unknown> = z.discriminatedUnion("dimension", [z.object({
   dimension: z.literal("blocked_cause"),
   value: z.lazy(() => ExecutionBlockedCauseV1Schema),
 }), z.object({
@@ -4327,8 +4327,8 @@ export const ExecutionTopologyDimensionV1Schema: z.ZodType<ExecutionTopologyDime
 resolved only through that same authorized local query boundary and is not
 a metric dimension or exportable identity. */
 export const ExecutionTopologyDrillAnchorV1Schema: z.ZodObject<{
-  cursor: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cursor: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   cursor: z.string(),
 }).strict();
 
@@ -4339,11 +4339,11 @@ and their next-envelope carriers; it is not attributed to a topology
 family. Sampling stays a count of sampled topology envelopes and is never
 expanded into a fabricated population estimate. */
 export const ExecutionTopologyEmissionCoverageV1Schema: z.ZodObject<{
-  delayed: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  dropped: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  emitted: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  sampled_events: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  delayed: z.ZodType<number | null, unknown>;
+  dropped: z.ZodType<number | null, unknown>;
+  emitted: z.ZodType<number | null, unknown>;
+  sampled_events: z.ZodType<number | null, unknown>;
+}, z.core.$strict> = z.object({
   delayed: z.number().int().safe().min(0).nullable(),
   dropped: z.number().int().safe().min(0).nullable(),
   emitted: z.number().int().safe().min(0).nullable(),
@@ -4354,10 +4354,10 @@ export const ExecutionTopologyEmissionCoverageV1Schema: z.ZodObject<{
 and the landed metric envelope carrying value, denominator, coverage, and
 provenance. */
 export const ExecutionTopologyMeasurementV1Schema: z.ZodObject<{
-  dimensions: z.ZodType<Array<ExecutionTopologyDimensionV1>, z.ZodTypeDef, unknown>;
-  unavailable: z.ZodType<ExecutionMetricUnavailableV1 | null, z.ZodTypeDef, unknown>;
-  value: z.ZodType<MetricValueV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  dimensions: z.ZodType<Array<ExecutionTopologyDimensionV1>, unknown>;
+  unavailable: z.ZodType<ExecutionMetricUnavailableV1 | null, unknown>;
+  value: z.ZodType<MetricValueV1, unknown>;
+}, z.core.$strict> = z.object({
   dimensions: z.array(z.lazy(() => ExecutionTopologyDimensionV1Schema)),
   unavailable: z.union([z.lazy(() => ExecutionMetricUnavailableV1Schema), z.null()]),
   value: z.lazy(() => MetricValueV1Schema),
@@ -4367,9 +4367,9 @@ export const ExecutionTopologyMeasurementV1Schema: z.ZodObject<{
 is taken from the request context, not from the request, so a caller can
 never widen the population it reads. */
 export const ExecutionTopologyMetricsRequestV1Schema: z.ZodObject<{
-  horizon: z.ZodType<ObservabilityHorizonV1, z.ZodTypeDef, unknown>;
-  max_events: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  horizon: z.ZodType<ObservabilityHorizonV1, unknown>;
+  max_events: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   horizon: z.lazy(() => ObservabilityHorizonV1Schema),
   max_events: z.number().int().min(0),
 }).strict();
@@ -4377,17 +4377,17 @@ export const ExecutionTopologyMetricsRequestV1Schema: z.ZodObject<{
 /** The canonical execution-topology read model. Observatory and Costs render
 this without local formulas; CLI, MCP, and HTTP return the same bytes. */
 export const ExecutionTopologyMetricsV1Schema: z.ZodObject<{
-  authorized_scope_ref: z.ZodType<string, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<MetricCoverageV1, z.ZodTypeDef, unknown>;
-  current: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  drill_anchors: z.ZodType<Array<ExecutionTopologyDrillAnchorV1>, z.ZodTypeDef, unknown>;
-  emission_coverage: z.ZodType<ExecutionTopologyEmissionCoverageV1, z.ZodTypeDef, unknown>;
-  github_stack_capability: z.ZodType<ExecutionGitHubStackCapabilityReadingV1, z.ZodTypeDef, unknown>;
-  horizon: z.ZodType<ObservabilityHorizonV1, z.ZodTypeDef, unknown>;
-  measurements: z.ZodType<Array<ExecutionTopologyMeasurementV1>, z.ZodTypeDef, unknown>;
-  observed_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  watermark: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  authorized_scope_ref: z.ZodType<string, unknown>;
+  coverage: z.ZodType<MetricCoverageV1, unknown>;
+  current: z.ZodType<boolean, unknown>;
+  drill_anchors: z.ZodType<Array<ExecutionTopologyDrillAnchorV1>, unknown>;
+  emission_coverage: z.ZodType<ExecutionTopologyEmissionCoverageV1, unknown>;
+  github_stack_capability: z.ZodType<ExecutionGitHubStackCapabilityReadingV1, unknown>;
+  horizon: z.ZodType<ObservabilityHorizonV1, unknown>;
+  measurements: z.ZodType<Array<ExecutionTopologyMeasurementV1>, unknown>;
+  observed_at_micros: z.ZodType<number, unknown>;
+  watermark: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   authorized_scope_ref: z.string(),
   coverage: z.lazy(() => MetricCoverageV1Schema),
   current: z.boolean(),
@@ -4402,7 +4402,7 @@ export const ExecutionTopologyMetricsV1Schema: z.ZodObject<{
 
 /** The application-owned execution-topology view. Absence of any Work in
 scope is a typed state, distinct from an authorized-but-empty page. */
-export const ExecutionTopologyViewV1Schema: z.ZodType<ExecutionTopologyViewV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const ExecutionTopologyViewV1Schema: z.ZodType<ExecutionTopologyViewV1, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("absent"),
 }).strict(), z.object({
   branch_topology: z.lazy(() => BranchTopologyPolicyV1Schema),
@@ -4416,35 +4416,35 @@ export const ExecutionTopologyViewV1Schema: z.ZodType<ExecutionTopologyViewV1, z
 
 /** Fixed width buckets. Raw widths stay authorized local detail; only
 bucket counts leave the projection. */
-export const ExecutionWidthBucketV1Schema: z.ZodEnum<["from17_to32", "from33_to64", "from3_to4", "from5_to8", "from9_to16", "one", "over64", "two", "zero"]> = z.enum(["from17_to32", "from33_to64", "from3_to4", "from5_to8", "from9_to16", "one", "over64", "two", "zero"]);
+export const ExecutionWidthBucketV1Schema: z.ZodEnum<{ "from17_to32": "from17_to32"; "from33_to64": "from33_to64"; "from3_to4": "from3_to4"; "from5_to8": "from5_to8"; "from9_to16": "from9_to16"; "one": "one"; "over64": "over64"; "two": "two"; "zero": "zero" }> = z.enum(["from17_to32", "from33_to64", "from3_to4", "from5_to8", "from9_to16", "one", "over64", "two", "zero"]);
 
-export const ExplorerFinalityV1Schema: z.ZodEnum<["cancelled", "complete", "error", "partial", "pending", "timed_out"]> = z.enum(["cancelled", "complete", "error", "partial", "pending", "timed_out"]);
+export const ExplorerFinalityV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "complete": "complete"; "error": "error"; "partial": "partial"; "pending": "pending"; "timed_out": "timed_out" }> = z.enum(["cancelled", "complete", "error", "partial", "pending", "timed_out"]);
 
 export const ExplorerQueryRequestV1Schema: z.ZodObject<{
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  offset: z.ZodType<number, z.ZodTypeDef, unknown>;
-  query: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  limit: z.ZodType<number, unknown>;
+  offset: z.ZodType<number, unknown>;
+  query: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   limit: z.number().int().safe(),
   offset: z.number().int().safe(),
   query: z.string(),
 }).strict();
 
 export const ExplorerQueryRunV1Schema: z.ZodObject<{
-  completed_at_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  elapsed_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  explanation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  finality: z.ZodType<ExplorerFinalityV1, z.ZodTypeDef, unknown>;
-  merge_revision: z.ZodType<string, z.ZodTypeDef, unknown>;
-  ordering_policy: z.ZodType<string, z.ZodTypeDef, unknown>;
-  plan_revision: z.ZodType<string, z.ZodTypeDef, unknown>;
-  request: z.ZodType<ExplorerQueryRequestV1, z.ZodTypeDef, unknown>;
-  request_revision: z.ZodType<string, z.ZodTypeDef, unknown>;
-  required_source_ids: z.ZodType<Array<ExplorerSourceIdV1>, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  sources: z.ZodType<Array<ExplorerSourceProgressV1>, z.ZodTypeDef, unknown>;
-  state: z.ZodType<ExplorerRunStateV1, z.ZodTypeDef, unknown>;
-  submitted_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
+  completed_at_micros: z.ZodType<number | null, unknown>;
+  elapsed_micros: z.ZodType<number, unknown>;
+  explanation: z.ZodType<string, unknown>;
+  finality: z.ZodType<ExplorerFinalityV1, unknown>;
+  merge_revision: z.ZodType<string, unknown>;
+  ordering_policy: z.ZodType<string, unknown>;
+  plan_revision: z.ZodType<string, unknown>;
+  request: z.ZodType<ExplorerQueryRequestV1, unknown>;
+  request_revision: z.ZodType<string, unknown>;
+  required_source_ids: z.ZodType<Array<ExplorerSourceIdV1>, unknown>;
+  run_id: z.ZodType<string, unknown>;
+  sources: z.ZodType<Array<ExplorerSourceProgressV1>, unknown>;
+  state: z.ZodType<ExplorerRunStateV1, unknown>;
+  submitted_at_micros: z.ZodType<number, unknown>;
 }> = z.object({
   completed_at_micros: z.number().int().safe().nullable(),
   elapsed_micros: z.number().int().safe(),
@@ -4463,17 +4463,17 @@ export const ExplorerQueryRunV1Schema: z.ZodObject<{
 });
 
 export const ExplorerReadContextV1Schema: z.ZodObject<{
-  counts: z.ZodType<ExplorerSessionCountsV1, z.ZodTypeDef, unknown>;
-  has_more: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  has_more_messages: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  has_more_summary_nodes: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  messages: z.ZodType<Array<LcmMessageV1>, z.ZodTypeDef, unknown>;
-  offset: z.ZodType<number, z.ZodTypeDef, unknown>;
-  order: z.ZodType<string, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  storage_scope: z.ZodType<string, z.ZodTypeDef, unknown>;
-  summary_nodes: z.ZodType<Array<LcmSummaryNodeV1>, z.ZodTypeDef, unknown>;
+  counts: z.ZodType<ExplorerSessionCountsV1, unknown>;
+  has_more: z.ZodType<boolean, unknown>;
+  has_more_messages: z.ZodType<boolean, unknown>;
+  has_more_summary_nodes: z.ZodType<boolean, unknown>;
+  limit: z.ZodType<number, unknown>;
+  messages: z.ZodType<Array<LcmMessageV1>, unknown>;
+  offset: z.ZodType<number, unknown>;
+  order: z.ZodType<string, unknown>;
+  session_id: z.ZodType<string, unknown>;
+  storage_scope: z.ZodType<string, unknown>;
+  summary_nodes: z.ZodType<Array<LcmSummaryNodeV1>, unknown>;
 }> = z.object({
   counts: z.lazy(() => ExplorerSessionCountsV1Schema),
   has_more: z.boolean(),
@@ -4489,12 +4489,12 @@ export const ExplorerReadContextV1Schema: z.ZodObject<{
 });
 
 export const ExplorerResultPageV1Schema: z.ZodObject<{
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  metadata: z.ZodType<unknown, z.ZodTypeDef, unknown>;
-  next_offset: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  offset: z.ZodType<number, z.ZodTypeDef, unknown>;
-  rows: z.ZodType<Array<unknown>, z.ZodTypeDef, unknown>;
-  total: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  limit: z.ZodType<number, unknown>;
+  metadata: z.ZodType<unknown, unknown>;
+  next_offset: z.ZodType<number | null, unknown>;
+  offset: z.ZodType<number, unknown>;
+  rows: z.ZodType<Array<unknown>, unknown>;
+  total: z.ZodType<number | null, unknown>;
 }> = z.object({
   limit: z.number().int().safe(),
   metadata: z.unknown(),
@@ -4504,14 +4504,14 @@ export const ExplorerResultPageV1Schema: z.ZodObject<{
   total: z.number().int().safe().min(0).nullable(),
 });
 
-export const ExplorerRunStateV1Schema: z.ZodEnum<["cancelled", "completed", "error", "partial", "pending", "timed_out"]> = z.enum(["cancelled", "completed", "error", "partial", "pending", "timed_out"]);
+export const ExplorerRunStateV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed"; "error": "error"; "partial": "partial"; "pending": "pending"; "timed_out": "timed_out" }> = z.enum(["cancelled", "completed", "error", "partial", "pending", "timed_out"]);
 
 export const ExplorerSessionCountsV1Schema: z.ZodObject<{
-  message_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  source_token_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  summary_node_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  summary_token_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  token_estimate_total: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  message_count: z.ZodType<number, unknown>;
+  source_token_count: z.ZodType<number | null, unknown>;
+  summary_node_count: z.ZodType<number, unknown>;
+  summary_token_count: z.ZodType<number | null, unknown>;
+  token_estimate_total: z.ZodType<number | null, unknown>;
 }> = z.object({
   message_count: z.number().int().safe(),
   source_token_count: z.number().int().safe().nullable(),
@@ -4521,16 +4521,16 @@ export const ExplorerSessionCountsV1Schema: z.ZodObject<{
 });
 
 export const ExplorerSessionSizeV1Schema: z.ZodObject<{
-  counts: z.ZodType<ExplorerSessionCountsV1, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  storage_scope: z.ZodType<string, z.ZodTypeDef, unknown>;
+  counts: z.ZodType<ExplorerSessionCountsV1, unknown>;
+  session_id: z.ZodType<string, unknown>;
+  storage_scope: z.ZodType<string, unknown>;
 }> = z.object({
   counts: z.lazy(() => ExplorerSessionCountsV1Schema),
   session_id: z.string(),
   storage_scope: z.string(),
 });
 
-export const ExplorerSourceIdV1Schema: z.ZodEnum<["code_graph", "knowledge", "sessions"]> = z.enum(["code_graph", "knowledge", "sessions"]);
+export const ExplorerSourceIdV1Schema: z.ZodEnum<{ "code_graph": "code_graph"; "knowledge": "knowledge"; "sessions": "sessions" }> = z.enum(["code_graph", "knowledge", "sessions"]);
 
 /** What one source truthfully concluded for this run. Every member has a real
 producer; none is speculative:
@@ -4539,23 +4539,23 @@ producer; none is speculative:
 - `Stale`: the source's store exists but does not match the current
   generation (verified graph stale reads, LCM stale projections).
 - `TimedOut`: the source's own read exceeded the admitted deadline. */
-export const ExplorerSourceOutcomeV1Schema: z.ZodEnum<["cancelled", "error", "partial", "pending", "ready", "stale", "timed_out", "unavailable"]> = z.enum(["cancelled", "error", "partial", "pending", "ready", "stale", "timed_out", "unavailable"]);
+export const ExplorerSourceOutcomeV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "error": "error"; "partial": "partial"; "pending": "pending"; "ready": "ready"; "stale": "stale"; "timed_out": "timed_out"; "unavailable": "unavailable" }> = z.enum(["cancelled", "error", "partial", "pending", "ready", "stale", "timed_out", "unavailable"]);
 
-export const ExplorerSourcePhaseV1Schema: z.ZodEnum<["cancelled", "completed", "queued", "reading"]> = z.enum(["cancelled", "completed", "queued", "reading"]);
+export const ExplorerSourcePhaseV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed"; "queued": "queued"; "reading": "reading" }> = z.enum(["cancelled", "completed", "queued", "reading"]);
 
 export const ExplorerSourceProgressV1Schema: z.ZodObject<{
-  completed_units: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<DashboardCoverageV1, z.ZodTypeDef, unknown>;
-  error_code: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  freshness: z.ZodType<string, z.ZodTypeDef, unknown>;
-  message: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  outcome: z.ZodType<ExplorerSourceOutcomeV1, z.ZodTypeDef, unknown>;
-  page: z.ZodType<ExplorerResultPageV1 | null, z.ZodTypeDef, unknown>;
-  phase: z.ZodType<ExplorerSourcePhaseV1, z.ZodTypeDef, unknown>;
-  source_id: z.ZodType<ExplorerSourceIdV1, z.ZodTypeDef, unknown>;
-  source_label: z.ZodType<string, z.ZodTypeDef, unknown>;
-  total_units: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  watermark: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  completed_units: z.ZodType<number | null, unknown>;
+  coverage: z.ZodType<DashboardCoverageV1, unknown>;
+  error_code: z.ZodType<string | null, unknown>;
+  freshness: z.ZodType<string, unknown>;
+  message: z.ZodType<string | null, unknown>;
+  outcome: z.ZodType<ExplorerSourceOutcomeV1, unknown>;
+  page: z.ZodType<ExplorerResultPageV1 | null, unknown>;
+  phase: z.ZodType<ExplorerSourcePhaseV1, unknown>;
+  source_id: z.ZodType<ExplorerSourceIdV1, unknown>;
+  source_label: z.ZodType<string, unknown>;
+  total_units: z.ZodType<number | null, unknown>;
+  watermark: z.ZodType<string | null, unknown>;
 }> = z.object({
   completed_units: z.number().int().safe().min(0).nullable(),
   coverage: z.lazy(() => DashboardCoverageV1Schema),
@@ -4572,10 +4572,10 @@ export const ExplorerSourceProgressV1Schema: z.ZodObject<{
 });
 
 export const FactArmCoverageV1Schema: z.ZodObject<{
-  completeness: z.ZodType<string, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  returned: z.ZodType<number, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  completeness: z.ZodType<string, unknown>;
+  limit: z.ZodType<number, unknown>;
+  returned: z.ZodType<number, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
 }> = z.object({
   completeness: z.string(),
   limit: z.number().int().safe().min(0),
@@ -4584,13 +4584,13 @@ export const FactArmCoverageV1Schema: z.ZodObject<{
 });
 
 /** Strongly typed canonical identity: `FactAssertionId`. */
-export const FactAssertionIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const FactAssertionIdSchema: z.ZodType<string, unknown> = z.string();
 
-export const FactCategoryV1Schema: z.ZodEnum<["code_area", "decision", "general", "project", "tool", "user_pref"]> = z.enum(["code_area", "decision", "general", "project", "tool", "user_pref"]);
+export const FactCategoryV1Schema: z.ZodEnum<{ "code_area": "code_area"; "decision": "decision"; "general": "general"; "project": "project"; "tool": "tool"; "user_pref": "user_pref" }> = z.enum(["code_area", "decision", "general", "project", "tool", "user_pref"]);
 
-export const FactCommitDispositionV1Schema: z.ZodEnum<["committed", "idempotent_replay"]> = z.enum(["committed", "idempotent_replay"]);
+export const FactCommitDispositionV1Schema: z.ZodEnum<{ "committed": "committed"; "idempotent_replay": "idempotent_replay" }> = z.enum(["committed", "idempotent_replay"]);
 
-export const FactCommitOwnerV1Schema: z.ZodType<FactCommitOwnerV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const FactCommitOwnerV1Schema: z.ZodType<FactCommitOwnerV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("profile"),
 }).strict(), z.object({
   kind: z.literal("project"),
@@ -4598,13 +4598,13 @@ export const FactCommitOwnerV1Schema: z.ZodType<FactCommitOwnerV1, z.ZodTypeDef,
 }).strict()]);
 
 export const FactCommitReceiptV1Schema: z.ZodObject<{
-  active_assertion_id: z.ZodType<FactAssertionId | null, z.ZodTypeDef, unknown>;
-  committed_event_ids: z.ZodType<Array<FactEventId>, z.ZodTypeDef, unknown>;
-  disposition: z.ZodType<FactCommitDispositionV1, z.ZodTypeDef, unknown>;
-  fact_id: z.ZodType<FactId, z.ZodTypeDef, unknown>;
-  last_event_id: z.ZodType<FactEventId, z.ZodTypeDef, unknown>;
-  owner: z.ZodType<FactCommitOwnerV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  active_assertion_id: z.ZodType<FactAssertionId | null, unknown>;
+  committed_event_ids: z.ZodType<Array<FactEventId>, unknown>;
+  disposition: z.ZodType<FactCommitDispositionV1, unknown>;
+  fact_id: z.ZodType<FactId, unknown>;
+  last_event_id: z.ZodType<FactEventId, unknown>;
+  owner: z.ZodType<FactCommitOwnerV1, unknown>;
+}, z.core.$strict> = z.object({
   active_assertion_id: z.union([z.lazy(() => FactAssertionIdSchema), z.null()]),
   committed_event_ids: z.array(z.lazy(() => FactEventIdSchema)),
   disposition: z.lazy(() => FactCommitDispositionV1Schema),
@@ -4614,17 +4614,17 @@ export const FactCommitReceiptV1Schema: z.ZodObject<{
 }).strict();
 
 /** Strongly typed canonical identity: `FactEventId`. */
-export const FactEventIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const FactEventIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Strongly typed canonical identity: `FactId`. */
-export const FactIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const FactIdSchema: z.ZodType<string, unknown> = z.string();
 
 export const FactMatchArmV1Schema: z.ZodObject<{
-  collision_warning: z.ZodType<string, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<FactArmCoverageV1, z.ZodTypeDef, unknown>;
-  facts: z.ZodType<Array<unknown>, z.ZodTypeDef, unknown>;
-  match_basis: z.ZodType<string, z.ZodTypeDef, unknown>;
-  strength: z.ZodType<string, z.ZodTypeDef, unknown>;
+  collision_warning: z.ZodType<string, unknown>;
+  coverage: z.ZodType<FactArmCoverageV1, unknown>;
+  facts: z.ZodType<Array<unknown>, unknown>;
+  match_basis: z.ZodType<string, unknown>;
+  strength: z.ZodType<string, unknown>;
 }> = z.object({
   collision_warning: z.string(),
   coverage: z.lazy(() => FactArmCoverageV1Schema),
@@ -4634,16 +4634,16 @@ export const FactMatchArmV1Schema: z.ZodObject<{
 });
 
 export const FactMatchesMeasurementV1Schema: z.ZodObject<{
-  arms: z.ZodType<Array<FactMatchArmV1>, z.ZodTypeDef, unknown>;
-  caption: z.ZodType<string, z.ZodTypeDef, unknown>;
-  entity_matches: z.ZodType<Array<unknown>, z.ZodTypeDef, unknown>;
-  granularity: z.ZodType<string, z.ZodTypeDef, unknown>;
-  identity_semantics: z.ZodType<string, z.ZodTypeDef, unknown>;
-  name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  node: z.ZodType<NodeRefV1, z.ZodTypeDef, unknown>;
-  normalized_name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  payload_fts_matches: z.ZodType<Array<unknown>, z.ZodTypeDef, unknown>;
-  same_name_collision_possible: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  arms: z.ZodType<Array<FactMatchArmV1>, unknown>;
+  caption: z.ZodType<string, unknown>;
+  entity_matches: z.ZodType<Array<unknown>, unknown>;
+  granularity: z.ZodType<string, unknown>;
+  identity_semantics: z.ZodType<string, unknown>;
+  name: z.ZodType<string, unknown>;
+  node: z.ZodType<NodeRefV1, unknown>;
+  normalized_name: z.ZodType<string, unknown>;
+  payload_fts_matches: z.ZodType<Array<unknown>, unknown>;
+  same_name_collision_possible: z.ZodType<boolean, unknown>;
 }> = z.object({
   arms: z.array(z.lazy(() => FactMatchArmV1Schema)),
   caption: z.string(),
@@ -4658,19 +4658,19 @@ export const FactMatchesMeasurementV1Schema: z.ZodObject<{
 });
 
 export const FactOutcomeRecordSchema: z.ZodObject<{
-  access_count: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  apply_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  canonical_fact_id: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  days_since_recorded: z.ZodType<number, z.ZodTypeDef, unknown>;
-  helpful_count: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  last_recalled_at: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  recorded_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  retrieval_count: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  run_id: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  state: z.ZodType<ProjectMemoryAutomaticFactStateV1, z.ZodTypeDef, unknown>;
-  still_exists: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  unhelpful_count: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  verdict: z.ZodType<FactOutcomeVerdict, z.ZodTypeDef, unknown>;
+  access_count: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  apply_id: z.ZodType<string, unknown>;
+  canonical_fact_id: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  days_since_recorded: z.ZodType<number, unknown>;
+  helpful_count: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  last_recalled_at: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  recorded_at: z.ZodType<number, unknown>;
+  retrieval_count: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  run_id: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  state: z.ZodType<ProjectMemoryAutomaticFactStateV1, unknown>;
+  still_exists: z.ZodType<boolean, unknown>;
+  unhelpful_count: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  verdict: z.ZodType<FactOutcomeVerdict, unknown>;
 }> = z.object({
   access_count: z.number().int().safe().min(0).nullable().optional(),
   apply_id: z.string(),
@@ -4687,9 +4687,9 @@ export const FactOutcomeRecordSchema: z.ZodObject<{
   verdict: z.lazy(() => FactOutcomeVerdictSchema),
 });
 
-export const FactOutcomeVerdictSchema: z.ZodEnum<["deleted", "never_recalled", "quarantined", "recalled", "recalled_and_helpful", "unavailable"]> = z.enum(["deleted", "never_recalled", "quarantined", "recalled", "recalled_and_helpful", "unavailable"]);
+export const FactOutcomeVerdictSchema: z.ZodEnum<{ "deleted": "deleted"; "never_recalled": "never_recalled"; "quarantined": "quarantined"; "recalled": "recalled"; "recalled_and_helpful": "recalled_and_helpful"; "unavailable": "unavailable" }> = z.enum(["deleted", "never_recalled", "quarantined", "recalled", "recalled_and_helpful", "unavailable"]);
 
-export const FactSearchGraphCoverageV1Schema: z.ZodType<FactSearchGraphCoverageV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const FactSearchGraphCoverageV1Schema: z.ZodType<FactSearchGraphCoverageV1, unknown> = z.discriminatedUnion("kind", [z.object({
   expanded_fact_count: z.number().int().safe().min(0),
   kind: z.literal("complete"),
   relation_count: z.number().int().safe().min(0),
@@ -4703,16 +4703,16 @@ export const FactSearchGraphCoverageV1Schema: z.ZodType<FactSearchGraphCoverageV
   kind: z.literal("not_mounted"),
 }).strict()]);
 
-export const FactSearchGraphDegradationV1Schema: z.ZodEnum<["budget_exhausted", "conflict", "deadline_exceeded", "unavailable"]> = z.enum(["budget_exhausted", "conflict", "deadline_exceeded", "unavailable"]);
+export const FactSearchGraphDegradationV1Schema: z.ZodEnum<{ "budget_exhausted": "budget_exhausted"; "conflict": "conflict"; "deadline_exceeded": "deadline_exceeded"; "unavailable": "unavailable" }> = z.enum(["budget_exhausted", "conflict", "deadline_exceeded", "unavailable"]);
 
 /** Closed public launcher for the automatic Memory Curator.
 
 Run identity, task selection, operations, proposals, approval, and apply
 authority are deliberately absent and rejected by `deny_unknown_fields`. */
 export const FactStoreCurateRequestV1Schema: z.ZodObject<{
-  fact_review_limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  min_confidence_millionths: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  fact_review_limit: z.ZodType<number, unknown>;
+  min_confidence_millionths: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   fact_review_limit: z.number().int().min(1).max(1000),
   min_confidence_millionths: z.number().int().min(0).max(1000000),
 }).strict();
@@ -4723,11 +4723,11 @@ The curator runs on the daemon after this receipt is returned. Its terminal
 is the automation run ledger record for `run_id`, read with
 `automation_run_view`. */
 export const FactStoreCurateResultV1Schema: z.ZodObject<{
-  request_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  state: z.ZodType<FactStoreCurateStateV1, z.ZodTypeDef, unknown>;
-  task: z.ZodType<AutomationTaskV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  request_digest: z.ZodType<ManifestDigest, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  state: z.ZodType<FactStoreCurateStateV1, unknown>;
+  task: z.ZodType<AutomationTaskV1, unknown>;
+}, z.core.$strict> = z.object({
   request_digest: z.lazy(() => ManifestDigestSchema),
   run_id: z.lazy(() => RunIdSchema),
   state: z.lazy(() => FactStoreCurateStateV1Schema),
@@ -4737,20 +4737,20 @@ export const FactStoreCurateResultV1Schema: z.ZodObject<{
 /** Lifecycle state a `fact_store_curate` receipt reports. */
 export const FactStoreCurateStateV1Schema: z.ZodLiteral<"started"> = z.literal("started");
 
-export const FeedbackCoverageV1Schema: z.ZodEnum<["capped", "known", "partial", "sampled", "stale", "unknown"]> = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
+export const FeedbackCoverageV1Schema: z.ZodEnum<{ "capped": "capped"; "known": "known"; "partial": "partial"; "sampled": "sampled"; "stale": "stale"; "unknown": "unknown" }> = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
 
 /** Strongly typed canonical identity: `FeedbackFindingId`. */
-export const FeedbackFindingIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const FeedbackFindingIdSchema: z.ZodType<string, unknown> = z.string();
 
 export const FeedbackObservationDenominatorsV1Schema: z.ZodObject<{
-  delayed: z.ZodType<number, z.ZodTypeDef, unknown>;
-  dropped: z.ZodType<number, z.ZodTypeDef, unknown>;
-  eligible: z.ZodType<number, z.ZodTypeDef, unknown>;
-  emitted: z.ZodType<number, z.ZodTypeDef, unknown>;
-  incomplete_boots: z.ZodType<number, z.ZodTypeDef, unknown>;
-  persisted: z.ZodType<number, z.ZodTypeDef, unknown>;
-  retention_dropped: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  delayed: z.ZodType<number, unknown>;
+  dropped: z.ZodType<number, unknown>;
+  eligible: z.ZodType<number, unknown>;
+  emitted: z.ZodType<number, unknown>;
+  incomplete_boots: z.ZodType<number, unknown>;
+  persisted: z.ZodType<number, unknown>;
+  retention_dropped: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   delayed: z.number().int().safe().min(0),
   dropped: z.number().int().safe().min(0),
   eligible: z.number().int().safe().min(0),
@@ -4761,20 +4761,20 @@ export const FeedbackObservationDenominatorsV1Schema: z.ZodObject<{
 }).strict();
 
 export const FeedbackObservationReadModelV1Schema: z.ZodObject<{
-  coverage: z.ZodType<FeedbackCoverageV1, z.ZodTypeDef, unknown>;
-  denominators: z.ZodType<FeedbackObservationDenominatorsV1, z.ZodTypeDef, unknown>;
-  event_counts: z.ZodType<Record<string, number>, z.ZodTypeDef, unknown>;
-  first_observed_at: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  last_observed_at: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  rejected_argument_groups: z.ZodType<Array<FeedbackRejectedArgumentGroupV1>, z.ZodTypeDef, unknown>;
-  schema_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  system_quality: z.ZodType<FeedbackSystemQualityReadModelV1, z.ZodTypeDef, unknown>;
-  total_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  watermark: z.ZodType<FeedbackObservationWatermarkV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  coverage: z.ZodType<FeedbackCoverageV1, unknown>;
+  denominators: z.ZodType<FeedbackObservationDenominatorsV1, unknown>;
+  event_counts: z.ZodType<Record<string, number>, unknown>;
+  first_observed_at: z.ZodType<UtcMicros | null, unknown>;
+  last_observed_at: z.ZodType<UtcMicros | null, unknown>;
+  rejected_argument_groups: z.ZodType<Array<FeedbackRejectedArgumentGroupV1>, unknown>;
+  schema_version: z.ZodType<number, unknown>;
+  system_quality: z.ZodType<FeedbackSystemQualityReadModelV1, unknown>;
+  total_count: z.ZodType<number, unknown>;
+  watermark: z.ZodType<FeedbackObservationWatermarkV1, unknown>;
+}, z.core.$strict> = z.object({
   coverage: z.lazy(() => FeedbackCoverageV1Schema),
   denominators: z.lazy(() => FeedbackObservationDenominatorsV1Schema),
-  event_counts: z.record(z.number().int().safe().min(0)),
+  event_counts: z.record(z.string(), z.number().int().safe().min(0)),
   first_observed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   last_observed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   rejected_argument_groups: z.array(z.lazy(() => FeedbackRejectedArgumentGroupV1Schema)),
@@ -4785,44 +4785,44 @@ export const FeedbackObservationReadModelV1Schema: z.ZodObject<{
 }).strict();
 
 export const FeedbackObservationWatermarkV1Schema: z.ZodObject<{
-  observed_through: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  producer_boot_id: z.ZodType<ManifestDigest | null, z.ZodTypeDef, unknown>;
-  producer_sequence: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  observed_through: z.ZodType<UtcMicros | null, unknown>;
+  producer_boot_id: z.ZodType<ManifestDigest | null, unknown>;
+  producer_sequence: z.ZodType<number | null, unknown>;
+}, z.core.$strict> = z.object({
   observed_through: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   producer_boot_id: z.union([z.lazy(() => ManifestDigestSchema), z.null()]),
   producer_sequence: z.number().int().safe().min(0).nullable(),
 }).strict();
 
-export const FeedbackProximityAccessKindV1Schema: z.ZodEnum<["read", "write"]> = z.enum(["read", "write"]);
+export const FeedbackProximityAccessKindV1Schema: z.ZodEnum<{ "read": "read"; "write": "write" }> = z.enum(["read", "write"]);
 
 export const FeedbackProximityCloneHandleV1Schema: z.ZodObject<{
-  retrieval_anchor_ids: z.ZodType<Array<RetrievalAnchorId>, z.ZodTypeDef, unknown>;
-  source_generation: z.ZodType<CodeGenerationId, z.ZodTypeDef, unknown>;
-  source_symbol: z.ZodType<SymbolOccurrenceId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  retrieval_anchor_ids: z.ZodType<Array<RetrievalAnchorId>, unknown>;
+  source_generation: z.ZodType<CodeGenerationId, unknown>;
+  source_symbol: z.ZodType<SymbolOccurrenceId, unknown>;
+}, z.core.$strict> = z.object({
   retrieval_anchor_ids: z.array(z.lazy(() => RetrievalAnchorIdSchema)),
   source_generation: z.lazy(() => CodeGenerationIdSchema),
   source_symbol: z.lazy(() => SymbolOccurrenceIdSchema),
 }).strict();
 
 export const FeedbackProximityConflictDifferenceV1Schema: z.ZodObject<{
-  difference_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  file: z.ZodType<FileOccurrenceId, z.ZodTypeDef, unknown>;
-  span: z.ZodType<SourceSpan, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  difference_digest: z.ZodType<ManifestDigest, unknown>;
+  file: z.ZodType<FileOccurrenceId, unknown>;
+  span: z.ZodType<SourceSpan, unknown>;
+}, z.core.$strict> = z.object({
   difference_digest: z.lazy(() => ManifestDigestSchema),
   file: z.lazy(() => FileOccurrenceIdSchema),
   span: z.lazy(() => SourceSpanSchema),
 }).strict();
 
 export const FeedbackProximityConflictHandleV1Schema: z.ZodObject<{
-  common_base_revision: z.ZodType<CommitId, z.ZodTypeDef, unknown>;
-  differences: z.ZodType<Array<FeedbackProximityConflictDifferenceV1>, z.ZodTypeDef, unknown>;
-  evidence_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  left_head_revision: z.ZodType<CommitId, z.ZodTypeDef, unknown>;
-  right_head_revision: z.ZodType<CommitId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  common_base_revision: z.ZodType<CommitId, unknown>;
+  differences: z.ZodType<Array<FeedbackProximityConflictDifferenceV1>, unknown>;
+  evidence_digest: z.ZodType<ManifestDigest, unknown>;
+  left_head_revision: z.ZodType<CommitId, unknown>;
+  right_head_revision: z.ZodType<CommitId, unknown>;
+}, z.core.$strict> = z.object({
   common_base_revision: z.lazy(() => CommitIdSchema),
   differences: z.array(z.lazy(() => FeedbackProximityConflictDifferenceV1Schema)),
   evidence_digest: z.lazy(() => ManifestDigestSchema),
@@ -4831,15 +4831,15 @@ export const FeedbackProximityConflictHandleV1Schema: z.ZodObject<{
 }).strict();
 
 export const FeedbackProximityEncounterV1Schema: z.ZodObject<{
-  coverage: z.ZodType<ProximityCoverageV1, z.ZodTypeDef, unknown>;
-  encounter_id: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  expires_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  interval: z.ZodType<FeedbackProximityIntervalV1, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  participants: z.ZodType<Array<FeedbackProximityParticipantV1>, z.ZodTypeDef, unknown>;
-  relation: z.ZodType<FeedbackProximityRelationV1, z.ZodTypeDef, unknown>;
-  scope: z.ZodType<FeedbackScopeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  coverage: z.ZodType<ProximityCoverageV1, unknown>;
+  encounter_id: z.ZodType<ManifestDigest, unknown>;
+  expires_at: z.ZodType<UtcMicros, unknown>;
+  interval: z.ZodType<FeedbackProximityIntervalV1, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  participants: z.ZodType<Array<FeedbackProximityParticipantV1>, unknown>;
+  relation: z.ZodType<FeedbackProximityRelationV1, unknown>;
+  scope: z.ZodType<FeedbackScopeV1, unknown>;
+}, z.core.$strict> = z.object({
   coverage: z.lazy(() => ProximityCoverageV1Schema),
   encounter_id: z.lazy(() => ManifestDigestSchema),
   expires_at: z.lazy(() => UtcMicrosSchema),
@@ -4851,26 +4851,26 @@ export const FeedbackProximityEncounterV1Schema: z.ZodObject<{
 }).strict();
 
 export const FeedbackProximityIntervalV1Schema: z.ZodObject<{
-  end: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  start: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  end: z.ZodType<UtcMicros, unknown>;
+  start: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   end: z.lazy(() => UtcMicrosSchema),
   start: z.lazy(() => UtcMicrosSchema),
 }).strict();
 
-export const FeedbackProximityOmissionV1Schema: z.ZodEnum<["active_session_limit", "clone_coverage_partial", "code_index_revision_mismatch", "conflict_evidence_unavailable", "edited_path_limit", "encounter_limit", "missing_code_address", "missing_participant_observation", "missing_participant_revision", "missing_participant_worktree", "recent_observation_limit", "session_activity_limit"]> = z.enum(["active_session_limit", "clone_coverage_partial", "code_index_revision_mismatch", "conflict_evidence_unavailable", "edited_path_limit", "encounter_limit", "missing_code_address", "missing_participant_observation", "missing_participant_revision", "missing_participant_worktree", "recent_observation_limit", "session_activity_limit"]);
+export const FeedbackProximityOmissionV1Schema: z.ZodEnum<{ "active_session_limit": "active_session_limit"; "clone_coverage_partial": "clone_coverage_partial"; "code_index_revision_mismatch": "code_index_revision_mismatch"; "conflict_evidence_unavailable": "conflict_evidence_unavailable"; "edited_path_limit": "edited_path_limit"; "encounter_limit": "encounter_limit"; "missing_code_address": "missing_code_address"; "missing_participant_observation": "missing_participant_observation"; "missing_participant_revision": "missing_participant_revision"; "missing_participant_worktree": "missing_participant_worktree"; "recent_observation_limit": "recent_observation_limit"; "session_activity_limit": "session_activity_limit" }> = z.enum(["active_session_limit", "clone_coverage_partial", "code_index_revision_mismatch", "conflict_evidence_unavailable", "edited_path_limit", "encounter_limit", "missing_code_address", "missing_participant_observation", "missing_participant_revision", "missing_participant_worktree", "recent_observation_limit", "session_activity_limit"]);
 
 export const FeedbackProximityParticipantV1Schema: z.ZodObject<{
-  access: z.ZodType<FeedbackProximityAccessKindV1, z.ZodTypeDef, unknown>;
-  activity: z.ZodType<FeedbackProximityIntervalV1, z.ZodTypeDef, unknown>;
-  address: z.ZodType<ProximityAddressV1, z.ZodTypeDef, unknown>;
-  agent_id: z.ZodType<AgentInstanceId, z.ZodTypeDef, unknown>;
-  branch_ref: z.ZodType<RefId | null, z.ZodTypeDef, unknown>;
-  head_revision: z.ZodType<CommitId | null, z.ZodTypeDef, unknown>;
-  source: z.ZodType<ObservationSourceIdentityV1, z.ZodTypeDef, unknown>;
-  worktree_id: z.ZodType<WorktreeId | null, z.ZodTypeDef, unknown>;
-  worktree_root: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  access: z.ZodType<FeedbackProximityAccessKindV1, unknown>;
+  activity: z.ZodType<FeedbackProximityIntervalV1, unknown>;
+  address: z.ZodType<ProximityAddressV1, unknown>;
+  agent_id: z.ZodType<AgentInstanceId, unknown>;
+  branch_ref: z.ZodType<RefId | null, unknown>;
+  head_revision: z.ZodType<CommitId | null, unknown>;
+  source: z.ZodType<ObservationSourceIdentityV1, unknown>;
+  worktree_id: z.ZodType<WorktreeId | null, unknown>;
+  worktree_root: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   access: z.lazy(() => FeedbackProximityAccessKindV1Schema),
   activity: z.lazy(() => FeedbackProximityIntervalV1Schema),
   address: z.lazy(() => ProximityAddressV1Schema),
@@ -4883,12 +4883,12 @@ export const FeedbackProximityParticipantV1Schema: z.ZodObject<{
 }).strict();
 
 export const FeedbackProximityReadPageV1Schema: z.ZodObject<{
-  encounters: z.ZodType<Array<FeedbackProximityEncounterV1>, z.ZodTypeDef, unknown>;
-  expires_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  scope: z.ZodType<FeedbackScopeV1, z.ZodTypeDef, unknown>;
-  source_generation: z.ZodType<CodeGenerationId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  encounters: z.ZodType<Array<FeedbackProximityEncounterV1>, unknown>;
+  expires_at: z.ZodType<UtcMicros, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  scope: z.ZodType<FeedbackScopeV1, unknown>;
+  source_generation: z.ZodType<CodeGenerationId, unknown>;
+}, z.core.$strict> = z.object({
   encounters: z.array(z.lazy(() => FeedbackProximityEncounterV1Schema)),
   expires_at: z.lazy(() => UtcMicrosSchema),
   observed_at: z.lazy(() => UtcMicrosSchema),
@@ -4897,12 +4897,12 @@ export const FeedbackProximityReadPageV1Schema: z.ZodObject<{
 }).strict();
 
 export const FeedbackProximityReadRequestV1Schema: z.ZodObject<{
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  observed_at: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   observed_at: z.lazy(() => UtcMicrosSchema),
 }).strict();
 
-export const FeedbackProximityReadResultV1Schema: z.ZodType<FeedbackProximityReadResultV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const FeedbackProximityReadResultV1Schema: z.ZodType<FeedbackProximityReadResultV1, unknown> = z.discriminatedUnion("state", [z.object({
   page: z.lazy(() => FeedbackProximityReadPageV1Schema),
   state: z.literal("complete"),
 }).strict(), z.object({
@@ -4924,7 +4924,7 @@ export const FeedbackProximityReadResultV1Schema: z.ZodType<FeedbackProximityRea
   state: z.literal("unavailable"),
 }).strict()]);
 
-export const FeedbackProximityRelationV1Schema: z.ZodType<FeedbackProximityRelationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("relation_kind", [z.object({
+export const FeedbackProximityRelationV1Schema: z.ZodType<FeedbackProximityRelationV1, unknown> = z.discriminatedUnion("relation_kind", [z.object({
   relation_kind: z.literal("code_neighborhood_candidate"),
   warning_class: z.lazy(() => ProximityWarningClassV1Schema),
 }).strict(), z.object({
@@ -4942,12 +4942,12 @@ export const FeedbackProximityRelationV1Schema: z.ZodType<FeedbackProximityRelat
 /** One surface × operation × argument × error-class cell projected from
 dispatcher rejection source events. */
 export const FeedbackRejectedArgumentGroupV1Schema: z.ZodObject<{
-  argument: z.ZodType<RejectedArgumentNameV1, z.ZodTypeDef, unknown>;
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  error_class: z.ZodType<RejectedArgumentErrorClassV1, z.ZodTypeDef, unknown>;
-  operation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  surface: z.ZodType<RejectedArgumentSurfaceV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  argument: z.ZodType<RejectedArgumentNameV1, unknown>;
+  count: z.ZodType<number, unknown>;
+  error_class: z.ZodType<RejectedArgumentErrorClassV1, unknown>;
+  operation: z.ZodType<string, unknown>;
+  surface: z.ZodType<RejectedArgumentSurfaceV1, unknown>;
+}, z.core.$strict> = z.object({
   argument: z.lazy(() => RejectedArgumentNameV1Schema),
   count: z.number().int().safe().min(0),
   error_class: z.lazy(() => RejectedArgumentErrorClassV1Schema),
@@ -4959,12 +4959,12 @@ export const FeedbackRejectedArgumentGroupV1Schema: z.ZodObject<{
 working directory, repository display name, or mutable branch label is not
 a substitute for this identity. */
 export const FeedbackScopeV1Schema: z.ZodObject<{
-  branch_ref: z.ZodType<string, z.ZodTypeDef, unknown>;
-  head_commit_id: z.ZodType<CommitId, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<ProjectId, z.ZodTypeDef, unknown>;
-  repository_id: z.ZodType<RepositoryId, z.ZodTypeDef, unknown>;
-  worktree_id: z.ZodType<WorktreeId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  branch_ref: z.ZodType<string, unknown>;
+  head_commit_id: z.ZodType<CommitId, unknown>;
+  project_id: z.ZodType<ProjectId, unknown>;
+  repository_id: z.ZodType<RepositoryId, unknown>;
+  worktree_id: z.ZodType<WorktreeId, unknown>;
+}, z.core.$strict> = z.object({
   branch_ref: z.string(),
   head_commit_id: z.lazy(() => CommitIdSchema),
   project_id: z.lazy(() => ProjectIdSchema),
@@ -4972,24 +4972,24 @@ export const FeedbackScopeV1Schema: z.ZodObject<{
   worktree_id: z.lazy(() => WorktreeIdSchema),
 }).strict();
 
-export const FeedbackSystemMetricDenominatorV1Schema: z.ZodEnum<["eligible_observations", "eligible_source_families", "latency_samples", "outcome_observations", "relevance_labels", "returned_and_omitted_items", "revocation_observations", "stack_transition_observations"]> = z.enum(["eligible_observations", "eligible_source_families", "latency_samples", "outcome_observations", "relevance_labels", "returned_and_omitted_items", "revocation_observations", "stack_transition_observations"]);
+export const FeedbackSystemMetricDenominatorV1Schema: z.ZodEnum<{ "eligible_observations": "eligible_observations"; "eligible_source_families": "eligible_source_families"; "latency_samples": "latency_samples"; "outcome_observations": "outcome_observations"; "relevance_labels": "relevance_labels"; "returned_and_omitted_items": "returned_and_omitted_items"; "revocation_observations": "revocation_observations"; "stack_transition_observations": "stack_transition_observations" }> = z.enum(["eligible_observations", "eligible_source_families", "latency_samples", "outcome_observations", "relevance_labels", "returned_and_omitted_items", "revocation_observations", "stack_transition_observations"]);
 
-export const FeedbackSystemMetricKindV1Schema: z.ZodEnum<["coverage", "denial", "diversity", "latency", "omission", "relevance", "revocation_propagation", "stack_transitions", "staleness"]> = z.enum(["coverage", "denial", "diversity", "latency", "omission", "relevance", "revocation_propagation", "stack_transitions", "staleness"]);
+export const FeedbackSystemMetricKindV1Schema: z.ZodEnum<{ "coverage": "coverage"; "denial": "denial"; "diversity": "diversity"; "latency": "latency"; "omission": "omission"; "relevance": "relevance"; "revocation_propagation": "revocation_propagation"; "stack_transitions": "stack_transitions"; "staleness": "staleness" }> = z.enum(["coverage", "denial", "diversity", "latency", "omission", "relevance", "revocation_propagation", "stack_transitions", "staleness"]);
 
-export const FeedbackSystemMetricUnavailableReasonV1Schema: z.ZodEnum<["no_diversity_observations", "no_eligible_observations", "no_latency_samples", "no_outcome_observations", "no_relevance_labels", "no_revocation_observations", "no_stack_transition_observations", "no_truncation_observations"]> = z.enum(["no_diversity_observations", "no_eligible_observations", "no_latency_samples", "no_outcome_observations", "no_relevance_labels", "no_revocation_observations", "no_stack_transition_observations", "no_truncation_observations"]);
+export const FeedbackSystemMetricUnavailableReasonV1Schema: z.ZodEnum<{ "no_diversity_observations": "no_diversity_observations"; "no_eligible_observations": "no_eligible_observations"; "no_latency_samples": "no_latency_samples"; "no_outcome_observations": "no_outcome_observations"; "no_relevance_labels": "no_relevance_labels"; "no_revocation_observations": "no_revocation_observations"; "no_stack_transition_observations": "no_stack_transition_observations"; "no_truncation_observations": "no_truncation_observations" }> = z.enum(["no_diversity_observations", "no_eligible_observations", "no_latency_samples", "no_outcome_observations", "no_relevance_labels", "no_revocation_observations", "no_stack_transition_observations", "no_truncation_observations"]);
 
-export const FeedbackSystemMetricUnitV1Schema: z.ZodEnum<["microseconds", "ratio", "transitions"]> = z.enum(["microseconds", "ratio", "transitions"]);
+export const FeedbackSystemMetricUnitV1Schema: z.ZodEnum<{ "microseconds": "microseconds"; "ratio": "ratio"; "transitions": "transitions" }> = z.enum(["microseconds", "ratio", "transitions"]);
 
 export const FeedbackSystemMetricV1Schema: z.ZodObject<{
-  coverage: z.ZodType<FeedbackCoverageV1, z.ZodTypeDef, unknown>;
-  denominator: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  denominator_population: z.ZodType<FeedbackSystemMetricDenominatorV1, z.ZodTypeDef, unknown>;
-  metric: z.ZodType<FeedbackSystemMetricKindV1, z.ZodTypeDef, unknown>;
-  numerator: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  unavailable_reason: z.ZodType<FeedbackSystemMetricUnavailableReasonV1 | null, z.ZodTypeDef, unknown>;
-  unit: z.ZodType<FeedbackSystemMetricUnitV1, z.ZodTypeDef, unknown>;
-  value: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  coverage: z.ZodType<FeedbackCoverageV1, unknown>;
+  denominator: z.ZodType<number | null, unknown>;
+  denominator_population: z.ZodType<FeedbackSystemMetricDenominatorV1, unknown>;
+  metric: z.ZodType<FeedbackSystemMetricKindV1, unknown>;
+  numerator: z.ZodType<number | null, unknown>;
+  unavailable_reason: z.ZodType<FeedbackSystemMetricUnavailableReasonV1 | null, unknown>;
+  unit: z.ZodType<FeedbackSystemMetricUnitV1, unknown>;
+  value: z.ZodType<number | null, unknown>;
+}, z.core.$strict> = z.object({
   coverage: z.lazy(() => FeedbackCoverageV1Schema),
   denominator: z.number().int().safe().min(0).nullable(),
   denominator_population: z.lazy(() => FeedbackSystemMetricDenominatorV1Schema),
@@ -5001,26 +5001,26 @@ export const FeedbackSystemMetricV1Schema: z.ZodObject<{
 }).strict();
 
 export const FeedbackSystemQualityReadModelV1Schema: z.ZodObject<{
-  metrics: z.ZodType<Array<FeedbackSystemMetricV1>, z.ZodTypeDef, unknown>;
-  schema_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  metrics: z.ZodType<Array<FeedbackSystemMetricV1>, unknown>;
+  schema_version: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   metrics: z.array(z.lazy(() => FeedbackSystemMetricV1Schema)),
   schema_version: z.number().int().min(0).max(65535),
 }).strict();
 
 /** Strongly typed canonical identity: `FileOccurrenceId`. */
-export const FileOccurrenceIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const FileOccurrenceIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** A canonical product proposal and the exact verified graph that licensed it.
 
 `proposal` can be moved directly into a `DecideWorkProposalRequestV1`;
 callers use `verified_graph_version` to construct that mutation's CAS pin. */
 export const GeneratedWorkProposalSchema: z.ZodObject<{
-  calibration: z.ZodType<WorkCalibrationEvidenceV1, z.ZodTypeDef, unknown>;
-  decision: z.ZodType<WorkProposalDecisionV1, z.ZodTypeDef, unknown>;
-  proposal: z.ZodType<WorkProposalV1, z.ZodTypeDef, unknown>;
-  verified_graph_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  calibration: z.ZodType<WorkCalibrationEvidenceV1, unknown>;
+  decision: z.ZodType<WorkProposalDecisionV1, unknown>;
+  proposal: z.ZodType<WorkProposalV1, unknown>;
+  verified_graph_version: z.ZodType<VerifiedWorkGraphVersionV1, unknown>;
+}, z.core.$strict> = z.object({
   calibration: z.lazy(() => WorkCalibrationEvidenceV1Schema),
   decision: z.lazy(() => WorkProposalDecisionV1Schema),
   proposal: z.lazy(() => WorkProposalV1Schema),
@@ -5029,12 +5029,12 @@ export const GeneratedWorkProposalSchema: z.ZodObject<{
 
 /** Read-only proposal generation over one exact current product graph. */
 export const GenerateProposalRequestSchema: z.ZodObject<{
-  live_git_evidence: z.ZodType<WorkEvidenceFrontierV1 | null, z.ZodTypeDef, unknown>;
-  occurred_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  proposal_id: z.ZodType<ProposalId, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  live_git_evidence: z.ZodType<WorkEvidenceFrontierV1 | null, unknown>;
+  occurred_at: z.ZodType<UtcMicros, unknown>;
+  proposal_id: z.ZodType<ProposalId, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   live_git_evidence: z.union([z.lazy(() => WorkEvidenceFrontierV1Schema), z.null()]),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   proposal_id: z.lazy(() => ProposalIdSchema),
@@ -5042,28 +5042,28 @@ export const GenerateProposalRequestSchema: z.ZodObject<{
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 
-export const GitHubStackedPullRequestPolicyV1Schema: z.ZodEnum<["disabled", "probe_private_preview"]> = z.enum(["disabled", "probe_private_preview"]);
+export const GitHubStackedPullRequestPolicyV1Schema: z.ZodEnum<{ "disabled": "disabled"; "probe_private_preview": "probe_private_preview" }> = z.enum(["disabled", "probe_private_preview"]);
 
 /** A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
 SHA-256 length. This is identity evidence only; it never authorizes
 object reconstruction or traversal outside native Git. */
-export const GitOidV1Schema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const GitOidV1Schema: z.ZodType<string, unknown> = z.string();
 
 export const GraphCappedV1Schema: z.ZodObject<{
-  edges: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  nodes: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  edges: z.ZodType<boolean, unknown>;
+  nodes: z.ZodType<boolean, unknown>;
 }> = z.object({
   edges: z.boolean(),
   nodes: z.boolean(),
 });
 
 export const GraphEdgeV1Schema: z.ZodObject<{
-  kind: z.ZodType<string, z.ZodTypeDef, unknown>;
-  line: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  source: z.ZodType<string, z.ZodTypeDef, unknown>;
-  source_name: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  target: z.ZodType<string, z.ZodTypeDef, unknown>;
-  target_name: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  kind: z.ZodType<string, unknown>;
+  line: z.ZodType<number | null, unknown>;
+  source: z.ZodType<string, unknown>;
+  source_name: z.ZodType<string | null, unknown>;
+  target: z.ZodType<string, unknown>;
+  target_name: z.ZodType<string | null, unknown>;
 }> = z.object({
   kind: z.string(),
   line: z.number().int().safe().nullable(),
@@ -5074,45 +5074,45 @@ export const GraphEdgeV1Schema: z.ZodObject<{
 });
 
 export const GraphKindCountV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<string, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  kind: z.ZodType<string, unknown>;
 }> = z.object({
   count: z.number().int().safe(),
   kind: z.string(),
 });
 
 export const GraphLanguageCountV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  language: z.ZodType<string, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  language: z.ZodType<string, unknown>;
 }> = z.object({
   count: z.number().int().safe(),
   language: z.string(),
 });
 
 export const GraphLargestFileV1Schema: z.ZodObject<{
-  node_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
+  node_count: z.ZodType<number, unknown>;
+  path: z.ZodType<string, unknown>;
 }> = z.object({
   node_count: z.number().int().safe(),
   path: z.string(),
 });
 
 export const GraphLimitsV1Schema: z.ZodObject<{
-  edges: z.ZodType<number, z.ZodTypeDef, unknown>;
-  nodes: z.ZodType<number, z.ZodTypeDef, unknown>;
+  edges: z.ZodType<number, unknown>;
+  nodes: z.ZodType<number, unknown>;
 }> = z.object({
   edges: z.number().int().safe(),
   nodes: z.number().int().safe(),
 });
 
 export const GraphNeighborsPayloadV1Schema: z.ZodObject<{
-  callees: z.ZodType<Array<GraphNodeV1>, z.ZodTypeDef, unknown>;
-  callers: z.ZodType<Array<GraphNodeV1>, z.ZodTypeDef, unknown>;
-  depth: z.ZodType<number, z.ZodTypeDef, unknown>;
-  edges: z.ZodType<Array<GraphEdgeV1>, z.ZodTypeDef, unknown>;
-  edges_by_kind: z.ZodType<Array<GraphKindCountV1>, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  node_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  callees: z.ZodType<Array<GraphNodeV1>, unknown>;
+  callers: z.ZodType<Array<GraphNodeV1>, unknown>;
+  depth: z.ZodType<number, unknown>;
+  edges: z.ZodType<Array<GraphEdgeV1>, unknown>;
+  edges_by_kind: z.ZodType<Array<GraphKindCountV1>, unknown>;
+  limit: z.ZodType<number, unknown>;
+  node_id: z.ZodType<string, unknown>;
 }> = z.object({
   callees: z.array(z.lazy(() => GraphNodeV1Schema)),
   callers: z.array(z.lazy(() => GraphNodeV1Schema)),
@@ -5124,40 +5124,40 @@ export const GraphNeighborsPayloadV1Schema: z.ZodObject<{
 });
 
 export const GraphNodePayloadV1Schema: z.ZodObject<{
-  node: z.ZodType<GraphNodeV1, z.ZodTypeDef, unknown>;
+  node: z.ZodType<GraphNodeV1, unknown>;
 }> = z.object({
   node: z.lazy(() => GraphNodeV1Schema),
 });
 
 export const GraphNodeV1Schema: z.ZodObject<{
-  assertions: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  attrs_start_line: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  branches: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  complexity_analysis: z.ZodType<ComplexityAnalysisV1 | null, z.ZodTypeDef, unknown>;
-  degree: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  doc: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  edge_kind: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  edge_line: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  end_column: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  end_line: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  file_path: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  is_async: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<string, z.ZodTypeDef, unknown>;
-  loops: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  max_nesting: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  name: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  parent_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  qualified_name: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  returns: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  signature: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  span: z.ZodType<GraphSpanV1 | null, z.ZodTypeDef, unknown>;
-  start_column: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  start_line: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  unchecked_calls: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  unsafe_blocks: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  updated_at: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  visibility: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  assertions: z.ZodType<number | null, unknown>;
+  attrs_start_line: z.ZodType<number | null, unknown>;
+  branches: z.ZodType<number | null, unknown>;
+  complexity_analysis: z.ZodType<ComplexityAnalysisV1 | null, unknown>;
+  degree: z.ZodType<number | null, unknown>;
+  doc: z.ZodType<string | null, unknown>;
+  edge_kind: z.ZodType<string | null, unknown>;
+  edge_line: z.ZodType<number | null, unknown>;
+  end_column: z.ZodType<number | null, unknown>;
+  end_line: z.ZodType<number | null, unknown>;
+  file_path: z.ZodType<string | null, unknown>;
+  id: z.ZodType<string, unknown>;
+  is_async: z.ZodType<number | null, unknown>;
+  kind: z.ZodType<string, unknown>;
+  loops: z.ZodType<number | null, unknown>;
+  max_nesting: z.ZodType<number | null, unknown>;
+  name: z.ZodType<string | null, unknown>;
+  parent_id: z.ZodType<string | null, unknown>;
+  qualified_name: z.ZodType<string | null, unknown>;
+  returns: z.ZodType<number | null, unknown>;
+  signature: z.ZodType<string | null, unknown>;
+  span: z.ZodType<GraphSpanV1 | null, unknown>;
+  start_column: z.ZodType<number | null, unknown>;
+  start_line: z.ZodType<number | null, unknown>;
+  unchecked_calls: z.ZodType<number | null, unknown>;
+  unsafe_blocks: z.ZodType<number | null, unknown>;
+  updated_at: z.ZodType<number | null, unknown>;
+  visibility: z.ZodType<string | null, unknown>;
 }> = z.object({
   assertions: z.number().int().safe().nullable(),
   attrs_start_line: z.number().int().safe().nullable(),
@@ -5190,12 +5190,12 @@ export const GraphNodeV1Schema: z.ZodObject<{
 });
 
 export const GraphOverviewPayloadV1Schema: z.ZodObject<{
-  files_by_language: z.ZodType<Array<GraphLanguageCountV1>, z.ZodTypeDef, unknown>;
-  largest_files: z.ZodType<Array<GraphLargestFileV1>, z.ZodTypeDef, unknown>;
-  nodes_by_kind: z.ZodType<Array<GraphKindCountV1>, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  top_connected: z.ZodType<Array<GraphNodeV1>, z.ZodTypeDef, unknown>;
-  totals: z.ZodType<GraphTotalsV1, z.ZodTypeDef, unknown>;
+  files_by_language: z.ZodType<Array<GraphLanguageCountV1>, unknown>;
+  largest_files: z.ZodType<Array<GraphLargestFileV1>, unknown>;
+  nodes_by_kind: z.ZodType<Array<GraphKindCountV1>, unknown>;
+  path: z.ZodType<string, unknown>;
+  top_connected: z.ZodType<Array<GraphNodeV1>, unknown>;
+  totals: z.ZodType<GraphTotalsV1, unknown>;
 }> = z.object({
   files_by_language: z.array(z.lazy(() => GraphLanguageCountV1Schema)),
   largest_files: z.array(z.lazy(() => GraphLargestFileV1Schema)),
@@ -5206,13 +5206,13 @@ export const GraphOverviewPayloadV1Schema: z.ZodObject<{
 });
 
 export const GraphPathPayloadV1Schema: z.ZodObject<{
-  edges: z.ZodType<Array<GraphEdgeV1>, z.ZodTypeDef, unknown>;
-  found: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  from: z.ZodType<string, z.ZodTypeDef, unknown>;
-  max_depth: z.ZodType<number, z.ZodTypeDef, unknown>;
-  nodes: z.ZodType<Array<GraphNodeV1>, z.ZodTypeDef, unknown>;
-  path: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  to: z.ZodType<string, z.ZodTypeDef, unknown>;
+  edges: z.ZodType<Array<GraphEdgeV1>, unknown>;
+  found: z.ZodType<boolean, unknown>;
+  from: z.ZodType<string, unknown>;
+  max_depth: z.ZodType<number, unknown>;
+  nodes: z.ZodType<Array<GraphNodeV1>, unknown>;
+  path: z.ZodType<Array<string>, unknown>;
+  to: z.ZodType<string, unknown>;
 }> = z.object({
   edges: z.array(z.lazy(() => GraphEdgeV1Schema)),
   found: z.boolean(),
@@ -5224,13 +5224,13 @@ export const GraphPathPayloadV1Schema: z.ZodObject<{
 });
 
 export const GraphSearchPayloadV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  has_more: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  offset: z.ZodType<number, z.ZodTypeDef, unknown>;
-  query: z.ZodType<string, z.ZodTypeDef, unknown>;
-  results: z.ZodType<Array<GraphNodeV1>, z.ZodTypeDef, unknown>;
-  total: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  has_more: z.ZodType<boolean, unknown>;
+  limit: z.ZodType<number, unknown>;
+  offset: z.ZodType<number, unknown>;
+  query: z.ZodType<string, unknown>;
+  results: z.ZodType<Array<GraphNodeV1>, unknown>;
+  total: z.ZodType<number | null, unknown>;
 }> = z.object({
   count: z.number().int().safe().min(0),
   has_more: z.boolean(),
@@ -5242,11 +5242,11 @@ export const GraphSearchPayloadV1Schema: z.ZodObject<{
 });
 
 export const GraphSpanV1Schema: z.ZodObject<{
-  attrs_start_line: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  end_column: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  end_line: z.ZodType<number, z.ZodTypeDef, unknown>;
-  start_column: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  start_line: z.ZodType<number, z.ZodTypeDef, unknown>;
+  attrs_start_line: z.ZodType<number | null, unknown>;
+  end_column: z.ZodType<number | null, unknown>;
+  end_line: z.ZodType<number, unknown>;
+  start_column: z.ZodType<number | null, unknown>;
+  start_line: z.ZodType<number, unknown>;
 }> = z.object({
   attrs_start_line: z.number().int().safe().nullable(),
   end_column: z.number().int().safe().nullable(),
@@ -5256,12 +5256,12 @@ export const GraphSpanV1Schema: z.ZodObject<{
 });
 
 export const GraphSubgraphPayloadV1Schema: z.ZodObject<{
-  capped: z.ZodType<GraphCappedV1, z.ZodTypeDef, unknown>;
-  edges: z.ZodType<Array<GraphEdgeV1>, z.ZodTypeDef, unknown>;
-  limits: z.ZodType<GraphLimitsV1, z.ZodTypeDef, unknown>;
-  mode: z.ZodType<string, z.ZodTypeDef, unknown>;
-  nodes: z.ZodType<Array<GraphNodeV1>, z.ZodTypeDef, unknown>;
-  seed_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  capped: z.ZodType<GraphCappedV1, unknown>;
+  edges: z.ZodType<Array<GraphEdgeV1>, unknown>;
+  limits: z.ZodType<GraphLimitsV1, unknown>;
+  mode: z.ZodType<string, unknown>;
+  nodes: z.ZodType<Array<GraphNodeV1>, unknown>;
+  seed_id: z.ZodType<string | null, unknown>;
 }> = z.object({
   capped: z.lazy(() => GraphCappedV1Schema),
   edges: z.array(z.lazy(() => GraphEdgeV1Schema)),
@@ -5272,18 +5272,18 @@ export const GraphSubgraphPayloadV1Schema: z.ZodObject<{
 });
 
 export const GraphTotalsV1Schema: z.ZodObject<{
-  edges: z.ZodType<number, z.ZodTypeDef, unknown>;
-  files: z.ZodType<number, z.ZodTypeDef, unknown>;
-  nodes: z.ZodType<number, z.ZodTypeDef, unknown>;
+  edges: z.ZodType<number, unknown>;
+  files: z.ZodType<number, unknown>;
+  nodes: z.ZodType<number, unknown>;
 }> = z.object({
   edges: z.number().int().safe().min(0),
   files: z.number().int().safe().min(0),
   nodes: z.number().int().safe().min(0),
 });
 
-export const HandoffOpenKindV1Schema: z.ZodEnum<["investigation", "task"]> = z.enum(["investigation", "task"]);
+export const HandoffOpenKindV1Schema: z.ZodEnum<{ "investigation": "investigation"; "task": "task" }> = z.enum(["investigation", "task"]);
 
-export const HandoffOpenTargetV1Schema: z.ZodType<HandoffOpenTargetV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const HandoffOpenTargetV1Schema: z.ZodType<HandoffOpenTargetV1, unknown> = z.discriminatedUnion("kind", [z.object({
   finding_id: z.lazy(() => FeedbackFindingIdSchema),
   kind: z.literal("investigation"),
   owner_version_digest: z.lazy(() => ManifestDigestSchema),
@@ -5297,10 +5297,10 @@ export const HandoffOpenTargetV1Schema: z.ZodType<HandoffOpenTargetV1, z.ZodType
 export const HistoryRewritePolicyV1Schema: z.ZodLiteral<"forbid_force_and_rebase"> = z.literal("forbid_force_and_rebase");
 
 export const IncomingCallEdgeV1Schema: z.ZodObject<{
-  kind: z.ZodType<string, z.ZodTypeDef, unknown>;
-  line: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  source: z.ZodType<string, z.ZodTypeDef, unknown>;
-  target: z.ZodType<string, z.ZodTypeDef, unknown>;
+  kind: z.ZodType<string, unknown>;
+  line: z.ZodType<number | null, unknown>;
+  source: z.ZodType<string, unknown>;
+  target: z.ZodType<string, unknown>;
 }> = z.object({
   kind: z.string(),
   line: z.number().int().min(0).nullable(),
@@ -5308,7 +5308,7 @@ export const IncomingCallEdgeV1Schema: z.ZodObject<{
   target: z.string(),
 });
 
-export const JobDeliverySchema: z.ZodType<JobDelivery, z.ZodTypeDef, unknown> = z.discriminatedUnion("mode", [z.object({
+export const JobDeliverySchema: z.ZodType<JobDelivery, unknown> = z.discriminatedUnion("mode", [z.object({
   mode: z.literal("file"),
   path: z.string().nullable().optional(),
 }), z.object({
@@ -5318,9 +5318,9 @@ export const JobDeliverySchema: z.ZodType<JobDelivery, z.ZodTypeDef, unknown> = 
 
 /** p50/p95/p99 for one provider operation latency stage. */
 export const LatencyDistributionReadModelV1Schema: z.ZodObject<{
-  p50: z.ZodType<MetricValueV1, z.ZodTypeDef, unknown>;
-  p95: z.ZodType<MetricValueV1, z.ZodTypeDef, unknown>;
-  p99: z.ZodType<MetricValueV1, z.ZodTypeDef, unknown>;
+  p50: z.ZodType<MetricValueV1, unknown>;
+  p95: z.ZodType<MetricValueV1, unknown>;
+  p99: z.ZodType<MetricValueV1, unknown>;
 }> = z.object({
   p50: z.lazy(() => MetricValueV1Schema),
   p95: z.lazy(() => MetricValueV1Schema),
@@ -5328,10 +5328,10 @@ export const LatencyDistributionReadModelV1Schema: z.ZodObject<{
 });
 
 export const LcmCompressionSummaryV1Schema: z.ZodObject<{
-  node_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  ratio: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  source_token_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  token_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  node_count: z.ZodType<number, unknown>;
+  ratio: z.ZodType<number | null, unknown>;
+  source_token_count: z.ZodType<number | null, unknown>;
+  token_count: z.ZodType<number | null, unknown>;
 }> = z.object({
   node_count: z.number().int().safe(),
   ratio: z.number().nullable(),
@@ -5340,18 +5340,18 @@ export const LcmCompressionSummaryV1Schema: z.ZodObject<{
 });
 
 export const LcmDepthCountV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  depth: z.ZodType<number, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  depth: z.ZodType<number, unknown>;
 }> = z.object({
   count: z.number().int().safe(),
   depth: z.number().int().safe(),
 });
 
 export const LcmLatestSessionV1Schema: z.ZodObject<{
-  last_store_id: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  last_timestamp: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  message_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  last_store_id: z.ZodType<number | null, unknown>;
+  last_timestamp: z.ZodType<number | null, unknown>;
+  message_count: z.ZodType<number, unknown>;
+  session_id: z.ZodType<string, unknown>;
 }> = z.object({
   last_store_id: z.number().int().safe().nullable(),
   last_timestamp: z.number().int().safe().nullable(),
@@ -5360,31 +5360,31 @@ export const LcmLatestSessionV1Schema: z.ZodObject<{
 });
 
 export const LcmMatchesV1Schema: z.ZodObject<{
-  messages: z.ZodType<Array<LcmMessageV1>, z.ZodTypeDef, unknown>;
-  summary_nodes: z.ZodType<Array<LcmSummaryNodeV1>, z.ZodTypeDef, unknown>;
+  messages: z.ZodType<Array<LcmMessageV1>, unknown>;
+  summary_nodes: z.ZodType<Array<LcmSummaryNodeV1>, unknown>;
 }> = z.object({
   messages: z.array(z.lazy(() => LcmMessageV1Schema)),
   summary_nodes: z.array(z.lazy(() => LcmSummaryNodeV1Schema)),
 });
 
 export const LcmMessageV1Schema: z.ZodObject<{
-  content: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  message_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  metadata_json: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  ordinal: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  pinned: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  role: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  snippet: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  source: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  storage_kind: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  store_id: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  summary_node_ids: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  timestamp: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  token_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  token_count_provenance: z.ZodType<LcmTokenCountProvenanceV1 | null, z.ZodTypeDef, unknown>;
-  tool_name: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  tool_use_id: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
+  content: z.ZodType<string | null, unknown>;
+  message_id: z.ZodType<string, unknown>;
+  metadata_json: z.ZodType<string | null, unknown>;
+  ordinal: z.ZodType<number | null, unknown>;
+  pinned: z.ZodType<number | null, unknown>;
+  role: z.ZodType<string | null, unknown>;
+  session_id: z.ZodType<string, unknown>;
+  snippet: z.ZodType<string | null, unknown>;
+  source: z.ZodType<string | null, unknown>;
+  storage_kind: z.ZodType<string | null, unknown>;
+  store_id: z.ZodType<number | null, unknown>;
+  summary_node_ids: z.ZodType<Array<string>, unknown>;
+  timestamp: z.ZodType<number | null, unknown>;
+  token_count: z.ZodType<number | null, unknown>;
+  token_count_provenance: z.ZodType<LcmTokenCountProvenanceV1 | null, unknown>;
+  tool_name: z.ZodType<string | null, unknown>;
+  tool_use_id: z.ZodOptional<z.ZodType<string | null, unknown>>;
 }> = z.object({
   content: z.string().nullable(),
   message_id: z.string(),
@@ -5406,15 +5406,15 @@ export const LcmMessageV1Schema: z.ZodObject<{
 });
 
 export const LcmOverviewPayloadV1Schema: z.ZodObject<{
-  exists: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  latest_sessions: z.ZodType<Array<LcmLatestSessionV1>, z.ZodTypeDef, unknown>;
-  latest_summary_nodes: z.ZodType<Array<LcmSummaryNodeV1>, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  matches: z.ZodType<LcmMatchesV1, z.ZodTypeDef, unknown>;
-  overview: z.ZodType<LcmOverviewStatsV1, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  query: z.ZodType<string, z.ZodTypeDef, unknown>;
-  storage_scope: z.ZodType<string, z.ZodTypeDef, unknown>;
+  exists: z.ZodType<boolean, unknown>;
+  latest_sessions: z.ZodType<Array<LcmLatestSessionV1>, unknown>;
+  latest_summary_nodes: z.ZodType<Array<LcmSummaryNodeV1>, unknown>;
+  limit: z.ZodType<number, unknown>;
+  matches: z.ZodType<LcmMatchesV1, unknown>;
+  overview: z.ZodType<LcmOverviewStatsV1, unknown>;
+  path: z.ZodType<string, unknown>;
+  query: z.ZodType<string, unknown>;
+  storage_scope: z.ZodType<string, unknown>;
 }> = z.object({
   exists: z.boolean(),
   latest_sessions: z.array(z.lazy(() => LcmLatestSessionV1Schema)),
@@ -5428,15 +5428,15 @@ export const LcmOverviewPayloadV1Schema: z.ZodObject<{
 });
 
 export const LcmOverviewStatsV1Schema: z.ZodObject<{
-  compression: z.ZodType<LcmCompressionSummaryV1, z.ZodTypeDef, unknown>;
-  depth_counts: z.ZodType<Array<LcmDepthCountV1>, z.ZodTypeDef, unknown>;
-  max_summary_depth: z.ZodType<number, z.ZodTypeDef, unknown>;
-  messages_total: z.ZodType<number, z.ZodTypeDef, unknown>;
-  role_counts: z.ZodType<Array<LcmRoleCountV1>, z.ZodTypeDef, unknown>;
-  sessions_total: z.ZodType<number, z.ZodTypeDef, unknown>;
-  source_counts: z.ZodType<Array<LcmSourceCountV1>, z.ZodTypeDef, unknown>;
-  summary_node_sessions_total: z.ZodType<number, z.ZodTypeDef, unknown>;
-  summary_nodes_total: z.ZodType<number, z.ZodTypeDef, unknown>;
+  compression: z.ZodType<LcmCompressionSummaryV1, unknown>;
+  depth_counts: z.ZodType<Array<LcmDepthCountV1>, unknown>;
+  max_summary_depth: z.ZodType<number, unknown>;
+  messages_total: z.ZodType<number, unknown>;
+  role_counts: z.ZodType<Array<LcmRoleCountV1>, unknown>;
+  sessions_total: z.ZodType<number, unknown>;
+  source_counts: z.ZodType<Array<LcmSourceCountV1>, unknown>;
+  summary_node_sessions_total: z.ZodType<number, unknown>;
+  summary_nodes_total: z.ZodType<number, unknown>;
 }> = z.object({
   compression: z.lazy(() => LcmCompressionSummaryV1Schema),
   depth_counts: z.array(z.lazy(() => LcmDepthCountV1Schema)),
@@ -5450,27 +5450,27 @@ export const LcmOverviewStatsV1Schema: z.ZodObject<{
 });
 
 export const LcmRoleCountV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  role: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  role: z.ZodType<string | null, unknown>;
 }> = z.object({
   count: z.number().int().safe(),
   role: z.string().nullable(),
 });
 
 export const LcmSearchEngineDetailV1Schema: z.ZodObject<{
-  messages: z.ZodType<string, z.ZodTypeDef, unknown>;
-  summary_nodes: z.ZodType<string, z.ZodTypeDef, unknown>;
+  messages: z.ZodType<string, unknown>;
+  summary_nodes: z.ZodType<string, unknown>;
 }> = z.object({
   messages: z.string(),
   summary_nodes: z.string(),
 });
 
 export const LcmSearchFiltersV1Schema: z.ZodObject<{
-  role: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  since: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  source: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  until: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  role: z.ZodType<string | null, unknown>;
+  session_id: z.ZodType<string | null, unknown>;
+  since: z.ZodType<number | null, unknown>;
+  source: z.ZodType<string | null, unknown>;
+  until: z.ZodType<number | null, unknown>;
 }> = z.object({
   role: z.string().nullable(),
   session_id: z.string().nullable(),
@@ -5480,17 +5480,17 @@ export const LcmSearchFiltersV1Schema: z.ZodObject<{
 });
 
 export const LcmSearchPayloadV1Schema: z.ZodObject<{
-  engine: z.ZodType<string, z.ZodTypeDef, unknown>;
-  engine_detail: z.ZodType<LcmSearchEngineDetailV1, z.ZodTypeDef, unknown>;
-  exists: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  filters: z.ZodType<LcmSearchFiltersV1, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  matches: z.ZodType<LcmMatchesV1, z.ZodTypeDef, unknown>;
-  next_cursor: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  query: z.ZodType<string, z.ZodTypeDef, unknown>;
-  storage_scope: z.ZodType<string, z.ZodTypeDef, unknown>;
-  total: z.ZodType<LcmSearchTotalsV1, z.ZodTypeDef, unknown>;
+  engine: z.ZodType<string, unknown>;
+  engine_detail: z.ZodType<LcmSearchEngineDetailV1, unknown>;
+  exists: z.ZodType<boolean, unknown>;
+  filters: z.ZodType<LcmSearchFiltersV1, unknown>;
+  limit: z.ZodType<number, unknown>;
+  matches: z.ZodType<LcmMatchesV1, unknown>;
+  next_cursor: z.ZodType<string | null, unknown>;
+  path: z.ZodType<string, unknown>;
+  query: z.ZodType<string, unknown>;
+  storage_scope: z.ZodType<string, unknown>;
+  total: z.ZodType<LcmSearchTotalsV1, unknown>;
 }> = z.object({
   engine: z.string(),
   engine_detail: z.lazy(() => LcmSearchEngineDetailV1Schema),
@@ -5506,18 +5506,18 @@ export const LcmSearchPayloadV1Schema: z.ZodObject<{
 });
 
 export const LcmSearchTotalsV1Schema: z.ZodObject<{
-  messages: z.ZodType<number, z.ZodTypeDef, unknown>;
-  summary_nodes: z.ZodType<number, z.ZodTypeDef, unknown>;
+  messages: z.ZodType<number, unknown>;
+  summary_nodes: z.ZodType<number, unknown>;
 }> = z.object({
   messages: z.number().int().safe(),
   summary_nodes: z.number().int().safe(),
 });
 
 export const LcmSessionCountsV1Schema: z.ZodObject<{
-  message_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  source_token_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  summary_node_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  summary_token_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  message_count: z.ZodType<number, unknown>;
+  source_token_count: z.ZodType<number | null, unknown>;
+  summary_node_count: z.ZodType<number, unknown>;
+  summary_token_count: z.ZodType<number | null, unknown>;
 }> = z.object({
   message_count: z.number().int().safe(),
   source_token_count: z.number().int().safe().nullable(),
@@ -5526,18 +5526,18 @@ export const LcmSessionCountsV1Schema: z.ZodObject<{
 });
 
 export const LcmSessionPayloadV1Schema: z.ZodObject<{
-  counts: z.ZodType<LcmSessionCountsV1, z.ZodTypeDef, unknown>;
-  exists: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  has_more: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  has_more_messages: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  has_more_summary_nodes: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  messages: z.ZodType<Array<LcmMessageV1>, z.ZodTypeDef, unknown>;
-  next_cursor: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  storage_scope: z.ZodType<string, z.ZodTypeDef, unknown>;
-  summary_nodes: z.ZodType<Array<LcmSummaryNodeV1>, z.ZodTypeDef, unknown>;
+  counts: z.ZodType<LcmSessionCountsV1, unknown>;
+  exists: z.ZodType<boolean, unknown>;
+  has_more: z.ZodType<boolean, unknown>;
+  has_more_messages: z.ZodType<boolean, unknown>;
+  has_more_summary_nodes: z.ZodType<boolean, unknown>;
+  limit: z.ZodType<number, unknown>;
+  messages: z.ZodType<Array<LcmMessageV1>, unknown>;
+  next_cursor: z.ZodType<string | null, unknown>;
+  path: z.ZodType<string, unknown>;
+  session_id: z.ZodType<string, unknown>;
+  storage_scope: z.ZodType<string, unknown>;
+  summary_nodes: z.ZodType<Array<LcmSummaryNodeV1>, unknown>;
 }> = z.object({
   counts: z.lazy(() => LcmSessionCountsV1Schema),
   exists: z.boolean(),
@@ -5554,27 +5554,27 @@ export const LcmSessionPayloadV1Schema: z.ZodObject<{
 });
 
 export const LcmSourceCountV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  source: z.ZodType<string, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  source: z.ZodType<string, unknown>;
 }> = z.object({
   count: z.number().int().safe(),
   source: z.string(),
 });
 
 export const LcmSummaryNodeV1Schema: z.ZodObject<{
-  category: z.ZodType<string, z.ZodTypeDef, unknown>;
-  created_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  depth: z.ZodType<number, z.ZodTypeDef, unknown>;
-  expand_hint: z.ZodType<string, z.ZodTypeDef, unknown>;
-  latest_at: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  node_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  recency: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  snippet: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  source_token_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  source_type: z.ZodType<string, z.ZodTypeDef, unknown>;
-  summary: z.ZodType<string, z.ZodTypeDef, unknown>;
-  token_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  category: z.ZodType<string, unknown>;
+  created_at: z.ZodType<number, unknown>;
+  depth: z.ZodType<number, unknown>;
+  expand_hint: z.ZodType<string, unknown>;
+  latest_at: z.ZodType<number | null, unknown>;
+  node_id: z.ZodType<string, unknown>;
+  recency: z.ZodType<number | null, unknown>;
+  session_id: z.ZodType<string, unknown>;
+  snippet: z.ZodType<string | null, unknown>;
+  source_token_count: z.ZodType<number | null, unknown>;
+  source_type: z.ZodType<string, unknown>;
+  summary: z.ZodType<string, unknown>;
+  token_count: z.ZodType<number | null, unknown>;
 }> = z.object({
   category: z.string(),
   created_at: z.number().int().safe(),
@@ -5592,12 +5592,12 @@ export const LcmSummaryNodeV1Schema: z.ZodObject<{
 });
 
 export const LcmTimelineBucketV1Schema: z.ZodObject<{
-  bucket: z.ZodType<string, z.ZodTypeDef, unknown>;
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  known_message_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  token_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  token_count_provenance: z.ZodType<LcmTokenCountProvenanceV1, z.ZodTypeDef, unknown>;
-  unknown_message_count: z.ZodType<number, z.ZodTypeDef, unknown>;
+  bucket: z.ZodType<string, unknown>;
+  count: z.ZodType<number, unknown>;
+  known_message_count: z.ZodType<number, unknown>;
+  token_count: z.ZodType<number | null, unknown>;
+  token_count_provenance: z.ZodType<LcmTokenCountProvenanceV1, unknown>;
+  unknown_message_count: z.ZodType<number, unknown>;
 }> = z.object({
   bucket: z.string(),
   count: z.number().int().safe(),
@@ -5608,12 +5608,12 @@ export const LcmTimelineBucketV1Schema: z.ZodObject<{
 });
 
 export const LcmTimelineCoverageV1Schema: z.ZodObject<{
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  next_before_bucket: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  ordering: z.ZodType<string, z.ZodTypeDef, unknown>;
-  returned_buckets: z.ZodType<number, z.ZodTypeDef, unknown>;
-  total_dated_buckets: z.ZodType<number, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  limit: z.ZodType<number, unknown>;
+  next_before_bucket: z.ZodType<string | null, unknown>;
+  ordering: z.ZodType<string, unknown>;
+  returned_buckets: z.ZodType<number, unknown>;
+  total_dated_buckets: z.ZodType<number, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
 }> = z.object({
   limit: z.number().int().safe(),
   next_before_bucket: z.string().nullable(),
@@ -5624,23 +5624,23 @@ export const LcmTimelineCoverageV1Schema: z.ZodObject<{
 });
 
 export const LcmTimelineNodeBucketV1Schema: z.ZodObject<{
-  bucket: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
+  bucket: z.ZodType<string | null, unknown>;
+  count: z.ZodType<number, unknown>;
 }> = z.object({
   bucket: z.string().nullable(),
   count: z.number().int().safe(),
 });
 
 export const LcmTimelinePayloadV1Schema: z.ZodObject<{
-  bucket: z.ZodType<string, z.ZodTypeDef, unknown>;
-  buckets: z.ZodType<Array<LcmTimelineBucketV1>, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<LcmTimelineCoverageV1 | null, z.ZodTypeDef, unknown>;
-  exists: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  node_buckets: z.ZodType<Array<LcmTimelineNodeBucketV1>, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  storage_scope: z.ZodType<string, z.ZodTypeDef, unknown>;
-  undated: z.ZodType<LcmTimelineUndatedV1, z.ZodTypeDef, unknown>;
+  bucket: z.ZodType<string, unknown>;
+  buckets: z.ZodType<Array<LcmTimelineBucketV1>, unknown>;
+  coverage: z.ZodType<LcmTimelineCoverageV1 | null, unknown>;
+  exists: z.ZodType<boolean, unknown>;
+  node_buckets: z.ZodType<Array<LcmTimelineNodeBucketV1>, unknown>;
+  path: z.ZodType<string, unknown>;
+  session_id: z.ZodType<string | null, unknown>;
+  storage_scope: z.ZodType<string, unknown>;
+  undated: z.ZodType<LcmTimelineUndatedV1, unknown>;
 }> = z.object({
   bucket: z.string(),
   buckets: z.array(z.lazy(() => LcmTimelineBucketV1Schema)),
@@ -5654,11 +5654,11 @@ export const LcmTimelinePayloadV1Schema: z.ZodObject<{
 });
 
 export const LcmTimelineUndatedV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  known_message_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  token_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  token_count_provenance: z.ZodType<LcmTokenCountProvenanceV1, z.ZodTypeDef, unknown>;
-  unknown_message_count: z.ZodType<number, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  known_message_count: z.ZodType<number, unknown>;
+  token_count: z.ZodType<number | null, unknown>;
+  token_count_provenance: z.ZodType<LcmTokenCountProvenanceV1, unknown>;
+  unknown_message_count: z.ZodType<number, unknown>;
 }> = z.object({
   count: z.number().int().safe(),
   known_message_count: z.number().int().safe(),
@@ -5667,20 +5667,20 @@ export const LcmTimelineUndatedV1Schema: z.ZodObject<{
   unknown_message_count: z.number().int().safe(),
 });
 
-export const LcmTokenCountProvenanceV1Schema: z.ZodEnum<["o200k_approximate", "unavailable"]> = z.enum(["o200k_approximate", "unavailable"]);
+export const LcmTokenCountProvenanceV1Schema: z.ZodEnum<{ "o200k_approximate": "o200k_approximate"; "unavailable": "unavailable" }> = z.enum(["o200k_approximate", "unavailable"]);
 
-export const LeakOwnerClassV1Schema: z.ZodEnum<["delivery", "git", "unknown", "work", "workflow"]> = z.enum(["delivery", "git", "unknown", "work", "workflow"]);
+export const LeakOwnerClassV1Schema: z.ZodEnum<{ "delivery": "delivery"; "git": "git"; "unknown": "unknown"; "work": "work"; "workflow": "workflow" }> = z.enum(["delivery", "git", "unknown", "work", "workflow"]);
 
 /** Bounded action an adapter may offer without inferring executable authority. */
-export const LegalActionSchema: z.ZodEnum<["contact_administrator", "correct_request", "reauthorize", "reconcile", "refresh", "reset", "restart_without_cursor", "retry"]> = z.enum(["contact_administrator", "correct_request", "reauthorize", "reconcile", "refresh", "reset", "restart_without_cursor", "retry"]);
+export const LegalActionSchema: z.ZodEnum<{ "contact_administrator": "contact_administrator"; "correct_request": "correct_request"; "reauthorize": "reauthorize"; "reconcile": "reconcile"; "refresh": "refresh"; "reset": "reset"; "restart_without_cursor": "restart_without_cursor"; "retry": "retry" }> = z.enum(["contact_administrator", "correct_request", "reauthorize", "reconcile", "refresh", "reset", "restart_without_cursor", "retry"]);
 
 export const LinkAcceptedWorkAttemptRequestV1Schema: z.ZodObject<{
-  based_on_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  identity: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  mutation: z.ZodType<WorkProductMutationIdentityV1, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  based_on_version: z.ZodType<number, unknown>;
+  identity: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  mutation: z.ZodType<WorkProductMutationIdentityV1, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   based_on_version: z.number().int().safe().min(0),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
@@ -5695,16 +5695,16 @@ inside the daemon authority, and only these identifiers cross the wire. No
 bearer secret exists to leak here. The authority never stored one, and the
 issuer's grant identity and policy digests stay concealed. */
 export const ListedTaskHandoffV1Schema: z.ZodObject<{
-  consumed_at: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  expires_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  issued_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  issued_request_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<HandoffOpenKindV1, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  state: z.ZodType<TaskHandoffTokenStateV1, z.ZodTypeDef, unknown>;
-  target: z.ZodType<HandoffOpenTargetV1, z.ZodTypeDef, unknown>;
-  token_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  consumed_at: z.ZodType<UtcMicros | null, unknown>;
+  expires_at: z.ZodType<UtcMicros, unknown>;
+  issued_at: z.ZodType<UtcMicros, unknown>;
+  issued_request_id: z.ZodType<string, unknown>;
+  kind: z.ZodType<HandoffOpenKindV1, unknown>;
+  session_id: z.ZodType<string, unknown>;
+  state: z.ZodType<TaskHandoffTokenStateV1, unknown>;
+  target: z.ZodType<HandoffOpenTargetV1, unknown>;
+  token_digest: z.ZodType<ManifestDigest, unknown>;
+}, z.core.$strict> = z.object({
   consumed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   expires_at: z.lazy(() => UtcMicrosSchema),
   issued_at: z.lazy(() => UtcMicrosSchema),
@@ -5723,20 +5723,20 @@ cannot answer "what has been handed to me and not yet taken up". This one
 can, and it does so without any bearer: the request carries no token, and
 the result carries only digests. */
 export const ListTaskHandoffsRequestV1Schema: z.ZodObject<{
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  session_id: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   session_id: z.string(),
 }).strict();
 
 /** The handoff-token frontier for one session. */
 export const ListTaskHandoffsResultV1Schema: z.ZodObject<{
-  consumed_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  expired_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  handoffs: z.ZodType<Array<ListedTaskHandoffV1>, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  open_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  consumed_count: z.ZodType<number, unknown>;
+  expired_count: z.ZodType<number, unknown>;
+  handoffs: z.ZodType<Array<ListedTaskHandoffV1>, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  open_count: z.ZodType<number, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
+}, z.core.$strict> = z.object({
   consumed_count: z.number().int().min(0),
   expired_count: z.number().int().min(0),
   handoffs: z.array(z.lazy(() => ListedTaskHandoffV1Schema)),
@@ -5746,17 +5746,17 @@ export const ListTaskHandoffsResultV1Schema: z.ZodObject<{
 }).strict();
 
 /** Strongly typed algorithm-tagged integrity digest: `LocatorDigest`. */
-export const LocatorDigestSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const LocatorDigestSchema: z.ZodType<string, unknown> = z.string();
 
 export const LoomBranchSpanV1Schema: z.ZodObject<{
-  branch: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  event_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  first_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  last_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  provider: z.ZodType<string, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  source: z.ZodType<string, z.ZodTypeDef, unknown>;
-  worktree: z.ZodType<string, z.ZodTypeDef, unknown>;
+  branch: z.ZodType<string | null, unknown>;
+  event_count: z.ZodType<number, unknown>;
+  first_at: z.ZodType<number, unknown>;
+  last_at: z.ZodType<number, unknown>;
+  provider: z.ZodType<string, unknown>;
+  session_id: z.ZodType<string, unknown>;
+  source: z.ZodType<string, unknown>;
+  worktree: z.ZodType<string, unknown>;
 }> = z.object({
   branch: z.string().nullable(),
   event_count: z.number().int().safe(),
@@ -5769,16 +5769,16 @@ export const LoomBranchSpanV1Schema: z.ZodObject<{
 });
 
 export const LoomCommitV1Schema: z.ZodObject<{
-  branch: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  commit_sha: z.ZodType<string, z.ZodTypeDef, unknown>;
-  committed_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  confidence: z.ZodType<number, z.ZodTypeDef, unknown>;
-  evidence: z.ZodType<string, z.ZodTypeDef, unknown>;
-  provider: z.ZodType<string, z.ZodTypeDef, unknown>;
-  relation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  span_overlap_kind: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  worktree: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  branch: z.ZodType<string | null, unknown>;
+  commit_sha: z.ZodType<string, unknown>;
+  committed_at: z.ZodType<number, unknown>;
+  confidence: z.ZodType<number, unknown>;
+  evidence: z.ZodType<string, unknown>;
+  provider: z.ZodType<string, unknown>;
+  relation: z.ZodType<string, unknown>;
+  session_id: z.ZodType<string, unknown>;
+  span_overlap_kind: z.ZodType<string | null, unknown>;
+  worktree: z.ZodType<string | null, unknown>;
 }> = z.object({
   branch: z.string().nullable(),
   commit_sha: z.string(),
@@ -5793,12 +5793,12 @@ export const LoomCommitV1Schema: z.ZodObject<{
 });
 
 export const LoomEditedFileV1Schema: z.ZodObject<{
-  change_type: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  edited_at_micros: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  hunks: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  provider: z.ZodType<string, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  change_type: z.ZodType<string | null, unknown>;
+  edited_at_micros: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  hunks: z.ZodType<number | null, unknown>;
+  path: z.ZodType<string, unknown>;
+  provider: z.ZodType<string, unknown>;
+  session_id: z.ZodType<string, unknown>;
 }> = z.object({
   change_type: z.string().nullable(),
   edited_at_micros: z.number().int().safe().nullable().optional(),
@@ -5809,7 +5809,7 @@ export const LoomEditedFileV1Schema: z.ZodObject<{
 });
 
 /** One recorded event on a displayed session's lane. */
-export const LoomEventV1Schema: z.ZodType<LoomEventV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const LoomEventV1Schema: z.ZodType<LoomEventV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("pull_request"),
   label: z.string().nullable().optional(),
   message_id: z.string(),
@@ -5837,12 +5837,12 @@ export const LoomEventV1Schema: z.ZodType<LoomEventV1, z.ZodTypeDef, unknown> = 
 })]);
 
 export const LoomFileSessionProjectionV1Schema: z.ZodObject<{
-  authority: z.ZodType<string, z.ZodTypeDef, unknown>;
-  eligible_sessions: z.ZodType<number, z.ZodTypeDef, unknown>;
-  granularity: z.ZodType<string, z.ZodTypeDef, unknown>;
-  matched_sessions: z.ZodType<number, z.ZodTypeDef, unknown>;
-  providers: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  sessions: z.ZodType<Array<unknown>, z.ZodTypeDef, unknown>;
+  authority: z.ZodType<string, unknown>;
+  eligible_sessions: z.ZodType<number, unknown>;
+  granularity: z.ZodType<string, unknown>;
+  matched_sessions: z.ZodType<number, unknown>;
+  providers: z.ZodType<Array<string>, unknown>;
+  sessions: z.ZodType<Array<unknown>, unknown>;
 }> = z.object({
   authority: z.string(),
   eligible_sessions: z.number().int().safe().min(0),
@@ -5853,24 +5853,24 @@ export const LoomFileSessionProjectionV1Schema: z.ZodObject<{
 });
 
 export const LoomSessionModelV1Schema: z.ZodObject<{
-  model: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  model: z.ZodType<string | null, unknown>;
 }> = z.object({
   model: z.string().nullable(),
 });
 
 export const LoomSessionRowV1Schema: z.ZodObject<{
-  edited_files_recorded: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  ended_at: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  is_subagent: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  last_message_at: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  messages: z.ZodType<number, z.ZodTypeDef, unknown>;
-  models: z.ZodType<Array<LoomSessionModelV1>, z.ZodTypeDef, unknown>;
-  parent_session_id: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  parent_tool_use_id: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  provider: z.ZodType<string, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  started_at: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  title: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  edited_files_recorded: z.ZodType<boolean, unknown>;
+  ended_at: z.ZodType<number | null, unknown>;
+  is_subagent: z.ZodType<boolean, unknown>;
+  last_message_at: z.ZodType<number | null, unknown>;
+  messages: z.ZodType<number, unknown>;
+  models: z.ZodType<Array<LoomSessionModelV1>, unknown>;
+  parent_session_id: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  parent_tool_use_id: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  provider: z.ZodType<string, unknown>;
+  session_id: z.ZodType<string, unknown>;
+  started_at: z.ZodType<number | null, unknown>;
+  title: z.ZodType<string | null, unknown>;
 }> = z.object({
   edited_files_recorded: z.boolean(),
   ended_at: z.number().int().safe().nullable(),
@@ -5887,13 +5887,13 @@ export const LoomSessionRowV1Schema: z.ZodObject<{
 });
 
 export const LoomSourceCoverageV1Schema: z.ZodObject<{
-  completeness: z.ZodType<string, z.ZodTypeDef, unknown>;
-  eligible: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  examined: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  matched: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  omitted: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  reason: z.ZodType<string, z.ZodTypeDef, unknown>;
-  unit: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  completeness: z.ZodType<string, unknown>;
+  eligible: z.ZodType<number | null, unknown>;
+  examined: z.ZodType<number | null, unknown>;
+  matched: z.ZodType<number | null, unknown>;
+  omitted: z.ZodType<number | null, unknown>;
+  reason: z.ZodType<string, unknown>;
+  unit: z.ZodType<string | null, unknown>;
 }> = z.object({
   completeness: z.string(),
   eligible: z.number().int().safe().min(0).nullable(),
@@ -5905,16 +5905,16 @@ export const LoomSourceCoverageV1Schema: z.ZodObject<{
 });
 
 export const LoomSourceStatusV1Schema: z.ZodObject<{
-  authority: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<LoomSourceCoverageV1, z.ZodTypeDef, unknown>;
-  granularity: z.ZodType<string, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  item_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  label: z.ZodType<string, z.ZodTypeDef, unknown>;
-  providers: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  reason: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  required_authority: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  state: z.ZodType<DashboardDomainStateV1, z.ZodTypeDef, unknown>;
+  authority: z.ZodType<string | null, unknown>;
+  coverage: z.ZodType<LoomSourceCoverageV1, unknown>;
+  granularity: z.ZodType<string, unknown>;
+  id: z.ZodType<string, unknown>;
+  item_count: z.ZodType<number | null, unknown>;
+  label: z.ZodType<string, unknown>;
+  providers: z.ZodType<Array<string>, unknown>;
+  reason: z.ZodType<string | null, unknown>;
+  required_authority: z.ZodType<string | null, unknown>;
+  state: z.ZodType<DashboardDomainStateV1, unknown>;
 }> = z.object({
   authority: z.string().nullable(),
   coverage: z.lazy(() => LoomSourceCoverageV1Schema),
@@ -5929,15 +5929,15 @@ export const LoomSourceStatusV1Schema: z.ZodObject<{
 });
 
 export const LoomTemporalPayloadV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  branch_spans: z.ZodType<Array<LoomBranchSpanV1>, z.ZodTypeDef, unknown>;
-  commits: z.ZodType<Array<LoomCommitV1>, z.ZodTypeDef, unknown>;
-  edited_files: z.ZodType<Array<LoomEditedFileV1>, z.ZodTypeDef, unknown>;
-  events: z.ZodType<Array<LoomEventV1>, z.ZodTypeDef, unknown>;
-  sessions: z.ZodType<Array<LoomSessionRowV1>, z.ZodTypeDef, unknown>;
-  source_statuses: z.ZodType<Array<LoomSourceStatusV1>, z.ZodTypeDef, unknown>;
-  temporal_refresh: z.ZodType<LoomTemporalRefreshV1, z.ZodTypeDef, unknown>;
-  total: z.ZodType<number, z.ZodTypeDef, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  branch_spans: z.ZodType<Array<LoomBranchSpanV1>, unknown>;
+  commits: z.ZodType<Array<LoomCommitV1>, unknown>;
+  edited_files: z.ZodType<Array<LoomEditedFileV1>, unknown>;
+  events: z.ZodType<Array<LoomEventV1>, unknown>;
+  sessions: z.ZodType<Array<LoomSessionRowV1>, unknown>;
+  source_statuses: z.ZodType<Array<LoomSourceStatusV1>, unknown>;
+  temporal_refresh: z.ZodType<LoomTemporalRefreshV1, unknown>;
+  total: z.ZodType<number, unknown>;
 }> = z.object({
   available: z.boolean(),
   branch_spans: z.array(z.lazy(() => LoomBranchSpanV1Schema)),
@@ -5951,10 +5951,10 @@ export const LoomTemporalPayloadV1Schema: z.ZodObject<{
 });
 
 export const LoomTemporalRefreshV1Schema: z.ZodObject<{
-  active_generations: z.ZodType<number, z.ZodTypeDef, unknown>;
-  authority: z.ZodType<string, z.ZodTypeDef, unknown>;
-  latest_activated_at_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  state: z.ZodType<DashboardDomainStateV1, z.ZodTypeDef, unknown>;
+  active_generations: z.ZodType<number, unknown>;
+  authority: z.ZodType<string, unknown>;
+  latest_activated_at_micros: z.ZodType<number | null, unknown>;
+  state: z.ZodType<DashboardDomainStateV1, unknown>;
 }> = z.object({
   active_generations: z.number().int().safe().min(0),
   authority: z.string(),
@@ -5964,12 +5964,12 @@ export const LoomTemporalRefreshV1Schema: z.ZodObject<{
 
 /** The outcome a finished managed test run recorded. */
 export const LoomTestRunOutcomeV1Schema: z.ZodObject<{
-  exit_code: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  failed: z.ZodType<number, z.ZodTypeDef, unknown>;
-  finished_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  ignored: z.ZodType<number, z.ZodTypeDef, unknown>;
-  passed: z.ZodType<number, z.ZodTypeDef, unknown>;
-  termination: z.ZodType<string, z.ZodTypeDef, unknown>;
+  exit_code: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  failed: z.ZodType<number, unknown>;
+  finished_at_micros: z.ZodType<number, unknown>;
+  ignored: z.ZodType<number, unknown>;
+  passed: z.ZodType<number, unknown>;
+  termination: z.ZodType<string, unknown>;
 }> = z.object({
   exit_code: z.number().int().safe().nullable().optional(),
   failed: z.number().int().safe().min(0),
@@ -5980,34 +5980,34 @@ export const LoomTestRunOutcomeV1Schema: z.ZodObject<{
 });
 
 export const ManagedSkillSchema: z.ZodObject<{
-  body_markdown: z.ZodType<string, z.ZodTypeDef, unknown>;
-  metadata: z.ZodType<ManagedSkillMetadata, z.ZodTypeDef, unknown>;
-  support_files: z.ZodType<Array<ManagedSupportFile>, z.ZodTypeDef, unknown>;
+  body_markdown: z.ZodType<string, unknown>;
+  metadata: z.ZodType<ManagedSkillMetadata, unknown>;
+  support_files: z.ZodType<Array<ManagedSupportFile>, unknown>;
 }> = z.object({
   body_markdown: z.string(),
   metadata: z.lazy(() => ManagedSkillMetadataSchema),
   support_files: z.array(z.lazy(() => ManagedSupportFileSchema)),
 });
 
-export const ManagedSkillMaterializationScopeSchema: z.ZodEnum<["global", "project"]> = z.enum(["global", "project"]);
+export const ManagedSkillMaterializationScopeSchema: z.ZodEnum<{ "global": "global"; "project": "project" }> = z.enum(["global", "project"]);
 
 export const ManagedSkillMetadataSchema: z.ZodObject<{
-  absorbed_into: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  activated_at: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  archived_reason: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  category: z.ZodType<string, z.ZodTypeDef, unknown>;
-  checksum: z.ZodType<string, z.ZodTypeDef, unknown>;
-  created_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  materialization_scope: z.ZodOptional<z.ZodType<ManagedSkillMaterializationScope, z.ZodTypeDef, unknown>>;
-  pinned: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  provenance: z.ZodType<ManagedSkillProvenance, z.ZodTypeDef, unknown>;
-  routing_description: z.ZodType<string, z.ZodTypeDef, unknown>;
-  state: z.ZodType<ManagedSkillState, z.ZodTypeDef, unknown>;
-  summary: z.ZodType<string, z.ZodTypeDef, unknown>;
-  targets: z.ZodType<Array<SkillInstallTarget>, z.ZodTypeDef, unknown>;
-  title: z.ZodType<string, z.ZodTypeDef, unknown>;
-  updated_at: z.ZodType<number, z.ZodTypeDef, unknown>;
+  absorbed_into: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  activated_at: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  archived_reason: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  category: z.ZodType<string, unknown>;
+  checksum: z.ZodType<string, unknown>;
+  created_at: z.ZodType<number, unknown>;
+  id: z.ZodType<string, unknown>;
+  materialization_scope: z.ZodOptional<z.ZodType<ManagedSkillMaterializationScope, unknown>>;
+  pinned: z.ZodType<boolean, unknown>;
+  provenance: z.ZodType<ManagedSkillProvenance, unknown>;
+  routing_description: z.ZodType<string, unknown>;
+  state: z.ZodType<ManagedSkillState, unknown>;
+  summary: z.ZodType<string, unknown>;
+  targets: z.ZodType<Array<SkillInstallTarget>, unknown>;
+  title: z.ZodType<string, unknown>;
+  updated_at: z.ZodType<number, unknown>;
 }> = z.object({
   absorbed_into: z.string().nullable().optional(),
   activated_at: z.number().int().safe().nullable().optional(),
@@ -6028,52 +6028,52 @@ export const ManagedSkillMetadataSchema: z.ZodObject<{
 });
 
 export const ManagedSkillProvenanceSchema: z.ZodObject<{
-  actor: z.ZodType<string, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  source: z.ZodType<ManagedSkillSource, z.ZodTypeDef, unknown>;
+  actor: z.ZodType<string, unknown>;
+  run_id: z.ZodType<string | null, unknown>;
+  source: z.ZodType<ManagedSkillSource, unknown>;
 }> = z.object({
   actor: z.string(),
   run_id: z.string().nullable(),
   source: z.lazy(() => ManagedSkillSourceSchema),
 });
 
-export const ManagedSkillSourceSchema: z.ZodEnum<["automation_run", "import", "user"]> = z.enum(["automation_run", "import", "user"]);
+export const ManagedSkillSourceSchema: z.ZodEnum<{ "automation_run": "automation_run"; "import": "import"; "user": "user" }> = z.enum(["automation_run", "import", "user"]);
 
-export const ManagedSkillStateSchema: z.ZodEnum<["active", "archived", "disabled"]> = z.enum(["active", "archived", "disabled"]);
+export const ManagedSkillStateSchema: z.ZodEnum<{ "active": "active"; "archived": "archived"; "disabled": "disabled" }> = z.enum(["active", "archived", "disabled"]);
 
 export const ManagedSupportFileSchema: z.ZodObject<{
-  bytes: z.ZodType<Array<number>, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
+  bytes: z.ZodType<Array<number>, unknown>;
+  path: z.ZodType<string, unknown>;
 }> = z.object({
   bytes: z.array(z.number().int().min(0).max(255)),
   path: z.string(),
 });
 
 /** Strongly typed algorithm-tagged integrity digest: `ManifestDigest`. */
-export const ManifestDigestSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const ManifestDigestSchema: z.ZodType<string, unknown> = z.string();
 
 export const MemoryAlgebraStatusV1Schema: z.ZodObject<{
-  estimated_capacity: z.ZodType<number, z.ZodTypeDef, unknown>;
-  hrr_dim: z.ZodType<number, z.ZodTypeDef, unknown>;
-  name: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  estimated_capacity: z.ZodType<number, unknown>;
+  hrr_dim: z.ZodType<number, unknown>;
+  name: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   estimated_capacity: z.number().int().safe().min(0),
   hrr_dim: z.number().int().safe().min(0),
   name: z.string(),
 }).strict();
 
-export const MemoryAutomationCurationAddDispositionV1Schema: z.ZodEnum<["added", "near_duplicate", "possible_conflict"]> = z.enum(["added", "near_duplicate", "possible_conflict"]);
+export const MemoryAutomationCurationAddDispositionV1Schema: z.ZodEnum<{ "added": "added"; "near_duplicate": "near_duplicate"; "possible_conflict": "possible_conflict" }> = z.enum(["added", "near_duplicate", "possible_conflict"]);
 
-export const MemoryAutomationCurationLinkDispositionV1Schema: z.ZodEnum<["already_linked", "linked"]> = z.enum(["already_linked", "linked"]);
+export const MemoryAutomationCurationLinkDispositionV1Schema: z.ZodEnum<{ "already_linked": "already_linked"; "linked": "linked" }> = z.enum(["already_linked", "linked"]);
 
 export const MemoryAutomationCurationMergeV1Schema: z.ZodObject<{
-  commit_receipts: z.ZodType<Array<FactCommitReceiptV1>, z.ZodTypeDef, unknown>;
-  content_updated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  deleted_loser_fact_ids: z.ZodType<Array<FactId>, z.ZodTypeDef, unknown>;
-  input_digest: z.ZodType<string, z.ZodTypeDef, unknown>;
-  operation_id: z.ZodType<ProvenanceId, z.ZodTypeDef, unknown>;
-  winner_fact_id: z.ZodType<FactId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  commit_receipts: z.ZodType<Array<FactCommitReceiptV1>, unknown>;
+  content_updated: z.ZodType<boolean, unknown>;
+  deleted_loser_fact_ids: z.ZodType<Array<FactId>, unknown>;
+  input_digest: z.ZodType<string, unknown>;
+  operation_id: z.ZodType<ProvenanceId, unknown>;
+  winner_fact_id: z.ZodType<FactId, unknown>;
+}, z.core.$strict> = z.object({
   commit_receipts: z.array(z.lazy(() => FactCommitReceiptV1Schema)),
   content_updated: z.boolean(),
   deleted_loser_fact_ids: z.array(z.lazy(() => FactIdSchema)),
@@ -6082,7 +6082,7 @@ export const MemoryAutomationCurationMergeV1Schema: z.ZodObject<{
   winner_fact_id: z.lazy(() => FactIdSchema),
 }).strict();
 
-export const MemoryAutomationCurationOperationEffectV1Schema: z.ZodType<MemoryAutomationCurationOperationEffectV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const MemoryAutomationCurationOperationEffectV1Schema: z.ZodType<MemoryAutomationCurationOperationEffectV1, unknown> = z.discriminatedUnion("kind", [z.object({
   closest_fact_id: z.union([z.lazy(() => FactIdSchema), z.null()]),
   commit: z.union([z.lazy(() => FactCommitReceiptV1Schema), z.null()]),
   disposition: z.lazy(() => MemoryAutomationCurationAddDispositionV1Schema),
@@ -6117,54 +6117,54 @@ export const MemoryAutomationCurationOperationEffectV1Schema: z.ZodType<MemoryAu
 }).strict()]);
 
 export const MemoryAutomationCurationReceiptV1Schema: z.ZodObject<{
-  canonical_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  receipt: z.ZodType<MemoryAutomationCurationResultV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  canonical_digest: z.ZodType<ManifestDigest, unknown>;
+  receipt: z.ZodType<MemoryAutomationCurationResultV1, unknown>;
+}, z.core.$strict> = z.object({
   canonical_digest: z.lazy(() => ManifestDigestSchema),
   receipt: z.lazy(() => MemoryAutomationCurationResultV1Schema),
 }).strict();
 
-export const MemoryAutomationCurationRelationKindV1Schema: z.ZodEnum<["contradicts", "derived_from", "supersedes", "supports"]> = z.enum(["contradicts", "derived_from", "supersedes", "supports"]);
+export const MemoryAutomationCurationRelationKindV1Schema: z.ZodEnum<{ "contradicts": "contradicts"; "derived_from": "derived_from"; "supersedes": "supersedes"; "supports": "supports" }> = z.enum(["contradicts", "derived_from", "supersedes", "supports"]);
 
 export const MemoryAutomationCurationRelationProvenanceV1Schema: z.ZodObject<{
-  sanitization_receipt: z.ZodType<SanitizationReceiptV1, z.ZodTypeDef, unknown>;
-  source_label: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  sanitization_receipt: z.ZodType<SanitizationReceiptV1, unknown>;
+  source_label: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   sanitization_receipt: z.lazy(() => SanitizationReceiptV1Schema),
   source_label: z.string(),
 }).strict();
 
 export const MemoryAutomationCurationRelationV1Schema: z.ZodObject<{
-  confidence_millionths: z.ZodType<number, z.ZodTypeDef, unknown>;
-  evidence_fact_ids: z.ZodType<Array<FactId>, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<MemoryAutomationCurationRelationKindV1, z.ZodTypeDef, unknown>;
-  provenance: z.ZodType<MemoryAutomationCurationRelationProvenanceV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  confidence_millionths: z.ZodType<number, unknown>;
+  evidence_fact_ids: z.ZodType<Array<FactId>, unknown>;
+  kind: z.ZodType<MemoryAutomationCurationRelationKindV1, unknown>;
+  provenance: z.ZodType<MemoryAutomationCurationRelationProvenanceV1, unknown>;
+}, z.core.$strict> = z.object({
   confidence_millionths: z.number().int().min(0),
   evidence_fact_ids: z.array(z.lazy(() => FactIdSchema)),
   kind: z.lazy(() => MemoryAutomationCurationRelationKindV1Schema),
   provenance: z.lazy(() => MemoryAutomationCurationRelationProvenanceV1Schema),
 }).strict();
 
-export const MemoryAutomationCurationRemoveDispositionV1Schema: z.ZodEnum<["already_removed", "not_found", "removed"]> = z.enum(["already_removed", "not_found", "removed"]);
+export const MemoryAutomationCurationRemoveDispositionV1Schema: z.ZodEnum<{ "already_removed": "already_removed"; "not_found": "not_found"; "removed": "removed" }> = z.enum(["already_removed", "not_found", "removed"]);
 
 export const MemoryAutomationCurationResultV1Schema: z.ZodObject<{
-  accepted_operations: z.ZodType<number, z.ZodTypeDef, unknown>;
-  automation_run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  changed_fact_ids: z.ZodType<Array<FactId>, z.ZodTypeDef, unknown>;
-  facts_added: z.ZodType<number, z.ZodTypeDef, unknown>;
-  facts_linked: z.ZodType<number, z.ZodTypeDef, unknown>;
-  facts_merged: z.ZodType<number, z.ZodTypeDef, unknown>;
-  facts_removed: z.ZodType<number, z.ZodTypeDef, unknown>;
-  facts_updated: z.ZodType<number, z.ZodTypeDef, unknown>;
-  input_digest: z.ZodType<string, z.ZodTypeDef, unknown>;
-  normalized_tags: z.ZodType<number, z.ZodTypeDef, unknown>;
-  operation_effects: z.ZodType<Array<MemoryAutomationCurationOperationEffectV1>, z.ZodTypeDef, unknown>;
-  operation_id: z.ZodType<ProvenanceId, z.ZodTypeDef, unknown>;
-  owner: z.ZodType<FactCommitOwnerV1, z.ZodTypeDef, unknown>;
-  replay_event_id: z.ZodType<FactEventId | null, z.ZodTypeDef, unknown>;
-  replay_fact_id: z.ZodType<FactId | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  accepted_operations: z.ZodType<number, unknown>;
+  automation_run_id: z.ZodType<RunId, unknown>;
+  changed_fact_ids: z.ZodType<Array<FactId>, unknown>;
+  facts_added: z.ZodType<number, unknown>;
+  facts_linked: z.ZodType<number, unknown>;
+  facts_merged: z.ZodType<number, unknown>;
+  facts_removed: z.ZodType<number, unknown>;
+  facts_updated: z.ZodType<number, unknown>;
+  input_digest: z.ZodType<string, unknown>;
+  normalized_tags: z.ZodType<number, unknown>;
+  operation_effects: z.ZodType<Array<MemoryAutomationCurationOperationEffectV1>, unknown>;
+  operation_id: z.ZodType<ProvenanceId, unknown>;
+  owner: z.ZodType<FactCommitOwnerV1, unknown>;
+  replay_event_id: z.ZodType<FactEventId | null, unknown>;
+  replay_fact_id: z.ZodType<FactId | null, unknown>;
+}, z.core.$strict> = z.object({
   accepted_operations: z.number().int().safe().min(0),
   automation_run_id: z.lazy(() => RunIdSchema),
   changed_fact_ids: z.array(z.lazy(() => FactIdSchema)),
@@ -6185,24 +6185,24 @@ export const MemoryAutomationCurationResultV1Schema: z.ZodObject<{
 export const MemoryAutomationFactConflictSourceV1Schema: z.ZodLiteral<"apply_time_add_fact_diff"> = z.literal("apply_time_add_fact_diff");
 
 export const MemoryAutomationFactConflictValidationV1Schema: z.ZodObject<{
-  note: z.ZodType<string, z.ZodTypeDef, unknown>;
-  source: z.ZodType<MemoryAutomationFactConflictSourceV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  note: z.ZodType<string, unknown>;
+  source: z.ZodType<MemoryAutomationFactConflictSourceV1, unknown>;
+}, z.core.$strict> = z.object({
   note: z.string(),
   source: z.lazy(() => MemoryAutomationFactConflictSourceV1Schema),
 }).strict();
 
 export const MemoryAutomationFactDedupeValidationV1Schema: z.ZodObject<{
-  near_duplicate_threshold: z.ZodType<number, z.ZodTypeDef, unknown>;
-  nearest: z.ZodType<MemoryAutomationFactNearestMatchV1 | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  near_duplicate_threshold: z.ZodType<number, unknown>;
+  nearest: z.ZodType<MemoryAutomationFactNearestMatchV1 | null, unknown>;
+}, z.core.$strict> = z.object({
   near_duplicate_threshold: z.number(),
   nearest: z.union([z.lazy(() => MemoryAutomationFactNearestMatchV1Schema), z.null()]),
 }).strict();
 
-export const MemoryAutomationFactDispositionV1Schema: z.ZodEnum<["already_applied", "applied", "quarantined"]> = z.enum(["already_applied", "applied", "quarantined"]);
+export const MemoryAutomationFactDispositionV1Schema: z.ZodEnum<{ "already_applied": "already_applied"; "applied": "applied"; "quarantined": "quarantined" }> = z.enum(["already_applied", "applied", "quarantined"]);
 
-export const MemoryAutomationFactEffectV1Schema: z.ZodType<MemoryAutomationFactEffectV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const MemoryAutomationFactEffectV1Schema: z.ZodType<MemoryAutomationFactEffectV1, unknown> = z.discriminatedUnion("state", [z.object({
   assertion_id: z.lazy(() => FactAssertionIdSchema),
   event_id: z.lazy(() => FactEventIdSchema),
   fact_id: z.lazy(() => FactIdSchema),
@@ -6214,14 +6214,14 @@ export const MemoryAutomationFactEffectV1Schema: z.ZodType<MemoryAutomationFactE
 }).strict()]);
 
 export const MemoryAutomationFactEvidenceItemV1Schema: z.ZodObject<{
-  category: z.ZodType<FactCategoryV1, z.ZodTypeDef, unknown>;
-  content: z.ZodType<string, z.ZodTypeDef, unknown>;
-  entities: z.ZodOptional<z.ZodType<Array<string> | null, z.ZodTypeDef, unknown>>;
-  reason: z.ZodType<string, z.ZodTypeDef, unknown>;
-  source_span: z.ZodType<MemoryAutomationFactEvidenceSourceSpanV1, z.ZodTypeDef, unknown>;
-  tags: z.ZodOptional<z.ZodType<Array<string> | null, z.ZodTypeDef, unknown>>;
-  trust: z.ZodType<MemoryAutomationFactEvidenceTrustV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  category: z.ZodType<FactCategoryV1, unknown>;
+  content: z.ZodType<string, unknown>;
+  entities: z.ZodOptional<z.ZodType<Array<string> | null, unknown>>;
+  reason: z.ZodType<string, unknown>;
+  source_span: z.ZodType<MemoryAutomationFactEvidenceSourceSpanV1, unknown>;
+  tags: z.ZodOptional<z.ZodType<Array<string> | null, unknown>>;
+  trust: z.ZodType<MemoryAutomationFactEvidenceTrustV1, unknown>;
+}, z.core.$strict> = z.object({
   category: z.lazy(() => FactCategoryV1Schema),
   content: z.string(),
   entities: z.array(z.string()).nullable().optional(),
@@ -6232,26 +6232,26 @@ export const MemoryAutomationFactEvidenceItemV1Schema: z.ZodObject<{
 }).strict();
 
 export const MemoryAutomationFactEvidenceSourceSpanV1Schema: z.ZodObject<{
-  message_id: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  node_id: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  session_id: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  store_id: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-}, "strict"> = z.object({
+  message_id: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  node_id: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  session_id: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  store_id: z.ZodOptional<z.ZodType<number | null, unknown>>;
+}, z.core.$strict> = z.object({
   message_id: z.string().nullable().optional(),
   node_id: z.string().nullable().optional(),
   session_id: z.string().nullable().optional(),
   store_id: z.number().int().safe().nullable().optional(),
 }).strict();
 
-export const MemoryAutomationFactEvidenceTrustBucketV1Schema: z.ZodEnum<["high", "low", "medium"]> = z.enum(["high", "low", "medium"]);
+export const MemoryAutomationFactEvidenceTrustBucketV1Schema: z.ZodEnum<{ "high": "high"; "low": "low"; "medium": "medium" }> = z.enum(["high", "low", "medium"]);
 
-export const MemoryAutomationFactEvidenceTrustV1Schema: z.ZodType<number | MemoryAutomationFactEvidenceTrustBucketV1, z.ZodTypeDef, unknown> = z.union([z.number(), z.lazy(() => MemoryAutomationFactEvidenceTrustBucketV1Schema)]);
+export const MemoryAutomationFactEvidenceTrustV1Schema: z.ZodType<number | MemoryAutomationFactEvidenceTrustBucketV1, unknown> = z.union([z.number(), z.lazy(() => MemoryAutomationFactEvidenceTrustBucketV1Schema)]);
 
 export const MemoryAutomationFactEvidenceV1Schema: z.ZodObject<{
-  evidence_hash: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  item: z.ZodOptional<z.ZodType<MemoryAutomationFactEvidenceItemV1 | null, z.ZodTypeDef, unknown>>;
-  validation: z.ZodOptional<z.ZodType<MemoryAutomationFactValidationV1 | null, z.ZodTypeDef, unknown>>;
-}, "strict"> = z.object({
+  evidence_hash: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  item: z.ZodOptional<z.ZodType<MemoryAutomationFactEvidenceItemV1 | null, unknown>>;
+  validation: z.ZodOptional<z.ZodType<MemoryAutomationFactValidationV1 | null, unknown>>;
+}, z.core.$strict> = z.object({
   evidence_hash: z.string().nullable().optional(),
   item: z.union([z.lazy(() => MemoryAutomationFactEvidenceItemV1Schema), z.null()]).optional(),
   validation: z.union([z.lazy(() => MemoryAutomationFactValidationV1Schema), z.null()]).optional(),
@@ -6259,13 +6259,13 @@ export const MemoryAutomationFactEvidenceV1Schema: z.ZodObject<{
 
 /** Store-owned raw SHA-256 input digest. This intentionally has no algorithm
 prefix because the canonical fact command does not expose one. */
-export const MemoryAutomationFactInputDigestV1Schema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const MemoryAutomationFactInputDigestV1Schema: z.ZodType<string, unknown> = z.string();
 
 export const MemoryAutomationFactNearestMatchV1Schema: z.ZodObject<{
-  canonical_fact_id: z.ZodType<FactId, z.ZodTypeDef, unknown>;
-  category: z.ZodType<FactCategoryV1, z.ZodTypeDef, unknown>;
-  score: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  canonical_fact_id: z.ZodType<FactId, unknown>;
+  category: z.ZodType<FactCategoryV1, unknown>;
+  score: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   canonical_fact_id: z.lazy(() => FactIdSchema),
   category: z.lazy(() => FactCategoryV1Schema),
   score: z.number(),
@@ -6273,17 +6273,17 @@ export const MemoryAutomationFactNearestMatchV1Schema: z.ZodObject<{
 
 /** Exact public projection of one canonical automatic-fact authority result. */
 export const MemoryAutomationFactReceiptV1Schema: z.ZodObject<{
-  apply_id: z.ZodType<ProvenanceId, z.ZodTypeDef, unknown>;
-  automation_run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  canonical_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  disposition: z.ZodType<MemoryAutomationFactDispositionV1, z.ZodTypeDef, unknown>;
-  effect: z.ZodType<MemoryAutomationFactEffectV1, z.ZodTypeDef, unknown>;
-  evidence: z.ZodType<MemoryAutomationFactEvidenceV1, z.ZodTypeDef, unknown>;
-  owner: z.ZodType<FactCommitOwnerV1, z.ZodTypeDef, unknown>;
-  recorded_at_micros: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  request: z.ZodType<MemoryAutomationFactRequestV1, z.ZodTypeDef, unknown>;
-  state: z.ZodType<MemoryAutomationFactStateV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  apply_id: z.ZodType<ProvenanceId, unknown>;
+  automation_run_id: z.ZodType<RunId, unknown>;
+  canonical_digest: z.ZodType<ManifestDigest, unknown>;
+  disposition: z.ZodType<MemoryAutomationFactDispositionV1, unknown>;
+  effect: z.ZodType<MemoryAutomationFactEffectV1, unknown>;
+  evidence: z.ZodType<MemoryAutomationFactEvidenceV1, unknown>;
+  owner: z.ZodType<FactCommitOwnerV1, unknown>;
+  recorded_at_micros: z.ZodType<UtcMicros, unknown>;
+  request: z.ZodType<MemoryAutomationFactRequestV1, unknown>;
+  state: z.ZodType<MemoryAutomationFactStateV1, unknown>;
+}, z.core.$strict> = z.object({
   apply_id: z.lazy(() => ProvenanceIdSchema),
   automation_run_id: z.lazy(() => RunIdSchema),
   canonical_digest: z.lazy(() => ManifestDigestSchema),
@@ -6297,37 +6297,37 @@ export const MemoryAutomationFactReceiptV1Schema: z.ZodObject<{
 }).strict();
 
 export const MemoryAutomationFactRequestV1Schema: z.ZodObject<{
-  actor: z.ZodType<ActorId | null, z.ZodTypeDef, unknown>;
-  category: z.ZodType<FactCategoryV1, z.ZodTypeDef, unknown>;
-  content: z.ZodType<string, z.ZodTypeDef, unknown>;
-  default_trust_millionths: z.ZodType<number, z.ZodTypeDef, unknown>;
-  entities: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  input_digest: z.ZodType<MemoryAutomationFactInputDigestV1, z.ZodTypeDef, unknown>;
-  metadata: z.ZodType<Record<string, unknown>, z.ZodTypeDef, unknown>;
-  operation_id: z.ZodType<ProvenanceId, z.ZodTypeDef, unknown>;
-  sanitization_receipt: z.ZodType<SanitizationReceiptV1, z.ZodTypeDef, unknown>;
-  source_label: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  tags: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  actor: z.ZodType<ActorId | null, unknown>;
+  category: z.ZodType<FactCategoryV1, unknown>;
+  content: z.ZodType<string, unknown>;
+  default_trust_millionths: z.ZodType<number, unknown>;
+  entities: z.ZodType<Array<string>, unknown>;
+  input_digest: z.ZodType<MemoryAutomationFactInputDigestV1, unknown>;
+  metadata: z.ZodType<Record<string, unknown>, unknown>;
+  operation_id: z.ZodType<ProvenanceId, unknown>;
+  sanitization_receipt: z.ZodType<SanitizationReceiptV1, unknown>;
+  source_label: z.ZodType<string | null, unknown>;
+  tags: z.ZodType<Array<string>, unknown>;
+}, z.core.$strict> = z.object({
   actor: z.union([z.lazy(() => ActorIdSchema), z.null()]),
   category: z.lazy(() => FactCategoryV1Schema),
   content: z.string(),
   default_trust_millionths: z.number().int().min(0),
   entities: z.array(z.string()),
   input_digest: z.lazy(() => MemoryAutomationFactInputDigestV1Schema),
-  metadata: z.record(z.unknown()),
+  metadata: z.record(z.string(), z.unknown()),
   operation_id: z.lazy(() => ProvenanceIdSchema),
   sanitization_receipt: z.lazy(() => SanitizationReceiptV1Schema),
   source_label: z.string().nullable(),
   tags: z.array(z.string()),
 }).strict();
 
-export const MemoryAutomationFactStateV1Schema: z.ZodEnum<["applied", "quarantined"]> = z.enum(["applied", "quarantined"]);
+export const MemoryAutomationFactStateV1Schema: z.ZodEnum<{ "applied": "applied"; "quarantined": "quarantined" }> = z.enum(["applied", "quarantined"]);
 
 export const MemoryAutomationFactTargetV1Schema: z.ZodObject<{
-  fact_id: z.ZodType<FactId, z.ZodTypeDef, unknown>;
-  owner: z.ZodType<FactCommitOwnerV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  fact_id: z.ZodType<FactId, unknown>;
+  owner: z.ZodType<FactCommitOwnerV1, unknown>;
+}, z.core.$strict> = z.object({
   fact_id: z.lazy(() => FactIdSchema),
   owner: z.lazy(() => FactCommitOwnerV1Schema),
 }).strict();
@@ -6335,28 +6335,28 @@ export const MemoryAutomationFactTargetV1Schema: z.ZodObject<{
 export const MemoryAutomationFactValidationStatusV1Schema: z.ZodLiteral<"accepted"> = z.literal("accepted");
 
 export const MemoryAutomationFactValidationV1Schema: z.ZodObject<{
-  conflict: z.ZodType<MemoryAutomationFactConflictValidationV1, z.ZodTypeDef, unknown>;
-  dedupe: z.ZodType<MemoryAutomationFactDedupeValidationV1, z.ZodTypeDef, unknown>;
-  status: z.ZodType<MemoryAutomationFactValidationStatusV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  conflict: z.ZodType<MemoryAutomationFactConflictValidationV1, unknown>;
+  dedupe: z.ZodType<MemoryAutomationFactDedupeValidationV1, unknown>;
+  status: z.ZodType<MemoryAutomationFactValidationStatusV1, unknown>;
+}, z.core.$strict> = z.object({
   conflict: z.lazy(() => MemoryAutomationFactConflictValidationV1Schema),
   dedupe: z.lazy(() => MemoryAutomationFactDedupeValidationV1Schema),
   status: z.lazy(() => MemoryAutomationFactValidationStatusV1Schema),
 }).strict();
 
 export const MemoryCategoryCountV1Schema: z.ZodObject<{
-  category: z.ZodType<string, z.ZodTypeDef, unknown>;
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  category: z.ZodType<string, unknown>;
+  count: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   category: z.string(),
   count: z.number().int().safe().min(0),
 }).strict();
 
 /** Cache provenance of one derived (projection or similarity) read. */
 export const MemoryDerivedScanV1Schema: z.ZodObject<{
-  cache_scope: z.ZodType<string, z.ZodTypeDef, unknown>;
-  cache_state: z.ZodType<string, z.ZodTypeDef, unknown>;
-  vector_rows_read: z.ZodType<number, z.ZodTypeDef, unknown>;
+  cache_scope: z.ZodType<string, unknown>;
+  cache_state: z.ZodType<string, unknown>;
+  vector_rows_read: z.ZodType<number, unknown>;
 }> = z.object({
   cache_scope: z.string(),
   cache_state: z.string(),
@@ -6364,46 +6364,46 @@ export const MemoryDerivedScanV1Schema: z.ZodObject<{
 });
 
 export const MemoryEntityRowV1Schema: z.ZodObject<{
-  entity_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  fact_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  name: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  entity_id: z.ZodType<string, unknown>;
+  fact_count: z.ZodType<number, unknown>;
+  name: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   entity_id: z.string(),
   fact_count: z.number().int().safe().min(0),
   name: z.string(),
 }).strict();
 
 export const MemoryFactDetailPayloadV1Schema: z.ZodObject<{
-  error: z.ZodType<string, z.ZodTypeDef, unknown>;
-  fact: z.ZodType<MemoryFactRowV1 | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  error: z.ZodType<string, unknown>;
+  fact: z.ZodType<MemoryFactRowV1 | null, unknown>;
+}, z.core.$strict> = z.object({
   error: z.string(),
   fact: z.union([z.lazy(() => MemoryFactRowV1Schema), z.null()]),
 }).strict();
 
 export const MemoryFactRowV1Schema: z.ZodObject<{
-  access_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  category: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  content: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  created_at: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  entities: z.ZodType<Array<string> | null, z.ZodTypeDef, unknown>;
-  fact_id: z.ZodType<FactId, z.ZodTypeDef, unknown>;
-  helpful_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  last_recalled_at: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  linked_entities: z.ZodType<Array<MemoryEntityRowV1> | null, z.ZodTypeDef, unknown>;
-  metadata: z.ZodType<unknown, z.ZodTypeDef, unknown>;
-  payload_access: z.ZodType<PayloadAccessState, z.ZodTypeDef, unknown>;
-  projected_as_of: z.ZodType<number, z.ZodTypeDef, unknown>;
-  retrieval_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  score_millionths: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  source_label: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  superseded_by: z.ZodOptional<z.ZodType<FactId | null, z.ZodTypeDef, unknown>>;
-  tags: z.ZodType<Array<string> | null, z.ZodTypeDef, unknown>;
-  trust_score: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  unhelpful_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  updated_at: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  why: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-}, "strict"> = z.object({
+  access_count: z.ZodType<number | null, unknown>;
+  category: z.ZodType<string | null, unknown>;
+  content: z.ZodType<string | null, unknown>;
+  created_at: z.ZodType<number | null, unknown>;
+  entities: z.ZodType<Array<string> | null, unknown>;
+  fact_id: z.ZodType<FactId, unknown>;
+  helpful_count: z.ZodType<number | null, unknown>;
+  last_recalled_at: z.ZodType<number | null, unknown>;
+  linked_entities: z.ZodType<Array<MemoryEntityRowV1> | null, unknown>;
+  metadata: z.ZodType<unknown, unknown>;
+  payload_access: z.ZodType<PayloadAccessState, unknown>;
+  projected_as_of: z.ZodType<number, unknown>;
+  retrieval_count: z.ZodType<number | null, unknown>;
+  score_millionths: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  source_label: z.ZodType<string | null, unknown>;
+  superseded_by: z.ZodOptional<z.ZodType<FactId | null, unknown>>;
+  tags: z.ZodType<Array<string> | null, unknown>;
+  trust_score: z.ZodType<number | null, unknown>;
+  unhelpful_count: z.ZodType<number | null, unknown>;
+  updated_at: z.ZodType<number | null, unknown>;
+  why: z.ZodOptional<z.ZodType<string | null, unknown>>;
+}, z.core.$strict> = z.object({
   access_count: z.number().int().safe().min(0).nullable(),
   category: z.string().nullable(),
   content: z.string().nullable(),
@@ -6428,12 +6428,12 @@ export const MemoryFactRowV1Schema: z.ZodObject<{
 }).strict();
 
 export const MemoryFactsCoverageV1Schema: z.ZodObject<{
-  completeness: z.ZodType<DashboardCoverageCompletenessV1, z.ZodTypeDef, unknown>;
-  eligible: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  examined: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  graph: z.ZodOptional<z.ZodType<FactSearchGraphCoverageV1 | null, z.ZodTypeDef, unknown>>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  completeness: z.ZodType<DashboardCoverageCompletenessV1, unknown>;
+  eligible: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  examined: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  graph: z.ZodOptional<z.ZodType<FactSearchGraphCoverageV1 | null, unknown>>;
+  limit: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   completeness: z.lazy(() => DashboardCoverageCompletenessV1Schema),
   eligible: z.number().int().safe().min(0).nullable().optional(),
   examined: z.number().int().safe().min(0).nullable().optional(),
@@ -6441,20 +6441,20 @@ export const MemoryFactsCoverageV1Schema: z.ZodObject<{
   limit: z.number().int().safe().min(1).max(100),
 }).strict();
 
-export const MemoryFeedbackActionV1Schema: z.ZodEnum<["helpful", "unhelpful"]> = z.enum(["helpful", "unhelpful"]);
+export const MemoryFeedbackActionV1Schema: z.ZodEnum<{ "helpful": "helpful"; "unhelpful": "unhelpful" }> = z.enum(["helpful", "unhelpful"]);
 
 /** How much of a feedback event this store can still account for. Redacted
 detail was withheld; unknown detail was never recorded. */
-export const MemoryFeedbackDetailsAvailabilityV1Schema: z.ZodEnum<["available", "redacted", "unknown"]> = z.enum(["available", "redacted", "unknown"]);
+export const MemoryFeedbackDetailsAvailabilityV1Schema: z.ZodEnum<{ "available": "available"; "redacted": "redacted"; "unknown": "unknown" }> = z.enum(["available", "redacted", "unknown"]);
 
 export const MemoryFeedbackFunnelV1Schema: z.ZodObject<{
-  access_count_total: z.ZodType<number, z.ZodTypeDef, unknown>;
-  feedback_total: z.ZodType<number, z.ZodTypeDef, unknown>;
-  rated_fact_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  retrieval_count_total: z.ZodType<number, z.ZodTypeDef, unknown>;
-  retrieved_fact_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  seen_to_feedback_ratio: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  access_count_total: z.ZodType<number, unknown>;
+  feedback_total: z.ZodType<number, unknown>;
+  rated_fact_count: z.ZodType<number, unknown>;
+  retrieval_count_total: z.ZodType<number, unknown>;
+  retrieved_fact_count: z.ZodType<number, unknown>;
+  seen_to_feedback_ratio: z.ZodType<number | null, unknown>;
+}, z.core.$strict> = z.object({
   access_count_total: z.number().int().safe().min(0),
   feedback_total: z.number().int().safe().min(0),
   rated_fact_count: z.number().int().safe().min(0),
@@ -6464,16 +6464,16 @@ export const MemoryFeedbackFunnelV1Schema: z.ZodObject<{
 }).strict();
 
 export const MemoryGraphEdgeV1Schema: z.ZodObject<{
-  kind: z.ZodType<ProjectMemoryGraphRelationKindV1, z.ZodTypeDef, unknown>;
-  source: z.ZodType<string, z.ZodTypeDef, unknown>;
-  target: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  kind: z.ZodType<ProjectMemoryGraphRelationKindV1, unknown>;
+  source: z.ZodType<string, unknown>;
+  target: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   kind: z.lazy(() => ProjectMemoryGraphRelationKindV1Schema),
   source: z.string(),
   target: z.string(),
 }).strict();
 
-export const MemoryGraphNodeV1Schema: z.ZodType<MemoryGraphNodeV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const MemoryGraphNodeV1Schema: z.ZodType<MemoryGraphNodeV1, unknown> = z.discriminatedUnion("kind", [z.object({
   assertion_id: z.lazy(() => FactAssertionIdSchema),
   fact_id: z.lazy(() => FactIdSchema),
   id: z.string(),
@@ -6504,16 +6504,16 @@ export const MemoryGraphNodeV1Schema: z.ZodType<MemoryGraphNodeV1, z.ZodTypeDef,
 }).strict()]);
 
 export const MemoryGraphPayloadV1Schema: z.ZodObject<{
-  coverage: z.ZodType<DashboardCoverageV1, z.ZodTypeDef, unknown>;
-  edges: z.ZodType<Array<MemoryGraphEdgeV1>, z.ZodTypeDef, unknown>;
-  fact_candidates_examined: z.ZodType<number, z.ZodTypeDef, unknown>;
-  fact_universe_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  nodes: z.ZodType<Array<MemoryGraphNodeV1>, z.ZodTypeDef, unknown>;
-  relation_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  relation_limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  root_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  unavailable_fact_candidates: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  coverage: z.ZodType<DashboardCoverageV1, unknown>;
+  edges: z.ZodType<Array<MemoryGraphEdgeV1>, unknown>;
+  fact_candidates_examined: z.ZodType<number, unknown>;
+  fact_universe_count: z.ZodType<number, unknown>;
+  nodes: z.ZodType<Array<MemoryGraphNodeV1>, unknown>;
+  relation_count: z.ZodType<number, unknown>;
+  relation_limit: z.ZodType<number, unknown>;
+  root_count: z.ZodType<number, unknown>;
+  unavailable_fact_candidates: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   coverage: z.lazy(() => DashboardCoverageV1Schema),
   edges: z.array(z.lazy(() => MemoryGraphEdgeV1Schema)),
   fact_candidates_examined: z.number().int().safe().min(0),
@@ -6526,26 +6526,26 @@ export const MemoryGraphPayloadV1Schema: z.ZodObject<{
 }).strict();
 
 export const MemoryGrowthPointV1Schema: z.ZodObject<{
-  cumulative_facts: z.ZodType<number, z.ZodTypeDef, unknown>;
-  date: z.ZodType<string, z.ZodTypeDef, unknown>;
-  facts: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cumulative_facts: z.ZodType<number, unknown>;
+  date: z.ZodType<string, unknown>;
+  facts: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   cumulative_facts: z.number().int().safe().min(0),
   date: z.string(),
   facts: z.number().int().safe().min(0),
 }).strict();
 
 export const MemoryHolographicPayloadV1Schema: z.ZodObject<{
-  entities: z.ZodType<Array<MemoryEntityRowV1>, z.ZodTypeDef, unknown>;
-  error: z.ZodType<string, z.ZodTypeDef, unknown>;
-  exists: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  facts: z.ZodType<Array<MemoryFactRowV1>, z.ZodTypeDef, unknown>;
-  facts_coverage: z.ZodType<MemoryFactsCoverageV1, z.ZodTypeDef, unknown>;
-  graph: z.ZodType<MemoryGraphPayloadV1, z.ZodTypeDef, unknown>;
-  overview: z.ZodType<MemoryOverviewSummaryV1 | null, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  reads: z.ZodType<Record<string, MemoryReadStatusV1>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  entities: z.ZodType<Array<MemoryEntityRowV1>, unknown>;
+  error: z.ZodType<string, unknown>;
+  exists: z.ZodType<boolean, unknown>;
+  facts: z.ZodType<Array<MemoryFactRowV1>, unknown>;
+  facts_coverage: z.ZodType<MemoryFactsCoverageV1, unknown>;
+  graph: z.ZodType<MemoryGraphPayloadV1, unknown>;
+  overview: z.ZodType<MemoryOverviewSummaryV1 | null, unknown>;
+  path: z.ZodType<string, unknown>;
+  reads: z.ZodType<Record<string, MemoryReadStatusV1>, unknown>;
+}, z.core.$strict> = z.object({
   entities: z.array(z.lazy(() => MemoryEntityRowV1Schema)),
   error: z.string(),
   exists: z.boolean(),
@@ -6554,16 +6554,16 @@ export const MemoryHolographicPayloadV1Schema: z.ZodObject<{
   graph: z.lazy(() => MemoryGraphPayloadV1Schema),
   overview: z.union([z.lazy(() => MemoryOverviewSummaryV1Schema), z.null()]),
   path: z.string(),
-  reads: z.record(z.lazy(() => MemoryReadStatusV1Schema)),
+  reads: z.record(z.string(), z.lazy(() => MemoryReadStatusV1Schema)),
 }).strict();
 
 /** One canonical lineage operation. Operations without a fact target carry no
 `fact_id`; the route does not expose mutation detail. */
 export const MemoryOplogEventV1Schema: z.ZodObject<{
-  fact_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  id: z.ZodType<number, z.ZodTypeDef, unknown>;
-  op: z.ZodType<string, z.ZodTypeDef, unknown>;
-  ts: z.ZodType<number, z.ZodTypeDef, unknown>;
+  fact_id: z.ZodType<string | null, unknown>;
+  id: z.ZodType<number, unknown>;
+  op: z.ZodType<string, unknown>;
+  ts: z.ZodType<number, unknown>;
 }> = z.object({
   fact_id: z.string().nullable(),
   id: z.number().int().safe(),
@@ -6573,12 +6573,12 @@ export const MemoryOplogEventV1Schema: z.ZodObject<{
 
 /** `GET /api/plugins/holographic/oplog`, newest first. */
 export const MemoryOplogPayloadV1Schema: z.ZodObject<{
-  code: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  error: z.ZodType<string, z.ZodTypeDef, unknown>;
-  events: z.ZodType<Array<MemoryOplogEventV1>, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  state: z.ZodOptional<z.ZodType<DashboardDomainStateV1 | null, z.ZodTypeDef, unknown>>;
+  code: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  count: z.ZodType<number, unknown>;
+  error: z.ZodType<string, unknown>;
+  events: z.ZodType<Array<MemoryOplogEventV1>, unknown>;
+  limit: z.ZodType<number, unknown>;
+  state: z.ZodOptional<z.ZodType<DashboardDomainStateV1 | null, unknown>>;
 }> = z.object({
   code: z.string().nullable().optional(),
   count: z.number().int().safe().min(0),
@@ -6589,24 +6589,24 @@ export const MemoryOplogPayloadV1Schema: z.ZodObject<{
 });
 
 export const MemoryOverviewPayloadV1Schema: z.ZodObject<{
-  holographic: z.ZodType<MemoryHolographicPayloadV1, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  providers: z.ZodType<Record<string, unknown>, z.ZodTypeDef, unknown>;
-  query: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  holographic: z.ZodType<MemoryHolographicPayloadV1, unknown>;
+  limit: z.ZodType<number, unknown>;
+  providers: z.ZodType<Record<string, unknown>, unknown>;
+  query: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   holographic: z.lazy(() => MemoryHolographicPayloadV1Schema),
   limit: z.number().int().safe(),
-  providers: z.record(z.unknown()),
+  providers: z.record(z.string(), z.unknown()),
   query: z.string(),
 }).strict();
 
 export const MemoryOverviewSummaryV1Schema: z.ZodObject<{
-  categories: z.ZodType<Array<MemoryCategoryCountV1>, z.ZodTypeDef, unknown>;
-  entities: z.ZodType<number, z.ZodTypeDef, unknown>;
-  facts: z.ZodType<number, z.ZodTypeDef, unknown>;
-  growth: z.ZodType<Array<MemoryGrowthPointV1>, z.ZodTypeDef, unknown>;
-  trust_histogram: z.ZodType<Array<MemoryTrustBucketV1>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  categories: z.ZodType<Array<MemoryCategoryCountV1>, unknown>;
+  entities: z.ZodType<number, unknown>;
+  facts: z.ZodType<number, unknown>;
+  growth: z.ZodType<Array<MemoryGrowthPointV1>, unknown>;
+  trust_histogram: z.ZodType<Array<MemoryTrustBucketV1>, unknown>;
+}, z.core.$strict> = z.object({
   categories: z.array(z.lazy(() => MemoryCategoryCountV1Schema)),
   entities: z.number().int().safe().min(0),
   facts: z.number().int().safe().min(0),
@@ -6614,13 +6614,13 @@ export const MemoryOverviewSummaryV1Schema: z.ZodObject<{
   trust_histogram: z.array(z.lazy(() => MemoryTrustBucketV1Schema)),
 }).strict();
 
-export const MemoryProjectionCompletenessV1Schema: z.ZodEnum<["bounded", "complete", "unknown"]> = z.enum(["bounded", "complete", "unknown"]);
+export const MemoryProjectionCompletenessV1Schema: z.ZodEnum<{ "bounded": "bounded"; "complete": "complete"; "unknown": "unknown" }> = z.enum(["bounded", "complete", "unknown"]);
 
 export const MemoryProjectionCoverageV1Schema: z.ZodObject<{
-  completeness: z.ZodType<MemoryProjectionCompletenessV1, z.ZodTypeDef, unknown>;
-  examined: z.ZodType<number, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  omission_reasons: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
+  completeness: z.ZodType<MemoryProjectionCompletenessV1, unknown>;
+  examined: z.ZodType<number, unknown>;
+  limit: z.ZodType<number, unknown>;
+  omission_reasons: z.ZodType<Array<string>, unknown>;
 }> = z.object({
   completeness: z.lazy(() => MemoryProjectionCompletenessV1Schema),
   examined: z.number().int().safe().min(0),
@@ -6630,20 +6630,20 @@ export const MemoryProjectionCoverageV1Schema: z.ZodObject<{
 
 /** `pca` only when the decomposition succeeded over at least two equal-length
 vectors; every other outcome is `none` and is not a semantic map. */
-export const MemoryProjectionMethodV1Schema: z.ZodEnum<["none", "pca"]> = z.enum(["none", "pca"]);
+export const MemoryProjectionMethodV1Schema: z.ZodEnum<{ "none": "none"; "pca": "pca" }> = z.enum(["none", "pca"]);
 
 /** `GET /api/plugins/holographic/projection`. */
 export const MemoryProjectionPayloadV1Schema: z.ZodObject<{
-  code: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  coverage: z.ZodType<MemoryProjectionCoverageV1, z.ZodTypeDef, unknown>;
-  dim: z.ZodType<number, z.ZodTypeDef, unknown>;
-  error: z.ZodType<string, z.ZodTypeDef, unknown>;
-  exists: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  method: z.ZodType<MemoryProjectionMethodV1, z.ZodTypeDef, unknown>;
-  points: z.ZodType<Array<MemoryProjectionPointV1>, z.ZodTypeDef, unknown>;
-  scan: z.ZodOptional<z.ZodType<MemoryDerivedScanV1 | null, z.ZodTypeDef, unknown>>;
-  state: z.ZodOptional<z.ZodType<DashboardDomainStateV1 | null, z.ZodTypeDef, unknown>>;
+  code: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  coverage: z.ZodType<MemoryProjectionCoverageV1, unknown>;
+  dim: z.ZodType<number, unknown>;
+  error: z.ZodType<string, unknown>;
+  exists: z.ZodType<boolean, unknown>;
+  limit: z.ZodType<number, unknown>;
+  method: z.ZodType<MemoryProjectionMethodV1, unknown>;
+  points: z.ZodType<Array<MemoryProjectionPointV1>, unknown>;
+  scan: z.ZodOptional<z.ZodType<MemoryDerivedScanV1 | null, unknown>>;
+  state: z.ZodOptional<z.ZodType<DashboardDomainStateV1 | null, unknown>>;
 }> = z.object({
   code: z.string().nullable().optional(),
   coverage: z.lazy(() => MemoryProjectionCoverageV1Schema),
@@ -6659,26 +6659,26 @@ export const MemoryProjectionPayloadV1Schema: z.ZodObject<{
 
 /** One projected fact placed in the 2D phase projection. */
 export const MemoryProjectionPointV1Schema: z.ZodObject<{
-  access_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  category: z.ZodType<string, z.ZodTypeDef, unknown>;
-  content: z.ZodType<string, z.ZodTypeDef, unknown>;
-  created_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  entities: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  entity_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  fact_id: z.ZodType<FactId, z.ZodTypeDef, unknown>;
-  helpful_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  last_recalled_at: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  metadata: z.ZodType<unknown, z.ZodTypeDef, unknown>;
-  payload_access: z.ZodType<PayloadAccessState, z.ZodTypeDef, unknown>;
-  projected_as_of: z.ZodType<number, z.ZodTypeDef, unknown>;
-  retrieval_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  source_label: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  tags: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  trust_score: z.ZodType<number, z.ZodTypeDef, unknown>;
-  unhelpful_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  updated_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  x: z.ZodType<number, z.ZodTypeDef, unknown>;
-  y: z.ZodType<number, z.ZodTypeDef, unknown>;
+  access_count: z.ZodType<number, unknown>;
+  category: z.ZodType<string, unknown>;
+  content: z.ZodType<string, unknown>;
+  created_at: z.ZodType<number, unknown>;
+  entities: z.ZodType<Array<string>, unknown>;
+  entity_count: z.ZodType<number, unknown>;
+  fact_id: z.ZodType<FactId, unknown>;
+  helpful_count: z.ZodType<number, unknown>;
+  last_recalled_at: z.ZodType<number | null, unknown>;
+  metadata: z.ZodType<unknown, unknown>;
+  payload_access: z.ZodType<PayloadAccessState, unknown>;
+  projected_as_of: z.ZodType<number, unknown>;
+  retrieval_count: z.ZodType<number, unknown>;
+  source_label: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  tags: z.ZodType<Array<string>, unknown>;
+  trust_score: z.ZodType<number, unknown>;
+  unhelpful_count: z.ZodType<number, unknown>;
+  updated_at: z.ZodType<number, unknown>;
+  x: z.ZodType<number, unknown>;
+  y: z.ZodType<number, unknown>;
 }> = z.object({
   access_count: z.number().int().safe().min(0),
   category: z.string(),
@@ -6703,10 +6703,10 @@ export const MemoryProjectionPointV1Schema: z.ZodObject<{
 });
 
 export const MemoryReadStatusV1Schema: z.ZodObject<{
-  code: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  error: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  state: z.ZodType<DashboardDomainStateV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  code: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  error: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  state: z.ZodType<DashboardDomainStateV1, unknown>;
+}, z.core.$strict> = z.object({
   code: z.string().nullable().optional(),
   error: z.string().nullable().optional(),
   state: z.lazy(() => DashboardDomainStateV1Schema),
@@ -6714,9 +6714,9 @@ export const MemoryReadStatusV1Schema: z.ZodObject<{
 
 /** One fixed-width similarity histogram bin. */
 export const MemoryScoreBinV1Schema: z.ZodObject<{
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  end: z.ZodType<number, z.ZodTypeDef, unknown>;
-  start: z.ZodType<number, z.ZodTypeDef, unknown>;
+  count: z.ZodType<number, unknown>;
+  end: z.ZodType<number, unknown>;
+  start: z.ZodType<number, unknown>;
 }> = z.object({
   count: z.number().int().safe().min(0),
   end: z.number(),
@@ -6726,12 +6726,12 @@ export const MemoryScoreBinV1Schema: z.ZodObject<{
 /** Similarity score distribution over every finite scored pair. Every
 statistic is `None` when no finite pair was scored, never zero. */
 export const MemoryScoreDistributionV1Schema: z.ZodObject<{
-  average_score: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  bin_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  bins: z.ZodType<Array<MemoryScoreBinV1>, z.ZodTypeDef, unknown>;
-  max_score: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  min_score: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  total_pairs: z.ZodType<number, z.ZodTypeDef, unknown>;
+  average_score: z.ZodType<number | null, unknown>;
+  bin_count: z.ZodType<number, unknown>;
+  bins: z.ZodType<Array<MemoryScoreBinV1>, unknown>;
+  max_score: z.ZodType<number | null, unknown>;
+  min_score: z.ZodType<number | null, unknown>;
+  total_pairs: z.ZodType<number, unknown>;
 }> = z.object({
   average_score: z.number().nullable(),
   bin_count: z.number().int().safe().min(0),
@@ -6743,14 +6743,14 @@ export const MemoryScoreDistributionV1Schema: z.ZodObject<{
 
 /** One scored fact pair above the requested similarity floor. */
 export const MemorySimilarityPairV1Schema: z.ZodObject<{
-  a_category: z.ZodType<string, z.ZodTypeDef, unknown>;
-  a_content: z.ZodType<string, z.ZodTypeDef, unknown>;
-  a_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  b_category: z.ZodType<string, z.ZodTypeDef, unknown>;
-  b_content: z.ZodType<string, z.ZodTypeDef, unknown>;
-  b_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  classification: z.ZodType<string, z.ZodTypeDef, unknown>;
-  similarity: z.ZodType<number, z.ZodTypeDef, unknown>;
+  a_category: z.ZodType<string, unknown>;
+  a_content: z.ZodType<string, unknown>;
+  a_id: z.ZodType<string, unknown>;
+  b_category: z.ZodType<string, unknown>;
+  b_content: z.ZodType<string, unknown>;
+  b_id: z.ZodType<string, unknown>;
+  classification: z.ZodType<string, unknown>;
+  similarity: z.ZodType<number, unknown>;
 }> = z.object({
   a_category: z.string(),
   a_content: z.string(),
@@ -6767,18 +6767,18 @@ export const MemorySimilarityPairV1Schema: z.ZodObject<{
 `count` is the number of vectored facts scored, `total_pairs` the finite
 pairs scored before the floor and cap, and `pairs` what survived both. */
 export const MemorySimilarityPayloadV1Schema: z.ZodObject<{
-  code: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  dim: z.ZodType<number, z.ZodTypeDef, unknown>;
-  error: z.ZodType<string, z.ZodTypeDef, unknown>;
-  exists: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  min_similarity: z.ZodType<number, z.ZodTypeDef, unknown>;
-  pairs: z.ZodType<Array<MemorySimilarityPairV1>, z.ZodTypeDef, unknown>;
-  scan: z.ZodOptional<z.ZodType<MemoryDerivedScanV1 | null, z.ZodTypeDef, unknown>>;
-  score_distribution: z.ZodType<MemoryScoreDistributionV1, z.ZodTypeDef, unknown>;
-  state: z.ZodOptional<z.ZodType<DashboardDomainStateV1 | null, z.ZodTypeDef, unknown>>;
-  total_pairs: z.ZodType<number, z.ZodTypeDef, unknown>;
+  code: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  count: z.ZodType<number, unknown>;
+  dim: z.ZodType<number, unknown>;
+  error: z.ZodType<string, unknown>;
+  exists: z.ZodType<boolean, unknown>;
+  limit: z.ZodType<number, unknown>;
+  min_similarity: z.ZodType<number, unknown>;
+  pairs: z.ZodType<Array<MemorySimilarityPairV1>, unknown>;
+  scan: z.ZodOptional<z.ZodType<MemoryDerivedScanV1 | null, unknown>>;
+  score_distribution: z.ZodType<MemoryScoreDistributionV1, unknown>;
+  state: z.ZodOptional<z.ZodType<DashboardDomainStateV1 | null, unknown>>;
+  total_pairs: z.ZodType<number, unknown>;
 }> = z.object({
   code: z.string().nullable().optional(),
   count: z.number().int().safe().min(0),
@@ -6795,11 +6795,11 @@ export const MemorySimilarityPayloadV1Schema: z.ZodObject<{
 });
 
 export const MemoryStatusPayloadV1Schema: z.ZodObject<{
-  error: z.ZodType<string, z.ZodTypeDef, unknown>;
-  exists: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  memory: z.ZodType<MemoryStatusV1, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  error: z.ZodType<string, unknown>;
+  exists: z.ZodType<boolean, unknown>;
+  memory: z.ZodType<MemoryStatusV1, unknown>;
+  path: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   error: z.string(),
   exists: z.boolean(),
   memory: z.lazy(() => MemoryStatusV1Schema),
@@ -6807,18 +6807,18 @@ export const MemoryStatusPayloadV1Schema: z.ZodObject<{
 }).strict();
 
 export const MemoryStatusV1Schema: z.ZodObject<{
-  algebra: z.ZodType<MemoryAlgebraStatusV1, z.ZodTypeDef, unknown>;
-  below_default_recall_threshold_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  entity_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  fact_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  feedback_funnel: z.ZodType<MemoryFeedbackFunnelV1, z.ZodTypeDef, unknown>;
-  helpful_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  trust_025_050_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  trust_050_075_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  trust_075_100_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  trust_0_025_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  unhelpful_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  algebra: z.ZodType<MemoryAlgebraStatusV1, unknown>;
+  below_default_recall_threshold_count: z.ZodType<number, unknown>;
+  entity_count: z.ZodType<number, unknown>;
+  fact_count: z.ZodType<number, unknown>;
+  feedback_funnel: z.ZodType<MemoryFeedbackFunnelV1, unknown>;
+  helpful_count: z.ZodType<number, unknown>;
+  trust_025_050_count: z.ZodType<number, unknown>;
+  trust_050_075_count: z.ZodType<number, unknown>;
+  trust_075_100_count: z.ZodType<number, unknown>;
+  trust_0_025_count: z.ZodType<number, unknown>;
+  unhelpful_count: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   algebra: z.lazy(() => MemoryAlgebraStatusV1Schema),
   below_default_recall_threshold_count: z.number().int().safe().min(0),
   entity_count: z.number().int().safe().min(0),
@@ -6833,21 +6833,21 @@ export const MemoryStatusV1Schema: z.ZodObject<{
 }).strict();
 
 export const MemoryTrustBucketV1Schema: z.ZodObject<{
-  bucket: z.ZodType<number, z.ZodTypeDef, unknown>;
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  label: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  bucket: z.ZodType<number, unknown>;
+  count: z.ZodType<number, unknown>;
+  label: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   bucket: z.number().int().safe().min(0),
   count: z.number().int().safe().min(0),
   label: z.string(),
 }).strict();
 
-export const MemoryTrustHistoryCompletenessV1Schema: z.ZodEnum<["complete", "partial"]> = z.enum(["complete", "partial"]);
+export const MemoryTrustHistoryCompletenessV1Schema: z.ZodEnum<{ "complete": "complete"; "partial": "partial" }> = z.enum(["complete", "partial"]);
 
 export const MemoryTrustHistoryCursorV1Schema: z.ZodObject<{
-  event_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  occurred_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  event_id: z.ZodType<string, unknown>;
+  occurred_at: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   event_id: z.string(),
   occurred_at: z.number().int().safe(),
 }).strict();
@@ -6855,15 +6855,15 @@ export const MemoryTrustHistoryCursorV1Schema: z.ZodObject<{
 /** One append-only feedback event. `source` and `note` are absent when the
 event carried none, which differs from an unknown value. */
 export const MemoryTrustHistoryEventV1Schema: z.ZodObject<{
-  action: z.ZodType<MemoryFeedbackActionV1, z.ZodTypeDef, unknown>;
-  delta: z.ZodType<number, z.ZodTypeDef, unknown>;
-  details_availability: z.ZodType<MemoryFeedbackDetailsAvailabilityV1, z.ZodTypeDef, unknown>;
-  event_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  new_trust: z.ZodType<number, z.ZodTypeDef, unknown>;
-  note: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  old_trust: z.ZodType<number, z.ZodTypeDef, unknown>;
-  source: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  timestamp: z.ZodType<number, z.ZodTypeDef, unknown>;
+  action: z.ZodType<MemoryFeedbackActionV1, unknown>;
+  delta: z.ZodType<number, unknown>;
+  details_availability: z.ZodType<MemoryFeedbackDetailsAvailabilityV1, unknown>;
+  event_id: z.ZodType<string, unknown>;
+  new_trust: z.ZodType<number, unknown>;
+  note: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  old_trust: z.ZodType<number, unknown>;
+  source: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  timestamp: z.ZodType<number, unknown>;
 }> = z.object({
   action: z.lazy(() => MemoryFeedbackActionV1Schema),
   delta: z.number(),
@@ -6879,12 +6879,12 @@ export const MemoryTrustHistoryEventV1Schema: z.ZodObject<{
 /** `GET /api/plugins/holographic/fact/{fact_id}/trust-history`. `partial`
 exactly when `next_after` names the continuation. */
 export const MemoryTrustHistoryPayloadV1Schema: z.ZodObject<{
-  completeness: z.ZodType<MemoryTrustHistoryCompletenessV1, z.ZodTypeDef, unknown>;
-  error: z.ZodType<string, z.ZodTypeDef, unknown>;
-  fact_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  next_after: z.ZodType<MemoryTrustHistoryCursorV1 | null, z.ZodTypeDef, unknown>;
-  trust_history: z.ZodType<Array<MemoryTrustHistoryEventV1>, z.ZodTypeDef, unknown>;
+  completeness: z.ZodType<MemoryTrustHistoryCompletenessV1, unknown>;
+  error: z.ZodType<string, unknown>;
+  fact_id: z.ZodType<string, unknown>;
+  limit: z.ZodType<number, unknown>;
+  next_after: z.ZodType<MemoryTrustHistoryCursorV1 | null, unknown>;
+  trust_history: z.ZodType<Array<MemoryTrustHistoryEventV1>, unknown>;
 }> = z.object({
   completeness: z.lazy(() => MemoryTrustHistoryCompletenessV1Schema),
   error: z.string(),
@@ -6895,11 +6895,11 @@ export const MemoryTrustHistoryPayloadV1Schema: z.ZodObject<{
 });
 
 export const MetricCalibrationV1Schema: z.ZodObject<{
-  calibration_revision: z.ZodType<string, z.ZodTypeDef, unknown>;
-  cohort_revision: z.ZodType<string, z.ZodTypeDef, unknown>;
-  drift_valid: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  estimator_revision: z.ZodType<string, z.ZodTypeDef, unknown>;
-  support: z.ZodType<number, z.ZodTypeDef, unknown>;
+  calibration_revision: z.ZodType<string, unknown>;
+  cohort_revision: z.ZodType<string, unknown>;
+  drift_valid: z.ZodType<boolean, unknown>;
+  estimator_revision: z.ZodType<string, unknown>;
+  support: z.ZodType<number, unknown>;
 }> = z.object({
   calibration_revision: z.string(),
   cohort_revision: z.string(),
@@ -6909,21 +6909,21 @@ export const MetricCalibrationV1Schema: z.ZodObject<{
 });
 
 export const MetricCohortV1Schema: z.ZodObject<{
-  descriptor_revision: z.ZodType<string, z.ZodTypeDef, unknown>;
-  eligible_population: z.ZodType<string, z.ZodTypeDef, unknown>;
+  descriptor_revision: z.ZodType<string, unknown>;
+  eligible_population: z.ZodType<string, unknown>;
 }> = z.object({
   descriptor_revision: z.string(),
   eligible_population: z.string(),
 });
 
 export const MetricCoverageV1Schema: z.ZodObject<{
-  censored: z.ZodType<number, z.ZodTypeDef, unknown>;
-  completed: z.ZodType<number, z.ZodTypeDef, unknown>;
-  eligible: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  excluded: z.ZodType<number, z.ZodTypeDef, unknown>;
-  observed: z.ZodType<number, z.ZodTypeDef, unknown>;
-  state: z.ZodType<CoverageStateV1, z.ZodTypeDef, unknown>;
-  unknown: z.ZodType<number, z.ZodTypeDef, unknown>;
+  censored: z.ZodType<number, unknown>;
+  completed: z.ZodType<number, unknown>;
+  eligible: z.ZodType<number | null, unknown>;
+  excluded: z.ZodType<number, unknown>;
+  observed: z.ZodType<number, unknown>;
+  state: z.ZodType<CoverageStateV1, unknown>;
+  unknown: z.ZodType<number, unknown>;
 }> = z.object({
   censored: z.number().int().safe().min(0),
   completed: z.number().int().safe().min(0),
@@ -6934,13 +6934,13 @@ export const MetricCoverageV1Schema: z.ZodObject<{
   unknown: z.number().int().safe().min(0),
 });
 
-export const MetricEvidenceClassV1Schema: z.ZodEnum<["association", "calibrated_prediction", "measurement"]> = z.enum(["association", "calibrated_prediction", "measurement"]);
+export const MetricEvidenceClassV1Schema: z.ZodEnum<{ "association": "association"; "calibrated_prediction": "calibrated_prediction"; "measurement": "measurement" }> = z.enum(["association", "calibrated_prediction", "measurement"]);
 
 export const MetricProvenanceV1Schema: z.ZodObject<{
-  projector_revision: z.ZodType<string, z.ZodTypeDef, unknown>;
-  source: z.ZodType<MetricSourceV1, z.ZodTypeDef, unknown>;
-  source_revision: z.ZodType<string, z.ZodTypeDef, unknown>;
-  watermark: z.ZodType<string, z.ZodTypeDef, unknown>;
+  projector_revision: z.ZodType<string, unknown>;
+  source: z.ZodType<MetricSourceV1, unknown>;
+  source_revision: z.ZodType<string, unknown>;
+  watermark: z.ZodType<string, unknown>;
 }> = z.object({
   projector_revision: z.string(),
   source: z.lazy(() => MetricSourceV1Schema),
@@ -6948,12 +6948,12 @@ export const MetricProvenanceV1Schema: z.ZodObject<{
   watermark: z.string(),
 });
 
-export const MetricSourceV1Schema: z.ZodEnum<["feedback_observations", "observability_envelope", "provider_usage_observation", "savings_ledger"]> = z.enum(["feedback_observations", "observability_envelope", "provider_usage_observation", "savings_ledger"]);
+export const MetricSourceV1Schema: z.ZodEnum<{ "feedback_observations": "feedback_observations"; "observability_envelope": "observability_envelope"; "provider_usage_observation": "provider_usage_observation"; "savings_ledger": "savings_ledger" }> = z.enum(["feedback_observations", "observability_envelope", "provider_usage_observation", "savings_ledger"]);
 
 export const MetricTemporalV1Schema: z.ZodObject<{
-  baseline_watermark: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  delta: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  horizon: z.ZodType<ObservabilityHorizonV1, z.ZodTypeDef, unknown>;
+  baseline_watermark: z.ZodType<string | null, unknown>;
+  delta: z.ZodType<number | null, unknown>;
+  horizon: z.ZodType<ObservabilityHorizonV1, unknown>;
 }> = z.object({
   baseline_watermark: z.string().nullable(),
   delta: z.number().nullable(),
@@ -6961,9 +6961,9 @@ export const MetricTemporalV1Schema: z.ZodObject<{
 });
 
 export const MetricUncertaintyV1Schema: z.ZodObject<{
-  lower: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  reason: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  upper: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  lower: z.ZodType<number | null, unknown>;
+  reason: z.ZodType<string | null, unknown>;
+  upper: z.ZodType<number | null, unknown>;
 }> = z.object({
   lower: z.number().nullable(),
   reason: z.string().nullable(),
@@ -6971,20 +6971,20 @@ export const MetricUncertaintyV1Schema: z.ZodObject<{
 });
 
 export const MetricValueV1Schema: z.ZodObject<{
-  calibration: z.ZodType<MetricCalibrationV1 | null, z.ZodTypeDef, unknown>;
-  cohort: z.ZodType<MetricCohortV1, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<MetricCoverageV1, z.ZodTypeDef, unknown>;
-  denominator: z.ZodType<string, z.ZodTypeDef, unknown>;
-  denominator_value: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  descriptor_revision: z.ZodType<string, z.ZodTypeDef, unknown>;
-  evidence_class: z.ZodType<MetricEvidenceClassV1, z.ZodTypeDef, unknown>;
-  metric: z.ZodType<string, z.ZodTypeDef, unknown>;
-  provenance: z.ZodType<MetricProvenanceV1, z.ZodTypeDef, unknown>;
-  temporal: z.ZodType<MetricTemporalV1, z.ZodTypeDef, unknown>;
-  unavailable_reason: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  uncertainty: z.ZodType<MetricUncertaintyV1, z.ZodTypeDef, unknown>;
-  unit: z.ZodType<string, z.ZodTypeDef, unknown>;
-  value: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  calibration: z.ZodType<MetricCalibrationV1 | null, unknown>;
+  cohort: z.ZodType<MetricCohortV1, unknown>;
+  coverage: z.ZodType<MetricCoverageV1, unknown>;
+  denominator: z.ZodType<string, unknown>;
+  denominator_value: z.ZodType<number | null, unknown>;
+  descriptor_revision: z.ZodType<string, unknown>;
+  evidence_class: z.ZodType<MetricEvidenceClassV1, unknown>;
+  metric: z.ZodType<string, unknown>;
+  provenance: z.ZodType<MetricProvenanceV1, unknown>;
+  temporal: z.ZodType<MetricTemporalV1, unknown>;
+  unavailable_reason: z.ZodType<string | null, unknown>;
+  uncertainty: z.ZodType<MetricUncertaintyV1, unknown>;
+  unit: z.ZodType<string, unknown>;
+  value: z.ZodType<number | null, unknown>;
 }> = z.object({
   calibration: z.union([z.lazy(() => MetricCalibrationV1Schema), z.null()]),
   cohort: z.lazy(() => MetricCohortV1Schema),
@@ -7003,7 +7003,7 @@ export const MetricValueV1Schema: z.ZodObject<{
 });
 
 /** Capability discovery never infers multi-root support from filesystem paths. */
-export const MultiRootCapabilityV1Schema: z.ZodType<MultiRootCapabilityV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("status", [z.object({
+export const MultiRootCapabilityV1Schema: z.ZodType<MultiRootCapabilityV1, unknown> = z.discriminatedUnion("status", [z.object({
   revision: z.lazy(() => ScopeSetRevisionSchema),
   root_count: z.number().int().min(0),
   scope_set_digest: z.lazy(() => ManifestDigestSchema),
@@ -7016,14 +7016,14 @@ export const MultiRootCapabilityV1Schema: z.ZodType<MultiRootCapabilityV1, z.Zod
 
 /** Frozen continuation identity shared by all participating roots. */
 export const MultiRootContinuationV1Schema: z.ZodObject<{
-  digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  next_page: z.ZodType<number, z.ZodTypeDef, unknown>;
-  order_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  query_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  root_cursors: z.ZodType<Array<RootScopeOutcomeV1_for_Nullable_string>, z.ZodTypeDef, unknown>;
-  root_generations: z.ZodType<Array<RootScopeOutcomeV1_for_Nullable_RootGenerationV1>, z.ZodTypeDef, unknown>;
-  scope_set_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  digest: z.ZodType<ManifestDigest, unknown>;
+  next_page: z.ZodType<number, unknown>;
+  order_digest: z.ZodType<ManifestDigest, unknown>;
+  query_digest: z.ZodType<ManifestDigest, unknown>;
+  root_cursors: z.ZodType<Array<RootScopeOutcomeV1_for_Nullable_string>, unknown>;
+  root_generations: z.ZodType<Array<RootScopeOutcomeV1_for_Nullable_RootGenerationV1>, unknown>;
+  scope_set_digest: z.ZodType<ManifestDigest, unknown>;
+}, z.core.$strict> = z.object({
   digest: z.lazy(() => ManifestDigestSchema),
   next_page: z.number().int().safe().min(1),
   order_digest: z.lazy(() => ManifestDigestSchema),
@@ -7036,13 +7036,13 @@ export const MultiRootContinuationV1Schema: z.ZodObject<{
 /** External federated request bound to one persisted scope-set revision and
 digest. Query/order digests and root generations are server-derived. */
 export const MultiRootExecuteRequestV1Schema: z.ZodObject<{
-  continuation: z.ZodType<MultiRootContinuationV1 | null, z.ZodTypeDef, unknown>;
-  operation: z.ZodType<MultiRootOperationV1, z.ZodTypeDef, unknown>;
-  page: z.ZodType<number, z.ZodTypeDef, unknown>;
-  scope_set_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  scope_set_id: z.ZodType<ScopeSetId, z.ZodTypeDef, unknown>;
-  scope_set_revision: z.ZodType<ScopeSetRevision, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  continuation: z.ZodType<MultiRootContinuationV1 | null, unknown>;
+  operation: z.ZodType<MultiRootOperationV1, unknown>;
+  page: z.ZodType<number, unknown>;
+  scope_set_digest: z.ZodType<ManifestDigest, unknown>;
+  scope_set_id: z.ZodType<ScopeSetId, unknown>;
+  scope_set_revision: z.ZodType<ScopeSetRevision, unknown>;
+}, z.core.$strict> = z.object({
   continuation: z.union([z.lazy(() => MultiRootContinuationV1Schema), z.null()]),
   operation: z.lazy(() => MultiRootOperationV1Schema),
   page: z.number().int().safe().min(0),
@@ -7054,7 +7054,7 @@ export const MultiRootExecuteRequestV1Schema: z.ZodObject<{
 /** Closed federated read families. The family is typed while its existing
 operation-specific request remains the canonical JSON payload owned by that
 application surface. */
-export const MultiRootOperationV1Schema: z.ZodType<MultiRootOperationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const MultiRootOperationV1Schema: z.ZodType<MultiRootOperationV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("feedback"),
   request: z.unknown(),
 }), z.object({
@@ -7073,13 +7073,13 @@ export const MultiRootOperationV1Schema: z.ZodType<MultiRootOperationV1, z.ZodTy
 
 /** Federated page preserving each root outcome and aggregate partial truth. */
 export const MultiRootQueryPageV1_for_AnyValueSchema: z.ZodObject<{
-  aggregate: z.ZodType<ScopeOutcome_for_Array_of_AnyValue, z.ZodTypeDef, unknown>;
-  continuation: z.ZodType<MultiRootContinuationV1 | null, z.ZodTypeDef, unknown>;
-  roots: z.ZodType<Array<RootScopeOutcomeV1_for_Array_of_AnyValue>, z.ZodTypeDef, unknown>;
-  scope_set_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  scope_set_id: z.ZodType<ScopeSetId, z.ZodTypeDef, unknown>;
-  scope_set_revision: z.ZodType<ScopeSetRevision, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  aggregate: z.ZodType<ScopeOutcome_for_Array_of_AnyValue, unknown>;
+  continuation: z.ZodType<MultiRootContinuationV1 | null, unknown>;
+  roots: z.ZodType<Array<RootScopeOutcomeV1_for_Array_of_AnyValue>, unknown>;
+  scope_set_digest: z.ZodType<ManifestDigest, unknown>;
+  scope_set_id: z.ZodType<ScopeSetId, unknown>;
+  scope_set_revision: z.ZodType<ScopeSetRevision, unknown>;
+}, z.core.$strict> = z.object({
   aggregate: z.lazy(() => ScopeOutcome_for_Array_of_AnyValueSchema),
   continuation: z.union([z.lazy(() => MultiRootContinuationV1Schema), z.null()]),
   roots: z.array(z.lazy(() => RootScopeOutcomeV1_for_Array_of_AnyValueSchema)),
@@ -7091,44 +7091,44 @@ export const MultiRootQueryPageV1_for_AnyValueSchema: z.ZodObject<{
 /** Wire-stable projection. The application page already owns every
 continuation and per-root truthfulness invariant, so the API does not
 reconstruct or flatten it. */
-export const MultiRootQueryReadModelV1Schema: z.ZodType<MultiRootQueryPageV1_for_AnyValue, z.ZodTypeDef, unknown> = z.lazy(() => MultiRootQueryPageV1_for_AnyValueSchema);
+export const MultiRootQueryReadModelV1Schema: z.ZodType<MultiRootQueryPageV1_for_AnyValue, unknown> = z.lazy(() => MultiRootQueryPageV1_for_AnyValueSchema);
 
 /** Canonical external selector for creating or updating an authorized scope
 set. Every member names one exact registered root; project-only selection
 cannot silently widen to an active or first-mounted graph. */
 export const MultiRootScopeSetCasRequestV1Schema: z.ZodObject<{
-  expected_revision: z.ZodType<ScopeSetRevision | null, z.ZodTypeDef, unknown>;
-  roots: z.ZodType<Array<RegisteredRootSelectorV1>, z.ZodTypeDef, unknown>;
-  scope_set_id: z.ZodType<ScopeSetId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  expected_revision: z.ZodType<ScopeSetRevision | null, unknown>;
+  roots: z.ZodType<Array<RegisteredRootSelectorV1>, unknown>;
+  scope_set_id: z.ZodType<ScopeSetId, unknown>;
+}, z.core.$strict> = z.object({
   expected_revision: z.union([z.lazy(() => ScopeSetRevisionSchema), z.null()]),
   roots: z.array(z.lazy(() => RegisteredRootSelectorV1Schema)),
   scope_set_id: z.lazy(() => ScopeSetIdSchema),
 }).strict();
 
 export const MultiRootScopeSetCasResultV1Schema: z.ZodObject<{
-  scope_set: z.ZodType<AuthorizedScopeSet | null, z.ZodTypeDef, unknown>;
-  status: z.ZodType<MultiRootScopeSetCasStatusV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  scope_set: z.ZodType<AuthorizedScopeSet | null, unknown>;
+  status: z.ZodType<MultiRootScopeSetCasStatusV1, unknown>;
+}, z.core.$strict> = z.object({
   scope_set: z.union([z.lazy(() => AuthorizedScopeSetSchema), z.null()]),
   status: z.lazy(() => MultiRootScopeSetCasStatusV1Schema),
 }).strict();
 
-export const MultiRootScopeSetCasStatusV1Schema: z.ZodEnum<["applied", "conflict"]> = z.enum(["applied", "conflict"]);
+export const MultiRootScopeSetCasStatusV1Schema: z.ZodEnum<{ "applied": "applied"; "conflict": "conflict" }> = z.enum(["applied", "conflict"]);
 
 export const MultiRootScopeSetReadRequestV1Schema: z.ZodObject<{
-  scope_set_id: z.ZodType<ScopeSetId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  scope_set_id: z.ZodType<ScopeSetId, unknown>;
+}, z.core.$strict> = z.object({
   scope_set_id: z.lazy(() => ScopeSetIdSchema),
 }).strict();
 
 export const NodeRefV1Schema: z.ZodObject<{
-  file_path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<string, z.ZodTypeDef, unknown>;
-  name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  qualified_name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  start_line: z.ZodType<number, z.ZodTypeDef, unknown>;
+  file_path: z.ZodType<string, unknown>;
+  id: z.ZodType<string, unknown>;
+  kind: z.ZodType<string, unknown>;
+  name: z.ZodType<string, unknown>;
+  qualified_name: z.ZodType<string, unknown>;
+  start_line: z.ZodType<number, unknown>;
 }> = z.object({
   file_path: z.string(),
   id: z.string(),
@@ -7139,11 +7139,11 @@ export const NodeRefV1Schema: z.ZodObject<{
 });
 
 export const NodeSessionsMeasurementV1Schema: z.ZodObject<{
-  available_granularities: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  linkage: z.ZodType<LoomFileSessionProjectionV1, z.ZodTypeDef, unknown>;
-  node: z.ZodType<NodeRefV1, z.ZodTypeDef, unknown>;
-  symbol_granularity_available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  symbol_granularity_reason: z.ZodType<string, z.ZodTypeDef, unknown>;
+  available_granularities: z.ZodType<Array<string>, unknown>;
+  linkage: z.ZodType<LoomFileSessionProjectionV1, unknown>;
+  node: z.ZodType<NodeRefV1, unknown>;
+  symbol_granularity_available: z.ZodType<boolean, unknown>;
+  symbol_granularity_reason: z.ZodType<string, unknown>;
 }> = z.object({
   available_granularities: z.array(z.string()),
   linkage: z.lazy(() => LoomFileSessionProjectionV1Schema),
@@ -7153,8 +7153,8 @@ export const NodeSessionsMeasurementV1Schema: z.ZodObject<{
 });
 
 export const ObservabilityHorizonV1Schema: z.ZodObject<{
-  since_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  until_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
+  since_micros: z.ZodType<number, unknown>;
+  until_micros: z.ZodType<number, unknown>;
 }> = z.object({
   since_micros: z.number().int().safe(),
   until_micros: z.number().int().safe(),
@@ -7165,25 +7165,25 @@ export const ObservabilityHorizonV1Schema: z.ZodObject<{
 The session identity is provider-native evidence. The physical file identity
 is represented separately by [`ObservationSourceGenerationV1`]. */
 export const ObservationSourceIdentityV1Schema: z.ZodObject<{
-  provider: z.ZodType<ProviderId, z.ZodTypeDef, unknown>;
-  session_id: z.ZodType<SessionId, z.ZodTypeDef, unknown>;
-  source_key: z.ZodOptional<z.ZodType<SessionId | null, z.ZodTypeDef, unknown>>;
-}, "strict"> = z.object({
+  provider: z.ZodType<ProviderId, unknown>;
+  session_id: z.ZodType<SessionId, unknown>;
+  source_key: z.ZodOptional<z.ZodType<SessionId | null, unknown>>;
+}, z.core.$strict> = z.object({
   provider: z.lazy(() => ProviderIdSchema),
   session_id: z.lazy(() => SessionIdSchema),
   source_key: z.union([z.lazy(() => SessionIdSchema), z.null()]).optional(),
 }).strict();
 
 export const ObservatoryReadModelV1Schema: z.ZodObject<{
-  analytics_mode: z.ZodType<AnalyticsModeReadModelV1, z.ZodTypeDef, unknown>;
-  authorized_scope_ref: z.ZodType<string, z.ZodTypeDef, unknown>;
-  comparison: z.ZodType<PerformanceComparisonReadModelV1, z.ZodTypeDef, unknown>;
-  current: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  horizon: z.ZodType<ObservabilityHorizonV1, z.ZodTypeDef, unknown>;
-  metrics: z.ZodType<Array<MetricValueV1>, z.ZodTypeDef, unknown>;
-  observed_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  rejected_arguments: z.ZodType<RejectedArgumentAnalyticsV1, z.ZodTypeDef, unknown>;
-  watermark: z.ZodType<string, z.ZodTypeDef, unknown>;
+  analytics_mode: z.ZodType<AnalyticsModeReadModelV1, unknown>;
+  authorized_scope_ref: z.ZodType<string, unknown>;
+  comparison: z.ZodType<PerformanceComparisonReadModelV1, unknown>;
+  current: z.ZodType<boolean, unknown>;
+  horizon: z.ZodType<ObservabilityHorizonV1, unknown>;
+  metrics: z.ZodType<Array<MetricValueV1>, unknown>;
+  observed_at_micros: z.ZodType<number, unknown>;
+  rejected_arguments: z.ZodType<RejectedArgumentAnalyticsV1, unknown>;
+  watermark: z.ZodType<string, unknown>;
 }> = z.object({
   analytics_mode: z.lazy(() => AnalyticsModeReadModelV1Schema),
   authorized_scope_ref: z.string(),
@@ -7197,12 +7197,12 @@ export const ObservatoryReadModelV1Schema: z.ZodObject<{
 });
 
 export const PauseWorkRunCommandSchema: z.ZodObject<{
-  expected_authority_version: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  occurred_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  reason: z.ZodType<WorkRunControlReasonV1, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  expected_authority_version: z.ZodType<number | null, unknown>;
+  occurred_at: z.ZodType<UtcMicros, unknown>;
+  reason: z.ZodType<WorkRunControlReasonV1, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   expected_authority_version: z.number().int().safe().min(0).nullable(),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   reason: z.lazy(() => WorkRunControlReasonV1Schema),
@@ -7210,35 +7210,35 @@ export const PauseWorkRunCommandSchema: z.ZodObject<{
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 
-export const PayloadAccessStateSchema: z.ZodEnum<["ambiguous", "deleted", "eligible", "quarantined", "redacted", "retention_expired", "unavailable"]> = z.enum(["ambiguous", "deleted", "eligible", "quarantined", "redacted", "retention_expired", "unavailable"]);
+export const PayloadAccessStateSchema: z.ZodEnum<{ "ambiguous": "ambiguous"; "deleted": "deleted"; "eligible": "eligible"; "quarantined": "quarantined"; "redacted": "redacted"; "retention_expired": "retention_expired"; "unavailable": "unavailable" }> = z.enum(["ambiguous", "deleted", "eligible", "quarantined", "redacted", "retention_expired", "unavailable"]);
 
 /** Strongly typed canonical identity: `PayloadDigestV1`. */
-export const PayloadDigestV1Schema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const PayloadDigestV1Schema: z.ZodType<string, unknown> = z.string();
 
 export const PayloadReferenceV1Schema: z.ZodObject<{
-  byte_len: z.ZodType<number, z.ZodTypeDef, unknown>;
-  digest: z.ZodType<PayloadDigestV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  byte_len: z.ZodType<number, unknown>;
+  digest: z.ZodType<PayloadDigestV1, unknown>;
+}, z.core.$strict> = z.object({
   byte_len: z.number().int().safe().min(0),
   digest: z.lazy(() => PayloadDigestV1Schema),
 }).strict();
 
 export const PerformanceComparisonReadModelV1Schema: z.ZodObject<{
-  baseline_build: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  candidate_build: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  configuration: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  corpus: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<MetricCoverageV1, z.ZodTypeDef, unknown>;
-  disposition: z.ZodType<ComparisonDispositionV1, z.ZodTypeDef, unknown>;
-  eligible_outcomes: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  environment: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  oracle: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  paired_outcomes: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  platform: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  regression_observed: z.ZodType<boolean | null, z.ZodTypeDef, unknown>;
-  rollback_profile: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  unavailable_reason: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  workload: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  baseline_build: z.ZodType<string | null, unknown>;
+  candidate_build: z.ZodType<string | null, unknown>;
+  configuration: z.ZodType<string | null, unknown>;
+  corpus: z.ZodType<string | null, unknown>;
+  coverage: z.ZodType<MetricCoverageV1, unknown>;
+  disposition: z.ZodType<ComparisonDispositionV1, unknown>;
+  eligible_outcomes: z.ZodType<number | null, unknown>;
+  environment: z.ZodType<string | null, unknown>;
+  oracle: z.ZodType<string | null, unknown>;
+  paired_outcomes: z.ZodType<number | null, unknown>;
+  platform: z.ZodType<string | null, unknown>;
+  regression_observed: z.ZodType<boolean | null, unknown>;
+  rollback_profile: z.ZodType<string | null, unknown>;
+  unavailable_reason: z.ZodType<string | null, unknown>;
+  workload: z.ZodType<string | null, unknown>;
 }> = z.object({
   baseline_build: z.string().nullable(),
   candidate_build: z.string().nullable(),
@@ -7261,12 +7261,12 @@ export const PerformanceComparisonReadModelV1Schema: z.ZodObject<{
 
 It represents immutable references only; it is never a path, display
 label, provider account, branch name, or native object identifier. */
-export const PolicyIdentifierV1Schema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const PolicyIdentifierV1Schema: z.ZodType<string, unknown> = z.string();
 
 export const PrAutoTrackEntryV1Schema: z.ZodObject<{
-  branch: z.ZodType<string, z.ZodTypeDef, unknown>;
-  head_branch: z.ZodType<string, z.ZodTypeDef, unknown>;
-  pr: z.ZodType<number, z.ZodTypeDef, unknown>;
+  branch: z.ZodType<string, unknown>;
+  head_branch: z.ZodType<string, unknown>;
+  pr: z.ZodType<number, unknown>;
 }> = z.object({
   branch: z.string(),
   head_branch: z.string(),
@@ -7274,7 +7274,7 @@ export const PrAutoTrackEntryV1Schema: z.ZodObject<{
 });
 
 export const PrAutoTrackPayloadV1Schema: z.ZodObject<{
-  tracked: z.ZodType<Array<PrAutoTrackEntryV1>, z.ZodTypeDef, unknown>;
+  tracked: z.ZodType<Array<PrAutoTrackEntryV1>, unknown>;
 }> = z.object({
   tracked: z.array(z.lazy(() => PrAutoTrackEntryV1Schema)),
 });
@@ -7282,12 +7282,12 @@ export const PrAutoTrackPayloadV1Schema: z.ZodObject<{
 /** Operator judgment before the owning Work authority binds exact current
 generations, relation revision, command identity, and observation time. */
 export const PrepareWorkDuplicateAdjudicationRequestV1Schema: z.ZodObject<{
-  first_attempt: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  quantities: z.ZodType<WorkDuplicateAdjudicationQuantitiesV1, z.ZodTypeDef, unknown>;
-  reason: z.ZodType<string, z.ZodTypeDef, unknown>;
-  second_attempt: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  verdict: z.ZodType<DuplicateEffortKindV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  first_attempt: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  quantities: z.ZodType<WorkDuplicateAdjudicationQuantitiesV1, unknown>;
+  reason: z.ZodType<string, unknown>;
+  second_attempt: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  verdict: z.ZodType<DuplicateEffortKindV1, unknown>;
+}, z.core.$strict> = z.object({
   first_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
   quantities: z.lazy(() => WorkDuplicateAdjudicationQuantitiesV1Schema),
   reason: z.string(),
@@ -7298,11 +7298,11 @@ export const PrepareWorkDuplicateAdjudicationRequestV1Schema: z.ZodObject<{
 /** Read-only preparation input. Authority identities, clocks, and revision
 pins are deliberately absent because the backend owns them. */
 export const PrepareWorkProductMutationRequestV1Schema: z.ZodObject<{
-  causation_event_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  change: z.ZodType<WorkProductChangeDraftV1, z.ZodTypeDef, unknown>;
-  evidence: z.ZodType<Array<WorkProductEventEvidenceV1>, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  causation_event_id: z.ZodType<string | null, unknown>;
+  change: z.ZodType<WorkProductChangeDraftV1, unknown>;
+  evidence: z.ZodType<Array<WorkProductEventEvidenceV1>, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+}, z.core.$strict> = z.object({
   causation_event_id: z.string().nullable(),
   change: z.lazy(() => WorkProductChangeDraftV1Schema),
   evidence: z.array(z.lazy(() => WorkProductEventEvidenceV1Schema)),
@@ -7310,22 +7310,22 @@ export const PrepareWorkProductMutationRequestV1Schema: z.ZodObject<{
 }).strict();
 
 /** Whether the served code generation is known current at serve time. */
-export const PrimitiveFreshnessStateV1Schema: z.ZodEnum<["fresh", "possibly_stale"]> = z.enum(["fresh", "possibly_stale"]);
+export const PrimitiveFreshnessStateV1Schema: z.ZodEnum<{ "fresh": "fresh"; "possibly_stale": "possibly_stale" }> = z.enum(["fresh", "possibly_stale"]);
 
 /** The indexing state behind a `possibly_stale` verdict: the served
 generation, the scheduler's latest sealed generation, its staleness-ladder
 state, and the lanes that answered from an older generation. `summary` is
 the one-line rendering agents read. */
 export const PrimitiveIndexingStateV1Schema: z.ZodObject<{
-  latest_generation: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  parked: z.ZodOptional<z.ZodType<CodeIndexConvergenceParkedV1 | null, z.ZodTypeDef, unknown>>;
-  reason: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  rebuild_in_flight: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  served_generation: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  stale_lanes: z.ZodOptional<z.ZodType<Array<string>, z.ZodTypeDef, unknown>>;
-  staleness_state: z.ZodOptional<z.ZodType<CodeIndexStalenessStateV1 | null, z.ZodTypeDef, unknown>>;
-  summary: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  latest_generation: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  parked: z.ZodOptional<z.ZodType<CodeIndexConvergenceParkedV1 | null, unknown>>;
+  reason: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  rebuild_in_flight: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+  served_generation: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  stale_lanes: z.ZodOptional<z.ZodType<Array<string>, unknown>>;
+  staleness_state: z.ZodOptional<z.ZodType<CodeIndexStalenessStateV1 | null, unknown>>;
+  summary: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   latest_generation: z.string().nullable().optional(),
   parked: z.union([z.lazy(() => CodeIndexConvergenceParkedV1Schema), z.null()]).optional(),
   reason: z.string().nullable().optional(),
@@ -7339,23 +7339,23 @@ export const PrimitiveIndexingStateV1Schema: z.ZodObject<{
 /** Freshness verdict carried by every search and context response. `indexing`
 is present exactly when the state is `possibly_stale`. */
 export const PrimitiveSearchFreshnessV1Schema: z.ZodObject<{
-  indexing: z.ZodOptional<z.ZodType<PrimitiveIndexingStateV1 | null, z.ZodTypeDef, unknown>>;
-  state: z.ZodType<PrimitiveFreshnessStateV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  indexing: z.ZodOptional<z.ZodType<PrimitiveIndexingStateV1 | null, unknown>>;
+  state: z.ZodType<PrimitiveFreshnessStateV1, unknown>;
+}, z.core.$strict> = z.object({
   indexing: z.union([z.lazy(() => PrimitiveIndexingStateV1Schema), z.null()]).optional(),
   state: z.lazy(() => PrimitiveFreshnessStateV1Schema),
 }).strict();
 
 /** Layer that owns resolving the problem rather than merely presenting it. */
-export const ProblemOwningLayerSchema: z.ZodEnum<["adapter", "application", "port", "runtime"]> = z.enum(["adapter", "application", "port", "runtime"]);
+export const ProblemOwningLayerSchema: z.ZodEnum<{ "adapter": "adapter"; "application": "application"; "port": "port"; "runtime": "runtime" }> = z.enum(["adapter", "application", "port", "runtime"]);
 
 /** Whether the problem occurred before admission or is an admitted terminal. */
-export const ProblemTerminalitySchema: z.ZodEnum<["admitted_terminal", "pre_admission"]> = z.enum(["admitted_terminal", "pre_admission"]);
+export const ProblemTerminalitySchema: z.ZodEnum<{ "admitted_terminal": "admitted_terminal"; "pre_admission": "pre_admission" }> = z.enum(["admitted_terminal", "pre_admission"]);
 
 export const ProjectAliasRecordSchema: z.ZodObject<{
-  alias_path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  last_seen_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  alias_path: z.ZodType<string, unknown>;
+  last_seen_at: z.ZodType<number, unknown>;
+  project_id: z.ZodType<string, unknown>;
 }> = z.object({
   alias_path: z.string(),
   last_seen_at: z.number().int().safe(),
@@ -7363,11 +7363,11 @@ export const ProjectAliasRecordSchema: z.ZodObject<{
 });
 
 export const ProjectContextPayloadV1Schema: z.ZodObject<{
-  aliases: z.ZodType<Array<ProjectAliasRecord>, z.ZodTypeDef, unknown>;
-  error: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  is_active: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  project: z.ZodType<PublicCodeProject | null, z.ZodTypeDef, unknown>;
-  status: z.ZodType<string, z.ZodTypeDef, unknown>;
+  aliases: z.ZodType<Array<ProjectAliasRecord>, unknown>;
+  error: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  is_active: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+  project: z.ZodType<PublicCodeProject | null, unknown>;
+  status: z.ZodType<string, unknown>;
 }> = z.object({
   aliases: z.array(z.lazy(() => ProjectAliasRecordSchema)),
   error: z.string().nullable().optional(),
@@ -7377,14 +7377,14 @@ export const ProjectContextPayloadV1Schema: z.ZodObject<{
 });
 
 export const ProjectEditableSettingsV1Schema: z.ZodObject<{
-  context_scout: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  exclude: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  extract_docstrings: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  include: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  max_file_size: z.ZodType<number, z.ZodTypeDef, unknown>;
-  sync: z.ZodType<SyncSettingsV1, z.ZodTypeDef, unknown>;
-  telemetry: z.ZodType<TelemetrySettingsV1, z.ZodTypeDef, unknown>;
-  track_call_sites: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  context_scout: z.ZodType<boolean, unknown>;
+  exclude: z.ZodType<Array<string>, unknown>;
+  extract_docstrings: z.ZodType<boolean, unknown>;
+  include: z.ZodType<Array<string>, unknown>;
+  max_file_size: z.ZodType<number, unknown>;
+  sync: z.ZodType<SyncSettingsV1, unknown>;
+  telemetry: z.ZodType<TelemetrySettingsV1, unknown>;
+  track_call_sites: z.ZodType<boolean, unknown>;
 }> = z.object({
   context_scout: z.boolean(),
   exclude: z.array(z.string()),
@@ -7397,15 +7397,15 @@ export const ProjectEditableSettingsV1Schema: z.ZodObject<{
 });
 
 /** Strongly typed canonical identity: `ProjectId`. */
-export const ProjectIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const ProjectIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Strongly typed canonical identity: `ProjectionGenerationId`. */
-export const ProjectionGenerationIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const ProjectionGenerationIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** The only durable outcomes of an automatic fact apply. Candidate discovery
 and in-flight work are owned by the automation run receipt, never this
 terminal audit record. */
-export const ProjectMemoryAutomaticFactStateV1Schema: z.ZodEnum<["applied", "quarantined"]> = z.enum(["applied", "quarantined"]);
+export const ProjectMemoryAutomaticFactStateV1Schema: z.ZodEnum<{ "applied": "applied"; "quarantined": "quarantined" }> = z.enum(["applied", "quarantined"]);
 
 /** Transport-neutral input accepted before privacy sanitization.
 
@@ -7413,14 +7413,14 @@ Transport adapters own their wire DTOs. This single use-case request owns
 the boundary between unsanitized user intent and the canonical store
 command, so callers cannot accidentally bypass payload sanitization. */
 export const ProjectMemoryFactAddRequestSchema: z.ZodObject<{
-  category: z.ZodType<FactCategoryV1, z.ZodTypeDef, unknown>;
-  content: z.ZodType<string, z.ZodTypeDef, unknown>;
-  entities: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  metadata: z.ZodType<unknown, z.ZodTypeDef, unknown>;
-  source_label: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  tags: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  trust: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  category: z.ZodType<FactCategoryV1, unknown>;
+  content: z.ZodType<string, unknown>;
+  entities: z.ZodType<Array<string>, unknown>;
+  metadata: z.ZodType<unknown, unknown>;
+  source_label: z.ZodType<string | null, unknown>;
+  tags: z.ZodType<Array<string>, unknown>;
+  trust: z.ZodType<number | null, unknown>;
+}, z.core.$strict> = z.object({
   category: z.lazy(() => FactCategoryV1Schema),
   content: z.string(),
   entities: z.array(z.string()),
@@ -7431,22 +7431,22 @@ export const ProjectMemoryFactAddRequestSchema: z.ZodObject<{
 }).strict();
 
 /** The finite relationship vocabulary exposed by the verified project-memory graph. */
-export const ProjectMemoryGraphRelationKindV1Schema: z.ZodEnum<["active_assertion", "contradicts", "derived_from", "evidence_anchor", "mentions", "supersedes", "supports"]> = z.enum(["active_assertion", "contradicts", "derived_from", "evidence_anchor", "mentions", "supersedes", "supports"]);
+export const ProjectMemoryGraphRelationKindV1Schema: z.ZodEnum<{ "active_assertion": "active_assertion"; "contradicts": "contradicts"; "derived_from": "derived_from"; "evidence_anchor": "evidence_anchor"; "mentions": "mentions"; "supersedes": "supersedes"; "supports": "supports" }> = z.enum(["active_assertion", "contradicts", "derived_from", "evidence_anchor", "mentions", "supersedes", "supports"]);
 
 export const ProjectRegistryEntrySchema: z.ZodObject<{
-  alias_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  artifact_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  branches: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  canonical_root: z.ZodType<string, z.ZodTypeDef, unknown>;
-  default_branch: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  head_branch: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  is_active: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  kind: z.ZodType<string, z.ZodTypeDef, unknown>;
-  label: z.ZodType<string, z.ZodTypeDef, unknown>;
-  last_seen_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  project_root: z.ZodType<string, z.ZodTypeDef, unknown>;
-  store_count: z.ZodType<number, z.ZodTypeDef, unknown>;
+  alias_count: z.ZodType<number, unknown>;
+  artifact_count: z.ZodType<number, unknown>;
+  branches: z.ZodType<Array<string>, unknown>;
+  canonical_root: z.ZodType<string, unknown>;
+  default_branch: z.ZodType<string | null, unknown>;
+  head_branch: z.ZodType<string | null, unknown>;
+  is_active: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+  kind: z.ZodType<string, unknown>;
+  label: z.ZodType<string, unknown>;
+  last_seen_at: z.ZodType<number, unknown>;
+  project_id: z.ZodType<string, unknown>;
+  project_root: z.ZodType<string, unknown>;
+  store_count: z.ZodType<number, unknown>;
 }> = z.object({
   alias_count: z.number().int().safe().min(0),
   artifact_count: z.number().int().safe().min(0),
@@ -7464,9 +7464,9 @@ export const ProjectRegistryEntrySchema: z.ZodObject<{
 });
 
 export const ProjectRegistrySummarySchema: z.ZodObject<{
-  project_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  repo_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  project_count: z.ZodType<number, unknown>;
+  repo_count: z.ZodType<number, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
 }> = z.object({
   project_count: z.number().int().safe().min(0),
   repo_count: z.number().int().safe().min(0),
@@ -7474,11 +7474,11 @@ export const ProjectRegistrySummarySchema: z.ZodObject<{
 });
 
 export const ProjectRepoGroupSchema: z.ZodObject<{
-  branches: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  git_common_dir: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  label: z.ZodType<string, z.ZodTypeDef, unknown>;
-  project_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  projects: z.ZodType<Array<ProjectRegistryEntry>, z.ZodTypeDef, unknown>;
+  branches: z.ZodType<Array<string>, unknown>;
+  git_common_dir: z.ZodType<string | null, unknown>;
+  label: z.ZodType<string, unknown>;
+  project_count: z.ZodType<number, unknown>;
+  projects: z.ZodType<Array<ProjectRegistryEntry>, unknown>;
 }> = z.object({
   branches: z.array(z.string()),
   git_common_dir: z.string().nullable(),
@@ -7489,17 +7489,17 @@ export const ProjectRepoGroupSchema: z.ZodObject<{
 
 /** Project-scoped settings patch accepted by `PATCH /api/settings/project`. */
 export const ProjectSettingsPatchSchema: z.ZodObject<{
-  context_scout: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  exclude: z.ZodOptional<z.ZodType<Array<string> | null, z.ZodTypeDef, unknown>>;
-  expected_revision_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  extract_docstrings: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  idempotency_key: z.ZodType<string, z.ZodTypeDef, unknown>;
-  include: z.ZodOptional<z.ZodType<Array<string> | null, z.ZodTypeDef, unknown>>;
-  max_file_size: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  sync: z.ZodOptional<z.ZodType<SyncSettingsPatch | null, z.ZodTypeDef, unknown>>;
-  telemetry: z.ZodOptional<z.ZodType<TelemetrySettingsPatch | null, z.ZodTypeDef, unknown>>;
-  track_call_sites: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-}, "strict"> = z.object({
+  context_scout: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+  exclude: z.ZodOptional<z.ZodType<Array<string> | null, unknown>>;
+  expected_revision_id: z.ZodType<string, unknown>;
+  extract_docstrings: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+  idempotency_key: z.ZodType<string, unknown>;
+  include: z.ZodOptional<z.ZodType<Array<string> | null, unknown>>;
+  max_file_size: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  sync: z.ZodOptional<z.ZodType<SyncSettingsPatch | null, unknown>>;
+  telemetry: z.ZodOptional<z.ZodType<TelemetrySettingsPatch | null, unknown>>;
+  track_call_sites: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+}, z.core.$strict> = z.object({
   context_scout: z.boolean().nullable().optional(),
   exclude: z.array(z.string()).nullable().optional(),
   expected_revision_id: z.string(),
@@ -7513,10 +7513,10 @@ export const ProjectSettingsPatchSchema: z.ZodObject<{
 }).strict();
 
 export const ProjectSettingsPayloadV1Schema: z.ZodObject<{
-  config: z.ZodType<ProjectEditableSettingsV1, z.ZodTypeDef, unknown>;
-  configuration_revision_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  configuration_snapshot_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  pr_autotrack: z.ZodType<PrAutoTrackPayloadV1, z.ZodTypeDef, unknown>;
+  config: z.ZodType<ProjectEditableSettingsV1, unknown>;
+  configuration_revision_id: z.ZodType<string, unknown>;
+  configuration_snapshot_id: z.ZodType<string, unknown>;
+  pr_autotrack: z.ZodType<PrAutoTrackPayloadV1, unknown>;
 }> = z.object({
   config: z.lazy(() => ProjectEditableSettingsV1Schema),
   configuration_revision_id: z.string(),
@@ -7525,15 +7525,15 @@ export const ProjectSettingsPayloadV1Schema: z.ZodObject<{
 });
 
 export const ProjectsPayloadV1Schema: z.ZodObject<{
-  active_project_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  active_project_root: z.ZodType<string, z.ZodTypeDef, unknown>;
-  error: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  project_tree: z.ZodType<Array<ProjectRepoGroup> | null, z.ZodTypeDef, unknown>;
-  projects: z.ZodType<Array<PublicCodeProject> | null, z.ZodTypeDef, unknown>;
-  status: z.ZodType<string, z.ZodTypeDef, unknown>;
-  summary: z.ZodType<ProjectRegistrySummary | null, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean | null, z.ZodTypeDef, unknown>;
+  active_project_id: z.ZodType<string | null, unknown>;
+  active_project_root: z.ZodType<string, unknown>;
+  error: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  limit: z.ZodType<number, unknown>;
+  project_tree: z.ZodType<Array<ProjectRepoGroup> | null, unknown>;
+  projects: z.ZodType<Array<PublicCodeProject> | null, unknown>;
+  status: z.ZodType<string, unknown>;
+  summary: z.ZodType<ProjectRegistrySummary | null, unknown>;
+  truncated: z.ZodType<boolean | null, unknown>;
 }> = z.object({
   active_project_id: z.string().nullable(),
   active_project_root: z.string(),
@@ -7547,19 +7547,19 @@ export const ProjectsPayloadV1Schema: z.ZodObject<{
 });
 
 /** Strongly typed canonical identity: `ProposalId`. */
-export const ProposalIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const ProposalIdSchema: z.ZodType<string, unknown> = z.string();
 
-export const ProtectedRefDispositionV1Schema: z.ZodEnum<["reject", "require_human_approval_and_independent_review"]> = z.enum(["reject", "require_human_approval_and_independent_review"]);
+export const ProtectedRefDispositionV1Schema: z.ZodEnum<{ "reject": "reject"; "require_human_approval_and_independent_review": "require_human_approval_and_independent_review" }> = z.enum(["reject", "require_human_approval_and_independent_review"]);
 
 export const ProtectedRefRuleV1Schema: z.ZodObject<{
-  disposition: z.ZodType<ProtectedRefDispositionV1, z.ZodTypeDef, unknown>;
-  selector: z.ZodType<ProtectedRefSelectorV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  disposition: z.ZodType<ProtectedRefDispositionV1, unknown>;
+  selector: z.ZodType<ProtectedRefSelectorV1, unknown>;
+}, z.core.$strict> = z.object({
   disposition: z.lazy(() => ProtectedRefDispositionV1Schema),
   selector: z.lazy(() => ProtectedRefSelectorV1Schema),
 }).strict();
 
-export const ProtectedRefSelectorV1Schema: z.ZodType<ProtectedRefSelectorV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const ProtectedRefSelectorV1Schema: z.ZodType<ProtectedRefSelectorV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("exact"),
   value: z.lazy(() => CanonicalGitRefNameV1Schema),
 }), z.object({
@@ -7570,10 +7570,10 @@ export const ProtectedRefSelectorV1Schema: z.ZodType<ProtectedRefSelectorV1, z.Z
 })]);
 
 /** Strongly typed canonical identity: `ProvenanceId`. */
-export const ProvenanceIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const ProvenanceIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Strongly typed canonical identity: `ProviderId`. */
-export const ProviderIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const ProviderIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** One provider/model cohort in the Costs latency read model.
 
@@ -7583,15 +7583,15 @@ provenance. Identity provenance is kept separately because latency is
 measured by `OperationResourceObservedV1`, while provider/model identity
 may be joined from an exact `ProviderUsageObservationV1` request/session. */
 export const ProviderLatencyReadModelV1Schema: z.ZodObject<{
-  first_progress: z.ZodType<LatencyDistributionReadModelV1, z.ZodTypeDef, unknown>;
-  identity_provenance: z.ZodType<MetricProvenanceV1, z.ZodTypeDef, unknown>;
-  identity_unavailable_reason: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  model: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  provider: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  queue: z.ZodType<LatencyDistributionReadModelV1, z.ZodTypeDef, unknown>;
-  service: z.ZodType<LatencyDistributionReadModelV1, z.ZodTypeDef, unknown>;
-  start: z.ZodType<LatencyDistributionReadModelV1, z.ZodTypeDef, unknown>;
-  terminal: z.ZodType<LatencyDistributionReadModelV1, z.ZodTypeDef, unknown>;
+  first_progress: z.ZodType<LatencyDistributionReadModelV1, unknown>;
+  identity_provenance: z.ZodType<MetricProvenanceV1, unknown>;
+  identity_unavailable_reason: z.ZodType<string | null, unknown>;
+  model: z.ZodType<string | null, unknown>;
+  provider: z.ZodType<string | null, unknown>;
+  queue: z.ZodType<LatencyDistributionReadModelV1, unknown>;
+  service: z.ZodType<LatencyDistributionReadModelV1, unknown>;
+  start: z.ZodType<LatencyDistributionReadModelV1, unknown>;
+  terminal: z.ZodType<LatencyDistributionReadModelV1, unknown>;
 }> = z.object({
   first_progress: z.lazy(() => LatencyDistributionReadModelV1Schema),
   identity_provenance: z.lazy(() => MetricProvenanceV1Schema),
@@ -7604,14 +7604,14 @@ export const ProviderLatencyReadModelV1Schema: z.ZodObject<{
   terminal: z.lazy(() => LatencyDistributionReadModelV1Schema),
 });
 
-export const ProviderUsageCoverageV1Schema: z.ZodEnum<["complete", "partial", "unavailable"]> = z.enum(["complete", "partial", "unavailable"]);
+export const ProviderUsageCoverageV1Schema: z.ZodEnum<{ "complete": "complete"; "partial": "partial"; "unavailable": "unavailable" }> = z.enum(["complete", "partial", "unavailable"]);
 
 /** Provider-reported usage attributed to one `(provider, session_id)`, summed
 from the reduced deltas of one aggregate. */
 export const ProviderUsageSessionTotalsV1Schema: z.ZodObject<{
-  complete: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  counters: z.ZodType<AggregatedProviderUsageCountersV1, z.ZodTypeDef, unknown>;
-  usage_events: z.ZodType<number, z.ZodTypeDef, unknown>;
+  complete: z.ZodType<boolean, unknown>;
+  counters: z.ZodType<AggregatedProviderUsageCountersV1, unknown>;
+  usage_events: z.ZodType<number, unknown>;
 }> = z.object({
   complete: z.boolean(),
   counters: z.lazy(() => AggregatedProviderUsageCountersV1Schema),
@@ -7619,13 +7619,13 @@ export const ProviderUsageSessionTotalsV1Schema: z.ZodObject<{
 });
 
 export const ProviderUsageSummaryV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  cost_basis: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  error: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  status: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  total_cost_usd: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  total_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  usage_event_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  cost_basis: z.ZodType<string | null, unknown>;
+  error: z.ZodType<string | null, unknown>;
+  status: z.ZodType<string | null, unknown>;
+  total_cost_usd: z.ZodType<number | null, unknown>;
+  total_tokens: z.ZodType<number | null, unknown>;
+  usage_event_count: z.ZodType<number | null, unknown>;
 }> = z.object({
   available: z.boolean(),
   cost_basis: z.string().nullable(),
@@ -7639,33 +7639,33 @@ export const ProviderUsageSummaryV1Schema: z.ZodObject<{
 /** A privacy-scoped code address. It identifies the coarse changed-code shape
 but carries no other actor, session, or private-source content. */
 export const ProximityAddressV1Schema: z.ZodObject<{
-  file: z.ZodType<FileOccurrenceId, z.ZodTypeDef, unknown>;
-  scope: z.ZodType<FeedbackScopeV1, z.ZodTypeDef, unknown>;
-  span: z.ZodType<SourceSpan | null, z.ZodTypeDef, unknown>;
-  symbol: z.ZodType<SymbolOccurrenceId | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  file: z.ZodType<FileOccurrenceId, unknown>;
+  scope: z.ZodType<FeedbackScopeV1, unknown>;
+  span: z.ZodType<SourceSpan | null, unknown>;
+  symbol: z.ZodType<SymbolOccurrenceId | null, unknown>;
+}, z.core.$strict> = z.object({
   file: z.lazy(() => FileOccurrenceIdSchema),
   scope: z.lazy(() => FeedbackScopeV1Schema),
   span: z.union([z.lazy(() => SourceSpanSchema), z.null()]),
   symbol: z.union([z.lazy(() => SymbolOccurrenceIdSchema), z.null()]),
 }).strict();
 
-export const ProximityCoverageV1Schema: z.ZodEnum<["complete", "denied", "partial", "private", "stale", "unavailable"]> = z.enum(["complete", "denied", "partial", "private", "stale", "unavailable"]);
+export const ProximityCoverageV1Schema: z.ZodEnum<{ "complete": "complete"; "denied": "denied"; "partial": "partial"; "private": "private"; "stale": "stale"; "unavailable": "unavailable" }> = z.enum(["complete", "denied", "partial", "private", "stale", "unavailable"]);
 
-export const ProximityWarningClassV1Schema: z.ZodEnum<["incompatible_branch_worktree", "neighborhood", "overlapping_range", "same_crate", "same_file", "same_package", "same_symbol", "shared_caller", "shared_dependency", "shared_test"]> = z.enum(["incompatible_branch_worktree", "neighborhood", "overlapping_range", "same_crate", "same_file", "same_package", "same_symbol", "shared_caller", "shared_dependency", "shared_test"]);
+export const ProximityWarningClassV1Schema: z.ZodEnum<{ "incompatible_branch_worktree": "incompatible_branch_worktree"; "neighborhood": "neighborhood"; "overlapping_range": "overlapping_range"; "same_crate": "same_crate"; "same_file": "same_file"; "same_package": "same_package"; "same_symbol": "same_symbol"; "shared_caller": "shared_caller"; "shared_dependency": "shared_dependency"; "shared_test": "shared_test" }> = z.enum(["incompatible_branch_worktree", "neighborhood", "overlapping_range", "same_crate", "same_file", "same_package", "same_symbol", "shared_caller", "shared_dependency", "shared_test"]);
 
 export const PublicCodeProjectSchema: z.ZodObject<{
-  canonical_root: z.ZodType<string, z.ZodTypeDef, unknown>;
-  created_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  default_branch: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  display_root: z.ZodType<string, z.ZodTypeDef, unknown>;
-  git_common_dir: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  head_branch: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  is_active: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  label: z.ZodType<string, z.ZodTypeDef, unknown>;
-  last_seen_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  project_root: z.ZodType<string, z.ZodTypeDef, unknown>;
+  canonical_root: z.ZodType<string, unknown>;
+  created_at: z.ZodType<number, unknown>;
+  default_branch: z.ZodType<string | null, unknown>;
+  display_root: z.ZodType<string, unknown>;
+  git_common_dir: z.ZodType<string | null, unknown>;
+  head_branch: z.ZodType<string | null, unknown>;
+  is_active: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+  label: z.ZodType<string, unknown>;
+  last_seen_at: z.ZodType<number, unknown>;
+  project_id: z.ZodType<string, unknown>;
+  project_root: z.ZodType<string, unknown>;
 }> = z.object({
   canonical_root: z.string(),
   created_at: z.number().int().safe(),
@@ -7680,30 +7680,30 @@ export const PublicCodeProjectSchema: z.ZodObject<{
   project_root: z.string(),
 });
 
-export const QuantityEvidenceClassV1Schema: z.ZodEnum<["estimated", "locally_measured", "owner_receipt", "unknown"]> = z.enum(["estimated", "locally_measured", "owner_receipt", "unknown"]);
+export const QuantityEvidenceClassV1Schema: z.ZodEnum<{ "estimated": "estimated"; "locally_measured": "locally_measured"; "owner_receipt": "owner_receipt"; "unknown": "unknown" }> = z.enum(["estimated", "locally_measured", "owner_receipt", "unknown"]);
 
 export const RecordWorkHandoffRequestV1Schema: z.ZodObject<{
-  handoff: z.ZodType<WorkHandoffV1, z.ZodTypeDef, unknown>;
-  mutation: z.ZodType<WorkProductMutationIdentityV1, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  handoff: z.ZodType<WorkHandoffV1, unknown>;
+  mutation: z.ZodType<WorkProductMutationIdentityV1, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+}, z.core.$strict> = z.object({
   handoff: z.lazy(() => WorkHandoffV1Schema),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
 }).strict();
 
 /** Strongly typed canonical identity: `RefId`. */
-export const RefIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const RefIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Exact registered root locator retained with an authorized scope.
 
 `canonical_root` is routing evidence for the already-resolved
 [`ResolvedScope`]. It cannot replace or manufacture that scope identity. */
 export const RegisteredRootLocatorV1Schema: z.ZodObject<{
-  canonical_root: z.ZodType<string, z.ZodTypeDef, unknown>;
-  profile: z.ZodType<SharedProfileStoreLocatorV1, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<ProjectId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  canonical_root: z.ZodType<string, unknown>;
+  profile: z.ZodType<SharedProfileStoreLocatorV1, unknown>;
+  project_id: z.ZodType<ProjectId, unknown>;
+}, z.core.$strict> = z.object({
   canonical_root: z.string(),
   profile: z.lazy(() => SharedProfileStoreLocatorV1Schema),
   project_id: z.lazy(() => ProjectIdSchema),
@@ -7711,9 +7711,9 @@ export const RegisteredRootLocatorV1Schema: z.ZodObject<{
 
 /** Exact registered-root selector accepted by scope-set CAS. */
 export const RegisteredRootSelectorV1Schema: z.ZodObject<{
-  project_id: z.ZodType<ProjectId, z.ZodTypeDef, unknown>;
-  root: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  project_id: z.ZodType<ProjectId, unknown>;
+  root: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   project_id: z.lazy(() => ProjectIdSchema),
   root: z.string(),
 }).strict();
@@ -7723,15 +7723,15 @@ export const RegisteredRootSelectorV1Schema: z.ZodObject<{
 Counts may be known while `rejection_rate` stays absent: Plan 26 forbids
 fabricating a rate when the eligible-attempt denominator is unknown. */
 export const RejectedArgumentAnalyticsV1Schema: z.ZodObject<{
-  coverage: z.ZodType<MetricCoverageV1, z.ZodTypeDef, unknown>;
-  eligible_attempts: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  groups: z.ZodType<Array<RejectedArgumentGroupV1>, z.ZodTypeDef, unknown>;
-  projector_revision: z.ZodType<string, z.ZodTypeDef, unknown>;
-  redacted_name_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  rejected_total: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  rejection_rate: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  unavailable_reason: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  watermark: z.ZodType<string, z.ZodTypeDef, unknown>;
+  coverage: z.ZodType<MetricCoverageV1, unknown>;
+  eligible_attempts: z.ZodType<number | null, unknown>;
+  groups: z.ZodType<Array<RejectedArgumentGroupV1>, unknown>;
+  projector_revision: z.ZodType<string, unknown>;
+  redacted_name_count: z.ZodType<number, unknown>;
+  rejected_total: z.ZodType<number | null, unknown>;
+  rejection_rate: z.ZodType<number | null, unknown>;
+  unavailable_reason: z.ZodType<string | null, unknown>;
+  watermark: z.ZodType<string, unknown>;
 }> = z.object({
   coverage: z.lazy(() => MetricCoverageV1Schema),
   eligible_attempts: z.number().int().safe().min(0).nullable(),
@@ -7745,16 +7745,16 @@ export const RejectedArgumentAnalyticsV1Schema: z.ZodObject<{
 });
 
 /** Closed error class for a rejected surface argument. */
-export const RejectedArgumentErrorClassV1Schema: z.ZodEnum<["invalid_shape", "missing", "out_of_bounds", "stale", "unauthorized", "unknown", "unsupported"]> = z.enum(["invalid_shape", "missing", "out_of_bounds", "stale", "unauthorized", "unknown", "unsupported"]);
+export const RejectedArgumentErrorClassV1Schema: z.ZodEnum<{ "invalid_shape": "invalid_shape"; "missing": "missing"; "out_of_bounds": "out_of_bounds"; "stale": "stale"; "unauthorized": "unauthorized"; "unknown": "unknown"; "unsupported": "unsupported" }> = z.enum(["invalid_shape", "missing", "out_of_bounds", "stale", "unauthorized", "unknown", "unsupported"]);
 
 /** One surface × operation × argument × error-class cell in the rejected-argument view. */
 export const RejectedArgumentGroupV1Schema: z.ZodObject<{
-  argument: z.ZodType<RejectedArgumentNameV1, z.ZodTypeDef, unknown>;
-  count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  error_class: z.ZodType<RejectedArgumentErrorClassV1, z.ZodTypeDef, unknown>;
-  operation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  rate: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  surface: z.ZodType<RejectedArgumentSurfaceV1, z.ZodTypeDef, unknown>;
+  argument: z.ZodType<RejectedArgumentNameV1, unknown>;
+  count: z.ZodType<number, unknown>;
+  error_class: z.ZodType<RejectedArgumentErrorClassV1, unknown>;
+  operation: z.ZodType<string, unknown>;
+  rate: z.ZodType<number | null, unknown>;
+  surface: z.ZodType<RejectedArgumentSurfaceV1, unknown>;
 }> = z.object({
   argument: z.lazy(() => RejectedArgumentNameV1Schema),
   count: z.number().int().safe().min(0),
@@ -7766,27 +7766,27 @@ export const RejectedArgumentGroupV1Schema: z.ZodObject<{
 
 /** Normalized rejected-argument name. Raw flags, values, and tokens never
 enter this vocabulary. */
-export const RejectedArgumentNameV1Schema: z.ZodEnum<["lifecycle", "operation", "pagination", "request_body", "request_handle", "unknown"]> = z.enum(["lifecycle", "operation", "pagination", "request_body", "request_handle", "unknown"]);
+export const RejectedArgumentNameV1Schema: z.ZodEnum<{ "lifecycle": "lifecycle"; "operation": "operation"; "pagination": "pagination"; "request_body": "request_body"; "request_handle": "request_handle"; "unknown": "unknown" }> = z.enum(["lifecycle", "operation", "pagination", "request_body", "request_handle", "unknown"]);
 
 /** Transport that rejected a surface argument. Unknown preserves missing
 attribution instead of inventing cli/mcp/http. */
-export const RejectedArgumentSurfaceV1Schema: z.ZodEnum<["cli", "http", "mcp", "unknown"]> = z.enum(["cli", "http", "mcp", "unknown"]);
+export const RejectedArgumentSurfaceV1Schema: z.ZodEnum<{ "cli": "cli"; "http": "http"; "mcp": "mcp"; "unknown": "unknown" }> = z.enum(["cli", "http", "mcp", "unknown"]);
 
 export const ReleaseWorkPlacementCommandSchema: z.ZodObject<{
-  expected_authority_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  occurred_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  expected_authority_version: z.ZodType<number, unknown>;
+  occurred_at: z.ZodType<UtcMicros, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   expected_authority_version: z.number().int().safe().min(0),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   run_id: z.lazy(() => RunIdSchema),
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 
-export const RemoteAuthorityMissingReasonV1Schema: z.ZodEnum<["authority_authentication_failed", "authority_unreachable", "caller_authentication_failed", "enrollment_expired", "enrollment_revoked", "fence_unverified", "insufficient_capability", "placement_unknown", "protocol_incompatible", "registry_unavailable", "scope_mismatch", "writer_authority_unpublished"]> = z.enum(["authority_authentication_failed", "authority_unreachable", "caller_authentication_failed", "enrollment_expired", "enrollment_revoked", "fence_unverified", "insufficient_capability", "placement_unknown", "protocol_incompatible", "registry_unavailable", "scope_mismatch", "writer_authority_unpublished"]);
+export const RemoteAuthorityMissingReasonV1Schema: z.ZodEnum<{ "authority_authentication_failed": "authority_authentication_failed"; "authority_unreachable": "authority_unreachable"; "caller_authentication_failed": "caller_authentication_failed"; "enrollment_expired": "enrollment_expired"; "enrollment_revoked": "enrollment_revoked"; "fence_unverified": "fence_unverified"; "insufficient_capability": "insufficient_capability"; "placement_unknown": "placement_unknown"; "protocol_incompatible": "protocol_incompatible"; "registry_unavailable": "registry_unavailable"; "scope_mismatch": "scope_mismatch"; "writer_authority_unpublished": "writer_authority_unpublished" }> = z.enum(["authority_authentication_failed", "authority_unreachable", "caller_authentication_failed", "enrollment_expired", "enrollment_revoked", "fence_unverified", "insufficient_capability", "placement_unknown", "protocol_incompatible", "registry_unavailable", "scope_mismatch", "writer_authority_unpublished"]);
 
-export const RemoteAuthoritySummaryV1Schema: z.ZodType<RemoteAuthoritySummaryV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const RemoteAuthoritySummaryV1Schema: z.ZodType<RemoteAuthoritySummaryV1, unknown> = z.discriminatedUnion("state", [z.object({
   fence: z.lazy(() => RemoteFenceSummaryV1Schema),
   state: z.literal("available"),
 }), z.object({
@@ -7799,12 +7799,12 @@ export const RemoteAuthoritySummaryV1Schema: z.ZodType<RemoteAuthoritySummaryV1,
 })]);
 
 export const RemoteFenceSummaryV1Schema: z.ZodObject<{
-  authority_epoch: z.ZodType<number, z.ZodTypeDef, unknown>;
-  authority_node_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  brain_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  generation_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  placement_revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-  shard_id: z.ZodType<string, z.ZodTypeDef, unknown>;
+  authority_epoch: z.ZodType<number, unknown>;
+  authority_node_id: z.ZodType<string, unknown>;
+  brain_id: z.ZodType<string, unknown>;
+  generation_id: z.ZodType<string, unknown>;
+  placement_revision: z.ZodType<number, unknown>;
+  shard_id: z.ZodType<string, unknown>;
 }> = z.object({
   authority_epoch: z.number().int().safe().min(0),
   authority_node_id: z.string(),
@@ -7814,10 +7814,10 @@ export const RemoteFenceSummaryV1Schema: z.ZodObject<{
   shard_id: z.string(),
 });
 
-export const RemoteListenerKindV1Schema: z.ZodEnum<["degraded", "disabled", "serving"]> = z.enum(["degraded", "disabled", "serving"]);
+export const RemoteListenerKindV1Schema: z.ZodEnum<{ "degraded": "degraded"; "disabled": "disabled"; "serving": "serving" }> = z.enum(["degraded", "disabled", "serving"]);
 
 /** Dashboard wire DTO for the Remote Brain operational plane. */
-export const RemoteOperationalStatusPayloadV1Schema: z.ZodType<RemoteOperationalStatusPayloadV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const RemoteOperationalStatusPayloadV1Schema: z.ZodType<RemoteOperationalStatusPayloadV1, unknown> = z.discriminatedUnion("kind", [z.object({
   authority: z.lazy(() => RemoteAuthoritySummaryV1Schema),
   coverage: z.lazy(() => DoctorCoverageCompletenessV1Schema),
   enrollment_configured: z.boolean(),
@@ -7836,12 +7836,12 @@ export const RemoteOperationalStatusPayloadV1Schema: z.ZodType<RemoteOperational
   kind: z.literal("unconfigured"),
 })]);
 
-export const RemoteReadinessKindV1Schema: z.ZodEnum<["partial", "ready", "recovery_required", "unconfigured"]> = z.enum(["partial", "ready", "recovery_required", "unconfigured"]);
+export const RemoteReadinessKindV1Schema: z.ZodEnum<{ "partial": "partial"; "ready": "ready"; "recovery_required": "recovery_required"; "unconfigured": "unconfigured" }> = z.enum(["partial", "ready", "recovery_required", "unconfigured"]);
 
 export const RemoteSpoolSummaryV1Schema: z.ZodObject<{
-  has_sequence_gap: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  pending_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  quarantined_count: z.ZodType<number, z.ZodTypeDef, unknown>;
+  has_sequence_gap: z.ZodType<boolean, unknown>;
+  pending_count: z.ZodType<number, unknown>;
+  quarantined_count: z.ZodType<number, unknown>;
 }> = z.object({
   has_sequence_gap: z.boolean(),
   pending_count: z.number().int().safe().min(0),
@@ -7849,9 +7849,9 @@ export const RemoteSpoolSummaryV1Schema: z.ZodObject<{
 });
 
 /** Strongly typed canonical identity: `RepositoryId`. */
-export const RepositoryIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const RepositoryIdSchema: z.ZodType<string, unknown> = z.string();
 
-export const RepositoryPlacementScopeV1Schema: z.ZodType<RepositoryPlacementScopeV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const RepositoryPlacementScopeV1Schema: z.ZodType<RepositoryPlacementScopeV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("all_authorized"),
 }), z.object({
   kind: z.literal("allowlist"),
@@ -7861,13 +7861,13 @@ export const RepositoryPlacementScopeV1Schema: z.ZodType<RepositoryPlacementScop
 /** What one request cost the stores that answered it, counted on its read
 lease, so an operator can see why a call was slow. */
 export const RequestCostReceiptV1Schema: z.ZodObject<{
-  adjacency_queries: z.ZodType<number, z.ZodTypeDef, unknown>;
-  adjacency_rows: z.ZodType<number, z.ZodTypeDef, unknown>;
-  bytes_hydrated: z.ZodType<number, z.ZodTypeDef, unknown>;
-  catalog_symbols: z.ZodType<number, z.ZodTypeDef, unknown>;
-  point_reads: z.ZodType<StorePointReadsV1, z.ZodTypeDef, unknown>;
-  wall_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  adjacency_queries: z.ZodType<number, unknown>;
+  adjacency_rows: z.ZodType<number, unknown>;
+  bytes_hydrated: z.ZodType<number, unknown>;
+  catalog_symbols: z.ZodType<number, unknown>;
+  point_reads: z.ZodType<StorePointReadsV1, unknown>;
+  wall_micros: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   adjacency_queries: z.number().int().safe().min(0),
   adjacency_rows: z.number().int().safe().min(0),
   bytes_hydrated: z.number().int().safe().min(0),
@@ -7879,10 +7879,10 @@ export const RequestCostReceiptV1Schema: z.ZodObject<{
 export const RequiredCheckExpectationV1Schema: z.ZodLiteral<"successful_terminal"> = z.literal("successful_terminal");
 
 export const RequiredCheckV1Schema: z.ZodObject<{
-  capability_id: z.ZodType<CapabilityId, z.ZodTypeDef, unknown>;
-  expectation: z.ZodType<RequiredCheckExpectationV1, z.ZodTypeDef, unknown>;
-  maximum_age_seconds: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  capability_id: z.ZodType<CapabilityId, unknown>;
+  expectation: z.ZodType<RequiredCheckExpectationV1, unknown>;
+  maximum_age_seconds: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   capability_id: z.lazy(() => CapabilityIdSchema),
   expectation: z.lazy(() => RequiredCheckExpectationV1Schema),
   maximum_age_seconds: z.number().int().min(1),
@@ -7891,38 +7891,38 @@ export const RequiredCheckV1Schema: z.ZodObject<{
 /** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
 from an omitted field. New terminal-state fields must be present on every
 record so a missing committed receipt cannot be mistaken for `None`. */
-export const RequiredNullableSchema: z.ZodType<ApplicationProblemDetailV1 | null, z.ZodTypeDef, unknown> = z.union([z.lazy(() => ApplicationProblemDetailV1Schema), z.null()]);
+export const RequiredNullableSchema: z.ZodType<ApplicationProblemDetailV1 | null, unknown> = z.union([z.lazy(() => ApplicationProblemDetailV1Schema), z.null()]);
 
 /** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
 from an omitted field. New terminal-state fields must be present on every
 record so a missing committed receipt cannot be mistaken for `None`. */
-export const RequiredNullable2Schema: z.ZodType<EffectReceipt | null, z.ZodTypeDef, unknown> = z.union([z.lazy(() => EffectReceiptSchema), z.null()]);
+export const RequiredNullable2Schema: z.ZodType<EffectReceipt | null, unknown> = z.union([z.lazy(() => EffectReceiptSchema), z.null()]);
 
 /** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
 from an omitted field. New terminal-state fields must be present on every
 record so a missing committed receipt cannot be mistaken for `None`. */
-export const RequiredNullable3Schema: z.ZodType<CancellationStage | null, z.ZodTypeDef, unknown> = z.union([z.lazy(() => CancellationStageSchema), z.null()]);
+export const RequiredNullable3Schema: z.ZodType<CancellationStage | null, unknown> = z.union([z.lazy(() => CancellationStageSchema), z.null()]);
 
 /** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
 from an omitted field. New terminal-state fields must be present on every
 record so a missing committed receipt cannot be mistaken for `None`. */
-export const RequiredNullable4Schema: z.ZodType<ApplicationUnavailableClassV1 | null, z.ZodTypeDef, unknown> = z.union([z.lazy(() => ApplicationUnavailableClassV1Schema), z.null()]);
+export const RequiredNullable4Schema: z.ZodType<ApplicationUnavailableClassV1 | null, unknown> = z.union([z.lazy(() => ApplicationUnavailableClassV1Schema), z.null()]);
 
 /** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
 from an omitted field. New terminal-state fields must be present on every
 record so a missing committed receipt cannot be mistaken for `None`. */
-export const RequiredNullable5Schema: z.ZodType<ApplicationExecutionFailureClassV1 | null, z.ZodTypeDef, unknown> = z.union([z.lazy(() => ApplicationExecutionFailureClassV1Schema), z.null()]);
+export const RequiredNullable5Schema: z.ZodType<ApplicationExecutionFailureClassV1 | null, unknown> = z.union([z.lazy(() => ApplicationExecutionFailureClassV1Schema), z.null()]);
 
 /** The resolved configuration scope is one exact project/repository/worktree root.
 
 Paths, CWDs, labels, and mutable branch spellings are deliberately absent. */
 export const ResolvedScopeSchema: z.ZodObject<{
-  project_id: z.ZodType<ProjectId, z.ZodTypeDef, unknown>;
-  reference: z.ZodType<RefId | null, z.ZodTypeDef, unknown>;
-  repository_id: z.ZodType<RepositoryId, z.ZodTypeDef, unknown>;
-  scope_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  worktree_id: z.ZodType<WorktreeId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  project_id: z.ZodType<ProjectId, unknown>;
+  reference: z.ZodType<RefId | null, unknown>;
+  repository_id: z.ZodType<RepositoryId, unknown>;
+  scope_digest: z.ZodType<ManifestDigest, unknown>;
+  worktree_id: z.ZodType<WorktreeId, unknown>;
+}, z.core.$strict> = z.object({
   project_id: z.lazy(() => ProjectIdSchema),
   reference: z.union([z.lazy(() => RefIdSchema), z.null()]),
   repository_id: z.lazy(() => RepositoryIdSchema),
@@ -7932,26 +7932,26 @@ export const ResolvedScopeSchema: z.ZodObject<{
 
 /** Versioned schema identity for an application result contract. */
 export const ResultContractRefSchema: z.ZodObject<{
-  schema_id: z.ZodType<SchemaId, z.ZodTypeDef, unknown>;
-  schema_revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  schema_id: z.ZodType<SchemaId, unknown>;
+  schema_revision: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   schema_id: z.lazy(() => SchemaIdSchema),
   schema_revision: z.number().int().min(0),
 }).strict();
 
 export const ResumeWorkAttemptsCommandSchema: z.ZodObject<{
-  occurred_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  occurred_at: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   occurred_at: z.lazy(() => UtcMicrosSchema),
 }).strict();
 
 export const ResumeWorkRunCommandSchema: z.ZodObject<{
-  expected_authority_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  occurred_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  reason: z.ZodType<WorkRunControlReasonV1, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  expected_authority_version: z.ZodType<number, unknown>;
+  occurred_at: z.ZodType<UtcMicros, unknown>;
+  reason: z.ZodType<WorkRunControlReasonV1, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   expected_authority_version: z.number().int().safe().min(0),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   reason: z.lazy(() => WorkRunControlReasonV1Schema),
@@ -7960,27 +7960,27 @@ export const ResumeWorkRunCommandSchema: z.ZodObject<{
 }).strict();
 
 /** Strongly typed canonical identity: `RetrievalAnchorId`. */
-export const RetrievalAnchorIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const RetrievalAnchorIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Safe adapter-independent retry instruction. Adapters preserve it verbatim. */
-export const RetryDirectiveSchema: z.ZodEnum<["after_delay", "after_reconcile", "after_revalidate", "never", "same_request"]> = z.enum(["after_delay", "after_reconcile", "after_revalidate", "never", "same_request"]);
+export const RetryDirectiveSchema: z.ZodEnum<{ "after_delay": "after_delay"; "after_reconcile": "after_reconcile"; "after_revalidate": "after_revalidate"; "never": "never"; "same_request": "same_request" }> = z.enum(["after_delay", "after_reconcile", "after_revalidate", "never", "same_request"]);
 
 /** Request identity boundary within which a retry remains valid. */
-export const RetryScopeSchema: z.ZodEnum<["fresh_request", "same_operation", "same_request"]> = z.enum(["fresh_request", "same_operation", "same_request"]);
+export const RetryScopeSchema: z.ZodEnum<{ "fresh_request": "fresh_request"; "same_operation": "same_operation"; "same_request": "same_request" }> = z.enum(["fresh_request", "same_operation", "same_request"]);
 
 export const RetryWorkAttemptCommandV1Schema: z.ZodObject<{
-  command_id: z.ZodType<WorkCommandId, z.ZodTypeDef, unknown>;
-  failure: z.ZodType<WorkRetryFailureSelectorV1, z.ZodTypeDef, unknown>;
-  new_attempt_id: z.ZodType<AttemptId, z.ZodTypeDef, unknown>;
-  original_attempt: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  command_id: z.ZodType<WorkCommandId, unknown>;
+  failure: z.ZodType<WorkRetryFailureSelectorV1, unknown>;
+  new_attempt_id: z.ZodType<AttemptId, unknown>;
+  original_attempt: z.ZodType<WorkAttemptIdentityV1, unknown>;
+}, z.core.$strict> = z.object({
   command_id: z.lazy(() => WorkCommandIdSchema),
   failure: z.lazy(() => WorkRetryFailureSelectorV1Schema),
   new_attempt_id: z.lazy(() => AttemptIdSchema),
   original_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
 }).strict();
 
-export const ReviewRequirementV1Schema: z.ZodType<ReviewRequirementV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const ReviewRequirementV1Schema: z.ZodType<ReviewRequirementV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("code_owner_and_independent_review"),
 }), z.object({
   count: z.number().int().min(1).max(65535),
@@ -7989,12 +7989,12 @@ export const ReviewRequirementV1Schema: z.ZodType<ReviewRequirementV1, z.ZodType
   kind: z.literal("none"),
 })]);
 
-export const ReviewTopologyKindV1Schema: z.ZodEnum<["git_hub_stacked_pull_requests", "independent_review", "no_review", "standard_pull_requests"]> = z.enum(["git_hub_stacked_pull_requests", "independent_review", "no_review", "standard_pull_requests"]);
+export const ReviewTopologyKindV1Schema: z.ZodEnum<{ "git_hub_stacked_pull_requests": "git_hub_stacked_pull_requests"; "independent_review": "independent_review"; "no_review": "no_review"; "standard_pull_requests": "standard_pull_requests" }> = z.enum(["git_hub_stacked_pull_requests", "independent_review", "no_review", "standard_pull_requests"]);
 
 export const ReviewTopologyPolicyV1Schema: z.ZodObject<{
-  allowed: z.ZodType<Array<ReviewTopologyKindV1>, z.ZodTypeDef, unknown>;
-  github_stacked_prs: z.ZodType<GitHubStackedPullRequestPolicyV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  allowed: z.ZodType<Array<ReviewTopologyKindV1>, unknown>;
+  github_stacked_prs: z.ZodType<GitHubStackedPullRequestPolicyV1, unknown>;
+}, z.core.$strict> = z.object({
   allowed: z.array(z.lazy(() => ReviewTopologyKindV1Schema)),
   github_stacked_prs: z.lazy(() => GitHubStackedPullRequestPolicyV1Schema),
 }).strict();
@@ -8002,30 +8002,30 @@ export const ReviewTopologyPolicyV1Schema: z.ZodObject<{
 /** The only non-accepting dispositions the proposal-review operation can
 commit. The broader decision request remains available to the graph
 mutation operation, which owns all decision forms. */
-export const ReviewWorkProposalDispositionV1Schema: z.ZodEnum<["rejected", "superseded"]> = z.enum(["rejected", "superseded"]);
+export const ReviewWorkProposalDispositionV1Schema: z.ZodEnum<{ "rejected": "rejected"; "superseded": "superseded" }> = z.enum(["rejected", "superseded"]);
 
 export const ReviewWorkProposalRequestV1Schema: z.ZodObject<{
-  disposition: z.ZodType<ReviewWorkProposalDispositionV1, z.ZodTypeDef, unknown>;
-  mutation: z.ZodType<WorkProductMutationIdentityV1, z.ZodTypeDef, unknown>;
-  proposal: z.ZodType<WorkProposalV1, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  disposition: z.ZodType<ReviewWorkProposalDispositionV1, unknown>;
+  mutation: z.ZodType<WorkProductMutationIdentityV1, unknown>;
+  proposal: z.ZodType<WorkProposalV1, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+}, z.core.$strict> = z.object({
   disposition: z.lazy(() => ReviewWorkProposalDispositionV1Schema),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   proposal: z.lazy(() => WorkProposalV1Schema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
 }).strict();
 
-export const RevisionPairChangeV1Schema: z.ZodEnum<["added", "changed", "removed", "unchanged"]> = z.enum(["added", "changed", "removed", "unchanged"]);
+export const RevisionPairChangeV1Schema: z.ZodEnum<{ "added": "added"; "changed": "changed"; "removed": "removed"; "unchanged": "unchanged" }> = z.enum(["added", "changed", "removed", "unchanged"]);
 
-export const RevisionPairFileDispositionV1Schema: z.ZodEnum<["binary", "deleted", "generated", "ignored", "present", "renamed", "unsupported_language"]> = z.enum(["binary", "deleted", "generated", "ignored", "present", "renamed", "unsupported_language"]);
+export const RevisionPairFileDispositionV1Schema: z.ZodEnum<{ "binary": "binary"; "deleted": "deleted"; "generated": "generated"; "ignored": "ignored"; "present": "present"; "renamed": "renamed"; "unsupported_language": "unsupported_language" }> = z.enum(["binary", "deleted", "generated", "ignored", "present", "renamed", "unsupported_language"]);
 
 export const RevisionPairFileRegionV1Schema: z.ZodObject<{
-  base: z.ZodType<RevisionPairFileV1 | null, z.ZodTypeDef, unknown>;
-  change: z.ZodType<RevisionPairChangeV1, z.ZodTypeDef, unknown>;
-  file_identity: z.ZodType<string, z.ZodTypeDef, unknown>;
-  head: z.ZodType<RevisionPairFileV1 | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  base: z.ZodType<RevisionPairFileV1 | null, unknown>;
+  change: z.ZodType<RevisionPairChangeV1, unknown>;
+  file_identity: z.ZodType<string, unknown>;
+  head: z.ZodType<RevisionPairFileV1 | null, unknown>;
+}, z.core.$strict> = z.object({
   base: z.union([z.lazy(() => RevisionPairFileV1Schema), z.null()]),
   change: z.lazy(() => RevisionPairChangeV1Schema),
   file_identity: z.string(),
@@ -8033,12 +8033,12 @@ export const RevisionPairFileRegionV1Schema: z.ZodObject<{
 }).strict();
 
 export const RevisionPairFileV1Schema: z.ZodObject<{
-  content_digest: z.ZodType<ContentDigest, z.ZodTypeDef, unknown>;
-  disposition: z.ZodType<RevisionPairFileDispositionV1, z.ZodTypeDef, unknown>;
-  file_occurrence_id: z.ZodType<FileOccurrenceId, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  symbol_identities: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  content_digest: z.ZodType<ContentDigest, unknown>;
+  disposition: z.ZodType<RevisionPairFileDispositionV1, unknown>;
+  file_occurrence_id: z.ZodType<FileOccurrenceId, unknown>;
+  path: z.ZodType<string, unknown>;
+  symbol_identities: z.ZodType<Array<string>, unknown>;
+}, z.core.$strict> = z.object({
   content_digest: z.lazy(() => ContentDigestSchema),
   disposition: z.lazy(() => RevisionPairFileDispositionV1Schema),
   file_occurrence_id: z.lazy(() => FileOccurrenceIdSchema),
@@ -8047,11 +8047,11 @@ export const RevisionPairFileV1Schema: z.ZodObject<{
 }).strict();
 
 export const RevisionPairRevisionV1Schema: z.ZodObject<{
-  generation: z.ZodType<CodeGenerationId, z.ZodTypeDef, unknown>;
-  reference: z.ZodType<RefId, z.ZodTypeDef, unknown>;
-  revision: z.ZodType<GitOidV1, z.ZodTypeDef, unknown>;
-  tree: z.ZodType<GitOidV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  generation: z.ZodType<CodeGenerationId, unknown>;
+  reference: z.ZodType<RefId, unknown>;
+  revision: z.ZodType<GitOidV1, unknown>;
+  tree: z.ZodType<GitOidV1, unknown>;
+}, z.core.$strict> = z.object({
   generation: z.lazy(() => CodeGenerationIdSchema),
   reference: z.lazy(() => RefIdSchema),
   revision: z.lazy(() => GitOidV1Schema),
@@ -8059,11 +8059,11 @@ export const RevisionPairRevisionV1Schema: z.ZodObject<{
 }).strict();
 
 export const RevisionPairSymbolRegionV1Schema: z.ZodObject<{
-  base: z.ZodType<RevisionPairSymbolV1 | null, z.ZodTypeDef, unknown>;
-  change: z.ZodType<RevisionPairChangeV1, z.ZodTypeDef, unknown>;
-  head: z.ZodType<RevisionPairSymbolV1 | null, z.ZodTypeDef, unknown>;
-  symbol_identity: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  base: z.ZodType<RevisionPairSymbolV1 | null, unknown>;
+  change: z.ZodType<RevisionPairChangeV1, unknown>;
+  head: z.ZodType<RevisionPairSymbolV1 | null, unknown>;
+  symbol_identity: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   base: z.union([z.lazy(() => RevisionPairSymbolV1Schema), z.null()]),
   change: z.lazy(() => RevisionPairChangeV1Schema),
   head: z.union([z.lazy(() => RevisionPairSymbolV1Schema), z.null()]),
@@ -8071,15 +8071,15 @@ export const RevisionPairSymbolRegionV1Schema: z.ZodObject<{
 }).strict();
 
 export const RevisionPairSymbolV1Schema: z.ZodObject<{
-  content_digest: z.ZodType<string, z.ZodTypeDef, unknown>;
-  file: z.ZodType<string, z.ZodTypeDef, unknown>;
-  file_identity: z.ZodType<string, z.ZodTypeDef, unknown>;
-  file_occurrence_id: z.ZodType<FileOccurrenceId, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<string, z.ZodTypeDef, unknown>;
-  name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  qualified_name: z.ZodType<string, z.ZodTypeDef, unknown>;
-  symbol_occurrence_id: z.ZodType<SymbolOccurrenceId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  content_digest: z.ZodType<string, unknown>;
+  file: z.ZodType<string, unknown>;
+  file_identity: z.ZodType<string, unknown>;
+  file_occurrence_id: z.ZodType<FileOccurrenceId, unknown>;
+  kind: z.ZodType<string, unknown>;
+  name: z.ZodType<string, unknown>;
+  qualified_name: z.ZodType<string, unknown>;
+  symbol_occurrence_id: z.ZodType<SymbolOccurrenceId, unknown>;
+}, z.core.$strict> = z.object({
   content_digest: z.string(),
   file: z.string(),
   file_identity: z.string(),
@@ -8091,11 +8091,11 @@ export const RevisionPairSymbolV1Schema: z.ZodObject<{
 }).strict();
 
 export const RevisionPairUnionLayoutV1Schema: z.ZodObject<{
-  base: z.ZodType<RevisionPairRevisionV1, z.ZodTypeDef, unknown>;
-  files: z.ZodType<Array<RevisionPairFileRegionV1>, z.ZodTypeDef, unknown>;
-  head: z.ZodType<RevisionPairRevisionV1, z.ZodTypeDef, unknown>;
-  symbols: z.ZodType<Array<RevisionPairSymbolRegionV1>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  base: z.ZodType<RevisionPairRevisionV1, unknown>;
+  files: z.ZodType<Array<RevisionPairFileRegionV1>, unknown>;
+  head: z.ZodType<RevisionPairRevisionV1, unknown>;
+  symbols: z.ZodType<Array<RevisionPairSymbolRegionV1>, unknown>;
+}, z.core.$strict> = z.object({
   base: z.lazy(() => RevisionPairRevisionV1Schema),
   files: z.array(z.lazy(() => RevisionPairFileRegionV1Schema)),
   head: z.lazy(() => RevisionPairRevisionV1Schema),
@@ -8104,11 +8104,11 @@ export const RevisionPairUnionLayoutV1Schema: z.ZodObject<{
 
 /** Immutable collection and stack revisions for one exact resolved root. */
 export const RootGenerationV1Schema: z.ZodObject<{
-  collection_revision: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  generation_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  scope_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  stack_revision: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  collection_revision: z.ZodType<ManifestDigest, unknown>;
+  generation_digest: z.ZodType<ManifestDigest, unknown>;
+  scope_digest: z.ZodType<ManifestDigest, unknown>;
+  stack_revision: z.ZodType<ManifestDigest, unknown>;
+}, z.core.$strict> = z.object({
   collection_revision: z.lazy(() => ManifestDigestSchema),
   generation_digest: z.lazy(() => ManifestDigestSchema),
   scope_digest: z.lazy(() => ManifestDigestSchema),
@@ -8117,45 +8117,45 @@ export const RootGenerationV1Schema: z.ZodObject<{
 
 /** One typed outcome pinned to the digest of an exact resolved root. */
 export const RootScopeOutcomeV1_for_Array_of_AnyValueSchema: z.ZodObject<{
-  outcome: z.ZodType<ScopeOutcome_for_Array_of_AnyValue, z.ZodTypeDef, unknown>;
-  scope_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  outcome: z.ZodType<ScopeOutcome_for_Array_of_AnyValue, unknown>;
+  scope_digest: z.ZodType<ManifestDigest, unknown>;
+}, z.core.$strict> = z.object({
   outcome: z.lazy(() => ScopeOutcome_for_Array_of_AnyValueSchema),
   scope_digest: z.lazy(() => ManifestDigestSchema),
 }).strict();
 
 /** One typed outcome pinned to the digest of an exact resolved root. */
 export const RootScopeOutcomeV1_for_Nullable_RootGenerationV1Schema: z.ZodObject<{
-  outcome: z.ZodType<ScopeOutcome_for_Nullable_RootGenerationV1, z.ZodTypeDef, unknown>;
-  scope_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  outcome: z.ZodType<ScopeOutcome_for_Nullable_RootGenerationV1, unknown>;
+  scope_digest: z.ZodType<ManifestDigest, unknown>;
+}, z.core.$strict> = z.object({
   outcome: z.lazy(() => ScopeOutcome_for_Nullable_RootGenerationV1Schema),
   scope_digest: z.lazy(() => ManifestDigestSchema),
 }).strict();
 
 /** One typed outcome pinned to the digest of an exact resolved root. */
 export const RootScopeOutcomeV1_for_Nullable_stringSchema: z.ZodObject<{
-  outcome: z.ZodType<ScopeOutcome_for_Nullable_string, z.ZodTypeDef, unknown>;
-  scope_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  outcome: z.ZodType<ScopeOutcome_for_Nullable_string, unknown>;
+  scope_digest: z.ZodType<ManifestDigest, unknown>;
+}, z.core.$strict> = z.object({
   outcome: z.lazy(() => ScopeOutcome_for_Nullable_stringSchema),
   scope_digest: z.lazy(() => ManifestDigestSchema),
 }).strict();
 
 /** Strongly typed canonical identity: `RunId`. */
-export const RunIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const RunIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Sanitized detail that may cross the application boundary. */
 export const SafeDiagnosticSchema: z.ZodObject<{
-  code: z.ZodType<string, z.ZodTypeDef, unknown>;
-  message: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  code: z.ZodType<string, unknown>;
+  message: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   code: z.string(),
   message: z.string(),
 }).strict();
 
 /** Strongly typed canonical identity: `SanitizationReceiptId`. */
-export const SanitizationReceiptIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const SanitizationReceiptIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Reference to a capture-owned sanitization receipt.
 
@@ -8163,33 +8163,33 @@ Receipt references are the explicit boundary between untrusted wire data and
 the proof-carrying text types below. They do not claim that the domain crate
 ran a sanitizer; the capture layer owns issuance and persistence of receipts. */
 export const SanitizationReceiptRefV1Schema: z.ZodObject<{
-  receipt_id: z.ZodType<SanitizationReceiptId, z.ZodTypeDef, unknown>;
-  sanitizer_version: z.ZodType<ComponentVersion, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  receipt_id: z.ZodType<SanitizationReceiptId, unknown>;
+  sanitizer_version: z.ZodType<ComponentVersion, unknown>;
+}, z.core.$strict> = z.object({
   receipt_id: z.lazy(() => SanitizationReceiptIdSchema),
   sanitizer_version: z.lazy(() => ComponentVersionSchema),
 }).strict();
 
 export const SanitizationReceiptV1Schema: z.ZodObject<{
-  disposition: z.ZodType<SanitizerDispositionV1, z.ZodTypeDef, unknown>;
-  payload: z.ZodType<PayloadReferenceV1 | null, z.ZodTypeDef, unknown>;
-  receipt: z.ZodType<SanitizationReceiptRefV1, z.ZodTypeDef, unknown>;
-  sensitivity: z.ZodType<SensitivityV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  disposition: z.ZodType<SanitizerDispositionV1, unknown>;
+  payload: z.ZodType<PayloadReferenceV1 | null, unknown>;
+  receipt: z.ZodType<SanitizationReceiptRefV1, unknown>;
+  sensitivity: z.ZodType<SensitivityV1, unknown>;
+}, z.core.$strict> = z.object({
   disposition: z.lazy(() => SanitizerDispositionV1Schema),
   payload: z.union([z.lazy(() => PayloadReferenceV1Schema), z.null()]),
   receipt: z.lazy(() => SanitizationReceiptRefV1Schema),
   sensitivity: z.lazy(() => SensitivityV1Schema),
 }).strict();
 
-export const SanitizerDispositionV1Schema: z.ZodEnum<["accepted", "quarantined", "redacted", "rejected"]> = z.enum(["accepted", "quarantined", "redacted", "rejected"]);
+export const SanitizerDispositionV1Schema: z.ZodEnum<{ "accepted": "accepted"; "quarantined": "quarantined"; "redacted": "redacted"; "rejected": "rejected" }> = z.enum(["accepted", "quarantined", "redacted", "rejected"]);
 
 export const SavingsAccountingSummaryV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  db: z.ZodType<string, z.ZodTypeDef, unknown>;
-  error: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  ledger: z.ZodType<SavingsLedgerSummaryV1 | null, z.ZodTypeDef, unknown>;
-  recording: z.ZodType<unknown, z.ZodTypeDef, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  db: z.ZodType<string, unknown>;
+  error: z.ZodType<string | null, unknown>;
+  ledger: z.ZodType<SavingsLedgerSummaryV1 | null, unknown>;
+  recording: z.ZodType<unknown, unknown>;
 }> = z.object({
   available: z.boolean(),
   db: z.string(),
@@ -8199,10 +8199,10 @@ export const SavingsAccountingSummaryV1Schema: z.ZodObject<{
 });
 
 export const SavingsLedgerSummaryV1Schema: z.ZodObject<{
-  all_time: z.ZodType<SavingsSumV1, z.ZodTypeDef, unknown>;
-  last_30d: z.ZodType<SavingsSumV1, z.ZodTypeDef, unknown>;
-  last_7d: z.ZodType<SavingsSumV1, z.ZodTypeDef, unknown>;
-  today: z.ZodType<SavingsSumV1, z.ZodTypeDef, unknown>;
+  all_time: z.ZodType<SavingsSumV1, unknown>;
+  last_30d: z.ZodType<SavingsSumV1, unknown>;
+  last_7d: z.ZodType<SavingsSumV1, unknown>;
+  today: z.ZodType<SavingsSumV1, unknown>;
 }> = z.object({
   all_time: z.lazy(() => SavingsSumV1Schema),
   last_30d: z.lazy(() => SavingsSumV1Schema),
@@ -8212,16 +8212,16 @@ export const SavingsLedgerSummaryV1Schema: z.ZodObject<{
 
 /** One UTC-day bucket of the per-model content aggregate. */
 export const SavingsModelDayRowV1Schema: z.ZodObject<{
-  cost_basis: z.ZodType<string, z.ZodTypeDef, unknown>;
-  day: z.ZodType<number, z.ZodTypeDef, unknown>;
-  estimated: z.ZodType<TokenPairV1, z.ZodTypeDef, unknown>;
-  estimated_messages: z.ZodType<number, z.ZodTypeDef, unknown>;
-  messages: z.ZodType<number, z.ZodTypeDef, unknown>;
-  model: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  provider_actual: z.ZodType<TokenActualV1 | null, z.ZodTypeDef, unknown>;
-  provider_usage_events: z.ZodType<number, z.ZodTypeDef, unknown>;
-  tokenized: z.ZodType<TokenPairV1, z.ZodTypeDef, unknown>;
-  tokenized_messages: z.ZodType<number, z.ZodTypeDef, unknown>;
+  cost_basis: z.ZodType<string, unknown>;
+  day: z.ZodType<number, unknown>;
+  estimated: z.ZodType<TokenPairV1, unknown>;
+  estimated_messages: z.ZodType<number, unknown>;
+  messages: z.ZodType<number, unknown>;
+  model: z.ZodType<string | null, unknown>;
+  provider_actual: z.ZodType<TokenActualV1 | null, unknown>;
+  provider_usage_events: z.ZodType<number, unknown>;
+  tokenized: z.ZodType<TokenPairV1, unknown>;
+  tokenized_messages: z.ZodType<number, unknown>;
 }> = z.object({
   cost_basis: z.string(),
   day: z.number().int().safe(),
@@ -8240,17 +8240,17 @@ exact provider usage recorded for that model. `model` is `None` for
 messages whose model was never recorded; that row keeps its token counts
 and is priced by nothing. */
 export const SavingsModelRowV1Schema: z.ZodObject<{
-  cost_basis: z.ZodType<string, z.ZodTypeDef, unknown>;
-  estimated: z.ZodType<TokenPairV1, z.ZodTypeDef, unknown>;
-  estimated_messages: z.ZodType<number, z.ZodTypeDef, unknown>;
-  messages: z.ZodType<number, z.ZodTypeDef, unknown>;
-  model: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  provider_actual: z.ZodType<TokenActualV1 | null, z.ZodTypeDef, unknown>;
-  provider_usage_events: z.ZodType<number, z.ZodTypeDef, unknown>;
-  sessions: z.ZodType<number, z.ZodTypeDef, unknown>;
-  tokenized: z.ZodType<TokenPairV1, z.ZodTypeDef, unknown>;
-  tokenized_messages: z.ZodType<number, z.ZodTypeDef, unknown>;
-  tokenizer: z.ZodType<unknown, z.ZodTypeDef, unknown>;
+  cost_basis: z.ZodType<string, unknown>;
+  estimated: z.ZodType<TokenPairV1, unknown>;
+  estimated_messages: z.ZodType<number, unknown>;
+  messages: z.ZodType<number, unknown>;
+  model: z.ZodType<string | null, unknown>;
+  provider_actual: z.ZodType<TokenActualV1 | null, unknown>;
+  provider_usage_events: z.ZodType<number, unknown>;
+  sessions: z.ZodType<number, unknown>;
+  tokenized: z.ZodType<TokenPairV1, unknown>;
+  tokenized_messages: z.ZodType<number, unknown>;
+  tokenizer: z.ZodType<unknown, unknown>;
 }> = z.object({
   cost_basis: z.string(),
   estimated: z.lazy(() => TokenPairV1Schema),
@@ -8267,15 +8267,15 @@ export const SavingsModelRowV1Schema: z.ZodObject<{
 
 /** GET `/api/plugins/savings/models` response contract. */
 export const SavingsModelsPayloadV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  daily: z.ZodType<Array<SavingsModelDayRowV1>, z.ZodTypeDef, unknown>;
-  error: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  models: z.ZodType<Array<SavingsModelRowV1>, z.ZodTypeDef, unknown>;
-  provider_usage: z.ZodType<SavingsProviderUsageAttributionV1, z.ZodTypeDef, unknown>;
-  provider_usage_coverage: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  range: z.ZodType<string, z.ZodTypeDef, unknown>;
-  since: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  status: z.ZodType<string | null, z.ZodTypeDef, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  daily: z.ZodType<Array<SavingsModelDayRowV1>, unknown>;
+  error: z.ZodType<string | null, unknown>;
+  models: z.ZodType<Array<SavingsModelRowV1>, unknown>;
+  provider_usage: z.ZodType<SavingsProviderUsageAttributionV1, unknown>;
+  provider_usage_coverage: z.ZodType<string | null, unknown>;
+  range: z.ZodType<string, unknown>;
+  since: z.ZodType<number | null, unknown>;
+  status: z.ZodType<string | null, unknown>;
 }> = z.object({
   available: z.boolean(),
   daily: z.array(z.lazy(() => SavingsModelDayRowV1Schema)),
@@ -8289,11 +8289,11 @@ export const SavingsModelsPayloadV1Schema: z.ZodObject<{
 });
 
 export const SavingsOverviewPayloadV1Schema: z.ZodObject<{
-  costs: z.ZodType<CostsReadModelV1, z.ZodTypeDef, unknown>;
-  pricing: z.ZodType<SavingsPricingSummaryV1, z.ZodTypeDef, unknown>;
-  provider_usage: z.ZodType<ProviderUsageSummaryV1, z.ZodTypeDef, unknown>;
-  savings: z.ZodType<SavingsAccountingSummaryV1, z.ZodTypeDef, unknown>;
-  sessions: z.ZodType<SavingsSessionSummaryV1, z.ZodTypeDef, unknown>;
+  costs: z.ZodType<CostsReadModelV1, unknown>;
+  pricing: z.ZodType<SavingsPricingSummaryV1, unknown>;
+  provider_usage: z.ZodType<ProviderUsageSummaryV1, unknown>;
+  savings: z.ZodType<SavingsAccountingSummaryV1, unknown>;
+  sessions: z.ZodType<SavingsSessionSummaryV1, unknown>;
 }> = z.object({
   costs: z.lazy(() => CostsReadModelV1Schema),
   pricing: z.lazy(() => SavingsPricingSummaryV1Schema),
@@ -8305,14 +8305,14 @@ export const SavingsOverviewPayloadV1Schema: z.ZodObject<{
 /** How much of one provider's observed usage the pricing authority could
 price. `priced` means every usage event priced; `partial` means some did
 and the dollar figure covers only those; `unpriced` means none did. */
-export const SavingsPricingClassV1Schema: z.ZodEnum<["partial", "priced", "unpriced"]> = z.enum(["partial", "priced", "unpriced"]);
+export const SavingsPricingClassV1Schema: z.ZodEnum<{ "partial": "partial"; "priced": "priced"; "unpriced": "unpriced" }> = z.enum(["partial", "priced", "unpriced"]);
 
 export const SavingsPricingSummaryV1Schema: z.ZodObject<{
-  fetched_at: z.ZodType<unknown, z.ZodTypeDef, unknown>;
-  model_count: z.ZodType<unknown, z.ZodTypeDef, unknown>;
-  offline: z.ZodType<unknown, z.ZodTypeDef, unknown>;
-  revision: z.ZodType<unknown, z.ZodTypeDef, unknown>;
-  source: z.ZodType<unknown, z.ZodTypeDef, unknown>;
+  fetched_at: z.ZodType<unknown, unknown>;
+  model_count: z.ZodType<unknown, unknown>;
+  offline: z.ZodType<unknown, unknown>;
+  revision: z.ZodType<unknown, unknown>;
+  source: z.ZodType<unknown, unknown>;
 }> = z.object({
   fetched_at: z.unknown(),
   model_count: z.unknown(),
@@ -8323,14 +8323,14 @@ export const SavingsPricingSummaryV1Schema: z.ZodObject<{
 
 /** One provider's canonical priced usage on one UTC day. */
 export const SavingsProviderDayPointV1Schema: z.ZodObject<{
-  day: z.ZodType<number, z.ZodTypeDef, unknown>;
-  priced_cost_usd: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  priced_events: z.ZodType<number, z.ZodTypeDef, unknown>;
-  provider: z.ZodType<string, z.ZodTypeDef, unknown>;
-  total_cost_usd: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  total_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  unpriced_events: z.ZodType<number, z.ZodTypeDef, unknown>;
-  usage_events: z.ZodType<number, z.ZodTypeDef, unknown>;
+  day: z.ZodType<number, unknown>;
+  priced_cost_usd: z.ZodType<number | null, unknown>;
+  priced_events: z.ZodType<number, unknown>;
+  provider: z.ZodType<string, unknown>;
+  total_cost_usd: z.ZodType<number | null, unknown>;
+  total_tokens: z.ZodType<number | null, unknown>;
+  unpriced_events: z.ZodType<number, unknown>;
+  usage_events: z.ZodType<number, unknown>;
 }> = z.object({
   day: z.number().int().safe(),
   priced_cost_usd: z.number().nullable(),
@@ -8344,11 +8344,11 @@ export const SavingsProviderDayPointV1Schema: z.ZodObject<{
 
 /** Canonical priced usage for one UTC day across every provider. */
 export const SavingsProviderDaySpendV1Schema: z.ZodObject<{
-  cost_usd: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  day: z.ZodType<number, z.ZodTypeDef, unknown>;
-  provider_actual: z.ZodType<TokenActualV1 | null, z.ZodTypeDef, unknown>;
-  total_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  usage_events: z.ZodType<number, z.ZodTypeDef, unknown>;
+  cost_usd: z.ZodType<number | null, unknown>;
+  day: z.ZodType<number, unknown>;
+  provider_actual: z.ZodType<TokenActualV1 | null, unknown>;
+  total_tokens: z.ZodType<number | null, unknown>;
+  usage_events: z.ZodType<number, unknown>;
 }> = z.object({
   cost_usd: z.number().nullable(),
   day: z.number().int().safe(),
@@ -8361,13 +8361,13 @@ export const SavingsProviderDaySpendV1Schema: z.ZodObject<{
 `None` whenever any usage event in the pair could not be priced: the
 projector never emits a partial dollar figure for a model. */
 export const SavingsProviderModelSpendV1Schema: z.ZodObject<{
-  cost_basis: z.ZodType<string, z.ZodTypeDef, unknown>;
-  cost_usd: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  model: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  provider: z.ZodType<string, z.ZodTypeDef, unknown>;
-  provider_actual: z.ZodType<TokenActualV1 | null, z.ZodTypeDef, unknown>;
-  total_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  usage_events: z.ZodType<number, z.ZodTypeDef, unknown>;
+  cost_basis: z.ZodType<string, unknown>;
+  cost_usd: z.ZodType<number | null, unknown>;
+  model: z.ZodType<string | null, unknown>;
+  provider: z.ZodType<string, unknown>;
+  provider_actual: z.ZodType<TokenActualV1 | null, unknown>;
+  total_tokens: z.ZodType<number | null, unknown>;
+  usage_events: z.ZodType<number, unknown>;
 }> = z.object({
   cost_basis: z.string(),
   cost_usd: z.number().nullable(),
@@ -8385,21 +8385,21 @@ priced completely, and the event/model counts beside it say how much of
 the provider's usage that figure covers. `total_cost_usd` is the
 projector's own complete total and is `None` unless every event priced. */
 export const SavingsProviderSpendV1Schema: z.ZodObject<{
-  models: z.ZodType<number, z.ZodTypeDef, unknown>;
-  priced_cost_usd: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  priced_events: z.ZodType<number, z.ZodTypeDef, unknown>;
-  priced_models: z.ZodType<number, z.ZodTypeDef, unknown>;
-  pricing: z.ZodType<SavingsPricingClassV1, z.ZodTypeDef, unknown>;
-  provider: z.ZodType<string, z.ZodTypeDef, unknown>;
-  provider_actual: z.ZodType<TokenActualV1 | null, z.ZodTypeDef, unknown>;
-  sessions: z.ZodType<number, z.ZodTypeDef, unknown>;
-  total_cost_usd: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  total_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  undated_events: z.ZodType<number, z.ZodTypeDef, unknown>;
-  unknown_model_events: z.ZodType<number, z.ZodTypeDef, unknown>;
-  unpriced_events: z.ZodType<number, z.ZodTypeDef, unknown>;
-  unpriced_models: z.ZodType<number, z.ZodTypeDef, unknown>;
-  usage_events: z.ZodType<number, z.ZodTypeDef, unknown>;
+  models: z.ZodType<number, unknown>;
+  priced_cost_usd: z.ZodType<number | null, unknown>;
+  priced_events: z.ZodType<number, unknown>;
+  priced_models: z.ZodType<number, unknown>;
+  pricing: z.ZodType<SavingsPricingClassV1, unknown>;
+  provider: z.ZodType<string, unknown>;
+  provider_actual: z.ZodType<TokenActualV1 | null, unknown>;
+  sessions: z.ZodType<number, unknown>;
+  total_cost_usd: z.ZodType<number | null, unknown>;
+  total_tokens: z.ZodType<number | null, unknown>;
+  undated_events: z.ZodType<number, unknown>;
+  unknown_model_events: z.ZodType<number, unknown>;
+  unpriced_events: z.ZodType<number, unknown>;
+  unpriced_models: z.ZodType<number, unknown>;
+  usage_events: z.ZodType<number, unknown>;
 }> = z.object({
   models: z.number().int().safe(),
   priced_cost_usd: z.number().nullable(),
@@ -8419,13 +8419,13 @@ export const SavingsProviderSpendV1Schema: z.ZodObject<{
 });
 
 export const SavingsProviderUsageAttributionV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  by_day: z.ZodType<Array<SavingsProviderDaySpendV1>, z.ZodTypeDef, unknown>;
-  by_model: z.ZodType<Array<SavingsProviderModelSpendV1>, z.ZodTypeDef, unknown>;
-  by_provider: z.ZodType<Array<SavingsProviderSpendV1>, z.ZodTypeDef, unknown>;
-  by_provider_day: z.ZodType<Array<SavingsProviderDayPointV1>, z.ZodTypeDef, unknown>;
-  pricing_revision: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  undated_events: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  by_day: z.ZodType<Array<SavingsProviderDaySpendV1>, unknown>;
+  by_model: z.ZodType<Array<SavingsProviderModelSpendV1>, unknown>;
+  by_provider: z.ZodType<Array<SavingsProviderSpendV1>, unknown>;
+  by_provider_day: z.ZodType<Array<SavingsProviderDayPointV1>, unknown>;
+  pricing_revision: z.ZodType<string | null, unknown>;
+  undated_events: z.ZodType<number | null, unknown>;
 }> = z.object({
   available: z.boolean(),
   by_day: z.array(z.lazy(() => SavingsProviderDaySpendV1Schema)),
@@ -8437,23 +8437,23 @@ export const SavingsProviderUsageAttributionV1Schema: z.ZodObject<{
 });
 
 export const SavingsSessionSummaryV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  cost_basis: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  db: z.ZodType<string, z.ZodTypeDef, unknown>;
-  error: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  estimated: z.ZodType<TokenPairV1 | null, z.ZodTypeDef, unknown>;
-  estimated_messages: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  messages: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  model_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  provider_actual: z.ZodType<TokenActualV1 | null, z.ZodTypeDef, unknown>;
-  provider_usage_events: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  scope: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  session_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  status: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  token_counting: z.ZodType<boolean | null, z.ZodTypeDef, unknown>;
-  tokenized: z.ZodType<TokenPairV1 | null, z.ZodTypeDef, unknown>;
-  tokenized_messages: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  unknown_model_messages: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  available: z.ZodType<boolean, unknown>;
+  cost_basis: z.ZodType<string | null, unknown>;
+  db: z.ZodType<string, unknown>;
+  error: z.ZodType<string | null, unknown>;
+  estimated: z.ZodType<TokenPairV1 | null, unknown>;
+  estimated_messages: z.ZodType<number | null, unknown>;
+  messages: z.ZodType<number | null, unknown>;
+  model_count: z.ZodType<number | null, unknown>;
+  provider_actual: z.ZodType<TokenActualV1 | null, unknown>;
+  provider_usage_events: z.ZodType<number | null, unknown>;
+  scope: z.ZodType<string | null, unknown>;
+  session_count: z.ZodType<number | null, unknown>;
+  status: z.ZodType<string | null, unknown>;
+  token_counting: z.ZodType<boolean | null, unknown>;
+  tokenized: z.ZodType<TokenPairV1 | null, unknown>;
+  tokenized_messages: z.ZodType<number | null, unknown>;
+  unknown_model_messages: z.ZodType<number | null, unknown>;
 }> = z.object({
   available: z.boolean(),
   cost_basis: z.string().nullable(),
@@ -8475,21 +8475,21 @@ export const SavingsSessionSummaryV1Schema: z.ZodObject<{
 });
 
 export const SavingsSumV1Schema: z.ZodObject<{
-  calls: z.ZodType<number, z.ZodTypeDef, unknown>;
-  saved_tokens: z.ZodType<number, z.ZodTypeDef, unknown>;
+  calls: z.ZodType<number, unknown>;
+  saved_tokens: z.ZodType<number, unknown>;
 }> = z.object({
   calls: z.number().int().safe(),
   saved_tokens: z.number().int().safe(),
 });
 
 export const SchemaConvergenceFindingV1Schema: z.ZodObject<{
-  degraded_row: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  progress: z.ZodType<SchemaConvergenceProgressV1 | null, z.ZodTypeDef, unknown>;
-  stage: z.ZodType<SchemaConvergenceStageV1, z.ZodTypeDef, unknown>;
-  started_at_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  state: z.ZodType<SchemaConvergenceStateV1, z.ZodTypeDef, unknown>;
-  store: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  degraded_row: z.ZodType<string | null, unknown>;
+  progress: z.ZodType<SchemaConvergenceProgressV1 | null, unknown>;
+  stage: z.ZodType<SchemaConvergenceStageV1, unknown>;
+  started_at_micros: z.ZodType<number, unknown>;
+  state: z.ZodType<SchemaConvergenceStateV1, unknown>;
+  store: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   degraded_row: z.string().nullable(),
   progress: z.union([z.lazy(() => SchemaConvergenceProgressV1Schema), z.null()]),
   stage: z.lazy(() => SchemaConvergenceStageV1Schema),
@@ -8498,7 +8498,7 @@ export const SchemaConvergenceFindingV1Schema: z.ZodObject<{
   store: z.string(),
 }).strict();
 
-export const SchemaConvergenceProgressV1Schema: z.ZodType<SchemaConvergenceProgressV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("unit", [z.object({
+export const SchemaConvergenceProgressV1Schema: z.ZodType<SchemaConvergenceProgressV1, unknown> = z.discriminatedUnion("unit", [z.object({
   done: z.number().int().safe().min(0),
   remaining: z.number().int().safe().min(0),
   unit: z.literal("pages"),
@@ -8510,16 +8510,16 @@ export const SchemaConvergenceProgressV1Schema: z.ZodType<SchemaConvergenceProgr
 
 export const SchemaConvergenceStageV1Schema: z.ZodLiteral<"registered_schema"> = z.literal("registered_schema");
 
-export const SchemaConvergenceStateV1Schema: z.ZodEnum<["completed", "degraded", "pending_schema_migration", "released_shape_convergence_in_progress"]> = z.enum(["completed", "degraded", "pending_schema_migration", "released_shape_convergence_in_progress"]);
+export const SchemaConvergenceStateV1Schema: z.ZodEnum<{ "completed": "completed"; "degraded": "degraded"; "pending_schema_migration": "pending_schema_migration"; "released_shape_convergence_in_progress": "released_shape_convergence_in_progress" }> = z.enum(["completed", "degraded", "pending_schema_migration", "released_shape_convergence_in_progress"]);
 
 /** Stable, canonical catalog identity for `SchemaId`. */
-export const SchemaIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const SchemaIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Truthful outcome for one authorized root or an aggregate over roots.
 
 `Denied` and `Unavailable` carry no value and therefore cannot be confused
 with a successful empty result. */
-export const ScopeOutcome_for_Array_of_AnyValueSchema: z.ZodType<ScopeOutcome_for_Array_of_AnyValue, z.ZodTypeDef, unknown> = z.discriminatedUnion("outcome", [z.object({
+export const ScopeOutcome_for_Array_of_AnyValueSchema: z.ZodType<ScopeOutcome_for_Array_of_AnyValue, unknown> = z.discriminatedUnion("outcome", [z.object({
   outcome: z.literal("denied"),
 }), z.object({
   outcome: z.literal("exact"),
@@ -8541,7 +8541,7 @@ export const ScopeOutcome_for_Array_of_AnyValueSchema: z.ZodType<ScopeOutcome_fo
 
 `Denied` and `Unavailable` carry no value and therefore cannot be confused
 with a successful empty result. */
-export const ScopeOutcome_for_Nullable_RootGenerationV1Schema: z.ZodType<ScopeOutcome_for_Nullable_RootGenerationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("outcome", [z.object({
+export const ScopeOutcome_for_Nullable_RootGenerationV1Schema: z.ZodType<ScopeOutcome_for_Nullable_RootGenerationV1, unknown> = z.discriminatedUnion("outcome", [z.object({
   outcome: z.literal("denied"),
 }), z.object({
   outcome: z.literal("exact"),
@@ -8563,7 +8563,7 @@ export const ScopeOutcome_for_Nullable_RootGenerationV1Schema: z.ZodType<ScopeOu
 
 `Denied` and `Unavailable` carry no value and therefore cannot be confused
 with a successful empty result. */
-export const ScopeOutcome_for_Nullable_stringSchema: z.ZodType<ScopeOutcome_for_Nullable_string, z.ZodTypeDef, unknown> = z.discriminatedUnion("outcome", [z.object({
+export const ScopeOutcome_for_Nullable_stringSchema: z.ZodType<ScopeOutcome_for_Nullable_string, unknown> = z.discriminatedUnion("outcome", [z.object({
   outcome: z.literal("denied"),
 }), z.object({
   outcome: z.literal("exact"),
@@ -8582,32 +8582,32 @@ export const ScopeOutcome_for_Nullable_stringSchema: z.ZodType<ScopeOutcome_for_
 })]);
 
 /** Typed explanation for a root that returned usable but incomplete data. */
-export const ScopePartialReasonV1Schema: z.ZodEnum<["budget_exceeded", "incomplete", "root_denied", "root_unavailable", "stale"]> = z.enum(["budget_exceeded", "incomplete", "root_denied", "root_unavailable", "stale"]);
+export const ScopePartialReasonV1Schema: z.ZodEnum<{ "budget_exceeded": "budget_exceeded"; "incomplete": "incomplete"; "root_denied": "root_denied"; "root_unavailable": "root_unavailable"; "stale": "stale" }> = z.enum(["budget_exceeded", "incomplete", "root_denied", "root_unavailable", "stale"]);
 
 /** Stable identity of one authorized scope-set record. */
-export const ScopeSetIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const ScopeSetIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Monotonic optimistic-concurrency revision of one scope set. */
-export const ScopeSetRevisionSchema: z.ZodType<number, z.ZodTypeDef, unknown> = z.number().int().safe().min(1);
+export const ScopeSetRevisionSchema: z.ZodType<number, unknown> = z.number().int().safe().min(1);
 
 /** Typed explanation for a root that could not return usable data. */
-export const ScopeUnavailableReasonV1Schema: z.ZodEnum<["authority_unavailable", "root_missing", "store_unavailable"]> = z.enum(["authority_unavailable", "root_missing", "store_unavailable"]);
+export const ScopeUnavailableReasonV1Schema: z.ZodEnum<{ "authority_unavailable": "authority_unavailable"; "root_missing": "root_missing"; "store_unavailable": "store_unavailable" }> = z.enum(["authority_unavailable", "root_missing", "store_unavailable"]);
 
 /** Reference-only filesystem locator. The raw path is sealed outside this
 contract; only the privacy-bound locator digest and sealed-value digest are
 representable here. */
 export const SensitiveFilesystemLocatorV1Schema: z.ZodObject<{
-  locator_digest: z.ZodType<LocatorDigest, z.ZodTypeDef, unknown>;
-  sealed_value_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  locator_digest: z.ZodType<LocatorDigest, unknown>;
+  sealed_value_digest: z.ZodType<ManifestDigest, unknown>;
+}, z.core.$strict> = z.object({
   locator_digest: z.lazy(() => LocatorDigestSchema),
   sealed_value_digest: z.lazy(() => ManifestDigestSchema),
 }).strict();
 
-export const SensitivityV1Schema: z.ZodEnum<["non_sensitive", "secret", "sensitive", "unclassified"]> = z.enum(["non_sensitive", "secret", "sensitive", "unclassified"]);
+export const SensitivityV1Schema: z.ZodEnum<{ "non_sensitive": "non_sensitive"; "secret": "secret"; "sensitive": "sensitive"; "unclassified": "unclassified" }> = z.enum(["non_sensitive", "secret", "sensitive", "unclassified"]);
 
 /** Strongly typed canonical identity: `SessionId`. */
-export const SessionIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const SessionIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** The ceiling and count behind a budget refusal.
 
@@ -8618,9 +8618,9 @@ distinguishes the resources inside one stage: a record read that stopped at
 the kernel's resource spelling stays in the kernel instead of becoming a
 second wire vocabulary to keep in step. */
 export const SessionRetrievalBudgetAccountingV1Schema: z.ZodObject<{
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  observed: z.ZodType<SessionRetrievalBudgetObservationV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  limit: z.ZodType<number, unknown>;
+  observed: z.ZodType<SessionRetrievalBudgetObservationV1, unknown>;
+}, z.core.$strict> = z.object({
   limit: z.number().int().safe().min(0),
   observed: z.lazy(() => SessionRetrievalBudgetObservationV1Schema),
 }).strict();
@@ -8630,7 +8630,7 @@ export const SessionRetrievalBudgetAccountingV1Schema: z.ZodObject<{
 Both variants are exact. A bounded read never counts the rows it declined to
 read, so an exhausted read reports what it consumed and that storage held
 more, never a total it would have to run the refused scan to learn. */
-export const SessionRetrievalBudgetObservationV1Schema: z.ZodType<SessionRetrievalBudgetObservationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("observation", [z.object({
+export const SessionRetrievalBudgetObservationV1Schema: z.ZodType<SessionRetrievalBudgetObservationV1, unknown> = z.discriminatedUnion("observation", [z.object({
   observation: z.literal("consumed_with_more_available"),
   units: z.number().int().safe().min(0),
 }).strict(), z.object({
@@ -8641,9 +8641,9 @@ export const SessionRetrievalBudgetObservationV1Schema: z.ZodType<SessionRetriev
 /** Structural budget boundary that rejected a session retrieval request.
 These causes are non-retryable request corrections; concurrent permit or
 queue pressure remains a separate capacity-saturation failure. */
-export const SessionRetrievalBudgetStageV1Schema: z.ZodEnum<["candidate_read_exhausted", "context_bytes", "context_tokens", "cursor_manifest_limit", "estimator_version_mismatch", "execution_work_exhausted", "hydration_bytes", "kernel_result_limit", "participant_manifest_canonical_bytes", "participant_manifest_participants", "record_read_exhausted", "request_candidate_bytes", "request_context_bytes", "request_hydration_bytes", "request_hydration_limit", "request_record_bytes", "request_result_limit"]> = z.enum(["candidate_read_exhausted", "context_bytes", "context_tokens", "cursor_manifest_limit", "estimator_version_mismatch", "execution_work_exhausted", "hydration_bytes", "kernel_result_limit", "participant_manifest_canonical_bytes", "participant_manifest_participants", "record_read_exhausted", "request_candidate_bytes", "request_context_bytes", "request_hydration_bytes", "request_hydration_limit", "request_record_bytes", "request_result_limit"]);
+export const SessionRetrievalBudgetStageV1Schema: z.ZodEnum<{ "candidate_read_exhausted": "candidate_read_exhausted"; "context_bytes": "context_bytes"; "context_tokens": "context_tokens"; "cursor_manifest_limit": "cursor_manifest_limit"; "estimator_version_mismatch": "estimator_version_mismatch"; "execution_work_exhausted": "execution_work_exhausted"; "hydration_bytes": "hydration_bytes"; "kernel_result_limit": "kernel_result_limit"; "participant_manifest_canonical_bytes": "participant_manifest_canonical_bytes"; "participant_manifest_participants": "participant_manifest_participants"; "record_read_exhausted": "record_read_exhausted"; "request_candidate_bytes": "request_candidate_bytes"; "request_context_bytes": "request_context_bytes"; "request_hydration_bytes": "request_hydration_bytes"; "request_hydration_limit": "request_hydration_limit"; "request_record_bytes": "request_record_bytes"; "request_result_limit": "request_result_limit" }> = z.enum(["candidate_read_exhausted", "context_bytes", "context_tokens", "cursor_manifest_limit", "estimator_version_mismatch", "execution_work_exhausted", "hydration_bytes", "kernel_result_limit", "participant_manifest_canonical_bytes", "participant_manifest_participants", "record_read_exhausted", "request_candidate_bytes", "request_context_bytes", "request_hydration_bytes", "request_hydration_limit", "request_record_bytes", "request_result_limit"]);
 
-export const SessionRetrievalStructuralRefusalV1Schema: z.ZodType<SessionRetrievalStructuralRefusalV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("refusal", [z.object({
+export const SessionRetrievalStructuralRefusalV1Schema: z.ZodType<SessionRetrievalStructuralRefusalV1, unknown> = z.discriminatedUnion("refusal", [z.object({
   accounting: z.union([z.lazy(() => SessionRetrievalBudgetAccountingV1Schema), z.null()]),
   refusal: z.literal("budget_exhausted"),
   stage: z.lazy(() => SessionRetrievalBudgetStageV1Schema),
@@ -8655,9 +8655,9 @@ export const SessionRetrievalStructuralRefusalV1Schema: z.ZodType<SessionRetriev
 }).strict()]);
 
 export const SettingsAvailabilityV1Schema: z.ZodObject<{
-  available: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  reason: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  required_authority: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
+  available: z.ZodType<boolean, unknown>;
+  reason: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  required_authority: z.ZodOptional<z.ZodType<string | null, unknown>>;
 }> = z.object({
   available: z.boolean(),
   reason: z.string().nullable().optional(),
@@ -8665,14 +8665,14 @@ export const SettingsAvailabilityV1Schema: z.ZodObject<{
 });
 
 export const SettingsPayloadV1Schema: z.ZodObject<{
-  automation: z.ZodType<AutomationSettingsPayloadV1, z.ZodTypeDef, unknown>;
-  environment: z.ZodType<EnvironmentSettingsPayloadV1, z.ZodTypeDef, unknown>;
-  project: z.ZodType<ProjectSettingsPayloadV1, z.ZodTypeDef, unknown>;
-  restart_recommended: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  resync_recommended: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  storage: z.ZodType<StorageSettingsPayloadV1, z.ZodTypeDef, unknown>;
-  user: z.ZodType<UserSettingsPayloadV1, z.ZodTypeDef, unknown>;
-  version: z.ZodType<VersionSettingsPayloadV1, z.ZodTypeDef, unknown>;
+  automation: z.ZodType<AutomationSettingsPayloadV1, unknown>;
+  environment: z.ZodType<EnvironmentSettingsPayloadV1, unknown>;
+  project: z.ZodType<ProjectSettingsPayloadV1, unknown>;
+  restart_recommended: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+  resync_recommended: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+  storage: z.ZodType<StorageSettingsPayloadV1, unknown>;
+  user: z.ZodType<UserSettingsPayloadV1, unknown>;
+  version: z.ZodType<VersionSettingsPayloadV1, unknown>;
 }> = z.object({
   automation: z.lazy(() => AutomationSettingsPayloadV1Schema),
   environment: z.lazy(() => EnvironmentSettingsPayloadV1Schema),
@@ -8689,10 +8689,10 @@ export const SettingsPayloadV1Schema: z.ZodObject<{
 Brain and profile IDs select the shard; the verified store locator binds its
 physical store. Lease incarnations and authority epochs remain runtime fences. */
 export const SharedProfileStoreLocatorV1Schema: z.ZodObject<{
-  brain_id: z.ZodType<BrainId, z.ZodTypeDef, unknown>;
-  profile_id: z.ZodType<UserProfileId, z.ZodTypeDef, unknown>;
-  store_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  brain_id: z.ZodType<BrainId, unknown>;
+  profile_id: z.ZodType<UserProfileId, unknown>;
+  store_id: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   brain_id: z.lazy(() => BrainIdSchema),
   profile_id: z.lazy(() => UserProfileIdSchema),
   store_id: z.string(),
@@ -8700,12 +8700,12 @@ export const SharedProfileStoreLocatorV1Schema: z.ZodObject<{
 
 /** One significant table-growth sample exposed to the dashboard. */
 export const SignificantTableGrowthSampleV1Schema: z.ZodObject<{
-  current_bytes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  current_observed_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  growth_bytes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  previous_bytes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  previous_observed_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  table: z.ZodType<string, z.ZodTypeDef, unknown>;
+  current_bytes: z.ZodType<number, unknown>;
+  current_observed_at: z.ZodType<number, unknown>;
+  growth_bytes: z.ZodType<number, unknown>;
+  previous_bytes: z.ZodType<number, unknown>;
+  previous_observed_at: z.ZodType<number, unknown>;
+  table: z.ZodType<string, unknown>;
 }> = z.object({
   current_bytes: z.number().int().safe().min(0),
   current_observed_at: z.number().int().safe(),
@@ -8715,7 +8715,7 @@ export const SignificantTableGrowthSampleV1Schema: z.ZodObject<{
   table: z.string(),
 });
 
-export const SimilarCoverageV1Schema: z.ZodType<SimilarCoverageV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("status", [z.object({
+export const SimilarCoverageV1Schema: z.ZodType<SimilarCoverageV1, unknown> = z.discriminatedUnion("status", [z.object({
   status: z.literal("complete"),
 }).strict(), z.object({
   status: z.literal("excluded_incomplete_tokenization"),
@@ -8731,15 +8731,15 @@ export const SimilarCoverageV1Schema: z.ZodType<SimilarCoverageV1, z.ZodTypeDef,
 }).strict()]);
 
 export const SimilarFamilyV1Schema: z.ZodObject<{
-  complete: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  family_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  match_class: z.ZodType<SimilarMatchClassV1, z.ZodTypeDef, unknown>;
-  member_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  members: z.ZodType<Array<SimilarOccurrenceV1>, z.ZodTypeDef, unknown>;
-  next_cursor: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  normalization_revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-  representative_payload_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  complete: z.ZodType<boolean, unknown>;
+  family_digest: z.ZodType<ManifestDigest, unknown>;
+  match_class: z.ZodType<SimilarMatchClassV1, unknown>;
+  member_count: z.ZodType<number, unknown>;
+  members: z.ZodType<Array<SimilarOccurrenceV1>, unknown>;
+  next_cursor: z.ZodType<string | null, unknown>;
+  normalization_revision: z.ZodType<number, unknown>;
+  representative_payload_digest: z.ZodType<ManifestDigest, unknown>;
+}, z.core.$strict> = z.object({
   complete: z.boolean(),
   family_digest: z.lazy(() => ManifestDigestSchema),
   match_class: z.lazy(() => SimilarMatchClassV1Schema),
@@ -8750,18 +8750,18 @@ export const SimilarFamilyV1Schema: z.ZodObject<{
   representative_payload_digest: z.lazy(() => ManifestDigestSchema),
 }).strict();
 
-export const SimilarMatchClassV1Schema: z.ZodEnum<["conservative_exact", "rename_normalized_exact"]> = z.enum(["conservative_exact", "rename_normalized_exact"]);
+export const SimilarMatchClassV1Schema: z.ZodEnum<{ "conservative_exact": "conservative_exact"; "rename_normalized_exact": "rename_normalized_exact" }> = z.enum(["conservative_exact", "rename_normalized_exact"]);
 
 export const SimilarOccurrenceV1Schema: z.ZodObject<{
-  body_span: z.ZodType<SourceSpan, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<ProjectId, z.ZodTypeDef, unknown>;
-  repository_id: z.ZodType<RepositoryId, z.ZodTypeDef, unknown>;
-  snapshot_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  source_generation: z.ZodType<CodeGenerationId, z.ZodTypeDef, unknown>;
-  symbol_occurrence_id: z.ZodType<SymbolOccurrenceId, z.ZodTypeDef, unknown>;
-  worktree_id: z.ZodType<WorktreeId | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  body_span: z.ZodType<SourceSpan, unknown>;
+  path: z.ZodType<string, unknown>;
+  project_id: z.ZodType<ProjectId, unknown>;
+  repository_id: z.ZodType<RepositoryId, unknown>;
+  snapshot_digest: z.ZodType<ManifestDigest, unknown>;
+  source_generation: z.ZodType<CodeGenerationId, unknown>;
+  symbol_occurrence_id: z.ZodType<SymbolOccurrenceId, unknown>;
+  worktree_id: z.ZodType<WorktreeId | null, unknown>;
+}, z.core.$strict> = z.object({
   body_span: z.lazy(() => SourceSpanSchema),
   path: z.string(),
   project_id: z.lazy(() => ProjectIdSchema),
@@ -8773,12 +8773,12 @@ export const SimilarOccurrenceV1Schema: z.ZodObject<{
 }).strict();
 
 export const SimilarResultV1Schema: z.ZodObject<{
-  coverage: z.ZodType<SimilarCoverageV1, z.ZodTypeDef, unknown>;
-  families: z.ZodType<Array<SimilarFamilyV1>, z.ZodTypeDef, unknown>;
-  freshness: z.ZodOptional<z.ZodType<PrimitiveSearchFreshnessV1 | null, z.ZodTypeDef, unknown>>;
-  source: z.ZodType<SimilarOccurrenceV1, z.ZodTypeDef, unknown>;
-  source_generation: z.ZodType<CodeGenerationId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  coverage: z.ZodType<SimilarCoverageV1, unknown>;
+  families: z.ZodType<Array<SimilarFamilyV1>, unknown>;
+  freshness: z.ZodOptional<z.ZodType<PrimitiveSearchFreshnessV1 | null, unknown>>;
+  source: z.ZodType<SimilarOccurrenceV1, unknown>;
+  source_generation: z.ZodType<CodeGenerationId, unknown>;
+}, z.core.$strict> = z.object({
   coverage: z.lazy(() => SimilarCoverageV1Schema),
   families: z.array(z.lazy(() => SimilarFamilyV1Schema)),
   freshness: z.union([z.lazy(() => PrimitiveSearchFreshnessV1Schema), z.null()]).optional(),
@@ -8786,16 +8786,16 @@ export const SimilarResultV1Schema: z.ZodObject<{
   source_generation: z.lazy(() => CodeGenerationIdSchema),
 }).strict();
 
-export const SkillInstallTargetSchema: z.ZodEnum<["agents", "claude", "codex", "cursor", "hermes", "kimi", "kiro", "opencode"]> = z.enum(["agents", "claude", "codex", "cursor", "hermes", "kimi", "kiro", "opencode"]);
+export const SkillInstallTargetSchema: z.ZodEnum<{ "agents": "agents"; "claude": "claude"; "codex": "codex"; "cursor": "cursor"; "hermes": "hermes"; "kimi": "kimi"; "kiro": "kiro"; "opencode": "opencode" }> = z.enum(["agents", "claude", "codex", "cursor", "hermes", "kimi", "kiro", "opencode"]);
 
 export const SkillOutcomeRecordSchema: z.ZodObject<{
-  activated_at: z.ZodType<number, z.ZodTypeDef, unknown>;
-  days_since_activation: z.ZodType<number, z.ZodTypeDef, unknown>;
-  skill_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  title: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-  uses_since_activation: z.ZodType<number, z.ZodTypeDef, unknown>;
-  verdict: z.ZodType<SkillOutcomeVerdict, z.ZodTypeDef, unknown>;
-  views_since_activation: z.ZodType<number, z.ZodTypeDef, unknown>;
+  activated_at: z.ZodType<number, unknown>;
+  days_since_activation: z.ZodType<number, unknown>;
+  skill_id: z.ZodType<string, unknown>;
+  title: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  uses_since_activation: z.ZodType<number, unknown>;
+  verdict: z.ZodType<SkillOutcomeVerdict, unknown>;
+  views_since_activation: z.ZodType<number, unknown>;
 }> = z.object({
   activated_at: z.number().int().safe(),
   days_since_activation: z.number().int().safe(),
@@ -8806,38 +8806,38 @@ export const SkillOutcomeRecordSchema: z.ZodObject<{
   views_since_activation: z.number().int().safe().min(0),
 });
 
-export const SkillOutcomeVerdictSchema: z.ZodEnum<["adopted", "ignored", "too_early"]> = z.enum(["adopted", "ignored", "too_early"]);
+export const SkillOutcomeVerdictSchema: z.ZodEnum<{ "adopted": "adopted"; "ignored": "ignored"; "too_early": "too_early" }> = z.enum(["adopted", "ignored", "too_early"]);
 
 /** Byte range inside one sanitized source file. Mutable line numbers are
 never part of identity. */
 export const SourceSpanSchema: z.ZodObject<{
-  end_byte: z.ZodType<number, z.ZodTypeDef, unknown>;
-  start_byte: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  end_byte: z.ZodType<number, unknown>;
+  start_byte: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   end_byte: z.number().int().safe().min(0),
   start_byte: z.number().int().safe().min(0),
 }).strict();
 
 /** Strongly typed canonical identity: `SourceStoreId`. */
-export const SourceStoreIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const SourceStoreIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Starts one admitted provider attempt. Every field is a typed fact; there
 is no argv, environment entry, executable path, or shell string here. The
 projection binding and admission facts are re-read from the canonical Work
 authority, never trusted from the caller. */
 export const StartWorkAttemptCommandSchema: z.ZodObject<{
-  attempt_id: z.ZodType<AttemptId, z.ZodTypeDef, unknown>;
-  commit: z.ZodType<CommitId, z.ZodTypeDef, unknown>;
-  effect_state: z.ZodType<WorkEffectStateV1, z.ZodTypeDef, unknown>;
-  execution_snapshot: z.ZodType<WorkExecutionSnapshot, z.ZodTypeDef, unknown>;
-  instructions: z.ZodType<string, z.ZodTypeDef, unknown>;
-  occurred_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  operation: z.ZodType<WorkflowOperationRef, z.ZodTypeDef, unknown>;
-  reference: z.ZodType<RefId | null, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-  worktree_root: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  attempt_id: z.ZodType<AttemptId, unknown>;
+  commit: z.ZodType<CommitId, unknown>;
+  effect_state: z.ZodType<WorkEffectStateV1, unknown>;
+  execution_snapshot: z.ZodType<WorkExecutionSnapshot, unknown>;
+  instructions: z.ZodType<string, unknown>;
+  occurred_at: z.ZodType<UtcMicros, unknown>;
+  operation: z.ZodType<WorkflowOperationRef, unknown>;
+  reference: z.ZodType<RefId | null, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+  worktree_root: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   attempt_id: z.lazy(() => AttemptIdSchema),
   commit: z.lazy(() => CommitIdSchema),
   effect_state: z.lazy(() => WorkEffectStateV1Schema),
@@ -8853,14 +8853,14 @@ export const StartWorkAttemptCommandSchema: z.ZodObject<{
 
 /** A byte size measurement. A newtype keeps sizes from being confused with
 counts, ratios, or timestamps in the read models and producers. */
-export const StorageByteSizeV1Schema: z.ZodType<number, z.ZodTypeDef, unknown> = z.number().int().safe().min(0);
+export const StorageByteSizeV1Schema: z.ZodType<number, unknown> = z.number().int().safe().min(0);
 
 /** Source-coverage status for one typed storage finding producer. */
 export const StorageFindingKindStatusV1Schema: z.ZodObject<{
-  kind: z.ZodType<DoctorStorageFindingKindV1, z.ZodTypeDef, unknown>;
-  observed_entries: z.ZodType<number, z.ZodTypeDef, unknown>;
-  reason: z.ZodType<string, z.ZodTypeDef, unknown>;
-  state: z.ZodType<StorageFindingSourceStateV1, z.ZodTypeDef, unknown>;
+  kind: z.ZodType<DoctorStorageFindingKindV1, unknown>;
+  observed_entries: z.ZodType<number, unknown>;
+  reason: z.ZodType<string, unknown>;
+  state: z.ZodType<StorageFindingSourceStateV1, unknown>;
 }> = z.object({
   kind: z.lazy(() => DoctorStorageFindingKindV1Schema),
   observed_entries: z.number().int().safe().min(0),
@@ -8871,19 +8871,19 @@ export const StorageFindingKindStatusV1Schema: z.ZodObject<{
 /** Whether one storage finding producer had enough source evidence to report
 a real result. This is source coverage, not a health grade: `Real` can
 describe a clean observation or a problem finding. */
-export const StorageFindingSourceStateV1Schema: z.ZodEnum<["partial", "real", "unsupported"]> = z.enum(["partial", "real", "unsupported"]);
+export const StorageFindingSourceStateV1Schema: z.ZodEnum<{ "partial": "partial"; "real": "real"; "unsupported": "unsupported" }> = z.enum(["partial", "real", "unsupported"]);
 
 export const StorageSettingsPayloadV1Schema: z.ZodObject<{
-  dashboard_root: z.ZodType<string, z.ZodTypeDef, unknown>;
-  graph_db: z.ZodType<string, z.ZodTypeDef, unknown>;
-  lcm_db: z.ZodType<string, z.ZodTypeDef, unknown>;
-  lcm_scope: z.ZodType<string, z.ZodTypeDef, unknown>;
-  memory_db: z.ZodType<string, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  project_root: z.ZodType<string, z.ZodTypeDef, unknown>;
-  savings_db: z.ZodType<string, z.ZodTypeDef, unknown>;
-  storage_mode: z.ZodType<string, z.ZodTypeDef, unknown>;
-  store_root: z.ZodType<string, z.ZodTypeDef, unknown>;
+  dashboard_root: z.ZodType<string, unknown>;
+  graph_db: z.ZodType<string, unknown>;
+  lcm_db: z.ZodType<string, unknown>;
+  lcm_scope: z.ZodType<string, unknown>;
+  memory_db: z.ZodType<string, unknown>;
+  project_id: z.ZodType<string | null, unknown>;
+  project_root: z.ZodType<string, unknown>;
+  savings_db: z.ZodType<string, unknown>;
+  storage_mode: z.ZodType<string, unknown>;
+  store_root: z.ZodType<string, unknown>;
 }> = z.object({
   dashboard_root: z.string(),
   graph_db: z.string(),
@@ -8900,11 +8900,11 @@ export const StorageSettingsPayloadV1Schema: z.ZodObject<{
 /** Telemetry payload: one entry per distinct store the dashboard holds a
 connection to. */
 export const StorageTelemetryPayloadV1Schema: z.ZodObject<{
-  budget_note: z.ZodType<string, z.ZodTypeDef, unknown>;
-  growth_note: z.ZodType<string, z.ZodTypeDef, unknown>;
-  stores: z.ZodType<Array<StoreTelemetryEntryV1>, z.ZodTypeDef, unknown>;
-  table_growth_coverage: z.ZodType<DashboardCoverageV1, z.ZodTypeDef, unknown>;
-  table_growth_threshold: z.ZodType<TableGrowthThresholdV1, z.ZodTypeDef, unknown>;
+  budget_note: z.ZodType<string, unknown>;
+  growth_note: z.ZodType<string, unknown>;
+  stores: z.ZodType<Array<StoreTelemetryEntryV1>, unknown>;
+  table_growth_coverage: z.ZodType<DashboardCoverageV1, unknown>;
+  table_growth_threshold: z.ZodType<TableGrowthThresholdV1, unknown>;
 }> = z.object({
   budget_note: z.string(),
   growth_note: z.string(),
@@ -8919,7 +8919,7 @@ The port is *total*: it never fails silently into a healthy or empty result.
 A platform that cannot query `dbstat`/pragmas reports [`Self::Unsupported`];
 a denied read reports [`Self::Denied`]; an undetermined read reports
 [`Self::Unknown`]. Each maps to a distinct, honest Doctor evidence state. */
-export const StorageTelemetryReadV1Schema: z.ZodType<StorageTelemetryReadV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const StorageTelemetryReadV1Schema: z.ZodType<StorageTelemetryReadV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("denied"),
   store: z.lazy(() => StoreKeyV1Schema),
 }), z.object({
@@ -8939,7 +8939,7 @@ export const StorageTelemetryReadV1Schema: z.ZodType<StorageTelemetryReadV1, z.Z
 })]);
 
 /** The budget-evaluation dimension, sourced from owner configuration. */
-export const StoreBudgetDimensionV1Schema: z.ZodType<StoreBudgetDimensionV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const StoreBudgetDimensionV1Schema: z.ZodType<StoreBudgetDimensionV1, unknown> = z.discriminatedUnion("state", [z.object({
   evaluation: z.lazy(() => StoreBudgetEvaluationV1Schema),
   reason: z.string(),
   setting_key: z.string(),
@@ -8954,7 +8954,7 @@ export const StoreBudgetDimensionV1Schema: z.ZodType<StoreBudgetDimensionV1, z.Z
 })]);
 
 /** The outcome of evaluating a store size against its soft budget. */
-export const StoreBudgetEvaluationV1Schema: z.ZodType<StoreBudgetEvaluationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const StoreBudgetEvaluationV1Schema: z.ZodType<StoreBudgetEvaluationV1, unknown> = z.discriminatedUnion("state", [z.object({
   observed: z.lazy(() => StorageByteSizeV1Schema),
   overage: z.lazy(() => StorageByteSizeV1Schema),
   soft_limit: z.lazy(() => StorageByteSizeV1Schema),
@@ -8967,20 +8967,20 @@ export const StoreBudgetEvaluationV1Schema: z.ZodType<StoreBudgetEvaluationV1, z
 
 /** The per-store growth dimension. A status read observes present size but
 cannot create the execution-owned history required for a growth claim. */
-export const StoreGrowthDimensionV1Schema: z.ZodType<StoreGrowthDimensionV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const StoreGrowthDimensionV1Schema: z.ZodType<StoreGrowthDimensionV1, unknown> = z.discriminatedUnion("state", [z.object({
   reason: z.string(),
   state: z.literal("unknown"),
 })]);
 
 /** Logical name of one owner-profile store (for example `sessions.db`,
 `graph.db`, or `projects/proj_x`). Never an absolute on-disk path. */
-export const StoreKeyV1Schema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const StoreKeyV1Schema: z.ZodType<string, unknown> = z.string();
 
 /** Point reads per graph store kind. */
 export const StorePointReadsV1Schema: z.ZodObject<{
-  graph_sealed: z.ZodType<number, z.ZodTypeDef, unknown>;
-  graph_staging: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  graph_sealed: z.ZodType<number, unknown>;
+  graph_staging: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   graph_sealed: z.number().int().safe().min(0),
   graph_staging: z.number().int().safe().min(0),
 }).strict();
@@ -8992,12 +8992,12 @@ export const StorePointReadsV1Schema: z.ZodObject<{
 the reclaimable-bytes estimate (Plan 38 §6 compaction) can be computed
 without re-reading the store. */
 export const StoreSizeSampleV1Schema: z.ZodObject<{
-  freelist_pages: z.ZodType<number, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  page_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  page_size_bytes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  store: z.ZodType<StoreKeyV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  freelist_pages: z.ZodType<number, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  page_count: z.ZodType<number, unknown>;
+  page_size_bytes: z.ZodType<number, unknown>;
+  store: z.ZodType<StoreKeyV1, unknown>;
+}, z.core.$strict> = z.object({
   freelist_pages: z.number().int().safe().min(0),
   observed_at: z.lazy(() => UtcMicrosSchema),
   page_count: z.number().int().safe().min(0),
@@ -9008,16 +9008,16 @@ export const StoreSizeSampleV1Schema: z.ZodObject<{
 /** One store's telemetry entry. One entry per distinct store **file**, not per
 dashboard role. */
 export const StoreTelemetryEntryV1Schema: z.ZodObject<{
-  budget: z.ZodType<StoreBudgetDimensionV1, z.ZodTypeDef, unknown>;
-  free_bytes: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  free_page_ratio: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  growth: z.ZodType<StoreGrowthDimensionV1, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  read: z.ZodType<StorageTelemetryReadV1, z.ZodTypeDef, unknown>;
-  roles: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  store: z.ZodType<string, z.ZodTypeDef, unknown>;
-  table_growth: z.ZodType<TableGrowthDimensionV1, z.ZodTypeDef, unknown>;
-  total_bytes: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  budget: z.ZodType<StoreBudgetDimensionV1, unknown>;
+  free_bytes: z.ZodType<number | null, unknown>;
+  free_page_ratio: z.ZodType<number | null, unknown>;
+  growth: z.ZodType<StoreGrowthDimensionV1, unknown>;
+  path: z.ZodType<string, unknown>;
+  read: z.ZodType<StorageTelemetryReadV1, unknown>;
+  roles: z.ZodType<Array<string>, unknown>;
+  store: z.ZodType<string, unknown>;
+  table_growth: z.ZodType<TableGrowthDimensionV1, unknown>;
+  total_bytes: z.ZodType<number | null, unknown>;
 }> = z.object({
   budget: z.lazy(() => StoreBudgetDimensionV1Schema),
   free_bytes: z.number().int().safe().min(0).nullable(),
@@ -9032,13 +9032,13 @@ export const StoreTelemetryEntryV1Schema: z.ZodObject<{
 });
 
 export const StrataClusterV1Schema: z.ZodObject<{
-  boundary_edges: z.ZodType<number, z.ZodTypeDef, unknown>;
-  directory: z.ZodType<string, z.ZodTypeDef, unknown>;
-  file_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  incoming_edges: z.ZodType<number, z.ZodTypeDef, unknown>;
-  internal_edges: z.ZodType<number, z.ZodTypeDef, unknown>;
-  order: z.ZodType<number, z.ZodTypeDef, unknown>;
-  outgoing_edges: z.ZodType<number, z.ZodTypeDef, unknown>;
+  boundary_edges: z.ZodType<number, unknown>;
+  directory: z.ZodType<string, unknown>;
+  file_count: z.ZodType<number, unknown>;
+  incoming_edges: z.ZodType<number, unknown>;
+  internal_edges: z.ZodType<number, unknown>;
+  order: z.ZodType<number, unknown>;
+  outgoing_edges: z.ZodType<number, unknown>;
 }> = z.object({
   boundary_edges: z.number().int().safe().min(0),
   directory: z.string(),
@@ -9050,10 +9050,10 @@ export const StrataClusterV1Schema: z.ZodObject<{
 });
 
 export const StrataFileV1Schema: z.ZodObject<{
-  chain: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  depth: z.ZodType<number, z.ZodTypeDef, unknown>;
-  path: z.ZodType<string, z.ZodTypeDef, unknown>;
-  scc_size: z.ZodType<number, z.ZodTypeDef, unknown>;
+  chain: z.ZodType<Array<string>, unknown>;
+  depth: z.ZodType<number, unknown>;
+  path: z.ZodType<string, unknown>;
+  scc_size: z.ZodType<number, unknown>;
 }> = z.object({
   chain: z.array(z.string()),
   depth: z.number().int().safe().min(0),
@@ -9062,16 +9062,16 @@ export const StrataFileV1Schema: z.ZodObject<{
 });
 
 export const StrataMeasurementV1Schema: z.ZodObject<{
-  algorithm: z.ZodType<string, z.ZodTypeDef, unknown>;
-  cluster_ordering: z.ZodType<string, z.ZodTypeDef, unknown>;
-  clusters: z.ZodType<Array<StrataClusterV1>, z.ZodTypeDef, unknown>;
-  dependency_edge_kinds: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  files: z.ZodType<Array<StrataFileV1>, z.ZodTypeDef, unknown>;
-  granularity: z.ZodType<string, z.ZodTypeDef, unknown>;
-  graph_generation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  ideal_depth: z.ZodType<number, z.ZodTypeDef, unknown>;
-  max_depth: z.ZodType<number, z.ZodTypeDef, unknown>;
-  scan: z.ZodType<StrataScanV1, z.ZodTypeDef, unknown>;
+  algorithm: z.ZodType<string, unknown>;
+  cluster_ordering: z.ZodType<string, unknown>;
+  clusters: z.ZodType<Array<StrataClusterV1>, unknown>;
+  dependency_edge_kinds: z.ZodType<Array<string>, unknown>;
+  files: z.ZodType<Array<StrataFileV1>, unknown>;
+  granularity: z.ZodType<string, unknown>;
+  graph_generation: z.ZodType<string, unknown>;
+  ideal_depth: z.ZodType<number, unknown>;
+  max_depth: z.ZodType<number, unknown>;
+  scan: z.ZodType<StrataScanV1, unknown>;
 }> = z.object({
   algorithm: z.string(),
   cluster_ordering: z.string(),
@@ -9086,10 +9086,10 @@ export const StrataMeasurementV1Schema: z.ZodObject<{
 });
 
 export const StrataScanV1Schema: z.ZodObject<{
-  cache_scope: z.ZodType<string, z.ZodTypeDef, unknown>;
-  cache_state: z.ZodType<string, z.ZodTypeDef, unknown>;
-  dependency_edges_examined: z.ZodType<number, z.ZodTypeDef, unknown>;
-  files_examined: z.ZodType<number, z.ZodTypeDef, unknown>;
+  cache_scope: z.ZodType<string, unknown>;
+  cache_state: z.ZodType<string, unknown>;
+  dependency_edges_examined: z.ZodType<number, unknown>;
+  files_examined: z.ZodType<number, unknown>;
 }> = z.object({
   cache_scope: z.string(),
   cache_state: z.string(),
@@ -9097,7 +9097,7 @@ export const StrataScanV1Schema: z.ZodObject<{
   files_examined: z.number().int().safe().min(0),
 });
 
-export const StructureReadV1Schema: z.ZodType<StructureReadV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("status", [z.object({
+export const StructureReadV1Schema: z.ZodType<StructureReadV1, unknown> = z.discriminatedUnion("status", [z.object({
   code: z.string(),
   detail: z.string(),
   retryable: z.boolean(),
@@ -9111,7 +9111,7 @@ export const StructureReadV1Schema: z.ZodType<StructureReadV1, z.ZodTypeDef, unk
   status: z.literal("unmeasured"),
 })]);
 
-export const StructureReadV12Schema: z.ZodType<StructureReadV12, z.ZodTypeDef, unknown> = z.discriminatedUnion("status", [z.object({
+export const StructureReadV12Schema: z.ZodType<StructureReadV12, unknown> = z.discriminatedUnion("status", [z.object({
   code: z.string(),
   detail: z.string(),
   retryable: z.boolean(),
@@ -9125,7 +9125,7 @@ export const StructureReadV12Schema: z.ZodType<StructureReadV12, z.ZodTypeDef, u
   status: z.literal("unmeasured"),
 })]);
 
-export const StructureReadV13Schema: z.ZodType<StructureReadV13, z.ZodTypeDef, unknown> = z.discriminatedUnion("status", [z.object({
+export const StructureReadV13Schema: z.ZodType<StructureReadV13, unknown> = z.discriminatedUnion("status", [z.object({
   code: z.string(),
   detail: z.string(),
   retryable: z.boolean(),
@@ -9139,7 +9139,7 @@ export const StructureReadV13Schema: z.ZodType<StructureReadV13, z.ZodTypeDef, u
   status: z.literal("unmeasured"),
 })]);
 
-export const StructureReadV14Schema: z.ZodType<StructureReadV14, z.ZodTypeDef, unknown> = z.discriminatedUnion("status", [z.object({
+export const StructureReadV14Schema: z.ZodType<StructureReadV14, unknown> = z.discriminatedUnion("status", [z.object({
   code: z.string(),
   detail: z.string(),
   retryable: z.boolean(),
@@ -9153,7 +9153,7 @@ export const StructureReadV14Schema: z.ZodType<StructureReadV14, z.ZodTypeDef, u
   status: z.literal("unmeasured"),
 })]);
 
-export const StructureReadV15Schema: z.ZodType<StructureReadV15, z.ZodTypeDef, unknown> = z.discriminatedUnion("status", [z.object({
+export const StructureReadV15Schema: z.ZodType<StructureReadV15, unknown> = z.discriminatedUnion("status", [z.object({
   code: z.string(),
   detail: z.string(),
   retryable: z.boolean(),
@@ -9168,20 +9168,20 @@ export const StructureReadV15Schema: z.ZodType<StructureReadV15, z.ZodTypeDef, u
 })]);
 
 /** Strongly typed canonical identity: `SymbolOccurrenceId`. */
-export const SymbolOccurrenceIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const SymbolOccurrenceIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Nested synchronization settings patch. */
 export const SyncSettingsPatchSchema: z.ZodObject<{
-  auto_track_pr_branches: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  auto_track_pr_poll_secs: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-}, "strict"> = z.object({
+  auto_track_pr_branches: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+  auto_track_pr_poll_secs: z.ZodOptional<z.ZodType<number | null, unknown>>;
+}, z.core.$strict> = z.object({
   auto_track_pr_branches: z.boolean().nullable().optional(),
   auto_track_pr_poll_secs: z.number().int().safe().min(0).nullable().optional(),
 }).strict();
 
 export const SyncSettingsV1Schema: z.ZodObject<{
-  auto_track_pr_branches: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  auto_track_pr_poll_secs: z.ZodType<number, z.ZodTypeDef, unknown>;
+  auto_track_pr_branches: z.ZodType<boolean, unknown>;
+  auto_track_pr_poll_secs: z.ZodType<number, unknown>;
 }> = z.object({
   auto_track_pr_branches: z.boolean(),
   auto_track_pr_poll_secs: z.number().int().safe().min(0),
@@ -9189,7 +9189,7 @@ export const SyncSettingsV1Schema: z.ZodObject<{
 
 /** Per-store typed table-growth state. Unavailable reads carry no byte values;
 each state includes source coverage and explicit omissions. */
-export const TableGrowthDimensionV1Schema: z.ZodType<TableGrowthDimensionV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const TableGrowthDimensionV1Schema: z.ZodType<TableGrowthDimensionV1, unknown> = z.discriminatedUnion("state", [z.object({
   coverage: z.lazy(() => DashboardCoverageV1Schema),
   observed_at: z.number().int().safe(),
   omission_reasons: z.array(z.string()),
@@ -9217,7 +9217,7 @@ export const TableGrowthDimensionV1Schema: z.ZodType<TableGrowthDimensionV1, z.Z
 
 /** One current table omitted from the significant-sample list. Numeric evidence
 remains structured so clients can format units consistently. */
-export const TableGrowthOmissionV1Schema: z.ZodType<TableGrowthOmissionV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const TableGrowthOmissionV1Schema: z.ZodType<TableGrowthOmissionV1, unknown> = z.discriminatedUnion("kind", [z.object({
   current_bytes: z.number().int().safe().min(0),
   kind: z.literal("baseline_pending"),
   observed_at: z.number().int().safe(),
@@ -9236,9 +9236,9 @@ export const TableGrowthOmissionV1Schema: z.ZodType<TableGrowthOmissionV1, z.Zod
 
 /** Informational threshold applied to per-table payload growth samples. */
 export const TableGrowthThresholdV1Schema: z.ZodObject<{
-  absolute_bytes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  relative_floor_bytes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  relative_percent: z.ZodType<number, z.ZodTypeDef, unknown>;
+  absolute_bytes: z.ZodType<number, unknown>;
+  relative_floor_bytes: z.ZodType<number, unknown>;
+  relative_percent: z.ZodType<number, unknown>;
 }> = z.object({
   absolute_bytes: z.number().int().safe().min(0),
   relative_floor_bytes: z.number().int().safe().min(0),
@@ -9246,13 +9246,13 @@ export const TableGrowthThresholdV1Schema: z.ZodObject<{
 });
 
 export const TaskEvidenceLinkV1Schema: z.ZodObject<{
-  anchor_id: z.ZodType<RetrievalAnchorId, z.ZodTypeDef, unknown>;
-  evidence_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  link_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  anchor_id: z.ZodType<RetrievalAnchorId, unknown>;
+  evidence_digest: z.ZodType<ManifestDigest, unknown>;
+  link_id: z.ZodType<string, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  revision: z.ZodType<number, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
   evidence_digest: z.lazy(() => ManifestDigestSchema),
   link_id: z.string(),
@@ -9265,23 +9265,23 @@ export const TaskEvidenceLinkV1Schema: z.ZodObject<{
 export const TaskHandoffTokenStateV1Schema: z.ZodUnion<[z.ZodLiteral<"open">, z.ZodLiteral<"consumed">, z.ZodLiteral<"expired">]> = z.union([z.literal("open"), z.literal("consumed"), z.literal("expired")]);
 
 /** Strongly typed canonical identity: `TaskId`. */
-export const TaskIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const TaskIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Nested telemetry settings patch. */
 export const TelemetrySettingsPatchSchema: z.ZodObject<{
-  timings: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-}, "strict"> = z.object({
+  timings: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+}, z.core.$strict> = z.object({
   timings: z.boolean().nullable().optional(),
 }).strict();
 
 export const TelemetrySettingsV1Schema: z.ZodObject<{
-  timings: z.ZodType<boolean, z.ZodTypeDef, unknown>;
+  timings: z.ZodType<boolean, unknown>;
 }> = z.object({
   timings: z.boolean(),
 });
 
 /** Requested temporal interpretation. */
-export const TemporalModeV1Schema: z.ZodType<TemporalModeV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const TemporalModeV1Schema: z.ZodType<TemporalModeV1, unknown> = z.discriminatedUnion("kind", [z.object({
   cutoff: z.lazy(() => UtcMicrosSchema),
   kind: z.literal("as_of"),
 }).strict(), z.object({
@@ -9293,14 +9293,14 @@ export const TemporalModeV1Schema: z.ZodType<TemporalModeV1, z.ZodTypeDef, unkno
 }).strict()]);
 
 export const TestMapMeasurementV1Schema: z.ZodObject<{
-  algorithm: z.ZodType<string, z.ZodTypeDef, unknown>;
-  applicable: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  caller_depth: z.ZodType<number, z.ZodTypeDef, unknown>;
-  granularity: z.ZodType<string, z.ZodTypeDef, unknown>;
-  node: z.ZodType<NodeRefV1, z.ZodTypeDef, unknown>;
-  reason: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  test_files: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  tests: z.ZodType<Array<CoveringTestV1>, z.ZodTypeDef, unknown>;
+  algorithm: z.ZodType<string, unknown>;
+  applicable: z.ZodType<boolean, unknown>;
+  caller_depth: z.ZodType<number, unknown>;
+  granularity: z.ZodType<string, unknown>;
+  node: z.ZodType<NodeRefV1, unknown>;
+  reason: z.ZodType<string | null, unknown>;
+  test_files: z.ZodType<Array<string>, unknown>;
+  tests: z.ZodType<Array<CoveringTestV1>, unknown>;
 }> = z.object({
   algorithm: z.string(),
   applicable: z.boolean(),
@@ -9313,10 +9313,10 @@ export const TestMapMeasurementV1Schema: z.ZodObject<{
 });
 
 export const TokenActualV1Schema: z.ZodObject<{
-  cache_read_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  cache_write_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  input_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  output_tokens: z.ZodType<number | null, z.ZodTypeDef, unknown>;
+  cache_read_tokens: z.ZodType<number | null, unknown>;
+  cache_write_tokens: z.ZodType<number | null, unknown>;
+  input_tokens: z.ZodType<number | null, unknown>;
+  output_tokens: z.ZodType<number | null, unknown>;
 }> = z.object({
   cache_read_tokens: z.number().int().safe().nullable(),
   cache_write_tokens: z.number().int().safe().nullable(),
@@ -9325,34 +9325,34 @@ export const TokenActualV1Schema: z.ZodObject<{
 });
 
 export const TokenPairV1Schema: z.ZodObject<{
-  input_tokens: z.ZodType<number, z.ZodTypeDef, unknown>;
-  output_tokens: z.ZodType<number, z.ZodTypeDef, unknown>;
+  input_tokens: z.ZodType<number, unknown>;
+  output_tokens: z.ZodType<number, unknown>;
 }> = z.object({
   input_tokens: z.number().int().safe(),
   output_tokens: z.number().int().safe(),
 });
 
 export const TopologyConcurrencyPolicyV1Schema: z.ZodObject<{
-  maximum_active_per_repository: z.ZodType<number, z.ZodTypeDef, unknown>;
-  maximum_global_active: z.ZodType<number, z.ZodTypeDef, unknown>;
-  maximum_parallel_per_task: z.ZodType<number, z.ZodTypeDef, unknown>;
-  maximum_stack_depth: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  maximum_active_per_repository: z.ZodType<number, unknown>;
+  maximum_global_active: z.ZodType<number, unknown>;
+  maximum_parallel_per_task: z.ZodType<number, unknown>;
+  maximum_stack_depth: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   maximum_active_per_repository: z.number().int().min(1).max(65535),
   maximum_global_active: z.number().int().min(1).max(65535),
   maximum_parallel_per_task: z.number().int().min(1).max(65535),
   maximum_stack_depth: z.number().int().min(1).max(65535),
 }).strict();
 
-export const TopologyEscalationPolicyV1Schema: z.ZodEnum<["reject", "require_explicit_human_approval", "require_human_approval_and_independent_review"]> = z.enum(["reject", "require_explicit_human_approval", "require_human_approval_and_independent_review"]);
+export const TopologyEscalationPolicyV1Schema: z.ZodEnum<{ "reject": "reject"; "require_explicit_human_approval": "require_explicit_human_approval"; "require_human_approval_and_independent_review": "require_human_approval_and_independent_review" }> = z.enum(["reject", "require_explicit_human_approval", "require_human_approval_and_independent_review"]);
 
 export const TopologyGatePolicyV1Schema: z.ZodObject<{
-  cleanliness: z.ZodType<WorktreeCleanlinessRequirementV1, z.ZodTypeDef, unknown>;
-  maximum_preflight_age_seconds: z.ZodType<number, z.ZodTypeDef, unknown>;
-  require_fresh_preflight: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  review: z.ZodType<ReviewRequirementV1, z.ZodTypeDef, unknown>;
-  tests: z.ZodType<Array<RequiredCheckV1>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cleanliness: z.ZodType<WorktreeCleanlinessRequirementV1, unknown>;
+  maximum_preflight_age_seconds: z.ZodType<number, unknown>;
+  require_fresh_preflight: z.ZodType<boolean, unknown>;
+  review: z.ZodType<ReviewRequirementV1, unknown>;
+  tests: z.ZodType<Array<RequiredCheckV1>, unknown>;
+}, z.core.$strict> = z.object({
   cleanliness: z.lazy(() => WorktreeCleanlinessRequirementV1Schema),
   maximum_preflight_age_seconds: z.number().int().min(1),
   require_fresh_preflight: z.boolean(),
@@ -9360,22 +9360,22 @@ export const TopologyGatePolicyV1Schema: z.ZodObject<{
   tests: z.array(z.lazy(() => RequiredCheckV1Schema)),
 }).strict();
 
-export const TopologyNotificationLevelV1Schema: z.ZodEnum<["critical_only", "lifecycle", "verbose"]> = z.enum(["critical_only", "lifecycle", "verbose"]);
+export const TopologyNotificationLevelV1Schema: z.ZodEnum<{ "critical_only": "critical_only"; "lifecycle": "lifecycle"; "verbose": "verbose" }> = z.enum(["critical_only", "lifecycle", "verbose"]);
 
 /** Stable, canonical catalog identity for `UseCaseId`. */
-export const UseCaseIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const UseCaseIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Strongly typed canonical identity: `UserProfileId`. */
-export const UserProfileIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const UserProfileIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Profile-scoped settings patch accepted by `PATCH /api/settings/user`. */
 export const UserSettingsPatchSchema: z.ZodObject<{
-  expected_revision_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  extraction_timeout_secs: z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>>;
-  idempotency_key: z.ZodType<string, z.ZodTypeDef, unknown>;
-  upload_enabled: z.ZodOptional<z.ZodType<boolean | null, z.ZodTypeDef, unknown>>;
-  watcher_debounce: z.ZodOptional<z.ZodType<string | null, z.ZodTypeDef, unknown>>;
-}, "strict"> = z.object({
+  expected_revision_id: z.ZodType<string, unknown>;
+  extraction_timeout_secs: z.ZodOptional<z.ZodType<number | null, unknown>>;
+  idempotency_key: z.ZodType<string, unknown>;
+  upload_enabled: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
+  watcher_debounce: z.ZodOptional<z.ZodType<string | null, unknown>>;
+}, z.core.$strict> = z.object({
   expected_revision_id: z.string(),
   extraction_timeout_secs: z.number().int().safe().min(0).nullable().optional(),
   idempotency_key: z.string(),
@@ -9384,16 +9384,16 @@ export const UserSettingsPatchSchema: z.ZodObject<{
 }).strict();
 
 export const UserSettingsPayloadV1Schema: z.ZodObject<{
-  code_index_worker_configuration_revision_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  code_index_worker_configuration_snapshot_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  code_index_worker_status: z.ZodType<CodeIndexWorkerStatusV1 | null, z.ZodTypeDef, unknown>;
-  code_index_workers: z.ZodType<CodeIndexWorkerSelectionV1, z.ZodTypeDef, unknown>;
-  configuration_revision_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  configuration_snapshot_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  extraction_timeout_secs: z.ZodType<number, z.ZodTypeDef, unknown>;
-  installed_agents: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  upload_enabled: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  watcher_debounce: z.ZodType<string, z.ZodTypeDef, unknown>;
+  code_index_worker_configuration_revision_id: z.ZodType<string, unknown>;
+  code_index_worker_configuration_snapshot_id: z.ZodType<string, unknown>;
+  code_index_worker_status: z.ZodType<CodeIndexWorkerStatusV1 | null, unknown>;
+  code_index_workers: z.ZodType<CodeIndexWorkerSelectionV1, unknown>;
+  configuration_revision_id: z.ZodType<string, unknown>;
+  configuration_snapshot_id: z.ZodType<string, unknown>;
+  extraction_timeout_secs: z.ZodType<number, unknown>;
+  installed_agents: z.ZodType<Array<string>, unknown>;
+  upload_enabled: z.ZodType<boolean, unknown>;
+  watcher_debounce: z.ZodType<string, unknown>;
 }> = z.object({
   code_index_worker_configuration_revision_id: z.string(),
   code_index_worker_configuration_snapshot_id: z.string(),
@@ -9408,16 +9408,16 @@ export const UserSettingsPayloadV1Schema: z.ZodObject<{
 });
 
 /** UTC timestamp represented as microseconds from the Unix epoch. */
-export const UtcMicrosSchema: z.ZodType<number, z.ZodTypeDef, unknown> = z.number().int().safe();
+export const UtcMicrosSchema: z.ZodType<number, unknown> = z.number().int().safe();
 
 export const VerifiedWorkEvidenceRootV1Schema: z.ZodObject<{
-  item: z.ZodType<WorkItemV1, z.ZodTypeDef, unknown>;
-  links: z.ZodType<Array<TaskEvidenceLinkV1>, z.ZodTypeDef, unknown>;
-  proposal_decisions: z.ZodType<Array<WorkProposalDecisionV12>, z.ZodTypeDef, unknown>;
-  relation_replan_decisions: z.ZodType<Array<WorkRelationReplanDecisionV1>, z.ZodTypeDef, unknown>;
-  relations: z.ZodType<Array<WorkProductRelationV1>, z.ZodTypeDef, unknown>;
-  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  item: z.ZodType<WorkItemV1, unknown>;
+  links: z.ZodType<Array<TaskEvidenceLinkV1>, unknown>;
+  proposal_decisions: z.ZodType<Array<WorkProposalDecisionV12>, unknown>;
+  relation_replan_decisions: z.ZodType<Array<WorkRelationReplanDecisionV1>, unknown>;
+  relations: z.ZodType<Array<WorkProductRelationV1>, unknown>;
+  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, unknown>;
+}, z.core.$strict> = z.object({
   item: z.lazy(() => WorkItemV1Schema),
   links: z.array(z.lazy(() => TaskEvidenceLinkV1Schema)),
   proposal_decisions: z.array(z.lazy(() => WorkProposalDecisionV12Schema)),
@@ -9428,31 +9428,31 @@ export const VerifiedWorkEvidenceRootV1Schema: z.ZodObject<{
 
 /** One exact verified graph snapshot identity. */
 export const VerifiedWorkGraphVersionV1Schema: z.ZodObject<{
-  event_sequence: z.ZodType<number, z.ZodTypeDef, unknown>;
-  graph_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  recovered_graph_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  source_watermark: z.ZodType<Record<string, number>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  event_sequence: z.ZodType<number, unknown>;
+  graph_version: z.ZodType<number, unknown>;
+  recovered_graph_digest: z.ZodType<ManifestDigest, unknown>;
+  source_watermark: z.ZodType<Record<string, number>, unknown>;
+}, z.core.$strict> = z.object({
   event_sequence: z.number().int().safe().min(0),
   graph_version: z.number().int().safe().min(0),
   recovered_graph_digest: z.lazy(() => ManifestDigestSchema),
-  source_watermark: z.record(z.number().int().safe().min(0)),
+  source_watermark: z.record(z.string(), z.number().int().safe().min(0)),
 }).strict();
 
 /** Exact result of one scan by the canonical lease/process/effect/placement/
 delivery evidence owner. Evidence references are opaque local anchors;
 their owning records remain behind normal authorization. */
 export const VerifiedWorkLeakEvidenceV1Schema: z.ZodObject<{
-  attempt: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<CoverageStateV1, z.ZodTypeDef, unknown>;
-  detection_horizon_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  evidence_refs: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<WorkExecutionLeakKindV1, z.ZodTypeDef, unknown>;
-  owner_class: z.ZodType<LeakOwnerClassV1, z.ZodTypeDef, unknown>;
-  recovery: z.ZodType<WorkExecutionLeakRecoveryV1, z.ZodTypeDef, unknown>;
-  scan_completed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  scan_started_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  attempt: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  coverage: z.ZodType<CoverageStateV1, unknown>;
+  detection_horizon_micros: z.ZodType<number, unknown>;
+  evidence_refs: z.ZodType<Array<string>, unknown>;
+  kind: z.ZodType<WorkExecutionLeakKindV1, unknown>;
+  owner_class: z.ZodType<LeakOwnerClassV1, unknown>;
+  recovery: z.ZodType<WorkExecutionLeakRecoveryV1, unknown>;
+  scan_completed_at: z.ZodType<UtcMicros, unknown>;
+  scan_started_at: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
   coverage: z.lazy(() => CoverageStateV1Schema),
   detection_horizon_micros: z.number().int().safe().min(0),
@@ -9466,19 +9466,19 @@ export const VerifiedWorkLeakEvidenceV1Schema: z.ZodObject<{
 
 /** Failure fact returned by a canonical evidence authority. */
 export const VerifiedWorkRetryFailureV1Schema: z.ZodObject<{
-  evidence_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  selector: z.ZodType<WorkRetryFailureSelectorV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  evidence_digest: z.ZodType<ManifestDigest, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  selector: z.ZodType<WorkRetryFailureSelectorV1, unknown>;
+}, z.core.$strict> = z.object({
   evidence_digest: z.lazy(() => ManifestDigestSchema),
   observed_at: z.lazy(() => UtcMicrosSchema),
   selector: z.lazy(() => WorkRetryFailureSelectorV1Schema),
 }).strict();
 
 export const VersionSettingsPayloadV1Schema: z.ZodObject<{
-  cached_latest_version: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  channel: z.ZodType<string, z.ZodTypeDef, unknown>;
-  version: z.ZodType<string, z.ZodTypeDef, unknown>;
+  cached_latest_version: z.ZodType<string | null, unknown>;
+  channel: z.ZodType<string, unknown>;
+  version: z.ZodType<string, unknown>;
 }> = z.object({
   cached_latest_version: z.string().nullable(),
   channel: z.string(),
@@ -9486,24 +9486,24 @@ export const VersionSettingsPayloadV1Schema: z.ZodObject<{
 });
 
 export const WorkAcceptanceCriterionV1Schema: z.ZodObject<{
-  criterion_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  description: z.ZodType<string, z.ZodTypeDef, unknown>;
-  evidence_required: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  criterion_id: z.ZodType<string, unknown>;
+  description: z.ZodType<string, unknown>;
+  evidence_required: z.ZodType<boolean, unknown>;
+}, z.core.$strict> = z.object({
   criterion_id: z.string(),
   description: z.string(),
   evidence_required: z.boolean(),
 }).strict();
 
 export const WorkAnchorHydrationV1Schema: z.ZodObject<{
-  anchor_id: z.ZodType<RetrievalAnchorId, z.ZodTypeDef, unknown>;
-  content: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  continuation: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<WorkEvidenceCoverageStateV1, z.ZodTypeDef, unknown>;
-  exact_anchors: z.ZodType<Array<RetrievalAnchorId>, z.ZodTypeDef, unknown>;
-  freshness: z.ZodType<WorkEvidenceFreshnessV1, z.ZodTypeDef, unknown>;
-  redacted: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  anchor_id: z.ZodType<RetrievalAnchorId, unknown>;
+  content: z.ZodType<Array<string>, unknown>;
+  continuation: z.ZodType<string | null, unknown>;
+  coverage: z.ZodType<WorkEvidenceCoverageStateV1, unknown>;
+  exact_anchors: z.ZodType<Array<RetrievalAnchorId>, unknown>;
+  freshness: z.ZodType<WorkEvidenceFreshnessV1, unknown>;
+  redacted: z.ZodType<boolean, unknown>;
+}, z.core.$strict> = z.object({
   anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
   content: z.array(z.string()),
   continuation: z.string().nullable(),
@@ -9513,21 +9513,21 @@ export const WorkAnchorHydrationV1Schema: z.ZodObject<{
   redacted: z.boolean(),
 }).strict();
 
-export const WorkApprovalPolicySchema: z.ZodEnum<["never", "on_request"]> = z.enum(["never", "on_request"]);
+export const WorkApprovalPolicySchema: z.ZodEnum<{ "never": "never"; "on_request": "on_request" }> = z.enum(["never", "on_request"]);
 
 /** One authority-scoped artifact hydration request, paged like the attempt
 list and pinned to the same verified topology generation. */
 export const WorkArtifactHydrationRequestV1Schema: z.ZodObject<{
-  cursor: z.ZodType<WorkAttemptListCursorV1 | null, z.ZodTypeDef, unknown>;
-  page_size: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cursor: z.ZodType<WorkAttemptListCursorV1 | null, unknown>;
+  page_size: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   cursor: z.union([z.lazy(() => WorkAttemptListCursorV1Schema), z.null()]),
   page_size: z.number().int().min(0),
 }).strict();
 
 /** One authority-scoped artifact hydration read. Absence of any Work in
 scope is a typed state, distinct from an authorized-but-empty page. */
-export const WorkArtifactHydrationV1Schema: z.ZodType<WorkArtifactHydrationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const WorkArtifactHydrationV1Schema: z.ZodType<WorkArtifactHydrationV1, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("absent"),
 }).strict(), z.object({
   attempts: z.array(z.lazy(() => WorkAttemptArtifactsV1Schema)),
@@ -9537,13 +9537,13 @@ export const WorkArtifactHydrationV1Schema: z.ZodType<WorkArtifactHydrationV1, z
 }).strict()]);
 
 /** Strongly typed canonical identity: `WorkArtifactId`. */
-export const WorkArtifactIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const WorkArtifactIdSchema: z.ZodType<string, unknown> = z.string();
 
 export const WorkArtifactRefV1Schema: z.ZodObject<{
-  artifact_id: z.ZodType<WorkArtifactId, z.ZodTypeDef, unknown>;
-  byte_length: z.ZodType<number, z.ZodTypeDef, unknown>;
-  digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  artifact_id: z.ZodType<WorkArtifactId, unknown>;
+  byte_length: z.ZodType<number, unknown>;
+  digest: z.ZodType<ManifestDigest, unknown>;
+}, z.core.$strict> = z.object({
   artifact_id: z.lazy(() => WorkArtifactIdSchema),
   byte_length: z.number().int().safe().min(0),
   digest: z.lazy(() => ManifestDigestSchema),
@@ -9551,10 +9551,10 @@ export const WorkArtifactRefV1Schema: z.ZodObject<{
 
 /** The artifacts and evidence one attempt declared. */
 export const WorkAttemptArtifactsV1Schema: z.ZodObject<{
-  artifacts: z.ZodType<Array<WorkArtifactRefV1>, z.ZodTypeDef, unknown>;
-  evidence: z.ZodType<WorkAttemptEvidenceStateV1, z.ZodTypeDef, unknown>;
-  identity: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  artifacts: z.ZodType<Array<WorkArtifactRefV1>, unknown>;
+  evidence: z.ZodType<WorkAttemptEvidenceStateV1, unknown>;
+  identity: z.ZodType<WorkAttemptIdentityV1, unknown>;
+}, z.core.$strict> = z.object({
   artifacts: z.array(z.lazy(() => WorkArtifactRefV1Schema)),
   evidence: z.lazy(() => WorkAttemptEvidenceStateV1Schema),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
@@ -9565,16 +9565,16 @@ record is the evidence digest carried by [`WorkTerminalEvidenceV1`] and by
 the `RuntimeEvidenceRef` attached to the Work projection, so the receipt
 in Work always names an inspectable record. */
 export const WorkAttemptEvidenceRecordV1Schema: z.ZodObject<{
-  actual_route: z.ZodType<WorkProviderRouteV1 | null, z.ZodTypeDef, unknown>;
-  identity: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  outcome: z.ZodType<WorkAttemptProviderOutcomeV1, z.ZodTypeDef, unknown>;
-  provider_fallback: z.ZodType<WorkProviderFallbackRecordV1 | null, z.ZodTypeDef, unknown>;
-  provider_session: z.ZodOptional<z.ZodType<ObservationSourceIdentityV1 | null, z.ZodTypeDef, unknown>>;
-  requested_route: z.ZodType<WorkProviderRouteV1, z.ZodTypeDef, unknown>;
-  stderr: z.ZodType<WorkAttemptStreamSummaryV1 | null, z.ZodTypeDef, unknown>;
-  stdout: z.ZodType<WorkAttemptStreamSummaryV1 | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  actual_route: z.ZodType<WorkProviderRouteV1 | null, unknown>;
+  identity: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  outcome: z.ZodType<WorkAttemptProviderOutcomeV1, unknown>;
+  provider_fallback: z.ZodType<WorkProviderFallbackRecordV1 | null, unknown>;
+  provider_session: z.ZodOptional<z.ZodType<ObservationSourceIdentityV1 | null, unknown>>;
+  requested_route: z.ZodType<WorkProviderRouteV1, unknown>;
+  stderr: z.ZodType<WorkAttemptStreamSummaryV1 | null, unknown>;
+  stdout: z.ZodType<WorkAttemptStreamSummaryV1 | null, unknown>;
+}, z.core.$strict> = z.object({
   actual_route: z.union([z.lazy(() => WorkProviderRouteV1Schema), z.null()]),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   observed_at: z.lazy(() => UtcMicrosSchema),
@@ -9588,7 +9588,7 @@ export const WorkAttemptEvidenceRecordV1Schema: z.ZodObject<{
 
 /** Whether an attempt's terminal evidence has been sealed. An attempt that
 has not reported an outcome yet is a typed state, not a missing record. */
-export const WorkAttemptEvidenceStateV1Schema: z.ZodType<WorkAttemptEvidenceStateV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const WorkAttemptEvidenceStateV1Schema: z.ZodType<WorkAttemptEvidenceStateV1, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("pending"),
 }).strict(), z.object({
   record: z.lazy(() => WorkAttemptEvidenceRecordV1Schema),
@@ -9596,17 +9596,17 @@ export const WorkAttemptEvidenceStateV1Schema: z.ZodType<WorkAttemptEvidenceStat
 }).strict()]);
 
 export const WorkAttemptIdentityV1Schema: z.ZodObject<{
-  attempt_id: z.ZodType<AttemptId, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  attempt_id: z.ZodType<AttemptId, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   attempt_id: z.lazy(() => AttemptIdSchema),
   run_id: z.lazy(() => RunIdSchema),
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 
 /** How much of the authorized attempt set one page covers. */
-export const WorkAttemptListCoverageV1Schema: z.ZodType<WorkAttemptListCoverageV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("coverage", [z.object({
+export const WorkAttemptListCoverageV1Schema: z.ZodType<WorkAttemptListCoverageV1, unknown> = z.discriminatedUnion("coverage", [z.object({
   coverage: z.literal("capped"),
   remaining: z.number().int().min(0),
   resume: z.lazy(() => WorkAttemptListCursorV1Schema),
@@ -9619,19 +9619,19 @@ export const WorkAttemptListCoverageV1Schema: z.ZodType<WorkAttemptListCoverageV
 /** Opaque resume point for the next page of one attempt-list-family read,
 bound to the operation and `page_size` that minted it and pinned to the
 verified topology generation the page was read under. */
-export const WorkAttemptListCursorV1Schema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const WorkAttemptListCursorV1Schema: z.ZodType<string, unknown> = z.string();
 
 export const WorkAttemptListRequestV1Schema: z.ZodObject<{
-  cursor: z.ZodType<WorkAttemptListCursorV1 | null, z.ZodTypeDef, unknown>;
-  page_size: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cursor: z.ZodType<WorkAttemptListCursorV1 | null, unknown>;
+  page_size: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   cursor: z.union([z.lazy(() => WorkAttemptListCursorV1Schema), z.null()]),
   page_size: z.number().int().min(0),
 }).strict();
 
 /** One authority-scoped attempt-list read. Absence of any Work in scope is a
 typed state, distinct from an authorized-but-empty page. */
-export const WorkAttemptListV1Schema: z.ZodType<WorkAttemptListV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const WorkAttemptListV1Schema: z.ZodType<WorkAttemptListV1, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("absent"),
 }).strict(), z.object({
   attempts: z.array(z.lazy(() => WorkAttemptV1Schema)),
@@ -9641,29 +9641,29 @@ export const WorkAttemptListV1Schema: z.ZodType<WorkAttemptListV1, z.ZodTypeDef,
 }).strict()]);
 
 export const WorkAttemptProgressV1Schema: z.ZodObject<{
-  completed: z.ZodType<number, z.ZodTypeDef, unknown>;
-  total: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  completed: z.ZodType<number, unknown>;
+  total: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   completed: z.number().int().safe().min(0),
   total: z.number().int().safe().min(0),
 }).strict();
 
 export const WorkAttemptProjectionBindingV1Schema: z.ZodObject<{
-  accepted_proposal: z.ZodType<ProposalId, z.ZodTypeDef, unknown>;
-  event_sequence: z.ZodType<number, z.ZodTypeDef, unknown>;
-  graph_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  recovered_graph_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  source_watermark: z.ZodType<Record<string, number>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  accepted_proposal: z.ZodType<ProposalId, unknown>;
+  event_sequence: z.ZodType<number, unknown>;
+  graph_version: z.ZodType<number, unknown>;
+  recovered_graph_digest: z.ZodType<ManifestDigest, unknown>;
+  source_watermark: z.ZodType<Record<string, number>, unknown>;
+}, z.core.$strict> = z.object({
   accepted_proposal: z.lazy(() => ProposalIdSchema),
   event_sequence: z.number().int().safe().min(0),
   graph_version: z.number().int().safe().min(0),
   recovered_graph_digest: z.lazy(() => ManifestDigestSchema),
-  source_watermark: z.record(z.number().int().safe().min(0)),
+  source_watermark: z.record(z.string(), z.number().int().safe().min(0)),
 }).strict();
 
 /** How one provider attempt ended, as observed by the daemon runtime. */
-export const WorkAttemptProviderOutcomeV1Schema: z.ZodType<WorkAttemptProviderOutcomeV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("outcome", [z.object({
+export const WorkAttemptProviderOutcomeV1Schema: z.ZodType<WorkAttemptProviderOutcomeV1, unknown> = z.discriminatedUnion("outcome", [z.object({
   outcome: z.literal("cancelled"),
 }), z.object({
   code: z.number().int(),
@@ -9686,10 +9686,10 @@ export const WorkAttemptProviderOutcomeV1Schema: z.ZodType<WorkAttemptProviderOu
 })]);
 
 export const WorkAttemptReceiptV1Schema: z.ZodObject<{
-  artifacts: z.ZodType<Array<WorkArtifactRefV1>, z.ZodTypeDef, unknown>;
-  evidence: z.ZodType<WorkAttemptEvidenceRecordV1 | null, z.ZodTypeDef, unknown>;
-  identity: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  artifacts: z.ZodType<Array<WorkArtifactRefV1>, unknown>;
+  evidence: z.ZodType<WorkAttemptEvidenceRecordV1 | null, unknown>;
+  identity: z.ZodType<WorkAttemptIdentityV1, unknown>;
+}, z.core.$strict> = z.object({
   artifacts: z.array(z.lazy(() => WorkArtifactRefV1Schema)),
   evidence: z.union([z.lazy(() => WorkAttemptEvidenceRecordV1Schema), z.null()]),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
@@ -9703,33 +9703,33 @@ does not authorize another launch; an explicit `retry_attempt` must verify
 the exact recovery fence and effect safety before it can atomically admit a
 new identity. */
 export const WorkAttemptRecoveryReportV1Schema: z.ZodObject<{
-  cancelled: z.ZodType<Array<WorkAttemptV1>, z.ZodTypeDef, unknown>;
-  recovery_required: z.ZodType<Array<WorkAttemptV1>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cancelled: z.ZodType<Array<WorkAttemptV1>, unknown>;
+  recovery_required: z.ZodType<Array<WorkAttemptV1>, unknown>;
+}, z.core.$strict> = z.object({
   cancelled: z.array(z.lazy(() => WorkAttemptV1Schema)),
   recovery_required: z.array(z.lazy(() => WorkAttemptV1Schema)),
 }).strict();
 
-export const WorkAttemptStateV1Schema: z.ZodEnum<["cancellation_acknowledged", "cancellation_escalated", "cancellation_requested", "cancelled", "failed", "leased", "recovery_required", "running", "succeeded", "timed_out"]> = z.enum(["cancellation_acknowledged", "cancellation_escalated", "cancellation_requested", "cancelled", "failed", "leased", "recovery_required", "running", "succeeded", "timed_out"]);
+export const WorkAttemptStateV1Schema: z.ZodEnum<{ "cancellation_acknowledged": "cancellation_acknowledged"; "cancellation_escalated": "cancellation_escalated"; "cancellation_requested": "cancellation_requested"; "cancelled": "cancelled"; "failed": "failed"; "leased": "leased"; "recovery_required": "recovery_required"; "running": "running"; "succeeded": "succeeded"; "timed_out": "timed_out" }> = z.enum(["cancellation_acknowledged", "cancellation_escalated", "cancellation_requested", "cancelled", "failed", "leased", "recovery_required", "running", "succeeded", "timed_out"]);
 
 export const WorkAttemptStatusRequestV1Schema: z.ZodObject<{
-  attempt_id: z.ZodType<AttemptId, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  attempt_id: z.ZodType<AttemptId, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   attempt_id: z.lazy(() => AttemptIdSchema),
   run_id: z.lazy(() => RunIdSchema),
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 
-export const WorkAttemptStreamChannelV1Schema: z.ZodEnum<["stderr", "stdout"]> = z.enum(["stderr", "stdout"]);
+export const WorkAttemptStreamChannelV1Schema: z.ZodEnum<{ "stderr": "stderr"; "stdout": "stdout" }> = z.enum(["stderr", "stdout"]);
 
 /** Bounded summary of one captured provider stream. */
 export const WorkAttemptStreamSummaryV1Schema: z.ZodObject<{
-  byte_length: z.ZodType<number, z.ZodTypeDef, unknown>;
-  digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  truncated: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  byte_length: z.ZodType<number, unknown>;
+  digest: z.ZodType<ManifestDigest, unknown>;
+  truncated: z.ZodType<boolean, unknown>;
+}, z.core.$strict> = z.object({
   byte_length: z.number().int().safe().min(0),
   digest: z.lazy(() => ManifestDigestSchema),
   truncated: z.boolean(),
@@ -9737,26 +9737,26 @@ export const WorkAttemptStreamSummaryV1Schema: z.ZodObject<{
 
 /** The verified Work topology snapshot one attempt-list page was read under. */
 export const WorkAttemptTopologyBindingV1Schema: z.ZodObject<{
-  generation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  task_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  generation: z.ZodType<string, unknown>;
+  task_count: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   generation: z.string(),
   task_count: z.number().int().min(0),
 }).strict();
 
 export const WorkAttemptV1Schema: z.ZodObject<{
-  actual_route: z.ZodType<WorkProviderRouteV1 | null, z.ZodTypeDef, unknown>;
-  artifacts: z.ZodType<Array<WorkArtifactRefV1>, z.ZodTypeDef, unknown>;
-  cancellation: z.ZodType<WorkCancellationStateV1, z.ZodTypeDef, unknown>;
-  execution: z.ZodType<WorkExecutionEnvelopeV1, z.ZodTypeDef, unknown>;
-  identity: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  lease: z.ZodType<WorkLeaseFenceV1, z.ZodTypeDef, unknown>;
-  progress: z.ZodType<WorkAttemptProgressV1 | null, z.ZodTypeDef, unknown>;
-  projection_binding: z.ZodType<WorkAttemptProjectionBindingV1, z.ZodTypeDef, unknown>;
-  recovery: z.ZodType<WorkRecoveryStateV1, z.ZodTypeDef, unknown>;
-  requested_route: z.ZodType<WorkProviderRouteV1, z.ZodTypeDef, unknown>;
-  state: z.ZodType<WorkAttemptStateV1, z.ZodTypeDef, unknown>;
-  terminal: z.ZodType<WorkTerminalEvidenceV1 | null, z.ZodTypeDef, unknown>;
+  actual_route: z.ZodType<WorkProviderRouteV1 | null, unknown>;
+  artifacts: z.ZodType<Array<WorkArtifactRefV1>, unknown>;
+  cancellation: z.ZodType<WorkCancellationStateV1, unknown>;
+  execution: z.ZodType<WorkExecutionEnvelopeV1, unknown>;
+  identity: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  lease: z.ZodType<WorkLeaseFenceV1, unknown>;
+  progress: z.ZodType<WorkAttemptProgressV1 | null, unknown>;
+  projection_binding: z.ZodType<WorkAttemptProjectionBindingV1, unknown>;
+  recovery: z.ZodType<WorkRecoveryStateV1, unknown>;
+  requested_route: z.ZodType<WorkProviderRouteV1, unknown>;
+  state: z.ZodType<WorkAttemptStateV1, unknown>;
+  terminal: z.ZodType<WorkTerminalEvidenceV1 | null, unknown>;
 }> = z.object({
   actual_route: z.union([z.lazy(() => WorkProviderRouteV1Schema), z.null()]),
   artifacts: z.array(z.lazy(() => WorkArtifactRefV1Schema)),
@@ -9773,12 +9773,12 @@ export const WorkAttemptV1Schema: z.ZodObject<{
 });
 
 export const WorkAuthoritySchema: z.ZodObject<{
-  actor_id: z.ZodType<ActorId, z.ZodTypeDef, unknown>;
-  policy_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<ProjectId, z.ZodTypeDef, unknown>;
-  repository_id: z.ZodType<RepositoryId, z.ZodTypeDef, unknown>;
-  worktree_id: z.ZodType<WorktreeId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  actor_id: z.ZodType<ActorId, unknown>;
+  policy_digest: z.ZodType<ManifestDigest, unknown>;
+  project_id: z.ZodType<ProjectId, unknown>;
+  repository_id: z.ZodType<RepositoryId, unknown>;
+  worktree_id: z.ZodType<WorktreeId, unknown>;
+}, z.core.$strict> = z.object({
   actor_id: z.lazy(() => ActorIdSchema),
   policy_digest: z.lazy(() => ManifestDigestSchema),
   project_id: z.lazy(() => ProjectIdSchema),
@@ -9790,14 +9790,14 @@ export const WorkAuthoritySchema: z.ZodObject<{
 named separately (Plan 06); `support_floor` carries the governing floor
 into the record. */
 export const WorkCalibratedSizingV1Schema: z.ZodObject<{
-  band: z.ZodType<WorkOrdinalBandV1, z.ZodTypeDef, unknown>;
-  cohort: z.ZodType<string, z.ZodTypeDef, unknown>;
-  drift_valid: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  error: z.ZodType<WorkOrdinalBandV1, z.ZodTypeDef, unknown>;
-  horizon: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  support: z.ZodType<number, z.ZodTypeDef, unknown>;
-  support_floor: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  band: z.ZodType<WorkOrdinalBandV1, unknown>;
+  cohort: z.ZodType<string, unknown>;
+  drift_valid: z.ZodType<boolean, unknown>;
+  error: z.ZodType<WorkOrdinalBandV1, unknown>;
+  horizon: z.ZodType<UtcMicros, unknown>;
+  support: z.ZodType<number, unknown>;
+  support_floor: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   band: z.lazy(() => WorkOrdinalBandV1Schema),
   cohort: z.string(),
   drift_valid: z.boolean(),
@@ -9813,15 +9813,15 @@ No rate, probability, or composite score is derived here. Consumers see
 the authority-supplied outcome rows, categorical uncertainty, and exact
 denominator counts that produced the proposal's existing calibrated sizing. */
 export const WorkCalibrationEvidenceV1Schema: z.ZodObject<{
-  cohort_route: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  comparable_outcomes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  eligible_route_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  incomparable_outcomes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  provenance: z.ZodType<WorkCalibrationProvenanceV1, z.ZodTypeDef, unknown>;
-  raw_outcomes: z.ZodType<Array<WorkPriorOutcomeV1>, z.ZodTypeDef, unknown>;
-  routes_with_outcomes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  uncertainty: z.ZodType<WorkCalibrationUncertaintyV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cohort_route: z.ZodType<string | null, unknown>;
+  comparable_outcomes: z.ZodType<number, unknown>;
+  eligible_route_count: z.ZodType<number, unknown>;
+  incomparable_outcomes: z.ZodType<number, unknown>;
+  provenance: z.ZodType<WorkCalibrationProvenanceV1, unknown>;
+  raw_outcomes: z.ZodType<Array<WorkPriorOutcomeV1>, unknown>;
+  routes_with_outcomes: z.ZodType<number, unknown>;
+  uncertainty: z.ZodType<WorkCalibrationUncertaintyV1, unknown>;
+}, z.core.$strict> = z.object({
   cohort_route: z.string().nullable(),
   comparable_outcomes: z.number().int().min(0),
   eligible_route_count: z.number().int().min(0),
@@ -9833,14 +9833,14 @@ export const WorkCalibrationEvidenceV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkCalibrationProvenanceV1Schema: z.ZodObject<{
-  configuration_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  configuration_revision: z.ZodType<ConfigurationRevisionId | null, z.ZodTypeDef, unknown>;
-  evaluated_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  evaluator_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  evaluator_revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-  input_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  local_evidence: z.ZodType<WorkEvidenceFrontierV1 | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  configuration_digest: z.ZodType<ManifestDigest, unknown>;
+  configuration_revision: z.ZodType<ConfigurationRevisionId | null, unknown>;
+  evaluated_at: z.ZodType<UtcMicros, unknown>;
+  evaluator_id: z.ZodType<string, unknown>;
+  evaluator_revision: z.ZodType<number, unknown>;
+  input_digest: z.ZodType<ManifestDigest, unknown>;
+  local_evidence: z.ZodType<WorkEvidenceFrontierV1 | null, unknown>;
+}, z.core.$strict> = z.object({
   configuration_digest: z.lazy(() => ManifestDigestSchema),
   configuration_revision: z.union([z.lazy(() => ConfigurationRevisionIdSchema), z.null()]),
   evaluated_at: z.lazy(() => UtcMicrosSchema),
@@ -9850,36 +9850,36 @@ export const WorkCalibrationProvenanceV1Schema: z.ZodObject<{
   local_evidence: z.union([z.lazy(() => WorkEvidenceFrontierV1Schema), z.null()]),
 }).strict();
 
-export const WorkCalibrationUncertaintyV1Schema: z.ZodEnum<["incomparable", "sparse", "stale", "supported"]> = z.enum(["incomparable", "sparse", "stale", "supported"]);
+export const WorkCalibrationUncertaintyV1Schema: z.ZodEnum<{ "incomparable": "incomparable"; "sparse": "sparse"; "stale": "stale"; "supported": "supported" }> = z.enum(["incomparable", "sparse", "stale", "supported"]);
 
 export const WorkCancellationAcknowledgementV1Schema: z.ZodObject<{
-  acknowledged_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  request: z.ZodType<WorkCancellationRequestV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  acknowledged_at: z.ZodType<UtcMicros, unknown>;
+  request: z.ZodType<WorkCancellationRequestV1, unknown>;
+}, z.core.$strict> = z.object({
   acknowledged_at: z.lazy(() => UtcMicrosSchema),
   request: z.lazy(() => WorkCancellationRequestV1Schema),
 }).strict();
 
 export const WorkCancellationEscalationV1Schema: z.ZodObject<{
-  acknowledgement: z.ZodType<WorkCancellationAcknowledgementV1, z.ZodTypeDef, unknown>;
-  escalated_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  acknowledgement: z.ZodType<WorkCancellationAcknowledgementV1, unknown>;
+  escalated_at: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   acknowledgement: z.lazy(() => WorkCancellationAcknowledgementV1Schema),
   escalated_at: z.lazy(() => UtcMicrosSchema),
 }).strict();
 
 /** Strongly typed canonical identity: `WorkCancellationRequestId`. */
-export const WorkCancellationRequestIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const WorkCancellationRequestIdSchema: z.ZodType<string, unknown> = z.string();
 
 export const WorkCancellationRequestV1Schema: z.ZodObject<{
-  request_id: z.ZodType<WorkCancellationRequestId, z.ZodTypeDef, unknown>;
-  requested_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  request_id: z.ZodType<WorkCancellationRequestId, unknown>;
+  requested_at: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   request_id: z.lazy(() => WorkCancellationRequestIdSchema),
   requested_at: z.lazy(() => UtcMicrosSchema),
 }).strict();
 
-export const WorkCancellationStateV1Schema: z.ZodType<WorkCancellationStateV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const WorkCancellationStateV1Schema: z.ZodType<WorkCancellationStateV1, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("acknowledged"),
   value: z.lazy(() => WorkCancellationAcknowledgementV1Schema),
 }), z.object({
@@ -9893,39 +9893,39 @@ export const WorkCancellationStateV1Schema: z.ZodType<WorkCancellationStateV1, z
 })]);
 
 export const WorkCausalProjectionV1Schema: z.ZodObject<{
-  candidate_edges: z.ZodType<Array<WorkDagEdgeV1>, z.ZodTypeDef, unknown>;
-  graph_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  candidate_edges: z.ZodType<Array<WorkDagEdgeV1>, unknown>;
+  graph_version: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   candidate_edges: z.array(z.lazy(() => WorkDagEdgeV1Schema)),
   graph_version: z.number().int().safe().min(0),
 }).strict();
 
 /** Strongly typed canonical identity: `WorkCommandId`. */
-export const WorkCommandIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const WorkCommandIdSchema: z.ZodType<string, unknown> = z.string();
 
 export const WorkCriticalPathProjectionV1Schema: z.ZodObject<{
-  graph_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  task_ids: z.ZodType<Array<TaskId>, z.ZodTypeDef, unknown>;
-  total_effort: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  graph_version: z.ZodType<number, unknown>;
+  task_ids: z.ZodType<Array<TaskId>, unknown>;
+  total_effort: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   graph_version: z.number().int().safe().min(0),
   task_ids: z.array(z.lazy(() => TaskIdSchema)),
   total_effort: z.number().int().min(0),
 }).strict();
 
 export const WorkDagEdgeV1Schema: z.ZodObject<{
-  dependency: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-  dependent: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  dependency: z.ZodType<TaskId, unknown>;
+  dependent: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   dependency: z.lazy(() => TaskIdSchema),
   dependent: z.lazy(() => TaskIdSchema),
 }).strict();
 
 export const WorkDagProjectionV1Schema: z.ZodObject<{
-  gating_edges: z.ZodType<Array<WorkDagEdgeV1>, z.ZodTypeDef, unknown>;
-  graph_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  task_ids: z.ZodType<Array<TaskId>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  gating_edges: z.ZodType<Array<WorkDagEdgeV1>, unknown>;
+  graph_version: z.ZodType<number, unknown>;
+  task_ids: z.ZodType<Array<TaskId>, unknown>;
+}, z.core.$strict> = z.object({
   gating_edges: z.array(z.lazy(() => WorkDagEdgeV1Schema)),
   graph_version: z.number().int().safe().min(0),
   task_ids: z.array(z.lazy(() => TaskIdSchema)),
@@ -9934,14 +9934,14 @@ export const WorkDagProjectionV1Schema: z.ZodObject<{
 /** A one-level decomposition proposal. Never recursive: a deeper split is a
 separate sequenced capability, not something this evaluator may invent. */
 export const WorkDecompositionProposalV1Schema: z.ZodObject<{
-  candidates: z.ZodType<Array<WorkSubtaskSketchV1>, z.ZodTypeDef, unknown>;
-  rationale: z.ZodType<Array<WorkProposalReasonV1>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  candidates: z.ZodType<Array<WorkSubtaskSketchV1>, unknown>;
+  rationale: z.ZodType<Array<WorkProposalReasonV1>, unknown>;
+}, z.core.$strict> = z.object({
   candidates: z.array(z.lazy(() => WorkSubtaskSketchV1Schema)),
   rationale: z.array(z.lazy(() => WorkProposalReasonV1Schema)),
 }).strict();
 
-export const WorkDuplicateAdjudicationAppendOutcomeV1Schema: z.ZodType<WorkDuplicateAdjudicationAppendOutcomeV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("outcome", [z.object({
+export const WorkDuplicateAdjudicationAppendOutcomeV1Schema: z.ZodType<WorkDuplicateAdjudicationAppendOutcomeV1, unknown> = z.discriminatedUnion("outcome", [z.object({
   outcome: z.literal("appended"),
   receipt: z.lazy(() => WorkDuplicateAdjudicationReceiptV1Schema),
 }), z.object({
@@ -9950,16 +9950,16 @@ export const WorkDuplicateAdjudicationAppendOutcomeV1Schema: z.ZodType<WorkDupli
 })]);
 
 export const WorkDuplicateAdjudicationCommandV1Schema: z.ZodObject<{
-  command_id: z.ZodType<WorkCommandId, z.ZodTypeDef, unknown>;
-  evidence: z.ZodType<WorkDuplicateAdjudicationEvidenceV1, z.ZodTypeDef, unknown>;
-  expected_revision: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  first_attempt: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  occurred_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  quantities: z.ZodType<WorkDuplicateAdjudicationQuantitiesV1, z.ZodTypeDef, unknown>;
-  reason: z.ZodType<string, z.ZodTypeDef, unknown>;
-  second_attempt: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  verdict: z.ZodType<DuplicateEffortKindV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  command_id: z.ZodType<WorkCommandId, unknown>;
+  evidence: z.ZodType<WorkDuplicateAdjudicationEvidenceV1, unknown>;
+  expected_revision: z.ZodType<number | null, unknown>;
+  first_attempt: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  occurred_at: z.ZodType<UtcMicros, unknown>;
+  quantities: z.ZodType<WorkDuplicateAdjudicationQuantitiesV1, unknown>;
+  reason: z.ZodType<string, unknown>;
+  second_attempt: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  verdict: z.ZodType<DuplicateEffortKindV1, unknown>;
+}, z.core.$strict> = z.object({
   command_id: z.lazy(() => WorkCommandIdSchema),
   evidence: z.lazy(() => WorkDuplicateAdjudicationEvidenceV1Schema),
   expected_revision: z.number().int().safe().min(0).nullable(),
@@ -9972,23 +9972,23 @@ export const WorkDuplicateAdjudicationCommandV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkDuplicateAdjudicationEvidenceV1Schema: z.ZodObject<{
-  topology_generation: z.ZodType<WorkTopologyGenerationRefV1, z.ZodTypeDef, unknown>;
-  work_generation: z.ZodType<ProjectionGenerationId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  topology_generation: z.ZodType<WorkTopologyGenerationRefV1, unknown>;
+  work_generation: z.ZodType<ProjectionGenerationId, unknown>;
+}, z.core.$strict> = z.object({
   topology_generation: z.lazy(() => WorkTopologyGenerationRefV1Schema),
   work_generation: z.lazy(() => ProjectionGenerationIdSchema),
 }).strict();
 
 export const WorkDuplicateAdjudicationQuantitiesV1Schema: z.ZodObject<{
-  cost_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<CoverageStateV1, z.ZodTypeDef, unknown>;
-  effect_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  effect_outcome: z.ZodType<DuplicateEffectOutcomeV1, z.ZodTypeDef, unknown>;
-  evidence: z.ZodType<QuantityEvidenceClassV1, z.ZodTypeDef, unknown>;
-  test_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  token_count: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  wall_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cost_micros: z.ZodType<number | null, unknown>;
+  coverage: z.ZodType<CoverageStateV1, unknown>;
+  effect_count: z.ZodType<number | null, unknown>;
+  effect_outcome: z.ZodType<DuplicateEffectOutcomeV1, unknown>;
+  evidence: z.ZodType<QuantityEvidenceClassV1, unknown>;
+  test_count: z.ZodType<number | null, unknown>;
+  token_count: z.ZodType<number | null, unknown>;
+  wall_micros: z.ZodType<number | null, unknown>;
+}, z.core.$strict> = z.object({
   cost_micros: z.number().int().safe().min(0).nullable(),
   coverage: z.lazy(() => CoverageStateV1Schema),
   effect_count: z.number().int().safe().min(0).nullable(),
@@ -10000,12 +10000,12 @@ export const WorkDuplicateAdjudicationQuantitiesV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkDuplicateAdjudicationReceiptV1Schema: z.ZodObject<{
-  actor_id: z.ZodType<ActorId, z.ZodTypeDef, unknown>;
-  adjudication_ref: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  canonical_input_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  command: z.ZodType<WorkDuplicateAdjudicationCommandV1, z.ZodTypeDef, unknown>;
-  revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  actor_id: z.ZodType<ActorId, unknown>;
+  adjudication_ref: z.ZodType<ManifestDigest, unknown>;
+  canonical_input_digest: z.ZodType<ManifestDigest, unknown>;
+  command: z.ZodType<WorkDuplicateAdjudicationCommandV1, unknown>;
+  revision: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   actor_id: z.lazy(() => ActorIdSchema),
   adjudication_ref: z.lazy(() => ManifestDigestSchema),
   canonical_input_digest: z.lazy(() => ManifestDigestSchema),
@@ -10014,11 +10014,11 @@ export const WorkDuplicateAdjudicationReceiptV1Schema: z.ZodObject<{
 }).strict();
 
 /** Effect semantics admitted for one provider attempt. */
-export const WorkEffectStateV1Schema: z.ZodEnum<["compound_non_repeatable", "intercepted", "observational"]> = z.enum(["compound_non_repeatable", "intercepted", "observational"]);
+export const WorkEffectStateV1Schema: z.ZodEnum<{ "compound_non_repeatable": "compound_non_repeatable"; "intercepted": "intercepted"; "observational": "observational" }> = z.enum(["compound_non_repeatable", "intercepted", "observational"]);
 
-export const WorkEgressPolicySchema: z.ZodEnum<["allowlisted", "deny"]> = z.enum(["allowlisted", "deny"]);
+export const WorkEgressPolicySchema: z.ZodEnum<{ "allowlisted": "allowlisted"; "deny": "deny" }> = z.enum(["allowlisted", "deny"]);
 
-export const WorkEvidenceContinuationV1Schema: z.ZodType<WorkEvidenceContinuationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const WorkEvidenceContinuationV1Schema: z.ZodType<WorkEvidenceContinuationV1, unknown> = z.discriminatedUnion("kind", [z.object({
   cursor: z.string(),
   kind: z.literal("anchor"),
   link_id: z.string(),
@@ -10027,21 +10027,21 @@ export const WorkEvidenceContinuationV1Schema: z.ZodType<WorkEvidenceContinuatio
   kind: z.literal("task_session"),
 }).strict()]);
 
-export const WorkEvidenceCoverageStateV1Schema: z.ZodEnum<["complete", "partial", "unknown"]> = z.enum(["complete", "partial", "unknown"]);
+export const WorkEvidenceCoverageStateV1Schema: z.ZodEnum<{ "complete": "complete"; "partial": "partial"; "unknown": "unknown" }> = z.enum(["complete", "partial", "unknown"]);
 
 export const WorkEvidenceCoverageV1Schema: z.ZodObject<{
-  hydrated: z.ZodType<number, z.ZodTypeDef, unknown>;
-  omitted: z.ZodType<number, z.ZodTypeDef, unknown>;
-  selected: z.ZodType<number, z.ZodTypeDef, unknown>;
-  state: z.ZodType<WorkEvidenceCoverageStateV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  hydrated: z.ZodType<number, unknown>;
+  omitted: z.ZodType<number, unknown>;
+  selected: z.ZodType<number, unknown>;
+  state: z.ZodType<WorkEvidenceCoverageStateV1, unknown>;
+}, z.core.$strict> = z.object({
   hydrated: z.number().int().min(0),
   omitted: z.number().int().min(0),
   selected: z.number().int().min(0),
   state: z.lazy(() => WorkEvidenceCoverageStateV1Schema),
 }).strict();
 
-export const WorkEvidenceExpansionSelectorV1Schema: z.ZodType<WorkEvidenceExpansionSelectorV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const WorkEvidenceExpansionSelectorV1Schema: z.ZodType<WorkEvidenceExpansionSelectorV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("anchor"),
   link_id: z.string(),
 }).strict(), z.object({
@@ -10049,47 +10049,47 @@ export const WorkEvidenceExpansionSelectorV1Schema: z.ZodType<WorkEvidenceExpans
   kind: z.literal("task_session"),
 }).strict()]);
 
-export const WorkEvidenceFreshnessV1Schema: z.ZodEnum<["current", "stale", "unknown"]> = z.enum(["current", "stale", "unknown"]);
+export const WorkEvidenceFreshnessV1Schema: z.ZodEnum<{ "current": "current"; "stale": "stale"; "unknown": "unknown" }> = z.enum(["current", "stale", "unknown"]);
 
 /** One immutable evidence frontier. Local code/session evidence and live Git
 evidence each carry their own frontier; the evaluator never merges,
 substitutes, or advances one from the other. */
 export const WorkEvidenceFrontierV1Schema: z.ZodObject<{
-  digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  watermark: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  digest: z.ZodType<ManifestDigest, unknown>;
+  watermark: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   digest: z.lazy(() => ManifestDigestSchema),
   watermark: z.lazy(() => UtcMicrosSchema),
 }).strict();
 
 export const WorkEvidenceOmissionReasonV1Schema: z.ZodType<"cancelled" | "limit_reached" | "not_found_or_not_authorized" | "pending" | "redacted" | "reset_required" | "stale" | "timed_out" | "unavailable" | {
   structural_refusal: SessionRetrievalStructuralRefusalV1;
-}, z.ZodTypeDef, unknown> = z.union([z.enum(["cancelled", "limit_reached", "not_found_or_not_authorized", "pending", "redacted", "reset_required", "stale", "timed_out", "unavailable"]), z.object({
+}, unknown> = z.union([z.enum(["cancelled", "limit_reached", "not_found_or_not_authorized", "pending", "redacted", "reset_required", "stale", "timed_out", "unavailable"]), z.object({
   structural_refusal: z.lazy(() => SessionRetrievalStructuralRefusalV1Schema),
 }).strict()]);
 
 export const WorkEvidenceOmissionV1Schema: z.ZodObject<{
-  reason: z.ZodType<WorkEvidenceOmissionReasonV1, z.ZodTypeDef, unknown>;
-  relation: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  reason: z.ZodType<WorkEvidenceOmissionReasonV1, unknown>;
+  relation: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   reason: z.lazy(() => WorkEvidenceOmissionReasonV1Schema),
   relation: z.string(),
 }).strict();
 
 export const WorkEvidenceRetrievalV1Schema: z.ZodObject<{
-  continuations: z.ZodType<Array<WorkEvidenceContinuationV1>, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<WorkEvidenceCoverageV1, z.ZodTypeDef, unknown>;
-  freshness: z.ZodType<WorkEvidenceFreshnessV1, z.ZodTypeDef, unknown>;
-  item: z.ZodType<WorkItemV1, z.ZodTypeDef, unknown>;
-  omissions: z.ZodType<Array<WorkEvidenceOmissionV1>, z.ZodTypeDef, unknown>;
-  proposal_decisions: z.ZodType<Array<WorkProposalDecisionV12>, z.ZodTypeDef, unknown>;
-  redacted: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  relation_replan_decisions: z.ZodType<Array<WorkRelationReplanDecisionV1>, z.ZodTypeDef, unknown>;
-  relations: z.ZodType<Array<WorkProductRelationV1>, z.ZodTypeDef, unknown>;
-  sources: z.ZodType<Array<WorkEvidenceSourceV1>, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  continuations: z.ZodType<Array<WorkEvidenceContinuationV1>, unknown>;
+  coverage: z.ZodType<WorkEvidenceCoverageV1, unknown>;
+  freshness: z.ZodType<WorkEvidenceFreshnessV1, unknown>;
+  item: z.ZodType<WorkItemV1, unknown>;
+  omissions: z.ZodType<Array<WorkEvidenceOmissionV1>, unknown>;
+  proposal_decisions: z.ZodType<Array<WorkProposalDecisionV12>, unknown>;
+  redacted: z.ZodType<boolean, unknown>;
+  relation_replan_decisions: z.ZodType<Array<WorkRelationReplanDecisionV1>, unknown>;
+  relations: z.ZodType<Array<WorkProductRelationV1>, unknown>;
+  sources: z.ZodType<Array<WorkEvidenceSourceV1>, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, unknown>;
+}, z.core.$strict> = z.object({
   continuations: z.array(z.lazy(() => WorkEvidenceContinuationV1Schema)),
   coverage: z.lazy(() => WorkEvidenceCoverageV1Schema),
   freshness: z.lazy(() => WorkEvidenceFreshnessV1Schema),
@@ -10108,15 +10108,15 @@ export const WorkEvidenceRetrievalV1Schema: z.ZodObject<{
 continuation and expansion requests, so neither an anchor nor a cursor is
 authority by possession. */
 export const WorkEvidenceRetrieveRequestV1Schema: z.ZodObject<{
-  continuation: z.ZodType<WorkEvidenceContinuationV1 | null, z.ZodTypeDef, unknown>;
-  expansion: z.ZodType<WorkEvidenceExpansionSelectorV1 | null, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  page_size: z.ZodType<number, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-  temporal: z.ZodType<TemporalModeV1, z.ZodTypeDef, unknown>;
-  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  continuation: z.ZodType<WorkEvidenceContinuationV1 | null, unknown>;
+  expansion: z.ZodType<WorkEvidenceExpansionSelectorV1 | null, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  page_size: z.ZodType<number, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+  temporal: z.ZodType<TemporalModeV1, unknown>;
+  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, unknown>;
+}, z.core.$strict> = z.object({
   continuation: z.union([z.lazy(() => WorkEvidenceContinuationV1Schema), z.null()]),
   expansion: z.union([z.lazy(() => WorkEvidenceExpansionSelectorV1Schema), z.null()]),
   observed_at: z.lazy(() => UtcMicrosSchema),
@@ -10127,7 +10127,7 @@ export const WorkEvidenceRetrieveRequestV1Schema: z.ZodObject<{
   verified_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
 }).strict();
 
-export const WorkEvidenceSourceV1Schema: z.ZodType<WorkEvidenceSourceV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const WorkEvidenceSourceV1Schema: z.ZodType<WorkEvidenceSourceV1, unknown> = z.discriminatedUnion("kind", [z.object({
   hydration: z.lazy(() => WorkAnchorHydrationV1Schema),
   kind: z.literal("anchor"),
   link: z.lazy(() => TaskEvidenceLinkV1Schema),
@@ -10141,9 +10141,9 @@ export const WorkEvidenceSourceV1Schema: z.ZodType<WorkEvidenceSourceV1, z.ZodTy
 }).strict()]);
 
 export const WorkExecutableReferenceSchema: z.ZodObject<{
-  artifact_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  executable_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  artifact_digest: z.ZodType<ManifestDigest, unknown>;
+  executable_id: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   artifact_digest: z.lazy(() => ManifestDigestSchema),
   executable_id: z.string(),
 }).strict();
@@ -10154,20 +10154,20 @@ Callers name typed route and scope facts, never argv, environment entries,
 or executable paths. The daemon resolves the registered executable only
 after this envelope has been persisted and admitted to the canonical queue. */
 export const WorkExecutionEnvelopeV1Schema: z.ZodObject<{
-  attempt_identity: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  cancellation_generation: z.ZodType<number, z.ZodTypeDef, unknown>;
-  commit: z.ZodType<CommitId, z.ZodTypeDef, unknown>;
-  effect_state: z.ZodType<WorkEffectStateV1, z.ZodTypeDef, unknown>;
-  execution_snapshot: z.ZodType<WorkExecutionSnapshot, z.ZodTypeDef, unknown>;
-  instructions: z.ZodType<string, z.ZodTypeDef, unknown>;
-  operation: z.ZodType<WorkflowOperationRef, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<ProjectId, z.ZodTypeDef, unknown>;
-  projection_binding: z.ZodType<WorkAttemptProjectionBindingV1, z.ZodTypeDef, unknown>;
-  reference: z.ZodType<RefId | null, z.ZodTypeDef, unknown>;
-  repository_id: z.ZodType<RepositoryId, z.ZodTypeDef, unknown>;
-  worktree_id: z.ZodType<WorktreeId, z.ZodTypeDef, unknown>;
-  worktree_root: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  attempt_identity: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  cancellation_generation: z.ZodType<number, unknown>;
+  commit: z.ZodType<CommitId, unknown>;
+  effect_state: z.ZodType<WorkEffectStateV1, unknown>;
+  execution_snapshot: z.ZodType<WorkExecutionSnapshot, unknown>;
+  instructions: z.ZodType<string, unknown>;
+  operation: z.ZodType<WorkflowOperationRef, unknown>;
+  project_id: z.ZodType<ProjectId, unknown>;
+  projection_binding: z.ZodType<WorkAttemptProjectionBindingV1, unknown>;
+  reference: z.ZodType<RefId | null, unknown>;
+  repository_id: z.ZodType<RepositoryId, unknown>;
+  worktree_id: z.ZodType<WorktreeId, unknown>;
+  worktree_root: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   attempt_identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   cancellation_generation: z.number().int().safe().min(0),
   commit: z.lazy(() => CommitIdSchema),
@@ -10183,7 +10183,7 @@ export const WorkExecutionEnvelopeV1Schema: z.ZodObject<{
   worktree_root: z.string(),
 }).strict();
 
-export const WorkExecutionHistoryV1Schema: z.ZodType<WorkExecutionHistoryV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const WorkExecutionHistoryV1Schema: z.ZodType<WorkExecutionHistoryV1, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("absent"),
 }).strict(), z.object({
   attempt_coverage: z.lazy(() => WorkAttemptListCoverageV1Schema),
@@ -10194,18 +10194,18 @@ export const WorkExecutionHistoryV1Schema: z.ZodType<WorkExecutionHistoryV1, z.Z
   timing_coverage: z.lazy(() => WorkExecutionTimingCoverageV1Schema),
 }).strict()]);
 
-export const WorkExecutionLeakKindV1Schema: z.ZodEnum<["attempt_without_live_owner", "effect_unknown_past_deadline", "lease_after_terminal", "missing_worktree_binding", "none", "unbounded_delivery", "unknown"]> = z.enum(["attempt_without_live_owner", "effect_unknown_past_deadline", "lease_after_terminal", "missing_worktree_binding", "none", "unbounded_delivery", "unknown"]);
+export const WorkExecutionLeakKindV1Schema: z.ZodEnum<{ "attempt_without_live_owner": "attempt_without_live_owner"; "effect_unknown_past_deadline": "effect_unknown_past_deadline"; "lease_after_terminal": "lease_after_terminal"; "missing_worktree_binding": "missing_worktree_binding"; "none": "none"; "unbounded_delivery": "unbounded_delivery"; "unknown": "unknown" }> = z.enum(["attempt_without_live_owner", "effect_unknown_past_deadline", "lease_after_terminal", "missing_worktree_binding", "none", "unbounded_delivery", "unknown"]);
 
-export const WorkExecutionLeakRecoveryV1Schema: z.ZodEnum<["failed", "not_required", "pending", "recovered", "unknown"]> = z.enum(["failed", "not_required", "pending", "recovered", "unknown"]);
+export const WorkExecutionLeakRecoveryV1Schema: z.ZodEnum<{ "failed": "failed"; "not_required": "not_required"; "pending": "pending"; "recovered": "recovered"; "unknown": "unknown" }> = z.enum(["failed", "not_required", "pending", "recovered", "unknown"]);
 
 export const WorkExecutionLimitsSchema: z.ZodObject<{
-  max_concurrency: z.ZodType<number, z.ZodTypeDef, unknown>;
-  max_input_tokens: z.ZodType<number, z.ZodTypeDef, unknown>;
-  max_output_tokens: z.ZodType<number, z.ZodTypeDef, unknown>;
-  max_protocol_bytes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  max_stderr_bytes: z.ZodType<number, z.ZodTypeDef, unknown>;
-  max_stdout_bytes: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  max_concurrency: z.ZodType<number, unknown>;
+  max_input_tokens: z.ZodType<number, unknown>;
+  max_output_tokens: z.ZodType<number, unknown>;
+  max_protocol_bytes: z.ZodType<number, unknown>;
+  max_stderr_bytes: z.ZodType<number, unknown>;
+  max_stdout_bytes: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   max_concurrency: z.number().int().min(0),
   max_input_tokens: z.number().int().safe().min(0),
   max_output_tokens: z.number().int().safe().min(0),
@@ -10219,26 +10219,26 @@ execution. Every constraint the execution is governed by is named here;
 nothing in this value is an opaque stand-in that a reader must resolve
 against a mutable store. */
 export const WorkExecutionSnapshotSchema: z.ZodObject<{
-  approval: z.ZodType<WorkApprovalPolicy, z.ZodTypeDef, unknown>;
-  backend: z.ZodType<WorkProviderBackendV1, z.ZodTypeDef, unknown>;
-  configuration_revision_id: z.ZodType<ConfigurationRevisionId, z.ZodTypeDef, unknown>;
-  configuration_snapshot_id: z.ZodType<ConfigurationSnapshotId, z.ZodTypeDef, unknown>;
-  credential_references: z.ZodType<Array<CredentialReferenceId>, z.ZodTypeDef, unknown>;
-  deadline: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  effective_behavior_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  egress: z.ZodType<WorkEgressPolicy, z.ZodTypeDef, unknown>;
-  environment_allowlist: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  executable: z.ZodType<WorkExecutableReference, z.ZodTypeDef, unknown>;
-  fallback: z.ZodType<WorkFallbackTopology, z.ZodTypeDef, unknown>;
-  filesystem: z.ZodType<WorkFilesystemPolicy, z.ZodTypeDef, unknown>;
-  limits: z.ZodType<WorkExecutionLimits, z.ZodTypeDef, unknown>;
-  model: z.ZodType<string, z.ZodTypeDef, unknown>;
-  protocol: z.ZodType<WorkProviderProtocol, z.ZodTypeDef, unknown>;
-  resolution_provenance_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  route: z.ZodType<WorkProviderRouteV1, z.ZodTypeDef, unknown>;
-  sandbox: z.ZodType<WorkSandboxPolicy, z.ZodTypeDef, unknown>;
-  topology: z.ZodType<WorkTopologyPolicyV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  approval: z.ZodType<WorkApprovalPolicy, unknown>;
+  backend: z.ZodType<WorkProviderBackendV1, unknown>;
+  configuration_revision_id: z.ZodType<ConfigurationRevisionId, unknown>;
+  configuration_snapshot_id: z.ZodType<ConfigurationSnapshotId, unknown>;
+  credential_references: z.ZodType<Array<CredentialReferenceId>, unknown>;
+  deadline: z.ZodType<UtcMicros, unknown>;
+  effective_behavior_digest: z.ZodType<ManifestDigest, unknown>;
+  egress: z.ZodType<WorkEgressPolicy, unknown>;
+  environment_allowlist: z.ZodType<Array<string>, unknown>;
+  executable: z.ZodType<WorkExecutableReference, unknown>;
+  fallback: z.ZodType<WorkFallbackTopology, unknown>;
+  filesystem: z.ZodType<WorkFilesystemPolicy, unknown>;
+  limits: z.ZodType<WorkExecutionLimits, unknown>;
+  model: z.ZodType<string, unknown>;
+  protocol: z.ZodType<WorkProviderProtocol, unknown>;
+  resolution_provenance_digest: z.ZodType<ManifestDigest, unknown>;
+  route: z.ZodType<WorkProviderRouteV1, unknown>;
+  sandbox: z.ZodType<WorkSandboxPolicy, unknown>;
+  topology: z.ZodType<WorkTopologyPolicyV1, unknown>;
+}, z.core.$strict> = z.object({
   approval: z.lazy(() => WorkApprovalPolicySchema),
   backend: z.lazy(() => WorkProviderBackendV1Schema),
   configuration_revision_id: z.lazy(() => ConfigurationRevisionIdSchema),
@@ -10261,15 +10261,15 @@ export const WorkExecutionSnapshotSchema: z.ZodObject<{
 }).strict();
 
 export const WorkExecutionSpanV1Schema: z.ZodObject<{
-  admitted_projection_sequence: z.ZodType<number, z.ZodTypeDef, unknown>;
-  effect_state: z.ZodType<WorkEffectStateV1, z.ZodTypeDef, unknown>;
-  ended_at: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  identity: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  started_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  state: z.ZodType<WorkAttemptStateV1, z.ZodTypeDef, unknown>;
-  terminal_evidence_digest: z.ZodType<ManifestDigest | null, z.ZodTypeDef, unknown>;
-  wall_micros: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  admitted_projection_sequence: z.ZodType<number, unknown>;
+  effect_state: z.ZodType<WorkEffectStateV1, unknown>;
+  ended_at: z.ZodType<UtcMicros | null, unknown>;
+  identity: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  started_at: z.ZodType<UtcMicros, unknown>;
+  state: z.ZodType<WorkAttemptStateV1, unknown>;
+  terminal_evidence_digest: z.ZodType<ManifestDigest | null, unknown>;
+  wall_micros: z.ZodType<number | null, unknown>;
+}, z.core.$strict> = z.object({
   admitted_projection_sequence: z.number().int().safe().min(0),
   effect_state: z.lazy(() => WorkEffectStateV1Schema),
   ended_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
@@ -10280,7 +10280,7 @@ export const WorkExecutionSpanV1Schema: z.ZodObject<{
   wall_micros: z.number().int().safe().min(0).nullable(),
 }).strict();
 
-export const WorkExecutionTimingCoverageV1Schema: z.ZodType<WorkExecutionTimingCoverageV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("coverage", [z.object({
+export const WorkExecutionTimingCoverageV1Schema: z.ZodType<WorkExecutionTimingCoverageV1, unknown> = z.discriminatedUnion("coverage", [z.object({
   coverage: z.literal("complete"),
 }).strict(), z.object({
   coverage: z.literal("partial"),
@@ -10288,21 +10288,21 @@ export const WorkExecutionTimingCoverageV1Schema: z.ZodType<WorkExecutionTimingC
   missing_dispatch: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
 }).strict()]);
 
-export const WorkExperienceApplicabilityV1Schema: z.ZodEnum<["same_accepted_route", "same_milestone"]> = z.enum(["same_accepted_route", "same_milestone"]);
+export const WorkExperienceApplicabilityV1Schema: z.ZodEnum<{ "same_accepted_route": "same_accepted_route"; "same_milestone": "same_milestone" }> = z.enum(["same_accepted_route", "same_milestone"]);
 
 export const WorkExperienceCandidateV1Schema: z.ZodObject<{
-  applicability: z.ZodType<Array<WorkExperienceApplicabilityV1>, z.ZodTypeDef, unknown>;
-  attempt_receipts: z.ZodType<Array<WorkAttemptReceiptV1>, z.ZodTypeDef, unknown>;
-  evidence: z.ZodType<Array<TaskEvidenceLinkV1>, z.ZodTypeDef, unknown>;
-  item: z.ZodType<WorkItemV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  applicability: z.ZodType<Array<WorkExperienceApplicabilityV1>, unknown>;
+  attempt_receipts: z.ZodType<Array<WorkAttemptReceiptV1>, unknown>;
+  evidence: z.ZodType<Array<TaskEvidenceLinkV1>, unknown>;
+  item: z.ZodType<WorkItemV1, unknown>;
+}, z.core.$strict> = z.object({
   applicability: z.array(z.lazy(() => WorkExperienceApplicabilityV1Schema)),
   attempt_receipts: z.array(z.lazy(() => WorkAttemptReceiptV1Schema)),
   evidence: z.array(z.lazy(() => TaskEvidenceLinkV1Schema)),
   item: z.lazy(() => WorkItemV1Schema),
 }).strict();
 
-export const WorkExperienceCoverageV1Schema: z.ZodType<WorkExperienceCoverageV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("coverage", [z.object({
+export const WorkExperienceCoverageV1Schema: z.ZodType<WorkExperienceCoverageV1, unknown> = z.discriminatedUnion("coverage", [z.object({
   applicable: z.number().int().min(0),
   coverage: z.literal("complete"),
   returned: z.number().int().min(0),
@@ -10318,14 +10318,14 @@ export const WorkExperienceCoverageV1Schema: z.ZodType<WorkExperienceCoverageV1,
 }).strict()]);
 
 export const WorkExperienceRequestV1Schema: z.ZodObject<{
-  evidence_not_before: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  expertise_categories: z.ZodType<Array<WorkExpertiseCategoryV1>, z.ZodTypeDef, unknown>;
-  limit: z.ZodType<number, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  evidence_not_before: z.ZodType<UtcMicros, unknown>;
+  expertise_categories: z.ZodType<Array<WorkExpertiseCategoryV1>, unknown>;
+  limit: z.ZodType<number, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, unknown>;
+}, z.core.$strict> = z.object({
   evidence_not_before: z.lazy(() => UtcMicrosSchema),
   expertise_categories: z.array(z.lazy(() => WorkExpertiseCategoryV1Schema)),
   limit: z.number().int().min(0),
@@ -10336,14 +10336,14 @@ export const WorkExperienceRequestV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkExperienceV1Schema: z.ZodObject<{
-  candidates: z.ZodType<Array<WorkExperienceCandidateV1>, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<WorkExperienceCoverageV1, z.ZodTypeDef, unknown>;
-  evidence_not_before: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  expertise: z.ZodType<WorkExpertiseAuthorizationV1, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  candidates: z.ZodType<Array<WorkExperienceCandidateV1>, unknown>;
+  coverage: z.ZodType<WorkExperienceCoverageV1, unknown>;
+  evidence_not_before: z.ZodType<UtcMicros, unknown>;
+  expertise: z.ZodType<WorkExpertiseAuthorizationV1, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, unknown>;
+}, z.core.$strict> = z.object({
   candidates: z.array(z.lazy(() => WorkExperienceCandidateV1Schema)),
   coverage: z.lazy(() => WorkExperienceCoverageV1Schema),
   evidence_not_before: z.lazy(() => UtcMicrosSchema),
@@ -10353,7 +10353,7 @@ export const WorkExperienceV1Schema: z.ZodObject<{
   verified_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
 }).strict();
 
-export const WorkExpertiseAuthorizationV1Schema: z.ZodType<WorkExpertiseAuthorizationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("availability", [z.object({
+export const WorkExpertiseAuthorizationV1Schema: z.ZodType<WorkExpertiseAuthorizationV1, unknown> = z.discriminatedUnion("availability", [z.object({
   availability: z.literal("available"),
   categories: z.array(z.lazy(() => WorkExpertiseCategoryV1Schema)),
   durability: z.lazy(() => WorkExpertiseContextDurabilityV1Schema),
@@ -10366,14 +10366,14 @@ export const WorkExpertiseAuthorizationV1Schema: z.ZodType<WorkExpertiseAuthoriz
   reasons: z.array(z.lazy(() => WorkExpertiseUnavailableReasonV1Schema)),
 }).strict()]);
 
-export const WorkExpertiseCategoryV1Schema: z.ZodEnum<["architecture", "domain", "framework", "language", "operations", "security", "testing"]> = z.enum(["architecture", "domain", "framework", "language", "operations", "security", "testing"]);
+export const WorkExpertiseCategoryV1Schema: z.ZodEnum<{ "architecture": "architecture"; "domain": "domain"; "framework": "framework"; "language": "language"; "operations": "operations"; "security": "security"; "testing": "testing" }> = z.enum(["architecture", "domain", "framework", "language", "operations", "security", "testing"]);
 
 export const WorkExpertiseConsentPinV1Schema: z.ZodObject<{
-  configuration_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  configuration_revision: z.ZodType<ConfigurationRevisionId, z.ZodTypeDef, unknown>;
-  configuration_snapshot: z.ZodType<ConfigurationSnapshotId, z.ZodTypeDef, unknown>;
-  provenance_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  configuration_digest: z.ZodType<ManifestDigest, unknown>;
+  configuration_revision: z.ZodType<ConfigurationRevisionId, unknown>;
+  configuration_snapshot: z.ZodType<ConfigurationSnapshotId, unknown>;
+  provenance_digest: z.ZodType<ManifestDigest, unknown>;
+}, z.core.$strict> = z.object({
   configuration_digest: z.lazy(() => ManifestDigestSchema),
   configuration_revision: z.lazy(() => ConfigurationRevisionIdSchema),
   configuration_snapshot: z.lazy(() => ConfigurationSnapshotIdSchema),
@@ -10382,11 +10382,11 @@ export const WorkExpertiseConsentPinV1Schema: z.ZodObject<{
 
 export const WorkExpertiseContextDurabilityV1Schema: z.ZodLiteral<"ephemeral_only"> = z.literal("ephemeral_only");
 
-export const WorkExpertiseLegalActionV1Schema: z.ZodEnum<["allow_requested_categories", "grant_project_consent", "grant_user_consent", "renew_project_consent", "renew_user_consent"]> = z.enum(["allow_requested_categories", "grant_project_consent", "grant_user_consent", "renew_project_consent", "renew_user_consent"]);
+export const WorkExpertiseLegalActionV1Schema: z.ZodEnum<{ "allow_requested_categories": "allow_requested_categories"; "grant_project_consent": "grant_project_consent"; "grant_user_consent": "grant_user_consent"; "renew_project_consent": "renew_project_consent"; "renew_user_consent": "renew_user_consent" }> = z.enum(["allow_requested_categories", "grant_project_consent", "grant_user_consent", "renew_project_consent", "renew_user_consent"]);
 
-export const WorkExpertiseUnavailableReasonV1Schema: z.ZodEnum<["project_consent_disabled", "project_consent_expired", "project_consent_not_yet_effective", "requested_category_not_allowed", "user_consent_disabled", "user_consent_expired", "user_consent_not_yet_effective"]> = z.enum(["project_consent_disabled", "project_consent_expired", "project_consent_not_yet_effective", "requested_category_not_allowed", "user_consent_disabled", "user_consent_expired", "user_consent_not_yet_effective"]);
+export const WorkExpertiseUnavailableReasonV1Schema: z.ZodEnum<{ "project_consent_disabled": "project_consent_disabled"; "project_consent_expired": "project_consent_expired"; "project_consent_not_yet_effective": "project_consent_not_yet_effective"; "requested_category_not_allowed": "requested_category_not_allowed"; "user_consent_disabled": "user_consent_disabled"; "user_consent_expired": "user_consent_expired"; "user_consent_not_yet_effective": "user_consent_not_yet_effective" }> = z.enum(["project_consent_disabled", "project_consent_expired", "project_consent_not_yet_effective", "requested_category_not_allowed", "user_consent_disabled", "user_consent_expired", "user_consent_not_yet_effective"]);
 
-export const WorkFallbackTopologySchema: z.ZodType<WorkFallbackTopology, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const WorkFallbackTopologySchema: z.ZodType<WorkFallbackTopology, unknown> = z.discriminatedUnion("kind", [z.object({
   executable: z.lazy(() => WorkExecutableReferenceSchema),
   kind: z.literal("codex_cli"),
   route: z.lazy(() => WorkProviderRouteV1Schema),
@@ -10394,19 +10394,19 @@ export const WorkFallbackTopologySchema: z.ZodType<WorkFallbackTopology, z.ZodTy
   kind: z.literal("disabled"),
 }).strict()]);
 
-export const WorkFenceEpochV1Schema: z.ZodType<number, z.ZodTypeDef, unknown> = z.number().int().safe().min(0);
+export const WorkFenceEpochV1Schema: z.ZodType<number, unknown> = z.number().int().safe().min(0);
 
-export const WorkFilesystemPolicySchema: z.ZodEnum<["read_only", "workspace_write"]> = z.enum(["read_only", "workspace_write"]);
+export const WorkFilesystemPolicySchema: z.ZodEnum<{ "read_only": "read_only"; "workspace_write": "workspace_write" }> = z.enum(["read_only", "workspace_write"]);
 
 export const WorkflowDefinitionSchema: z.ZodObject<{
-  definition_id: z.ZodType<WorkflowDefinitionId, z.ZodTypeDef, unknown>;
-  definition_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  pinned_catalog_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  pinned_configuration_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  pinned_policy_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  project_id: z.ZodType<ProjectId, z.ZodTypeDef, unknown>;
-  steps: z.ZodType<Array<WorkflowStep>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  definition_id: z.ZodType<WorkflowDefinitionId, unknown>;
+  definition_version: z.ZodType<number, unknown>;
+  pinned_catalog_digest: z.ZodType<ManifestDigest, unknown>;
+  pinned_configuration_digest: z.ZodType<ManifestDigest, unknown>;
+  pinned_policy_digest: z.ZodType<ManifestDigest, unknown>;
+  project_id: z.ZodType<ProjectId, unknown>;
+  steps: z.ZodType<Array<WorkflowStep>, unknown>;
+}, z.core.$strict> = z.object({
   definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
   definition_version: z.number().int().safe().min(0),
   pinned_catalog_digest: z.lazy(() => ManifestDigestSchema),
@@ -10418,10 +10418,10 @@ export const WorkflowDefinitionSchema: z.ZodObject<{
 
 /** Wire request for [`WorkflowDefinitionService::activate`]. */
 export const WorkflowDefinitionActivateRequestSchema: z.ZodObject<{
-  definition_id: z.ZodType<WorkflowDefinitionId, z.ZodTypeDef, unknown>;
-  definition_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  expected_revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  definition_id: z.ZodType<WorkflowDefinitionId, unknown>;
+  definition_version: z.ZodType<number, unknown>;
+  expected_revision: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
   definition_version: z.number().int().safe().min(1),
   expected_revision: z.number().int().safe().min(1),
@@ -10429,12 +10429,12 @@ export const WorkflowDefinitionActivateRequestSchema: z.ZodObject<{
 
 /** Revisioned lifecycle disposition of one definition version. */
 export const WorkflowDefinitionDispositionSchema: z.ZodObject<{
-  definition_id: z.ZodType<WorkflowDefinitionId, z.ZodTypeDef, unknown>;
-  definition_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-  state: z.ZodType<WorkflowDefinitionLifecycleState, z.ZodTypeDef, unknown>;
-  transitioned_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  definition_id: z.ZodType<WorkflowDefinitionId, unknown>;
+  definition_version: z.ZodType<number, unknown>;
+  revision: z.ZodType<number, unknown>;
+  state: z.ZodType<WorkflowDefinitionLifecycleState, unknown>;
+  transitioned_at: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
   definition_version: z.number().int().safe().min(1),
   revision: z.number().int().safe().min(1),
@@ -10444,22 +10444,22 @@ export const WorkflowDefinitionDispositionSchema: z.ZodObject<{
 
 /** Wire request for [`WorkflowDefinitionService::get`]. */
 export const WorkflowDefinitionGetRequestSchema: z.ZodObject<{
-  definition_id: z.ZodType<WorkflowDefinitionId, z.ZodTypeDef, unknown>;
-  definition_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  definition_id: z.ZodType<WorkflowDefinitionId, unknown>;
+  definition_version: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
   definition_version: z.number().int().safe().min(1),
 }).strict();
 
 /** Wire request for [`WorkflowDefinitionService::history`]. */
 export const WorkflowDefinitionHistoryRequestSchema: z.ZodObject<{
-  definition_id: z.ZodType<WorkflowDefinitionId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  definition_id: z.ZodType<WorkflowDefinitionId, unknown>;
+}, z.core.$strict> = z.object({
   definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
 }).strict();
 
 /** Strongly typed canonical identity: `WorkflowDefinitionId`. */
-export const WorkflowDefinitionIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const WorkflowDefinitionIdSchema: z.ZodType<string, unknown> = z.string();
 
 /** Durable lifecycle disposition of one immutable workflow definition version.
 
@@ -10469,17 +10469,17 @@ through the same application surfaces." The definition payload itself stays
 immutable, "Editing creates a new version; admitted runs remain pinned",
 so the disposition is a separate revisioned aggregate keyed by the same
 definition identity. */
-export const WorkflowDefinitionLifecycleStateSchema: z.ZodEnum<["active", "candidate", "rejected", "retired", "validated"]> = z.enum(["active", "candidate", "rejected", "retired", "validated"]);
+export const WorkflowDefinitionLifecycleStateSchema: z.ZodEnum<{ "active": "active"; "candidate": "candidate"; "rejected": "rejected"; "retired": "retired"; "validated": "validated" }> = z.enum(["active", "candidate", "rejected", "retired", "validated"]);
 
 /** Wire request for [`WorkflowDefinitionService::list`]. */
-export const WorkflowDefinitionListRequestSchema: z.ZodObject<{}, "strict"> = z.object({}).strict();
+export const WorkflowDefinitionListRequestSchema: z.ZodObject<{}, z.core.$strict> = z.object({}).strict();
 
 /** Wire request for [`WorkflowDefinitionService::reject`]. */
 export const WorkflowDefinitionRejectRequestSchema: z.ZodObject<{
-  definition_id: z.ZodType<WorkflowDefinitionId, z.ZodTypeDef, unknown>;
-  definition_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  expected_revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  definition_id: z.ZodType<WorkflowDefinitionId, unknown>;
+  definition_version: z.ZodType<number, unknown>;
+  expected_revision: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
   definition_version: z.number().int().safe().min(1),
   expected_revision: z.number().int().safe().min(1),
@@ -10487,34 +10487,34 @@ export const WorkflowDefinitionRejectRequestSchema: z.ZodObject<{
 
 /** Wire request for [`WorkflowDefinitionService::retire`]. */
 export const WorkflowDefinitionRetireRequestSchema: z.ZodObject<{
-  definition_id: z.ZodType<WorkflowDefinitionId, z.ZodTypeDef, unknown>;
-  definition_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  expected_revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  definition_id: z.ZodType<WorkflowDefinitionId, unknown>;
+  definition_version: z.ZodType<number, unknown>;
+  expected_revision: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   definition_id: z.lazy(() => WorkflowDefinitionIdSchema),
   definition_version: z.number().int().safe().min(1),
   expected_revision: z.number().int().safe().min(1),
 }).strict();
 
 export const WorkflowFanOutSchema: z.ZodObject<{
-  max_width: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  max_width: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   max_width: z.number().int().min(0),
 }).strict();
 
 export const WorkflowFanOutChildPlanV1Schema: z.ZodObject<{
-  admit_command_id: z.ZodType<WorkCommandId, z.ZodTypeDef, unknown>;
-  attempt_identity: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  create_command_id: z.ZodType<WorkCommandId, z.ZodTypeDef, unknown>;
-  initiative: z.ZodType<WorkInitiativeV1, z.ZodTypeDef, unknown>;
-  instructions: z.ZodType<string, z.ZodTypeDef, unknown>;
-  item: z.ZodType<WorkItemV1, z.ZodTypeDef, unknown>;
-  milestone: z.ZodType<WorkMilestoneV1, z.ZodTypeDef, unknown>;
-  plan: z.ZodType<WorkPlanV1, z.ZodTypeDef, unknown>;
-  proposal: z.ZodType<WorkProposalV1, z.ZodTypeDef, unknown>;
-  proposal_command_id: z.ZodType<WorkCommandId, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  admit_command_id: z.ZodType<WorkCommandId, unknown>;
+  attempt_identity: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  create_command_id: z.ZodType<WorkCommandId, unknown>;
+  initiative: z.ZodType<WorkInitiativeV1, unknown>;
+  instructions: z.ZodType<string, unknown>;
+  item: z.ZodType<WorkItemV1, unknown>;
+  milestone: z.ZodType<WorkMilestoneV1, unknown>;
+  plan: z.ZodType<WorkPlanV1, unknown>;
+  proposal: z.ZodType<WorkProposalV1, unknown>;
+  proposal_command_id: z.ZodType<WorkCommandId, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   admit_command_id: z.lazy(() => WorkCommandIdSchema),
   attempt_identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   create_command_id: z.lazy(() => WorkCommandIdSchema),
@@ -10528,7 +10528,7 @@ export const WorkflowFanOutChildPlanV1Schema: z.ZodObject<{
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 
-export const WorkflowFanOutFailurePolicyV1Schema: z.ZodType<WorkflowFanOutFailurePolicyV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("policy", [z.object({
+export const WorkflowFanOutFailurePolicyV1Schema: z.ZodType<WorkflowFanOutFailurePolicyV1, unknown> = z.discriminatedUnion("policy", [z.object({
   policy: z.literal("collect"),
 }), z.object({
   policy: z.literal("fail_fast"),
@@ -10538,19 +10538,19 @@ export const WorkflowFanOutFailurePolicyV1Schema: z.ZodType<WorkflowFanOutFailur
 })]);
 
 export const WorkflowFanOutPlanV1Schema: z.ZodObject<{
-  admitted_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  authority: z.ZodType<WorkAuthority, z.ZodTypeDef, unknown>;
-  children: z.ZodType<Array<WorkflowFanOutChildPlanV1>, z.ZodTypeDef, unknown>;
-  commit: z.ZodType<CommitId, z.ZodTypeDef, unknown>;
-  effect_state: z.ZodType<WorkEffectStateV1, z.ZodTypeDef, unknown>;
-  execution_snapshot: z.ZodType<WorkExecutionSnapshot, z.ZodTypeDef, unknown>;
-  failure_policy: z.ZodType<WorkflowFanOutFailurePolicyV1, z.ZodTypeDef, unknown>;
-  maximum_parallel: z.ZodType<number, z.ZodTypeDef, unknown>;
-  operation: z.ZodType<WorkflowOperationRef, z.ZodTypeDef, unknown>;
-  plan_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  reference: z.ZodType<RefId | null, z.ZodTypeDef, unknown>;
-  step_id: z.ZodType<WorkflowStepId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  admitted_at: z.ZodType<UtcMicros, unknown>;
+  authority: z.ZodType<WorkAuthority, unknown>;
+  children: z.ZodType<Array<WorkflowFanOutChildPlanV1>, unknown>;
+  commit: z.ZodType<CommitId, unknown>;
+  effect_state: z.ZodType<WorkEffectStateV1, unknown>;
+  execution_snapshot: z.ZodType<WorkExecutionSnapshot, unknown>;
+  failure_policy: z.ZodType<WorkflowFanOutFailurePolicyV1, unknown>;
+  maximum_parallel: z.ZodType<number, unknown>;
+  operation: z.ZodType<WorkflowOperationRef, unknown>;
+  plan_digest: z.ZodType<ManifestDigest, unknown>;
+  reference: z.ZodType<RefId | null, unknown>;
+  step_id: z.ZodType<WorkflowStepId, unknown>;
+}, z.core.$strict> = z.object({
   admitted_at: z.lazy(() => UtcMicrosSchema),
   authority: z.lazy(() => WorkAuthoritySchema),
   children: z.array(z.lazy(() => WorkflowFanOutChildPlanV1Schema)),
@@ -10566,39 +10566,39 @@ export const WorkflowFanOutPlanV1Schema: z.ZodObject<{
 }).strict();
 
 /** Strongly typed canonical identity: `WorkflowOperationRef`. */
-export const WorkflowOperationRefSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const WorkflowOperationRefSchema: z.ZodType<string, unknown> = z.string();
 
 export const WorkflowOutputArtifactSchema: z.ZodObject<{
-  artifact: z.ZodType<WorkArtifactRefV1, z.ZodTypeDef, unknown>;
-  attempt_identity: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  artifact: z.ZodType<WorkArtifactRefV1, unknown>;
+  attempt_identity: z.ZodType<WorkAttemptIdentityV1, unknown>;
+}, z.core.$strict> = z.object({
   artifact: z.lazy(() => WorkArtifactRefV1Schema),
   attempt_identity: z.lazy(() => WorkAttemptIdentityV1Schema),
 }).strict();
 
 /** Strongly typed canonical identity: `WorkflowOutputName`. */
-export const WorkflowOutputNameSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const WorkflowOutputNameSchema: z.ZodType<string, unknown> = z.string();
 
 export const WorkflowOutputReferenceSchema: z.ZodObject<{
-  output_name: z.ZodType<WorkflowOutputName, z.ZodTypeDef, unknown>;
-  producer_step_id: z.ZodType<WorkflowStepId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  output_name: z.ZodType<WorkflowOutputName, unknown>;
+  producer_step_id: z.ZodType<WorkflowStepId, unknown>;
+}, z.core.$strict> = z.object({
   output_name: z.lazy(() => WorkflowOutputNameSchema),
   producer_step_id: z.lazy(() => WorkflowStepIdSchema),
 }).strict();
 
 export const WorkflowPlacementReceiptSchema: z.ZodObject<{
-  backend: z.ZodType<WorkProviderBackendV1, z.ZodTypeDef, unknown>;
-  configuration_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  model: z.ZodType<string, z.ZodTypeDef, unknown>;
-  placement_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  provider_registry_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  route: z.ZodType<WorkProviderRouteV1, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  step_id: z.ZodType<WorkflowStepId, z.ZodTypeDef, unknown>;
-  topology_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  worktree_placement: z.ZodType<WorktreePlacementModeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  backend: z.ZodType<WorkProviderBackendV1, unknown>;
+  configuration_digest: z.ZodType<ManifestDigest, unknown>;
+  model: z.ZodType<string, unknown>;
+  placement_digest: z.ZodType<ManifestDigest, unknown>;
+  provider_registry_digest: z.ZodType<ManifestDigest, unknown>;
+  route: z.ZodType<WorkProviderRouteV1, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  step_id: z.ZodType<WorkflowStepId, unknown>;
+  topology_digest: z.ZodType<ManifestDigest, unknown>;
+  worktree_placement: z.ZodType<WorktreePlacementModeV1, unknown>;
+}, z.core.$strict> = z.object({
   backend: z.lazy(() => WorkProviderBackendV1Schema),
   configuration_digest: z.lazy(() => ManifestDigestSchema),
   model: z.string(),
@@ -10612,13 +10612,13 @@ export const WorkflowPlacementReceiptSchema: z.ZodObject<{
 }).strict();
 
 export const WorkflowRunEventSchema: z.ZodObject<{
-  command_id: z.ZodType<WorkCommandId, z.ZodTypeDef, unknown>;
-  event: z.ZodType<WorkflowRunEventKind, z.ZodTypeDef, unknown>;
-  input_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  occurred_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  sequence: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  command_id: z.ZodType<WorkCommandId, unknown>;
+  event: z.ZodType<WorkflowRunEventKind, unknown>;
+  input_digest: z.ZodType<ManifestDigest, unknown>;
+  occurred_at: z.ZodType<UtcMicros, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  sequence: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   command_id: z.lazy(() => WorkCommandIdSchema),
   event: z.lazy(() => WorkflowRunEventKindSchema),
   input_digest: z.lazy(() => ManifestDigestSchema),
@@ -10627,7 +10627,7 @@ export const WorkflowRunEventSchema: z.ZodObject<{
   sequence: z.number().int().safe().min(0),
 }).strict();
 
-export const WorkflowRunEventKindSchema: z.ZodType<WorkflowRunEventKind, z.ZodTypeDef, unknown> = z.discriminatedUnion("type", [z.object({
+export const WorkflowRunEventKindSchema: z.ZodType<WorkflowRunEventKind, unknown> = z.discriminatedUnion("type", [z.object({
   definition: z.lazy(() => WorkflowDefinitionSchema),
   fan_out_plans: z.array(z.lazy(() => WorkflowFanOutPlanV1Schema)),
   pinned_provider_registry_digest: z.lazy(() => ManifestDigestSchema),
@@ -10673,26 +10673,26 @@ export const WorkflowRunEventKindSchema: z.ZodType<WorkflowRunEventKind, z.ZodTy
 })]);
 
 export const WorkflowRunGetRequestSchema: z.ZodObject<{
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  run_id: z.ZodType<RunId, unknown>;
+}, z.core.$strict> = z.object({
   run_id: z.lazy(() => RunIdSchema),
 }).strict();
 
 export const WorkflowRunProjectionSchema: z.ZodObject<{
-  definition: z.ZodType<WorkflowDefinition, z.ZodTypeDef, unknown>;
-  fan_out_plans: z.ZodType<Record<string, WorkflowFanOutPlanV1>, z.ZodTypeDef, unknown>;
-  history: z.ZodType<Array<WorkflowRunEvent>, z.ZodTypeDef, unknown>;
-  pinned_provider_registry_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  pinned_topology_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  released_fan_out_attempts: z.ZodType<Array<WorkAttemptIdentityV1>, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  sequence: z.ZodType<number, z.ZodTypeDef, unknown>;
-  settled_fan_out_attempts: z.ZodType<Array<WorkAttemptIdentityV1>, z.ZodTypeDef, unknown>;
-  status: z.ZodType<WorkflowRunStatus, z.ZodTypeDef, unknown>;
-  steps: z.ZodType<Record<string, WorkflowStepRunProjection>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  definition: z.ZodType<WorkflowDefinition, unknown>;
+  fan_out_plans: z.ZodType<Record<string, WorkflowFanOutPlanV1>, unknown>;
+  history: z.ZodType<Array<WorkflowRunEvent>, unknown>;
+  pinned_provider_registry_digest: z.ZodType<ManifestDigest, unknown>;
+  pinned_topology_digest: z.ZodType<ManifestDigest, unknown>;
+  released_fan_out_attempts: z.ZodType<Array<WorkAttemptIdentityV1>, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  sequence: z.ZodType<number, unknown>;
+  settled_fan_out_attempts: z.ZodType<Array<WorkAttemptIdentityV1>, unknown>;
+  status: z.ZodType<WorkflowRunStatus, unknown>;
+  steps: z.ZodType<Record<string, WorkflowStepRunProjection>, unknown>;
+}, z.core.$strict> = z.object({
   definition: z.lazy(() => WorkflowDefinitionSchema),
-  fan_out_plans: z.record(z.lazy(() => WorkflowFanOutPlanV1Schema)),
+  fan_out_plans: z.record(z.string(), z.lazy(() => WorkflowFanOutPlanV1Schema)),
   history: z.array(z.lazy(() => WorkflowRunEventSchema)),
   pinned_provider_registry_digest: z.lazy(() => ManifestDigestSchema),
   pinned_topology_digest: z.lazy(() => ManifestDigestSchema),
@@ -10701,19 +10701,19 @@ export const WorkflowRunProjectionSchema: z.ZodObject<{
   sequence: z.number().int().safe().min(0),
   settled_fan_out_attempts: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
   status: z.lazy(() => WorkflowRunStatusSchema),
-  steps: z.record(z.lazy(() => WorkflowStepRunProjectionSchema)),
+  steps: z.record(z.string(), z.lazy(() => WorkflowStepRunProjectionSchema)),
 }).strict();
 
-export const WorkflowRunStatusSchema: z.ZodEnum<["cancelled", "cancelling", "completed", "failed", "paused", "running"]> = z.enum(["cancelled", "cancelling", "completed", "failed", "paused", "running"]);
+export const WorkflowRunStatusSchema: z.ZodEnum<{ "cancelled": "cancelled"; "cancelling": "cancelling"; "completed": "completed"; "failed": "failed"; "paused": "paused"; "running": "running" }> = z.enum(["cancelled", "cancelling", "completed", "failed", "paused", "running"]);
 
 export const WorkflowStepSchema: z.ZodObject<{
-  fan_out: z.ZodType<WorkflowFanOut | null, z.ZodTypeDef, unknown>;
-  inputs: z.ZodType<Array<WorkflowOutputReference>, z.ZodTypeDef, unknown>;
-  operation: z.ZodType<WorkflowOperationRef, z.ZodTypeDef, unknown>;
-  outputs: z.ZodType<Array<WorkflowOutputName>, z.ZodTypeDef, unknown>;
-  predecessors: z.ZodType<Array<WorkflowStepId>, z.ZodTypeDef, unknown>;
-  step_id: z.ZodType<WorkflowStepId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  fan_out: z.ZodType<WorkflowFanOut | null, unknown>;
+  inputs: z.ZodType<Array<WorkflowOutputReference>, unknown>;
+  operation: z.ZodType<WorkflowOperationRef, unknown>;
+  outputs: z.ZodType<Array<WorkflowOutputName>, unknown>;
+  predecessors: z.ZodType<Array<WorkflowStepId>, unknown>;
+  step_id: z.ZodType<WorkflowStepId, unknown>;
+}, z.core.$strict> = z.object({
   fan_out: z.union([z.lazy(() => WorkflowFanOutSchema), z.null()]),
   inputs: z.array(z.lazy(() => WorkflowOutputReferenceSchema)),
   operation: z.lazy(() => WorkflowOperationRefSchema),
@@ -10722,17 +10722,17 @@ export const WorkflowStepSchema: z.ZodObject<{
   step_id: z.lazy(() => WorkflowStepIdSchema),
 }).strict();
 
-export const WorkflowStepEffectOutcomeSchema: z.ZodEnum<["cancelled", "completed", "failed", "timed_out", "unknown"]> = z.enum(["cancelled", "completed", "failed", "timed_out", "unknown"]);
+export const WorkflowStepEffectOutcomeSchema: z.ZodEnum<{ "cancelled": "cancelled"; "completed": "completed"; "failed": "failed"; "timed_out": "timed_out"; "unknown": "unknown" }> = z.enum(["cancelled", "completed", "failed", "timed_out", "unknown"]);
 
 export const WorkflowStepEffectReceiptSchema: z.ZodObject<{
-  effect_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  outcome: z.ZodType<WorkflowStepEffectOutcome, z.ZodTypeDef, unknown>;
-  output_set_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  placement_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  receipt_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  step_id: z.ZodType<WorkflowStepId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  effect_digest: z.ZodType<ManifestDigest, unknown>;
+  outcome: z.ZodType<WorkflowStepEffectOutcome, unknown>;
+  output_set_digest: z.ZodType<ManifestDigest, unknown>;
+  placement_digest: z.ZodType<ManifestDigest, unknown>;
+  receipt_digest: z.ZodType<ManifestDigest, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  step_id: z.ZodType<WorkflowStepId, unknown>;
+}, z.core.$strict> = z.object({
   effect_digest: z.lazy(() => ManifestDigestSchema),
   outcome: z.lazy(() => WorkflowStepEffectOutcomeSchema),
   output_set_digest: z.lazy(() => ManifestDigestSchema),
@@ -10743,37 +10743,37 @@ export const WorkflowStepEffectReceiptSchema: z.ZodObject<{
 }).strict();
 
 /** Strongly typed canonical identity: `WorkflowStepId`. */
-export const WorkflowStepIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const WorkflowStepIdSchema: z.ZodType<string, unknown> = z.string();
 
 export const WorkflowStepOutputSchema: z.ZodObject<{
-  artifacts: z.ZodType<Array<WorkflowOutputArtifact>, z.ZodTypeDef, unknown>;
-  output_name: z.ZodType<WorkflowOutputName, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  artifacts: z.ZodType<Array<WorkflowOutputArtifact>, unknown>;
+  output_name: z.ZodType<WorkflowOutputName, unknown>;
+}, z.core.$strict> = z.object({
   artifacts: z.array(z.lazy(() => WorkflowOutputArtifactSchema)),
   output_name: z.lazy(() => WorkflowOutputNameSchema),
 }).strict();
 
 export const WorkflowStepRunProjectionSchema: z.ZodObject<{
-  effect_receipt: z.ZodType<WorkflowStepEffectReceipt | null, z.ZodTypeDef, unknown>;
-  outputs: z.ZodType<Record<string, WorkflowStepOutput>, z.ZodTypeDef, unknown>;
-  placement_receipt: z.ZodType<WorkflowPlacementReceipt | null, z.ZodTypeDef, unknown>;
-  status: z.ZodType<WorkflowStepStatus, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  effect_receipt: z.ZodType<WorkflowStepEffectReceipt | null, unknown>;
+  outputs: z.ZodType<Record<string, WorkflowStepOutput>, unknown>;
+  placement_receipt: z.ZodType<WorkflowPlacementReceipt | null, unknown>;
+  status: z.ZodType<WorkflowStepStatus, unknown>;
+}, z.core.$strict> = z.object({
   effect_receipt: z.union([z.lazy(() => WorkflowStepEffectReceiptSchema), z.null()]),
-  outputs: z.record(z.lazy(() => WorkflowStepOutputSchema)),
+  outputs: z.record(z.string(), z.lazy(() => WorkflowStepOutputSchema)),
   placement_receipt: z.union([z.lazy(() => WorkflowPlacementReceiptSchema), z.null()]),
   status: z.lazy(() => WorkflowStepStatusSchema),
 }).strict();
 
-export const WorkflowStepStatusSchema: z.ZodEnum<["blocked", "cancelled", "failed", "ready", "running", "succeeded"]> = z.enum(["blocked", "cancelled", "failed", "ready", "running", "succeeded"]);
+export const WorkflowStepStatusSchema: z.ZodEnum<{ "blocked": "blocked"; "cancelled": "cancelled"; "failed": "failed"; "ready": "ready"; "running": "running"; "succeeded": "succeeded" }> = z.enum(["blocked", "cancelled", "failed", "ready", "running", "succeeded"]);
 
 /** A provider's claim that one artifact of a fan-out output synthesizes its
 sibling source artifacts. */
 export const WorkflowSynthesisDraftSchema: z.ZodObject<{
-  cited_source_digests: z.ZodType<Array<ManifestDigest>, z.ZodTypeDef, unknown>;
-  output_name: z.ZodType<WorkflowOutputName, z.ZodTypeDef, unknown>;
-  synthesis_attempt: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cited_source_digests: z.ZodType<Array<ManifestDigest>, unknown>;
+  output_name: z.ZodType<WorkflowOutputName, unknown>;
+  synthesis_attempt: z.ZodType<WorkAttemptIdentityV1, unknown>;
+}, z.core.$strict> = z.object({
   cited_source_digests: z.array(z.lazy(() => ManifestDigestSchema)),
   output_name: z.lazy(() => WorkflowOutputNameSchema),
   synthesis_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
@@ -10781,9 +10781,9 @@ export const WorkflowSynthesisDraftSchema: z.ZodObject<{
 
 /** Recorded relation between the two supplied frontiers. `Incomparable` means
 at least one side was absent; it is not collapsed into agreement. */
-export const WorkFrontierComparisonV1Schema: z.ZodEnum<["agree", "disagree", "incomparable"]> = z.enum(["agree", "disagree", "incomparable"]);
+export const WorkFrontierComparisonV1Schema: z.ZodEnum<{ "agree": "agree"; "disagree": "disagree"; "incomparable": "incomparable" }> = z.enum(["agree", "disagree", "incomparable"]);
 
-export const WorkGraphChangeV1Schema: z.ZodType<WorkGraphChangeV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const WorkGraphChangeV1Schema: z.ZodType<WorkGraphChangeV1, unknown> = z.discriminatedUnion("kind", [z.object({
   based_on_version: z.number().int().safe().min(0),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   kind: z.literal("accepted_attempt_linked"),
@@ -10817,7 +10817,7 @@ export const WorkGraphChangeV1Schema: z.ZodType<WorkGraphChangeV1, z.ZodTypeDef,
   proposal: z.lazy(() => WorkRelationReplanProposalV1Schema),
 }).strict(), z.object({
   accepted_at: z.lazy(() => UtcMicrosSchema),
-  evidence_by_criterion: z.record(z.string()),
+  evidence_by_criterion: z.record(z.string(), z.string()),
   kind: z.literal("task_accepted"),
   task_id: z.lazy(() => TaskIdSchema),
 }).strict(), z.object({
@@ -10835,7 +10835,7 @@ export const WorkGraphChangeV1Schema: z.ZodType<WorkGraphChangeV1, z.ZodTypeDef,
   proposal_id: z.lazy(() => ProposalIdSchema),
 }).strict()]);
 
-export const WorkGraphReadModeV1Schema: z.ZodType<WorkGraphReadModeV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("mode", [z.object({
+export const WorkGraphReadModeV1Schema: z.ZodType<WorkGraphReadModeV1, unknown> = z.discriminatedUnion("mode", [z.object({
   mode: z.literal("as_of"),
   valid_at: z.lazy(() => UtcMicrosSchema),
 }), z.object({
@@ -10851,18 +10851,18 @@ export const WorkGraphReadModeV1Schema: z.ZodType<WorkGraphReadModeV1, z.ZodType
 })]);
 
 export const WorkGraphReadRequestV1Schema: z.ZodObject<{
-  continuation: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  mode: z.ZodType<WorkGraphReadModeV1, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  continuation: z.ZodType<string | null, unknown>;
+  mode: z.ZodType<WorkGraphReadModeV1, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+}, z.core.$strict> = z.object({
   continuation: z.string().nullable(),
   mode: z.lazy(() => WorkGraphReadModeV1Schema),
   observed_at: z.lazy(() => UtcMicrosSchema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
 }).strict();
 
-export const WorkGraphReadV1Schema: z.ZodType<WorkGraphReadV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("mode", [z.object({
+export const WorkGraphReadV1Schema: z.ZodType<WorkGraphReadV1, unknown> = z.discriminatedUnion("mode", [z.object({
   authorized_scope: z.lazy(() => AuthorizedWorkProductScopeV1Schema),
   mode: z.literal("absent"),
   selection_coverage: z.lazy(() => WorkGraphSelectionCoverageV1Schema),
@@ -10908,7 +10908,7 @@ not cover ends the readable slice: every later version, whatever scopes its
 own event named, would have to be folded across that event to exist at all.
 `excluded_events` therefore counts every event from the first uncovered one
 onward. */
-export const WorkGraphSelectionCoverageV1Schema: z.ZodType<WorkGraphSelectionCoverageV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("coverage", [z.object({
+export const WorkGraphSelectionCoverageV1Schema: z.ZodType<WorkGraphSelectionCoverageV1, unknown> = z.discriminatedUnion("coverage", [z.object({
   coverage: z.literal("complete"),
   covered_events: z.number().int().min(0),
 }), z.object({
@@ -10918,7 +10918,7 @@ export const WorkGraphSelectionCoverageV1Schema: z.ZodType<WorkGraphSelectionCov
   first_excluded_sequence: z.number().int().safe().min(0),
 })]);
 
-export const WorkGraphTimelineCoverageV1Schema: z.ZodType<WorkGraphTimelineCoverageV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("coverage", [z.object({
+export const WorkGraphTimelineCoverageV1Schema: z.ZodType<WorkGraphTimelineCoverageV1, unknown> = z.discriminatedUnion("coverage", [z.object({
   coverage: z.literal("complete"),
   returned: z.number().int().min(0),
 }), z.object({
@@ -10928,9 +10928,9 @@ export const WorkGraphTimelineCoverageV1Schema: z.ZodType<WorkGraphTimelineCover
 })]);
 
 export const WorkGraphTimelineV1Schema: z.ZodObject<{
-  coverage: z.ZodType<WorkGraphTimelineCoverageV1, z.ZodTypeDef, unknown>;
-  entries: z.ZodType<Array<WorkGraphVersionEntryV1>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  coverage: z.ZodType<WorkGraphTimelineCoverageV1, unknown>;
+  entries: z.ZodType<Array<WorkGraphVersionEntryV1>, unknown>;
+}, z.core.$strict> = z.object({
   coverage: z.lazy(() => WorkGraphTimelineCoverageV1Schema),
   entries: z.array(z.lazy(() => WorkGraphVersionEntryV1Schema)),
 }).strict();
@@ -10938,14 +10938,14 @@ export const WorkGraphTimelineV1Schema: z.ZodObject<{
 /** One immutable graph version and every Work projection derived from that
 same version at the caller's explicit observation time. */
 export const WorkGraphVersionEntryV1Schema: z.ZodObject<{
-  graph: z.ZodType<WorkProductGraphV1, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  projected_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  projections: z.ZodType<WorkProductProjectionBundleV1, z.ZodTypeDef, unknown>;
-  runtime: z.ZodType<WorkRuntimeProjectionV1, z.ZodTypeDef, unknown>;
-  valid_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  graph: z.ZodType<WorkProductGraphV1, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  projected_at: z.ZodType<UtcMicros, unknown>;
+  projections: z.ZodType<WorkProductProjectionBundleV1, unknown>;
+  runtime: z.ZodType<WorkRuntimeProjectionV1, unknown>;
+  valid_at: z.ZodType<UtcMicros, unknown>;
+  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, unknown>;
+}, z.core.$strict> = z.object({
   graph: z.lazy(() => WorkProductGraphV1Schema),
   observed_at: z.lazy(() => UtcMicrosSchema),
   projected_at: z.lazy(() => UtcMicrosSchema),
@@ -10956,14 +10956,14 @@ export const WorkGraphVersionEntryV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkHandoffV1Schema: z.ZodObject<{
-  evidence_frontier: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  from_actor: z.ZodType<ActorId, z.ZodTypeDef, unknown>;
-  handed_off_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  handoff_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-  to_actor: z.ZodType<ActorId, z.ZodTypeDef, unknown>;
-  unknowns: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  evidence_frontier: z.ZodType<Array<string>, unknown>;
+  from_actor: z.ZodType<ActorId, unknown>;
+  handed_off_at: z.ZodType<UtcMicros, unknown>;
+  handoff_id: z.ZodType<string, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+  to_actor: z.ZodType<ActorId, unknown>;
+  unknowns: z.ZodType<Array<string>, unknown>;
+}, z.core.$strict> = z.object({
   evidence_frontier: z.array(z.string()),
   from_actor: z.lazy(() => ActorIdSchema),
   handed_off_at: z.lazy(() => UtcMicrosSchema),
@@ -10974,39 +10974,39 @@ export const WorkHandoffV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkHierarchyV1Schema: z.ZodObject<{
-  initiative_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  milestone_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  plan_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  initiative_id: z.ZodType<string, unknown>;
+  milestone_id: z.ZodType<string, unknown>;
+  plan_id: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   initiative_id: z.string(),
   milestone_id: z.string(),
   plan_id: z.string(),
 }).strict();
 
 export const WorkInitiativeV1Schema: z.ZodObject<{
-  created_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  title: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  created_at: z.ZodType<UtcMicros, unknown>;
+  id: z.ZodType<string, unknown>;
+  title: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   created_at: z.lazy(() => UtcMicrosSchema),
   id: z.string(),
   title: z.string(),
 }).strict();
 
 export const WorkItemInputV1Schema: z.ZodObject<{
-  acceptance_criteria: z.ZodType<Array<WorkAcceptanceCriterionV1>, z.ZodTypeDef, unknown>;
-  causal_candidates: z.ZodType<Array<TaskId>, z.ZodTypeDef, unknown>;
-  created_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  deadline: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  dependencies: z.ZodType<Array<TaskId>, z.ZodTypeDef, unknown>;
-  effort: z.ZodType<number, z.ZodTypeDef, unknown>;
-  hierarchy: z.ZodType<WorkHierarchyV1, z.ZodTypeDef, unknown>;
-  informational_relations: z.ZodType<Array<TaskId>, z.ZodTypeDef, unknown>;
-  scheduled_at: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-  title: z.ZodType<string, z.ZodTypeDef, unknown>;
-  updated_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  acceptance_criteria: z.ZodType<Array<WorkAcceptanceCriterionV1>, unknown>;
+  causal_candidates: z.ZodType<Array<TaskId>, unknown>;
+  created_at: z.ZodType<UtcMicros, unknown>;
+  deadline: z.ZodType<UtcMicros | null, unknown>;
+  dependencies: z.ZodType<Array<TaskId>, unknown>;
+  effort: z.ZodType<number, unknown>;
+  hierarchy: z.ZodType<WorkHierarchyV1, unknown>;
+  informational_relations: z.ZodType<Array<TaskId>, unknown>;
+  scheduled_at: z.ZodType<UtcMicros | null, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+  title: z.ZodType<string, unknown>;
+  updated_at: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   acceptance_criteria: z.array(z.lazy(() => WorkAcceptanceCriterionV1Schema)),
   causal_candidates: z.array(z.lazy(() => TaskIdSchema)),
   created_at: z.lazy(() => UtcMicrosSchema),
@@ -11022,20 +11022,20 @@ export const WorkItemInputV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkItemV1Schema: z.ZodObject<{
-  accepted_at: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  accepted_attempts: z.ZodType<Array<WorkAttemptIdentityV1>, z.ZodTypeDef, unknown>;
-  accepted_criteria: z.ZodType<Record<string, string>, z.ZodTypeDef, unknown>;
-  accepted_proposal: z.ZodType<ProposalId | null, z.ZodTypeDef, unknown>;
-  accepted_route: z.ZodType<WorkRouteDecisionV1 | null, z.ZodTypeDef, unknown>;
-  archived_at: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  evidence_links: z.ZodType<Array<string>, z.ZodTypeDef, unknown>;
-  execution_admitted_at: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  handoffs: z.ZodType<Array<WorkHandoffV1>, z.ZodTypeDef, unknown>;
-  input: z.ZodType<WorkItemInputV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  accepted_at: z.ZodType<UtcMicros | null, unknown>;
+  accepted_attempts: z.ZodType<Array<WorkAttemptIdentityV1>, unknown>;
+  accepted_criteria: z.ZodType<Record<string, string>, unknown>;
+  accepted_proposal: z.ZodType<ProposalId | null, unknown>;
+  accepted_route: z.ZodType<WorkRouteDecisionV1 | null, unknown>;
+  archived_at: z.ZodType<UtcMicros | null, unknown>;
+  evidence_links: z.ZodType<Array<string>, unknown>;
+  execution_admitted_at: z.ZodType<UtcMicros | null, unknown>;
+  handoffs: z.ZodType<Array<WorkHandoffV1>, unknown>;
+  input: z.ZodType<WorkItemInputV1, unknown>;
+}, z.core.$strict> = z.object({
   accepted_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   accepted_attempts: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
-  accepted_criteria: z.record(z.string()),
+  accepted_criteria: z.record(z.string(), z.string()),
   accepted_proposal: z.union([z.lazy(() => ProposalIdSchema), z.null()]),
   accepted_route: z.union([z.lazy(() => WorkRouteDecisionV1Schema), z.null()]),
   archived_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
@@ -11046,11 +11046,11 @@ export const WorkItemV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkKanbanCardV1Schema: z.ZodObject<{
-  effort: z.ZodType<number, z.ZodTypeDef, unknown>;
-  lane: z.ZodType<WorkTimelineLaneV1, z.ZodTypeDef, unknown>;
-  legal_actions: z.ZodType<Array<WorkLegalActionV1>, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  effort: z.ZodType<number, unknown>;
+  lane: z.ZodType<WorkTimelineLaneV1, unknown>;
+  legal_actions: z.ZodType<Array<WorkLegalActionV1>, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   effort: z.number().int().min(0),
   lane: z.lazy(() => WorkTimelineLaneV1Schema),
   legal_actions: z.array(z.lazy(() => WorkLegalActionV1Schema)),
@@ -11058,14 +11058,14 @@ export const WorkKanbanCardV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkKanbanProjectionV1Schema: z.ZodObject<{
-  cards: z.ZodType<Array<WorkKanbanCardV1>, z.ZodTypeDef, unknown>;
-  graph_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cards: z.ZodType<Array<WorkKanbanCardV1>, unknown>;
+  graph_version: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   cards: z.array(z.lazy(() => WorkKanbanCardV1Schema)),
   graph_version: z.number().int().safe().min(0),
 }).strict();
 
-export const WorkLeakAdjudicationOutcomeV1Schema: z.ZodType<WorkLeakAdjudicationOutcomeV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("outcome", [z.object({
+export const WorkLeakAdjudicationOutcomeV1Schema: z.ZodType<WorkLeakAdjudicationOutcomeV1, unknown> = z.discriminatedUnion("outcome", [z.object({
   outcome: z.literal("appended"),
   receipt: z.lazy(() => WorkLeakAdjudicationReceiptV1Schema),
 }), z.object({
@@ -11074,12 +11074,12 @@ export const WorkLeakAdjudicationOutcomeV1Schema: z.ZodType<WorkLeakAdjudication
 })]);
 
 export const WorkLeakAdjudicationReceiptV1Schema: z.ZodObject<{
-  canonical_input_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  command: z.ZodType<AdjudicateWorkLeakCommandV1, z.ZodTypeDef, unknown>;
-  evidence: z.ZodType<VerifiedWorkLeakEvidenceV1, z.ZodTypeDef, unknown>;
-  revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-  scan_deadline: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  canonical_input_digest: z.ZodType<ManifestDigest, unknown>;
+  command: z.ZodType<AdjudicateWorkLeakCommandV1, unknown>;
+  evidence: z.ZodType<VerifiedWorkLeakEvidenceV1, unknown>;
+  revision: z.ZodType<number, unknown>;
+  scan_deadline: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   canonical_input_digest: z.lazy(() => ManifestDigestSchema),
   command: z.lazy(() => AdjudicateWorkLeakCommandV1Schema),
   evidence: z.lazy(() => VerifiedWorkLeakEvidenceV1Schema),
@@ -11088,24 +11088,24 @@ export const WorkLeakAdjudicationReceiptV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkLeaseFenceV1Schema: z.ZodObject<{
-  epoch: z.ZodType<WorkFenceEpochV1, z.ZodTypeDef, unknown>;
-  lease_id: z.ZodType<WorkLeaseId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  epoch: z.ZodType<WorkFenceEpochV1, unknown>;
+  lease_id: z.ZodType<WorkLeaseId, unknown>;
+}, z.core.$strict> = z.object({
   epoch: z.lazy(() => WorkFenceEpochV1Schema),
   lease_id: z.lazy(() => WorkLeaseIdSchema),
 }).strict();
 
 /** Strongly typed canonical identity: `WorkLeaseId`. */
-export const WorkLeaseIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const WorkLeaseIdSchema: z.ZodType<string, unknown> = z.string();
 
-export const WorkLegalActionV1Schema: z.ZodEnum<["accept_proposal", "accept_task", "archive", "generate_proposal", "handoff", "link_accepted_attempt", "view_evidence"]> = z.enum(["accept_proposal", "accept_task", "archive", "generate_proposal", "handoff", "link_accepted_attempt", "view_evidence"]);
+export const WorkLegalActionV1Schema: z.ZodEnum<{ "accept_proposal": "accept_proposal"; "accept_task": "accept_task"; "archive": "archive"; "generate_proposal": "generate_proposal"; "handoff": "handoff"; "link_accepted_attempt": "link_accepted_attempt"; "view_evidence": "view_evidence" }> = z.enum(["accept_proposal", "accept_task", "archive", "generate_proposal", "handoff", "link_accepted_attempt", "view_evidence"]);
 
 export const WorkMilestoneV1Schema: z.ZodObject<{
-  created_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  plan_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  title: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  created_at: z.ZodType<UtcMicros, unknown>;
+  id: z.ZodType<string, unknown>;
+  plan_id: z.ZodType<string, unknown>;
+  title: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   created_at: z.lazy(() => UtcMicrosSchema),
   id: z.string(),
   plan_id: z.string(),
@@ -11115,13 +11115,13 @@ export const WorkMilestoneV1Schema: z.ZodObject<{
 export const WorkObservedExecutionOrderBasisV1Schema: z.ZodLiteral<"terminal_observed_at_then_admitted_projection_sequence_then_attempt_identity"> = z.literal("terminal_observed_at_then_admitted_projection_sequence_then_attempt_identity");
 
 export const WorkObservedExecutionV1Schema: z.ZodObject<{
-  admitted_projection_sequence: z.ZodType<number, z.ZodTypeDef, unknown>;
-  evidence_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  identity: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  ordinal: z.ZodType<number, z.ZodTypeDef, unknown>;
-  state: z.ZodType<WorkAttemptStateV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  admitted_projection_sequence: z.ZodType<number, unknown>;
+  evidence_digest: z.ZodType<ManifestDigest, unknown>;
+  identity: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  ordinal: z.ZodType<number, unknown>;
+  state: z.ZodType<WorkAttemptStateV1, unknown>;
+}, z.core.$strict> = z.object({
   admitted_projection_sequence: z.number().int().safe().min(0),
   evidence_digest: z.lazy(() => ManifestDigestSchema),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
@@ -11135,16 +11135,16 @@ export const WorkObservedExecutionV1Schema: z.ZodObject<{
 Bands are ordered `Lowest` .. `Highest`. Comparison is the only operation
 consumers perform over them, so no weighted sum can be reconstructed from
 a recorded decision. */
-export const WorkOrdinalBandV1Schema: z.ZodEnum<["high", "highest", "low", "lowest", "moderate"]> = z.enum(["high", "highest", "low", "lowest", "moderate"]);
+export const WorkOrdinalBandV1Schema: z.ZodEnum<{ "high": "high"; "highest": "highest"; "low": "low"; "lowest": "lowest"; "moderate": "moderate" }> = z.enum(["high", "highest", "low", "lowest", "moderate"]);
 
 /** Closed set of conditions that block admission or removal. */
 export const WorkPlacementBlockerV1Schema: z.ZodUnion<[z.ZodLiteral<"dirty_tracked_files">, z.ZodLiteral<"untracked_data">, z.ZodLiteral<"unique_commits">, z.ZodLiteral<"active_holder">, z.ZodLiteral<"unresolved_effect">, z.ZodLiteral<"unacknowledged_receipt">, z.ZodLiteral<"uncertain_pull_request">, z.ZodLiteral<"shared_ref">, z.ZodLiteral<"missing_anchor">, z.ZodLiteral<"stale_scope">, z.ZodLiteral<"authorization_lost">, z.ZodLiteral<"target_unreadable">, z.ZodLiteral<"network_required">]> = z.union([z.literal("dirty_tracked_files"), z.literal("untracked_data"), z.literal("unique_commits"), z.literal("active_holder"), z.literal("unresolved_effect"), z.literal("unacknowledged_receipt"), z.literal("uncertain_pull_request"), z.literal("shared_ref"), z.literal("missing_anchor"), z.literal("stale_scope"), z.literal("authorization_lost"), z.literal("target_unreadable"), z.literal("network_required")]);
 
 /** Which run a placement belongs to. Placement never redefines TaskId. */
 export const WorkPlacementIdentityV1Schema: z.ZodObject<{
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  run_id: z.ZodType<RunId, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   run_id: z.lazy(() => RunIdSchema),
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
@@ -11158,14 +11158,14 @@ Counts are measurements: a zero is "we looked and found none", and
 `readable: false` is the separate state for "we could not look". Collapsing
 them would let an unreadable target read as a clean one. */
 export const WorkPlacementObservationV1Schema: z.ZodObject<{
-  active_holder: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  dirty_tracked_paths: z.ZodType<number, z.ZodTypeDef, unknown>;
-  network_required: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  readable: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  unique_commits: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  untracked_paths: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  active_holder: z.ZodType<boolean, unknown>;
+  dirty_tracked_paths: z.ZodType<number, unknown>;
+  network_required: z.ZodType<boolean, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  readable: z.ZodType<boolean, unknown>;
+  unique_commits: z.ZodType<number | null, unknown>;
+  untracked_paths: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   active_holder: z.boolean(),
   dirty_tracked_paths: z.number().int().min(0),
   network_required: z.boolean(),
@@ -11176,11 +11176,11 @@ export const WorkPlacementObservationV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkPlacementPreflightRequestV1Schema: z.ZodObject<{
-  occurred_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  target: z.ZodType<WorkPlacementTargetV1, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  occurred_at: z.ZodType<UtcMicros, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  target: z.ZodType<WorkPlacementTargetV1, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   occurred_at: z.lazy(() => UtcMicrosSchema),
   run_id: z.lazy(() => RunIdSchema),
   target: z.lazy(() => WorkPlacementTargetV1Schema),
@@ -11190,11 +11190,11 @@ export const WorkPlacementPreflightRequestV1Schema: z.ZodObject<{
 /** One placement preflight reading: what was asked for, what was seen, and
 exactly what blocks it. */
 export const WorkPlacementPreflightV1Schema: z.ZodObject<{
-  blockers: z.ZodType<Array<WorkPlacementBlockerV1>, z.ZodTypeDef, unknown>;
-  identity: z.ZodType<WorkPlacementIdentityV1, z.ZodTypeDef, unknown>;
-  observation: z.ZodType<WorkPlacementObservationV1, z.ZodTypeDef, unknown>;
-  target: z.ZodType<WorkPlacementTargetV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  blockers: z.ZodType<Array<WorkPlacementBlockerV1>, unknown>;
+  identity: z.ZodType<WorkPlacementIdentityV1, unknown>;
+  observation: z.ZodType<WorkPlacementObservationV1, unknown>;
+  target: z.ZodType<WorkPlacementTargetV1, unknown>;
+}, z.core.$strict> = z.object({
   blockers: z.array(z.lazy(() => WorkPlacementBlockerV1Schema)),
   identity: z.lazy(() => WorkPlacementIdentityV1Schema),
   observation: z.lazy(() => WorkPlacementObservationV1Schema),
@@ -11202,7 +11202,7 @@ export const WorkPlacementPreflightV1Schema: z.ZodObject<{
 }).strict();
 
 /** One placement reading. Absence is a state, not an empty placement. */
-export const WorkPlacementReadingV1Schema: z.ZodType<WorkPlacementReadingV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const WorkPlacementReadingV1Schema: z.ZodType<WorkPlacementReadingV1, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("absent"),
 }).strict(), z.object({
   placement: z.lazy(() => WorkPlacementV1Schema),
@@ -11213,20 +11213,20 @@ export const WorkPlacementReadingV1Schema: z.ZodType<WorkPlacementReadingV1, z.Z
 export const WorkPlacementStateV1Schema: z.ZodUnion<[z.ZodLiteral<"admitted">, z.ZodLiteral<"released">, z.ZodLiteral<"quarantined">]> = z.union([z.literal("admitted"), z.literal("released"), z.literal("quarantined")]);
 
 export const WorkPlacementStatusRequestV1Schema: z.ZodObject<{
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  run_id: z.ZodType<RunId, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   run_id: z.lazy(() => RunIdSchema),
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 
 /** The exact placement a caller asked for. */
 export const WorkPlacementTargetV1Schema: z.ZodObject<{
-  in_place_acknowledged: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<WorkPlacementKindV1, z.ZodTypeDef, unknown>;
-  network_free: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  root: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  in_place_acknowledged: z.ZodType<boolean, unknown>;
+  kind: z.ZodType<WorkPlacementKindV1, unknown>;
+  network_free: z.ZodType<boolean, unknown>;
+  root: z.ZodType<string | null, unknown>;
+}, z.core.$strict> = z.object({
   in_place_acknowledged: z.boolean(),
   kind: z.lazy(() => WorkPlacementKindV1Schema),
   network_free: z.boolean(),
@@ -11235,14 +11235,14 @@ export const WorkPlacementTargetV1Schema: z.ZodObject<{
 
 /** One run's durable placement relation. */
 export const WorkPlacementV1Schema: z.ZodObject<{
-  authority_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  blockers: z.ZodType<Array<WorkPlacementBlockerV1>, z.ZodTypeDef, unknown>;
-  identity: z.ZodType<WorkPlacementIdentityV1, z.ZodTypeDef, unknown>;
-  retention_eligible_at: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  state: z.ZodType<WorkPlacementStateV1, z.ZodTypeDef, unknown>;
-  target: z.ZodType<WorkPlacementTargetV1, z.ZodTypeDef, unknown>;
-  transitioned_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  authority_version: z.ZodType<number, unknown>;
+  blockers: z.ZodType<Array<WorkPlacementBlockerV1>, unknown>;
+  identity: z.ZodType<WorkPlacementIdentityV1, unknown>;
+  retention_eligible_at: z.ZodType<UtcMicros | null, unknown>;
+  state: z.ZodType<WorkPlacementStateV1, unknown>;
+  target: z.ZodType<WorkPlacementTargetV1, unknown>;
+  transitioned_at: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   authority_version: z.number().int().safe().min(0),
   blockers: z.array(z.lazy(() => WorkPlacementBlockerV1Schema)),
   identity: z.lazy(() => WorkPlacementIdentityV1Schema),
@@ -11253,11 +11253,11 @@ export const WorkPlacementV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkPlanV1Schema: z.ZodObject<{
-  created_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  initiative_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  title: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  created_at: z.ZodType<UtcMicros, unknown>;
+  id: z.ZodType<string, unknown>;
+  initiative_id: z.ZodType<string, unknown>;
+  title: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   created_at: z.lazy(() => UtcMicrosSchema),
   id: z.string(),
   initiative_id: z.string(),
@@ -11269,13 +11269,13 @@ export const WorkPlanV1Schema: z.ZodObject<{
 A worker cannot widen its own calibration cohort, so a route cannot earn
 calibrated sizing by reporting its own successes. */
 export const WorkPriorOutcomeV1Schema: z.ZodObject<{
-  accepted: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  escaped_defect: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  rework: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  route_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  terminal: z.ZodType<WorkPriorTerminalV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  accepted: z.ZodType<boolean, unknown>;
+  escaped_defect: z.ZodType<boolean, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  rework: z.ZodType<boolean, unknown>;
+  route_id: z.ZodType<string, unknown>;
+  terminal: z.ZodType<WorkPriorTerminalV1, unknown>;
+}, z.core.$strict> = z.object({
   accepted: z.boolean(),
   escaped_defect: z.boolean(),
   observed_at: z.lazy(() => UtcMicrosSchema),
@@ -11285,9 +11285,9 @@ export const WorkPriorOutcomeV1Schema: z.ZodObject<{
 }).strict();
 
 /** How a prior attempt on a route ended. Recorded, never inferred. */
-export const WorkPriorTerminalV1Schema: z.ZodEnum<["cancelled", "failed", "succeeded", "timed_out"]> = z.enum(["cancelled", "failed", "succeeded", "timed_out"]);
+export const WorkPriorTerminalV1Schema: z.ZodEnum<{ "cancelled": "cancelled"; "failed": "failed"; "succeeded": "succeeded"; "timed_out": "timed_out" }> = z.enum(["cancelled", "failed", "succeeded", "timed_out"]);
 
-export const WorkProductAuthorizedRelationScopeV1Schema: z.ZodType<WorkProductAuthorizedRelationScopeV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const WorkProductAuthorizedRelationScopeV1Schema: z.ZodType<WorkProductAuthorizedRelationScopeV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("project"),
   project_id: z.lazy(() => ProjectIdSchema),
 }).strict(), z.object({
@@ -11298,9 +11298,9 @@ export const WorkProductAuthorizedRelationScopeV1Schema: z.ZodType<WorkProductAu
 
 /** Operator-selected graph change before the owning Work authority binds the
 current verified head and revision authorities. */
-export const WorkProductChangeDraftV1Schema: z.ZodType<WorkProductChangeDraftV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("change", [z.object({
+export const WorkProductChangeDraftV1Schema: z.ZodType<WorkProductChangeDraftV1, unknown> = z.discriminatedUnion("change", [z.object({
   change: z.literal("accept_task"),
-  evidence_by_criterion: z.record(z.string()),
+  evidence_by_criterion: z.record(z.string(), z.string()),
   task_id: z.lazy(() => TaskIdSchema),
 }), z.object({
   change: z.literal("add_task"),
@@ -11335,16 +11335,16 @@ export const WorkProductChangeDraftV1Schema: z.ZodType<WorkProductChangeDraftV1,
 })]);
 
 export const WorkProductEventEvidenceV1Schema: z.ZodObject<{
-  anchor_id: z.ZodType<RetrievalAnchorId, z.ZodTypeDef, unknown>;
-  evidence_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  source_store_id: z.ZodType<SourceStoreId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  anchor_id: z.ZodType<RetrievalAnchorId, unknown>;
+  evidence_digest: z.ZodType<ManifestDigest, unknown>;
+  source_store_id: z.ZodType<SourceStoreId, unknown>;
+}, z.core.$strict> = z.object({
   anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
   evidence_digest: z.lazy(() => ManifestDigestSchema),
   source_store_id: z.lazy(() => SourceStoreIdSchema),
 }).strict();
 
-export const WorkProductEventPayloadV1Schema: z.ZodType<WorkProductEventPayloadV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const WorkProductEventPayloadV1Schema: z.ZodType<WorkProductEventPayloadV1, unknown> = z.discriminatedUnion("kind", [z.object({
   change: z.lazy(() => WorkGraphChangeV1Schema),
   kind: z.literal("changed"),
 }).strict(), z.object({
@@ -11353,24 +11353,24 @@ export const WorkProductEventPayloadV1Schema: z.ZodType<WorkProductEventPayloadV
 }).strict()]);
 
 export const WorkProductEventV1Schema: z.ZodObject<{
-  actor_id: z.ZodType<ActorId, z.ZodTypeDef, unknown>;
-  authorized_relation_scopes: z.ZodType<Array<WorkProductAuthorizedRelationScopeV1>, z.ZodTypeDef, unknown>;
-  canonical_input_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  catalog_generation_id: z.ZodType<CatalogGenerationId, z.ZodTypeDef, unknown>;
-  causation_event_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  command_id: z.ZodType<WorkCommandId, z.ZodTypeDef, unknown>;
-  configuration_revision_id: z.ZodType<ConfigurationRevisionId, z.ZodTypeDef, unknown>;
-  event_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  evidence: z.ZodType<Array<WorkProductEventEvidenceV1>, z.ZodTypeDef, unknown>;
-  expected_graph_version: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  occurred_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  owner_scope: z.ZodType<WorkProductProfileScopeV1, z.ZodTypeDef, unknown>;
-  payload: z.ZodType<WorkProductEventPayloadV1, z.ZodTypeDef, unknown>;
-  policy_revision_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  result_graph_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  sequence: z.ZodType<number, z.ZodTypeDef, unknown>;
-  source_watermark: z.ZodType<Record<string, number>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  actor_id: z.ZodType<ActorId, unknown>;
+  authorized_relation_scopes: z.ZodType<Array<WorkProductAuthorizedRelationScopeV1>, unknown>;
+  canonical_input_digest: z.ZodType<ManifestDigest, unknown>;
+  catalog_generation_id: z.ZodType<CatalogGenerationId, unknown>;
+  causation_event_id: z.ZodType<string | null, unknown>;
+  command_id: z.ZodType<WorkCommandId, unknown>;
+  configuration_revision_id: z.ZodType<ConfigurationRevisionId, unknown>;
+  event_id: z.ZodType<string, unknown>;
+  evidence: z.ZodType<Array<WorkProductEventEvidenceV1>, unknown>;
+  expected_graph_version: z.ZodType<number | null, unknown>;
+  occurred_at: z.ZodType<UtcMicros, unknown>;
+  owner_scope: z.ZodType<WorkProductProfileScopeV1, unknown>;
+  payload: z.ZodType<WorkProductEventPayloadV1, unknown>;
+  policy_revision_id: z.ZodType<string, unknown>;
+  result_graph_version: z.ZodType<number, unknown>;
+  sequence: z.ZodType<number, unknown>;
+  source_watermark: z.ZodType<Record<string, number>, unknown>;
+}, z.core.$strict> = z.object({
   actor_id: z.lazy(() => ActorIdSchema),
   authorized_relation_scopes: z.array(z.lazy(() => WorkProductAuthorizedRelationScopeV1Schema)),
   canonical_input_digest: z.lazy(() => ManifestDigestSchema),
@@ -11387,10 +11387,10 @@ export const WorkProductEventV1Schema: z.ZodObject<{
   policy_revision_id: z.string(),
   result_graph_version: z.number().int().safe().min(0),
   sequence: z.number().int().safe().min(0),
-  source_watermark: z.record(z.number().int().safe().min(0)),
+  source_watermark: z.record(z.string(), z.number().int().safe().min(0)),
 }).strict();
 
-export const WorkProductExpectedAuthorityV1Schema: z.ZodType<WorkProductExpectedAuthorityV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("authority", [z.object({
+export const WorkProductExpectedAuthorityV1Schema: z.ZodType<WorkProductExpectedAuthorityV1, unknown> = z.discriminatedUnion("authority", [z.object({
   authority: z.literal("no_prior_graph"),
 }).strict(), z.object({
   authority: z.literal("verified"),
@@ -11398,15 +11398,15 @@ export const WorkProductExpectedAuthorityV1Schema: z.ZodType<WorkProductExpected
 }).strict()]);
 
 export const WorkProductGraphV1Schema: z.ZodObject<{
-  evidence: z.ZodType<Array<TaskEvidenceLinkV1>, z.ZodTypeDef, unknown>;
-  initiatives: z.ZodType<Array<WorkInitiativeV1>, z.ZodTypeDef, unknown>;
-  items: z.ZodType<Array<WorkItemV1>, z.ZodTypeDef, unknown>;
-  milestones: z.ZodType<Array<WorkMilestoneV1>, z.ZodTypeDef, unknown>;
-  plans: z.ZodType<Array<WorkPlanV1>, z.ZodTypeDef, unknown>;
-  proposal_decisions: z.ZodType<Array<WorkProposalDecisionV12>, z.ZodTypeDef, unknown>;
-  relation_replan_decisions: z.ZodType<Array<WorkRelationReplanDecisionV1>, z.ZodTypeDef, unknown>;
-  version: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  evidence: z.ZodType<Array<TaskEvidenceLinkV1>, unknown>;
+  initiatives: z.ZodType<Array<WorkInitiativeV1>, unknown>;
+  items: z.ZodType<Array<WorkItemV1>, unknown>;
+  milestones: z.ZodType<Array<WorkMilestoneV1>, unknown>;
+  plans: z.ZodType<Array<WorkPlanV1>, unknown>;
+  proposal_decisions: z.ZodType<Array<WorkProposalDecisionV12>, unknown>;
+  relation_replan_decisions: z.ZodType<Array<WorkRelationReplanDecisionV1>, unknown>;
+  version: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   evidence: z.array(z.lazy(() => TaskEvidenceLinkV1Schema)),
   initiatives: z.array(z.lazy(() => WorkInitiativeV1Schema)),
   items: z.array(z.lazy(() => WorkItemV1Schema)),
@@ -11418,13 +11418,13 @@ export const WorkProductGraphV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkProductMutationIdentityV1Schema: z.ZodObject<{
-  causation_event_id: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  command_id: z.ZodType<WorkCommandId, z.ZodTypeDef, unknown>;
-  evidence: z.ZodType<Array<WorkProductEventEvidenceV1>, z.ZodTypeDef, unknown>;
-  expected_authority: z.ZodType<WorkProductExpectedAuthorityV1, z.ZodTypeDef, unknown>;
-  occurred_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  revisions: z.ZodType<WorkProductRevisionPinsV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  causation_event_id: z.ZodType<string | null, unknown>;
+  command_id: z.ZodType<WorkCommandId, unknown>;
+  evidence: z.ZodType<Array<WorkProductEventEvidenceV1>, unknown>;
+  expected_authority: z.ZodType<WorkProductExpectedAuthorityV1, unknown>;
+  occurred_at: z.ZodType<UtcMicros, unknown>;
+  revisions: z.ZodType<WorkProductRevisionPinsV1, unknown>;
+}, z.core.$strict> = z.object({
   causation_event_id: z.string().nullable(),
   command_id: z.lazy(() => WorkCommandIdSchema),
   evidence: z.array(z.lazy(() => WorkProductEventEvidenceV1Schema)),
@@ -11434,17 +11434,17 @@ export const WorkProductMutationIdentityV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkProductMutationReceiptV1Schema: z.ZodObject<{
-  event: z.ZodType<WorkProductEventV1, z.ZodTypeDef, unknown>;
-  replayed: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  verified_graph_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  event: z.ZodType<WorkProductEventV1, unknown>;
+  replayed: z.ZodType<boolean, unknown>;
+  verified_graph_version: z.ZodType<VerifiedWorkGraphVersionV1, unknown>;
+}, z.core.$strict> = z.object({
   event: z.lazy(() => WorkProductEventV1Schema),
   replayed: z.boolean(),
   verified_graph_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
 }).strict();
 
 /** Closed public mutation surface for the Work-product graph authority. */
-export const WorkProductMutationRequestV1Schema: z.ZodType<WorkProductMutationRequestV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("mutation", [z.object({
+export const WorkProductMutationRequestV1Schema: z.ZodType<WorkProductMutationRequestV1, unknown> = z.discriminatedUnion("mutation", [z.object({
   mutation: z.literal("accept_task"),
   request: z.lazy(() => AcceptWorkTaskRequestV1Schema),
 }), z.object({
@@ -11477,23 +11477,23 @@ export const WorkProductMutationRequestV1Schema: z.ZodType<WorkProductMutationRe
 })]);
 
 export const WorkProductProfileScopeV1Schema: z.ZodObject<{
-  brain_id: z.ZodType<BrainId, z.ZodTypeDef, unknown>;
-  profile_id: z.ZodType<UserProfileId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  brain_id: z.ZodType<BrainId, unknown>;
+  profile_id: z.ZodType<UserProfileId, unknown>;
+}, z.core.$strict> = z.object({
   brain_id: z.lazy(() => BrainIdSchema),
   profile_id: z.lazy(() => UserProfileIdSchema),
 }).strict();
 
 export const WorkProductProjectionBundleV1Schema: z.ZodObject<{
-  causal: z.ZodType<WorkCausalProjectionV1, z.ZodTypeDef, unknown>;
-  critical_path: z.ZodType<WorkCriticalPathProjectionV1, z.ZodTypeDef, unknown>;
-  dag: z.ZodType<WorkDagProjectionV1, z.ZodTypeDef, unknown>;
-  graph_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  kanban: z.ZodType<WorkKanbanProjectionV1, z.ZodTypeDef, unknown>;
-  runtime: z.ZodType<WorkRuntimeProjectionV1, z.ZodTypeDef, unknown>;
-  timeline: z.ZodType<WorkTimelineProjectionV1, z.ZodTypeDef, unknown>;
-  workload: z.ZodType<WorkWorkloadProjectionV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  causal: z.ZodType<WorkCausalProjectionV1, unknown>;
+  critical_path: z.ZodType<WorkCriticalPathProjectionV1, unknown>;
+  dag: z.ZodType<WorkDagProjectionV1, unknown>;
+  graph_version: z.ZodType<number, unknown>;
+  kanban: z.ZodType<WorkKanbanProjectionV1, unknown>;
+  runtime: z.ZodType<WorkRuntimeProjectionV1, unknown>;
+  timeline: z.ZodType<WorkTimelineProjectionV1, unknown>;
+  workload: z.ZodType<WorkWorkloadProjectionV1, unknown>;
+}, z.core.$strict> = z.object({
   causal: z.lazy(() => WorkCausalProjectionV1Schema),
   critical_path: z.lazy(() => WorkCriticalPathProjectionV1Schema),
   dag: z.lazy(() => WorkDagProjectionV1Schema),
@@ -11504,7 +11504,7 @@ export const WorkProductProjectionBundleV1Schema: z.ZodObject<{
   workload: z.lazy(() => WorkWorkloadProjectionV1Schema),
 }).strict();
 
-export const WorkProductRelationV1Schema: z.ZodType<WorkProductRelationV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const WorkProductRelationV1Schema: z.ZodType<WorkProductRelationV1, unknown> = z.discriminatedUnion("kind", [z.object({
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   kind: z.literal("accepted_attempt"),
   task_id: z.lazy(() => TaskIdSchema),
@@ -11547,10 +11547,10 @@ export const WorkProductRelationV1Schema: z.ZodType<WorkProductRelationV1, z.Zod
 })]);
 
 export const WorkProductRevisionPinsV1Schema: z.ZodObject<{
-  catalog_generation_id: z.ZodType<CatalogGenerationId, z.ZodTypeDef, unknown>;
-  configuration_revision_id: z.ZodType<ConfigurationRevisionId, z.ZodTypeDef, unknown>;
-  policy_revision_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  catalog_generation_id: z.ZodType<CatalogGenerationId, unknown>;
+  configuration_revision_id: z.ZodType<ConfigurationRevisionId, unknown>;
+  policy_revision_id: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   catalog_generation_id: z.lazy(() => CatalogGenerationIdSchema),
   configuration_revision_id: z.lazy(() => ConfigurationRevisionIdSchema),
   policy_revision_id: z.string(),
@@ -11562,28 +11562,28 @@ This identity lives in the domain because attempt admission must retain
 it byte-for-byte through provider settlement. Reconstructing it from a
 project context would conflate explicit no-Git work with a scoped
 repository relation. */
-export const WorkProductSelectionScopeV1Schema: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("selection", [z.object({
+export const WorkProductSelectionScopeV1Schema: z.ZodType<WorkProductSelectionScopeV1, unknown> = z.discriminatedUnion("selection", [z.object({
   selection: z.literal("profile_owned_no_git"),
 }), z.object({
   relation_scopes: z.array(z.lazy(() => WorkProductAuthorizedRelationScopeV1Schema)),
   selection: z.literal("relations"),
 })]);
 
-export const WorkProjectionSequenceV1Schema: z.ZodType<number, z.ZodTypeDef, unknown> = z.number().int().safe().min(0);
+export const WorkProjectionSequenceV1Schema: z.ZodType<number, unknown> = z.number().int().safe().min(0);
 
 /** The explicit command the decision recommends next. A recommendation never
 executes; each action names a separate version-checked application command. */
-export const WorkProposalActionV1Schema: z.ZodEnum<["admit_execution", "hold_for_dependencies", "proceed_to_acceptance", "replan"]> = z.enum(["admit_execution", "hold_for_dependencies", "proceed_to_acceptance", "replan"]);
+export const WorkProposalActionV1Schema: z.ZodEnum<{ "admit_execution": "admit_execution"; "hold_for_dependencies": "hold_for_dependencies"; "proceed_to_acceptance": "proceed_to_acceptance"; "replan": "replan" }> = z.enum(["admit_execution", "hold_for_dependencies", "proceed_to_acceptance", "replan"]);
 
 export const WorkProposalComparisonEffectV1Schema: z.ZodLiteral<"advisory_only"> = z.literal("advisory_only");
 
 export const WorkProposalComparisonRequestV1Schema: z.ZodObject<{
-  new_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  old_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
-  selection: z.ZodType<WorkProductSelectionScopeV1, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  new_version: z.ZodType<VerifiedWorkGraphVersionV1, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  old_version: z.ZodType<VerifiedWorkGraphVersionV1, unknown>;
+  selection: z.ZodType<WorkProductSelectionScopeV1, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   new_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
   observed_at: z.lazy(() => UtcMicrosSchema),
   old_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
@@ -11592,16 +11592,16 @@ export const WorkProposalComparisonRequestV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkProposalComparisonV1Schema: z.ZodObject<{
-  added_evidence: z.ZodType<Array<TaskEvidenceLinkV1>, z.ZodTypeDef, unknown>;
-  added_relations: z.ZodType<Array<WorkProductRelationV1>, z.ZodTypeDef, unknown>;
-  effect: z.ZodType<WorkProposalComparisonEffectV1, z.ZodTypeDef, unknown>;
-  item_changed: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  new: z.ZodType<VerifiedWorkEvidenceRootV1, z.ZodTypeDef, unknown>;
-  old: z.ZodType<VerifiedWorkEvidenceRootV1, z.ZodTypeDef, unknown>;
-  removed_evidence: z.ZodType<Array<TaskEvidenceLinkV1>, z.ZodTypeDef, unknown>;
-  removed_relations: z.ZodType<Array<WorkProductRelationV1>, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  added_evidence: z.ZodType<Array<TaskEvidenceLinkV1>, unknown>;
+  added_relations: z.ZodType<Array<WorkProductRelationV1>, unknown>;
+  effect: z.ZodType<WorkProposalComparisonEffectV1, unknown>;
+  item_changed: z.ZodType<boolean, unknown>;
+  new: z.ZodType<VerifiedWorkEvidenceRootV1, unknown>;
+  old: z.ZodType<VerifiedWorkEvidenceRootV1, unknown>;
+  removed_evidence: z.ZodType<Array<TaskEvidenceLinkV1>, unknown>;
+  removed_relations: z.ZodType<Array<WorkProductRelationV1>, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   added_evidence: z.array(z.lazy(() => TaskEvidenceLinkV1Schema)),
   added_relations: z.array(z.lazy(() => WorkProductRelationV1Schema)),
   effect: z.lazy(() => WorkProposalComparisonEffectV1Schema),
@@ -11615,27 +11615,27 @@ export const WorkProposalComparisonV1Schema: z.ZodObject<{
 
 /** One explained, replayable work-loop decision. */
 export const WorkProposalDecisionV1Schema: z.ZodObject<{
-  based_on_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  configuration_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  configuration_revision: z.ZodType<ConfigurationRevisionId | null, z.ZodTypeDef, unknown>;
-  decomposition: z.ZodOptional<z.ZodType<WorkDecompositionProposalV1 | null, z.ZodTypeDef, unknown>>;
-  deterministic_fallback: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  disposition: z.ZodType<WorkProposalDispositionV1, z.ZodTypeDef, unknown>;
-  evaluator_id: z.ZodType<PolicyIdentifierV1, z.ZodTypeDef, unknown>;
-  evaluator_revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-  frontier_comparison: z.ZodType<WorkFrontierComparisonV1, z.ZodTypeDef, unknown>;
-  input_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  live_git_evidence: z.ZodType<WorkEvidenceFrontierV1 | null, z.ZodTypeDef, unknown>;
-  local_evidence: z.ZodType<WorkEvidenceFrontierV1 | null, z.ZodTypeDef, unknown>;
-  ordered_reason_codes: z.ZodType<Array<WorkProposalReasonV1>, z.ZodTypeDef, unknown>;
-  policy_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  policy_revision: z.ZodType<number, z.ZodTypeDef, unknown>;
-  recommended_action: z.ZodType<WorkProposalActionV1 | null, z.ZodTypeDef, unknown>;
-  route_plan: z.ZodOptional<z.ZodType<WorkRoutePlanV1 | null, z.ZodTypeDef, unknown>>;
-  shape: z.ZodOptional<z.ZodType<WorkTaskShapeV1 | null, z.ZodTypeDef, unknown>>;
-  sizing: z.ZodOptional<z.ZodType<WorkCalibratedSizingV1 | null, z.ZodTypeDef, unknown>>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  based_on_version: z.ZodType<number, unknown>;
+  configuration_digest: z.ZodType<ManifestDigest, unknown>;
+  configuration_revision: z.ZodType<ConfigurationRevisionId | null, unknown>;
+  decomposition: z.ZodOptional<z.ZodType<WorkDecompositionProposalV1 | null, unknown>>;
+  deterministic_fallback: z.ZodType<boolean, unknown>;
+  disposition: z.ZodType<WorkProposalDispositionV1, unknown>;
+  evaluator_id: z.ZodType<PolicyIdentifierV1, unknown>;
+  evaluator_revision: z.ZodType<number, unknown>;
+  frontier_comparison: z.ZodType<WorkFrontierComparisonV1, unknown>;
+  input_digest: z.ZodType<ManifestDigest, unknown>;
+  live_git_evidence: z.ZodType<WorkEvidenceFrontierV1 | null, unknown>;
+  local_evidence: z.ZodType<WorkEvidenceFrontierV1 | null, unknown>;
+  ordered_reason_codes: z.ZodType<Array<WorkProposalReasonV1>, unknown>;
+  policy_digest: z.ZodType<ManifestDigest, unknown>;
+  policy_revision: z.ZodType<number, unknown>;
+  recommended_action: z.ZodType<WorkProposalActionV1 | null, unknown>;
+  route_plan: z.ZodOptional<z.ZodType<WorkRoutePlanV1 | null, unknown>>;
+  shape: z.ZodOptional<z.ZodType<WorkTaskShapeV1 | null, unknown>>;
+  sizing: z.ZodOptional<z.ZodType<WorkCalibratedSizingV1 | null, unknown>>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   based_on_version: z.number().int().safe().min(0),
   configuration_digest: z.lazy(() => ManifestDigestSchema),
   configuration_revision: z.union([z.lazy(() => ConfigurationRevisionIdSchema), z.null()]),
@@ -11659,34 +11659,34 @@ export const WorkProposalDecisionV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkProposalDecisionV12Schema: z.ZodObject<{
-  decided_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  disposition: z.ZodType<WorkProposalDispositionV12, z.ZodTypeDef, unknown>;
-  proposal: z.ZodType<WorkProposalV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  decided_at: z.ZodType<UtcMicros, unknown>;
+  disposition: z.ZodType<WorkProposalDispositionV12, unknown>;
+  proposal: z.ZodType<WorkProposalV1, unknown>;
+}, z.core.$strict> = z.object({
   decided_at: z.lazy(() => UtcMicrosSchema),
   disposition: z.lazy(() => WorkProposalDispositionV12Schema),
   proposal: z.lazy(() => WorkProposalV1Schema),
 }).strict();
 
 /** Exactly one disposition per decision. */
-export const WorkProposalDispositionV1Schema: z.ZodEnum<["abstain", "allow", "deny", "indeterminate"]> = z.enum(["abstain", "allow", "deny", "indeterminate"]);
+export const WorkProposalDispositionV1Schema: z.ZodEnum<{ "abstain": "abstain"; "allow": "allow"; "deny": "deny"; "indeterminate": "indeterminate" }> = z.enum(["abstain", "allow", "deny", "indeterminate"]);
 
-export const WorkProposalDispositionV12Schema: z.ZodEnum<["accepted", "rejected", "superseded"]> = z.enum(["accepted", "rejected", "superseded"]);
+export const WorkProposalDispositionV12Schema: z.ZodEnum<{ "accepted": "accepted"; "rejected": "rejected"; "superseded": "superseded" }> = z.enum(["accepted", "rejected", "superseded"]);
 
-export const WorkProposalReasonV1Schema: z.ZodEnum<["deadline_exceeded", "dependencies_unresolved", "deterministic_baseline_selected", "execution_in_flight", "frontier_agreement", "frontier_disagreement", "frontier_incomparable", "human_override_applied", "insufficient_calibration_support", "invalid_request", "no_eligible_routes", "proposal_accepted", "ready", "request_cancelled", "route_budget_exceeded", "route_content_location_refused", "route_evidence_sparse", "route_evidence_stale", "runtime_coverage_partial", "runtime_coverage_unavailable", "task_accepted", "terminal_evidence_observed"]> = z.enum(["deadline_exceeded", "dependencies_unresolved", "deterministic_baseline_selected", "execution_in_flight", "frontier_agreement", "frontier_disagreement", "frontier_incomparable", "human_override_applied", "insufficient_calibration_support", "invalid_request", "no_eligible_routes", "proposal_accepted", "ready", "request_cancelled", "route_budget_exceeded", "route_content_location_refused", "route_evidence_sparse", "route_evidence_stale", "runtime_coverage_partial", "runtime_coverage_unavailable", "task_accepted", "terminal_evidence_observed"]);
+export const WorkProposalReasonV1Schema: z.ZodEnum<{ "deadline_exceeded": "deadline_exceeded"; "dependencies_unresolved": "dependencies_unresolved"; "deterministic_baseline_selected": "deterministic_baseline_selected"; "execution_in_flight": "execution_in_flight"; "frontier_agreement": "frontier_agreement"; "frontier_disagreement": "frontier_disagreement"; "frontier_incomparable": "frontier_incomparable"; "human_override_applied": "human_override_applied"; "insufficient_calibration_support": "insufficient_calibration_support"; "invalid_request": "invalid_request"; "no_eligible_routes": "no_eligible_routes"; "proposal_accepted": "proposal_accepted"; "ready": "ready"; "request_cancelled": "request_cancelled"; "route_budget_exceeded": "route_budget_exceeded"; "route_content_location_refused": "route_content_location_refused"; "route_evidence_sparse": "route_evidence_sparse"; "route_evidence_stale": "route_evidence_stale"; "runtime_coverage_partial": "runtime_coverage_partial"; "runtime_coverage_unavailable": "runtime_coverage_unavailable"; "task_accepted": "task_accepted"; "terminal_evidence_observed": "terminal_evidence_observed" }> = z.enum(["deadline_exceeded", "dependencies_unresolved", "deterministic_baseline_selected", "execution_in_flight", "frontier_agreement", "frontier_disagreement", "frontier_incomparable", "human_override_applied", "insufficient_calibration_support", "invalid_request", "no_eligible_routes", "proposal_accepted", "ready", "request_cancelled", "route_budget_exceeded", "route_content_location_refused", "route_evidence_sparse", "route_evidence_stale", "runtime_coverage_partial", "runtime_coverage_unavailable", "task_accepted", "terminal_evidence_observed"]);
 
 export const WorkProposalV1Schema: z.ZodObject<{
-  based_on_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  children: z.ZodType<Array<WorkProposedChildV1>, z.ZodTypeDef, unknown>;
-  configuration_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  evidence_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  explanation: z.ZodType<string, z.ZodTypeDef, unknown>;
-  proposal_id: z.ZodType<ProposalId, z.ZodTypeDef, unknown>;
-  route: z.ZodType<WorkRouteDecisionV1, z.ZodTypeDef, unknown>;
-  shape: z.ZodType<WorkShapeAssessmentV1, z.ZodTypeDef, unknown>;
-  sizing: z.ZodType<WorkSizingV1, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  based_on_version: z.ZodType<number, unknown>;
+  children: z.ZodType<Array<WorkProposedChildV1>, unknown>;
+  configuration_digest: z.ZodType<ManifestDigest, unknown>;
+  evidence_digest: z.ZodType<ManifestDigest, unknown>;
+  explanation: z.ZodType<string, unknown>;
+  proposal_id: z.ZodType<ProposalId, unknown>;
+  route: z.ZodType<WorkRouteDecisionV1, unknown>;
+  shape: z.ZodType<WorkShapeAssessmentV1, unknown>;
+  sizing: z.ZodType<WorkSizingV1, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   based_on_version: z.number().int().safe().min(0),
   children: z.array(z.lazy(() => WorkProposedChildV1Schema)),
   configuration_digest: z.lazy(() => ManifestDigestSchema),
@@ -11700,11 +11700,11 @@ export const WorkProposalV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkProposedChildV1Schema: z.ZodObject<{
-  dependencies: z.ZodType<Array<TaskId>, z.ZodTypeDef, unknown>;
-  effort: z.ZodType<number, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-  title: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  dependencies: z.ZodType<Array<TaskId>, unknown>;
+  effort: z.ZodType<number, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+  title: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   dependencies: z.array(z.lazy(() => TaskIdSchema)),
   effort: z.number().int().min(0),
   task_id: z.lazy(() => TaskIdSchema),
@@ -11717,7 +11717,7 @@ provider could not run, without inventing a fallback. */
 export const WorkProviderAvailabilityV1Schema: z.ZodUnion<[z.ZodLiteral<"absent">, z.ZodLiteral<"stale">, z.ZodLiteral<"unsupported">, z.ZodLiteral<"digest_mismatch">, z.ZodLiteral<"unavailable">]> = z.union([z.literal("absent"), z.literal("stale"), z.literal("unsupported"), z.literal("digest_mismatch"), z.literal("unavailable")]);
 
 /** Provider protocol selected by the pinned Work configuration snapshot. */
-export const WorkProviderBackendV1Schema: z.ZodEnum<["claude_code_cli", "codex_app_server", "codex_cli"]> = z.enum(["claude_code_cli", "codex_app_server", "codex_cli"]);
+export const WorkProviderBackendV1Schema: z.ZodEnum<{ "claude_code_cli": "claude_code_cli"; "codex_app_server": "codex_app_server"; "codex_cli": "codex_cli" }> = z.enum(["claude_code_cli", "codex_app_server", "codex_cli"]);
 
 /** Why an admitted attempt did not run on the backend its pinned execution
 snapshot preferred.
@@ -11734,13 +11734,13 @@ never be read as a first choice.
 It is also written when the fallback itself was refused, so a denial keeps
 both failures instead of collapsing them into one state. */
 export const WorkProviderFallbackRecordV1Schema: z.ZodObject<{
-  fallback_backend: z.ZodType<WorkProviderBackendV1, z.ZodTypeDef, unknown>;
-  fallback_route: z.ZodType<WorkProviderRouteV1, z.ZodTypeDef, unknown>;
-  fallback_state: z.ZodType<WorkProviderAvailabilityV1 | null, z.ZodTypeDef, unknown>;
-  preferred_backend: z.ZodType<WorkProviderBackendV1, z.ZodTypeDef, unknown>;
-  preferred_route: z.ZodType<WorkProviderRouteV1, z.ZodTypeDef, unknown>;
-  preferred_state: z.ZodType<WorkProviderAvailabilityV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  fallback_backend: z.ZodType<WorkProviderBackendV1, unknown>;
+  fallback_route: z.ZodType<WorkProviderRouteV1, unknown>;
+  fallback_state: z.ZodType<WorkProviderAvailabilityV1 | null, unknown>;
+  preferred_backend: z.ZodType<WorkProviderBackendV1, unknown>;
+  preferred_route: z.ZodType<WorkProviderRouteV1, unknown>;
+  preferred_state: z.ZodType<WorkProviderAvailabilityV1, unknown>;
+}, z.core.$strict> = z.object({
   fallback_backend: z.lazy(() => WorkProviderBackendV1Schema),
   fallback_route: z.lazy(() => WorkProviderRouteV1Schema),
   fallback_state: z.union([z.lazy(() => WorkProviderAvailabilityV1Schema), z.null()]),
@@ -11749,30 +11749,30 @@ export const WorkProviderFallbackRecordV1Schema: z.ZodObject<{
   preferred_state: z.lazy(() => WorkProviderAvailabilityV1Schema),
 }).strict();
 
-export const WorkProviderProtocolSchema: z.ZodEnum<["claude_stream_json", "codex_app_server_json_rpc", "codex_exec_json"]> = z.enum(["claude_stream_json", "codex_app_server_json_rpc", "codex_exec_json"]);
+export const WorkProviderProtocolSchema: z.ZodEnum<{ "claude_stream_json": "claude_stream_json"; "codex_app_server_json_rpc": "codex_app_server_json_rpc"; "codex_exec_json": "codex_exec_json" }> = z.enum(["claude_stream_json", "codex_app_server_json_rpc", "codex_exec_json"]);
 
 /** Strongly typed canonical identity: `WorkProviderRouteId`. */
-export const WorkProviderRouteIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const WorkProviderRouteIdSchema: z.ZodType<string, unknown> = z.string();
 
 export const WorkProviderRouteV1Schema: z.ZodObject<{
-  provider_id: z.ZodType<ProviderId, z.ZodTypeDef, unknown>;
-  route_id: z.ZodType<WorkProviderRouteId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  provider_id: z.ZodType<ProviderId, unknown>;
+  route_id: z.ZodType<WorkProviderRouteId, unknown>;
+}, z.core.$strict> = z.object({
   provider_id: z.lazy(() => ProviderIdSchema),
   route_id: z.lazy(() => WorkProviderRouteIdSchema),
 }).strict();
 
 /** Ranked route. Dimensions stay SEPARATE. No scalar score field is permitted here. */
 export const WorkRankedRouteV1Schema: z.ZodObject<{
-  autonomy: z.ZodType<WorkOrdinalBandV1, z.ZodTypeDef, unknown>;
-  correctness: z.ZodType<WorkOrdinalBandV1, z.ZodTypeDef, unknown>;
-  cost: z.ZodType<WorkOrdinalBandV1, z.ZodTypeDef, unknown>;
-  evidence_quality: z.ZodType<WorkOrdinalBandV1, z.ZodTypeDef, unknown>;
-  latency: z.ZodType<WorkOrdinalBandV1, z.ZodTypeDef, unknown>;
-  rank: z.ZodType<number, z.ZodTypeDef, unknown>;
-  route_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-  sensitive_data_fitness: z.ZodType<WorkOrdinalBandV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  autonomy: z.ZodType<WorkOrdinalBandV1, unknown>;
+  correctness: z.ZodType<WorkOrdinalBandV1, unknown>;
+  cost: z.ZodType<WorkOrdinalBandV1, unknown>;
+  evidence_quality: z.ZodType<WorkOrdinalBandV1, unknown>;
+  latency: z.ZodType<WorkOrdinalBandV1, unknown>;
+  rank: z.ZodType<number, unknown>;
+  route_id: z.ZodType<string, unknown>;
+  sensitive_data_fitness: z.ZodType<WorkOrdinalBandV1, unknown>;
+}, z.core.$strict> = z.object({
   autonomy: z.lazy(() => WorkOrdinalBandV1Schema),
   correctness: z.lazy(() => WorkOrdinalBandV1Schema),
   cost: z.lazy(() => WorkOrdinalBandV1Schema),
@@ -11783,7 +11783,7 @@ export const WorkRankedRouteV1Schema: z.ZodObject<{
   sensitive_data_fitness: z.lazy(() => WorkOrdinalBandV1Schema),
 }).strict();
 
-export const WorkRecoveryStateV1Schema: z.ZodType<WorkRecoveryStateV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const WorkRecoveryStateV1Schema: z.ZodType<WorkRecoveryStateV1, unknown> = z.discriminatedUnion("state", [z.object({
   state: z.literal("fresh"),
 }), z.object({
   observed_at: z.lazy(() => UtcMicrosSchema),
@@ -11801,24 +11801,24 @@ export const WorkRecoveryStateV1Schema: z.ZodType<WorkRecoveryStateV1, z.ZodType
 })]);
 
 export const WorkRelationReplanDecisionV1Schema: z.ZodObject<{
-  decided_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  disposition: z.ZodType<WorkProposalDispositionV12, z.ZodTypeDef, unknown>;
-  proposal: z.ZodType<WorkRelationReplanProposalV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  decided_at: z.ZodType<UtcMicros, unknown>;
+  disposition: z.ZodType<WorkProposalDispositionV12, unknown>;
+  proposal: z.ZodType<WorkRelationReplanProposalV1, unknown>;
+}, z.core.$strict> = z.object({
   decided_at: z.lazy(() => UtcMicrosSchema),
   disposition: z.lazy(() => WorkProposalDispositionV12Schema),
   proposal: z.lazy(() => WorkRelationReplanProposalV1Schema),
 }).strict();
 
 export const WorkRelationReplanProposalV1Schema: z.ZodObject<{
-  based_on_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  causal_candidates: z.ZodType<Array<TaskId>, z.ZodTypeDef, unknown>;
-  dependencies: z.ZodType<Array<TaskId>, z.ZodTypeDef, unknown>;
-  informational_relations: z.ZodType<Array<TaskId>, z.ZodTypeDef, unknown>;
-  payload_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  proposal_id: z.ZodType<ProposalId, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  based_on_version: z.ZodType<number, unknown>;
+  causal_candidates: z.ZodType<Array<TaskId>, unknown>;
+  dependencies: z.ZodType<Array<TaskId>, unknown>;
+  informational_relations: z.ZodType<Array<TaskId>, unknown>;
+  payload_digest: z.ZodType<ManifestDigest, unknown>;
+  proposal_id: z.ZodType<ProposalId, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   based_on_version: z.number().int().safe().min(0),
   causal_candidates: z.array(z.lazy(() => TaskIdSchema)),
   dependencies: z.array(z.lazy(() => TaskIdSchema)),
@@ -11828,9 +11828,9 @@ export const WorkRelationReplanProposalV1Schema: z.ZodObject<{
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 
-export const WorkRestartReasonV1Schema: z.ZodEnum<["failure_observed", "lease_lost", "process_lost", "provider_unavailable"]> = z.enum(["failure_observed", "lease_lost", "process_lost", "provider_unavailable"]);
+export const WorkRestartReasonV1Schema: z.ZodEnum<{ "failure_observed": "failure_observed"; "lease_lost": "lease_lost"; "process_lost": "process_lost"; "provider_unavailable": "provider_unavailable" }> = z.enum(["failure_observed", "lease_lost", "process_lost", "provider_unavailable"]);
 
-export const WorkRetryAttemptOutcomeV1Schema: z.ZodType<WorkRetryAttemptOutcomeV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("outcome", [z.object({
+export const WorkRetryAttemptOutcomeV1Schema: z.ZodType<WorkRetryAttemptOutcomeV1, unknown> = z.discriminatedUnion("outcome", [z.object({
   attempt: z.lazy(() => WorkAttemptV1Schema),
   outcome: z.literal("created"),
   receipt: z.lazy(() => WorkRetryReceiptV1Schema),
@@ -11840,7 +11840,7 @@ export const WorkRetryAttemptOutcomeV1Schema: z.ZodType<WorkRetryAttemptOutcomeV
   receipt: z.lazy(() => WorkRetryReceiptV1Schema),
 }).strict()]);
 
-export const WorkRetryCauseV1Schema: z.ZodEnum<["restart_recovery_required", "runtime_failure"]> = z.enum(["restart_recovery_required", "runtime_failure"]);
+export const WorkRetryCauseV1Schema: z.ZodEnum<{ "restart_recovery_required": "restart_recovery_required"; "runtime_failure": "runtime_failure" }> = z.enum(["restart_recovery_required", "runtime_failure"]);
 
 /** A selector into the owning runtime-terminal evidence authority.
 
@@ -11848,24 +11848,24 @@ export const WorkRetryCauseV1Schema: z.ZodEnum<["restart_recovery_required", "ru
 it through [`WorkRetryEvidencePortV1`]; callers never submit the evidence
 digest, outcome, or observation time that decides eligibility. */
 export const WorkRetryFailureSelectorV1Schema: z.ZodObject<{
-  cause: z.ZodType<WorkRetryCauseV1, z.ZodTypeDef, unknown>;
-  evidence_ref: z.ZodType<string, z.ZodTypeDef, unknown>;
-  source: z.ZodType<WorkRetrySourceV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cause: z.ZodType<WorkRetryCauseV1, unknown>;
+  evidence_ref: z.ZodType<string, unknown>;
+  source: z.ZodType<WorkRetrySourceV1, unknown>;
+}, z.core.$strict> = z.object({
   cause: z.lazy(() => WorkRetryCauseV1Schema),
   evidence_ref: z.string(),
   source: z.lazy(() => WorkRetrySourceV1Schema),
 }).strict();
 
 export const WorkRetryReceiptV1Schema: z.ZodObject<{
-  canonical_input_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  command: z.ZodType<RetryWorkAttemptCommandV1, z.ZodTypeDef, unknown>;
-  failure: z.ZodType<VerifiedWorkRetryFailureV1, z.ZodTypeDef, unknown>;
-  new_attempt: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  owner_receipt_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  restarted_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  retry_required_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  canonical_input_digest: z.ZodType<ManifestDigest, unknown>;
+  command: z.ZodType<RetryWorkAttemptCommandV1, unknown>;
+  failure: z.ZodType<VerifiedWorkRetryFailureV1, unknown>;
+  new_attempt: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  owner_receipt_digest: z.ZodType<ManifestDigest, unknown>;
+  restarted_at: z.ZodType<UtcMicros, unknown>;
+  retry_required_at: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   canonical_input_digest: z.lazy(() => ManifestDigestSchema),
   command: z.lazy(() => RetryWorkAttemptCommandV1Schema),
   failure: z.lazy(() => VerifiedWorkRetryFailureV1Schema),
@@ -11877,7 +11877,7 @@ export const WorkRetryReceiptV1Schema: z.ZodObject<{
 
 export const WorkRetrySourceV1Schema: z.ZodLiteral<"runtime"> = z.literal("runtime");
 
-export const WorkRouteDecisionV1Schema: z.ZodType<WorkRouteDecisionV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("decision", [z.object({
+export const WorkRouteDecisionV1Schema: z.ZodType<WorkRouteDecisionV1, unknown> = z.discriminatedUnion("decision", [z.object({
   decision: z.literal("abstained"),
   reason: z.string(),
 }), z.object({
@@ -11891,22 +11891,22 @@ export const WorkRouteDecisionV1Schema: z.ZodType<WorkRouteDecisionV1, z.ZodType
 /** One refused route and the single reason that refused it. Exclusion is
 recorded rather than silent so a missing route is always explained. */
 export const WorkRouteExclusionV1Schema: z.ZodObject<{
-  reason: z.ZodType<WorkProposalReasonV1, z.ZodTypeDef, unknown>;
-  route_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  reason: z.ZodType<WorkProposalReasonV1, unknown>;
+  route_id: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   reason: z.lazy(() => WorkProposalReasonV1Schema),
   route_id: z.string(),
 }).strict();
 
 /** The explained route plan for one decision. Recommends; never dispatches. */
 export const WorkRoutePlanV1Schema: z.ZodObject<{
-  coverage: z.ZodType<WorkOrdinalBandV1, z.ZodTypeDef, unknown>;
-  deterministic_baseline: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  exclusions: z.ZodType<Array<WorkRouteExclusionV1>, z.ZodTypeDef, unknown>;
-  human_override_applied: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  ranked: z.ZodType<Array<WorkRankedRouteV1>, z.ZodTypeDef, unknown>;
-  uncertainty: z.ZodType<WorkOrdinalBandV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  coverage: z.ZodType<WorkOrdinalBandV1, unknown>;
+  deterministic_baseline: z.ZodType<string | null, unknown>;
+  exclusions: z.ZodType<Array<WorkRouteExclusionV1>, unknown>;
+  human_override_applied: z.ZodType<boolean, unknown>;
+  ranked: z.ZodType<Array<WorkRankedRouteV1>, unknown>;
+  uncertainty: z.ZodType<WorkOrdinalBandV1, unknown>;
+}, z.core.$strict> = z.object({
   coverage: z.lazy(() => WorkOrdinalBandV1Schema),
   deterministic_baseline: z.string().nullable(),
   exclusions: z.array(z.lazy(() => WorkRouteExclusionV1Schema)),
@@ -11916,7 +11916,7 @@ export const WorkRoutePlanV1Schema: z.ZodObject<{
 }).strict();
 
 /** A monotonically versioned control authority. */
-export const WorkRunControlAuthorityV1Schema: z.ZodType<number, z.ZodTypeDef, unknown> = z.number().int().safe().min(0);
+export const WorkRunControlAuthorityV1Schema: z.ZodType<number, unknown> = z.number().int().safe().min(0);
 
 /** One run's control reading.
 
@@ -11924,7 +11924,7 @@ export const WorkRunControlAuthorityV1Schema: z.ZodType<number, z.ZodTypeDef, un
 admitted and running under its admitted deadline with no control transition
 ever published, which is not the same as a control row that happens to say
 `Running`. */
-export const WorkRunControlReadingV1Schema: z.ZodType<WorkRunControlReadingV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("state", [z.object({
+export const WorkRunControlReadingV1Schema: z.ZodType<WorkRunControlReadingV1, unknown> = z.discriminatedUnion("state", [z.object({
   control: z.lazy(() => WorkRunControlV1Schema),
   live_attempts: z.array(z.lazy(() => AttemptIdSchema)),
   state: z.literal("controlled"),
@@ -11941,9 +11941,9 @@ of free text so it can be read by a projection without being a prompt. */
 export const WorkRunControlReasonV1Schema: z.ZodUnion<[z.ZodLiteral<"operator_request">, z.ZodLiteral<"human_wait">, z.ZodLiteral<"budget_exhausted">, z.ZodLiteral<"recovery">]> = z.union([z.literal("operator_request"), z.literal("human_wait"), z.literal("budget_exhausted"), z.literal("recovery")]);
 
 export const WorkRunControlRequestV1Schema: z.ZodObject<{
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  run_id: z.ZodType<RunId, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   run_id: z.lazy(() => RunIdSchema),
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
@@ -11957,15 +11957,15 @@ export const WorkRunControlStateV1Schema: z.ZodUnion<[z.ZodLiteral<"running">, z
 
 /** One run's durable control aggregate. */
 export const WorkRunControlV1Schema: z.ZodObject<{
-  authority: z.ZodType<WorkRunControlAuthorityV1, z.ZodTypeDef, unknown>;
-  deadline: z.ZodType<WorkRunDeadlineCheckpointV1, z.ZodTypeDef, unknown>;
-  fenced_attempts: z.ZodType<Array<AttemptId>, z.ZodTypeDef, unknown>;
-  reason: z.ZodType<WorkRunControlReasonV1 | null, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  state: z.ZodType<WorkRunControlStateV1, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-  transitioned_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  authority: z.ZodType<WorkRunControlAuthorityV1, unknown>;
+  deadline: z.ZodType<WorkRunDeadlineCheckpointV1, unknown>;
+  fenced_attempts: z.ZodType<Array<AttemptId>, unknown>;
+  reason: z.ZodType<WorkRunControlReasonV1 | null, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  state: z.ZodType<WorkRunControlStateV1, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+  transitioned_at: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   authority: z.lazy(() => WorkRunControlAuthorityV1Schema),
   deadline: z.lazy(() => WorkRunDeadlineCheckpointV1Schema),
   fenced_attempts: z.array(z.lazy(() => AttemptIdSchema)),
@@ -11982,24 +11982,24 @@ export const WorkRunControlV1Schema: z.ZodObject<{
 remaining resolves to while the run is running. Both are recorded so a
 reader never has to recompute one from a clock it does not trust. */
 export const WorkRunDeadlineCheckpointV1Schema: z.ZodObject<{
-  checkpoint_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  deadline: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  remaining_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  checkpoint_at: z.ZodType<UtcMicros, unknown>;
+  deadline: z.ZodType<UtcMicros, unknown>;
+  remaining_micros: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   checkpoint_at: z.lazy(() => UtcMicrosSchema),
   deadline: z.lazy(() => UtcMicrosSchema),
   remaining_micros: z.number().int().safe(),
 }).strict();
 
 export const WorkRuntimeAttemptProjectionV1Schema: z.ZodObject<{
-  identity: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  state: z.ZodType<WorkAttemptStateV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  identity: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  state: z.ZodType<WorkAttemptStateV1, unknown>;
+}, z.core.$strict> = z.object({
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   state: z.lazy(() => WorkAttemptStateV1Schema),
 }).strict();
 
-export const WorkRuntimeProjectionCoverageV1Schema: z.ZodType<WorkRuntimeProjectionCoverageV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("coverage", [z.object({
+export const WorkRuntimeProjectionCoverageV1Schema: z.ZodType<WorkRuntimeProjectionCoverageV1, unknown> = z.discriminatedUnion("coverage", [z.object({
   coverage: z.literal("complete"),
 }).strict(), z.object({
   coverage: z.literal("partial"),
@@ -12009,13 +12009,13 @@ export const WorkRuntimeProjectionCoverageV1Schema: z.ZodType<WorkRuntimeProject
 }).strict()]);
 
 export const WorkRuntimeProjectionV1Schema: z.ZodObject<{
-  attempts: z.ZodType<Array<WorkRuntimeAttemptProjectionV1>, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<WorkRuntimeProjectionCoverageV1, z.ZodTypeDef, unknown>;
-  generation_id: z.ZodType<ProjectionGenerationId, z.ZodTypeDef, unknown>;
-  graph_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  observed_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  sequence: z.ZodType<WorkProjectionSequenceV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  attempts: z.ZodType<Array<WorkRuntimeAttemptProjectionV1>, unknown>;
+  coverage: z.ZodType<WorkRuntimeProjectionCoverageV1, unknown>;
+  generation_id: z.ZodType<ProjectionGenerationId, unknown>;
+  graph_version: z.ZodType<number, unknown>;
+  observed_at: z.ZodType<UtcMicros, unknown>;
+  sequence: z.ZodType<WorkProjectionSequenceV1, unknown>;
+}, z.core.$strict> = z.object({
   attempts: z.array(z.lazy(() => WorkRuntimeAttemptProjectionV1Schema)),
   coverage: z.lazy(() => WorkRuntimeProjectionCoverageV1Schema),
   generation_id: z.lazy(() => ProjectionGenerationIdSchema),
@@ -12026,15 +12026,15 @@ export const WorkRuntimeProjectionV1Schema: z.ZodObject<{
 
 export const WorkSandboxPolicySchema: z.ZodLiteral<"required"> = z.literal("required");
 
-export const WorkScoreKindV1Schema: z.ZodEnum<["calibrated_range", "heuristic", "ordinal"]> = z.enum(["calibrated_range", "heuristic", "ordinal"]);
+export const WorkScoreKindV1Schema: z.ZodEnum<{ "calibrated_range": "calibrated_range"; "heuristic": "heuristic"; "ordinal": "ordinal" }> = z.enum(["calibrated_range", "heuristic", "ordinal"]);
 
 export const WorkShapeAssessmentV1Schema: z.ZodObject<{
-  ambiguity: z.ZodType<number, z.ZodTypeDef, unknown>;
-  blast_radius: z.ZodType<number, z.ZodTypeDef, unknown>;
-  complexity: z.ZodType<number, z.ZodTypeDef, unknown>;
-  integration_overhead: z.ZodType<number, z.ZodTypeDef, unknown>;
-  score_kind: z.ZodType<WorkScoreKindV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  ambiguity: z.ZodType<number, unknown>;
+  blast_radius: z.ZodType<number, unknown>;
+  complexity: z.ZodType<number, unknown>;
+  integration_overhead: z.ZodType<number, unknown>;
+  score_kind: z.ZodType<WorkScoreKindV1, unknown>;
+}, z.core.$strict> = z.object({
   ambiguity: z.number().int().min(0).max(255),
   blast_radius: z.number().int().min(0).max(255),
   complexity: z.number().int().min(0).max(255),
@@ -12043,12 +12043,12 @@ export const WorkShapeAssessmentV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkSizingV1Schema: z.ZodObject<{
-  coverage: z.ZodType<string, z.ZodTypeDef, unknown>;
-  high: z.ZodType<number, z.ZodTypeDef, unknown>;
-  likely: z.ZodType<number, z.ZodTypeDef, unknown>;
-  low: z.ZodType<number, z.ZodTypeDef, unknown>;
-  score_kind: z.ZodType<WorkScoreKindV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  coverage: z.ZodType<string, unknown>;
+  high: z.ZodType<number, unknown>;
+  likely: z.ZodType<number, unknown>;
+  low: z.ZodType<number, unknown>;
+  score_kind: z.ZodType<WorkScoreKindV1, unknown>;
+}, z.core.$strict> = z.object({
   coverage: z.string(),
   high: z.number().int().min(0),
   likely: z.number().int().min(0),
@@ -12058,10 +12058,10 @@ export const WorkSizingV1Schema: z.ZodObject<{
 
 /** One level only (Q3). Read-only sketch; accepting it stays a separate version-checked command. */
 export const WorkSubtaskSketchV1Schema: z.ZodObject<{
-  ordinal: z.ZodType<number, z.ZodTypeDef, unknown>;
-  shape: z.ZodType<WorkTaskShapeKindV1, z.ZodTypeDef, unknown>;
-  summary: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  ordinal: z.ZodType<number, unknown>;
+  shape: z.ZodType<WorkTaskShapeKindV1, unknown>;
+  summary: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   ordinal: z.number().int().min(0),
   shape: z.lazy(() => WorkTaskShapeKindV1Schema),
   summary: z.string(),
@@ -12069,7 +12069,7 @@ export const WorkSubtaskSketchV1Schema: z.ZodObject<{
 
 /** The typed outcome of a synthesis request: an admitted attempt, or the
 sealed unsynthesized set when synthesis could not truthfully begin. */
-export const WorkSynthesisAttemptV1Schema: z.ZodType<WorkSynthesisAttemptV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("synthesis", [z.object({
+export const WorkSynthesisAttemptV1Schema: z.ZodType<WorkSynthesisAttemptV1, unknown> = z.discriminatedUnion("synthesis", [z.object({
   attempt: z.lazy(() => WorkAttemptV1Schema),
   draft: z.lazy(() => WorkflowSynthesisDraftSchema),
   groups: z.array(z.lazy(() => WorkSynthesisEvidenceGroupV1Schema)),
@@ -12087,9 +12087,9 @@ Groups are ordered largest first; smaller groups are the minority
 evidence, and more than one group is the disagreement, preserved as
 structure instead of being resolved by fiat. */
 export const WorkSynthesisEvidenceGroupV1Schema: z.ZodObject<{
-  artifacts: z.ZodType<Array<ManifestDigest>, z.ZodTypeDef, unknown>;
-  sources: z.ZodType<Array<WorkAttemptIdentityV1>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  artifacts: z.ZodType<Array<ManifestDigest>, unknown>;
+  sources: z.ZodType<Array<WorkAttemptIdentityV1>, unknown>;
+}, z.core.$strict> = z.object({
   artifacts: z.array(z.lazy(() => ManifestDigestSchema)),
   sources: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
 }).strict();
@@ -12101,16 +12101,16 @@ export const WorkSynthesisRefusalV1Schema: z.ZodLiteral<"no_citable_sources"> = 
 /** One immutable source envelope: which attempt, and what it truthfully
 contributed at admission time. */
 export const WorkSynthesisSourceEnvelopeV1Schema: z.ZodObject<{
-  outcome: z.ZodType<WorkSynthesisSourceOutcomeV1, z.ZodTypeDef, unknown>;
-  source: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  outcome: z.ZodType<WorkSynthesisSourceOutcomeV1, unknown>;
+  source: z.ZodType<WorkAttemptIdentityV1, unknown>;
+}, z.core.$strict> = z.object({
   outcome: z.lazy(() => WorkSynthesisSourceOutcomeV1Schema),
   source: z.lazy(() => WorkAttemptIdentityV1Schema),
 }).strict();
 
 /** One sibling attempt's terminal contribution, captured verbatim from the
 Work authority at admission time. */
-export const WorkSynthesisSourceOutcomeV1Schema: z.ZodType<WorkSynthesisSourceOutcomeV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("outcome", [z.object({
+export const WorkSynthesisSourceOutcomeV1Schema: z.ZodType<WorkSynthesisSourceOutcomeV1, unknown> = z.discriminatedUnion("outcome", [z.object({
   evidence: z.lazy(() => ManifestDigestSchema),
   outcome: z.literal("cancelled"),
 }), z.object({
@@ -12131,22 +12131,22 @@ export const WorkSynthesisSourceOutcomeV1Schema: z.ZodType<WorkSynthesisSourceOu
 consumed. Reordering or mutating any envelope changes the digest, so a
 replayed or tampered set is distinguishable from the admitted one. */
 export const WorkSynthesisSourceSetV1Schema: z.ZodObject<{
-  set_digest: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  sources: z.ZodType<Array<WorkSynthesisSourceEnvelopeV1>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  set_digest: z.ZodType<ManifestDigest, unknown>;
+  sources: z.ZodType<Array<WorkSynthesisSourceEnvelopeV1>, unknown>;
+}, z.core.$strict> = z.object({
   set_digest: z.lazy(() => ManifestDigestSchema),
   sources: z.array(z.lazy(() => WorkSynthesisSourceEnvelopeV1Schema)),
 }).strict();
 
 export const WorkTaskSessionContinuationV1Schema: z.ZodObject<{
-  attempt: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  binding: z.ZodType<string, z.ZodTypeDef, unknown>;
-  participant_epoch: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  ranking_cursor: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  source: z.ZodType<ObservationSourceIdentityV1, z.ZodTypeDef, unknown>;
-  temporal_cursor: z.ZodType<string | null, z.ZodTypeDef, unknown>;
-  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  attempt: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  binding: z.ZodType<string, unknown>;
+  participant_epoch: z.ZodType<ManifestDigest, unknown>;
+  ranking_cursor: z.ZodType<string | null, unknown>;
+  source: z.ZodType<ObservationSourceIdentityV1, unknown>;
+  temporal_cursor: z.ZodType<string | null, unknown>;
+  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, unknown>;
+}, z.core.$strict> = z.object({
   attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
   binding: z.string(),
   participant_epoch: z.lazy(() => ManifestDigestSchema),
@@ -12157,11 +12157,11 @@ export const WorkTaskSessionContinuationV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkTaskSessionCoverageV1Schema: z.ZodObject<{
-  hidden: z.ZodType<number, z.ZodTypeDef, unknown>;
-  redacted: z.ZodType<number, z.ZodTypeDef, unknown>;
-  unknown: z.ZodType<number, z.ZodTypeDef, unknown>;
-  visible: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  hidden: z.ZodType<number, unknown>;
+  redacted: z.ZodType<number, unknown>;
+  unknown: z.ZodType<number, unknown>;
+  visible: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   hidden: z.number().int().safe().min(0),
   redacted: z.number().int().safe().min(0),
   unknown: z.number().int().safe().min(0),
@@ -12169,19 +12169,19 @@ export const WorkTaskSessionCoverageV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkTaskSessionEvidenceV1Schema: z.ZodObject<{
-  attempt: z.ZodType<WorkAttemptIdentityV1, z.ZodTypeDef, unknown>;
-  continuation: z.ZodType<WorkTaskSessionContinuationV1 | null, z.ZodTypeDef, unknown>;
-  coverage: z.ZodType<WorkEvidenceCoverageStateV1, z.ZodTypeDef, unknown>;
-  coverage_counts: z.ZodType<WorkTaskSessionCoverageV1, z.ZodTypeDef, unknown>;
-  freshness: z.ZodType<WorkEvidenceFreshnessV1, z.ZodTypeDef, unknown>;
-  hydrated: z.ZodType<Array<WorkTaskSessionHydrationV1>, z.ZodTypeDef, unknown>;
-  participant_epoch: z.ZodType<ManifestDigest, z.ZodTypeDef, unknown>;
-  ranked_anchors: z.ZodType<Array<WorkTaskSessionRankedAnchorV1>, z.ZodTypeDef, unknown>;
-  redacted: z.ZodType<boolean, z.ZodTypeDef, unknown>;
-  source: z.ZodType<ObservationSourceIdentityV1, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  attempt: z.ZodType<WorkAttemptIdentityV1, unknown>;
+  continuation: z.ZodType<WorkTaskSessionContinuationV1 | null, unknown>;
+  coverage: z.ZodType<WorkEvidenceCoverageStateV1, unknown>;
+  coverage_counts: z.ZodType<WorkTaskSessionCoverageV1, unknown>;
+  freshness: z.ZodType<WorkEvidenceFreshnessV1, unknown>;
+  hydrated: z.ZodType<Array<WorkTaskSessionHydrationV1>, unknown>;
+  participant_epoch: z.ZodType<ManifestDigest, unknown>;
+  ranked_anchors: z.ZodType<Array<WorkTaskSessionRankedAnchorV1>, unknown>;
+  redacted: z.ZodType<boolean, unknown>;
+  source: z.ZodType<ObservationSourceIdentityV1, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+  verified_version: z.ZodType<VerifiedWorkGraphVersionV1, unknown>;
+}, z.core.$strict> = z.object({
   attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
   continuation: z.union([z.lazy(() => WorkTaskSessionContinuationV1Schema), z.null()]),
   coverage: z.lazy(() => WorkEvidenceCoverageStateV1Schema),
@@ -12196,14 +12196,14 @@ export const WorkTaskSessionEvidenceV1Schema: z.ZodObject<{
   verified_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
 }).strict();
 
-export const WorkTaskSessionHydrationStateV1Schema: z.ZodEnum<["available", "deleted", "locked", "redacted", "retained_but_unavailable", "retention_expired", "unauthorized", "unverifiable"]> = z.enum(["available", "deleted", "locked", "redacted", "retained_but_unavailable", "retention_expired", "unauthorized", "unverifiable"]);
+export const WorkTaskSessionHydrationStateV1Schema: z.ZodEnum<{ "available": "available"; "deleted": "deleted"; "locked": "locked"; "redacted": "redacted"; "retained_but_unavailable": "retained_but_unavailable"; "retention_expired": "retention_expired"; "unauthorized": "unauthorized"; "unverifiable": "unverifiable" }> = z.enum(["available", "deleted", "locked", "redacted", "retained_but_unavailable", "retention_expired", "unauthorized", "unverifiable"]);
 
 export const WorkTaskSessionHydrationV1Schema: z.ZodObject<{
-  anchor_id: z.ZodType<RetrievalAnchorId, z.ZodTypeDef, unknown>;
-  content: z.ZodType<Array<number> | null, z.ZodTypeDef, unknown>;
-  rank: z.ZodType<number, z.ZodTypeDef, unknown>;
-  state: z.ZodType<WorkTaskSessionHydrationStateV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  anchor_id: z.ZodType<RetrievalAnchorId, unknown>;
+  content: z.ZodType<Array<number> | null, unknown>;
+  rank: z.ZodType<number, unknown>;
+  state: z.ZodType<WorkTaskSessionHydrationStateV1, unknown>;
+}, z.core.$strict> = z.object({
   anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
   content: z.array(z.number().int().min(0).max(255)).nullable(),
   rank: z.number().int().min(0),
@@ -12211,17 +12211,17 @@ export const WorkTaskSessionHydrationV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkTaskSessionRankContributionV1Schema: z.ZodObject<{
-  calibrated_feature_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  calibration_profile: z.ZodType<string, z.ZodTypeDef, unknown>;
-  ordinal_rank: z.ZodType<number, z.ZodTypeDef, unknown>;
-  raw_score_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  retriever: z.ZodType<string, z.ZodTypeDef, unknown>;
-  retriever_revision: z.ZodType<string, z.ZodTypeDef, unknown>;
-  score_domain: z.ZodType<string, z.ZodTypeDef, unknown>;
-  source_occurrence: z.ZodType<string, z.ZodTypeDef, unknown>;
-  weight_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-  weighted_contribution_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  calibrated_feature_micros: z.ZodType<number, unknown>;
+  calibration_profile: z.ZodType<string, unknown>;
+  ordinal_rank: z.ZodType<number, unknown>;
+  raw_score_micros: z.ZodType<number, unknown>;
+  retriever: z.ZodType<string, unknown>;
+  retriever_revision: z.ZodType<string, unknown>;
+  score_domain: z.ZodType<string, unknown>;
+  source_occurrence: z.ZodType<string, unknown>;
+  weight_micros: z.ZodType<number, unknown>;
+  weighted_contribution_micros: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   calibrated_feature_micros: z.number().int().min(0),
   calibration_profile: z.string(),
   ordinal_rank: z.number().int().min(0),
@@ -12235,11 +12235,11 @@ export const WorkTaskSessionRankContributionV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkTaskSessionRankedAnchorV1Schema: z.ZodObject<{
-  anchor_id: z.ZodType<RetrievalAnchorId, z.ZodTypeDef, unknown>;
-  contributions: z.ZodType<Array<WorkTaskSessionRankContributionV1>, z.ZodTypeDef, unknown>;
-  final_ordinal: z.ZodType<number, z.ZodTypeDef, unknown>;
-  utility_micros: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  anchor_id: z.ZodType<RetrievalAnchorId, unknown>;
+  contributions: z.ZodType<Array<WorkTaskSessionRankContributionV1>, unknown>;
+  final_ordinal: z.ZodType<number, unknown>;
+  utility_micros: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
   contributions: z.array(z.lazy(() => WorkTaskSessionRankContributionV1Schema)),
   final_ordinal: z.number().int().min(0),
@@ -12248,19 +12248,19 @@ export const WorkTaskSessionRankedAnchorV1Schema: z.ZodObject<{
 
 /** Kind of work the snapshot facts describe. Derived only from facts already in
 the input; `Unclassified` when those facts do not distinguish a kind. */
-export const WorkTaskShapeKindV1Schema: z.ZodEnum<["change", "investigation", "synthesis", "unclassified"]> = z.enum(["change", "investigation", "synthesis", "unclassified"]);
+export const WorkTaskShapeKindV1Schema: z.ZodEnum<{ "change": "change"; "investigation": "investigation"; "synthesis": "synthesis"; "unclassified": "unclassified" }> = z.enum(["change", "investigation", "synthesis", "unclassified"]);
 
 /** The derived shape of the task: what kind of work it is and how large the
 declared dependency and evidence counts make it. */
 export const WorkTaskShapeV1Schema: z.ZodObject<{
-  band: z.ZodType<WorkOrdinalBandV1, z.ZodTypeDef, unknown>;
-  kind: z.ZodType<WorkTaskShapeKindV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  band: z.ZodType<WorkOrdinalBandV1, unknown>;
+  kind: z.ZodType<WorkTaskShapeKindV1, unknown>;
+}, z.core.$strict> = z.object({
   band: z.lazy(() => WorkOrdinalBandV1Schema),
   kind: z.lazy(() => WorkTaskShapeKindV1Schema),
 }).strict();
 
-export const WorkTerminalEvidenceV1Schema: z.ZodType<WorkTerminalEvidenceV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("outcome", [z.object({
+export const WorkTerminalEvidenceV1Schema: z.ZodType<WorkTerminalEvidenceV1, unknown> = z.discriminatedUnion("outcome", [z.object({
   evidence_digest: z.lazy(() => ManifestDigestSchema),
   observed_at: z.lazy(() => UtcMicrosSchema),
   outcome: z.literal("cancelled"),
@@ -12279,12 +12279,12 @@ export const WorkTerminalEvidenceV1Schema: z.ZodType<WorkTerminalEvidenceV1, z.Z
 })]);
 
 export const WorkTimelineEntryV1Schema: z.ZodObject<{
-  created_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-  deadline: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  scheduled_at: z.ZodType<UtcMicros | null, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-  updated_at: z.ZodType<UtcMicros, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  created_at: z.ZodType<UtcMicros, unknown>;
+  deadline: z.ZodType<UtcMicros | null, unknown>;
+  scheduled_at: z.ZodType<UtcMicros | null, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+  updated_at: z.ZodType<UtcMicros, unknown>;
+}, z.core.$strict> = z.object({
   created_at: z.lazy(() => UtcMicrosSchema),
   deadline: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   scheduled_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
@@ -12292,12 +12292,12 @@ export const WorkTimelineEntryV1Schema: z.ZodObject<{
   updated_at: z.lazy(() => UtcMicrosSchema),
 }).strict();
 
-export const WorkTimelineLaneV1Schema: z.ZodEnum<["archived", "blocked", "cancelled", "done", "ready", "review", "running", "scheduled", "todo", "triage", "unavailable"]> = z.enum(["archived", "blocked", "cancelled", "done", "ready", "review", "running", "scheduled", "todo", "triage", "unavailable"]);
+export const WorkTimelineLaneV1Schema: z.ZodEnum<{ "archived": "archived"; "blocked": "blocked"; "cancelled": "cancelled"; "done": "done"; "ready": "ready"; "review": "review"; "running": "running"; "scheduled": "scheduled"; "todo": "todo"; "triage": "triage"; "unavailable": "unavailable" }> = z.enum(["archived", "blocked", "cancelled", "done", "ready", "review", "running", "scheduled", "todo", "triage", "unavailable"]);
 
 export const WorkTimelineProjectionV1Schema: z.ZodObject<{
-  entries: z.ZodType<Array<WorkTimelineEntryV1>, z.ZodTypeDef, unknown>;
-  graph_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  entries: z.ZodType<Array<WorkTimelineEntryV1>, unknown>;
+  graph_version: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   entries: z.array(z.lazy(() => WorkTimelineEntryV1Schema)),
   graph_version: z.number().int().safe().min(0),
 }).strict();
@@ -12305,23 +12305,23 @@ export const WorkTimelineProjectionV1Schema: z.ZodObject<{
 /** The execution-placement dimension: the policy's placement mode plus one
 lane per distinct `(task, run)` pair in page order. */
 export const WorkTopologyExecutionPlacementV1Schema: z.ZodObject<{
-  lanes: z.ZodType<Array<WorkTopologyPlacementLaneV1>, z.ZodTypeDef, unknown>;
-  mode: z.ZodType<WorktreePlacementModeV1, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  lanes: z.ZodType<Array<WorkTopologyPlacementLaneV1>, unknown>;
+  mode: z.ZodType<WorktreePlacementModeV1, unknown>;
+}, z.core.$strict> = z.object({
   lanes: z.array(z.lazy(() => WorkTopologyPlacementLaneV1Schema)),
   mode: z.lazy(() => WorktreePlacementModeV1Schema),
 }).strict();
 
 /** Strongly typed algorithm-tagged integrity digest: `WorkTopologyGenerationRefV1`. */
-export const WorkTopologyGenerationRefV1Schema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const WorkTopologyGenerationRefV1Schema: z.ZodType<string, unknown> = z.string();
 
 /** The integration-strategy dimension, read verbatim from the resolved work
 topology policy the runs in scope are admitted against. */
 export const WorkTopologyIntegrationStrategyV1Schema: z.ZodObject<{
-  cross_merge: z.ZodType<CrossMergePolicyV1, z.ZodTypeDef, unknown>;
-  gates: z.ZodType<TopologyGatePolicyV1, z.ZodTypeDef, unknown>;
-  protected_refs: z.ZodType<Array<ProtectedRefRuleV1>, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cross_merge: z.ZodType<CrossMergePolicyV1, unknown>;
+  gates: z.ZodType<TopologyGatePolicyV1, unknown>;
+  protected_refs: z.ZodType<Array<ProtectedRefRuleV1>, unknown>;
+}, z.core.$strict> = z.object({
   cross_merge: z.lazy(() => CrossMergePolicyV1Schema),
   gates: z.lazy(() => TopologyGatePolicyV1Schema),
   protected_refs: z.array(z.lazy(() => ProtectedRefRuleV1Schema)),
@@ -12331,11 +12331,11 @@ export const WorkTopologyIntegrationStrategyV1Schema: z.ZodObject<{
 attempt page joined to its durable placement reading. Placement absence is
 a state on the lane, not a dropped lane. */
 export const WorkTopologyPlacementLaneV1Schema: z.ZodObject<{
-  attempt_count: z.ZodType<number, z.ZodTypeDef, unknown>;
-  placement: z.ZodType<WorkPlacementReadingV1, z.ZodTypeDef, unknown>;
-  run_id: z.ZodType<RunId, z.ZodTypeDef, unknown>;
-  task_id: z.ZodType<TaskId, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  attempt_count: z.ZodType<number, unknown>;
+  placement: z.ZodType<WorkPlacementReadingV1, unknown>;
+  run_id: z.ZodType<RunId, unknown>;
+  task_id: z.ZodType<TaskId, unknown>;
+}, z.core.$strict> = z.object({
   attempt_count: z.number().int().min(0),
   placement: z.lazy(() => WorkPlacementReadingV1Schema),
   run_id: z.lazy(() => RunIdSchema),
@@ -12345,21 +12345,21 @@ export const WorkTopologyPlacementLaneV1Schema: z.ZodObject<{
 /** Complete V1 policy. Partial values are intentionally impossible: callers
 must provide the entire policy and validation rejects adapter-local defaults. */
 export const WorkTopologyPolicyV1Schema: z.ZodObject<{
-  branch_naming: z.ZodType<BranchNamingPolicyV1, z.ZodTypeDef, unknown>;
-  branch_topology: z.ZodType<BranchTopologyPolicyV1, z.ZodTypeDef, unknown>;
-  concurrency: z.ZodType<TopologyConcurrencyPolicyV1, z.ZodTypeDef, unknown>;
-  cross_merge: z.ZodType<CrossMergePolicyV1, z.ZodTypeDef, unknown>;
-  escalation: z.ZodType<TopologyEscalationPolicyV1, z.ZodTypeDef, unknown>;
-  gates: z.ZodType<TopologyGatePolicyV1, z.ZodTypeDef, unknown>;
-  history_rewrite: z.ZodType<HistoryRewritePolicyV1, z.ZodTypeDef, unknown>;
-  notifications: z.ZodType<TopologyNotificationLevelV1, z.ZodTypeDef, unknown>;
-  placement: z.ZodType<WorktreePlacementModeV1, z.ZodTypeDef, unknown>;
-  protected_refs: z.ZodType<Array<ProtectedRefRuleV1>, z.ZodTypeDef, unknown>;
-  retention: z.ZodType<WorktreeRetentionPolicyV1, z.ZodTypeDef, unknown>;
-  review_topology: z.ZodType<ReviewTopologyPolicyV1, z.ZodTypeDef, unknown>;
-  roots: z.ZodType<Array<WorktreeRootPolicyV1>, z.ZodTypeDef, unknown>;
-  schema_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  branch_naming: z.ZodType<BranchNamingPolicyV1, unknown>;
+  branch_topology: z.ZodType<BranchTopologyPolicyV1, unknown>;
+  concurrency: z.ZodType<TopologyConcurrencyPolicyV1, unknown>;
+  cross_merge: z.ZodType<CrossMergePolicyV1, unknown>;
+  escalation: z.ZodType<TopologyEscalationPolicyV1, unknown>;
+  gates: z.ZodType<TopologyGatePolicyV1, unknown>;
+  history_rewrite: z.ZodType<HistoryRewritePolicyV1, unknown>;
+  notifications: z.ZodType<TopologyNotificationLevelV1, unknown>;
+  placement: z.ZodType<WorktreePlacementModeV1, unknown>;
+  protected_refs: z.ZodType<Array<ProtectedRefRuleV1>, unknown>;
+  retention: z.ZodType<WorktreeRetentionPolicyV1, unknown>;
+  review_topology: z.ZodType<ReviewTopologyPolicyV1, unknown>;
+  roots: z.ZodType<Array<WorktreeRootPolicyV1>, unknown>;
+  schema_version: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   branch_naming: z.lazy(() => BranchNamingPolicyV1Schema),
   branch_topology: z.lazy(() => BranchTopologyPolicyV1Schema),
   concurrency: z.lazy(() => TopologyConcurrencyPolicyV1Schema),
@@ -12380,19 +12380,19 @@ export const WorkTopologyPolicyV1Schema: z.ZodObject<{
 list's: a cursor minted under a superseded topology generation is a typed
 staleness refusal, never a silently different page. */
 export const WorkTopologyViewRequestV1Schema: z.ZodObject<{
-  cursor: z.ZodType<WorkAttemptListCursorV1 | null, z.ZodTypeDef, unknown>;
-  page_size: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  cursor: z.ZodType<WorkAttemptListCursorV1 | null, unknown>;
+  page_size: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   cursor: z.union([z.lazy(() => WorkAttemptListCursorV1Schema), z.null()]),
   page_size: z.number().int().min(0),
 }).strict();
 
-export const WorktreeCleanlinessRequirementV1Schema: z.ZodEnum<["allow_untracked_only_for_preflight", "read_only_preflight_only", "require_clean"]> = z.enum(["allow_untracked_only_for_preflight", "read_only_preflight_only", "require_clean"]);
+export const WorktreeCleanlinessRequirementV1Schema: z.ZodEnum<{ "allow_untracked_only_for_preflight": "allow_untracked_only_for_preflight"; "read_only_preflight_only": "read_only_preflight_only"; "require_clean": "require_clean" }> = z.enum(["allow_untracked_only_for_preflight", "read_only_preflight_only", "require_clean"]);
 
 /** Strongly typed canonical identity: `WorktreeId`. */
-export const WorktreeIdSchema: z.ZodType<string, z.ZodTypeDef, unknown> = z.string();
+export const WorktreeIdSchema: z.ZodType<string, unknown> = z.string();
 
-export const WorktreePlacementModeV1Schema: z.ZodType<WorktreePlacementModeV1, z.ZodTypeDef, unknown> = z.discriminatedUnion("kind", [z.object({
+export const WorktreePlacementModeV1Schema: z.ZodType<WorktreePlacementModeV1, unknown> = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("configured_root"),
   root_id: z.string(),
 }), z.object({
@@ -12404,11 +12404,11 @@ export const WorktreePlacementModeV1Schema: z.ZodType<WorktreePlacementModeV1, z
 })]);
 
 export const WorktreeRetentionPolicyV1Schema: z.ZodObject<{
-  abandoned_retention_seconds: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  automatic_gc: z.ZodType<AutomaticWorktreeGcV1, z.ZodTypeDef, unknown>;
-  maximum_retained_per_repository: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  terminal_retention_seconds: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  abandoned_retention_seconds: z.ZodType<number | null, unknown>;
+  automatic_gc: z.ZodType<AutomaticWorktreeGcV1, unknown>;
+  maximum_retained_per_repository: z.ZodType<number | null, unknown>;
+  terminal_retention_seconds: z.ZodType<number | null, unknown>;
+}, z.core.$strict> = z.object({
   abandoned_retention_seconds: z.number().int().safe().min(1).nullable(),
   automatic_gc: z.lazy(() => AutomaticWorktreeGcV1Schema),
   maximum_retained_per_repository: z.number().int().min(1).max(65535).nullable(),
@@ -12416,11 +12416,11 @@ export const WorktreeRetentionPolicyV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorktreeRootPolicyV1Schema: z.ZodObject<{
-  locator: z.ZodType<SensitiveFilesystemLocatorV1, z.ZodTypeDef, unknown>;
-  maximum_active_worktrees: z.ZodType<number, z.ZodTypeDef, unknown>;
-  repository_scope: z.ZodType<RepositoryPlacementScopeV1, z.ZodTypeDef, unknown>;
-  root_id: z.ZodType<string, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  locator: z.ZodType<SensitiveFilesystemLocatorV1, unknown>;
+  maximum_active_worktrees: z.ZodType<number, unknown>;
+  repository_scope: z.ZodType<RepositoryPlacementScopeV1, unknown>;
+  root_id: z.ZodType<string, unknown>;
+}, z.core.$strict> = z.object({
   locator: z.lazy(() => SensitiveFilesystemLocatorV1Schema),
   maximum_active_worktrees: z.number().int().min(1).max(65535),
   repository_scope: z.lazy(() => RepositoryPlacementScopeV1Schema),
@@ -12428,14 +12428,14 @@ export const WorktreeRootPolicyV1Schema: z.ZodObject<{
 }).strict();
 
 export const WorkWorkloadProjectionV1Schema: z.ZodObject<{
-  actual_concurrency: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  blocked_effort: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  graph_version: z.ZodType<number, z.ZodTypeDef, unknown>;
-  ready_effort: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  requested_concurrency: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  running_effort: z.ZodType<number | null, z.ZodTypeDef, unknown>;
-  total_effort: z.ZodType<number, z.ZodTypeDef, unknown>;
-}, "strict"> = z.object({
+  actual_concurrency: z.ZodType<number | null, unknown>;
+  blocked_effort: z.ZodType<number | null, unknown>;
+  graph_version: z.ZodType<number, unknown>;
+  ready_effort: z.ZodType<number | null, unknown>;
+  requested_concurrency: z.ZodType<number | null, unknown>;
+  running_effort: z.ZodType<number | null, unknown>;
+  total_effort: z.ZodType<number, unknown>;
+}, z.core.$strict> = z.object({
   actual_concurrency: z.number().int().min(0).nullable(),
   blocked_effort: z.number().int().min(0).nullable(),
   graph_version: z.number().int().safe().min(0),

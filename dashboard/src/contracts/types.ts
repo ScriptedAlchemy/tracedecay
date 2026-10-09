@@ -121,7 +121,7 @@ export type AnalyticsDiagnosticsPayloadV1 = {
   events_per_hour: number | null;
   hint_efficacy: AnalyticsHintEfficacyV1;
   hook_call_count: number;
-  hook_readiness?: unknown;
+  hook_readiness: unknown;
   hook_sources: Array<unknown>;
   hook_window: AnalyticsHookWindowV1;
   mcp_tool_call_count: number;
@@ -552,7 +552,7 @@ export type AutomationRunArtifactKind = "codex_handoff" | "feedback" | "generate
 
 export type AutomationRunArtifactPayloadV1 = {
   artifact: AutomationRunArtifact;
-  payload?: unknown;
+  payload: unknown;
   run_id: string;
 };
 
@@ -2346,7 +2346,7 @@ export type ExplorerReadContextV1 = {
 
 export type ExplorerResultPageV1 = {
   limit: number;
-  metadata?: unknown;
+  metadata: unknown;
   next_offset: number | null;
   offset: number;
   rows: Array<unknown>;
@@ -3526,7 +3526,7 @@ export type MemoryFactRowV1 = {
   helpful_count: number | null;
   last_recalled_at: number | null;
   linked_entities: Array<MemoryEntityRowV1> | null;
-  metadata?: unknown;
+  metadata: unknown;
   payload_access: PayloadAccessState;
   projected_as_of: number;
   retrieval_count: number | null;
@@ -3696,7 +3696,7 @@ export type MemoryProjectionPointV1 = {
   fact_id: FactId;
   helpful_count: number;
   last_recalled_at: number | null;
-  metadata?: unknown;
+  metadata: unknown;
   payload_access: PayloadAccessState;
   projected_as_of: number;
   retrieval_count: number;
@@ -3909,23 +3909,23 @@ export type MultiRootExecuteRequestV1 = {
 export type MultiRootOperationV1 = 
   | {
     kind: "feedback";
-    request?: unknown;
+    request: unknown;
   }
   | {
     kind: "git";
-    request?: unknown;
+    request: unknown;
   }
   | {
     kind: "impact";
-    request?: unknown;
+    request: unknown;
   }
   | {
     kind: "query";
-    request?: unknown;
+    request: unknown;
   }
   | {
     kind: "work";
-    request?: unknown;
+    request: unknown;
   };
 
 export type MultiRootQueryPageV1_for_AnyValue = {
@@ -4115,7 +4115,7 @@ export type ProjectMemoryFactAddRequest = {
   category: FactCategoryV1;
   content: string;
   entities: Array<string>;
-  metadata?: unknown;
+  metadata: unknown;
   source_label: string | null;
   tags: Array<string>;
   trust: number | null;
@@ -4584,7 +4584,7 @@ export type SavingsAccountingSummaryV1 = {
   db: string;
   error: string | null;
   ledger: SavingsLedgerSummaryV1 | null;
-  recording?: unknown;
+  recording: unknown;
 };
 
 export type SavingsLedgerSummaryV1 = {
@@ -4618,7 +4618,7 @@ export type SavingsModelRowV1 = {
   sessions: number;
   tokenized: TokenPairV1;
   tokenized_messages: number;
-  tokenizer?: unknown;
+  tokenizer: unknown;
 };
 
 export type SavingsModelsPayloadV1 = {
@@ -4644,11 +4644,11 @@ export type SavingsOverviewPayloadV1 = {
 export type SavingsPricingClassV1 = "partial" | "priced" | "unpriced";
 
 export type SavingsPricingSummaryV1 = {
-  fetched_at?: unknown;
-  model_count?: unknown;
-  offline?: unknown;
-  revision?: unknown;
-  source?: unknown;
+  fetched_at: unknown;
+  model_count: unknown;
+  offline: unknown;
+  revision: unknown;
+  source: unknown;
 };
 
 export type SavingsProviderDayPointV1 = {
