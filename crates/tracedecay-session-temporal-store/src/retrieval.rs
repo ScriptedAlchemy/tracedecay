@@ -117,7 +117,7 @@ fn temporal_relation_error(
 }
 
 fn observation_matches_filter(
-    encoded: &str,
+    observation: &DurableObservationV1,
     occurrence_role: &str,
     filter: &TemporalCandidateFilterV1,
 ) -> Result<bool, TemporalPortError> {
@@ -129,8 +129,6 @@ fn observation_matches_filter(
     {
         return Ok(false);
     }
-    let observation: DurableObservationV1 =
-        serde_json::from_str(encoded).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     if let Some(source) = filter.source.as_deref()
         && observation.source().provider().as_str() != source
         && observation.source().source_key().as_str() != source
@@ -727,7 +725,14 @@ impl<'a> SessionTemporalReadPort<'a> {
             let role: String = row
                 .get(1)
                 .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
-            if observation_matches_filter(&encoded, &role, filter)? {
+            let observation = crate::query::decode_stored_observation(
+                &self.read,
+                &encoded,
+                CANDIDATE_OPERATION,
+            )
+            .await
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+            if observation_matches_filter(&observation, &role, filter)? {
                 matched = true;
             }
         }
@@ -817,7 +822,14 @@ impl<'a> SessionTemporalReadPort<'a> {
             let role = row
                 .get::<String>(1)
                 .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
-            if observation_matches_filter(&encoded, &role, filter)? {
+            let observation = crate::query::decode_stored_observation(
+                &self.read,
+                &encoded,
+                CANDIDATE_OPERATION,
+            )
+            .await
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+            if observation_matches_filter(&observation, &role, filter)? {
                 matched = true;
             }
         }

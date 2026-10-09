@@ -26,14 +26,14 @@ fn receipt(payload: &Value) -> SanitizationReceiptV1 {
     .unwrap()
 }
 
-fn encoded_observation(facts: Vec<CanonicalObservationFactV1>) -> String {
+fn encoded_observation(facts: Vec<CanonicalObservationFactV1>) -> DurableObservationV1 {
     encoded_observation_at(facts, None)
 }
 
 fn encoded_observation_at(
     facts: Vec<CanonicalObservationFactV1>,
     native_timestamp: Option<i64>,
-) -> String {
+) -> DurableObservationV1 {
     let session_id = SessionId::new("session-semantic-filter").unwrap();
     let provider = ProviderId::new("codex").unwrap();
     let source =
@@ -65,14 +65,11 @@ fn encoded_observation_at(
         record_id,
     )
     .unwrap();
-    serde_json::to_string(
-        &DurableObservationV1::new(
-            identity,
-            receipt(&payload),
-            RetentionClass::new("retention.semantic-filter-test").unwrap(),
-            payload,
-        )
-        .unwrap(),
+    DurableObservationV1::new(
+        identity,
+        receipt(&payload),
+        RetentionClass::new("retention.semantic-filter-test").unwrap(),
+        payload,
     )
     .unwrap()
 }
