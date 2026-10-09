@@ -193,6 +193,20 @@ async fn moved_source_proof_reads_the_publication_as_stale_until_renewed() {
     let published = await_published_diagnostics(&server, arguments.clone()).await;
     assert_eq!(published_records(&published).len(), 1, "{published}");
 
+    let scheduler = fixture
+        .harness
+        .project_scheduler_handle(&fixture.project_root)
+        .await
+        .expect("mounted project scheduler");
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let holding = tokio::task::spawn_blocking(move || {
+        let _guard = scheduler.lock().expect("hold source-proof renewal");
+        held_tx.send(()).expect("scheduler held");
+        let _ = release_rx.blocking_recv();
+    });
+    held_rx.await.expect("source-proof renewal is fenced");
+
     let index = std::fs::File::options()
         .write(true)
         .open(fixture.project_root.join(".git/index"))
@@ -202,7 +216,12 @@ async fn moved_source_proof_reads_the_publication_as_stale_until_renewed() {
         .expect("move the git index mtime");
     drop(index);
 
-    let mut codes = Vec::new();
+    let stale =
+        handle_real_server_tool_call(&server, "tracedecay_diagnostics", arguments.clone()).await;
+    drop(release_tx);
+    holding.await.expect("release source-proof renewal");
+    assert_eq!(stale["isError"], json!(true), "{stale}");
+    let mut codes = vec![stale["structuredContent"]["problem"]["code"].clone()];
     let renewed = loop {
         let result =
             handle_real_server_tool_call(&server, "tracedecay_diagnostics", arguments.clone())
