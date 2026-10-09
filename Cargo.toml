@@ -54,6 +54,7 @@ members = [
 exclude = [
     ".worktrees",
     ".codex-worktrees",
+    "patches/tokensave-medium-treesitters",
 ]
 resolver = "3"
 

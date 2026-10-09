@@ -1,6 +1,3 @@
-# Standalone patch package (not a workspace member).
-[workspace]
-
 [package]
 name = "tokensave-medium-treesitters"
 version = "0.2.0"
