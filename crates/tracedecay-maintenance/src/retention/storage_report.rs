@@ -47,6 +47,7 @@ use tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME;
 use crate::store_maintenance::{CodeGenerationProtectionUnavailableV1, code_generation_protection};
 
 const GLOBAL_DB_FILENAME: &str = "global.db";
+const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
 pub const MAX_STORAGE_REPORT_PAGE_LIMIT: usize = 64;
 const CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const CODE_GENERATIONS_DIRECTORY: &str = "code-generations-v1";
@@ -168,6 +169,10 @@ pub struct StorageReport {
     pub unregistered_dir_count: usize,
     pub unregistered_bytes: u64,
     pub global_db_bytes: u64,
+    /// `user-sessions.db` with its `-wal` and `-shm`. Profile-level, not a
+    /// project store; omitted from older reports.
+    #[serde(default)]
+    pub user_sessions_db_bytes: u64,
     /// A direct, read-only census of every regular file under the profile
     /// root. The daemon's bounded per-page response leaves this absent; the
     /// explicit `storage report` command attaches it after paging completes.
@@ -232,6 +237,8 @@ pub struct ProfileTotalSizeV1 {
     /// Graph database families of every registered store in this report.
     pub registered_store_bytes: u64,
     pub global_db_bytes: u64,
+    #[serde(default)]
+    pub user_sessions_db_bytes: u64,
     pub unregistered_bytes: u64,
     /// Families known to exist that this report did not fully size.
     pub excluded_families: Vec<String>,
@@ -246,6 +253,7 @@ impl StorageReport {
             .fold(0u64, |total, store| total.saturating_add(store.total_bytes));
         let accounted_bytes = registered_store_bytes
             .saturating_add(self.global_db_bytes)
+            .saturating_add(self.user_sessions_db_bytes)
             .saturating_add(self.unregistered_bytes);
 
         if let Some(full_profile_size) = self.full_profile_size {
@@ -260,16 +268,18 @@ impl StorageReport {
                 accounted_bytes: full_profile_size.total_bytes,
                 registered_store_bytes,
                 global_db_bytes: self.global_db_bytes,
+                user_sessions_db_bytes: self.user_sessions_db_bytes,
                 unregistered_bytes: self.unregistered_bytes,
                 excluded_families: excluded_families.into_iter().collect(),
             };
         }
 
-        // Store rows size every file under `projects/<id>/`, but profile-level
-        // files beside `global.db` (the profile session store, spools, daemon
+        // Store rows size every file under `projects/<id>/`. Profile-level
+        // files beside `global.db` and `user-sessions.db` (spools, daemon
         // state) are only sized by the full census, so this total is a floor.
-        let mut excluded_families =
-            vec!["profile-level files outside global.db and projects/".to_owned()];
+        let mut excluded_families = vec![
+            "profile-level files outside global.db, user-sessions.db, and projects/".to_owned(),
+        ];
         if self.coverage.state == StorageReportCoverageState::Partial {
             excluded_families.push("registered stores beyond this page".to_owned());
         }
@@ -286,6 +296,7 @@ impl StorageReport {
             accounted_bytes,
             registered_store_bytes,
             global_db_bytes: self.global_db_bytes,
+            user_sessions_db_bytes: self.user_sessions_db_bytes,
             unregistered_bytes: self.unregistered_bytes,
             excluded_families,
         }
@@ -389,6 +400,7 @@ pub async fn build_storage_report(
         unregistered_dir_count: sampled.unregistered_dir_count,
         unregistered_bytes: sampled.unregistered_bytes,
         global_db_bytes: sampled.global_db_bytes,
+        user_sessions_db_bytes: sampled.user_sessions_db_bytes,
         full_profile_size: Some(full_profile_size),
         coverage: StorageReportCoverage::default(),
     })
@@ -401,6 +413,7 @@ struct SampledRegisteredStorage {
     unregistered_dir_count: usize,
     unregistered_bytes: u64,
     global_db_bytes: u64,
+    user_sessions_db_bytes: u64,
 }
 
 /// Copies `global.db` off-profile on the blocking pool, then lists registered
@@ -504,6 +517,7 @@ fn sample_registered_storage(
         unregistered_dir_count,
         unregistered_bytes,
         global_db_bytes: database_family_bytes(global_db_path),
+        user_sessions_db_bytes: user_sessions_family_bytes(profile_root),
     })
 }
 
@@ -557,6 +571,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     let limit = limit.clamp(1, MAX_STORAGE_REPORT_PAGE_LIMIT);
     let global_db_bytes = database_family_bytes(&profile_root.join(GLOBAL_DB_FILENAME));
+    let user_sessions_db_bytes = user_sessions_family_bytes(profile_root);
     let binding = storage_report_binding(limit)?;
     let position = match cursor {
         Some(cursor) => decode_bound_cursor::<StorageReportPosition>(&binding, cursor)
@@ -576,6 +591,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
                 after_project_id.as_deref(),
                 limit,
                 global_db_bytes,
+                user_sessions_db_bytes,
             )
             .await;
         }
@@ -624,6 +640,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
         unregistered_dir_count,
         unregistered_bytes,
         global_db_bytes,
+        user_sessions_db_bytes,
         coverage: next_cursor.map_or_else(
             StorageReportCoverage::default,
             StorageReportCoverage::partial,
@@ -640,6 +657,7 @@ async fn project_storage_report_page(
     after_project_id: Option<&str>,
     limit: usize,
     global_db_bytes: u64,
+    user_sessions_db_bytes: u64,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     let mut projects = global_db
         .list_code_projects_after(after_project_id, limit.saturating_add(1))
@@ -675,6 +693,7 @@ async fn project_storage_report_page(
         let mut report = StorageReport {
             profile_root: profile_root.display().to_string(),
             global_db_bytes,
+            user_sessions_db_bytes,
             coverage: StorageReportCoverage::partial(next_cursor),
             ..StorageReport::default()
         };
@@ -836,6 +855,7 @@ pub fn build_project_storage_report(
         unregistered_dir_count: 0,
         unregistered_bytes: 0,
         global_db_bytes: database_family_bytes(&global_db_path),
+        user_sessions_db_bytes: user_sessions_family_bytes(profile_root),
         full_profile_size: None,
         coverage: StorageReportCoverage::default(),
     })
@@ -1003,6 +1023,10 @@ fn generation_digest_scan_exceeds_budget(
         }
     }
     Ok(false)
+}
+
+fn user_sessions_family_bytes(profile_root: &Path) -> u64 {
+    database_family_bytes(&profile_root.join(USER_SESSIONS_DB_FILENAME))
 }
 
 fn database_family_bytes(database_path: &Path) -> u64 {
@@ -1238,9 +1262,31 @@ mod tests {
         assert_eq!(
             total.excluded_families,
             vec![
-                "profile-level files outside global.db and projects/".to_owned(),
+                "profile-level files outside global.db, user-sessions.db, and projects/".to_owned(),
                 "2 unreadable entries under registered stores".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn paginated_report_includes_named_user_sessions_family() {
+        let report = StorageReport {
+            stores: vec![store("alpha", 400)],
+            global_db_bytes: 100,
+            user_sessions_db_bytes: 50,
+            coverage: StorageReportCoverage::partial("alpha".to_owned()),
+            ..StorageReport::default()
+        };
+
+        let total = report.profile_total_size();
+        assert_eq!(total.state, ProfileTotalCoverageStateV1::Partial);
+        assert_eq!(total.accounted_bytes, 550);
+        assert_eq!(total.user_sessions_db_bytes, 50);
+        assert!(
+            total
+                .excluded_families
+                .iter()
+                .any(|family| family.contains("user-sessions.db"))
         );
     }
 
@@ -1645,6 +1691,30 @@ mod tests {
         assert!(report.stores[0].total_bytes > 0);
         assert_eq!(report.unregistered_dir_count, 1);
         assert!(report.unregistered_bytes >= 2048);
+    }
+
+    #[tokio::test]
+    async fn storage_report_names_user_sessions_db_family() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        seed_global_db(&profile_root, &[]).await;
+        std::fs::write(
+            profile_root.join(USER_SESSIONS_DB_FILENAME),
+            vec![1u8; 4_096],
+        )
+        .unwrap();
+        std::fs::write(
+            profile_root.join(format!("{USER_SESSIONS_DB_FILENAME}-wal")),
+            vec![2u8; 1_024],
+        )
+        .unwrap();
+
+        let report = build_storage_report(&profile_root).await.unwrap();
+        let total = report.profile_total_size();
+
+        assert_eq!(report.user_sessions_db_bytes, 5_120);
+        assert_eq!(total.user_sessions_db_bytes, 5_120);
     }
 
     #[tokio::test]

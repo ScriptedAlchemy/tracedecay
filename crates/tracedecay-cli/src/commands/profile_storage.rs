@@ -372,6 +372,9 @@ fn merge_storage_report_page(
         .unregistered_bytes
         .saturating_add(page.unregistered_bytes);
     report.global_db_bytes = report.global_db_bytes.max(page.global_db_bytes);
+    report.user_sessions_db_bytes = report
+        .user_sessions_db_bytes
+        .max(page.user_sessions_db_bytes);
     report.coverage = page.coverage;
 }
 
@@ -465,6 +468,10 @@ async fn handle_storage_report(
     println!(
         "  global.db: {} bytes",
         format_bytes(report.global_db_bytes)
+    );
+    println!(
+        "  user-sessions.db: {} bytes",
+        format_bytes(report.user_sessions_db_bytes)
     );
     println!("  registered stores: {}", report.stores.len());
     for store in &report.stores {

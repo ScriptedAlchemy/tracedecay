@@ -3207,6 +3207,7 @@ fn storage_report_prints_registered_store_size_and_unregistered_backlog() {
     let unregistered = profile_root.join("projects/proj_ghost");
     std::fs::create_dir_all(&unregistered).unwrap();
     std::fs::write(unregistered.join("payload.bin"), vec![0u8; 4096]).unwrap();
+    std::fs::write(profile_root.join("user-sessions.db"), vec![1u8; 2048]).unwrap();
 
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
     command.args([
@@ -3230,6 +3231,7 @@ fn storage_report_prints_registered_store_size_and_unregistered_backlog() {
     assert!(report["stores"][0]["total_bytes"].as_u64().unwrap() > 0);
     assert_eq!(report["unregistered_dir_count"], 1);
     assert!(report["unregistered_bytes"].as_u64().unwrap() >= 4096);
+    assert_eq!(report["user_sessions_db_bytes"], 2048);
 }
 
 #[tokio::test]
