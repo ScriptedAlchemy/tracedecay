@@ -291,21 +291,10 @@ jobs:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
-  # Linux compile and test authority: the generated Bazel workspace, split
-  # so the measured serial suites no longer share one runner. Union is
-  # `tests(//...)` by construction: root-b is the rest of
-  # `//crates/tracedecay/...`, workspace-a/b partition everything outside
-  # that package (workspace-b is the catch-all).
-  #
-  # Run 37944061798 (sha 5710b1aa): workspace held 129/148 test targets,
-  # 6343s elapsed / 1740s critical path, 2420 disk-cache hits vs 273 local
-  # compiles. Harness time inside those tests summed to ~28m; the other
-  # ~77m was compile work serialized behind
-  # `--default_test_resources=cpu=HOST_CPUS` (each suite claims every core,
-  # so `jobs=4` rustc actions stall for the whole suite). Split the
-  # non-root packages across two runners and relax that reservation only
-  # on those shards so unit tests can overlap compiles. root-a/root-b keep
-  # the global HOST_CPUS default for the heavy aggregate suites.
+  # Root suites and the full-daemon memory journey retain exclusive CPU
+  # reservation: overlapping compiler work can exhaust their test budgets.
+  # The remaining workspace suites may overlap compilation on two runners.
+  # root-b and workspace-b catch unlisted targets in their respective groups.
   linux-test:
     name: Test Linux (${{ matrix.shard }})
     needs: [scope-gate, gates]
@@ -325,6 +314,7 @@ jobs:
               //crates/tracedecay:dashboard_api_test
               //crates/tracedecay:daemon_suite
               //crates/tracedecay:storage_suite
+              //crates/tracedecay-cli:refresh_memory_journey
           - shard: root-b
             test_resources: ""
             targets: >-
@@ -339,6 +329,7 @@ jobs:
           - shard: workspace-a
             test_resources: --default_test_resources=cpu=1
             targets: >-
+              --
               //crates/tracedecay-agent-hosts/...
               //crates/tracedecay-api/...
               //crates/tracedecay-application/...
@@ -362,6 +353,7 @@ jobs:
               //crates/tracedecay-global-db/...
               //crates/tracedecay-graph-db/...
               //crates/tracedecay-graph-query/...
+              -//crates/tracedecay-cli:refresh_memory_journey
           - shard: workspace-b
             test_resources: --default_test_resources=cpu=1
             targets: >-
