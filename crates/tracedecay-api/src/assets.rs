@@ -20,6 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Router, http::StatusCode};
 use flate2::read::GzDecoder;
+use http_encoding_headers::{Encoding, decode_header_value};
 
 /// Wire encoding of [`StaticDashboardAsset::contents`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,21 +167,47 @@ fn fingerprinted_static_asset_path(path: &str) -> bool {
     })
 }
 
-fn client_accepts_gzip(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::ACCEPT_ENCODING)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value.split(',').any(|part| {
-                let encoding = part
-                    .trim()
-                    .split(';')
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                encoding.eq_ignore_ascii_case("gzip") || encoding == "*"
-            })
-        })
+fn response_encoding(
+    headers: &HeaderMap,
+    stored: StaticAssetEncoding,
+) -> Result<StaticAssetEncoding, StatusCode> {
+    if !headers.contains_key(header::ACCEPT_ENCODING) {
+        return Ok(StaticAssetEncoding::Identity);
+    }
+    let mut preferences = Vec::new();
+    for value in headers.get_all(header::ACCEPT_ENCODING) {
+        let value = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
+        if !value.trim().is_empty() {
+            preferences.extend(decode_header_value(value).map_err(|_| StatusCode::BAD_REQUEST)?);
+        }
+    }
+    if preferences
+        .iter()
+        .any(|(_, quality)| !(0.0..=1.0).contains(quality))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let quality = |encoding| {
+        preferences
+            .iter()
+            .find_map(|(candidate, quality)| (candidate == &encoding).then_some(*quality))
+    };
+    let wildcard = quality(Encoding::Wildcard);
+    let gzip = quality(Encoding::Gzip).or(wildcard).unwrap_or(0.0);
+    // Identity remains acceptable unless explicitly excluded. An explicit
+    // identity preference can outrank gzip; otherwise prefer the stored bytes.
+    let identity =
+        quality(Encoding::Identity).unwrap_or(if wildcard == Some(0.0) { 0.0 } else { 1.0 });
+    if stored == StaticAssetEncoding::Gzip
+        && gzip > 0.0
+        && quality(Encoding::Identity).is_none_or(|weight| gzip >= weight)
+    {
+        Ok(StaticAssetEncoding::Gzip)
+    } else if identity > 0.0 {
+        Ok(StaticAssetEncoding::Identity)
+    } else {
+        Err(StatusCode::NOT_ACCEPTABLE)
+    }
 }
 
 fn inflate_gzip(bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
@@ -196,7 +223,16 @@ fn app_response(
     cache_tag: &str,
     cache_policy: CachePolicy,
 ) -> Response {
-    let entity_tag = format!("\"{cache_tag}\"");
+    let encoding = match response_encoding(headers, asset.encoding) {
+        Ok(encoding) => encoding,
+        Err(status) => return status.into_response(),
+    };
+    let gzip = encoding == StaticAssetEncoding::Gzip;
+    let entity_tag = if gzip {
+        format!("\"{cache_tag}-gzip\"")
+    } else {
+        format!("\"{cache_tag}\"")
+    };
     let hit = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
@@ -211,14 +247,7 @@ fn app_response(
     } else {
         match asset.encoding {
             StaticAssetEncoding::Identity => asset.contents.into_response(),
-            StaticAssetEncoding::Gzip if client_accepts_gzip(headers) => {
-                let mut response = asset.contents.into_response();
-                response.headers_mut().insert(
-                    header::CONTENT_ENCODING,
-                    header::HeaderValue::from_static("gzip"),
-                );
-                response
-            }
+            StaticAssetEncoding::Gzip if gzip => asset.contents.into_response(),
             StaticAssetEncoding::Gzip => match inflate_gzip(asset.contents) {
                 Ok(inflated) => inflated.into_response(),
                 Err(error) => {
@@ -227,12 +256,24 @@ fn app_response(
                         error = %error,
                         "embedded gzip dashboard asset could not be decoded"
                     );
-                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
             },
         }
     };
     let response_headers = response.headers_mut();
+    if asset.encoding == StaticAssetEncoding::Gzip {
+        response_headers.insert(
+            header::VARY,
+            header::HeaderValue::from_static("accept-encoding"),
+        );
+    }
+    if gzip {
+        response_headers.insert(
+            header::CONTENT_ENCODING,
+            header::HeaderValue::from_static("gzip"),
+        );
+    }
     if let Ok(value) = header::HeaderValue::from_str(asset.content_type) {
         response_headers.insert(header::CONTENT_TYPE, value);
     }
@@ -477,5 +518,101 @@ mod tests {
             .await
             .expect("body");
         assert_eq!(body.as_ref(), raw);
+    }
+    #[tokio::test]
+    async fn compressed_asset_validators_follow_the_selected_representation() {
+        let raw = b"<html>cache variants</html>";
+        let compressed = Box::leak(gzip_bytes(raw).into_boxed_slice());
+        let asset = StaticDashboardAsset {
+            path: "index.html",
+            contents: compressed,
+            content_type: "text/html; charset=utf-8",
+            encoding: StaticAssetEncoding::Gzip,
+        };
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+        let encoded =
+            super::app_response(&headers, asset, "bundle", super::CachePolicy::Revalidate);
+        let encoded_etag = encoded.headers()[header::ETAG].clone();
+        assert_eq!(encoded.headers()[header::VARY], "accept-encoding");
+        headers.insert(header::IF_NONE_MATCH, encoded_etag);
+        let unchanged =
+            super::app_response(&headers, asset, "bundle", super::CachePolicy::Revalidate);
+        assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(unchanged.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(unchanged.headers()[header::VARY], "accept-encoding");
+        headers.remove(header::ACCEPT_ENCODING);
+        let identity =
+            super::app_response(&headers, asset, "bundle", super::CachePolicy::Revalidate);
+        assert_eq!(identity.status(), StatusCode::OK);
+        assert_eq!(identity.headers()[header::VARY], "accept-encoding");
+        assert!(identity.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(
+            to_bytes(identity.into_body(), 1024).await.unwrap().as_ref(),
+            raw
+        );
+    }
+
+    #[test]
+    fn corrupt_embedded_assets_do_not_receive_success_cache_headers() {
+        let asset = StaticDashboardAsset {
+            path: "static/bad.abc12345.js",
+            contents: b"invalid gzip",
+            content_type: "application/javascript",
+            encoding: StaticAssetEncoding::Gzip,
+        };
+        let response = super::app_response(
+            &axum::http::HeaderMap::new(),
+            asset,
+            "bundle",
+            super::CachePolicy::Revalidate,
+        );
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response.headers().get(header::ETAG).is_none());
+        assert!(response.headers().get(header::CACHE_CONTROL).is_none());
+    }
+    #[tokio::test]
+    async fn asset_responses_respect_encoding_rejections_and_preferences() {
+        let raw = b"<html>encoding preferences</html>";
+        let compressed = Box::leak(gzip_bytes(raw).into_boxed_slice());
+        let asset = StaticDashboardAsset {
+            path: "index.html",
+            contents: compressed,
+            content_type: "text/html",
+            encoding: StaticAssetEncoding::Gzip,
+        };
+        for (accept, status, encoded) in [
+            ("gzip;q=0", StatusCode::OK, false),
+            ("", StatusCode::OK, false),
+            ("GZIP", StatusCode::OK, true),
+            ("gzip;q=invalid", StatusCode::BAD_REQUEST, false),
+            ("gzip;q=NaN", StatusCode::BAD_REQUEST, false),
+            ("gzip;q=1.2", StatusCode::BAD_REQUEST, false),
+            ("gzip;q=0, *;q=1", StatusCode::OK, false),
+            ("gzip;q=0.5, identity;q=0.8", StatusCode::OK, false),
+            ("gzip;q=0.8, identity;q=0.2", StatusCode::OK, true),
+            ("*;q=0.5", StatusCode::OK, true),
+            ("gzip;q=0, identity;q=0", StatusCode::NOT_ACCEPTABLE, false),
+            ("*;q=0", StatusCode::NOT_ACCEPTABLE, false),
+        ] {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(header::ACCEPT_ENCODING, accept.parse().unwrap());
+            let response =
+                super::app_response(&headers, asset, "bundle", super::CachePolicy::Revalidate);
+            assert_eq!(response.status(), status, "{accept}");
+            assert_eq!(
+                response.headers().contains_key(header::CONTENT_ENCODING),
+                encoded,
+                "{accept}"
+            );
+            if status == StatusCode::OK {
+                let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                assert_eq!(
+                    body.as_ref(),
+                    if encoded { &*compressed } else { raw },
+                    "{accept}"
+                );
+            }
+        }
     }
 }

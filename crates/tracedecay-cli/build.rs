@@ -94,7 +94,10 @@ struct EmbeddedDashboard {
 }
 
 impl EmbeddedDashboard {
-    fn staged(bundle: dashboard_bundle::StagedBundle, out_dir: &Path) -> Result<Self, Box<dyn Error>> {
+    fn staged(
+        bundle: dashboard_bundle::StagedBundle,
+        out_dir: &Path,
+    ) -> Result<Self, Box<dyn Error>> {
         let include_root = format!("/{BUNDLE_STORE_DIR}/{}", bundle.digest_hex);
         let source_root = out_dir.join(BUNDLE_STORE_DIR).join(&bundle.digest_hex);
         Self::from_sources(
@@ -163,12 +166,12 @@ impl EmbeddedDashboard {
             })?;
             if dashboard_asset_should_gzip(relative) {
                 let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
-                encoder.write_all(&raw).map_err(|error| {
-                    format!("gzip dashboard asset {relative}: {error}")
-                })?;
-                let compressed = encoder.finish().map_err(|error| {
-                    format!("gzip finish dashboard asset {relative}: {error}")
-                })?;
+                encoder
+                    .write_all(&raw)
+                    .map_err(|error| format!("gzip dashboard asset {relative}: {error}"))?;
+                let compressed = encoder
+                    .finish()
+                    .map_err(|error| format!("gzip finish dashboard asset {relative}: {error}"))?;
                 let mut roundtrip = Vec::new();
                 GzDecoder::new(compressed.as_slice())
                     .read_to_end(&mut roundtrip)
@@ -182,14 +185,11 @@ impl EmbeddedDashboard {
                     .into());
                 }
                 if compressed.len() < raw.len() {
-                    let gz_relative = relative.replace('/', "__");
-                    let dest = gz_root.join(&gz_relative);
+                    let gz_relative = relative;
+                    let dest = gz_root.join(gz_relative);
                     if let Some(parent) = dest.parent() {
                         fs::create_dir_all(parent).map_err(|error| {
-                            format!(
-                                "failed to create {}: {error}",
-                                parent.display()
-                            )
+                            format!("failed to create {}: {error}", parent.display())
                         })?;
                     }
                     fs::write(&dest, &compressed).map_err(|error| {
@@ -216,10 +216,7 @@ impl EmbeddedDashboard {
                 encoding: "Identity",
             });
         }
-        Ok(Self {
-            assets,
-            digest_hex,
-        })
+        Ok(Self { assets, digest_hex })
     }
 }
 
