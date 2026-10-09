@@ -587,7 +587,10 @@ mod tests {
             .query(
                 "SELECT COUNT(*) FROM lcm_raw_messages
                  WHERE length(COALESCE(placeholder_text, '')) > ?1",
-                params![SNIPPET_CAP_SQL],
+                params![
+                    i64::try_from(tracedecay_lcm::retrieval_content::MAX_DERIVED_SNIPPET_CHARS)
+                        .unwrap()
+                ],
             )
             .await
             .unwrap()
