@@ -80,6 +80,7 @@ use tracedecay_store::ParseOffset;
 
 use meta::session_meta;
 
+use crate::runtime::ingest::TranscriptCatchUpFailure;
 use crate::runtime::jsonl_observation_admission::{
     SharedJsonlPathPin, install_shared_jsonl_preparation_authority, pin_shared_jsonl_paths,
     reserve_shared_jsonl_bytes,
@@ -182,21 +183,24 @@ struct CodexDiscoveryConsumerState {
     mode: CodexDiscoveryConsumerMode,
     awaiting_ack: Option<CodexQueuedDiscoveryPass>,
     _memory: Option<ProcessSharedMemoryReservationV1>,
-    /// Transcript files, of any host, this consumer's scope admitted through
-    /// end of file or decided are outside it, by the settled identity they
-    /// had before that pass read them. A later pass that finds one unchanged
-    /// skips it unopened.
-    ///
-    /// ponytail: a deleted file's entry lives until the consumer deregisters;
-    /// prune against discovery if corpora churn enough for that to matter.
-    converged: HashMap<PathBuf, (SettledFileWitness, ProcessSharedMemoryReservationV1)>,
+    /// Per-consumer outcomes tied to the settled identity observed before
+    /// reading. A retained source-contract failure avoids rereading bytes but
+    /// continues to block coverage; it never proves admission or convergence.
+    /// Reservations and records are released when the consumer deregisters.
+    read_outcomes: HashMap<PathBuf, TranscriptReadRecord>,
+}
+
+struct TranscriptReadRecord {
+    witness: SettledFileWitness,
+    failure: Option<TranscriptCatchUpFailure>,
+    _memory: ProcessSharedMemoryReservationV1,
 }
 
 impl CodexDiscoveryConsumerState {
     fn holds_converged(&self, path: &Path, witness: SettledFileWitness) -> bool {
-        self.converged
+        self.read_outcomes
             .get(path)
-            .is_some_and(|(recorded, _)| *recorded == witness)
+            .is_some_and(|recorded| recorded.witness == witness && recorded.failure.is_none())
     }
 }
 
@@ -266,6 +270,35 @@ impl<'a> PendingTranscript<'a> {
         Ok(Some(Self {
             convergence: witness.map(|witness| (hub, consumer, witness)),
         }))
+    }
+
+    pub(crate) fn cached_source_failure(&self, path: &Path) -> Option<TranscriptCatchUpFailure> {
+        let (hub, consumer, witness) = self.convergence?;
+        let inner = hub.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let recorded = inner.consumers.get(consumer)?.read_outcomes.get(path)?;
+        (recorded.witness == witness)
+            .then_some(recorded.failure)
+            .flatten()
+    }
+
+    /// Only source-contract failures depend solely on the witnessed bytes.
+    /// Admission, privacy, and storage failures can recover independently.
+    pub(crate) fn record_source_failure(
+        self,
+        path: &Path,
+        error: &TranscriptIngestError,
+        failure: TranscriptCatchUpFailure,
+    ) -> TranscriptIngestResult<()> {
+        if matches!(
+            error,
+            TranscriptIngestError::Domain(_)
+                | TranscriptIngestError::ObservationContract(_)
+                | TranscriptIngestError::InvalidSourceIdentity { .. }
+        ) && let Some((hub, consumer, witness)) = self.convergence
+        {
+            hub.record_file_result(consumer, path, witness, Some(failure))?;
+        }
+        Ok(())
     }
 
     /// Records convergence once admission covered every byte the witness
@@ -579,7 +612,7 @@ impl CodexDiscoveryHub {
                 mode,
                 awaiting_ack: None,
                 _memory: None,
-                converged: HashMap::new(),
+                read_outcomes: HashMap::new(),
             },
         );
     }
@@ -636,7 +669,7 @@ impl CodexDiscoveryHub {
             let delivery = hub.discover_blocking(&consumer, &source, bounds, frontier)?;
             let prefetch = match &delivery {
                 CodexDiscoveryDelivery::Ready(pass) if pass._shared_page_pin.is_some() => {
-                    hub.unconverged_paths(&consumer, &pass.report.paths)?
+                    hub.paths_needing_source_read(&consumer, &pass.report.paths)?
                 }
                 _ => Vec::new(),
             };
@@ -1051,7 +1084,12 @@ impl CodexDiscoveryHub {
             .unwrap_or_else(PoisonError::into_inner)
             .consumers
             .get(consumer)
-            .is_some_and(|state| state.converged.contains_key(path))
+            .is_some_and(|state| {
+                state
+                    .read_outcomes
+                    .get(path)
+                    .is_some_and(|recorded| recorded.failure.is_none())
+            })
     }
 
     /// Whether `consumer` already finished `path` while it had exactly
@@ -1067,7 +1105,7 @@ impl CodexDiscoveryHub {
 
     /// The delivered paths `consumer` would still read, in delivery order, so
     /// speculative page reads never open a rollout admission will skip.
-    fn unconverged_paths(
+    fn paths_needing_source_read(
         &self,
         consumer: &str,
         paths: &[PathBuf],
@@ -1083,7 +1121,12 @@ impl CodexDiscoveryHub {
             .zip(witnesses)
             .filter(|(path, witness)| {
                 !witness.is_some_and(|witness| {
-                    state.is_some_and(|state| state.holds_converged(path, witness))
+                    state.is_some_and(|state| {
+                        state
+                            .read_outcomes
+                            .get(*path)
+                            .is_some_and(|recorded| recorded.witness == witness)
+                    })
                 })
             })
             .map(|(path, _)| path.clone())
@@ -1099,26 +1142,43 @@ impl CodexDiscoveryHub {
         path: &Path,
         witness: SettledFileWitness,
     ) -> TranscriptIngestResult<()> {
+        self.record_file_result(consumer, path, witness, None)
+    }
+
+    fn record_file_result(
+        &self,
+        consumer: &str,
+        path: &Path,
+        witness: SettledFileWitness,
+        failure: Option<TranscriptCatchUpFailure>,
+    ) -> TranscriptIngestResult<()> {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(state) = inner.consumers.get_mut(consumer) else {
             return Ok(());
         };
-        if let Some((recorded, _)) = state.converged.get_mut(path) {
-            *recorded = witness;
+        if let Some(recorded) = state.read_outcomes.get_mut(path) {
+            recorded.witness = witness;
+            recorded.failure = failure;
             return Ok(());
         }
         let charge = candidate_charge(
             path,
-            u64::try_from(std::mem::size_of::<(PathBuf, SettledFileWitness)>()).unwrap_or(u64::MAX),
+            u64::try_from(std::mem::size_of::<(PathBuf, TranscriptReadRecord)>())
+                .unwrap_or(u64::MAX),
         )?;
         let Some(reservation) =
-            reserve_shared_jsonl_bytes(charge, "converged transcript index capacity")?
+            reserve_shared_jsonl_bytes(charge, "transcript read outcome capacity")?
         else {
             return Ok(());
         };
-        state
-            .converged
-            .insert(path.to_path_buf(), (witness, reservation));
+        state.read_outcomes.insert(
+            path.to_path_buf(),
+            TranscriptReadRecord {
+                witness,
+                failure,
+                _memory: reservation,
+            },
+        );
         Ok(())
     }
 

@@ -189,6 +189,9 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                     outcome.bytes_consumed,
                     outcome.deferred_by_byte_cap,
                 );
+                for failure in result.failures {
+                    run.add_failure(failure);
+                }
                 let mut frontier_persisted = result.committable_frontier.is_some();
                 if let Some(next_frontier) = result
                     .committable_frontier

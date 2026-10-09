@@ -73,10 +73,18 @@ pub struct CodexTurnContext {
 
 /// Read the leading `session_meta` line of a rollout for cwd/session-id/model.
 pub(super) fn session_meta(path: &Path) -> Option<CodexMeta> {
-    session_meta_with_provenance(path).map(|parsed| parsed.meta)
+    match session_meta_with_provenance(path) {
+        Ok(parsed) => parsed.map(|parsed| parsed.meta),
+        Err(error) => {
+            tracing::debug!(transcript_path = %path.display(), %error, "Codex metadata unavailable");
+            None
+        }
+    }
 }
 
-pub(super) fn session_meta_with_provenance(path: &Path) -> Option<CodexMetaWithProvenance> {
+pub(super) fn session_meta_with_provenance(
+    path: &Path,
+) -> std::io::Result<Option<CodexMetaWithProvenance>> {
     #[cfg(test)]
     {
         let reads = SESSION_META_READS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
@@ -95,26 +103,26 @@ pub(super) fn session_meta_with_provenance(path: &Path) -> Option<CodexMetaWithP
             gate.park();
         }
     }
-    let file = std::fs::File::open(path).ok()?;
+    let file = std::fs::File::open(path)?;
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
     for _ in 0..4 {
-        match frames.next_frame().ok()? {
+        match frames.next_frame()? {
             RawJsonlFrame::Eof => break,
             RawJsonlFrame::Complete { .. } | RawJsonlFrame::Partial { .. } => {
                 let Ok(value) = serde_json::from_slice::<Value>(frames.record()) else {
                     continue;
                 };
                 if let Some(meta) = session_meta_with_provenance_from_record(&value, path) {
-                    return Some(CodexMetaWithProvenance {
+                    return Ok(Some(CodexMetaWithProvenance {
                         source_frame_bytes: frames.record().len(),
                         ..meta
-                    });
+                    }));
                 }
             }
             RawJsonlFrame::Oversized { .. } | RawJsonlFrame::BudgetExhausted { .. } => {}
         }
     }
-    None
+    Ok(None)
 }
 
 #[cfg(test)]

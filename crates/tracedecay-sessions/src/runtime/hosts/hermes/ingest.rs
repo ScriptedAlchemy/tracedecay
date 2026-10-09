@@ -211,12 +211,16 @@ pub async fn ingest_homes_for_projects(
             continue;
         }
         match try_ingest_state_db_for_projects(&source, &eligible, &mut budget).await {
-            Ok(source_stats) => stats = stats.merge(source_stats),
-            Err(error) => tracing::debug!(
-                state_db = %source.state_db.display(),
-                error,
-                "skipping shared Hermes transcript source"
-            ),
+            Ok(source_stats) => {
+                stats = stats.merge(source_stats);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    state_db = %source.state_db.display(),
+                    error,
+                    "skipping shared Hermes transcript source"
+                );
+            }
         }
     }
     for destination in destinations {
@@ -550,9 +554,31 @@ fn project_is_real(project_root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admission::test_support::MemoryHostAdmission;
 
     #[test]
     fn missing_home_is_typed_absence_not_empty_homes() {
         assert_eq!(hermes_homes_from(None), None);
+    }
+
+    #[tokio::test]
+    async fn unchanged_failed_state_db_remains_a_reported_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let hermes = temp.path().join(".hermes");
+        std::fs::create_dir_all(&hermes).unwrap();
+        std::fs::write(hermes.join("state.db"), "not a sqlite database").unwrap();
+        let admission = MemoryHostAdmission::default();
+
+        let first = ingest_user_homes_capped(&admission, &[hermes.clone()], &[], None).await;
+        assert!(
+            first.source_failures > 0,
+            "a corrupt state.db must fail the first sweep"
+        );
+
+        let second = ingest_user_homes_capped(&admission, &[hermes], &[], None).await;
+        assert_eq!(
+            second.source_failures, 1,
+            "an unchanged unreadable source must not become a successful empty sweep"
+        );
     }
 }
