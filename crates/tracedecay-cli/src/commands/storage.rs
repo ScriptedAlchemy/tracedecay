@@ -371,6 +371,13 @@ mod wipe_safety_tests {
     }
 
     #[test]
+    fn default_list_omits_recursive_store_size() {
+        let missing = Path::new("/definitely/missing-tracedecay-store");
+        assert_eq!(list_store_size_bytes(false, true, missing), None);
+        assert_eq!(list_store_size_bytes(true, false, missing), Some(0));
+    }
+
+    #[test]
     fn complete_wipe_accepts_an_exact_canonical_profile_directory() {
         let profile = tempfile::TempDir::new().expect("create temporary profile");
         let profile = profile
@@ -755,7 +762,11 @@ fn handle_list_inner(
         use tracedecay_runtime_core::text::format_token_count;
 
         let home_tracedecay = Some(profile.data_dir().to_path_buf());
-        let project_paths = global::gather_target_projects(profile, all).await?;
+        let project_paths = if all {
+            global::gather_target_projects(profile, true).await?
+        } else {
+            global::gather_list_projects(profile).await?
+        };
 
         if !all && project_paths.is_empty() {
             println!("No tracedecay projects found in current folder, parents, or children.");
@@ -813,11 +824,7 @@ fn handle_list_inner(
                 }
             }
             let has_data = location.data_root.exists();
-            let size = if has_data {
-                dir_size_bytes(&location.data_root)
-            } else {
-                0
-            };
+            let size = list_store_size_bytes(all, has_data, &location.data_root);
             let project_key = tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(path);
             let token_row = token_rows.iter().find(|row| {
                 tracedecay_global_db::RegisteredGlobalDb::canonical_project_key(&row.project)
@@ -850,7 +857,9 @@ fn handle_list_inner(
             return Ok(());
         }
 
-        let total_size: u64 = rows.iter().map(|row| row.size).sum();
+        let total_size = rows.iter().try_fold(0u64, |acc, row| {
+            row.size.map(|size| acc.saturating_add(size))
+        });
         let total_tokens: u64 = rows.iter().filter_map(|row| row.tokens).sum();
 
         rows.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.path.cmp(&b.path)));
@@ -870,10 +879,9 @@ fn handle_list_inner(
         for r in &rows {
             let path_str = format!("{} [{}]", r.path.display(), r.status_label);
             let pad = path_w.saturating_sub(path_str.chars().count());
-            let size_str = if r.has_data {
-                tracedecay_runtime_core::text::format_bytes(r.size)
-            } else {
-                "—".to_string()
+            let size_str = match r.size {
+                Some(size) if r.has_data => tracedecay_runtime_core::text::format_bytes(size),
+                _ => "—".to_string(),
             };
             let tokens_str = match r.tokens {
                 None => "unavailable".to_string(),
@@ -901,7 +909,9 @@ fn handle_list_inner(
         };
         println!(
             "Total: {} on disk · {} tokens saved{}",
-            tracedecay_runtime_core::text::format_bytes(total_size),
+            total_size
+                .map(tracedecay_runtime_core::text::format_bytes)
+                .unwrap_or_else(|| "—".to_string()),
             total_tokens_str,
             total_suffix
         );
@@ -919,12 +929,24 @@ fn handle_list_inner(
     })
 }
 
+fn list_store_size_bytes(all: bool, has_data: bool, data_root: &Path) -> Option<u64> {
+    if !all {
+        return None;
+    }
+    if !has_data {
+        return Some(0);
+    }
+    Some(dir_size_bytes(data_root))
+}
+
 #[derive(Debug)]
 struct ListRow {
     path: std::path::PathBuf,
     status_label: &'static str,
     has_data: bool,
-    size: u64,
+    /// `None` when this run did not measure the store. Default `list`
+    /// skips the recursive size walk.
+    size: Option<u64>,
     /// `None` when this run could not read the project's saved-token total.
     tokens: Option<u64>,
 }
@@ -959,11 +981,7 @@ fn append_orphan_manifest_rows(
         }
         let data_root = profile_root.join(&plan.store.store_relpath);
         let has_data = data_root.exists();
-        let size = if has_data {
-            dir_size_bytes(&data_root)
-        } else {
-            0
-        };
+        let size = list_store_size_bytes(true, has_data, &data_root);
         rows.push(ListRow {
             path: plan.project.project_root,
             status_label: "orphan manifest-reconstructable",
