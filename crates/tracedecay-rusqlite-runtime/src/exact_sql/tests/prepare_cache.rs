@@ -108,7 +108,9 @@ fn cached_prepare_without_hot_path_ddl_does_not_reprepare() {
 
     let after_connection = Connection::open_in_memory().unwrap();
     seed_rows(&after_connection);
-    after_connection.execute_batch(RUNTIME_LEDGER_SCHEMA).unwrap();
+    after_connection
+        .execute_batch(RUNTIME_LEDGER_SCHEMA)
+        .unwrap();
     let version_before = schema_version(&after_connection);
     let after = measure_after(&after_connection);
     let version_after = schema_version(&after_connection);
