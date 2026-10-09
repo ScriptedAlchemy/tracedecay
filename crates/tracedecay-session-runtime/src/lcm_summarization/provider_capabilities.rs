@@ -232,10 +232,12 @@ async fn claude_summary_pair_is_exact(
         return Ok(false);
     };
     let Some(boundary) = decode_message_envelope(
+        snapshot,
         row.get::<Option<String>>(0)
             .map_err(|error| LcmError::Db(error.to_string()))?
             .as_deref(),
-    )?
+    )
+    .await?
     else {
         return Ok(false);
     };

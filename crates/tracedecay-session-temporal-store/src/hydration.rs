@@ -45,8 +45,7 @@ const SERVED_MESSAGE_METADATA_COLUMN: &str = "CASE WHEN json_valid(message.metad
       THEN NULLIF(json_remove(message.metadata_json, '$.ingest_protection'), '{}')
       ELSE message.metadata_json END";
 
-const OCCURRENCE_ENVELOPE_COLUMN: &str =
-    "(SELECT json_extract(observation.observation_json, '$.payload')
+const OCCURRENCE_ENVELOPE_COLUMN: &str = "(SELECT observation.observation_json
    FROM observations AS observation
    WHERE observation.observation_id = occurrence.source_observation_id)";
 
@@ -503,7 +502,15 @@ pub(super) async fn session_message_from_hydrated_bytes(
         (Some(_), Some(envelope)) => Some(
             message_metadata_with_envelope(
                 stored_metadata.as_deref(),
-                &serde_json::from_str(&envelope).map_err(hydration_failure)?,
+                &crate::query::decode_stored_observation(
+                    read,
+                    &envelope,
+                    "hydrate occurrence envelope",
+                )
+                .await
+                .map_err(hydration_failure)?
+                .payload()
+                .clone(),
             )
             .map_err(hydration_failure)?,
         ),

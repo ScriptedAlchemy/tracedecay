@@ -17,6 +17,7 @@ use tracedecay_lcm::{
 use crate::runtime::SessionMessageRecord;
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn};
+use super::sessions::stored_message_record_from_row;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RawProtectionRevision {
@@ -63,15 +64,16 @@ async fn require_current_protection_input(
             store_id: expected.store_id,
         });
     };
-    let actual_message = message_record_from_row(&row)?;
+    let actual_message = stored_message_record_from_row(&row, 0)
+        .map_err(|error| LcmError::Db(error.source.to_string()))?;
     let actual_raw_revision = RawProtectionRevision {
-        role: row.get(13)?,
-        ordinal: row.get(14)?,
-        timestamp: row.get(15)?,
-        content_hash: row.get(16)?,
-        storage_kind: row.get(17)?,
-        payload_ref: row.get(18)?,
-        metadata_json: row.get(19)?,
+        role: row.get(17)?,
+        ordinal: row.get(18)?,
+        timestamp: row.get(19)?,
+        content_hash: row.get(20)?,
+        storage_kind: row.get(21)?,
+        payload_ref: row.get(22)?,
+        metadata_json: row.get(23)?,
     };
     if actual_message != expected.message || actual_raw_revision != expected.raw_revision {
         return Err(LcmError::StaleRawProtectionSource {
@@ -79,26 +81,6 @@ async fn require_current_protection_input(
         });
     }
     Ok(())
-}
-
-fn message_record_from_row(
-    row: &tracedecay_runtime_core::db::engine::Row,
-) -> Result<SessionMessageRecord, LcmError> {
-    Ok(SessionMessageRecord {
-        provider: row.get(0)?,
-        message_id: row.get(1)?,
-        session_id: row.get(2)?,
-        role: row.get(3)?,
-        timestamp: row.get(4)?,
-        ordinal: row.get(5)?,
-        text: row.get(6)?,
-        kind: row.get(7)?,
-        model: row.get(8)?,
-        tool_names: row.get(9)?,
-        source_path: row.get(10)?,
-        source_offset: row.get(11)?,
-        metadata_json: row.get(12)?,
-    })
 }
 
 async fn require_current_raw_protection_revision(
@@ -441,7 +423,11 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
                         metadata_json,
                         '$.ingest_protection.sanitization_receipt'
                     ) IS NULL THEN 1 ELSE 0 END,
-                    COALESCE(length(CAST(content AS BLOB)), 0)
+                    CASE WHEN content IS NULL
+                         THEN COALESCE((SELECT uncompressed_bytes
+                                        FROM session_canonical_bodies
+                                        WHERE content_hash = raw.content_hash), 0)
+                         ELSE length(CAST(content AS BLOB)) END
              FROM lcm_raw_messages AS raw
              WHERE provider = ?1 AND session_id = ?2 AND store_id > ?3
              ORDER BY store_id
@@ -468,9 +454,9 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         let mut frontier_store_id = after_store_id;
         let mut byte_limited = false;
         while let Some(row) = rows.next().await? {
-            let store_id: i64 = row.get(20)?;
-            let needs_protection = row.get::<i64>(21)? != 0;
-            let row_bytes = u64::try_from(row.get::<i64>(22)?).map_err(|error| {
+            let store_id: i64 = row.get(24)?;
+            let needs_protection = row.get::<i64>(25)? != 0;
+            let row_bytes = u64::try_from(row.get::<i64>(26)?).map_err(|error| {
                 LcmError::Db(format!("invalid LCM protection row byte count: {error}"))
             })?;
             if bytes_scanned.saturating_add(row_bytes) > page_max_bytes {
@@ -484,30 +470,34 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             bytes_scanned = bytes_scanned.saturating_add(row_bytes);
             frontier_store_id = store_id;
             let raw_revision = RawProtectionRevision {
-                role: row.get(13)?,
-                ordinal: row.get(14)?,
-                timestamp: row.get(15)?,
-                content_hash: row.get(16)?,
-                storage_kind: row.get(17)?,
-                payload_ref: row.get(18)?,
-                metadata_json: row.get(19)?,
+                role: row.get(17)?,
+                ordinal: row.get(18)?,
+                timestamp: row.get(19)?,
+                content_hash: row.get(20)?,
+                storage_kind: row.get(21)?,
+                payload_ref: row.get(22)?,
+                metadata_json: row.get(23)?,
             };
             scanned_revisions.push((store_id, raw_revision.clone()));
             if !needs_protection {
                 continue;
             }
             // An unreceipted row is re-ingested from its own stored body. A
-            // body stored outside the row leaves only its placeholder here,
-            // which is not the message and must not be re-ingested as one.
+            // body stored outside the row in an external payload keeps only a
+            // placeholder here, which is not the message and must not be
+            // re-ingested as one. Canonical bodies hydrate back to the whole
+            // stored body before re-ingest.
             if raw_revision.storage_kind != "inline" {
                 return Err(LcmError::SummarySourceUnavailable {
                     source_id: store_id.to_string(),
                     reason: "external_body_without_receipt".to_string(),
                 });
             }
+            let message = stored_message_record_from_row(&row, 0)
+                .map_err(|error| LcmError::Db(error.source.to_string()))?;
             unprotected.push(RawProtectionInput {
                 store_id,
-                message: message_record_from_row(&row)?,
+                message,
                 raw_revision,
             });
         }

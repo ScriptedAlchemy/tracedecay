@@ -1181,6 +1181,42 @@ pub fn message_record_from_row(
     })
 }
 
+/// Message row read through [`tracedecay_lcm::raw::stored_message_record_select_columns`],
+/// starting at `offset`. Rows that stored their body in
+/// `session_canonical_bodies` get the verified full body back; external
+/// payloads keep their placeholder text.
+pub fn stored_message_record_from_row(
+    row: &Row,
+    offset: i32,
+) -> Result<SessionMessageRecord, SqlColumnError> {
+    let mut record = message_record_from_row(row, offset)?;
+    let encoding: Option<String> = column(row, offset + 14, "body_encoding")?;
+    let Some(encoding) = encoding else {
+        return Ok(record);
+    };
+    let content_hash: String = column(row, offset + 13, "content_hash")?;
+    let blob: Option<Vec<u8>> = column(row, offset + 15, "body")?;
+    let uncompressed: Option<i64> = column(row, offset + 16, "uncompressed_bytes")?;
+    let (Some(blob), Some(uncompressed)) = (blob, uncompressed) else {
+        return Err(SqlColumnError {
+            column: "body",
+            source: EngineError::InvalidOperation(format!(
+                "canonical body {content_hash} is missing"
+            )),
+        });
+    };
+    let bytes = tracedecay_store::unpack_body(&content_hash, &encoding, &blob, uncompressed)
+        .map_err(|error| SqlColumnError {
+            column: "body",
+            source: EngineError::Runtime(error.to_string()),
+        })?;
+    record.text = String::from_utf8(bytes).map_err(|error| SqlColumnError {
+        column: "body",
+        source: EngineError::Runtime(error.to_string()),
+    })?;
+    Ok(record)
+}
+
 fn row_to_session(row: &Row) -> std::result::Result<SessionRecord, String> {
     session_record_from_row(row).map_err(|error| session_column_error(error.column, &error.source))
 }

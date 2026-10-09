@@ -1,9 +1,11 @@
 use tracedecay_runtime_core::db::engine::TestConnection;
 use tracedecay_store::{CANONICAL_BODIES_TABLE_SQL, SessionMessageRecord};
 
-const RAW_MESSAGE_TEST_SCHEMA: &str = concat!(
-    CANONICAL_BODIES_TABLE_SQL,
-    "CREATE TABLE lcm_raw_messages (
+fn raw_message_test_schema() -> String {
+    format!("{CANONICAL_BODIES_TABLE_SQL}{RAW_MESSAGE_TEST_SCHEMA_TAIL}")
+}
+
+const RAW_MESSAGE_TEST_SCHEMA_TAIL: &str = "CREATE TABLE lcm_raw_messages (
     store_id INTEGER PRIMARY KEY,
     provider TEXT NOT NULL,
     message_id TEXT NOT NULL,
@@ -24,14 +26,13 @@ const RAW_MESSAGE_TEST_SCHEMA: &str = concat!(
     tool_names TEXT,
     source_path TEXT,
     source_offset INTEGER
-);"
-);
+);";
 
 #[tokio::test]
 async fn exact_identity_reader_rejects_tampered_inline_content() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
-    conn.execute_batch(RAW_MESSAGE_TEST_SCHEMA)
+    conn.execute_batch(&raw_message_test_schema())
         .await
         .expect("raw message schema");
     conn.execute(
@@ -58,7 +59,7 @@ async fn exact_identity_reader_rejects_tampered_inline_content() {
 async fn exact_identity_reader_rejects_missing_inline_content() {
     let temp = tempfile::tempdir().expect("temporary directory");
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
-    conn.execute_batch(RAW_MESSAGE_TEST_SCHEMA)
+    conn.execute_batch(&raw_message_test_schema())
         .await
         .expect("raw message schema");
     conn.execute(

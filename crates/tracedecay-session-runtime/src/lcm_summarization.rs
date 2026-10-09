@@ -222,7 +222,7 @@ pub(super) async fn native_summary_evidence(
         candidates.into_iter().rev()
     {
         let metadata = parse_message_metadata(metadata_json.as_deref());
-        let envelope = decode_message_envelope(envelope_json.as_deref())?;
+        let envelope = decode_message_envelope(&snapshot, envelope_json.as_deref()).await?;
         let candidate = NativeSummaryCandidate {
             provider,
             message_id: &message_id,
@@ -344,10 +344,12 @@ async fn native_store_is_recognized(
             .as_deref(),
     );
     let envelope = decode_message_envelope(
+        snapshot,
         row.get::<Option<String>>(4)
             .map_err(|error| LcmError::Db(error.to_string()))?
             .as_deref(),
-    )?;
+    )
+    .await?;
     drop(rows);
     let candidate = NativeSummaryCandidate {
         provider,
@@ -369,8 +371,7 @@ async fn native_store_is_recognized(
 /// `message` row. Message metadata does not embed it: the observation row is
 /// its only copy. Rows no observation projected (direct transcript ingest)
 /// select NULL.
-pub(super) const MESSAGE_ENVELOPE_COLUMN: &str =
-    "(SELECT json_extract(observation.observation_json, '$.payload')
+pub(super) const MESSAGE_ENVELOPE_COLUMN: &str = "(SELECT observation.observation_json
       FROM observation_projection_provenance AS provenance
       JOIN observations AS observation
         ON observation.observation_id = provenance.observation_id
@@ -387,21 +388,84 @@ fn parse_message_metadata(metadata: Option<&str>) -> Value {
 }
 
 /// A projected row's observation payload is a validated canonical envelope, so
-/// one that does not decode is corruption, never an unrecognized row.
-pub(super) fn decode_message_envelope(
-    envelope: Option<&str>,
+/// one that does not decode is corruption, never an unrecognized row. The
+/// stored observation can carry `tracedecay.body_ref` markers for strings
+/// held in `session_canonical_bodies`, so decoding hydrates them first.
+pub(super) async fn decode_message_envelope(
+    conn: &(impl QueryExecutor + ?Sized),
+    observation_json: Option<&str>,
 ) -> Result<Option<Box<CanonicalObservationEnvelopeV1>>, LcmError> {
-    envelope
-        .map(|envelope| {
-            serde_json::from_str(envelope)
-                .map(Box::new)
-                .map_err(|error| {
-                    LcmError::Db(format!(
-                        "message observation envelope decode failed: {error}"
-                    ))
-                })
+    let Some(json) = observation_json else {
+        return Ok(None);
+    };
+    let hashes = tracedecay_store::collect_body_refs(json)
+        .map_err(|error| LcmError::Db(format!("message observation decode failed: {error}")))?;
+    let mut bodies = std::collections::HashMap::new();
+    for hash in hashes {
+        if bodies.contains_key(&hash) {
+            continue;
+        }
+        let mut rows = conn
+            .query(
+                tracedecay_store::LOAD_CANONICAL_BODY_SQL,
+                params![hash.as_str()],
+            )
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?
+            .ok_or_else(|| {
+                LcmError::Db(format!(
+                    "message observation decode failed: canonical body {hash} is missing"
+                ))
+            })?;
+        let encoding: String = row.get(0).map_err(|e| LcmError::Db(e.to_string()))?;
+        let blob: Vec<u8> = row.get(1).map_err(|e| LcmError::Db(e.to_string()))?;
+        let uncompressed: i64 = row.get(2).map_err(|e| LcmError::Db(e.to_string()))?;
+        bodies.insert(
+            hash.clone(),
+            tracedecay_store::unpack_body(&hash, &encoding, &blob, uncompressed).map_err(
+                |error| LcmError::Db(format!("message observation decode failed: {error}")),
+            )?,
+        );
+    }
+    decode_message_envelope_from_bodies(Some(json), |hash| {
+        bodies
+            .get(hash)
+            .cloned()
+            .ok_or_else(|| tracedecay_store::CanonicalBodyError::Missing {
+                content_hash: hash.to_owned(),
+            })
+    })
+}
+
+/// A projected row's observation payload is a validated canonical envelope, so
+/// one that does not decode is corruption, never an unrecognized row.
+fn decode_message_envelope_from_bodies<E>(
+    observation_json: Option<&str>,
+    load: impl FnMut(&str) -> Result<Vec<u8>, E>,
+) -> Result<Option<Box<CanonicalObservationEnvelopeV1>>, LcmError>
+where
+    E: From<tracedecay_store::CanonicalBodyError> + std::fmt::Display,
+{
+    let Some(json) = observation_json else {
+        return Ok(None);
+    };
+    let observation = tracedecay_store::parse_stored_observation(json, load).map_err(|error| {
+        LcmError::Db(format!(
+            "message observation envelope decode failed: {error}"
+        ))
+    })?;
+    serde_json::from_value::<CanonicalObservationEnvelopeV1>(observation.payload().clone())
+        .map(Box::new)
+        .map(Some)
+        .map_err(|error| {
+            LcmError::Db(format!(
+                "message observation envelope decode failed: {error}"
+            ))
         })
-        .transpose()
 }
 
 async fn native_source_membership_is_exact(
@@ -466,12 +530,16 @@ impl From<LcmError> for SummaryResolutionError {
 
 #[cfg(test)]
 mod decode_message_envelope_tests {
-    use super::decode_message_envelope;
+    use super::decode_message_envelope_from_bodies;
+    use tracedecay_store::CanonicalBodyError;
 
     #[test]
     fn corrupt_observation_envelope_is_typed() {
-        let error = decode_message_envelope(Some(r#"{"not": "an envelope"}"#))
-            .expect_err("a corrupt observation payload must not read as unrecognized");
+        let error = decode_message_envelope_from_bodies::<CanonicalBodyError>(
+            Some(r#"{"not": "an envelope"}"#),
+            |_| unreachable!("plain JSON never loads a canonical body"),
+        )
+        .expect_err("a corrupt observation payload must not read as unrecognized");
         assert!(
             error
                 .to_string()
@@ -482,6 +550,10 @@ mod decode_message_envelope_tests {
 
     #[test]
     fn unprojected_row_has_no_envelope() {
-        assert!(decode_message_envelope(None).unwrap().is_none());
+        assert!(
+            decode_message_envelope_from_bodies::<CanonicalBodyError>(None, |_| unreachable!())
+                .unwrap()
+                .is_none()
+        );
     }
 }

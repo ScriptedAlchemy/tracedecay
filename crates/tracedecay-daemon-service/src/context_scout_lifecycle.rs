@@ -421,6 +421,9 @@ async fn decode_lifecycle_observation(
         collect_body_refs(observation_json).map_err(|_| Failure::MalformedDurableObservation)?;
     let mut bodies = HashMap::new();
     for hash in hashes {
+        if bodies.contains_key(&hash) {
+            continue;
+        }
         let mut rows = snapshot
             .query(LOAD_CANONICAL_BODY_SQL, params![hash.as_str()])
             .await
@@ -436,9 +439,12 @@ async fn decode_lifecycle_observation(
         let blob = row
             .get::<Vec<u8>>(1)
             .map_err(|_| Failure::ObservationRowUnreadable)?;
+        let uncompressed = row
+            .get::<i64>(2)
+            .map_err(|_| Failure::ObservationRowUnreadable)?;
         bodies.insert(
             hash.clone(),
-            unpack_body(&hash, &encoding, &blob)
+            unpack_body(&hash, &encoding, &blob, uncompressed)
                 .map_err(|_| Failure::MalformedDurableObservation)?,
         );
     }

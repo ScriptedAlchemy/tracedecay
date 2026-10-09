@@ -3003,8 +3003,8 @@ async fn occurrence_replay_accepts_existing_full_text_and_rejects_changed_conten
 
 fn realistic_words(seed: u64, bytes: usize) -> String {
     const WORDS: [&str; 16] = [
-        "select", "from", "where", "join", "index", "session", "tool", "output", "error",
-        "trace", "payload", "cursor", "anchor", "query", "store", "graph",
+        "select", "from", "where", "join", "index", "session", "tool", "output", "error", "trace",
+        "payload", "cursor", "anchor", "query", "store", "graph",
     ];
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).max(1);
     let mut out = String::with_capacity(bytes + 16);
@@ -3032,8 +3032,12 @@ fn fixture_realistic_observation(
         ObservationId::new(format!("record.realistic.{session}.{ordinal}")).unwrap(),
         CanonicalObservationRelationsV1::new(session_id.clone())
             .with_thread_id(ObservationId::new(format!("thread.realistic.{session}")).unwrap())
-            .with_turn_id(ObservationId::new(format!("turn.realistic.{session}.{}", ordinal / 4)).unwrap())
-            .with_message_id(ObservationId::new(format!("message.realistic.{session}.{ordinal}")).unwrap())
+            .with_turn_id(
+                ObservationId::new(format!("turn.realistic.{session}.{}", ordinal / 4)).unwrap(),
+            )
+            .with_message_id(
+                ObservationId::new(format!("message.realistic.{session}.{ordinal}")).unwrap(),
+            )
             .with_agent_id(ObservationId::new(format!("agent.realistic.{session}")).unwrap()),
         facts,
         None,
@@ -3106,11 +3110,12 @@ async fn print_user_sessions_dbstat(snapshot: &impl QueryExecutor, family_bytes:
             (SELECT COUNT(*) FROM session_canonical_bodies),
             (SELECT COALESCE(SUM(length(body)), 0) FROM session_canonical_bodies),
             (SELECT COALESCE(SUM(uncompressed_bytes), 0) FROM session_canonical_bodies)";
-    let mut cols = snapshot
-        .query(column_sql, ())
+    let mut cols = snapshot.query(column_sql, ()).await.expect("column census");
+    let row = cols
+        .next()
         .await
+        .expect("column census row")
         .expect("column census");
-    let row = cols.next().await.expect("column census row").expect("column census");
     println!(
         "user-sessions census N={n} family_bytes={family_bytes} dbstat_accounted={accounted} observations={} observation_json={} anchor_json={} availability_json={} capture_json={} lcm_content={} occurrence_index_text={} cas_rows={} cas_stored={} cas_uncompressed={}",
         row.get::<i64>(0).unwrap(),
@@ -3151,7 +3156,8 @@ async fn realistic_user_sessions_dbstat_names_dominant_bytes() {
                     realistic_words(seed ^ 2, 1_200)
                 };
                 let wrap = realistic_words(seed ^ 3, 280);
-                let call = ObservationId::new(format!("tool.realistic.{next_session}.{turn}")).unwrap();
+                let call =
+                    ObservationId::new(format!("tool.realistic.{next_session}.{turn}")).unwrap();
                 let facts = [
                     vec![CanonicalObservationFactV1::Message {
                         role: CanonicalMessageRoleV1::User,

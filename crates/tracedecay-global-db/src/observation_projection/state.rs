@@ -17,7 +17,7 @@ use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Row, params};
 use tracedecay_sessions::runtime::shared::durable_project_path_key;
 use tracedecay_sessions::runtime::store_access::{
-    message_record_from_row, session_record_from_row,
+    session_record_from_row, stored_message_record_from_row,
 };
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
@@ -422,7 +422,7 @@ pub(super) async fn read_message(
     else {
         return Ok(None);
     };
-    message_record_from_row(&row, 0)
+    stored_message_record_from_row(&row, 0)
         .map(Some)
         .map_err(|error| storage("decode projected message", error.source))
 }
@@ -717,8 +717,13 @@ pub(super) async fn read_output_state(
     let latest_json = row
         .get::<String>(1)
         .map_err(|error| storage("read projection output state", error))?;
-    let latest: DurableObservationV1 = serde_json::from_str(&latest_json)
-        .map_err(|error| storage("decode latest projection output owner", error))?;
+    let latest: DurableObservationV1 = crate::observation::decode_observation_json(
+        conn,
+        &latest_json,
+        "read projection output state",
+    )
+    .await
+    .map_err(|error| storage("decode latest projection output owner", error))?;
     let latest_observation_id: String = row
         .get(5)
         .map_err(|error| storage("read projection output state", error))?;
@@ -728,10 +733,14 @@ pub(super) async fn read_output_state(
     let canonical = if latest_observation_id == canonical_observation_id {
         latest.clone()
     } else {
-        serde_json::from_str(
-            &row.get::<String>(2)
-                .map_err(|error| storage("read projection output state", error))?,
+        crate::observation::decode_observation_json(
+            conn,
+            row.get::<String>(2)
+                .map_err(|error| storage("read projection output state", error))?
+                .as_str(),
+            "read projection output state",
         )
+        .await
         .map_err(|error| storage("decode canonical projection output owner", error))?
     };
     let projector_owned = row
@@ -1024,7 +1033,7 @@ pub(in super::super) async fn read_projection_rows_batch(
             .await
             .map_err(|error| storage("read projected messages", error))?
         {
-            let message = message_record_from_row(&row, 0)
+            let message = stored_message_record_from_row(&row, 0)
                 .map_err(|error| storage("decode projected messages", error.source))?;
             let decode = |index: i32| {
                 row.get::<String>(index)
@@ -1032,11 +1041,11 @@ pub(in super::super) async fn read_projection_rows_batch(
             };
             let columns = ProjectionStorageColumns {
                 session_id: message.session_id.clone(),
-                storage_kind: decode(13)?,
-                content: decode(14)?,
-                content_hash: decode(15)?,
-                snippet_text: decode(16)?,
-                index_text: decode(17)?,
+                storage_kind: decode(17)?,
+                content: decode(18)?,
+                content_hash: decode(19)?,
+                snippet_text: decode(20)?,
+                index_text: decode(21)?,
             };
             let key = (message.provider.clone(), message.message_id.clone());
             storage_columns.insert(key.clone(), columns);
