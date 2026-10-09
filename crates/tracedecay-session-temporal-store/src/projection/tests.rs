@@ -2713,6 +2713,33 @@ fn fixture_observation_with_text(
     )
 }
 
+async fn session_effect_sequence(
+    runtime: &HostAdmissionTestRuntimeV1,
+    session_id: &SessionId,
+) -> u64 {
+    let snapshot = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database")
+        .read_snapshot()
+        .await
+        .expect("effect sequence snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT observation_sequence
+             FROM session_temporal_observation_effects
+             WHERE session_id = ?1",
+            params![session_id.as_str()],
+        )
+        .await
+        .expect("effect sequence query");
+    let row = rows
+        .next()
+        .await
+        .expect("effect sequence row")
+        .expect("projected observation must leave a session effect");
+    u64::try_from(row.get::<i64>(0).expect("observation_sequence")).expect("sequence fits u64")
+}
+
 fn sqlite_family_bytes(path: &std::path::Path) -> u64 {
     ["", "-wal", "-shm"].iter().fold(0u64, |total, suffix| {
         let member = if suffix.is_empty() {
@@ -2755,7 +2782,8 @@ async fn persist_caps_occurrence_index_text_and_measures_user_sessions_per_n() {
             let (observation, write) =
                 fixture_observation_with_text(&session_id, next_ordinal, text);
             Box::pin(persist_fixture(&runtime, observation, write)).await;
-            refresh_through(&store, &session_id, 1, 0).await;
+            let sequence = session_effect_sequence(&runtime, &session_id).await;
+            refresh_through(&store, &session_id, sequence, sequence.saturating_sub(1)).await;
             next_ordinal += 1;
         }
 
