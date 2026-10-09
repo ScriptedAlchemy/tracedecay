@@ -290,15 +290,44 @@ jobs:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
-  # Linux compile and test authority: the generated Bazel workspace.
+  # Linux compile and test authority: the generated Bazel workspace, split
+  # so the measured serial suites no longer share one runner. Union is
+  # `tests(//...)` by construction: root-b is the rest of
+  # `//crates/tracedecay/...`, workspace is everything outside that package.
+  # Last-green 37707017494: bazel 83m, critical path 34m (`mcp_suite` 10m,
+  # `transcript_ingest_suite` 9m, `dashboard_api_test` 6m) because
+  # `--default_test_resources=cpu=HOST_CPUS` runs one suite at a time.
   linux-test:
-    name: Test Linux
+    name: Test Linux (${{ matrix.shard }})
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
       CARGO_BAZEL_TIMEOUT: "3600"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: root-a
+            targets: >-
+              //crates/tracedecay:mcp_suite
+              //crates/tracedecay:dashboard_api_test
+              //crates/tracedecay:daemon_suite
+              //crates/tracedecay:storage_suite
+          - shard: root-b
+            targets: >-
+              --
+              //crates/tracedecay/...
+              -//crates/tracedecay:mcp_suite
+              -//crates/tracedecay:dashboard_api_test
+              -//crates/tracedecay:daemon_suite
+              -//crates/tracedecay:storage_suite
+          - shard: workspace
+            targets: >-
+              --
+              //...
+              -//crates/tracedecay/...
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -334,24 +363,38 @@ jobs:
 
       # `bazel test` builds every target in the pattern, so tests start
       # while the rest of the workspace still links.
-      - name: Build and test the workspace
-        run: bazel test --config=ci //...
+      - name: Build and test this shard
+        run: bazel test --config=ci ${{ matrix.targets }}
 
       - name: Upload failed test diagnostics
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: bazel-test-logs-${{ runner.os }}
+          name: bazel-test-logs-${{ runner.os }}-${{ matrix.shard }}
           path: |
             bazel-testlogs/**/test.log
             bazel-testlogs/**/test.xml
 
+      # Matrix shards share github.job, so they would race the same save key.
+      # root-b compiles most //crates/tracedecay test binaries; one write
+      # keeps the 10 GiB Actions cache from holding three copies.
       - name: Save compiled Bazel actions
-        if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
+        if: always() && !cancelled() && github.ref == 'refs/heads/master' && matrix.shard == 'root-b' && steps.bazel.outputs.disk-cache-key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+  # Preserves the "Test Linux" check name for branch protection.
+  linux-test-result:
+    name: Test Linux
+    needs: [scope-gate, linux-test]
+    if: ${{ always() && !cancelled() && needs.scope-gate.outputs.run-heavy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every Linux test shard
+        run: test "${{ needs.linux-test.result }}" = "success"
 
   windows-test:
     name: Test Windows
