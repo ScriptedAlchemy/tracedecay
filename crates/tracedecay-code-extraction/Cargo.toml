@@ -25,19 +25,16 @@ test-helpers = []
 # indexing its documentation. Its grammar is the dedicated `tree-sitter-md`
 # crate (byte-identical parser/scanner sources to the copy vendored in the
 # large bundle), so `lite` never links the large bundle.
-# Kotlin is registered from arborium-kotlin (see `lang-kotlin`), not from the
+# Kotlin is registered from arborium-kotlin (through `medium-grammars`), not from the
 # medium bundle's former tree-sitter-kotlin-sg dependency, so `full` never
 # links two Kotlin parse tables.
-lite = ["medium-grammars", "lang-markdown", "lang-json", "lang-kotlin"]
+lite = ["medium-grammars", "lang-markdown", "lang-json"]
 # The two grammar bundles supply native parse tables. Every `lang-*` feature
 # names the bundle that ships its grammar, and `ts_provider` registers only the
 # languages whose features are on so unused tables can be linker-GC'd when a
 # tier omits a language. The shipping `full` set matches master.
-medium-grammars = ["dep:tracedecay-medium-treesitters"]
+medium-grammars = ["dep:tracedecay-medium-treesitters", "dep:arborium-kotlin"]
 large-grammars = ["dep:tracedecay-large-treesitters"]
-# Prefer the large-bundle reexport when present (same arborium-kotlin crate);
-# otherwise take a direct dep so lite still ships Kotlin.
-lang-kotlin = ["dep:arborium-kotlin"]
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
 full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]
 lang-dart = ["medium-grammars"]

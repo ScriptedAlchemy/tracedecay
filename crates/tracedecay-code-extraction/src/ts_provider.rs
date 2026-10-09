@@ -78,15 +78,7 @@ fn build_language_table() -> HashMap<&'static str, Language> {
         languages.insert("scala", tree_sitter_scala::LANGUAGE.into());
     }
 
-    // Kotlin via arborium-kotlin only (see path-patched medium bundle). The
-    // large bundle reexports the same crate; prefer that path when linked so
-    // we do not name the dependency twice in source.
-    #[cfg(all(feature = "lang-kotlin", feature = "large-grammars"))]
-    languages.insert(
-        "kotlin",
-        tracedecay_large_treesitters::kotlin::language().into(),
-    );
-    #[cfg(all(feature = "lang-kotlin", not(feature = "large-grammars")))]
+    #[cfg(feature = "medium-grammars")]
     languages.insert("kotlin", arborium_kotlin::language().into());
 
     if has_grammar_bundle() {
@@ -438,7 +430,7 @@ mod tests {
 
     /// Shipping tiers keep Kotlin via arborium-kotlin (not a second sg table).
     #[test]
-    #[cfg(feature = "lang-kotlin")]
+    #[cfg(feature = "medium-grammars")]
     fn shipping_tiers_register_kotlin() -> Result<(), String> {
         super::try_language("kotlin")
             .map(|_| ())
