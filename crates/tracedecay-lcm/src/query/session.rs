@@ -78,9 +78,7 @@ fn load_session_query(request: &LcmLoadSessionRequest, fetch_limit: usize) -> (S
     values.push(request.end_time.map_or(Value::Null, Value::Integer));
     values.push(Value::Integer(fetch_limit as i64));
     let sql = format!(
-        "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                timestamp, content, content_hash, storage_kind, payload_ref,
-                snippet_text, metadata_json
+        "SELECT {columns}
          FROM lcm_raw_messages
          {scope}
            AND store_id > ?
@@ -89,7 +87,8 @@ fn load_session_query(request: &LcmLoadSessionRequest, fetch_limit: usize) -> (S
            AND (? IS NULL OR timestamp <= ?)
          ORDER BY store_id
          LIMIT ?",
-        scope = scope_clause
+        scope = scope_clause,
+        columns = raw::RAW_MESSAGE_SELECT_COLUMNS
     );
     (sql, values)
 }

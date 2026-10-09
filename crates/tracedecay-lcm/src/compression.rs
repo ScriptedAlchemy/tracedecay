@@ -2515,12 +2515,12 @@ async fn load_raw_messages_for_session(
         async {
             let mut rows = conn
                 .query(
-                    "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                            timestamp, content, content_hash, storage_kind, payload_ref,
-                            snippet_text, metadata_json
-                     FROM lcm_raw_messages
+                    &format!(
+                        "SELECT {} FROM lcm_raw_messages
                      WHERE provider = ?1 AND session_id = ?2
                      ORDER BY store_id",
+                        raw::RAW_MESSAGE_SELECT_COLUMNS
+                    ),
                     params![provider, session_id],
                 )
                 .await?;
@@ -2562,10 +2562,11 @@ async fn load_raw_messages_for_session_page(
         .map_err(|_| LcmError::Db("retained compression row limit overflow".to_string()))?;
     let mut rows = conn
         .query(
-            "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                    timestamp, content, content_hash, storage_kind, payload_ref,
-                    snippet_text, metadata_json,
-                    length(CAST(COALESCE(content, '') AS BLOB))
+            &format!(
+                "SELECT {},
+                    COALESCE(length(CAST(content AS BLOB)),
+                      (SELECT uncompressed_bytes FROM session_canonical_bodies
+                       WHERE content_hash = lcm_raw_messages.content_hash), 0)
                       + length(CAST(snippet_text AS BLOB))
                       + length(CAST(index_text AS BLOB))
                       + length(CAST(COALESCE(metadata_json, '') AS BLOB))
@@ -2573,6 +2574,8 @@ async fn load_raw_messages_for_session_page(
              WHERE provider = ?1 AND session_id = ?2 AND store_id > ?3
              ORDER BY store_id
              LIMIT ?4",
+                raw::RAW_MESSAGE_SELECT_COLUMNS
+            ),
             params![provider, session_id, after_store_id, row_limit],
         )
         .await?;
@@ -2580,7 +2583,7 @@ async fn load_raw_messages_for_session_page(
     let mut bytes_scanned = 0_u64;
     let mut byte_limited = false;
     while let Some(row) = rows.next().await? {
-        let row_bytes = u64::try_from(row.get::<i64>(13)?).map_err(|error| {
+        let row_bytes = u64::try_from(row.get::<i64>(15)?).map_err(|error| {
             LcmError::Db(format!("invalid retained compression byte count: {error}"))
         })?;
         if bytes_scanned.saturating_add(row_bytes) > limit.byte_limit {

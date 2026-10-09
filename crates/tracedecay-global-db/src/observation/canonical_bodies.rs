@@ -2,14 +2,14 @@ use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_store::{
     CANONICAL_BODIES_TABLE_SQL, CanonicalBodyError, INLINE_BODY_BYTES, LOAD_CANONICAL_BODY_SQL,
-    StoredCanonicalBody, UPSERT_CANONICAL_BODY_SQL, collect_body_refs, parse_stored_observation,
-    slim_stored_json, unpack_body,
+    StoredCanonicalBody, UPSERT_CANONICAL_BODY_SQL, collect_body_refs, migrate_stored_json,
+    parse_stored_observation, stored_json_needs_hydrate, unpack_body,
 };
 
 use super::super::global_db_operation_error;
 use super::codec::storage;
 
-pub(super) const CANONICAL_BODY_MIGRATION: &str = "session-canonical-bodies-v1";
+pub(super) const CANONICAL_BODY_MIGRATION: &str = "session-canonical-bodies-root-refs-v1";
 const LCM_CANONICAL_BODY_MIGRATION: &str = "session-canonical-bodies-lcm-v1";
 const LCM_PLACEHOLDER_SNIPPET_MIGRATION: &str = "session-canonical-bodies-lcm-snippet-v1";
 const OPERATION: &str = "compact session canonical bodies";
@@ -138,8 +138,8 @@ async fn compact_observation_page(
     let mut next = None;
     let mut rewrote = false;
     for (id, json) in page {
-        if json.len() >= INLINE_BODY_BYTES {
-            let (slim, bodies) = slim_stored_json(&json)
+        if json.len() >= INLINE_BODY_BYTES || stored_json_needs_hydrate(&json) {
+            let (slim, bodies) = migrate_stored_json(&json)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
             persist_bodies(conn, &bodies).await?;
             if slim != json {
@@ -397,6 +397,49 @@ mod tests {
         };
         assert!(
             matches!(source.downcast_ref::<CanonicalBodyError>(), Some(CanonicalBodyError::Missing { content_hash }) if content_hash == "missing")
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_legacy_compaction_upgrades_small_reference_rows() {
+        let tmp = TempDir::new().unwrap();
+        let conn = TestConnection::open(&tmp.path().join("legacy-bodies.db"));
+        conn.execute_batch(
+            "CREATE TABLE global_schema_migrations (migration TEXT PRIMARY KEY);
+             INSERT INTO global_schema_migrations VALUES ('session-canonical-bodies-v1');
+             CREATE TABLE observations (observation_id TEXT PRIMARY KEY, observation_json TEXT NOT NULL);",
+        ).await.unwrap();
+        ensure_canonical_bodies_table(&conn).await.unwrap();
+        let text = "large body".repeat(INLINE_BODY_BYTES);
+        let body = StoredCanonicalBody::pack(text.as_bytes()).unwrap();
+        persist_bodies(&conn, std::slice::from_ref(&body))
+            .await
+            .unwrap();
+        let legacy =
+            serde_json::json!({"payload": {"tracedecay.body_ref": body.content_hash}}).to_string();
+        assert!(legacy.len() < INLINE_BODY_BYTES);
+        conn.execute(
+            "INSERT INTO observations VALUES ('legacy', ?1)",
+            params![legacy],
+        )
+        .await
+        .unwrap();
+        assert!(compact_observation_bodies(&conn).await.unwrap());
+        assert!(!compact_observation_bodies(&conn).await.unwrap());
+        let mut rows = conn
+            .query("SELECT observation_json FROM observations", ())
+            .await
+            .unwrap();
+        let encoded: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(value[BODY_REF_KEY]["/payload"], body.content_hash);
+        tracedecay_store::hydrate_json_value(&mut value, |_| body.unpack()).unwrap();
+        assert_eq!(value["payload"], text);
+        assert_eq!(
+            load_canonical_body(&conn, &body.content_hash)
+                .await
+                .unwrap(),
+            text.as_bytes()
         );
     }
 

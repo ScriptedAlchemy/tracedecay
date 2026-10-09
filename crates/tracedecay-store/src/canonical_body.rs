@@ -20,6 +20,7 @@ pub const INLINE_BODY_BYTES: usize = 4096;
 // DurableObservationV1 never serializes this root field. Provider-controlled
 // JSON stays under payload and cannot be mistaken for storage metadata.
 pub const BODY_REF_KEY: &str = "_tracedecay_canonical_body_refs";
+const LEGACY_BODY_REF_KEY: &str = "tracedecay.body_ref";
 pub const ENCODING_IDENTITY: &str = "identity";
 pub const ENCODING_DEFLATE: &str = "deflate";
 
@@ -122,7 +123,7 @@ pub fn unpack_body(
 }
 
 pub fn stored_json_needs_hydrate(json: &str) -> bool {
-    json.contains(BODY_REF_KEY)
+    json.contains(BODY_REF_KEY) || json.contains(LEGACY_BODY_REF_KEY)
 }
 
 pub fn collect_body_refs(json: &str) -> Result<Vec<String>, CanonicalBodyError> {
@@ -139,7 +140,11 @@ pub fn collect_body_refs(json: &str) -> Result<Vec<String>, CanonicalBodyError> 
 
 fn body_refs(value: &Value) -> Result<BTreeMap<String, String>, CanonicalBodyError> {
     match value.as_object().and_then(|map| map.get(BODY_REF_KEY)) {
-        None => Ok(BTreeMap::new()),
+        None => {
+            let mut refs = BTreeMap::new();
+            collect_legacy_refs(value, "", &mut refs);
+            Ok(refs)
+        }
         Some(refs) => serde_json::from_value(refs.clone()).map_err(Into::into),
     }
 }
@@ -155,12 +160,10 @@ pub fn slim_json_value(value: &mut Value) -> Result<Vec<StoredCanonicalBody>, Ca
     let mut bodies = Vec::new();
     let mut refs = BTreeMap::new();
     slim_value(value, "", &mut bodies, &mut refs)?;
-    if !refs.is_empty() {
-        value
-            .as_object_mut()
-            .ok_or(CanonicalBodyError::InvalidJson)?
-            .insert(BODY_REF_KEY.to_owned(), serde_json::to_value(refs)?);
-    }
+    value
+        .as_object_mut()
+        .ok_or(CanonicalBodyError::InvalidJson)?
+        .insert(BODY_REF_KEY.to_owned(), serde_json::to_value(refs)?);
     Ok(bodies)
 }
 
@@ -172,13 +175,18 @@ where
     E: From<CanonicalBodyError>,
 {
     let refs = body_refs(value).map_err(E::from)?;
-    if refs.is_empty() {
-        return Ok(false);
-    }
+    let has_refs = !refs.is_empty();
+    let root_format = value.get(BODY_REF_KEY).is_some();
     for (path, hash) in refs {
         let target = value
             .pointer_mut(&path)
-            .filter(|target| target.is_null())
+            .filter(|target| {
+                if root_format {
+                    target.is_null()
+                } else {
+                    legacy_ref(target) == Some(hash.as_str())
+                }
+            })
             .ok_or_else(|| E::from(CanonicalBodyError::InvalidJson))?;
         let bytes = load(&hash)?;
         let text = String::from_utf8(bytes).map_err(|_| {
@@ -193,7 +201,64 @@ where
         .as_object_mut()
         .ok_or_else(|| E::from(CanonicalBodyError::InvalidJson))?
         .remove(BODY_REF_KEY);
-    Ok(true)
+    Ok(has_refs)
+}
+
+fn legacy_ref(value: &Value) -> Option<&str> {
+    let map = value.as_object()?;
+    (map.len() == 1)
+        .then(|| map.get(LEGACY_BODY_REF_KEY).and_then(Value::as_str))
+        .flatten()
+}
+
+fn collect_legacy_refs(value: &Value, path: &str, refs: &mut BTreeMap<String, String>) {
+    if let Some(hash) = legacy_ref(value) {
+        refs.insert(path.to_owned(), hash.to_owned());
+        return;
+    }
+    match value {
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_legacy_refs(item, &format!("{path}/{index}"), refs);
+            }
+        }
+        Value::Object(map) => {
+            for (key, child) in map {
+                let token = key.replace('~', "~0").replace('/', "~1");
+                collect_legacy_refs(child, &format!("{path}/{token}"), refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Upgrades the nested reference encoding shipped before root reference maps.
+/// New observations must use `slim_stored_json` so provider objects are never
+/// interpreted as references from the old storage format.
+pub fn migrate_stored_json(
+    json: &str,
+) -> Result<(String, Vec<StoredCanonicalBody>), CanonicalBodyError> {
+    let mut value: Value = serde_json::from_str(json)?;
+    if value.get(BODY_REF_KEY).is_some() {
+        body_refs(&value)?;
+        return Ok((json.to_owned(), Vec::new()));
+    }
+    let mut refs = body_refs(&value)?;
+    for path in refs.keys() {
+        *value
+            .pointer_mut(path)
+            .ok_or(CanonicalBodyError::InvalidJson)? = Value::Null;
+    }
+    let mut bodies = Vec::new();
+    slim_value(&mut value, "", &mut bodies, &mut refs)?;
+    if refs.is_empty() {
+        return Ok((json.to_owned(), bodies));
+    }
+    value
+        .as_object_mut()
+        .ok_or(CanonicalBodyError::InvalidJson)?
+        .insert(BODY_REF_KEY.to_owned(), serde_json::to_value(refs)?);
+    Ok((value.to_string(), bodies))
 }
 
 pub fn slim_stored_json(
@@ -201,9 +266,6 @@ pub fn slim_stored_json(
 ) -> Result<(String, Vec<StoredCanonicalBody>), CanonicalBodyError> {
     let mut value: Value = serde_json::from_str(json)?;
     let bodies = slim_json_value(&mut value)?;
-    if bodies.is_empty() {
-        return Ok((json.to_owned(), bodies));
-    }
     Ok((value.to_string(), bodies))
 }
 
@@ -315,6 +377,72 @@ mod tests {
         })
         .unwrap();
         assert_eq!(stored, original);
+    }
+
+    #[test]
+    fn small_provider_reference_objects_are_not_storage_references() {
+        let original = json!({"payload": {(LEGACY_BODY_REF_KEY): "provider-data"}});
+        let (encoded, bodies) = slim_stored_json(&original.to_string()).unwrap();
+        assert!(bodies.is_empty());
+        assert!(collect_body_refs(&encoded).unwrap().is_empty());
+        let mut stored: Value = serde_json::from_str(&encoded).unwrap();
+        assert!(
+            !hydrate_json_value(&mut stored, |_| -> Result<Vec<u8>, CanonicalBodyError> {
+                panic!("provider metadata must not load canonical storage")
+            })
+            .unwrap()
+        );
+        assert_eq!(stored, original);
+    }
+
+    #[test]
+    fn shipped_nested_references_hydrate_and_migrate_idempotently() {
+        let body = StoredCanonicalBody::pack(b"previously stored body").unwrap();
+        let legacy =
+            json!({"payload": {"slash/key~": [{(LEGACY_BODY_REF_KEY): body.content_hash}]}});
+        let expected = json!({"payload": {"slash/key~": ["previously stored body"]}});
+        let mut hydrated = legacy.clone();
+        hydrate_json_value(&mut hydrated, |hash| {
+            assert_eq!(hash, body.content_hash);
+            body.unpack()
+        })
+        .unwrap();
+        assert_eq!(hydrated, expected);
+        let (encoded, bodies) = migrate_stored_json(&legacy.to_string()).unwrap();
+        assert!(
+            bodies.is_empty(),
+            "migration reuses existing canonical bytes"
+        );
+        assert_eq!(
+            collect_body_refs(&encoded).unwrap(),
+            vec![body.content_hash.clone()]
+        );
+        let mut migrated: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            migrated[BODY_REF_KEY]["/payload/slash~1key~0/0"],
+            body.content_hash
+        );
+        hydrate_json_value(&mut migrated, |_| body.unpack()).unwrap();
+        assert_eq!(migrated, expected);
+        assert_eq!(
+            migrate_stored_json(&encoded).unwrap(),
+            (encoded, Vec::new())
+        );
+    }
+
+    #[test]
+    fn shipped_nested_references_preserve_missing_and_corrupt_errors() {
+        let legacy = json!({"payload": {(LEGACY_BODY_REF_KEY): "missing"}});
+        let missing = hydrate_json_value(&mut legacy.clone(), |hash| {
+            Err::<Vec<u8>, _>(CanonicalBodyError::Missing {
+                content_hash: hash.to_owned(),
+            })
+        });
+        assert!(matches!(missing, Err(CanonicalBodyError::Missing { .. })));
+        let corrupt = hydrate_json_value(&mut legacy.clone(), |hash| {
+            unpack_body(hash, ENCODING_IDENTITY, b"wrong bytes")
+        });
+        assert!(matches!(corrupt, Err(CanonicalBodyError::Corrupt { .. })));
     }
 
     #[test]

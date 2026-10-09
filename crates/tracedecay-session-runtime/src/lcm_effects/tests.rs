@@ -3371,27 +3371,16 @@ async fn insert_summary_evidence(
             "to_store_id": last_source_id,
         });
     }
-    let transaction = db.begin_write_transaction().await.unwrap();
-    transaction
-        .execute(
-            "INSERT INTO lcm_raw_messages (
-                     provider, message_id, session_id, role, ordinal, content, content_hash,
-                     storage_kind, kind, metadata_json
-                 ) VALUES (?1, ?2, ?3, 'system', ?4, ?5, ?8, 'inline', ?6, ?7)",
-            tracedecay_runtime_core::db::engine::params![
-                provider,
-                message_id,
-                session_id,
-                ordinal,
-                text,
-                kind,
-                metadata.to_string(),
-                tracedecay_lcm::retrieval_content::projected_content_hash(text),
-            ],
-        )
+    let mut evidence = message(session_id, ordinal);
+    evidence.provider = provider.to_string();
+    evidence.message_id = message_id.to_string();
+    evidence.role = "system".to_string();
+    evidence.text = text.to_string();
+    evidence.kind = Some(kind.to_string());
+    evidence.metadata_json = Some(metadata.to_string());
+    db.lcm_ingest_raw_message(db.db_path().parent().unwrap(), &evidence)
         .await
         .unwrap();
-    transaction.commit().await.unwrap();
 }
 
 /// Seeds one session row and its raw LCM messages in order.

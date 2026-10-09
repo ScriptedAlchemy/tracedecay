@@ -214,14 +214,10 @@ fn decode_verified_raw_message(row: &Row) -> Result<LcmRawMessage, LcmError> {
 
 fn inline_content_from_canonical_body(row: &Row, content_hash: &str) -> Result<String, LcmError> {
     let encoding = row
-        .get::<Option<String>>(13)
-        .ok()
-        .flatten()
+        .get::<Option<String>>(13)?
         .ok_or(LcmError::PayloadIntegrityMismatch)?;
     let blob = row
-        .get::<Option<Vec<u8>>>(14)
-        .ok()
-        .flatten()
+        .get::<Option<Vec<u8>>>(14)?
         .ok_or(LcmError::PayloadIntegrityMismatch)?;
     let bytes = unpack_body(content_hash, &encoding, &blob)
         .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
