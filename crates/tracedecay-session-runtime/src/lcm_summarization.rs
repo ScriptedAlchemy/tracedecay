@@ -5,7 +5,11 @@ use tracedecay_domain::CanonicalObservationEnvelopeV1;
 use tracedecay_domain::configuration::LcmSummarizerExecutablesV1;
 
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_lcm::raw::{LcmPredecessorRangeState, predecessor_range_state};
+use tracedecay_global_db::observation::decode_observation_json;
+use tracedecay_lcm::raw::{
+    LcmPredecessorRangeState, RAW_MESSAGE_SELECT_COLUMNS, predecessor_range_state,
+    verified_raw_message_from_row,
+};
 use tracedecay_lcm::{LcmError, LcmSummaryRequest, LcmSummarySourceRange};
 use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
@@ -150,17 +154,17 @@ pub(super) async fn native_summary_evidence(
     let (candidate_sql, candidate_params) = if let Some(required) = required_source {
         (
             format!(
-                "SELECT message.message_id, COALESCE(message.content, message.placeholder_text, ''), message.kind,
-                    message.metadata_json, source_range.from_store_id, source_range.to_store_id,
-                    message.store_id, {MESSAGE_ENVELOPE_COLUMN}
+                "SELECT message.*, source_range.from_store_id, source_range.to_store_id,
+                    {MESSAGE_OBSERVATION_COLUMN}
              FROM lcm_raw_predecessor_ranges AS source_range
-             JOIN lcm_raw_messages AS message
+             JOIN (SELECT {RAW_MESSAGE_SELECT_COLUMNS}, kind, placeholder_text FROM lcm_raw_messages) AS message
                ON message.provider = source_range.provider
               AND message.message_id = source_range.message_id
               AND message.session_id = source_range.session_id
              WHERE source_range.provider = ?1 AND source_range.session_id = ?2
                AND source_range.to_store_id = ?3
-               AND length(trim(COALESCE(message.content, message.placeholder_text, ''))) > 0
+               AND ((message.storage_kind = 'inline' AND message.content IS NULL)
+                    OR length(trim(COALESCE(message.content, message.placeholder_text, ''))) > 0)
              ORDER BY message.store_id, message.message_id
              LIMIT 2"
             ),
@@ -169,16 +173,16 @@ pub(super) async fn native_summary_evidence(
     } else {
         (
             format!(
-                "SELECT message.message_id, COALESCE(message.content, message.placeholder_text, ''), message.kind,
-                    message.metadata_json, source_range.from_store_id, source_range.to_store_id,
-                    message.store_id, {MESSAGE_ENVELOPE_COLUMN}
-             FROM lcm_raw_messages AS message
+                "SELECT message.*, source_range.from_store_id, source_range.to_store_id,
+                    {MESSAGE_OBSERVATION_COLUMN}
+             FROM (SELECT {RAW_MESSAGE_SELECT_COLUMNS}, kind, placeholder_text FROM lcm_raw_messages) AS message
              LEFT JOIN lcm_raw_predecessor_ranges AS source_range
                ON source_range.provider = message.provider
               AND source_range.message_id = message.message_id
               AND source_range.session_id = message.session_id
              WHERE message.provider = ?1 AND message.session_id = ?2
-               AND length(trim(COALESCE(message.content, message.placeholder_text, ''))) > 0
+               AND ((message.storage_kind = 'inline' AND message.content IS NULL)
+                    OR length(trim(COALESCE(message.content, message.placeholder_text, ''))) > 0)
              ORDER BY message.ordinal DESC, message.message_id DESC
              LIMIT 512"
             ),
@@ -195,22 +199,22 @@ pub(super) async fn native_summary_evidence(
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?
     {
+        let message = verified_raw_message_from_row(&row)?;
+        if message.content.trim().is_empty() {
+            continue;
+        }
         candidates.push((
-            row.get::<String>(0)
+            message.message_id,
+            message.content,
+            row.get::<Option<String>>(15)
                 .map_err(|error| LcmError::Db(error.to_string()))?,
-            row.get::<String>(1)
+            message.metadata_json,
+            row.get::<Option<i64>>(17)
                 .map_err(|error| LcmError::Db(error.to_string()))?,
-            row.get::<Option<String>>(2)
+            row.get::<Option<i64>>(18)
                 .map_err(|error| LcmError::Db(error.to_string()))?,
-            row.get::<Option<String>>(3)
-                .map_err(|error| LcmError::Db(error.to_string()))?,
-            row.get::<Option<i64>>(4)
-                .map_err(|error| LcmError::Db(error.to_string()))?,
-            row.get::<Option<i64>>(5)
-                .map_err(|error| LcmError::Db(error.to_string()))?,
-            row.get::<Option<i64>>(6)
-                .map_err(|error| LcmError::Db(error.to_string()))?,
-            row.get::<Option<String>>(7)
+            Some(message.store_id),
+            row.get::<Option<String>>(19)
                 .map_err(|error| LcmError::Db(error.to_string()))?,
         ));
     }
@@ -222,7 +226,7 @@ pub(super) async fn native_summary_evidence(
         candidates.into_iter().rev()
     {
         let metadata = parse_message_metadata(metadata_json.as_deref());
-        let envelope = decode_message_envelope(envelope_json.as_deref())?;
+        let envelope = decode_message_envelope(&snapshot, envelope_json.as_deref()).await?;
         let candidate = NativeSummaryCandidate {
             provider,
             message_id: &message_id,
@@ -311,9 +315,8 @@ async fn native_store_is_recognized(
     let mut rows = snapshot
         .query(
             &format!(
-                "SELECT message.message_id, COALESCE(message.content, message.placeholder_text, ''), message.kind,
-                        message.metadata_json, {MESSAGE_ENVELOPE_COLUMN}
-             FROM lcm_raw_messages AS message
+                "SELECT message.*, {MESSAGE_OBSERVATION_COLUMN}
+             FROM (SELECT {RAW_MESSAGE_SELECT_COLUMNS}, kind, placeholder_text FROM lcm_raw_messages) AS message
              WHERE message.provider = ?1 AND message.session_id = ?2
                AND message.store_id = ?3
              LIMIT 1"
@@ -329,25 +332,20 @@ async fn native_store_is_recognized(
     else {
         return Ok(false);
     };
-    let message_id = row
-        .get::<String>(0)
-        .map_err(|error| LcmError::Db(error.to_string()))?;
-    let text = row
-        .get::<String>(1)
-        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let message = verified_raw_message_from_row(&row)?;
+    let message_id = message.message_id;
+    let text = message.content;
     let kind = row
-        .get::<Option<String>>(2)
+        .get::<Option<String>>(15)
         .map_err(|error| LcmError::Db(error.to_string()))?;
-    let metadata = parse_message_metadata(
-        row.get::<Option<String>>(3)
-            .map_err(|error| LcmError::Db(error.to_string()))?
-            .as_deref(),
-    );
+    let metadata = parse_message_metadata(message.metadata_json.as_deref());
     let envelope = decode_message_envelope(
-        row.get::<Option<String>>(4)
+        snapshot,
+        row.get::<Option<String>>(17)
             .map_err(|error| LcmError::Db(error.to_string()))?
             .as_deref(),
-    )?;
+    )
+    .await?;
     drop(rows);
     let candidate = NativeSummaryCandidate {
         provider,
@@ -365,12 +363,11 @@ async fn native_store_is_recognized(
     Ok(false)
 }
 
-/// The canonical envelope of the newest observation projected into the
+/// The complete newest canonical observation projected into the
 /// `message` row. Message metadata does not embed it: the observation row is
 /// its only copy. Rows no observation projected (direct transcript ingest)
 /// select NULL.
-pub(super) const MESSAGE_ENVELOPE_COLUMN: &str =
-    "(SELECT json_extract(observation.observation_json, '$.payload')
+pub(super) const MESSAGE_OBSERVATION_COLUMN: &str = "(SELECT observation.observation_json
       FROM observation_projection_provenance AS provenance
       JOIN observations AS observation
         ON observation.observation_id = provenance.observation_id
@@ -388,20 +385,28 @@ fn parse_message_metadata(metadata: Option<&str>) -> Value {
 
 /// A projected row's observation payload is a validated canonical envelope, so
 /// one that does not decode is corruption, never an unrecognized row.
-pub(super) fn decode_message_envelope(
-    envelope: Option<&str>,
+pub(super) async fn decode_message_envelope(
+    conn: &impl QueryExecutor,
+    observation_json: Option<&str>,
 ) -> Result<Option<Box<CanonicalObservationEnvelopeV1>>, LcmError> {
-    envelope
-        .map(|envelope| {
-            serde_json::from_str(envelope)
-                .map(Box::new)
-                .map_err(|error| {
-                    LcmError::Db(format!(
-                        "message observation envelope decode failed: {error}"
-                    ))
-                })
+    let Some(observation_json) = observation_json else {
+        return Ok(None);
+    };
+    let observation = decode_observation_json(conn, observation_json, "read summary observation")
+        .await
+        .map_err(|error| {
+            LcmError::Db(format!(
+                "message observation envelope decode failed: {error}"
+            ))
+        })?;
+    serde_json::from_value(observation.payload().clone())
+        .map(Box::new)
+        .map(Some)
+        .map_err(|error| {
+            LcmError::Db(format!(
+                "message observation envelope decode failed: {error}"
+            ))
         })
-        .transpose()
 }
 
 async fn native_source_membership_is_exact(
@@ -467,10 +472,14 @@ impl From<LcmError> for SummaryResolutionError {
 #[cfg(test)]
 mod decode_message_envelope_tests {
     use super::decode_message_envelope;
+    use tracedecay_runtime_core::db::engine::TestConnection;
 
-    #[test]
-    fn corrupt_observation_envelope_is_typed() {
-        let error = decode_message_envelope(Some(r#"{"not": "an envelope"}"#))
+    #[tokio::test]
+    async fn corrupt_observation_envelope_is_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = TestConnection::open(&dir.path().join("corrupt-envelope.db"));
+        let error = decode_message_envelope(&conn, Some(r#"{"not": "an envelope"}"#))
+            .await
             .expect_err("a corrupt observation payload must not read as unrecognized");
         assert!(
             error
@@ -480,8 +489,15 @@ mod decode_message_envelope_tests {
         );
     }
 
-    #[test]
-    fn unprojected_row_has_no_envelope() {
-        assert!(decode_message_envelope(None).unwrap().is_none());
+    #[tokio::test]
+    async fn unprojected_row_has_no_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = TestConnection::open(&dir.path().join("no-envelope.db"));
+        assert!(
+            decode_message_envelope(&conn, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

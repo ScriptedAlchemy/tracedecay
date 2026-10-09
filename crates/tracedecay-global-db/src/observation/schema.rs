@@ -287,7 +287,7 @@ pub async fn ensure_observation_schema(
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     }
-    super::canonical_bodies::compact_observation_bodies(conn).await?;
+    super::canonical_bodies::ensure_canonical_bodies_table(conn).await?;
     Ok(None)
 }
 

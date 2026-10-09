@@ -6,12 +6,14 @@ use tracedecay_domain::{
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCoverageV1};
 
 use crate::global_db_operation_error;
+use crate::observation::decode_observation_json;
 use tracedecay_domain::errors::ProjectOpenFailureKind;
 use tracedecay_runtime_core::db::engine::{Error as EngineError, QueryExecutor, params};
 use tracedecay_session_temporal_store::operations::{
     FrozenPublicationReceipt, SANITIZER_VERSION as SUMMARY_PUBLICATION_SANITIZER_VERSION,
     receipt_id as summary_receipt_id,
 };
+use tracedecay_store::ObservationStoreError;
 
 use super::triggers::{INVARIANTS, Invariant};
 use super::{AUDIT_PAGE_ROWS, OBSERVATION_AUDIT_PAGE_ROWS, OPERATION};
@@ -108,6 +110,22 @@ pub(super) fn audit_read_error(error: EngineError) -> tracedecay_domain::errors:
     } else {
         authority_violation(error.to_string())
     }
+}
+
+pub(super) async fn decode_authority_observation(
+    conn: &impl QueryExecutor,
+    json: &str,
+) -> tracedecay_domain::errors::Result<DurableObservationV1> {
+    decode_observation_json(conn, json, "read committed observation authority")
+        .await
+        .map_err(|error| match error {
+            ObservationStoreError::Storage { source, .. } => match source.downcast::<EngineError>()
+            {
+                Ok(error) => audit_read_error(*error),
+                Err(source) => authority_violation(source.to_string()),
+            },
+            error => authority_violation(error.to_string()),
+        })
 }
 
 pub(super) fn decode_authority_json<T: DeserializeOwned>(
@@ -271,7 +289,7 @@ pub(super) async fn validate_observation_authority_page(
         };
 
         let observation: DurableObservationV1 =
-            decode_authority_json(&observation_json, "committed observation authority JSON")?;
+            decode_authority_observation(conn, &observation_json).await?;
         let cursor: ObservationSourceCursorV1 =
             decode_authority_json(&cursor_json, "committed source cursor authority JSON")?;
         if sequence <= 0

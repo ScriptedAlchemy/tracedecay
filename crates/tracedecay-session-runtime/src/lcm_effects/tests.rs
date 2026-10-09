@@ -447,7 +447,7 @@ async fn native_summary_evidence_requires_exact_cursor_text_and_claude_pair_iden
     ] {
         assert!(db.upsert_session(&session(provider, session_id)).await);
     }
-    let cursor_text = "exact Cursor Composer compacted text";
+    let cursor_text = "exact Cursor Composer compacted text".repeat(256);
     let cursor_summary = canonical_record(canonical_envelope(
         "cursor",
         "cursor-native-session",

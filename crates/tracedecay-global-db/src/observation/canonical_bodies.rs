@@ -1,8 +1,9 @@
+use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_store::{
-    BODY_REF_KEY, CANONICAL_BODIES_TABLE_SQL, CanonicalBodyError, INLINE_BODY_BYTES,
-    LOAD_CANONICAL_BODY_SQL, StoredCanonicalBody, UPSERT_CANONICAL_BODY_SQL, collect_body_refs,
-    parse_stored_observation, slim_stored_json, unpack_body,
+    CANONICAL_BODIES_TABLE_SQL, CanonicalBodyError, INLINE_BODY_BYTES, LOAD_CANONICAL_BODY_SQL,
+    StoredCanonicalBody, UPSERT_CANONICAL_BODY_SQL, collect_body_refs, parse_stored_observation,
+    slim_stored_json, unpack_body,
 };
 
 use super::super::global_db_operation_error;
@@ -12,7 +13,6 @@ pub(super) const CANONICAL_BODY_MIGRATION: &str = "session-canonical-bodies-v1";
 const LCM_CANONICAL_BODY_MIGRATION: &str = "session-canonical-bodies-lcm-v1";
 const OPERATION: &str = "compact session canonical bodies";
 const COMPACT_PAGE: i64 = 64;
-const INLINE_BODY_BYTES_SQL: i64 = INLINE_BODY_BYTES as i64;
 const LIFT_OBSERVATION_IMMUTABILITY: &str = "
     DROP TRIGGER IF EXISTS observations_immutable_update;
     CREATE TRIGGER observations_immutable_update
@@ -32,150 +32,197 @@ pub(crate) async fn ensure_canonical_bodies_table(
         .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
-pub(crate) async fn compact_observation_bodies(
+struct CompactionPage<T> {
+    next: Option<T>,
+    rewrote: bool,
+}
+
+/// Each page restores guards before committing and releases the canonical
+/// writer. Interrupted runs can rescan already-slim rows without changing them.
+pub(crate) async fn converge_canonical_bodies(
+    database: &Database,
+) -> tracedecay_domain::errors::Result<()> {
+    let mut after = None;
+    loop {
+        let transaction = database.begin_write_transaction(OPERATION).await?;
+        let page = compact_observation_page(&transaction, after.as_deref()).await?;
+        transaction.commit().await?;
+        after = page.next;
+        if after.is_none() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let mut after = 0;
+    loop {
+        let transaction = database.begin_write_transaction(OPERATION).await?;
+        if migration_recorded(&transaction, LCM_CANONICAL_BODY_MIGRATION).await? {
+            transaction.commit().await?;
+            break;
+        }
+        let page = compact_lcm_page(&transaction, after).await?;
+        if page.next.is_none() {
+            record_migration(&transaction, LCM_CANONICAL_BODY_MIGRATION).await?;
+        }
+        transaction.commit().await?;
+        let Some(next) = page.next else {
+            break;
+        };
+        after = next;
+        tokio::task::yield_now().await;
+    }
+    Ok(())
+}
+
+async fn record_migration(
     conn: &impl Executor,
-) -> tracedecay_domain::errors::Result<bool> {
+    migration: &str,
+) -> tracedecay_domain::errors::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
+        params![migration],
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    Ok(())
+}
+
+async fn compact_observation_page(
+    conn: &impl Executor,
+    after: Option<&str>,
+) -> tracedecay_domain::errors::Result<CompactionPage<String>> {
     ensure_canonical_bodies_table(conn).await?;
     if migration_recorded(conn, CANONICAL_BODY_MIGRATION).await? {
-        return Ok(false);
+        return Ok(CompactionPage {
+            next: None,
+            rewrote: false,
+        });
+    }
+    let mut rows = conn
+        .query(
+            "SELECT observation_id, observation_json FROM observations
+         WHERE (?1 IS NULL OR observation_id > ?1)
+         ORDER BY observation_id LIMIT ?2",
+            params![after, COMPACT_PAGE],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut page = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        page.push((
+            row.get::<String>(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            row.get::<String>(1)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        ));
+    }
+    drop(rows);
+    if page.is_empty() {
+        record_migration(conn, CANONICAL_BODY_MIGRATION).await?;
+        return Ok(CompactionPage {
+            next: None,
+            rewrote: false,
+        });
     }
     conn.execute_batch(LIFT_OBSERVATION_IMMUTABILITY)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut next = None;
     let mut rewrote = false;
-    let mut after_observation_id: Option<String> = None;
-    loop {
-        let mut rows = conn
-            .query(
-                "SELECT observation_id, observation_json FROM observations
-                 WHERE length(CAST(observation_json AS BLOB)) >= ?1
-                   AND (?2 IS NULL OR observation_id > ?2)
-                 ORDER BY observation_id
-                 LIMIT ?3",
-                params![
-                    INLINE_BODY_BYTES_SQL,
-                    after_observation_id.as_deref(),
-                    COMPACT_PAGE
-                ],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let mut page = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        {
-            page.push((
-                row.get::<String>(0)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                row.get::<String>(1)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            ));
-        }
-        drop(rows);
-        if page.is_empty() {
-            break;
-        }
-        for (observation_id, observation_json) in page {
-            let (slim, bodies) = slim_stored_json(&observation_json)
+    for (id, json) in page {
+        if json.len() >= INLINE_BODY_BYTES {
+            let (slim, bodies) = slim_stored_json(&json)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
             persist_bodies(conn, &bodies).await?;
-            if slim != observation_json {
+            if slim != json {
                 conn.execute(
                     "UPDATE observations SET observation_json = ?1 WHERE observation_id = ?2",
-                    params![slim, observation_id.as_str()],
+                    params![slim, id.as_str()],
                 )
                 .await
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
                 rewrote = true;
             }
-            after_observation_id = Some(observation_id);
         }
+        next = Some(id);
     }
     conn.execute_batch(RESTORE_OBSERVATION_IMMUTABILITY)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    conn.execute(
-        "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
-        params![CANONICAL_BODY_MIGRATION],
-    )
-    .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    Ok(rewrote)
-}
-
-pub(crate) async fn compact_attached_lcm_bodies(
-    conn: &impl Executor,
-) -> tracedecay_domain::errors::Result<bool> {
-    if migration_recorded(conn, LCM_CANONICAL_BODY_MIGRATION).await? {
-        return Ok(false);
-    }
-    let rewrote = compact_lcm_bodies(conn).await?;
-    conn.execute(
-        "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
-        params![LCM_CANONICAL_BODY_MIGRATION],
-    )
-    .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    Ok(rewrote)
+    Ok(CompactionPage { next, rewrote })
 }
 
 pub(crate) async fn compact_lcm_bodies(
     conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<bool> {
-    ensure_canonical_bodies_table(conn).await?;
-    if !table_exists(conn, "lcm_raw_messages").await? {
-        return Ok(false);
-    }
+    let mut after = 0;
     let mut rewrote = false;
     loop {
-        let mut rows = conn
-            .query(
-                "SELECT store_id, content FROM lcm_raw_messages
-                 WHERE content IS NOT NULL AND length(CAST(content AS BLOB)) >= ?1
-                 LIMIT ?2",
-                params![INLINE_BODY_BYTES_SQL, COMPACT_PAGE],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let mut page = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        {
-            page.push((
-                row.get::<i64>(0)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                row.get::<String>(1)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            ));
-        }
-        drop(rows);
-        if page.is_empty() {
-            break;
-        }
-        for (store_id, content) in page {
-            let body = StoredCanonicalBody::pack(content.as_bytes())
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            persist_bodies(conn, std::slice::from_ref(&body)).await?;
-            let placeholder = tracedecay_lcm::retrieval_content::derived_text_for_index(&content);
-            conn.execute(
-                "UPDATE lcm_raw_messages
-                 SET content = NULL, placeholder_text = ?1
-                 WHERE store_id = ?2",
-                params![placeholder, store_id],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            rewrote = true;
-        }
+        let page = compact_lcm_page(conn, after).await?;
+        rewrote |= page.rewrote;
+        let Some(next) = page.next else {
+            return Ok(rewrote);
+        };
+        after = next;
     }
-    Ok(rewrote)
 }
 
-pub(crate) async fn decode_observation_json(
+async fn compact_lcm_page(
+    conn: &impl Executor,
+    after: i64,
+) -> tracedecay_domain::errors::Result<CompactionPage<i64>> {
+    ensure_canonical_bodies_table(conn).await?;
+    if !table_exists(conn, "lcm_raw_messages").await? {
+        return Ok(CompactionPage {
+            next: None,
+            rewrote: false,
+        });
+    }
+    let mut rows = conn.query(
+        "SELECT store_id, content FROM lcm_raw_messages WHERE store_id > ?1 ORDER BY store_id LIMIT ?2",
+        params![after, COMPACT_PAGE]
+    ).await.map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut page = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        page.push((
+            row.get::<i64>(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            row.get::<Option<String>>(1)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        ));
+    }
+    drop(rows);
+    let mut next = None;
+    let mut rewrote = false;
+    for (id, content) in page {
+        next = Some(id);
+        let Some(content) = content.filter(|content| content.len() >= INLINE_BODY_BYTES) else {
+            continue;
+        };
+        let body = StoredCanonicalBody::pack(content.as_bytes())
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        persist_bodies(conn, std::slice::from_ref(&body)).await?;
+        let placeholder = tracedecay_lcm::retrieval_content::derived_text_for_index(&content);
+        conn.execute(
+            "UPDATE lcm_raw_messages SET content = NULL, placeholder_text = ?1 WHERE store_id = ?2",
+            params![placeholder, id],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        rewrote = true;
+    }
+    Ok(CompactionPage { next, rewrote })
+}
+
+pub async fn decode_observation_json(
     conn: &impl QueryExecutor,
     observation_json: &str,
     operation: &'static str,
@@ -183,12 +230,7 @@ pub(crate) async fn decode_observation_json(
     let hashes = collect_body_refs(observation_json).map_err(|error| storage(operation, error))?;
     let mut bodies = std::collections::HashMap::new();
     for hash in hashes {
-        bodies.insert(
-            hash.clone(),
-            load_canonical_body(conn, &hash)
-                .await
-                .map_err(|error| storage(operation, error))?,
-        );
+        bodies.insert(hash.clone(), load_canonical_body(conn, &hash).await?);
     }
     parse_stored_observation(observation_json, |hash| {
         bodies
@@ -204,29 +246,27 @@ pub(crate) async fn decode_observation_json(
 pub(crate) async fn load_canonical_body(
     conn: &impl QueryExecutor,
     content_hash: &str,
-) -> Result<Vec<u8>, CanonicalBodyError> {
+) -> tracedecay_store::ObservationStoreResult<Vec<u8>> {
+    const OPERATION: &str = "read canonical observation body";
     let mut rows = conn
         .query(LOAD_CANONICAL_BODY_SQL, params![content_hash])
         .await
-        .map_err(|_| CanonicalBodyError::Missing {
-            content_hash: content_hash.to_owned(),
-        })?;
+        .map_err(|error| storage(OPERATION, error))?;
     let row = rows
         .next()
         .await
-        .map_err(|_| CanonicalBodyError::Missing {
-            content_hash: content_hash.to_owned(),
-        })?
-        .ok_or_else(|| CanonicalBodyError::Missing {
-            content_hash: content_hash.to_owned(),
+        .map_err(|error| storage(OPERATION, error))?
+        .ok_or_else(|| {
+            storage(
+                OPERATION,
+                CanonicalBodyError::Missing {
+                    content_hash: content_hash.to_owned(),
+                },
+            )
         })?;
-    let encoding: String = row.get(0).map_err(|_| CanonicalBodyError::Missing {
-        content_hash: content_hash.to_owned(),
-    })?;
-    let blob: Vec<u8> = row.get(1).map_err(|_| CanonicalBodyError::Missing {
-        content_hash: content_hash.to_owned(),
-    })?;
-    unpack_body(content_hash, &encoding, &blob)
+    let encoding: String = row.get(0).map_err(|error| storage(OPERATION, error))?;
+    let blob: Vec<u8> = row.get(1).map_err(|error| storage(OPERATION, error))?;
+    unpack_body(content_hash, &encoding, &blob).map_err(|error| storage(OPERATION, error))
 }
 
 async fn persist_bodies(
@@ -288,7 +328,22 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use tracedecay_runtime_core::db::engine::TestConnection;
-    use tracedecay_store::unpack_body;
+    use tracedecay_store::{BODY_REF_KEY, unpack_body};
+
+    async fn compact_observation_bodies(
+        conn: &impl Executor,
+    ) -> tracedecay_domain::errors::Result<bool> {
+        let mut after = None;
+        let mut rewrote = false;
+        loop {
+            let page = compact_observation_page(conn, after.as_deref()).await?;
+            rewrote |= page.rewrote;
+            after = page.next;
+            if after.is_none() {
+                return Ok(rewrote);
+            }
+        }
+    }
 
     fn family_bytes(path: &std::path::Path) -> u64 {
         ["", "-wal", "-shm"].iter().fold(0u64, |total, suffix| {
@@ -305,6 +360,25 @@ mod tests {
                     .unwrap_or(0),
             )
         })
+    }
+
+    #[tokio::test]
+    async fn body_reads_distinguish_storage_failures_from_missing_rows() {
+        let tmp = TempDir::new().unwrap();
+        let conn = TestConnection::open(&tmp.path().join("body-read-errors.db"));
+        let error = load_canonical_body(&conn, "missing").await.unwrap_err();
+        let tracedecay_store::ObservationStoreError::Storage { source, .. } = error else {
+            panic!("expected a storage error");
+        };
+        assert!(source.is::<tracedecay_runtime_core::db::engine::Error>());
+        ensure_canonical_bodies_table(&conn).await.unwrap();
+        let error = load_canonical_body(&conn, "missing").await.unwrap_err();
+        let tracedecay_store::ObservationStoreError::Storage { source, .. } = error else {
+            panic!("expected a missing-body error");
+        };
+        assert!(
+            matches!(source.downcast_ref::<CanonicalBodyError>(), Some(CanonicalBodyError::Missing { content_hash }) if content_hash == "missing")
+        );
     }
 
     #[tokio::test]
@@ -335,6 +409,22 @@ mod tests {
         .await
         .unwrap();
 
+        let first = compact_observation_page(&conn, None).await.unwrap();
+        assert!(!first.rewrote);
+        assert!(first.next.is_some());
+        assert!(
+            !migration_recorded(&conn, CANONICAL_BODY_MIGRATION)
+                .await
+                .unwrap()
+        );
+        assert!(
+            conn.execute(
+                "UPDATE observations SET observation_json = '{}' WHERE observation_id = 'a.000'",
+                ()
+            )
+            .await
+            .is_err()
+        );
         assert!(compact_observation_bodies(&conn).await.unwrap());
         assert!(!compact_observation_bodies(&conn).await.unwrap());
         let mut rows = conn

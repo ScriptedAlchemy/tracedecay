@@ -4,12 +4,13 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex as StdMutex, OnceLock};
 
 use tracedecay_domain::{
-    AgentInstanceId, CanonicalObservationEnvelopeV1, DurableObservationV1, MessageId,
-    ObservationScopeV1, ProjectId, SessionId, ThreadId, TurnId, UserProfileId, WorktreeId,
+    AgentInstanceId, CanonicalObservationEnvelopeV1, MessageId, ObservationScopeV1, ProjectId,
+    SessionId, ThreadId, TurnId, UserProfileId, WorktreeId,
 };
 use tracedecay_store::StoreShardScopeV1;
 
 use tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1;
+use tracedecay_global_db::observation::decode_observation_json;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 const MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1: usize = 64;
@@ -498,9 +499,12 @@ async fn lookup_context_scout_lifecycle_inner(
             .get::<String>(0)
             .map_err(|_| Failure::ObservationRowUnreadable)?;
         let durable = {
-            let _span =
-                tracing::trace_span!("daemon.context_scout.lifecycle_lookup.decode").entered();
-            serde_json::from_str::<DurableObservationV1>(&observation_json)
+            use tracing::Instrument as _;
+            decode_observation_json(&snapshot, &observation_json, "read Context Scout lifecycle")
+                .instrument(tracing::trace_span!(
+                    "daemon.context_scout.lifecycle_lookup.decode"
+                ))
+                .await
         }
         .map_err(|_| Failure::MalformedDurableObservation)?;
         if durable.scope() != &project_scope || durable.source().session_id() != session_id {
