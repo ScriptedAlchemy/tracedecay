@@ -6,8 +6,8 @@
 //!    real BPE tokenizer (tiktoken). Exact for modern OpenAI-family models
 //!    on `o200k_base`; legacy GPT-4 / GPT-3.5 / embeddings and other vendors
 //!    (Claude/Gemini have no public tokenizer) use the same vocabulary as a
-//!    labeled approximation. Shipping only `o200k_base` keeps ~1.6 MiB of
-//!    `cl100k_base` vocabulary out of the binary.
+//!    labeled approximation. Shipping only gzip-compressed `o200k_base`
+//!    (path-patched tiktoken-rs) keeps legacy vocabularies out of `.rodata`.
 //! 2. **estimated**, the legacy `(len+3)/4` chars/4 heuristic, used when
 //!    the `token-counting` feature is compiled out (or a count failed).
 //!

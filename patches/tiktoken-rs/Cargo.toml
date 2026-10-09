@@ -1,0 +1,45 @@
+[package]
+name = "tiktoken-rs"
+version = "0.12.1"
+authors = ["Roger Zurawicki <roger@zura.wiki>"]
+edition = "2024"
+rust-version = "1.85.0"
+description = "Library for encoding and decoding with the tiktoken library in Rust"
+homepage = "https://github.com/zurawiki/tiktoken-rs"
+documentation = "https://docs.rs/crate/tiktoken-rs/"
+readme = "README.md"
+keywords = ["openai", "ai", "gpt", "bpe"]
+license = "MIT"
+repository = "https://github.com/zurawiki/tiktoken-rs"
+publish = false
+include = [
+    "assets/**/*",
+    "src/**/*",
+    "README.md",
+]
+
+# TraceDecay path-patch: ship only gzip-compressed o200k_base. Legacy
+# cl100k/p50k/r50k assets are omitted; their constructors return a typed error.
+
+[features]
+async-openai = ["dep:async-openai"]
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+anyhow = "1.0.102"
+base64 = "0.22.1"
+bstr = "1.13.1"
+fancy-regex = "0.19.0"
+flate2 = "1"
+regex = "1.13.1"
+rustc-hash = "2"
+
+[dependencies.async-openai]
+version = "0.34.0"
+features = ["chat-completion-types"]
+optional = true
+default-features = false
+
+[dependencies.dhat]
+version = "0.3.2"
+optional = true
