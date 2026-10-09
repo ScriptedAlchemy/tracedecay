@@ -2832,8 +2832,66 @@ async fn persist_caps_occurrence_index_text_and_measures_user_sessions_per_n() {
             family_bytes > previous_family_bytes,
             "N={n}: user-sessions family must grow with sessions ({family_bytes} vs {previous_family_bytes})"
         );
+        let mut body_rows = snapshot
+            .query(
+                "SELECT COUNT(*), COALESCE(SUM(length(body)), 0), COALESCE(SUM(uncompressed_bytes), 0)
+                 FROM session_canonical_bodies",
+                (),
+            )
+            .await
+            .expect("canonical body census");
+        let body_row = body_rows
+            .next()
+            .await
+            .expect("canonical body census row")
+            .expect("canonical body census missing row");
+        let stored_bodies: i64 = body_row.get(0).expect("body count");
+        let stored_body_bytes: i64 = body_row.get(1).expect("stored body bytes");
+        let uncompressed_body_bytes: i64 = body_row.get(2).expect("uncompressed body bytes");
+        assert_eq!(stored_bodies, i64::try_from(n).unwrap());
+        assert_eq!(uncompressed_body_bytes, uncapped_index_bytes);
+        assert!(
+            stored_body_bytes < uncompressed_body_bytes,
+            "N={n}: large bodies must be stored compressed ({stored_body_bytes} vs {uncompressed_body_bytes})"
+        );
+
+        let observation_copy: i64 = snapshot
+            .query(
+                "SELECT COUNT(*) FROM observations WHERE instr(observation_json, ?1) > 0",
+                params![payload_stem.as_str()],
+            )
+            .await
+            .expect("observation body leak query")
+            .next()
+            .await
+            .expect("observation body leak row")
+            .expect("observation body leak missing row")
+            .get(0)
+            .expect("observation body leak count");
+        assert_eq!(
+            observation_copy, 0,
+            "N={n}: observation_json must not keep the canonical body"
+        );
+        let lcm_copy: i64 = snapshot
+            .query(
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE content IS NOT NULL AND length(content) >= 4096",
+                (),
+            )
+            .await
+            .expect("lcm body leak query")
+            .next()
+            .await
+            .expect("lcm body leak row")
+            .expect("lcm body leak missing row")
+            .get(0)
+            .expect("lcm body leak count");
+        assert_eq!(
+            lcm_copy, 0,
+            "N={n}: lcm_raw_messages.content must not keep the canonical body"
+        );
         println!(
-            "user-sessions ingest N={n} family_bytes={family_bytes} stored_index_bytes={stored_index_bytes} uncapped_index_bytes={uncapped_index_bytes} unique_payload_bytes={uncapped_index_bytes}"
+            "user-sessions ingest N={n} family_bytes={family_bytes} stored_index_bytes={stored_index_bytes} uncapped_index_bytes={uncapped_index_bytes} unique_payload_bytes={uncapped_index_bytes} stored_body_bytes={stored_body_bytes}"
         );
         previous_family_bytes = family_bytes;
     }

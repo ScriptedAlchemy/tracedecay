@@ -14,7 +14,10 @@ use tracedecay_privacy::{
     sanitize_provider_metadata_json, verify_sanitized_json_payload,
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, Value, params};
-use tracedecay_store::SessionMessageRecord;
+use tracedecay_store::{
+    INLINE_BODY_BYTES, SessionMessageRecord, StoredCanonicalBody, UPSERT_CANONICAL_BODY_SQL,
+    unpack_body,
+};
 
 use super::{
     LcmError, LcmPayloadRef, LcmRawMessage, LcmRawMessageMetadata, LcmStorageKind,
@@ -24,7 +27,11 @@ use super::{
 pub const RAW_MESSAGE_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, content, content_hash, storage_kind, payload_ref,
-                    snippet_text, metadata_json";
+                    snippet_text, metadata_json,
+                    (SELECT encoding FROM session_canonical_bodies
+                      WHERE content_hash = lcm_raw_messages.content_hash),
+                    (SELECT body FROM session_canonical_bodies
+                      WHERE content_hash = lcm_raw_messages.content_hash)";
 fn record_select_columns(alias: &str, text: &str, metadata: &str) -> String {
     format!(
         "{alias}.provider, {alias}.message_id, {alias}.session_id, {alias}.role,
@@ -163,7 +170,10 @@ fn decode_verified_raw_message(row: &Row) -> Result<LcmRawMessage, LcmError> {
     let metadata = raw_message_metadata_from_row(row)?;
     let message = match metadata.storage_kind {
         LcmStorageKind::Inline => {
-            let inline_content = inline_content.ok_or(LcmError::PayloadIntegrityMismatch)?;
+            let inline_content = match inline_content {
+                Some(content) => content,
+                None => inline_content_from_canonical_body(row, &metadata.content_hash)?,
+            };
             metadata.with_verified_content(inline_content)?
         }
         // External rows hash the owning payload, while the raw-message
@@ -172,6 +182,41 @@ fn decode_verified_raw_message(row: &Row) -> Result<LcmRawMessage, LcmError> {
     };
     verify_raw_message_receipt(&message)?;
     Ok(message)
+}
+
+fn inline_content_from_canonical_body(row: &Row, content_hash: &str) -> Result<String, LcmError> {
+    let encoding = row
+        .get::<Option<String>>(13)
+        .ok()
+        .flatten()
+        .ok_or(LcmError::PayloadIntegrityMismatch)?;
+    let blob = row
+        .get::<Option<Vec<u8>>>(14)
+        .ok()
+        .flatten()
+        .ok_or(LcmError::PayloadIntegrityMismatch)?;
+    let bytes = unpack_body(content_hash, &encoding, &blob)
+        .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    String::from_utf8(bytes).map_err(|_| LcmError::PayloadIntegrityMismatch)
+}
+
+async fn persist_canonical_text(
+    conn: &(impl Executor + ?Sized),
+    text: &str,
+) -> Result<(), LcmError> {
+    let body = StoredCanonicalBody::pack(text.as_bytes())
+        .map_err(|error| LcmError::Db(format!("canonical body pack failed: {error}")))?;
+    conn.execute(
+        UPSERT_CANONICAL_BODY_SQL,
+        params![
+            body.content_hash.as_str(),
+            body.encoding,
+            body.blob.as_slice(),
+            body.uncompressed_bytes
+        ],
+    )
+    .await?;
+    Ok(())
 }
 
 pub async fn load_raw_message_by_identity(
@@ -447,6 +492,23 @@ async fn upsert_inline_raw_message(
     metadata_json: Option<&str>,
 ) -> Result<(), LcmError> {
     let content_hash = projected_content_hash(text);
+    if text.len() >= INLINE_BODY_BYTES {
+        persist_canonical_text(conn, text).await?;
+        let placeholder = derived_text_for_index(text);
+        return upsert_owned_raw_message(
+            conn,
+            message,
+            OwnedRawMessageWrite {
+                content: None,
+                content_hash: content_hash.as_str(),
+                storage_kind: LcmStorageKind::Inline,
+                payload_ref: None,
+                placeholder: Some(placeholder.as_str()),
+                metadata_json,
+            },
+        )
+        .await;
+    }
     upsert_owned_raw_message(
         conn,
         message,

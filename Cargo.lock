@@ -6714,6 +6714,7 @@ dependencies = [
 name = "tracedecay-store"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "schemars",
  "serde",
  "serde_json",

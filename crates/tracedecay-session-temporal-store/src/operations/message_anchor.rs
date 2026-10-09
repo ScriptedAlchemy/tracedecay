@@ -173,8 +173,13 @@ async fn resolve_materialized_occurrences(
         }
         let anchor: RetrievalAnchorRecord = serde_json::from_str(&retained.anchor_json)
             .map_err(|_| unavailable(&retained.anchor_id, "unverifiable_anchor"))?;
-        let observation: DurableObservationV1 = serde_json::from_str(&retained.observation_json)
-            .map_err(|_| unavailable(&retained.anchor_id, "unverifiable_observation"))?;
+        let observation: DurableObservationV1 = crate::query::decode_stored_observation(
+            conn,
+            &retained.observation_json,
+            "resolve message anchor observation",
+        )
+        .await
+        .map_err(|_| unavailable(&retained.anchor_id, "unverifiable_observation"))?;
         require_session_owned_observation(
             &observation,
             &anchor,
