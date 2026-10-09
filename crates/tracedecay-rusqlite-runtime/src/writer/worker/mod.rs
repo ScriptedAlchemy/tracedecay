@@ -326,7 +326,7 @@ pub(super) struct Worker {
 }
 
 impl Worker {
-    pub(super) fn run(self) {
+    pub(super) fn run(mut self) {
         #[cfg(any(unix, windows))]
         if let Some(opened_database) = self._opened_database.as_deref() {
             #[cfg(unix)]
