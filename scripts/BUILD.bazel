@@ -5,6 +5,8 @@ exports_files(
         "bazel/rust_test.bzl",
         "bazel/rust_test_environment_probe.txt",
         "check-dashboard-bundle.py",
+        "check-github-hosted-runners.py",
+        "test-check-github-hosted-runners.py",
     ],
     visibility = ["//visibility:public"],
 )
