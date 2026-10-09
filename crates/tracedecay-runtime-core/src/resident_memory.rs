@@ -418,6 +418,11 @@ fn cgroup_committed_bytes_v1(proc_self_cgroup: &Path, cgroup_root: &Path) -> Opt
 /// private pages together, which is the kernel figure a memory kill line
 /// would count. It fills `unreclaimable_bytes` so `admission_bytes` compares
 /// the same quantity `/proc` reports as `RssAnon + RssShmem + VmSwap`.
+///
+/// macOS reads `TASK_VM_INFO`: `resident_size` is every resident page, and
+/// `phys_footprint` is the jetsam charge (Activity Monitor's physical
+/// footprint). Without this sample the daemon's pressure cell stays
+/// unobserved and never sheds retained ingest pages or trims mimalloc.
 #[must_use]
 pub fn sampled_process_resident_v1() -> Option<ProcessResidentSampleV1> {
     #[cfg(target_os = "linux")]
@@ -433,10 +438,69 @@ pub fn sampled_process_resident_v1() -> Option<ProcessResidentSampleV1> {
     {
         process_resident_sample_from_counters_v1()
     }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    {
+        process_resident_sample_from_task_v1()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         None
     }
+}
+
+/// Maps a macOS `TASK_VM_INFO` reading onto [`ProcessResidentSampleV1`].
+///
+/// `phys_footprint` is the admission charge: jetsam and memory-pressure
+/// kills use it, not `resident_size`. A zero footprint falls back to
+/// `internal` (anonymous), then `resident_size`. All-zero is unobserved.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn process_resident_sample_from_macos_vm_info_v1(
+    resident_size: u64,
+    phys_footprint: u64,
+    internal: u64,
+) -> Option<ProcessResidentSampleV1> {
+    let unreclaimable_bytes = if phys_footprint > 0 {
+        phys_footprint
+    } else if internal > 0 {
+        internal
+    } else {
+        resident_size
+    };
+    if unreclaimable_bytes == 0 && resident_size == 0 {
+        return None;
+    }
+    Some(ProcessResidentSampleV1 {
+        resident_bytes: resident_size.max(unreclaimable_bytes),
+        unreclaimable_bytes,
+        swapped_bytes: 0,
+        cgroup_committed_bytes: None,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn process_resident_sample_from_task_v1() -> Option<ProcessResidentSampleV1> {
+    let mut info = std::mem::MaybeUninit::<libc::task_vm_info>::uninit();
+    let mut count = libc::TASK_VM_INFO_COUNT;
+    // SAFETY: `info` is a live `task_vm_info` of the size `TASK_VM_INFO_COUNT`
+    // declares, and `mach_task_self` is a task port this process owns.
+    let status = unsafe {
+        libc::task_info(
+            libc::mach_task_self(),
+            libc::TASK_VM_INFO,
+            info.as_mut_ptr().cast(),
+            &raw mut count,
+        )
+    };
+    if status != libc::KERN_SUCCESS {
+        return None;
+    }
+    // SAFETY: `task_info` wrote `count` fields of `task_vm_info` on success.
+    let info = unsafe { info.assume_init() };
+    process_resident_sample_from_macos_vm_info_v1(
+        info.resident_size,
+        info.phys_footprint,
+        info.internal,
+    )
 }
 
 /// The Windows kernel's per-process memory counters, mapped onto the

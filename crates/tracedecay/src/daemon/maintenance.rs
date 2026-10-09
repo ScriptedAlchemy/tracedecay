@@ -539,6 +539,15 @@ impl MaintenanceCoordinator {
                 }
                 collect_idle_installed_worker_heaps();
                 request_idle_thread_collection_v1();
+                let pages = tracedecay_sessions::runtime::release_unpinned_shared_jsonl_pages();
+                if pages.pages > 0 {
+                    tracing::info!(
+                        event = "shared_jsonl_pages_released",
+                        pages = pages.pages,
+                        bytes = pages.bytes,
+                        "released unpinned prepared transcript pages"
+                    );
+                }
                 sample_process_resident_memory(&log);
             }),
         )
@@ -959,7 +968,10 @@ impl MaintenanceCoordinator {
 /// closes the loop: admission stops trusting its reservation model once the
 /// measurement says the process is over budget. Admission and the over-budget
 /// log use the pressure state, which also counts cgroup committed bytes.
-#[cfg(target_os = "linux")]
+///
+/// The kernel sample is Linux `/proc`, Windows `GetProcessMemoryInfo`, or
+/// macOS `TASK_VM_INFO`. A host that cannot observe RSS returns `None` and
+/// this function stays quiet rather than publishing zero.
 fn sample_process_resident_memory(log: &std::sync::Mutex<ResidentMemoryLogStateV1>) {
     use tracedecay_runtime_core::resident_memory::ResidentMemoryPressureStateV1;
 
@@ -1034,9 +1046,6 @@ fn sweep_resident_owners() -> bool {
     !released.is_empty()
 }
 
-#[cfg(not(target_os = "linux"))]
-fn sample_process_resident_memory(_log: &std::sync::Mutex<ResidentMemoryLogStateV1>) {}
-
 type ResidentMemorySampleV1 = Arc<dyn Fn() + Send + Sync + 'static>;
 
 async fn run_resident_memory_sampler_loop(
@@ -1082,8 +1091,6 @@ struct ResidentMemoryLogStateV1 {
 }
 
 /// A change in the logged resident-memory verdict.
-// Only the Linux resident-memory sampler (and tests) observe transitions.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResidentMemoryLogTransitionV1 {
     EnteredOverBudget,
@@ -1091,7 +1098,6 @@ enum ResidentMemoryLogTransitionV1 {
 }
 
 impl ResidentMemoryLogStateV1 {
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     /// Record one verdict and return the transition it made, if any: a
     /// sustained state is logged once, when it starts and when it ends.
     fn observe(&mut self, over_budget: bool) -> Option<ResidentMemoryLogTransitionV1> {
