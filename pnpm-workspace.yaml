@@ -44,3 +44,8 @@ verifyDepsBeforeRun: error
 # the source replacement in `.cargo/config.toml` for Bazel dependency inputs.
 cargo:
   enabled: true
+
+# Use the manifest chunk's ESM exports: Bazel may resolve its shared runtime
+# through a different symlink path than the importing Rsbuild module.
+patchedDependencies:
+  '@rsbuild/core@2.2.12': patches/@rsbuild__core@2.2.12.patch
