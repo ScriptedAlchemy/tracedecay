@@ -13,10 +13,10 @@ import {
   existsSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
+import { checkContractTypes } from "./typecheck.ts";
 import { generateContracts, OUTPUT_FILES, type JsonSchema } from "./generate.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -71,34 +71,17 @@ function exportSdkSources(): Record<string, string> {
 
 /** Validate decoder implementations once at generation, outside dashboard checks. */
 function checkDecoderTypes(files: Record<string, string>): void {
-  const decodersPath = join(DASHBOARD_ROOT, OUTPUT_FILES.DECODERS_FILE);
-  const typesPath = join(DASHBOARD_ROOT, OUTPUT_FILES.TYPES_FILE);
-  const generatedPath = join(DASHBOARD_ROOT, OUTPUT_FILES.GENERATED_FILE);
-  const sources = new Map<string, string>([
-    [decodersPath, (files[OUTPUT_FILES.DECODERS_FILE] ?? "").replace("// @ts-nocheck\n", "")],
-    [typesPath, files[OUTPUT_FILES.TYPES_FILE] ?? ""],
-    [generatedPath, files[OUTPUT_FILES.GENERATED_FILE] ?? ""],
-  ]);
-  const options: ts.CompilerOptions = {
-    strict: true, noEmit: true, skipLibCheck: true,
-    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    allowImportingTsExtensions: true,
-    exactOptionalPropertyTypes: true,
-  };
-  const host = ts.createCompilerHost(options);
-  const readFile = host.readFile.bind(host);
-  const fileExists = host.fileExists.bind(host);
-  host.fileExists = (path) => sources.has(path) || fileExists(path);
-  host.readFile = (path) => sources.get(path) ?? readFile(path);
-  const program = ts.createProgram([decodersPath, generatedPath], options, host);
-  const diagnostics = ts.getPreEmitDiagnostics(program);
-  if (diagnostics.length > 0) {
-    throw new Error(ts.formatDiagnosticsWithColorAndContext(diagnostics, {
-      getCurrentDirectory: () => REPOSITORY_ROOT,
-      getCanonicalFileName: (path) => path,
-      getNewLine: () => "\n",
-    }));
+  // Keep staging beneath dashboard so zod resolves from the same installation.
+  const directory = mkdtempSync(join(DASHBOARD_ROOT, ".contract-check-"));
+  try {
+    for (const file of Object.values(OUTPUT_FILES)) {
+      const source = files[file];
+      if (source === undefined) throw new Error(`missing generated contract: ${file}`);
+      writeFileSync(join(directory, basename(file)), source.replace("// @ts-nocheck\n", ""));
+    }
+    checkContractTypes(directory, ["decoders.ts", "generated.ts"]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 }
 

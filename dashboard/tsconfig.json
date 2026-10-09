@@ -16,7 +16,7 @@
     "verbatimModuleSyntax": false,
     "allowImportingTsExtensions": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node", "@rsbuild/core/types"]
   },
   "include": ["codegen", "src", "e2e", "stories"],
   "exclude": ["stories/audit.ts"]
