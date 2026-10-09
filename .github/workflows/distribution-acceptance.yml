@@ -7,12 +7,6 @@
 # ship job on that battery and then failed before MCPB. This workflow runs
 # the battery on one free ubuntu-latest runner when someone dispatches it.
 #
-# The battery's production binary is the CLI it builds from the extracted
-# package with `--profile dist`. This job does not build the source tree
-# first: that compile is `shipped-cli` in ci.yml, and the script only
-# compared the extra binary's `--version` string. Packaged builds use the
-# host `target/dist` layout, so that source-tree binary was not an input
-# they read.
 name: Distribution acceptance
 
 # On demand only. Nothing in this repository runs on a timer: a scheduled

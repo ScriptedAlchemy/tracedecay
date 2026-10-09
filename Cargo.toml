@@ -97,10 +97,7 @@ debug-assertions = false
 overflow-checks = false
 incremental = false
 
-# Shipping compile only. Release/dist jobs pass `--profile dist`.
-# Dev, test, and `cargo build --release` stay on the built-in profiles.
-# panic stays unwind: production catch_unwind in rusqlite-runtime, graph-db,
-# daemon-service, code-index, and query recovers poisoned work.
+# panic stays unwind. Production catch_unwind recovers poisoned work.
 [profile.dist]
 inherits = "release"
 lto = "thin"
