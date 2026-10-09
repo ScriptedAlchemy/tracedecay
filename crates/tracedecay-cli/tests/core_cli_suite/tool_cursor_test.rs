@@ -128,6 +128,28 @@ fn callees_args(node_id: &str, cursor: Option<&str>) -> Value {
     json!({"node_id": node_id, "maximum_depth": 1, "meta": meta})
 }
 
+#[test]
+fn source_body_returns_exact_source_across_tool_processes() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home = canonical_existing_path(home.path());
+    let project = canonical_existing_path(project.path());
+    let source = "pub fn source_anchor() -> u32 { 7 }";
+    committed_git_project(&project, source);
+    initialize_tracedecay_cli_project(&home, &project);
+    let occurrence = node_id(&home, &project, "source_anchor");
+    let run = run_tool(
+        &home,
+        &project,
+        "source_body",
+        &json!({"node_id": occurrence, "format": "json"}),
+    );
+    stop_managed_daemon(&home);
+    let (_, body) = json_answer(&run);
+    assert_eq!(body["outcome"]["outcome"], "evidence", "{body}");
+    assert_eq!(body["outcome"]["value"]["payload"]["body"], source);
+}
+
 fn page_names(body: &Value) -> Vec<String> {
     body["outcome"]["value"]["payload"]["items"]
         .as_array()
