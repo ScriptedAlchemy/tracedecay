@@ -7,8 +7,9 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_domain::UtcMicros;
 use tracedecay_graph_db::{
-    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphGenerationManifest,
-    GraphIdempotencyKey, NeverCancelled, VerifiedGraphSnapshot,
+    GraphDbOwnerAttachmentV1, GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry,
+    GraphDbRegistryConfig, GraphGenerationManifest, GraphIdempotencyKey, NeverCancelled,
+    VerifiedGraphSnapshot,
 };
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
@@ -19,13 +20,15 @@ use tracedecay_rusqlite_runtime::{
 use tracedecay_store::{
     AdmissionConfigV1, BrainId, GraphProjectionIdentityV1, GraphPublicationInputDigestV1,
     GraphPublicationOperationContextV1, GraphPublicationStoreV1, ProjectId,
-    RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
-    RuntimeRequestProbeV1, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1,
-    StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
+    RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
+    RetainedGraphStoreOwnerOperationLeaseErrorV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreAuthorityEpochV1, StoreIncarnationV1,
+    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
+    canonical_store_locator_digest,
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct BenchmarkGraphLease {
     binding: StoreRuntimeBindingV1,
     verified_locator: VerifiedStoreLocatorV1,
@@ -43,6 +46,27 @@ impl RetainedGraphStoreLeaseV1 for BenchmarkGraphLease {
 
     fn canonical_path(&self) -> &Path {
         &self.canonical_path
+    }
+}
+
+impl RetainedGraphStoreOwnerAttachmentV1 for BenchmarkGraphLease {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+
+    fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
+    fn issue_operation_lease(
+        &self,
+    ) -> Result<Arc<dyn RetainedGraphStoreLeaseV1>, RetainedGraphStoreOwnerOperationLeaseErrorV1>
+    {
+        Ok(Arc::new(self.clone()))
     }
 }
 
@@ -130,6 +154,7 @@ pub struct PersistentGitGraph {
     _writer: PersistentWriter,
     _readers: ReaderPool<NoReads>,
     registry: GraphDbRegistry,
+    owner_attachment: Option<GraphDbOwnerAttachmentV1>,
     binding: StoreRuntimeBindingV1,
     graph_path: PathBuf,
     authority: GraphPublicationExactSqlStorage,
@@ -197,6 +222,7 @@ impl PersistentGitGraph {
         Self {
             registry: GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 })
                 .expect("benchmark graph registry config is valid"),
+            owner_attachment: None,
             authority: GraphPublicationExactSqlStorage::from_authorized_handle(handle)
                 .expect("benchmark graph publication authority attaches"),
             binding,
@@ -211,6 +237,7 @@ impl PersistentGitGraph {
     }
 
     pub fn publish(&mut self, manifest: GraphGenerationManifest) -> VerifiedGraphSnapshot {
+        self.mount_owner();
         self.sequence += 1;
         let (append_control, append_probe) = operation_control(self.sequence);
         let append_context =
@@ -259,6 +286,7 @@ impl PersistentGitGraph {
     }
 
     pub fn recover_snapshot(&mut self) -> VerifiedGraphSnapshot {
+        self.owner_attachment.take();
         let registration = self.registration();
         assert!(
             self.registry
@@ -266,6 +294,7 @@ impl PersistentGitGraph {
                 .expect("benchmark graph store closes"),
             "benchmark recovery must close an open graph store",
         );
+        self.mount_owner();
         self.sequence += 1;
         let (control, probe) = operation_control(self.sequence);
         let context = GraphPublicationOperationContextV1::new(&control, &probe)
@@ -282,6 +311,26 @@ impl PersistentGitGraph {
                 &latest_projection,
             )
             .expect("benchmark verified snapshot recovers")
+    }
+
+    fn mount_owner(&mut self) {
+        if self.owner_attachment.is_some() {
+            return;
+        }
+        let operation = self.registration();
+        let authority_attachment = Box::new(BenchmarkGraphLease {
+            binding: operation.authority_lease.binding().clone(),
+            verified_locator: operation.authority_lease.verified_locator().clone(),
+            canonical_path: operation.authority_lease.canonical_path().to_path_buf(),
+        });
+        self.owner_attachment = Some(
+            self.registry
+                .resolve_owner_attachment(GraphDbOwnerRegistrationV1 {
+                    operation,
+                    authority_attachment,
+                })
+                .expect("benchmark graph map owner mounts"),
+        );
     }
 
     fn registration(&self) -> GraphDbRegistration {
