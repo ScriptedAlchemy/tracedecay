@@ -290,8 +290,7 @@ fn count_displayed_token_batch(
         misses
             .into_iter()
             .filter_map(|(provider, message_id, fingerprint, text)| {
-                count_text_tokens(&text, "")
-                    .map(|tokens| (provider, message_id, fingerprint, tokens))
+                count_text_tokens(&text).map(|tokens| (provider, message_id, fingerprint, tokens))
             })
             .collect::<Vec<_>>()
     };
@@ -327,7 +326,7 @@ fn displayed_content_token_count(
     let token_count = token_counts
         .displayed_tokens(&message.provider, &message.message_id, fingerprint)
         .or_else(|| {
-            let counted = count_text_tokens(&message.content, "")?;
+            let counted = count_text_tokens(&message.content)?;
             token_counts.store_displayed_tokens(
                 &message.provider,
                 &message.message_id,
@@ -793,7 +792,7 @@ mod tests {
             let fingerprint = content_fingerprint(&message.content);
             assert_eq!(
                 cache.displayed_tokens(&message.provider, &message.message_id, fingerprint),
-                count_text_tokens(&message.content, ""),
+                count_text_tokens(&message.content),
                 "message render must populate the shared cache"
             );
         }
