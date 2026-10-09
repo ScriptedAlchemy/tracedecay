@@ -16,6 +16,7 @@ use tracedecay_global_db::{
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{
     Connection, Error as EngineError, Executor, IntoParams, QueryExecutor, Rows, TestConnection,
+    Transaction,
 };
 use tracedecay_store::StoreShardScopeV1;
 
@@ -81,6 +82,36 @@ impl SessionTemporalExec for TestConnection {
 
     fn execute_batch(&self, sql: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
         Executor::execute_batch(self, sql)
+    }
+}
+
+impl SessionTemporalQuery for Transaction {
+    fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> impl Future<Output = Result<Rows, EngineError>> + Send
+    where
+        P: IntoParams + Send,
+    {
+        Transaction::query(self, sql, params)
+    }
+}
+
+impl SessionTemporalExec for Transaction {
+    fn execute<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> impl Future<Output = Result<u64, EngineError>> + Send
+    where
+        P: IntoParams + Send,
+    {
+        Transaction::execute(self, sql, params)
+    }
+
+    fn execute_batch(&self, sql: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
+        Transaction::execute_batch(self, sql)
     }
 }
 

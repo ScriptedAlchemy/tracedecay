@@ -141,6 +141,10 @@ impl Database {
     /// opened file identity. A read-write facade additionally retains the
     /// originating authority; a read-only facade never requests it. Neither
     /// mode derives identity from a path or extracts the physical attachment.
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Runtime publication must remain lazy so an unpolled future cannot publish an owner."
+    )]
     pub async fn publish_runtime(
         runtime: StoreRuntimeClientLease,
         access: DatabaseAccessMode,

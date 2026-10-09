@@ -774,7 +774,7 @@ pub(super) fn retain_authority_epoch_floor(floor: StoreAuthorityEpochV1) {
 pub(super) fn allocate_authority_epoch()
 -> Result<StoreAuthorityEpochV1, StoreRuntimeRegistryFailure> {
     let previous = PROCESS_AUTHORITY_EPOCH
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
             value.checked_add(1)
         })
         .map_err(|_| StoreRuntimeRegistryFailure::AuthorityEpochExhausted)?;

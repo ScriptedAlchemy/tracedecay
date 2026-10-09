@@ -264,7 +264,7 @@ fn automatic_fact_apply_settlement(
             error,
             authority_result,
         }) => (
-            authority_result,
+            *authority_result,
             Some(memory_application_error(error)),
             true,
         ),

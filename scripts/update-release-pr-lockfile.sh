@@ -33,7 +33,7 @@ repository_root=$PWD
 # pnpm validates workspace crate versions even for a frozen npm installation.
 # Repair the release's Cargo lock before installing generated-build inputs.
 pnpm install --frozen-lockfile
-python3 scripts/bazel/gen_builds.py
+bazel run //scripts:bazel/gen_builds.py
 pnpm --dir sdks/typescript run build
 pnpm --dir plugin/chatgpt-extension run build
 

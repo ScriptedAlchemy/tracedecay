@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
@@ -20,6 +22,55 @@ def load_scorecard() -> ModuleType:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+class ScorecardBuildTests(unittest.TestCase):
+    def test_resolves_binary_from_configured_bazel_output(self) -> None:
+        scorecard = load_scorecard()
+        with tempfile.TemporaryDirectory(prefix="scorecard build ") as scratch:
+            output = Path(scratch)
+            binary = output / "crates" / "tracedecay-cli" / "tracedecay"
+            binary.parent.mkdir(parents=True)
+            binary.touch()
+            with mock.patch.object(
+                scorecard.subprocess,
+                "run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0),
+                    subprocess.CompletedProcess([], 0, f"{output}\n", ""),
+                ],
+            ) as run:
+                self.assertEqual(scorecard.build_binary(), binary)
+            self.assertEqual(
+                [call.args[0] for call in run.call_args_list],
+                [
+                    ("bazel", "build", "--config=release", "//crates/tracedecay-cli:tracedecay"),
+                    ("bazel", "info", "--config=release", "bazel-bin"),
+                ],
+            )
+
+    def test_failed_build_does_not_use_an_old_binary(self) -> None:
+        scorecard = load_scorecard()
+        with mock.patch.object(
+            scorecard.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)
+        ) as run:
+            with self.assertRaisesRegex(scorecard.HarnessError, "release build failed"):
+                scorecard.build_binary()
+            self.assertEqual(run.call_count, 1)
+
+    def test_failed_or_empty_output_discovery_is_an_error(self) -> None:
+        scorecard = load_scorecard()
+        for discovery in (
+            subprocess.CompletedProcess([], 1, "", "configuration failed"),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ):
+            with self.subTest(discovery=discovery), mock.patch.object(
+                scorecard.subprocess,
+                "run",
+                side_effect=[subprocess.CompletedProcess([], 0), discovery],
+            ):
+                with self.assertRaisesRegex(scorecard.HarnessError, "resolve the Bazel output"):
+                    scorecard.build_binary()
 
 
 class FakeStatusObserver:

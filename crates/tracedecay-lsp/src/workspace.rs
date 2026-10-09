@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(mutation.observed_scope_digest, None);
         assert_eq!(mutation.active_root_uri, "file:///workspace/root-a");
         assert_eq!(mutation.added, vec!["file:///workspace/root-b"]);
-        assert!(mutation.removed.is_empty());
+        assert_eq!(mutation.removed.len(), 0);
         assert_eq!(
             mutation.next_root_uris,
             vec!["file:///workspace/root-a", "file:///workspace/root-b"]

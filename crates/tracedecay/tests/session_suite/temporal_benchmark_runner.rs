@@ -7,13 +7,11 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 use tempfile::TempDir;
 
 const RUNNER_PATH: &str = "scripts/run-session-temporal-benchmark.sh";
-const FAKE_CARGO_STATUS: i32 = 47;
+const FAKE_BAZEL_STATUS: i32 = 47;
 
 struct RunnerInvocation {
     output: Output,
-    cargo_receipt: Option<String>,
-    parent_data: PathBuf,
-    parent_home: PathBuf,
+    bazel_receipt: Option<String>,
 }
 
 fn write_executable(path: &Path, body: &str) {
@@ -24,15 +22,15 @@ fn invoke_runner(uname: &str, mode: &str) -> RunnerInvocation {
     let temp = TempDir::new().expect("runner tempdir");
     let fake_bin = temp.path().join("bin");
     fs::create_dir_all(&fake_bin).expect("create fake bin");
-    let cargo_receipt_path = temp.path().join("cargo-receipt.txt");
+    let bazel_receipt_path = temp.path().join("bazel-receipt.txt");
 
     write_executable(
         &fake_bin.join("uname"),
         "#!/bin/sh\nprintf '%s\\n' \"$FAKE_UNAME\"\n",
     );
     write_executable(
-        &fake_bin.join("cargo"),
-        "#!/bin/sh\n{\n  printf 'argv='\n  printf '<%s>' \"$@\"\n  printf '\\nHOME=<%s>\\n' \"$HOME\"\n  printf 'TRACEDECAY_DATA_DIR=<%s>\\n' \"$TRACEDECAY_DATA_DIR\"\n} >\"$FAKE_CARGO_RECEIPT\"\nexit 47\n",
+        &fake_bin.join("bazel"),
+        "#!/bin/sh\n{\n  printf 'argv='\n  printf '<%s>' \"$@\"\n  printf '\\nHOME=<%s>\\n' \"$HOME\"\n  printf 'TRACEDECAY_DATA_DIR=<%s>\\n' \"$TRACEDECAY_DATA_DIR\"\n} >\"$FAKE_BAZEL_RECEIPT\"\nexit 47\n",
     );
 
     let parent_home = temp.path().join("parent-home");
@@ -49,7 +47,7 @@ fn invoke_runner(uname: &str, mode: &str) -> RunnerInvocation {
         .arg(mode)
         .current_dir(repository_root())
         .env("CARGO_HOME", temp.path().join("cargo-home"))
-        .env("FAKE_CARGO_RECEIPT", &cargo_receipt_path)
+        .env("FAKE_BAZEL_RECEIPT", &bazel_receipt_path)
         .env("FAKE_UNAME", uname)
         .env("HOME", &parent_home)
         .env("PATH", fake_path)
@@ -59,64 +57,44 @@ fn invoke_runner(uname: &str, mode: &str) -> RunnerInvocation {
         .output()
         .expect("run session-temporal runner");
 
-    let cargo_receipt = match fs::read_to_string(&cargo_receipt_path) {
+    let bazel_receipt = match fs::read_to_string(&bazel_receipt_path) {
         Ok(receipt) => Some(receipt),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => panic!("read cargo receipt: {error}"),
+        Err(error) => panic!("read Bazel receipt: {error}"),
     };
     RunnerInvocation {
         output,
-        cargo_receipt,
-        parent_data,
-        parent_home,
+        bazel_receipt,
     }
 }
 
 fn repository_root() -> PathBuf {
-    crate::common::repository_root().to_path_buf()
+    crate::common::repository_root()
+        .canonicalize()
+        .expect("canonical fixture repository root")
 }
 
 #[test]
-fn diagnostic_runner_reaches_cargo_on_linux_and_macos() {
+fn diagnostic_runner_reaches_bazel_on_linux_and_macos() {
     for (uname, platform) in [("Linux", "linux"), ("Darwin", "macos")] {
         let invocation = invoke_runner(uname, "--run");
 
         assert_eq!(
             invocation.output.status.code(),
-            Some(FAKE_CARGO_STATUS),
+            Some(FAKE_BAZEL_STATUS),
             "{platform} runner output: {}",
             String::from_utf8_lossy(&invocation.output.stderr)
         );
         let receipt = invocation
-            .cargo_receipt
-            .expect("diagnostic runner must execute cargo");
-        assert!(
-            // `eebf0957a` retargeted the shipped runner after the crate move:
-            // the repository root is a virtual workspace, so `cargo bench` must
-            // name `-p tracedecay` to resolve the harness at all.
-            receipt.starts_with(
-                "argv=<bench><-p><tracedecay><--bench><session_temporal><--all-features><--><--run>\n"
+            .bazel_receipt
+            .expect("diagnostic runner must execute Bazel");
+        assert_eq!(
+            receipt.lines().next().expect("Bazel argument receipt"),
+            format!(
+                "argv=<test><--config=release><--config=ci><//crates/tracedecay:session_temporal><--test_strategy=standalone><--nocache_test_results><--test_output=all><--test_env=TRACEDECAY_BENCHMARK_REPO_ROOT={}><--test_arg=--bench><--test_arg=--run>",
+                repository_root().display()
             ),
-            "{platform} cargo receipt: {receipt}"
-        );
-        assert!(
-            receipt.contains("HOME=<"),
-            "{platform} cargo receipt: {receipt}"
-        );
-        assert!(
-            !receipt.contains(&format!("HOME=<{}>", invocation.parent_home.display())),
-            "{platform} runner must isolate HOME: {receipt}"
-        );
-        assert!(
-            receipt.contains("TRACEDECAY_DATA_DIR=<"),
-            "{platform} cargo receipt: {receipt}"
-        );
-        assert!(
-            !receipt.contains(&format!(
-                "TRACEDECAY_DATA_DIR=<{}>",
-                invocation.parent_data.display()
-            )),
-            "{platform} runner must isolate TRACEDECAY_DATA_DIR: {receipt}"
+            "{platform} Bazel receipt: {receipt}"
         );
     }
 }

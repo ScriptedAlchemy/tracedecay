@@ -284,7 +284,7 @@ impl DaemonInvocationState {
         repository_owner: &str,
         repository_name: &str,
     ) -> tracedecay_application::advisory::github_runtime::ProfileGitHubReadOnlyCredentialMountOutcomeV1
-    {
+{
         self.github_credential_lifecycle
             .mount(profile_id, repository_owner, repository_name)
     }

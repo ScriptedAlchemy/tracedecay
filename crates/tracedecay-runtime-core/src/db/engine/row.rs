@@ -59,6 +59,10 @@ impl Rows {
             .map(String::as_str)
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "An unpolled row read must not consume a row; retain the lazy async iterator API."
+    )]
     pub async fn next(&mut self) -> Result<Option<Row>> {
         Ok(self.rows.pop_front())
     }

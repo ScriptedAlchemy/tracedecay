@@ -161,10 +161,11 @@ fn absent_analyzer_keeps_an_admitted_graph_fallback_provider() {
             .expect("configured adapter")
             .is_none()
     );
-    assert!(
+    assert_eq!(
         broker
             .mounted_providers_for_files(&["src/lib.rs".to_owned()])
-            .is_empty()
+            .len(),
+        0
     );
 }
 

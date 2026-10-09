@@ -64,7 +64,7 @@ async fn remote_project_deletion_removes_only_its_profile_shard_and_fences_repla
         ["proj_remote_deleted".to_owned()]
     );
     assert!(receipt.tombstone_recorded);
-    assert!(receipt.pending_project_ids.is_empty());
+    assert_eq!(receipt.pending_project_ids.len(), 0);
     assert!(!layout.data_root.exists(), "exact profile shard is removed");
     assert!(project.exists(), "source checkout is never removed");
     assert!(unrelated_layout.data_root.exists());
@@ -99,7 +99,7 @@ async fn remote_project_deletion_removes_only_its_profile_shard_and_fences_repla
         .await
         .expect("the same tombstone remains idempotent after exact shard removal");
     assert_eq!(replayed.status, RemoteDeletionStatus::Deleted);
-    assert!(replayed.pending_project_ids.is_empty());
+    assert_eq!(replayed.pending_project_ids.len(), 0);
     assert!(!layout.data_root.exists());
     assert!(project.exists(), "idempotent replay preserves the checkout");
     engine

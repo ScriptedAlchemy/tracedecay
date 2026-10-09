@@ -1414,7 +1414,7 @@ mod tests {
             build_storage_report_page_from_registered_global_db(profile_root, &db, None, None, 1)
                 .await
                 .unwrap();
-        assert!(registry.stores.is_empty());
+        assert_eq!(registry.stores.len(), 0);
         let directories = registry.coverage.next_cursor.unwrap();
         assert!(directories.starts_with("bc1."), "{directories}");
         let first = build_storage_report_page_from_registered_global_db(
@@ -1570,12 +1570,12 @@ mod tests {
         .unwrap()
         .unwrap();
         let empty = list_project_directories_page(&profile_root, "", 1).unwrap();
-        assert!(empty.directories.is_empty());
+        assert_eq!(empty.directories.len(), 0);
         let cursor = empty
             .next_cursor
             .expect("lock contention is incomplete, never empty success");
         let repeated = list_project_directories_page(&profile_root, &cursor, 1).unwrap();
-        assert!(repeated.directories.is_empty());
+        assert_eq!(repeated.directories.len(), 0);
         assert_eq!(repeated.next_cursor.as_deref(), Some(cursor.as_str()));
         drop(lock);
         let resumed = list_project_directories_page(&profile_root, &cursor, 1).unwrap();
@@ -1586,7 +1586,7 @@ mod tests {
             1,
         )
         .unwrap();
-        assert!(final_page.directories.is_empty());
+        assert_eq!(final_page.directories.len(), 0);
         assert!(final_page.next_cursor.is_none());
     }
 
@@ -2011,7 +2011,7 @@ mod tests {
             build_storage_report_page_from_registered_global_db(&profile_root, &db, None, None, 8)
                 .await
                 .unwrap();
-        assert!(without_authority.code_generation_retention.is_empty());
+        assert_eq!(without_authority.code_generation_retention.len(), 0);
         assert_eq!(
             without_authority.code_generation_retention_availability[0]
                 .reason
@@ -2065,7 +2065,7 @@ mod tests {
         assert_eq!(report.stores.len(), 1);
         assert_eq!(report.stores[0].project_id, "proj_a");
         assert_eq!(report.stores[0].canonical_root, "/repos/a");
-        assert!(report.code_generation_retention.is_empty());
+        assert_eq!(report.code_generation_retention.len(), 0);
         assert!(!profile_root.join(GLOBAL_DB_FILENAME).exists());
     }
 
@@ -2090,7 +2090,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(report.code_generation_retention.is_empty());
+        assert_eq!(report.code_generation_retention.len(), 0);
         let availability = report
             .code_generation_retention_availability
             .first()

@@ -688,21 +688,35 @@ cargo nextest run \
 # graph. Query, root-library, and LSP source suites run in exhaustive Linux CI;
 # rerunning them here added no archive assertion. The MCP harness stays focused
 # on the modules that spawn TRACEDECAY_TEST_BIN, so it proves the packaged CLI
-# without rerunning all 573 source-library tests. Run it from the verified
-# checkout so unchanged source-graph units retain their original Cargo paths.
+# without rerunning unrelated source-library tests. Run it from the verified
+# checkout through the canonical isolated Bazel launcher.
 echo "distribution acceptance: checking packaged CLI integration behavior"
 resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
-TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
-  CARGO_NET_OFFLINE=true cargo nextest run \
-  --manifest-path "$repo/Cargo.toml" \
-  --release \
-  -p tracedecay \
-  --test mcp_suite \
-  --features tracedecay/test-transport \
-  --no-fail-fast \
-  --retries 2 \
-  -E 'test(/^mcp_cli_serve_test::/) | test(/^serve_template_path_test::/) | test(=mcp_handler_test::lcm_test::lcm_status_cli_bridge_accepts_json_args)' \
-  --no-tests=fail
+# The extracted binary is outside Bazel's declared runfiles. Run locally and
+# disable result caching so its current bytes are exercised on every invocation.
+# Check each filter independently: libtest otherwise accepts zero matches.
+require_command bazel
+for filter in \
+  'mcp_cli_serve_test::' \
+  'serve_template_path_test::' \
+  'mcp_handler_test::lcm_test::lcm_status_cli_bridge_accepts_json_args'; do
+  (
+    cd "$repo"
+    test_args=(--test_arg="$filter")
+    expected_count=nonzero
+    if [[ $filter == mcp_handler_test::* ]]; then
+      test_args+=(--test_arg=--exact)
+      expected_count=1
+    fi
+    REQUIRE_EXACT_TEST_COUNT="$expected_count" scripts/require-exact-test.sh \
+      bazel test --config=ci //crates/tracedecay:mcp_suite \
+      --test_strategy=standalone \
+      --nocache_test_results \
+      --test_output=all \
+      --test_env="TRACEDECAY_TEST_BIN=$packaged_cli_bin" \
+      "${test_args[@]}"
+  )
+done
 resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
 
 install_root="$work/install"

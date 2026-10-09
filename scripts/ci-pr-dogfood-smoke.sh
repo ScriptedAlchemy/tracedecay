@@ -519,7 +519,7 @@ run_smoke() {
 
 main() {
   local binary project_root base_ref head_ref base_branch head_branch checked_out_oid head_oid started_ms status
-  binary="${TRACEDECAY_BIN:-$REPO_ROOT/target/debug/tracedecay}"
+  binary="${TRACEDECAY_BIN:-$REPO_ROOT/bazel-bin/crates/tracedecay-cli/tracedecay}"
   project_root="${TRACEDECAY_DOGFOOD_PROJECT:-$REPO_ROOT}"
   base_ref="${TRACEDECAY_DOGFOOD_BASE_REF:-}"
   head_ref="${TRACEDECAY_DOGFOOD_HEAD_REF:-HEAD}"

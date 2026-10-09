@@ -229,6 +229,12 @@ class ManualReleasePrRefreshTests(unittest.TestCase):
         edited_path = scratch_path / "edited.md"
         stubs = {
             "cargo": cargo_stub.format(lockfile=checkout / "Cargo.lock"),
+            "bazel": (
+                "#!/bin/sh\n"
+                '[ "$#" -eq 2 ] && [ "$1" = run ] && '
+                '[ "$2" = //scripts:bazel/gen_builds.py ] || exit 64\n'
+                'exec python3 scripts/bazel/gen_builds.py\n'
+            ),
             "gh": (
                 "#!/bin/sh\n"
                 'case "$1 $2" in\n'

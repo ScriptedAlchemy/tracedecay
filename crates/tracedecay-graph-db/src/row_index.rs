@@ -186,7 +186,7 @@ impl RowIndexBuilder {
 
 fn lanes_bytes(lanes: RowLanes) -> [u8; 32] {
     let mut bytes = [0_u8; 32];
-    for (slot, lane) in bytes.chunks_exact_mut(8).zip(lanes) {
+    for (slot, lane) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(lanes) {
         slot.copy_from_slice(&lane.to_be_bytes());
     }
     bytes
@@ -196,7 +196,10 @@ fn record_parts(record: &[u8; RECORD_BYTES as usize]) -> (RowKey, RowLanes, u32,
     let mut key = [0_u8; 16];
     key.copy_from_slice(&record[..16]);
     let mut lanes = [0_u64; 4];
-    for (lane, word) in lanes.iter_mut().zip(record[16..48].chunks_exact(8)) {
+    for (lane, word) in lanes
+        .iter_mut()
+        .zip(record[16..48].as_chunks::<8>().0.iter())
+    {
         let mut buffer = [0_u8; 8];
         buffer.copy_from_slice(word);
         *lane = u64::from_be_bytes(buffer);

@@ -70,6 +70,15 @@ async fn owned_rows_decode_the_engine_value_set() {
 }
 
 #[tokio::test]
+async fn dropping_unpolled_row_read_preserves_the_next_row() {
+    let mut rows = Rows::from_rows(vec![Row::from_values(vec![Value::Integer(7)])]);
+    drop(rows.next());
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 7);
+    assert!(rows.next().await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn runtime_rows_preserve_column_metadata_without_materialized_rows() {
     let fixture = runtime_fixture();
     let assert_columns = |rows: &Rows| {

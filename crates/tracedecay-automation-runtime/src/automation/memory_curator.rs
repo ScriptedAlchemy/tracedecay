@@ -779,7 +779,7 @@ fn settle_memory_curation_result(
         }) => Err(MemoryCurationApplyFailure::Settled {
             error: memory_application_error(error),
             operation_count,
-            receipt: Box::new(authority_result),
+            receipt: authority_result,
         }),
     }
 }

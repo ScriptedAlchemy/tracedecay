@@ -1,4 +1,4 @@
 [toolchain]
-channel = "1.97.1"
+channel = "1.99.0"
 # LSP acceptance negotiates capabilities with the pinned upstream analyzer.
 components = ["clippy", "rustfmt", "rust-analyzer", "rust-src"]

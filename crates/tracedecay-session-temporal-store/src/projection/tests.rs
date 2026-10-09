@@ -468,6 +468,265 @@ async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
 }
 
 #[tokio::test]
+async fn all_skipped_refresh_persists_reopens_and_completes_idempotently() {
+    let tmp = TempDir::new().unwrap();
+    let session_id = fixture_session("session.projector.all-skipped");
+    let request;
+    {
+        let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+            .await
+            .unwrap();
+        let (observation, write) = fixture_observation(&session_id, 0, None, false);
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+        let store = temporal_store(&runtime);
+        refresh_through(&store, &session_id, 1, 0).await;
+        for ordinal in 1..=2 {
+            let (observation, write) = fixture_observation_from_facts(
+                &session_id,
+                ordinal,
+                ProviderId::new(format!("projector-test-{ordinal}")).unwrap(),
+                ObservationId::new(format!("record.projector.{ordinal}")).unwrap(),
+                CanonicalObservationRelationsV1::new(session_id.clone()),
+                vec![CanonicalObservationFactV1::Boundary {
+                    boundary_kind: tracedecay_domain::CanonicalBoundaryKindV1::TurnStart,
+                }],
+                None,
+            );
+            assert_eq!(
+                tracedecay_store::derive_canonical_projection(&observation)
+                    .unwrap()
+                    .skip_reason(),
+                Some(ProjectionSkipReason::NonConversationalRecord)
+            );
+            Box::pin(persist_fixture(&runtime, observation, write)).await;
+        }
+        store
+            .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+                session_id.clone(),
+                SessionRefreshFrontierV1::new(3, 1).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let recovery = store
+            .session_refresh_recovery(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let (progress, batch) = store
+            .materialize_session_temporal_refresh_batch_for_test(&recovery)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(batch.occurrences().is_empty());
+        assert_eq!(batch.item_count(), 0);
+        assert_eq!(progress.frontier().committed_through(), 3);
+        request = SessionRefreshCompletionRequestV1::new(
+            progress.operation_id().clone(),
+            session_id.clone(),
+            progress.frontier(),
+            *progress.coverage(),
+        )
+        .unwrap();
+        store
+            .persist_session_refresh_projection_batch(progress, batch)
+            .await
+            .unwrap();
+    }
+    let receipt = {
+        let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+            .await
+            .unwrap();
+        let store = temporal_store(&runtime);
+        let recovery = store
+            .session_refresh_recovery(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovery.restart_state(),
+            SessionRefreshRestartStateV1::ReadyToComplete
+        );
+        let receipt = store
+            .complete_session_refresh(request.clone(), ExecutionControl::default())
+            .await
+            .unwrap();
+        assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+        receipt
+    };
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    assert_eq!(
+        temporal_store(&runtime)
+            .complete_session_refresh(request, ExecutionControl::default())
+            .await
+            .unwrap(),
+        receipt
+    );
+    for (kind, expected) in [
+        (SessionTemporalFixtureCountV1::Occurrences, 1),
+        (SessionTemporalFixtureCountV1::RefreshReceipts, 2),
+    ] {
+        assert_eq!(
+            runtime
+                .session_temporal_fixture_count_for_test(HostAdmissionScope::Profile, kind)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn refresh_at_committed_frontier_needs_no_new_observation_effect() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let session_id = fixture_session("session.projector.unchanged-frontier");
+    let (observation, write) = fixture_observation(&session_id, 0, None, false);
+    Box::pin(persist_fixture(&runtime, observation, write)).await;
+    let store = temporal_store(&runtime);
+    let baseline = refresh_through(&store, &session_id, 1, 0).await;
+    let refreshed = refresh_through(&store, &session_id, 1, 1).await;
+    assert_ne!(refreshed, baseline);
+    assert_eq!(
+        runtime
+            .session_temporal_fixture_count_for_test(
+                HostAdmissionScope::Profile,
+                SessionTemporalFixtureCountV1::Occurrences
+            )
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn refresh_frontier_without_observation_effects_cannot_activate() {
+    assert_unsupported_frontier_cannot_activate(FrontierPrefix::Absent, false).await;
+}
+
+#[tokio::test]
+async fn skipped_prefix_cannot_prove_an_unsupported_target_frontier() {
+    for foreign_target in [false, true] {
+        assert_unsupported_frontier_cannot_activate(FrontierPrefix::Skipped, foreign_target).await;
+    }
+}
+
+#[tokio::test]
+async fn message_prefix_cannot_prove_an_unsupported_target_frontier() {
+    assert_unsupported_frontier_cannot_activate(FrontierPrefix::Message, false).await;
+}
+
+enum FrontierPrefix {
+    Absent,
+    Skipped,
+    Message,
+}
+
+async fn assert_unsupported_frontier_cannot_activate(prefix: FrontierPrefix, foreign_target: bool) {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let session_id = fixture_session("session.projector.unsupported-frontier");
+    let (observation, write) = fixture_observation(&session_id, 0, None, false);
+    Box::pin(persist_fixture(&runtime, observation, write)).await;
+    let store = temporal_store(&runtime);
+    refresh_through(&store, &session_id, 1, 0).await;
+    let target = if matches!(prefix, FrontierPrefix::Skipped) {
+        let (observation, write) = fixture_observation_from_facts(
+            &session_id,
+            1,
+            ProviderId::new("projector-test-1").unwrap(),
+            ObservationId::new("record.projector.1").unwrap(),
+            CanonicalObservationRelationsV1::new(session_id.clone()),
+            vec![CanonicalObservationFactV1::Boundary {
+                boundary_kind: tracedecay_domain::CanonicalBoundaryKindV1::TurnStart,
+            }],
+            None,
+        );
+        assert_eq!(
+            tracedecay_store::derive_canonical_projection(&observation)
+                .unwrap()
+                .skip_reason(),
+            Some(ProjectionSkipReason::NonConversationalRecord)
+        );
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+        3
+    } else if matches!(prefix, FrontierPrefix::Message) {
+        let (observation, write) = fixture_observation(&session_id, 1, None, false);
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+        3
+    } else {
+        2
+    };
+    if foreign_target {
+        let foreign_session = fixture_session("session.projector.foreign-frontier");
+        let (observation, write) = fixture_observation(&foreign_session, 2, None, false);
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+    }
+    store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(target, 1).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let recovery = store
+        .session_refresh_recovery(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let (progress, batch) = store
+        .materialize_session_temporal_refresh_batch_for_test(&recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        batch.occurrences().len(),
+        usize::from(matches!(prefix, FrontierPrefix::Message))
+    );
+    assert_eq!(progress.frontier().committed_through(), target);
+    let request = SessionRefreshCompletionRequestV1::new(
+        progress.operation_id().clone(),
+        session_id.clone(),
+        progress.frontier(),
+        *progress.coverage(),
+    )
+    .unwrap();
+    store
+        .persist_session_refresh_projection_batch(progress, batch)
+        .await
+        .unwrap();
+    let error = store
+        .complete_session_refresh(request, ExecutionControl::default())
+        .await
+        .expect_err("a prefix batch cannot prove an unsupported source frontier");
+    assert!(matches!(error, SessionStoreError::Storage { .. }));
+    assert_eq!(
+        store
+            .session_refresh_recovery(&session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .restart_state(),
+        SessionRefreshRestartStateV1::ReadyToComplete
+    );
+    assert_eq!(
+        runtime
+            .session_temporal_fixture_count_for_test(
+                HostAdmissionScope::Profile,
+                SessionTemporalFixtureCountV1::RefreshReceipts
+            )
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn terminal_receipt_rejects_corrupted_derived_evidence() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())

@@ -390,7 +390,7 @@ fn acknowledge_dynamic_request<P, S, D>(
 fn initialized_client_registers_and_unregisters_workspace_diagnostics_with_live_readiness() {
     let ready = Arc::new(AtomicBool::new(false));
     let mut session = dynamic_workspace_session(Arc::clone(&ready));
-    assert!(session.drain_outbound().is_empty());
+    assert_eq!(session.drain_outbound().len(), 0);
 
     ready.store(true, Ordering::Release);
     session.flush_due(2);
@@ -407,7 +407,7 @@ fn initialized_client_registers_and_unregisters_workspace_diagnostics_with_live_
         true
     );
     session.flush_due(3);
-    assert!(session.drain_outbound().is_empty());
+    assert_eq!(session.drain_outbound().len(), 0);
 
     acknowledge_dynamic_request(&mut session, &dynamic_request_id(&register), 4);
     session.handle_payload(
@@ -459,7 +459,7 @@ fn readiness_loss_cancels_an_unacknowledged_registration_before_unregistration()
     assert_eq!(frames[0]["params"]["id"], register["id"]);
     assert_eq!(frames[1]["method"], "client/unregisterCapability");
     session.flush_due(3);
-    assert!(session.drain_outbound().is_empty());
+    assert_eq!(session.drain_outbound().len(), 0);
 }
 
 #[test]
@@ -493,7 +493,7 @@ fn rejected_registration_stays_unavailable_until_a_new_readiness_epoch() {
         2,
     );
     session.flush_due(3);
-    assert!(session.drain_outbound().is_empty());
+    assert_eq!(session.drain_outbound().len(), 0);
     session.handle_payload(
         br#"{"jsonrpc":"2.0","id":2,"method":"workspace/diagnostic","params":{"previousResultIds":[]}}"#,
         4,

@@ -219,8 +219,7 @@ async fn cold_project_shutdown_joins_every_production_graph_holder() {
     let (cold_commit_entered, release_cold_commit) =
         tracedecay_code_index_runtime::CodeIndexSchedulerRegistryV1::pause_next_cold_mount_before_final_commit(
             canonical_project,
-        )
-        .await;
+        );
     let lifecycle = engine.lifecycle.clone();
     let server = engine
         .project_server(&handshake)

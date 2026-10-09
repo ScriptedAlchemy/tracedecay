@@ -713,7 +713,7 @@ fn a_layered_endpoint_copy_refuses_an_offset_past_the_pinned_rows() {
         .unwrap()
         .len();
     let mut offsets = std::fs::read(parent_directory.join("entity-rows.offsets")).unwrap();
-    for record in offsets[16..].chunks_exact_mut(16) {
+    for record in offsets[16..].as_chunks_mut::<16>().0 {
         record[8..].copy_from_slice(&rows_length.saturating_add(1).to_be_bytes());
     }
     std::fs::write(parent_directory.join("entity-rows.offsets"), offsets).unwrap();

@@ -9,7 +9,6 @@ usage() {
   cat >&2 <<'EOF'
 Usage:
   with-isolated-tracedecay-daemon.sh --bin PATH [options] -- COMMAND [ARG...]
-  with-isolated-tracedecay-daemon.sh --cargo DIR [options] -- COMMAND [ARG...]
 
 Options:
   --ready-timeout SECONDS  Daemon readiness deadline (default: 60)
@@ -27,15 +26,13 @@ EOF
 ready_timeout=60
 stop_timeout=5
 lifecycle_label=""
-daemon_mode=""
 daemon_value=""
 
 while (($# > 0)); do
   case "$1" in
-    --bin | --cargo)
+    --bin)
       (($# >= 2)) || usage
-      [[ -z "$daemon_mode" ]] || usage
-      daemon_mode="${1#--}"
+      [[ -z "$daemon_value" ]] || usage
       daemon_value="$2"
       shift 2
       ;;
@@ -64,27 +61,16 @@ while (($# > 0)); do
   esac
 done
 
-[[ -n "$daemon_mode" && $# -gt 0 ]] || usage
+[[ -n "$daemon_value" && $# -gt 0 ]] || usage
 for value in "$ready_timeout" "$stop_timeout"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || usage
 done
 
-case "$daemon_mode" in
-  bin)
-    [[ -x "$daemon_value" ]] || {
-      echo "error: tracedecay binary is not executable: $daemon_value" >&2
-      exit 2
-    }
-    daemon_value="$(cd "$(dirname "$daemon_value")" && pwd)/$(basename "$daemon_value")"
-    ;;
-  cargo)
-    [[ -f "$daemon_value/Cargo.toml" ]] || {
-      echo "error: Cargo.toml not found under: $daemon_value" >&2
-      exit 2
-    }
-    daemon_value="$(cd "$daemon_value" && pwd)"
-    ;;
-esac
+[[ -x "$daemon_value" ]] || {
+  echo "error: tracedecay binary is not executable: $daemon_value" >&2
+  exit 2
+}
+daemon_value="$(cd "$(dirname "$daemon_value")" && pwd)/$(basename "$daemon_value")"
 
 command -v python3 >/dev/null 2>&1 || {
   echo "error: python3 is required for the bounded daemon socket probe" >&2
@@ -163,17 +149,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 [[ -z "$lifecycle_label" ]] || echo "== starting $lifecycle_label"
-if [[ "$daemon_mode" == "bin" ]]; then
-  python3 -S "$PROCESS_HELPER" exec-session --parent-pid "$$" -- \
-    "$daemon_value" daemon run --socket "$TRACEDECAY_DAEMON_SOCKET" \
-    >"$daemon_log" 2>&1 &
-else
-  (
-    cd "$daemon_value"
-    exec python3 -S "$PROCESS_HELPER" exec-session --parent-pid "$$" -- \
-      cargo run -- daemon run --socket "$TRACEDECAY_DAEMON_SOCKET"
-  ) >"$daemon_log" 2>&1 &
-fi
+python3 -S "$PROCESS_HELPER" exec-session --parent-pid "$$" -- \
+  "$daemon_value" daemon run --socket "$TRACEDECAY_DAEMON_SOCKET" \
+  >"$daemon_log" 2>&1 &
 daemon_pid=$!
 # `exec-session` execs into the daemon, so this is the daemon's own PID. The
 # smoke command samples its resident memory per readiness probe; a timeout or

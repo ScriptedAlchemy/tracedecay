@@ -63,8 +63,10 @@ The legacy schema records real SHA-256 identities for workload members and
 native fixtures plus the host target, Rust/Cargo versions, kernel, and hardware.
 Those source/content digests remain useful provenance. Do not recreate the
 former clean-checkout archive, tracked-source snapshot, compiler-input
-attestation, or evidence-only commit workflow. Run ordinary Cargo against the
-working checkout and report the source revision and dirty state truthfully.
+attestation, or evidence-only commit workflow. The runner uses Bazel `--config=release` in the current clean checkout and
+records the source revision before and after measurement, the Bazel and Rust
+versions, and the measured executable identity. It validates new output before
+publishing the result and index, without archive or backup copies.
 
 Linux `/proc` is the explicit measurement platform contract. Preflight requires
 all measured interfaces, a successful write of `5` to

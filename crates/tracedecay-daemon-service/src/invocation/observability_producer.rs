@@ -13,7 +13,7 @@ fn daemon_observability_producer_identity(
     policy_revision: &ManifestDigest,
 ) -> Result<tracedecay_application::observability::ObservabilityProducerIdentityV1, &'static str> {
     let registration = NEXT_DAEMON_OBSERVABILITY_PRODUCER_REGISTRATION
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
             current.checked_add(1)
         })
         .map_err(|_| "daemon_observability_producer_registrations_exhausted")?;

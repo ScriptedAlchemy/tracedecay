@@ -510,7 +510,7 @@ where
         transport: T,
     ) -> std::result::Result<
         rmcp::service::RunningService<RoleServer, Self>,
-        rmcp::service::ServerInitializeError,
+        Box<rmcp::service::ServerInitializeError>,
     >
     where
         T: rmcp::transport::Transport<RoleServer> + Send + 'static,
@@ -524,6 +524,7 @@ where
             },
         )
         .await
+        .map_err(Box::new)
     }
 }
 

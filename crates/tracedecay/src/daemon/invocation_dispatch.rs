@@ -239,20 +239,20 @@ async fn open_scope_set_cas_projects<'a>(
     request_cancellation: &CancellationToken,
     project_open_gates: &Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     mut open_project: impl FnMut(DaemonHandshake) -> ProjectOpenFuture<'a>,
-) -> std::result::Result<Vec<Arc<crate::mcp::McpServer>>, DaemonInvocationResponse> {
+) -> std::result::Result<Vec<Arc<crate::mcp::McpServer>>, Box<DaemonInvocationResponse>> {
     if cancellation.is_cancelled() || request_cancellation.is_cancelled() {
-        return Err(DaemonInvocationResponse::application_problem(
+        return Err(Box::new(DaemonInvocationResponse::application_problem(
             request_id.to_owned(),
             tracedecay_contracts::ApplicationProblem::cancelled_before_admission(),
-        ));
+        )));
     }
     if deadline.is_elapsed_at(observed_at)
         || deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros())
     {
-        return Err(DaemonInvocationResponse::application_problem(
+        return Err(Box::new(DaemonInvocationResponse::application_problem(
             request_id.to_owned(),
             tracedecay_contracts::ApplicationProblem::timed_out_before_admission(),
-        ));
+        )));
     }
     let mut servers = Vec::with_capacity(scope_set_request.roots.len());
     for selector in &scope_set_request.roots {
@@ -268,18 +268,18 @@ async fn open_scope_set_cas_projects<'a>(
             Ok(Err(error)) if error_is_project_open_retryable(&error) => {}
             Ok(Err(error)) => {
                 record_project_open_refusal("multi_root_scope_set_compare_and_swap", &error);
-                return Err(project_open_refusal_response(
+                return Err(Box::new(project_open_refusal_response(
                     request_id.to_owned(),
                     &error,
                     false,
                     false,
-                ));
+                )));
             }
             Err(problem) => {
-                return Err(DaemonInvocationResponse::application_problem(
+                return Err(Box::new(DaemonInvocationResponse::application_problem(
                     request_id.to_owned(),
                     problem,
-                ));
+                )));
             }
         }
         let root = canonical_existing_identity(&selector.root).map_err(|_| {
@@ -302,7 +302,7 @@ async fn open_scope_set_cas_projects<'a>(
         )
         .await;
         if let Some(response) = lsp_project_open_wait_response(request_id, wait, false, false) {
-            return Err(response);
+            return Err(Box::new(response));
         }
         let project_server = await_lsp_route_rejoin(
             deadline,
@@ -314,18 +314,18 @@ async fn open_scope_set_cas_projects<'a>(
             Ok(Ok(project_server)) => servers.push(project_server),
             Ok(Err(error)) => {
                 record_project_open_refusal("multi_root_scope_set_compare_and_swap", &error);
-                return Err(project_open_refusal_response(
+                return Err(Box::new(project_open_refusal_response(
                     request_id.to_owned(),
                     &error,
                     false,
                     false,
-                ));
+                )));
             }
             Err(problem) => {
-                return Err(DaemonInvocationResponse::application_problem(
+                return Err(Box::new(DaemonInvocationResponse::application_problem(
                     request_id.to_owned(),
                     problem,
-                ));
+                )));
             }
         }
     }
@@ -542,7 +542,7 @@ pub(super) async fn execute_portable_daemon_invocation(
             .await
             {
                 Ok(servers) => servers,
-                Err(response) => return response,
+                Err(response) => return *response,
             }
         } else {
             Vec::new()
@@ -876,7 +876,7 @@ pub(super) async fn execute_daemon_invocation(
             .await
             {
                 Ok(servers) => servers,
-                Err(response) => return response,
+                Err(response) => return *response,
             }
         } else {
             Vec::new()

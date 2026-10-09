@@ -31,6 +31,8 @@ export type ReadState<T, BlockedState extends DomainStateKind = DomainStateKind>
       state: BlockedState;
       /** Whatever the source said about this state, and nothing where it said nothing. */
       detail?: string | undefined;
+      /** A decoded response can report unknown without supplying a payload. */
+      responseReceived?: boolean | undefined;
       /**
        * The decoded body a *source-level* refusal still carried.
        *
@@ -112,7 +114,10 @@ export function envelopeReadState<T>(
     return {
       kind: 'blocked',
       state: result.state,
-      detail: result.detail ?? details.transport ?? 'daemon unreachable',
+      detail: result.detail ?? (result.responseReceived
+        ? 'no usable result was provided'
+        : details.transport ?? 'daemon unreachable'),
+      responseReceived: result.responseReceived,
     };
   }
   return { kind: 'ready', value: result.envelope };
@@ -150,7 +155,7 @@ export function ReadSection<T>({
     return state.kind === 'ready' ? (
       <>{children(state.value)}</>
     ) : (
-      <CenteredState title={title} kind={state.state} detail={state.detail} />
+      <CenteredState title={title} kind={state.state} detail={state.detail} responseReceived={state.responseReceived} />
     );
   }
   return (
@@ -315,12 +320,19 @@ export function CenteredState({
   title,
   kind,
   detail,
+  responseReceived,
 }: {
   title: string;
   kind: DomainStateKind;
   detail?: string | undefined;
+  responseReceived?: boolean | undefined;
 }) {
-  const guidance = STATE_GUIDANCE[kind];
+  const guidance = kind === 'unknown' && responseReceived
+    ? {
+        sentence: 'The daemon responded without a usable result for this read.',
+        action: 'The reported reason describes why no result is shown.',
+      }
+    : STATE_GUIDANCE[kind];
   // A dead channel on an instrument still shows its ruled field and its bezel:
   // the reader can see the surface is present and simply carrying no signal.
   // Sized by its CONTAINER, not the viewport: this plate renders both on

@@ -178,13 +178,14 @@ async fn sweep_atomically_relinks_moved_store_to_registered_live_project() {
         .unwrap();
 
     assert_eq!(report.relinked_registry_rows, 1);
-    assert!(report.outcome.collected.is_empty());
+    assert_eq!(report.outcome.collected.len(), 0);
     assert!(store_root.exists(), "re-link must not delete store payload");
-    assert!(
+    assert_eq!(
         db.try_list_store_instances_for_project("proj_old")
             .await
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
     let target_stores = db
         .try_list_store_instances_for_project("proj_live")
@@ -243,11 +244,12 @@ async fn sweep_resumes_manifest_forward_after_interrupted_relink() {
         .unwrap();
 
     assert_eq!(report.relinked_registry_rows, 1);
-    assert!(
+    assert_eq!(
         db.try_list_store_instances_for_project("proj_old")
             .await
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
     assert_eq!(
         db.try_list_store_instances_for_project("proj_live")
@@ -294,7 +296,7 @@ async fn sweep_leaves_relinkable_store_unchanged_without_exact_target_registrati
         .unwrap();
 
     assert_eq!(report.relinked_registry_rows, 0);
-    assert!(report.outcome.collected.is_empty());
+    assert_eq!(report.outcome.collected.len(), 0);
     assert!(store_root.exists());
     let prior = db
         .try_list_store_instances_for_project("proj_old")
@@ -421,7 +423,7 @@ async fn sweep_unregistered_stores_protects_unverifiable_payload_and_retains_you
         .await
         .unwrap();
     assert!(report.applied);
-    assert!(report.outcome.collected.is_empty());
+    assert_eq!(report.outcome.collected.len(), 0);
     assert_eq!(report.outcome.errors.len(), 1);
     assert_eq!(
         report.outcome.errors[0].kind,
@@ -506,8 +508,8 @@ async fn unregistered_store_with_a_vanished_manifest_root_waits_out_the_window()
     let outcome = execute_unregistered_collection(&db, &plan, &profile_root)
         .await
         .unwrap();
-    assert!(outcome.collected.is_empty());
-    assert!(outcome.errors.is_empty());
+    assert_eq!(outcome.collected.len(), 0);
+    assert_eq!(outcome.errors.len(), 0);
     assert!(vanished.exists());
     assert!(present.exists());
     assert!(unmanifested.exists());
@@ -548,7 +550,7 @@ async fn sweep_unregistered_stores_aborts_when_directory_gets_registered_first()
     let outcome = execute_unregistered_collection(&db, &plan, &profile_root)
         .await
         .unwrap();
-    assert!(outcome.collected.is_empty());
+    assert_eq!(outcome.collected.len(), 0);
     assert_eq!(outcome.errors.len(), 1);
     assert_eq!(
         outcome.errors[0].kind,
@@ -709,8 +711,8 @@ async fn unregistered_store_sweep_elapsed_deadline_does_not_advance_page_state()
         report.completion,
         UnregisteredSweepCompletionV1::DeadlineExceeded
     );
-    assert!(report.plan.collect.is_empty());
-    assert!(report.outcome.collected.is_empty());
+    assert_eq!(report.plan.collect.len(), 0);
+    assert_eq!(report.outcome.collected.len(), 0);
     assert!(report.next_cursor.is_none());
     assert!(
         profile_root.join("projects/proj_page_a").is_dir()
@@ -834,8 +836,8 @@ async fn unregistered_store_sweep_returns_cancelled_without_mutation() {
     .unwrap();
 
     assert_eq!(report.completion, UnregisteredSweepCompletionV1::Cancelled);
-    assert!(report.plan.collect.is_empty());
-    assert!(report.outcome.collected.is_empty());
+    assert_eq!(report.plan.collect.len(), 0);
+    assert_eq!(report.outcome.collected.len(), 0);
     assert!(profile_root.join("projects/proj_cancelled").is_dir());
 }
 
@@ -870,7 +872,7 @@ async fn unregistered_store_sweep_returns_deadline_without_mutation() {
         report.completion,
         UnregisteredSweepCompletionV1::DeadlineExceeded
     );
-    assert!(report.plan.collect.is_empty());
-    assert!(report.outcome.collected.is_empty());
+    assert_eq!(report.plan.collect.len(), 0);
+    assert_eq!(report.outcome.collected.len(), 0);
     assert!(profile_root.join("projects/proj_deadline").is_dir());
 }

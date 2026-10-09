@@ -108,5 +108,5 @@ async fn retrieval_contract_failure_preserves_the_committed_authority_outcome() 
     else {
         panic!("authority contract failure must retain its committed outcome");
     };
-    assert_eq!(authority_result, expected);
+    assert_eq!(*authority_result, expected);
 }

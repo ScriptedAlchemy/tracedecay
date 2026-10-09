@@ -7,7 +7,7 @@ regression can be proven by running the same command on two commits and
 diffing two files.
 
     scripts/efficiency-scorecard.py                       # build + run (3 runs)
-    scripts/efficiency-scorecard.py --binary target/release/tracedecay
+    scripts/efficiency-scorecard.py --binary /path/to/tracedecay
     scripts/efficiency-scorecard.py --quick               # 1 run smoke (~1 min)
     scripts/efficiency-scorecard.py --label b9181367ba \
         --binary /path/to/old/tracedecay --output target/effscore-base
@@ -1205,28 +1205,29 @@ def flatten_store_bytes(run: dict) -> None:
 
 
 def build_binary() -> Path:
-    jobs = os.environ.get("CARGO_BUILD_JOBS", "8")
-    print(f"scorecard: building tracedecay (release, jobs={jobs})", file=sys.stderr)
-    env = dict(os.environ, CARGO_BUILD_JOBS=jobs, TRACEDECAY_SKIP_DASHBOARD_BUILD="1")
+    print("scorecard: building tracedecay (Bazel release)", file=sys.stderr)
     completed = subprocess.run(
         (
-            "cargo",
+            "bazel",
             "build",
-            "--locked",
-            "--release",
-            "-p",
-            "tracedecay-cli",
-            "--bin",
-            "tracedecay",
+            "--config=release",
+            "//crates/tracedecay-cli:tracedecay",
         ),
         cwd=REPO_ROOT,
-        env=env,
         check=False,
     )
     if completed.returncode != 0:
         raise HarnessError("the tracedecay release build failed")
-    target_dir = Path(os.environ.get("CARGO_TARGET_DIR", REPO_ROOT / "target"))
-    binary = target_dir / "release" / "tracedecay"
+    output = subprocess.run(
+        ("bazel", "info", "--config=release", "bazel-bin"),
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if output.returncode != 0 or not output.stdout.strip():
+        raise HarnessError(f"could not resolve the Bazel output directory: {output.stderr.strip()}")
+    binary = Path(output.stdout.strip()) / "crates" / "tracedecay-cli" / "tracedecay"
     if not binary.is_file():
         raise HarnessError(f"expected a binary at {binary} after the build")
     return binary
@@ -1243,7 +1244,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0], formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--binary", help="prebuilt tracedecay binary (default: cargo build)")
+    parser.add_argument("--binary", help="prebuilt tracedecay binary (default: Bazel release build)")
     parser.add_argument(
         "--output",
         default=str(REPO_ROOT / "target" / "efficiency-scorecard"),

@@ -427,7 +427,7 @@ fn same_component_process_shared_reservations_shrink_and_release_independently()
     let released = authority.snapshot();
     assert_eq!(released.used_bytes, 0);
     assert_eq!(released.process_shared_charge_for(component), 0);
-    assert!(released.process_shared_charges.is_empty());
+    assert_eq!(released.process_shared_charges.len(), 0);
 }
 
 fn key(

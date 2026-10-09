@@ -794,7 +794,7 @@ impl ProjectRuntimeReservationLease {
         self.active = false;
     }
 
-    async fn commit(
+    fn commit(
         mut self,
         publication: ProjectRuntimePublication,
     ) -> Result<(), ProjectRuntimeRegistryError> {
@@ -1010,7 +1010,7 @@ impl ProjectRuntimeRegistryV1 {
             .send_modify(|version| *version = version.wrapping_add(1));
     }
 
-    async fn reserve(
+    fn reserve(
         &self,
         project_root: PathBuf,
         reservation: ProjectRuntimeReservation,
@@ -1125,12 +1125,11 @@ impl ProjectRuntimeRegistryV1 {
     {
         let lease = self
             .reserve(project_root, reservation.clone())
-            .await
             .map_err(E::from)?;
         let publication = ProjectRuntimePublication::new(reservation);
         match build(publication).await {
             Ok((publication, output)) => {
-                lease.commit(publication).await.map_err(E::from)?;
+                lease.commit(publication).map_err(E::from)?;
                 Ok(output)
             }
             Err(error) => {
@@ -1287,6 +1286,10 @@ impl ProjectRuntimeRegistryV1 {
     }
 
     /// Read one component through a projection, under one lock.
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "The caller projection must run when polled, preserving async read cancellation."
+    )]
     pub async fn read<C, T, F>(&self, project_root: &Path, read: F) -> Option<T>
     where
         C: ProjectRuntimeComponent,
@@ -1615,7 +1618,7 @@ impl ProjectRuntimeRegistryV1 {
     /// Answering with a component while several projects hold one would attach
     /// a request to whichever project happened to sort first.
     #[cfg(test)]
-    pub(crate) async fn sole<C>(&self) -> Option<C>
+    pub(crate) fn sole<C>(&self) -> Option<C>
     where
         C: ProjectRuntimeComponent + Clone,
     {
@@ -1626,7 +1629,7 @@ impl ProjectRuntimeRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.lock_runtimes().is_empty()
     }
 
@@ -1636,7 +1639,7 @@ impl ProjectRuntimeRegistryV1 {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn feedback_publication_state(&self, project_root: &Path) -> (bool, bool, bool) {
+    pub fn feedback_publication_state(&self, project_root: &Path) -> (bool, bool, bool) {
         let runtimes = self.lock_runtimes();
         let runtime = runtimes.get(project_root);
         (

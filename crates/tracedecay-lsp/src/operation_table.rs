@@ -20,7 +20,7 @@ impl BoundedOperationCapacity {
 
     pub(crate) fn acquire(&self) -> Option<OperationCapacityPermit> {
         self.available
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |available| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |available| {
                 available.checked_sub(1)
             })
             .ok()

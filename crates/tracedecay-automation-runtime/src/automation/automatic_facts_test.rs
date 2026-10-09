@@ -268,7 +268,7 @@ async fn automatic_apply_commits_a_terminal_receipt_with_canonical_evidence() {
         .unwrap(),
         batch.receipts
     );
-    assert!(
+    assert_eq!(
         list_automatic_fact_receipts(
             &memory,
             Some(AutomaticFactState::Quarantined),
@@ -277,7 +277,8 @@ async fn automatic_apply_commits_a_terminal_receipt_with_canonical_evidence() {
         )
         .await
         .unwrap()
-        .is_empty()
+        .len(),
+        0
     );
 }
 
@@ -437,7 +438,7 @@ async fn interrupted_automation_run_returns_a_retry_error_without_committing_a_f
     .await
     .unwrap();
 
-    assert!(batch.receipts.is_empty());
+    assert_eq!(batch.receipts.len(), 0);
     let TraceDecayError::Database { operation, message } = batch
         .retry_error
         .expect("interrupted fact application must remain retryable")
@@ -464,7 +465,7 @@ fn settled_invalid_authority_fact_preserves_its_receipt_across_effect_boundaries
             error: MemoryApplicationError::InvalidAuthorityResult {
                 invariant: "automatic fact receipt fixture invariant",
             },
-            authority_result,
+            authority_result: Box::new(authority_result),
         }))
         .unwrap();
     let AutomaticFactApplySettlement::Terminal {
@@ -550,7 +551,7 @@ fn unprojectable_invalid_authority_fact_retains_raw_receipt_with_null_run_id() {
         error: MemoryApplicationError::InvalidAuthorityResult {
             invariant: "automatic fact exact request and evidence identity",
         },
-        authority_result,
+        authority_result: Box::new(authority_result),
     }))
     .unwrap()
     else {

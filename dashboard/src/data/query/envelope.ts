@@ -7,7 +7,7 @@ import { readOnlyScopeRefusal } from '../scope/store.ts';
  * states rather than exceptions: the UI always has a state to render. */
 export type EnvelopeResult<T> =
   | { outcome: 'envelope'; envelope: DashboardEnvelopeV1<T> }
-  | { outcome: 'transport'; state: DashboardDomainStateV1; detail?: string };
+  | { outcome: 'transport'; state: DashboardDomainStateV1; detail?: string; responseReceived?: true };
 
 /** Fetches and decodes a DashboardEnvelopeV1<T> from a daemon API route.
  * - network failure → offline
@@ -81,6 +81,7 @@ function decodeEnvelopeBody<T>(
       outcome: 'transport',
       state: envelope.domain_state,
       detail: envelope.coverage.omission_reasons[0],
+      responseReceived: true,
     };
   }
   return { outcome: 'envelope', envelope: envelope as DashboardEnvelopeV1<T> };

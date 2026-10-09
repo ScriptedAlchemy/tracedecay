@@ -898,7 +898,7 @@ mod tests {
             payload.pointer("/applied_change_outcomes/status").unwrap(),
             &json!("no_outcomes_recorded")
         );
-        assert!(generated_eval_payloads(&ctx).outcome_definitions.is_empty());
+        assert_eq!(generated_eval_payloads(&ctx).outcome_definitions.len(), 0);
     }
 
     #[test]

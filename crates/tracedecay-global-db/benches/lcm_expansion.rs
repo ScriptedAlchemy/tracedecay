@@ -17,9 +17,12 @@ use tracedecay_lcm::{
     LcmContentSlice, LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
     LcmSummaryNodeDraft,
 };
-use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
+use tracedecay_session_temporal_store::{
+    RegisteredGlobalDbSessionTemporalExecution, SessionTemporalStore,
+};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
+    SessionRetrievalStore, SessionTemporalSnapshotRequestV1,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 use tracedecay_temporal_query::execution::{BindingDigest, ExecutionControl};
@@ -261,12 +264,20 @@ async fn build_fixture() -> Fixture {
             .expect("publish benchmark leaf through production authority");
         expected_source_content.push(leaf_summary_text(index));
     }
-    let root_receipt = database
+    database
         .lcm_publish_immutable_summary_guarded(root_publication(), &publication_control, || Ok(()))
         .await
         .expect("publish benchmark root through production authority");
-    let generation = u64::try_from(root_receipt.generation)
-        .expect("published benchmark generation is non-negative");
+    let temporal = SessionTemporalStore::new(database);
+    temporal
+        .materialize_pending_session_refresh_for_test(&session_id)
+        .await
+        .expect("publish benchmark temporal rows and summary relations");
+    let frozen = temporal
+        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(session_id.clone()))
+        .await
+        .expect("freeze benchmark canonical temporal watermarks");
+    let watermarks = frozen.watermarks();
     let snapshot = TemporalExecutionSnapshot::new_authorized(
         TemporalSnapshotRequest::new(
             session_id,
@@ -278,11 +289,11 @@ async fn build_fixture() -> Fixture {
         )
         .expect("benchmark temporal request is valid"),
         TemporalWatermarks {
-            generation,
-            source: 0,
-            projection: 0,
-            index: 0,
-            summary: generation,
+            generation: watermarks.active_generation().value(),
+            source: watermarks.source_frontier(),
+            projection: watermarks.projection_frontier(),
+            index: watermarks.projection_frontier(),
+            summary: watermarks.summary_frontier(),
         },
         KernelVersions {
             schema: 1,

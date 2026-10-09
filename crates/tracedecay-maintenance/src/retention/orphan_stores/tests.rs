@@ -206,8 +206,8 @@ fn live_root_is_never_collected() {
         plan.collect.is_empty(),
         "a live store must never be collected"
     );
-    assert!(plan.relink.is_empty());
-    assert!(plan.retained_immature.is_empty());
+    assert_eq!(plan.relink.len(), 0);
+    assert_eq!(plan.retained_immature.len(), 0);
 }
 
 #[test]
@@ -233,9 +233,9 @@ fn live_registered_alias_keeps_the_store_out_of_every_collectable_bucket() {
     );
 
     let plan = plan_collection(findings, 0);
-    assert!(plan.collect.is_empty());
-    assert!(plan.retained_immature.is_empty());
-    assert!(plan.unverifiable.is_empty());
+    assert_eq!(plan.collect.len(), 0);
+    assert_eq!(plan.retained_immature.len(), 0);
+    assert_eq!(plan.unverifiable.len(), 0);
 }
 
 #[cfg(unix)]
@@ -286,7 +286,7 @@ fn live_git_common_dir_keeps_a_linked_worktree_store_live() {
 
     let findings = classify_stores(&[census_entry], 1_000 * DAY, &BTreeSet::new());
     assert_eq!(findings[0].disposition, StoreDisposition::Live);
-    assert!(plan_collection(findings, 0).collect.is_empty());
+    assert_eq!(plan_collection(findings, 0).collect.len(), 0);
 }
 
 #[test]
@@ -708,7 +708,7 @@ fn portable_inventory_sidecar_writer_lock_serializes_concurrent_advances() {
         .unwrap()
         .unwrap()
         .expect("a contending writer must return an incomplete retry page");
-    assert!(page.entries.is_empty());
+    assert_eq!(page.entries.len(), 0);
     assert_eq!(
         page.next_cursor,
         Some(format!("portable-v2:{signature}:0")),

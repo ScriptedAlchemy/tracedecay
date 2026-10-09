@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Run one name-filtered cargo test and require that it actually ran.
+# Run one name-filtered libtest target and require that it actually ran.
 #
-# `cargo test <name> -- --exact` exits 0 when the filter matches NOTHING:
+# `bazel test TARGET --test_arg=NAME --test_arg=--exact` exits 0 when the filter matches NOTHING:
 #
 #     running 0 tests
 #     test result: ok. 0 passed; 0 failed; 0 ignored; 118 filtered out
@@ -12,7 +12,8 @@
 # nextest has --no-tests=fail for this; libtest does not, so assert on the count
 # libtest reports instead of on the exit code alone.
 #
-# usage: scripts/require-exact-test.sh cargo test --test foo the_test -- --exact
+# usage: scripts/require-exact-test.sh bazel test //crates/tracedecay-hooks:unit_test \
+#   --test_output=all --test_arg=spool::tests::checksum_is_real_sha256 --test_arg=--exact
 #
 # Set REQUIRE_EXACT_TEST_COUNT to a positive integer, or to `nonzero` for a
 # single-target suite whose membership may evolve but must never become empty.
@@ -27,7 +28,7 @@ fi
 
 if [ "$#" -eq 0 ]; then
     echo "usage: $0 <command...>" >&2
-    echo "example: $0 cargo test --test foo the_test -- --exact" >&2
+    echo "example: $0 bazel test //crates/tracedecay-hooks:unit_test --test_output=all --test_arg=spool::tests::checksum_is_real_sha256 --test_arg=--exact" >&2
     exit 2
 fi
 

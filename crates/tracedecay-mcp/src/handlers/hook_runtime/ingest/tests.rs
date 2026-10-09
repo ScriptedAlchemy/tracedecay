@@ -109,7 +109,7 @@ fn cursor_compaction_response_matches_hook_contract() {
     assert_eq!(outcome.status, "skipped");
     assert_eq!(outcome.reason, "no messages to compact");
     assert_eq!(outcome.summary_nodes_created, 0);
-    assert!(outcome.summary_node_ids.is_empty());
+    assert_eq!(outcome.summary_node_ids.len(), 0);
     assert_eq!(
         outcome.relation_projection_status,
         tracedecay_lcm::LcmRelationProjectionStatus::NotApplicable

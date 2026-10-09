@@ -98,9 +98,9 @@ fn producer_work_commits_with_its_admission_and_redrives_until_completed() {
     assert!(!duplicate.work_completed);
 
     assert!(complete_hook_v2_pending_work(data_root.path(), &envelope));
-    assert!(pending_work(data_root.path()).is_empty());
+    assert_eq!(pending_work(data_root.path()).len(), 0);
     restart_ledger(data_root.path());
-    assert!(pending_work(data_root.path()).is_empty());
+    assert_eq!(pending_work(data_root.path()).len(), 0);
     assert!(
         record_hook_v2_admission(data_root.path(), &envelope, now)
             .unwrap()
@@ -145,7 +145,7 @@ fn redelivered_producer_event_with_pending_work_is_an_exact_duplicate() {
         data_root.path(),
         &redelivered
     ));
-    assert!(pending_work(data_root.path()).is_empty());
+    assert_eq!(pending_work(data_root.path()).len(), 0);
 }
 
 #[test]

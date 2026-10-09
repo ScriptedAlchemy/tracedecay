@@ -272,6 +272,17 @@ impl CodeGraphReadCostMeter {
 }
 
 impl CodeGraphProjectionStore {
+    /// Holds the existing catalog-build gate while a fixture drives real reads.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn hold_catalog_build_for_test(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, ()>, CodeGraphProjectionError> {
+        self.interactive_catalog
+            .build
+            .lock()
+            .map_err(|_| catalog_lock_poisoned())
+    }
+
     /// Builds and validates the generation-pinned interactive catalog before
     /// serving latency-bounded reads. Only a fully built immutable catalog is
     /// published into the store's shared slot.

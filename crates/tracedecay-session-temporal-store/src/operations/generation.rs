@@ -735,10 +735,18 @@ mod tests {
         let mut affected = 0_usize;
         let mut final_rewind = None;
         for _ in 0..32 {
-            let page =
-                invalidate_raw_summary_revision(&conn, "cursor", "large-closure", 100, PAGE_LIMIT)
-                    .await
-                    .unwrap();
+            // Production commits one bounded invalidation page atomically.
+            let transaction = conn.transaction().await.unwrap();
+            let page = invalidate_raw_summary_revision(
+                &transaction,
+                "cursor",
+                "large-closure",
+                100,
+                PAGE_LIMIT,
+            )
+            .await
+            .unwrap();
+            transaction.commit().await.unwrap();
             assert!(page.stale_summary_count <= PAGE_LIMIT);
             affected = affected.saturating_add(page.stale_summary_count);
             final_rewind = Some(page.rewind_frontier_store_id);

@@ -1178,7 +1178,7 @@ mod tests {
             .await
             .expect("abandon preserved conflicting authority");
         assert!(!conflicting_journal.exists());
-        assert!(pending_journal_files(&fixture.dashboard_root).is_empty());
+        assert_eq!(pending_journal_files(&fixture.dashboard_root).len(), 0);
         let report =
             tracedecay_daemon_service::automation_effect::recovery_composition::reconcile_reserved_automation_effects_for_project(
                 fixture.memory.as_ref(),
@@ -1402,7 +1402,7 @@ mod tests {
         );
         assert!(!current_skill_journal.exists());
         assert!(!current_skill_sidecar.exists());
-        assert!(pending_journal_files(&fixture.dashboard_root).is_empty());
+        assert_eq!(pending_journal_files(&fixture.dashboard_root).len(), 0);
         assert_eq!(exact_spool_files(&fixture.dashboard_root), spool_before);
         assert!(
             tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock::try_acquire(

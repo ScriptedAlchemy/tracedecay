@@ -888,7 +888,7 @@ fn managed_stop_refuses_live_endpoint_when_task_is_already_stopped() {
 
     assert!(error.to_string().contains("unmanaged"));
     assert_eq!(control.shutdown_requests, 0);
-    assert!(api.operations.is_empty());
+    assert_eq!(api.operations.len(), 0);
 }
 
 #[test]

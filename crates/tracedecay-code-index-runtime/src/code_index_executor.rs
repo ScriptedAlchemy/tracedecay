@@ -118,10 +118,10 @@ async fn bounded_by_settlement<F: std::future::Future>(
     deadline: Option<&tracedecay_contracts::Deadline>,
     cancellation: Option<&tracedecay_contracts::CancellationSignal>,
     work: F,
-) -> Result<F::Output, code_search::CodeIndexSearchOutcomeV1> {
+) -> Result<F::Output, Box<code_search::CodeIndexSearchOutcomeV1>> {
     settled_or(deadline, cancellation, work)
         .await
-        .map_err(|reason| code_index_search_unavailable(reason, reason.as_str()))
+        .map_err(|reason| Box::new(code_index_search_unavailable(reason, reason.as_str())))
 }
 
 /// [`bounded_by_settlement`] for executors that answer with a bare typed
@@ -768,7 +768,8 @@ where
                     .await
                     {
                         Ok(None) => (),
-                        Ok(Some(outcome)) | Err(outcome) => return outcome,
+                        Ok(Some(outcome)) => return outcome,
+                        Err(outcome) => return *outcome,
                     }
                 }
                 let admission = match admission_provider.admit_current(&scope) {
@@ -1142,7 +1143,7 @@ where
                     Ok(text) => text.filter(|text| {
                         text.metadata().manifest().generation_id == executed.generation
                     }),
-                    Err(outcome) => return outcome,
+                    Err(outcome) => return *outcome,
                 };
                 let display_source = if let Some(text) = text_serving {
                     CodeIndexSearchDisplaySourceV1::Text(text)
@@ -1157,7 +1158,7 @@ where
                     .await
                     {
                         Ok(latest) => latest,
-                        Err(outcome) => return outcome,
+                        Err(outcome) => return *outcome,
                     };
                     let paths =
                         match CodeIndexDisplayPathIndexV1::for_generation(latest.generation()) {
@@ -1232,7 +1233,7 @@ where
                 .await
                 {
                     Ok(binding) => binding,
-                    Err(outcome) => return outcome,
+                    Err(outcome) => return *outcome,
                 };
                 if let Err(error) = cursor_binding {
                     use code_index_task_support::ExactCursorPublicationErrorV1;

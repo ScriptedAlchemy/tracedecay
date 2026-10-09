@@ -35,6 +35,7 @@ jobs:
     timeout-minutes: 240
     env:
       TARGET: x86_64-unknown-linux-gnu
+      AST_GREP_VERSION: "0.44.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,6 +46,11 @@ jobs:
           node-version: "24.21.0"
 
       - uses: ./.github/actions/setup-pnpm
+
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: distribution-acceptance-linux
+          test-tools: "true"
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

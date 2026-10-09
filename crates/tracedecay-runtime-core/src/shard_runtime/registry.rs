@@ -569,7 +569,7 @@ fn allocate_database_attachment_counter(
     counter: &AtomicU64,
 ) -> Result<u64, StoreRuntimeRegistryFailure> {
     counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
             value.checked_add(1)
         })
         .map_err(|_| StoreRuntimeRegistryFailure::DatabaseAttachmentIdentityExhausted)

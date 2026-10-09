@@ -172,6 +172,10 @@ impl ProjectRuntimeRegistryV1 {
     /// Owners are keyed by the registered root. A request spelling that only
     /// matches through canonicalize, the admitted canonical root, or the
     /// Windows verbatim/ordinary pair still resolves that same entry.
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Request admission belongs to the polled request, not future construction."
+    )]
     pub async fn request_runtimes(
         &self,
         project_root: Option<&Path>,

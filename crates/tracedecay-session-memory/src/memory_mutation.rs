@@ -31,7 +31,9 @@ pub fn memory_mutation_settlement<T: Debug>(
         }
         Err(MemoryMutationError::InvalidAuthorityResult {
             authority_result, ..
-        }) => Ok(MemoryMutationSettlement::InvalidAuthority(authority_result)),
+        }) => Ok(MemoryMutationSettlement::InvalidAuthority(
+            *authority_result,
+        )),
     }
 }
 

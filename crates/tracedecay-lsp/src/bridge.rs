@@ -710,7 +710,7 @@ mod tests {
                 limit: MAX_LSP_FRAME_BYTES,
             })
         );
-        assert!(bridge.daemon.output.is_empty());
+        assert_eq!(bridge.daemon.output.len(), 0);
         assert!(bridge.pump_once().unwrap().closed);
     }
 
@@ -724,8 +724,8 @@ mod tests {
 
         assert!(bridge.pump_once().unwrap().closed);
         let (stdio, daemon) = bridge.into_parts();
-        assert!(stdio.output.is_empty());
-        assert!(daemon.output.is_empty());
+        assert_eq!(stdio.output.len(), 0);
+        assert_eq!(daemon.output.len(), 0);
     }
 
     #[test]

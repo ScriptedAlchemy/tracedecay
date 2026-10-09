@@ -652,6 +652,6 @@
       ]
     }
   },
-  "command": "cargo test --quiet --release -p tracedecay --features test-helpers --test claude_observation_benchmark production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1",
+  "command": "scripts/run-claude-observation-benchmark.sh",
   "evidence_runner": "scripts/run-claude-observation-benchmark.sh"
 }

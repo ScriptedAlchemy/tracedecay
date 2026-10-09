@@ -411,7 +411,7 @@ impl OperationResumeAuthority {
 
     fn next_generation(&self) -> Result<u64, OperationEventError> {
         self.next_generation
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
                 (generation < i64::MAX as u64).then_some(generation + 1)
             })
             .map_err(|_| OperationEventError::ResumeUnavailable)
@@ -859,7 +859,7 @@ impl OperationEventAuthority {
         }
         record
             .subscribers
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < self.inner.config.max_subscribers_per_operation).then_some(count + 1)
             })
             .map_err(|_| OperationEventError::Saturated)?;
@@ -1289,7 +1289,7 @@ impl Drop for OperationEventStream {
     fn drop(&mut self) {
         let _ = self
             .subscribers
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_sub(1)
             });
     }

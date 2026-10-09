@@ -306,7 +306,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
         .route_plan
         .as_ref()
         .expect("the configured route remains in the explained decision");
-    assert!(!route_plan.ranked.is_empty());
+    assert_ne!(route_plan.ranked.len(), 0);
     assert!(
         !generated
             .decision

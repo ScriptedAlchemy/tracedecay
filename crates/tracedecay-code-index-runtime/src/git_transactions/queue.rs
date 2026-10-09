@@ -106,7 +106,7 @@ impl RepositoryMutationQueue {
         operation: impl FnOnce(Option<UtcMicros>) -> T,
     ) -> Result<T, RepositoryMutationQueueError> {
         self.pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
                 (pending < self.capacity).then_some(pending + 1)
             })
             .map_err(|_| RepositoryMutationQueueError::Saturated)?;

@@ -1238,11 +1238,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
     let (observer_holding, observer_is_holding) = std::sync::mpsc::channel();
     let (release_observer, observer_may_release) = std::sync::mpsc::channel();
     let observer = tokio::spawn(async move {
-        let mut samples = vec![
-            observer_registry
-                .feedback_publication_state(&observer_root)
-                .await,
-        ];
+        let mut samples = vec![observer_registry.feedback_publication_state(&observer_root)];
         observer_registry
             .read::<Arc<dyn Any + Send + Sync>, _, _>(&observer_root, move |_| {
                 observer_holding
@@ -1256,9 +1252,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
             .expect("observer marker");
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                let sample = observer_registry
-                    .feedback_publication_state(&observer_root)
-                    .await;
+                let sample = observer_registry.feedback_publication_state(&observer_root);
                 samples.push(sample);
                 if sample == (true, true, true) {
                     break;

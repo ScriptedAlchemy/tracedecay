@@ -911,7 +911,7 @@ enum ClaudeWindowedCaptureFailure {
     /// The admission batch demands per-frame capture (a non-durable record in
     /// the window or a store-level scalar-fallback verdict). Nothing from the
     /// failed window committed; the carried stats cover only committed work.
-    ScalarReplay(ClaudeObservationIngestStats),
+    ScalarReplay(Box<ClaudeObservationIngestStats>),
     Error(ClaudeObservationIngestError),
 }
 
@@ -989,8 +989,8 @@ async fn capture_frame_window<A: HostAdmission + ?Sized>(
                     // quarantined coverage advances.
                     CaptureObservationOutcome::Rejected { .. }
                     | CaptureObservationOutcome::Quarantined { .. } => {
-                        return Err(ClaudeWindowedCaptureFailure::ScalarReplay(std::mem::take(
-                            stats,
+                        return Err(ClaudeWindowedCaptureFailure::ScalarReplay(Box::new(
+                            std::mem::take(stats),
                         )));
                     }
                 }
@@ -999,8 +999,8 @@ async fn capture_frame_window<A: HostAdmission + ?Sized>(
         }
         Err(outcome) => {
             if outcome.recovery.is_some() && !context.cancellation.is_cancelled() {
-                return Err(ClaudeWindowedCaptureFailure::ScalarReplay(std::mem::take(
-                    stats,
+                return Err(ClaudeWindowedCaptureFailure::ScalarReplay(Box::new(
+                    std::mem::take(stats),
                 )));
             }
             // A batched advance collision does not say which frame is uncovered.
@@ -1009,8 +1009,8 @@ async fn capture_frame_window<A: HostAdmission + ?Sized>(
             if outcome.reason_code == Some("observation_cursor_advance_collision")
                 && !context.cancellation.is_cancelled()
             {
-                return Err(ClaudeWindowedCaptureFailure::ScalarReplay(std::mem::take(
-                    stats,
+                return Err(ClaudeWindowedCaptureFailure::ScalarReplay(Box::new(
+                    std::mem::take(stats),
                 )));
             }
             Err(ClaudeWindowedCaptureFailure::Error(
@@ -1146,13 +1146,13 @@ where
                         {
                             Ok(stats) => stats,
                             Err(error) => {
-                                return Err(merge_committed_into_error(committed, error));
+                                return Err(merge_committed_into_error(*committed, error));
                             }
                         }
                     }
-                    Err(error) => return Err(merge_committed_into_error(committed, error)),
+                    Err(error) => return Err(merge_committed_into_error(*committed, error)),
                 };
-                committed.merge(replay)
+                (*committed).merge(replay)
             }
         };
     // A deferred pass has not yet read the new generation to the end, so a
