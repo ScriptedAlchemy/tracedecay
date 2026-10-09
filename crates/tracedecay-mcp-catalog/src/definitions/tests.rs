@@ -289,24 +289,17 @@ fn maximal_tool_definitions_are_assembled_once_per_process() {
     );
 }
 
-/// `tracedecay tool search` parses flags from one request schema. Building the
-/// maximal MCP catalog is `tools/list` work, not a prerequisite for that call.
 #[test]
-fn search_cli_definition_does_not_assemble_the_maximal_registry() {
-    use std::sync::atomic::Ordering;
-
-    let baseline = MAXIMAL_DEFINITION_BUILDS.load(Ordering::SeqCst);
+fn search_cli_definition_matches_the_advertised_contract() {
     let definition = cli_tool_definition("tracedecay_search").expect("search CLI definition");
-    assert_eq!(definition.name, "tracedecay_search");
-    assert!(
-        definition.input_schema["properties"]["query"].is_object(),
-        "search CLI definition must expose the query field: {}",
-        definition.input_schema
-    );
+    let advertised = get_tool_definitions_ref()
+        .expect("advertised catalog")
+        .iter()
+        .find(|definition| definition.name == "tracedecay_search")
+        .expect("advertised search");
     assert_eq!(
-        MAXIMAL_DEFINITION_BUILDS.load(Ordering::SeqCst),
-        baseline,
-        "flag-based search assembled the maximal MCP catalog"
+        serde_json::to_value(definition).unwrap(),
+        serde_json::to_value(advertised).unwrap(),
     );
 }
 

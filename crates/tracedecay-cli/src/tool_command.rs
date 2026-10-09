@@ -241,10 +241,7 @@ fn run_inner(
                 show_help: _,
             } = parsed;
             if dry_run {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&tool_args).unwrap_or_default()
-                );
+                println!("{}", serde_json::to_string_pretty(&tool_args)?);
                 return Ok(());
             }
             let explicit_project = project.or(parsed_project);
@@ -366,10 +363,7 @@ fn run_inner(
         } = parsed;
 
         if dry_run {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&tool_args).unwrap_or_default()
-            );
+            println!("{}", serde_json::to_string_pretty(&tool_args)?);
             return Ok(());
         }
 
