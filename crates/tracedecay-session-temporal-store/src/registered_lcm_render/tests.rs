@@ -1,5 +1,7 @@
 use tempfile::tempdir;
 use tracedecay_domain::RetrievalAnchorId;
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_store::{StoredCanonicalBody, UPSERT_CANONICAL_BODY_SQL};
 
 use super::*;
 use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
@@ -475,4 +477,82 @@ async fn session_describe_reports_the_message_not_an_empty_stub() {
             .content_preview,
         "canonical external payload"
     );
+}
+
+#[tokio::test]
+async fn session_describe_names_canonical_body_length_not_snippet_budget() {
+    let directory = tempdir().expect("temporary session store");
+    let runtime = seeded_render_fixture(directory.path()).await;
+    let content = format!("orchard dispatch {}", "external-payload-body ".repeat(220));
+    let preview = tracedecay_lcm::retrieval_content::derived_text_for_snippet(&content);
+    let body = StoredCanonicalBody::pack(content.as_bytes()).expect("pack canonical body");
+    assert!(
+        content.chars().count() > tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS,
+        "fixture must exceed the snippet budget"
+    );
+    assert_eq!(
+        preview.chars().count(),
+        tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS
+    );
+
+    let writer = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered session database")
+        .writer_connection()
+        .expect("registered writer");
+    writer
+        .execute(
+            UPSERT_CANONICAL_BODY_SQL,
+            params![
+                body.content_hash.as_str(),
+                body.encoding,
+                body.blob.as_slice(),
+                body.uncompressed_bytes
+            ],
+        )
+        .await
+        .expect("store canonical body");
+    // Escape single quotes for the SQL literal.
+    let escaped_preview = preview.replace('\'', "''");
+    writer
+        .execute_batch(&format!(
+            "UPDATE lcm_raw_messages
+                SET content = NULL,
+                    content_hash = '{}',
+                    placeholder_text = '{escaped_preview}'
+              WHERE message_id = 'message-a';",
+            body.content_hash
+        ))
+        .await
+        .expect("offload message body like CAS ingest");
+
+    let snapshot = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered session database")
+        .read_snapshot()
+        .await
+        .expect("registered read snapshot");
+    let description = describe(
+        &snapshot,
+        LcmDescribeRequest {
+            provider: "codex".to_string(),
+            session_id: "session-a".to_string(),
+            target: LcmDescribeTarget::Session,
+        },
+        &canonical_fixture_relations(),
+    )
+    .await
+    .expect("session describe");
+    let overview = description
+        .raw_messages
+        .iter()
+        .find(|message| message.message_id == "message-a")
+        .expect("describe must list the captured message");
+    assert_eq!(overview.content_preview, preview);
+    assert_eq!(
+        overview.content_range.total_chars,
+        content.chars().count() as u64,
+        "describe must name the captured message length, not the preview stub"
+    );
+    assert!(overview.content_range.truncated);
 }

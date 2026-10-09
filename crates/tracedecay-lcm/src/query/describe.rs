@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use tracedecay_store::{LOAD_CANONICAL_BODY_SQL, unpack_body};
+
 use super::super::util::{SQLITE_IN_BATCH_SIZE, sql_in_placeholders};
 use super::*;
 
@@ -8,12 +10,30 @@ pub(super) async fn raw_message_overviews(
     provider: &str,
     session_id: &str,
 ) -> Result<Vec<LcmRawMessageOverview>, LcmError> {
+    // Preview stays on the snippet budget. `total_chars` is the captured
+    // message length (external char_count, inline content, or canonical body),
+    // never the preview stub — large rows keep `content` NULL after CAS.
     let mut rows = conn
         .query(
-            "SELECT message_id, store_id, role, storage_kind, payload_ref, snippet_text
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND session_id = ?2
-             ORDER BY store_id
+            "SELECT raw.message_id, raw.store_id, raw.role, raw.storage_kind, raw.payload_ref,
+                    raw.snippet_text,
+                    COALESCE(
+                        (SELECT payload.char_count
+                           FROM lcm_external_payloads AS payload
+                          WHERE payload.payload_ref = raw.payload_ref),
+                        length(raw.content),
+                        (SELECT CASE
+                            WHEN canonical.encoding = 'identity'
+                            THEN length(CAST(canonical.body AS TEXT))
+                            ELSE NULL
+                         END
+                           FROM session_canonical_bodies AS canonical
+                          WHERE canonical.content_hash = raw.content_hash)
+                    ),
+                    raw.content_hash
+             FROM lcm_raw_messages AS raw
+             WHERE raw.provider = ?1 AND raw.session_id = ?2
+             ORDER BY raw.store_id
              LIMIT 20",
             params![provider, session_id],
         )
@@ -23,7 +43,16 @@ pub(super) async fn raw_message_overviews(
     while let Some(row) = rows.next().await? {
         let storage_kind_text: String = row.get(3)?;
         let content_preview: String = row.get(5)?;
-        let (_, content_range) = slice_content(&content_preview, None);
+        let sql_total_chars: Option<i64> = row.get(6)?;
+        let total_chars = match sql_total_chars {
+            Some(total) if total >= 0 => total as u64,
+            _ => {
+                let content_hash: String = row.get(7)?;
+                canonical_body_char_count(conn, &content_hash).await?
+            }
+        };
+        let returned_chars = content_preview.chars().count() as u64;
+        let total_chars = total_chars.max(returned_chars);
         overviews.push(LcmRawMessageOverview {
             message_id: row.get(0)?,
             store_id: row.get(1)?,
@@ -32,11 +61,37 @@ pub(super) async fn raw_message_overviews(
                 LcmError::Db(format!("invalid storage_kind: {storage_kind_text}"))
             })?,
             payload_ref: row.get(4)?,
+            content_range: LcmContentRange {
+                offset: 0,
+                limit: returned_chars,
+                returned_chars,
+                total_chars,
+                truncated: returned_chars < total_chars,
+            },
             content_preview,
-            content_range,
         });
     }
     Ok(overviews)
+}
+
+async fn canonical_body_char_count(
+    conn: &(impl QueryExecutor + ?Sized),
+    content_hash: &str,
+) -> Result<u64, LcmError> {
+    let mut rows = conn
+        .query(LOAD_CANONICAL_BODY_SQL, params![content_hash])
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or(LcmError::PayloadIntegrityMismatch)?;
+    let encoding: String = row.get(0)?;
+    let blob: Vec<u8> = row.get(1)?;
+    let uncompressed_bytes: i64 = row.get(2)?;
+    let bytes = unpack_body(content_hash, &encoding, &blob, uncompressed_bytes)
+        .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    let text = String::from_utf8(bytes).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    Ok(text.chars().count() as u64)
 }
 
 pub(super) async fn summary_overviews(

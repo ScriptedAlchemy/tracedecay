@@ -17,6 +17,7 @@ use tracedecay_lcm::raw::{RAW_MESSAGE_METADATA_SELECT_COLUMNS, raw_message_metad
 use tracedecay_lcm::schema::SUMMARY_VISIBLE_SQL;
 use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Row, Value, params, params_from_iter};
+use tracedecay_store::{LOAD_CANONICAL_BODY_SQL, unpack_body};
 
 macro_rules! field {
     ($row:expr, $column:expr) => {
@@ -306,9 +307,10 @@ async fn raw_message_overviews(
     session_id: &str,
 ) -> Result<Vec<LcmRawMessageOverview>, LcmError> {
     // The snippet is the bounded preview. `total_chars` is the message's own
-    // length: an external payload's recorded char count, otherwise the stored
-    // content. Using the snippet length here described a stub, which is how a
-    // session that expand can read came back empty.
+    // length: an external payload's recorded char count, inline `content`, or
+    // the content-addressed body when large rows keep `content` NULL. Never
+    // fall back to the snippet length — that described a stub after bodies
+    // moved into `session_canonical_bodies`.
     let preview_cap = i64::try_from(tracedecay_lcm::MAX_DERIVED_SNIPPET_CHARS)
         .map_err(|_| LcmError::Db("snippet preview cap does not fit i64".to_string()))?;
     let mut rows = query(
@@ -323,9 +325,15 @@ async fn raw_message_overviews(
                        FROM lcm_external_payloads AS payload
                       WHERE payload.payload_ref = raw.payload_ref),
                     length(raw.content),
-                    length(raw.snippet_text),
-                    0
-                )
+                    (SELECT CASE
+                        WHEN canonical.encoding = 'identity'
+                        THEN length(CAST(canonical.body AS TEXT))
+                        ELSE NULL
+                     END
+                       FROM session_canonical_bodies AS canonical
+                      WHERE canonical.content_hash = raw.content_hash)
+                ),
+                raw.content_hash
          FROM lcm_raw_messages AS raw
          WHERE raw.provider = ?1 AND raw.session_id = ?2
          ORDER BY raw.store_id
@@ -337,7 +345,14 @@ async fn raw_message_overviews(
     while let Some(row) = next_row(&mut rows).await? {
         let storage_kind_text: String = field!(&row, 3)?;
         let content_preview: String = field!(&row, 5)?;
-        let total_chars = field!(&row, 6, i64)?.max(0) as u64;
+        let sql_total_chars = field!(&row, 6, Option<i64>)?;
+        let total_chars = match sql_total_chars {
+            Some(total) if total >= 0 => total as u64,
+            _ => {
+                let content_hash: String = field!(&row, 7)?;
+                canonical_body_char_count(snapshot, &content_hash).await?
+            }
+        };
         out.push(LcmRawMessageOverview {
             message_id: field!(&row, 0)?,
             store_id: field!(&row, 1)?,
@@ -349,6 +364,23 @@ async fn raw_message_overviews(
         });
     }
     Ok(out)
+}
+
+async fn canonical_body_char_count(
+    snapshot: &(impl QueryExecutor + ?Sized),
+    content_hash: &str,
+) -> Result<u64, LcmError> {
+    let mut rows = query(snapshot, LOAD_CANONICAL_BODY_SQL, params![content_hash]).await?;
+    let row = next_row(&mut rows)
+        .await?
+        .ok_or(LcmError::PayloadIntegrityMismatch)?;
+    let encoding: String = field!(&row, 0)?;
+    let blob: Vec<u8> = field!(&row, 1)?;
+    let uncompressed_bytes = field!(&row, 2, i64)?;
+    let bytes = unpack_body(content_hash, &encoding, &blob, uncompressed_bytes)
+        .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    let text = String::from_utf8(bytes).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    Ok(text.chars().count() as u64)
 }
 
 fn preview_range(preview: &str, total_chars: u64) -> LcmContentRange {
