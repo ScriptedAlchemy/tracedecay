@@ -454,6 +454,16 @@ impl SessionTemporalRefreshWakeState {
         telemetry.quiescent = false;
     }
 
+    pub(crate) fn history_is_blocked(&self) -> bool {
+        matches!(
+            self.telemetry
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .historical_state,
+            SessionHistoricalServingState::Blocked(_)
+        )
+    }
+
     pub fn record_history_outcome(&self, outcome: SessionHistoricalIngestOutcome) {
         let state = match outcome {
             SessionHistoricalIngestOutcome::Complete => SessionHistoricalServingState::Current,
@@ -1101,5 +1111,18 @@ mod tests {
         assert!(!state.historical_dirty.load(Ordering::Acquire));
         assert!(!state.busy.load(Ordering::Acquire));
         assert!(!state.history_retry_pending());
+    }
+
+    #[test]
+    fn blocked_history_is_a_typed_state() {
+        let state = SessionTemporalRefreshWakeState::default();
+        assert!(!state.history_is_blocked());
+        state.record_history_outcome(SessionHistoricalIngestOutcome::Blocked {
+            reason_code: "transcript_source_contract_invalid",
+            made_progress: false,
+        });
+        assert!(state.history_is_blocked());
+        state.record_history_outcome(SessionHistoricalIngestOutcome::Complete);
+        assert!(!state.history_is_blocked());
     }
 }

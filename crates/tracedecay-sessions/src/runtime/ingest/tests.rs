@@ -492,3 +492,81 @@ fn project_provider_deferral_preserves_existing_deferred_work() {
         }
     );
 }
+
+#[tokio::test]
+async fn non_retryable_codex_source_is_skipped_until_it_changes() {
+    use crate::admission::test_support::MemoryHostAdmission;
+    use crate::runtime::hosts::codex::session_meta_read_count_for_test;
+    use crate::runtime::ingest::project_provider::ProjectProviderRun;
+    use crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority;
+    use crate::runtime::terminal_source::reset_terminal_source_skips_for_test;
+    use crate::runtime::{SessionProvider, with_transcript_source_profile};
+    use tracedecay_runtime_core::config::ProfileRoot;
+
+    reset_terminal_source_skips_for_test();
+    install_test_shared_jsonl_preparation_authority();
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let dir = home.path().join(".codex/sessions/2026/10/09");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollout-2026-10-09T10-00-00-invalid.jsonl");
+    std::fs::write(&path, "{}\n").unwrap();
+    let project_id = ProjectId::new("project.terminal-codex-skip").unwrap();
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let admission = MemoryHostAdmission::default();
+    let cancellation = ObservationCancellation::default();
+
+    let run = || {
+        ProjectProviderRun {
+            project_root: &project,
+            project_id: &project_id,
+            facade: &admission,
+            scope: &scope,
+            candidate: SessionProvider::Codex,
+            max_new_bytes: 1 << 20,
+            cancellation: &cancellation,
+            codex_discovery: None,
+        }
+        .run_codex()
+    };
+
+    let first = with_transcript_source_profile(ProfileRoot::under_home(home.path()), run()).await;
+    assert_eq!(first.failures.len(), 1);
+    assert_eq!(
+        first.failures[0].reason_code,
+        "transcript_source_contract_invalid"
+    );
+    assert!(!first.failures[0].retryable);
+    let reads_after_first = session_meta_read_count_for_test(&path);
+    assert!(
+        reads_after_first > 0,
+        "the first pass must open the invalid rollout"
+    );
+
+    let second = with_transcript_source_profile(ProfileRoot::under_home(home.path()), run()).await;
+    assert!(
+        second.failures.is_empty(),
+        "an unchanged terminal source must not fail the next pass: {:?}",
+        second.failures
+    );
+    assert_eq!(
+        session_meta_read_count_for_test(&path),
+        reads_after_first,
+        "the unchanged invalid rollout must not be reopened"
+    );
+
+    std::fs::write(&path, "{}\n{}\n").unwrap();
+    let third = with_transcript_source_profile(ProfileRoot::under_home(home.path()), run()).await;
+    assert_eq!(
+        third.failures.len(),
+        1,
+        "a changed terminal source must be retried"
+    );
+    assert!(
+        session_meta_read_count_for_test(&path) > reads_after_first,
+        "the changed rollout must be opened again"
+    );
+}
