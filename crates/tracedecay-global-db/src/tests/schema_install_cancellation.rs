@@ -108,7 +108,7 @@ impl EmptyStore {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cancelled_daemon_attach_leaves_the_store_empty_or_fully_installed_and_reopens() {
+async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
     let reference = EmptyStore::create();
     let (outcome, total_polls) = reference.attach_cancelled_at(usize::MAX).await;
     outcome.unwrap();
@@ -123,6 +123,9 @@ async fn cancelled_daemon_attach_leaves_the_store_empty_or_fully_installed_and_r
     let mut completed = Vec::new();
     for cancel_at in (1..total_polls).step_by(stride).chain([total_polls + 10]) {
         let store = EmptyStore::create();
+        // Publishing the runtime installs its writer ledger before admission.
+        // Cancellation must preserve exactly that pre-admission schema.
+        let before_admission = store.schema_objects().await;
         let (outcome, _) = store.attach_cancelled_at(cancel_at).await;
         let objects = store.schema_objects().await;
         match outcome {
@@ -132,8 +135,7 @@ async fn cancelled_daemon_attach_leaves_the_store_empty_or_fully_installed_and_r
                     "cancel at poll {cancel_at}/{total_polls} must fail typed: {error:?}"
                 );
                 assert_eq!(
-                    objects,
-                    Vec::<String>::new(),
+                    objects, before_admission,
                     "cancel at poll {cancel_at}/{total_polls} must roll the install back"
                 );
                 cancelled.push(cancel_at);
