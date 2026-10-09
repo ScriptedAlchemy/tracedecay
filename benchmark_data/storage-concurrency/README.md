@@ -80,6 +80,17 @@ mutated transactions open before either commits, snapshot isolation, shared
 checkpoint conflict, full rollback/retry, replay, digest conflict, and reopen.
 The exact production ledger DDL is a separate negative compatibility probe.
 This is an engine experiment, not a production adapter or migration.
+Its added differential lane exercises the actual four-ledger schema adapted
+to ROWID tables against SQLite's original schema: 34 constraint rejections,
+rollback/CAS/retry, representative mutations, replay and fresh-process reopen.
+That lane is sequential; its success does not establish overlapping execution
+of TraceDecay's full ledger protocol or hook/search parity.
+
+The [caller and data migration plan](MIGRATION-PLAN.md) identifies the exact
+rejected DDL, all search/guard dependencies, the complete cutover sequence,
+and the smallest search compatibility decision. It includes direct database
+opens and foreign SQLite sources, rather than replacing only registered
+connection constructors.
 
 Every committed TraceDecay operation updates one checkpoint/commit-sequence row
 per shard. That singleton remains a conflict with otherwise independent
@@ -124,3 +135,7 @@ Clippy, and generated Bazel build checks passed.
 [Workspace verification](workspace-verification.txt)
 records the exact scope, failures, controlled baseline evidence, and host-tool
 reruns. The full workspace test suite is not green.
+
+[Focused failure triage](TRIAGE.md) records exact isolated controls and
+original-condition comparisons without weakening assertions or increasing
+budgets.

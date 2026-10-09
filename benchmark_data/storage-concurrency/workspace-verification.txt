@@ -65,10 +65,12 @@ Timeout:
   several long-running artifact/reader cases, without completed panic details.
   No timeout was raised; this target remains unresolved.
 
-Only the four controlled runtime-core failures below are experimentally shown
-with the original reader condition. Other failures are outside edited sources,
-but host pressure, fixture behavior, and indirect effects have not been isolated.
-They remain failures, not assumed pre-existing successes.
+At this initial verification stage, only the four runtime-core failures below
+were experimentally shown with the original reader condition. The follow-up
+TRIAGE.md records six additional original-condition reproductions, bounded
+controls of the other failures/timeout, and the controlled MCP result.
+The original full-workspace outcomes remain failing; filtered controls do not
+reclassify whole targets or prove every load-sensitive failure pre-existing.
 
 HOST-TOOL RERUNS (NON-VACUOUS)
 Installed @ast-grep/cli@0.44.0 in an isolated host-tool directory, matching CI's
@@ -132,3 +134,18 @@ No release capacity benchmark, full FTS/application workload benchmark, Turso
 production adapter or caller/data migration, crash/power-loss Turso durability,
 Windows/Linux prototype execution, or power-loss SQLite durability was run.
 Workspace failures and the timeout above remain unresolved.
+
+FOLLOW-UP VERIFICATION (no production changes after c081b413c6)
+See TRIAGE.md for 19 initial exact controls, six original-condition repetitions,
+two index timeout controls, four MCP Git/import controls, and three MCP boundary
+controls. Ten persistent failed cases have original-condition reproductions.
+Twelve of eighteen other original failed cases passed alone; this does not
+reclassify their whole targets. Complete MCP control: 384PASS/243FAIL/627executed,
+553.05s; all243 failures are subprocess EBADF9. First failed exact case passes,
+its preceding pair passes, and all56 graph-query cases pass as a smaller group.
+Original full-target accumulated failure cause remains unproven; source/host
+spawn-limit evidence and a complete failure inventory are preserved in TRIAGE.
+Standalone pinned native Turso test passed uncached (1PASS,0.6s), including the
+new differential actual-four-ledger ROWID adaptation versus SQLite original
+layout,34isolated invalid writes,rollback/CAS/retry/replay/mutations/reopen.
+No production adapter or caller/API migration is implied by that result.

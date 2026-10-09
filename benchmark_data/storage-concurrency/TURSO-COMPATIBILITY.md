@@ -15,6 +15,12 @@ checked at runtime; the wheel's source commit is not independently attested.
 | Hooks | [Compatibility matrix](https://github.com/tursodatabase/turso/blob/2829ee1662bd01d79f60c2c170af684a2b50af86/COMPAT.md), [C binding](https://github.com/tursodatabase/turso/blob/2829ee1662bd01d79f60c2c170af684a2b50af86/bindings/c/src/lib.rs) | `sqlite3_set_authorizer` explicitly returns `SQLITE_ERROR`. Required authorizer and update hooks prevent a drop-in runtime replacement. WAL hooks are an additional gap, not a current production dependency. |
 | JSON and triggers | [Compatibility matrix](https://github.com/tursodatabase/turso/blob/2829ee1662bd01d79f60c2c170af684a2b50af86/COMPAT.md) | JSON extraction and ordinary triggers are supported; these do not resolve the ledger, search, or hook incompatibilities. |
 
+The [complete caller and data migration plan](MIGRATION-PLAN.md) maps the four
+production FTS5 indexes, their query/trigger/ranking contracts, and the required
+execution guards. No current production SQL call uses `snippet()`; TraceDecay
+renders its bounded snippets in Rust. The missing FTS5 indexing/query behavior
+and authorizer/update-hook parity remain concrete blockers.
+
 The runtime dependencies are concrete: `src/ledger/schema.rs` defines the table
 layouts, `src/ledger/checkpoint.rs` persists the ordered checkpoint, and
 `src/connection/mod.rs` plus `src/exact_sql/guard.rs` install authorizer/update
@@ -25,3 +31,6 @@ checkpoint/receipt protocol. This is a compatibility adaptation within an
 isolated experiment, not a migration, production integration, or claim that
 TraceDecay's complete schema works on Turso. The experiment's own README and
 results describe its executed cases and remaining limitations.
+The follow-up actual four-ledger ROWID adaptation preserves every constraint
+and index and passes differential SQL/constraint/reopen checks; it still runs
+sequentially per engine and does not establish Rust codec or policy parity.
