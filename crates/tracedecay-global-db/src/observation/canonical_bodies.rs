@@ -478,7 +478,10 @@ mod tests {
             .unwrap()
             .get(0)
             .unwrap();
-        assert_eq!(long_placeholder, 0, "CAS rows must not keep a second full body in placeholder_text");
+        assert_eq!(
+            long_placeholder, 0,
+            "CAS rows must not keep a second full body in placeholder_text"
+        );
 
         let expected = format!("payload-00-{stem}");
         let stored_json: String = conn

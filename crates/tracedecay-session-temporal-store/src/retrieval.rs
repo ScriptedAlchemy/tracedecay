@@ -725,13 +725,10 @@ impl<'a> SessionTemporalReadPort<'a> {
             let role: String = row
                 .get(1)
                 .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
-            let observation = crate::query::decode_stored_observation(
-                &self.read,
-                &encoded,
-                CANDIDATE_OPERATION,
-            )
-            .await
-            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+            let observation =
+                crate::query::decode_stored_observation(&self.read, &encoded, CANDIDATE_OPERATION)
+                    .await
+                    .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
             if observation_matches_filter(&observation, &role, filter)? {
                 matched = true;
             }
@@ -822,13 +819,10 @@ impl<'a> SessionTemporalReadPort<'a> {
             let role = row
                 .get::<String>(1)
                 .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
-            let observation = crate::query::decode_stored_observation(
-                &self.read,
-                &encoded,
-                CANDIDATE_OPERATION,
-            )
-            .await
-            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+            let observation =
+                crate::query::decode_stored_observation(&self.read, &encoded, CANDIDATE_OPERATION)
+                    .await
+                    .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
             if observation_matches_filter(&observation, &role, filter)? {
                 matched = true;
             }
