@@ -63,6 +63,7 @@ use super::store::execution_control_graph_cancellation;
 use candidates::*;
 use cursors::*;
 use queries::ROOT_OCCURRENCE_FTS_COUNT_QUERY;
+use queries::ROOT_SCOPE_CANDIDATE_QUERY;
 pub(crate) use queries::partial_summary_invalidation_exists;
 use records::*;
 use rows::*;
@@ -857,63 +858,7 @@ impl<'a> SessionTemporalReadPort<'a> {
             .map_or(Value::Null, |value| Value::Text(value.to_string()));
         self.read
             .query(
-                "SELECT occurrence.occurrence_id, occurrence.retrieval_anchor_id,
-                        occurrence.knowledge_at, occurrence.message_id, occurrence.turn_id,
-                        occurrence.session_id, occurrence.role, authority_session.provider,
-                        frozen.generation
-                 FROM session_temporal_generations frozen
-                 JOIN session_occurrences occurrence
-                   ON occurrence.session_id = frozen.session_id
-                  AND +occurrence.generation <= frozen.generation
-                 JOIN retrieval_anchors authority_anchor
-                   ON authority_anchor.anchor_id = occurrence.retrieval_anchor_id
-                 JOIN sessions authority_session
-                   ON authority_session.session_id = occurrence.session_id
-                  AND authority_session.provider = occurrence.source_provider
-                  AND authority_session.project_key = ?1
-                 WHERE frozen.state = 'active'
-                   AND (?2 IS NULL OR authority_session.provider = ?2)
-                   AND (
-                       (authority_session.project_key = 'user'
-                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-                       OR
-                       (authority_session.project_key <> 'user'
-                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-                        AND json_extract(authority_anchor.owner_json, '$.project_id')
-                            = authority_session.project_key)
-                   )
-                   AND (
-                       occurrence.knowledge_at < ?3
-                       OR (
-                           occurrence.knowledge_at = ?3
-                           AND (
-                               occurrence.session_id > ?4
-                               OR (
-                                   occurrence.session_id = ?4
-                                   AND occurrence.occurrence_id > ?5
-                               )
-                           )
-                       )
-                   )
-                   AND length(CAST(occurrence.occurrence_id AS BLOB)) <= ?6
-                   AND length(CAST(occurrence.retrieval_anchor_id AS BLOB)) <= ?7
-                   AND length(CAST(COALESCE(occurrence.message_id, '') AS BLOB)) <= ?8
-                   AND length(CAST(COALESCE(occurrence.turn_id, '') AS BLOB)) <= ?8
-                   AND length(CAST(occurrence.session_id AS BLOB)) <= ?8
-                   AND length(CAST(occurrence.role AS BLOB)) <= ?8
-                   AND length(CAST(authority_session.provider AS BLOB)) <= ?8
-                   AND length(CAST(occurrence.occurrence_id AS BLOB))
-                       + length(CAST(occurrence.retrieval_anchor_id AS BLOB))
-                       + length(CAST(COALESCE(occurrence.message_id, '') AS BLOB))
-                       + length(CAST(COALESCE(occurrence.turn_id, '') AS BLOB))
-                       + length(CAST(occurrence.session_id AS BLOB))
-                       + length(CAST(occurrence.role AS BLOB))
-                       + length(CAST(authority_session.provider AS BLOB)) <= ?9
-                   AND length(CAST(occurrence.occurrence_id AS BLOB))
-                       + length(CAST(occurrence.session_id AS BLOB)) + 9 <= ?10
-                 ORDER BY occurrence.knowledge_at DESC, occurrence.session_id,
-                          occurrence.occurrence_id
-                 LIMIT ?11",
+                ROOT_SCOPE_CANDIDATE_QUERY,
                 vec![
                     Value::Text(project_key.to_string()),
                     provider,
