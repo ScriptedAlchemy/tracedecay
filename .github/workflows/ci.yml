@@ -22,11 +22,12 @@ permissions:
   contents: read
 
 # Explicit OS/host coverage must not be replaced by a default-coverage push
-# while queued. Within each coverage request, master finishes its current
-# snapshot and retains only the newest pending run.
+# while queued (separate group suffixes). Within each group, a newer run
+# cancels the older one so tip validation is not blocked behind a stale
+# in-progress snapshot (observed as multi-minute runs with zero jobs).
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'workflow_dispatch' && format('os-{0}-hosts-{1}', inputs.run_os, inputs.run_hosts) || 'default' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/master') }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
