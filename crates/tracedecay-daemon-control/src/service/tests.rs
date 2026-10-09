@@ -94,8 +94,27 @@ fn launchd_service_activity_comes_from_the_owned_job() {
     );
     write_executable_script(
         &launchctl,
-        format!("#!/bin/sh\nif [ \"$1\" = print ]; then\n  echo 'path = {}'\n  echo 'state = running'\nfi\n", plist.display()),
-    ).unwrap();
+        format!(
+            "#!/bin/sh
+if [ \"$1\" = print ]; then
+cat <<'JOB'
+gui/501/com.tracedecay.daemon = {{
+\tpath = {}
+\tstate = running
+\tresource coalition = {{
+\t\tstate = active
+\t}}
+\tjetsam coalition = {{
+\t\tstate = active
+\t}}
+}}
+JOB
+fi
+",
+            plist.display()
+        ),
+    )
+    .unwrap();
     assert_eq!(
         runner.service_state().unwrap(),
         DaemonServiceState::RunningEnabled
@@ -130,6 +149,8 @@ fn launchd_owned_job_requires_a_recognized_activity_state() {
         "state = ",
         "state = unfamiliar",
         "state = running\nstate = waiting",
+        "\tresource coalition = {\n\t\tstate = running\n\t}",
+        "\tstate = unfamiliar\n\tresource coalition = {\n\t\tstate = running\n\t}",
     ] {
         write_executable_script(
             &launchctl,
