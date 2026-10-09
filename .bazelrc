@@ -33,11 +33,7 @@ build "--strategy_regexp=Compiling Rust bin build_script_build_.*=local"
 # runs. Compile Rust in the real execroot so that path stays readable.
 build --strategy=Rustc=local
 build --strategy=RustcMetadata=local
-# rustc's bundled rust-lld is the Cargo default for *-linux-gnu. Forcing
-# ld.bfd made every link several times slower and needed --jobs=4 to stay
-# under ~4 GB per link. rust-lld stays well under that, so the job cap
-# can follow the host.
-build --jobs=HOST_CPUS
+build --jobs=4
 build:linux "--@rules_rust//rust/settings:extra_rustc_flag=-Csplit-debuginfo=unpacked"
 # Skip LLVM bitcode in rlibs. Thin LTO (dist) re-enables it below; other
 # configs never ran LTO, so the bitcode was paid compile cost with no
