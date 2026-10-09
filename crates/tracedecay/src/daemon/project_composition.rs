@@ -1470,11 +1470,6 @@ impl ProjectOpenInputs<'_> {
     /// Mount the full server's dependent owners: the source-edit lane, Git
     /// index transactions, the production owners, the owners that depend on
     /// them, and the HTTP application router.
-    ///
-    /// The widest project-open phase: the two owner registrations it awaits
-    /// are the largest leaves of the open (each ~20 KB, ~80 KB when
-    /// instrumented), so its caller boxes this phase rather than doubling it
-    /// into its own state.
     #[tracing::instrument(name = "daemon.project.compose.full_owners", level = "trace", skip_all)]
     async fn mount_full_server_owners(
         &self,

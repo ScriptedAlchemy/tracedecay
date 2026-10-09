@@ -3,41 +3,41 @@ use std::future::Future;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Spawn HTTP so its sync router build cannot starve owner polls.
-#[tracing::instrument(
-    name = "daemon.project.compose.join_full_mounts",
-    level = "trace",
-    skip_all
-)]
-pub(super) async fn join_independent_full_owner_mounts<Owners, Http, OwnersMount, HttpMount>(
+/// Box both arms so the caller's phase future stays one leaf wide.
+pub(super) fn join_independent_full_owner_mounts<Owners, Http, OwnersMount, HttpMount>(
     owners_mount: OwnersMount,
     http_mount: HttpMount,
-) -> Result<(Owners, Http)>
+) -> impl Future<Output = Result<(Owners, Http)>>
 where
     OwnersMount: Future<Output = Result<Owners>>,
     HttpMount: Future<Output = Result<Http>> + Send + 'static,
     Http: Send + 'static,
 {
-    let mut http_tasks = tokio::task::JoinSet::new();
-    http_tasks.spawn(tracing::Instrument::instrument(
+    let owners_mount = Box::pin(tracing::Instrument::instrument(
+        owners_mount,
+        tracing::trace_span!("daemon.project.open.production_owners"),
+    ));
+    let http_mount = Box::pin(tracing::Instrument::instrument(
         http_mount,
         tracing::trace_span!("daemon.project.open.http_application"),
     ));
-    tokio::try_join!(
-        tracing::Instrument::instrument(
-            owners_mount,
-            tracing::trace_span!("daemon.project.open.production_owners")
-        ),
-        async {
-            http_tasks
-                .join_next()
-                .await
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "http application mount task missing".to_owned(),
-                })?
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("http application mount task failed: {error}"),
-                })?
-        }
+    tracing::Instrument::instrument(
+        async move {
+            let mut http_tasks = tokio::task::JoinSet::new();
+            http_tasks.spawn(http_mount);
+            tokio::try_join!(owners_mount, async {
+                http_tasks
+                    .join_next()
+                    .await
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message: "http application mount task missing".to_owned(),
+                    })?
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!("http application mount task failed: {error}"),
+                    })?
+            })
+        },
+        tracing::trace_span!("daemon.project.compose.join_full_mounts"),
     )
 }
 
