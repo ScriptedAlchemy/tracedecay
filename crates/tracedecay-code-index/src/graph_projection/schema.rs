@@ -1,15 +1,19 @@
 //! Durable labels, properties, and identities for the code-graph projection.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use flate2::write::DeflateEncoder;
+use flate2::{Compression, Decompress, FlushDecompress, Status};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracedecay_domain::FileOccurrenceId;
 pub(super) use tracedecay_graph_db::graph_stable_identity as stable_identity;
 use tracedecay_graph_db::{
-    GraphEntity, GraphEntityId, GraphProperty, GraphPropertyName, GraphRelationId,
+    GraphBudgetKind, GraphDbError, GraphEntity, GraphEntityId, GraphProperty, GraphPropertyName,
+    GraphRelationId, MAX_GRAPH_PROPERTY_AGGREGATE_BYTES, MAX_GRAPH_PROPERTY_VALUE_BYTES,
 };
 
 use super::CodeGraphProjectionError;
@@ -64,16 +68,37 @@ pub(super) fn serialize(value: &impl Serialize) -> Result<Vec<u8>, CodeGraphProj
     serde_json::to_vec(value).map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))
 }
 
-/// A record's serialized JSON as the compact text property that carries it.
-///
-/// The record stays a string, not bytes: the sealed compact store keeps byte
-/// payloads in its string dictionary as marked hex. [`compact_record`] turns
-/// the JSON's structural tokens and 64-hex digests into short marked codes;
-/// free-form values stay JSON text.
+/// Compact text preserves existing records; oversized records use lossless
+/// DEFLATE within the same property limit and the graph's aggregate decode bound.
 pub(super) fn record_property(payload: Vec<u8>) -> Result<GraphProperty, CodeGraphProjectionError> {
     let json = String::from_utf8(payload)
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
-    Ok(GraphProperty::String(compact_record(&json)))
+    let compact = compact_record(&json);
+    if compact.len() <= MAX_GRAPH_PROPERTY_VALUE_BYTES {
+        return Ok(GraphProperty::String(compact));
+    }
+    if json.len() > MAX_GRAPH_PROPERTY_AGGREGATE_BYTES {
+        return Err(GraphDbError::budget_exhausted_count(
+            GraphBudgetKind::Capacity,
+            MAX_GRAPH_PROPERTY_AGGREGATE_BYTES,
+        )
+        .into());
+    }
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(json.as_bytes())
+        .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+    let compressed = encoder
+        .finish()
+        .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+    if compressed.len() > MAX_GRAPH_PROPERTY_VALUE_BYTES {
+        return Err(GraphDbError::budget_exhausted_count(
+            GraphBudgetKind::Capacity,
+            MAX_GRAPH_PROPERTY_VALUE_BYTES,
+        )
+        .into());
+    }
+    Ok(GraphProperty::Bytes(compressed))
 }
 
 pub(super) fn deserialize_property<T>(
@@ -88,13 +113,36 @@ where
         .ok_or_else(|| {
             CodeGraphProjectionError::Corrupt(format!("code graph row is missing {name}"))
         })?;
-    let GraphProperty::String(stored) = property else {
-        return Err(CodeGraphProjectionError::Corrupt(format!(
+    match property {
+        GraphProperty::String(stored) => serde_json::from_str(&expand_record(stored)?)
+            .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string())),
+        GraphProperty::Bytes(stored) => {
+            let corrupt = || {
+                CodeGraphProjectionError::Corrupt(format!(
+                    "code graph row {name} has invalid or oversized compressed content"
+                ))
+            };
+            if stored.len() > MAX_GRAPH_PROPERTY_VALUE_BYTES {
+                return Err(corrupt());
+            }
+            let mut decoder = Decompress::new(false);
+            let mut decoded = Vec::with_capacity(MAX_GRAPH_PROPERTY_AGGREGATE_BYTES + 1);
+            let status = decoder
+                .decompress_vec(stored, &mut decoded, FlushDecompress::Finish)
+                .map_err(|_| corrupt())?;
+            if status != Status::StreamEnd
+                || decoder.total_in() != stored.len() as u64
+                || decoded.len() > MAX_GRAPH_PROPERTY_AGGREGATE_BYTES
+            {
+                return Err(corrupt());
+            }
+            serde_json::from_slice(&decoded)
+                .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))
+        }
+        _ => Err(CodeGraphProjectionError::Corrupt(format!(
             "code graph row {name} has the wrong type"
-        )));
-    };
-    serde_json::from_str(&expand_record(stored)?)
-        .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))
+        ))),
+    }
 }
 
 /// Leads a [`RECORD_TOKENS`] code in stored record text.
@@ -272,4 +320,77 @@ pub(super) fn has_label(entity: &GraphEntity, label: &str) -> bool {
         .labels
         .iter()
         .any(|candidate| candidate.as_str() == label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decode(property: GraphProperty) -> Result<String, CodeGraphProjectionError> {
+        deserialize_property(
+            &BTreeMap::from([(GraphPropertyName::new("record").unwrap(), property)]),
+            "record",
+        )
+    }
+
+    #[test]
+    fn oversized_record_compresses_and_round_trips_exactly() {
+        let original = "\"\\".repeat(320_000);
+        let raw = serde_json::to_vec(&original).unwrap();
+        let compact_bytes = compact_record(std::str::from_utf8(&raw).unwrap()).len();
+        let property = record_property(raw.clone()).unwrap();
+        let GraphProperty::Bytes(compressed) = &property else {
+            panic!("oversized compact record must use compressed bytes");
+        };
+        assert!(compact_bytes > MAX_GRAPH_PROPERTY_VALUE_BYTES);
+        assert!(
+            compressed.len() <= MAX_GRAPH_PROPERTY_VALUE_BYTES,
+            "raw={} compact={} compressed={}",
+            raw.len(),
+            compact_bytes,
+            compressed.len()
+        );
+        assert_eq!(decode(property).unwrap(), original);
+    }
+
+    #[test]
+    fn published_compact_strings_remain_byte_exact() {
+        let original = "quoted \" text \\ and \u{1} sha256:".to_owned() + &"a".repeat(64);
+        let raw = serde_json::to_vec(&original).unwrap();
+        let published = GraphProperty::String(compact_record(std::str::from_utf8(&raw).unwrap()));
+        assert_eq!(record_property(raw).unwrap(), published);
+        assert_eq!(decode(published).unwrap(), original);
+    }
+
+    #[test]
+    fn compressed_records_refuse_corruption_and_decoded_overflow() {
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"\"valid\"").unwrap();
+        let valid = encoder.finish().unwrap();
+        assert_eq!(
+            decode(GraphProperty::Bytes(valid.clone())).unwrap(),
+            "valid"
+        );
+        let mut trailing = valid.clone();
+        trailing.push(0);
+        for bytes in [vec![0xff], valid[..valid.len() - 1].to_vec(), trailing] {
+            assert!(matches!(
+                decode(GraphProperty::Bytes(bytes)),
+                Err(CodeGraphProjectionError::Corrupt(_))
+            ));
+        }
+        let oversized = vec![b' '; MAX_GRAPH_PROPERTY_AGGREGATE_BYTES + 1];
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&oversized).unwrap();
+        assert!(matches!(
+            decode(GraphProperty::Bytes(encoder.finish().unwrap())),
+            Err(CodeGraphProjectionError::Corrupt(_))
+        ));
+        assert!(matches!(
+            record_property(
+                serde_json::to_vec(&"x".repeat(MAX_GRAPH_PROPERTY_AGGREGATE_BYTES)).unwrap()
+            ),
+            Err(CodeGraphProjectionError::BudgetExhausted { .. })
+        ));
+    }
 }

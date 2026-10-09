@@ -10,7 +10,13 @@ use crate::support::{assert_path_text_eq, setup};
 async fn opencode_state_db_is_the_session_transcript_path() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
-    let data_dir = home.join(".local/share/opencode");
+    let data_dir = home.join(if cfg!(target_os = "macos") {
+        "Library/Application Support/opencode"
+    } else if cfg!(target_os = "windows") {
+        "AppData/Local/opencode"
+    } else {
+        ".local/share/opencode"
+    });
     std::fs::create_dir_all(&data_dir).unwrap();
     let database = data_dir.join("opencode.db");
     let connection = rusqlite::Connection::open(&database).unwrap();

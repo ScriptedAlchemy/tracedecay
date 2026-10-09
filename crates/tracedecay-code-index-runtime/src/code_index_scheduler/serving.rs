@@ -1688,7 +1688,6 @@ impl LatestCompleteCodeIndexV1 {
     pub fn prewarm_serving_derivations(&self) {
         let _ = self.production_query_owners();
         let _ = self.record_index();
-        let _ = self.generation.test_attribution_authority();
         let generation_id = self.generation.manifest().generation_id.clone();
         let Ok(freshness) = self.source_freshness() else {
             return;
@@ -2007,15 +2006,6 @@ fn clone_index_omission_reasons(census: &CodeLexicalCloneIndexCensusV1) -> Vec<S
 }
 
 impl LatestCompleteCodeIndexV1 {
-    pub fn test_attribution_authority(
-        &self,
-    ) -> Result<
-        crate::code_index::production::PublishedGenerationTestAttributionAuthorityV1,
-        crate::code_index::production::CodeIndexProductionErrorV1,
-    > {
-        self.generation.test_attribution_authority()
-    }
-
     #[cfg(test)]
     pub fn exact(
         &self,

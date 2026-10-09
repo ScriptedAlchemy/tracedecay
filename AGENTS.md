@@ -113,10 +113,10 @@ unauthorized external action after completing independent, authorized work.
   `pnpm remove crate:` is unsupported. `pnpm install` leaves unused
   `.pnpm/crates` directories in place; they are inert once the lock stops
   naming them.
-- Code generation: run `bazel run //sdks/codegen:...` targets from the
-  repository root. The Bazel rules invoke the generators inside the
-  `sdks/codegen` working directory with the correct `.cargo/config.toml`
-  already in scope.
+- Code generation: `bazel run //sdks/codegen:generate -- <output-root>`
+  exports SDK sources; `bazel run //sdks/codegen:dashboard_schema -- <output-file>`
+  exports the dashboard schema. Dashboard `contracts:generate` and
+  `contracts:check` invoke these targets from the repository root.
 - Dashboard: `pnpm run build` (rsbuild), `pnpm run typecheck` (`tsc --noEmit`),
   `pnpm test` (vitest) from `dashboard/`.
 - libtest `--exact` requires the full module path and exits 0 when a filter

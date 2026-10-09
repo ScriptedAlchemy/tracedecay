@@ -602,7 +602,7 @@ Examples:
   tracedecay memory status --json                Memory health and counts
 
 Related: tracedecay automation (agent-managed curation and terminal receipts),
-tracedecay tool fact_store (canonical fact operations), tracedecay sessions
+tracedecay tool fact_store_search (search durable facts), tracedecay sessions
 (transcript recall).";
 
 pub(crate) const AUTOMATION_LONG_ABOUT: &str = "\

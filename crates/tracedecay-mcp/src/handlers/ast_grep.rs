@@ -139,7 +139,7 @@ fn render_md(result: &AstGrepSearchResultV1) -> String {
 
     md.blank();
     let mut summary = format!(
-        "_{} matches across {files_scanned} files._",
+        "_{} matches; {files_scanned} files scanned._",
         result.results.len()
     );
     if result.truncated {

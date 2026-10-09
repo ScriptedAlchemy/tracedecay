@@ -446,12 +446,13 @@ mod wipe_safety_tests {
         use std::os::unix::fs::symlink;
 
         let parent = tempfile::TempDir::new().expect("create temporary parent");
-        let profile = parent.path().join("profile");
-        let profile_link = parent.path().join("profile-link");
-        let dangling = parent.path().join("dangling");
+        let parent_path = parent.path().canonicalize().expect("canonical parent");
+        let profile = parent_path.join("profile");
+        let profile_link = parent_path.join("profile-link");
+        let dangling = parent_path.join("dangling");
         std::fs::create_dir(&profile).expect("create real profile");
         symlink(&profile, &profile_link).expect("create profile symlink");
-        symlink(parent.path().join("missing"), &dangling).expect("create dangling symlink");
+        symlink(parent_path.join("missing"), &dangling).expect("create dangling symlink");
 
         assert_eq!(
             validate_complete_wipe_profile_root(&profile_link, None)
