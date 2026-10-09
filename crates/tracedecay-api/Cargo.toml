@@ -12,6 +12,7 @@ doctest = false
 
 [dependencies]
 axum = "0.8"
+flate2 = "1"
 futures-util = "0.3"
 schemars.workspace = true
 serde = { version = "1", features = ["derive"] }

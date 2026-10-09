@@ -4,7 +4,14 @@
 //! place that can resolve its `OUT_DIR`. This module owns the HTTP behavior
 //! around those bytes: asset lookup, cache headers, entity tags, and the rule
 //! that an API request can never be answered with the single-page app.
+//!
+//! Compressible dashboard assets may be gzip-embedded (`StaticAssetEncoding::Gzip`).
+//! When the client advertises `Accept-Encoding: gzip`, those bytes are served
+//! with `Content-Encoding: gzip` so the binary keeps the compressed form and
+//! the browser inflates. Clients that omit gzip are served an identity body
+//! decoded here.
 
+use std::io::Read;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -12,6 +19,17 @@ use axum::http::{HeaderMap, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Router, http::StatusCode};
+use flate2::read::GzDecoder;
+
+/// Wire encoding of [`StaticDashboardAsset::contents`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaticAssetEncoding {
+    /// `contents` are the exact bytes clients receive for an identity response.
+    Identity,
+    /// `contents` are gzip-compressed; inflate before identity responses, or
+    /// pass through with `Content-Encoding: gzip` when the client accepts it.
+    Gzip,
+}
 
 /// One immutable embedded dashboard asset supplied by the owning binary.
 #[derive(Clone, Copy)]
@@ -19,6 +37,7 @@ pub struct StaticDashboardAsset {
     pub path: &'static str,
     pub contents: &'static [u8],
     pub content_type: &'static str,
+    pub encoding: StaticAssetEncoding,
 }
 
 /// Byte authority for a dashboard bundle embedded by an executable build.
@@ -147,6 +166,30 @@ fn fingerprinted_static_asset_path(path: &str) -> bool {
     })
 }
 
+fn client_accepts_gzip(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|part| {
+                let encoding = part
+                    .trim()
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                encoding.eq_ignore_ascii_case("gzip") || encoding == "*"
+            })
+        })
+}
+
+fn inflate_gzip(bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    let mut decoder = GzDecoder::new(bytes);
+    let mut inflated = Vec::new();
+    decoder.read_to_end(&mut inflated)?;
+    Ok(inflated)
+}
+
 fn app_response(
     headers: &HeaderMap,
     asset: StaticDashboardAsset,
@@ -166,7 +209,28 @@ fn app_response(
     let mut response = if hit {
         StatusCode::NOT_MODIFIED.into_response()
     } else {
-        asset.contents.into_response()
+        match asset.encoding {
+            StaticAssetEncoding::Identity => asset.contents.into_response(),
+            StaticAssetEncoding::Gzip if client_accepts_gzip(headers) => {
+                let mut response = asset.contents.into_response();
+                response.headers_mut().insert(
+                    header::CONTENT_ENCODING,
+                    header::HeaderValue::from_static("gzip"),
+                );
+                response
+            }
+            StaticAssetEncoding::Gzip => match inflate_gzip(asset.contents) {
+                Ok(inflated) => inflated.into_response(),
+                Err(error) => {
+                    tracing::error!(
+                        path = asset.path,
+                        error = %error,
+                        "embedded gzip dashboard asset could not be decoded"
+                    );
+                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                }
+            },
+        }
     };
     let response_headers = response.headers_mut();
     if let Ok(value) = header::HeaderValue::from_str(asset.content_type) {
@@ -184,31 +248,45 @@ fn app_response(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::sync::Arc;
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
     use tower::ServiceExt;
 
-    use super::{StaticDashboardAsset, StaticDashboardAssets, static_dashboard_router};
+    use super::{
+        StaticAssetEncoding, StaticDashboardAsset, StaticDashboardAssets, static_dashboard_router,
+    };
 
     const ASSETS: &[StaticDashboardAsset] = &[
         StaticDashboardAsset {
             path: "index.html",
             contents: b"<html>TraceDecay</html>",
             content_type: "text/html; charset=utf-8",
+            encoding: StaticAssetEncoding::Identity,
         },
         StaticDashboardAsset {
             path: "static/app.abc12345.js",
             contents: b"console.log('dashboard')",
             content_type: "application/javascript",
+            encoding: StaticAssetEncoding::Identity,
         },
         StaticDashboardAsset {
             path: "static/unversioned.js",
             contents: b"console.log('must revalidate')",
             content_type: "application/javascript",
+            encoding: StaticAssetEncoding::Identity,
         },
     ];
+
+    fn gzip_bytes(raw: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(raw).expect("gzip");
+        encoder.finish().expect("gzip finish")
+    }
 
     fn router() -> axum::Router {
         static_dashboard_router(Arc::new(StaticDashboardAssets {
@@ -327,5 +405,77 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("no-cache")
         );
+    }
+
+    #[tokio::test]
+    async fn gzip_embedded_assets_pass_through_when_client_accepts_gzip() {
+        let raw = b"console.log('gzip-dashboard')";
+        let compressed = gzip_bytes(raw);
+        // Leak so the asset slice can be 'static for the router state.
+        let compressed_static: &'static [u8] = Box::leak(compressed.into_boxed_slice());
+        let assets: &'static [StaticDashboardAsset] = Box::leak(Box::new([StaticDashboardAsset {
+            path: "index.html",
+            contents: compressed_static,
+            content_type: "text/html; charset=utf-8",
+            encoding: StaticAssetEncoding::Gzip,
+        }]));
+        let response = static_dashboard_router(Arc::new(StaticDashboardAssets {
+            assets,
+            cache_tag: "gz.1",
+        }))
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::ACCEPT_ENCODING, "gzip, deflate")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("router response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+            Some("gzip")
+        );
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        assert_eq!(body.as_ref(), compressed_static);
+    }
+
+    #[tokio::test]
+    async fn gzip_embedded_assets_inflate_when_client_omits_gzip() {
+        let raw = b"<html>inflated</html>";
+        let compressed = gzip_bytes(raw);
+        let compressed_static: &'static [u8] = Box::leak(compressed.into_boxed_slice());
+        let assets: &'static [StaticDashboardAsset] = Box::leak(Box::new([StaticDashboardAsset {
+            path: "index.html",
+            contents: compressed_static,
+            content_type: "text/html; charset=utf-8",
+            encoding: StaticAssetEncoding::Gzip,
+        }]));
+        let response = static_dashboard_router(Arc::new(StaticDashboardAssets {
+            assets,
+            cache_tag: "gz.2",
+        }))
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("router response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        assert_eq!(body.as_ref(), raw);
     }
 }

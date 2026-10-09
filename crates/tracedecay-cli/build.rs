@@ -23,9 +23,15 @@ use std::{
     ffi::OsStr,
     fmt::Write as _,
     fs, io,
+    io::Read as _,
+    io::Write as IoWrite,
     path::{Path, PathBuf},
     process::Command,
 };
+
+use flate2::Compression;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 
 #[path = "build-support/dashboard_bundle.rs"]
 mod dashboard_bundle;
@@ -58,25 +64,162 @@ const BUNDLE_STORE_DIR: &str = "dashboard-bundle";
 /// `dashboard/app-dist` (see `dashboard/rsbuild.config.ts`).
 const DASHBOARD_DIST_PATH_ENV: &str = "TRACEDECAY_DASHBOARD_DIST_PATH";
 
-/// The embedded dashboard bundle: manifest-validated relative paths, the
-/// `include_bytes!` root the generated module uses (a compile-time env var
-/// plus a path under it), and the cross-tool bundle digest that becomes the
-/// HTTP cache tag.
-struct EmbeddedDashboard {
-    asset_paths: Vec<String>,
+/// Directory under `OUT_DIR` for gzip-compressed dashboard asset payloads.
+const DASHBOARD_GZ_DIR: &str = "dashboard-gz";
+
+/// Extensions whose on-disk form compresses enough to justify a gzip embed.
+/// Already-compressed fonts/images stay identity.
+fn dashboard_asset_should_gzip(relative: &str) -> bool {
+    matches!(
+        relative.rsplit('.').next().unwrap_or(""),
+        "html" | "js" | "mjs" | "css" | "json" | "map" | "svg" | "txt"
+    )
+}
+
+/// One embeddable dashboard asset after optional gzip staging.
+struct EmbeddedDashboardAsset {
+    relative: String,
     include_env: &'static str,
-    include_root: String,
+    include_path: String,
+    content_type: &'static str,
+    encoding: &'static str,
+}
+
+/// The embedded dashboard bundle: manifest-validated relative paths, the
+/// `include_bytes!` roots the generated module uses, and the cross-tool
+/// bundle digest that becomes the HTTP cache tag.
+struct EmbeddedDashboard {
+    assets: Vec<EmbeddedDashboardAsset>,
     digest_hex: String,
 }
 
 impl EmbeddedDashboard {
-    fn staged(bundle: dashboard_bundle::StagedBundle) -> Self {
-        Self {
-            asset_paths: bundle.asset_paths,
-            include_env: "OUT_DIR",
-            include_root: format!("/{BUNDLE_STORE_DIR}/{}", bundle.digest_hex),
-            digest_hex: bundle.digest_hex,
+    fn staged(bundle: dashboard_bundle::StagedBundle, out_dir: &Path) -> Result<Self, Box<dyn Error>> {
+        let include_root = format!("/{BUNDLE_STORE_DIR}/{}", bundle.digest_hex);
+        let source_root = out_dir.join(BUNDLE_STORE_DIR).join(&bundle.digest_hex);
+        Self::from_sources(
+            &bundle.asset_paths,
+            "OUT_DIR",
+            &include_root,
+            &source_root,
+            out_dir,
+            bundle.digest_hex,
+        )
+    }
+
+    fn packaged(
+        asset_paths: Vec<String>,
+        digest_hex: String,
+        app_dist: &Path,
+        out_dir: &Path,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::from_sources(
+            &asset_paths,
+            "CARGO_MANIFEST_DIR",
+            "/dashboard/app-dist",
+            app_dist,
+            out_dir,
+            digest_hex,
+        )
+    }
+
+    fn from_sources(
+        asset_paths: &[String],
+        identity_include_env: &'static str,
+        identity_include_root: &str,
+        source_root: &Path,
+        out_dir: &Path,
+        digest_hex: String,
+    ) -> Result<Self, Box<dyn Error>> {
+        let gz_root = out_dir.join(DASHBOARD_GZ_DIR);
+        fs::create_dir_all(&gz_root).map_err(|error| {
+            format!(
+                "failed to create dashboard gzip dir {}: {error}",
+                gz_root.display()
+            )
+        })?;
+        let mut assets = Vec::with_capacity(asset_paths.len());
+        for relative in asset_paths {
+            let content_type = match relative.rsplit('.').next().unwrap_or("") {
+                "html" => "text/html; charset=utf-8",
+                "js" | "mjs" => "application/javascript",
+                "css" => "text/css",
+                "json" | "map" => "application/json",
+                "svg" => "image/svg+xml",
+                "png" => "image/png",
+                "ico" => "image/x-icon",
+                "woff2" => "font/woff2",
+                "woff" => "font/woff",
+                "ttf" => "font/ttf",
+                "txt" => "text/plain; charset=utf-8",
+                _ => "application/octet-stream",
+            };
+            let source_path = source_root.join(relative);
+            let raw = fs::read(&source_path).map_err(|error| {
+                format!(
+                    "failed to read dashboard asset {} for embed: {error}",
+                    source_path.display()
+                )
+            })?;
+            if dashboard_asset_should_gzip(relative) {
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+                encoder.write_all(&raw).map_err(|error| {
+                    format!("gzip dashboard asset {relative}: {error}")
+                })?;
+                let compressed = encoder.finish().map_err(|error| {
+                    format!("gzip finish dashboard asset {relative}: {error}")
+                })?;
+                let mut roundtrip = Vec::new();
+                GzDecoder::new(compressed.as_slice())
+                    .read_to_end(&mut roundtrip)
+                    .map_err(|error| {
+                        format!("gzip roundtrip dashboard asset {relative}: {error}")
+                    })?;
+                if roundtrip != raw {
+                    return Err(format!(
+                        "gzip roundtrip for dashboard asset {relative} did not match the source bytes"
+                    )
+                    .into());
+                }
+                if compressed.len() < raw.len() {
+                    let gz_relative = relative.replace('/', "__");
+                    let dest = gz_root.join(&gz_relative);
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent).map_err(|error| {
+                            format!(
+                                "failed to create {}: {error}",
+                                parent.display()
+                            )
+                        })?;
+                    }
+                    fs::write(&dest, &compressed).map_err(|error| {
+                        format!(
+                            "failed to write gzip dashboard asset {}: {error}",
+                            dest.display()
+                        )
+                    })?;
+                    assets.push(EmbeddedDashboardAsset {
+                        relative: relative.clone(),
+                        include_env: "OUT_DIR",
+                        include_path: format!("/{DASHBOARD_GZ_DIR}/{gz_relative}"),
+                        content_type,
+                        encoding: "Gzip",
+                    });
+                    continue;
+                }
+            }
+            assets.push(EmbeddedDashboardAsset {
+                relative: relative.clone(),
+                include_env: identity_include_env,
+                include_path: format!("{identity_include_root}/{relative}"),
+                content_type,
+                encoding: "Identity",
+            });
         }
+        Ok(Self {
+            assets,
+            digest_hex,
+        })
     }
 }
 
@@ -107,12 +250,7 @@ fn embed_dashboard(
         let app_dist = package_local_dashboard.join("app-dist");
         let asset_paths = dashboard_manifest::dashboard_asset_paths(&app_dist)?;
         let digest_hex = dashboard_bundle::bundle_digest(&app_dist, &asset_paths)?;
-        return Ok(EmbeddedDashboard {
-            asset_paths,
-            include_env: "CARGO_MANIFEST_DIR",
-            include_root: "/dashboard/app-dist".to_owned(),
-            digest_hex,
-        });
+        return EmbeddedDashboard::packaged(asset_paths, digest_hex, &app_dist, out_dir);
     }
 
     let repository_root = manifest_dir.join(REPOSITORY_ROOT_FROM_CRATE);
@@ -149,7 +287,7 @@ fn embed_dashboard(
         // staged, later reruns reuse it without reading app-dist again.
         let expected = required_bundle_digest_env()?;
         if let Some(bundle) = dashboard_bundle::open(&store, &expected)? {
-            return Ok(EmbeddedDashboard::staged(bundle));
+            return EmbeddedDashboard::staged(bundle, out_dir);
         }
         // TRACEDECAY_DASHBOARD_DIST_DIR names a prebuilt bundle outside the
         // checkout layout (Bazel's js_run_binary output tree). Without it the
@@ -172,7 +310,7 @@ fn embed_dashboard(
                     )
                     .into());
                 }
-                return Ok(EmbeddedDashboard::staged(bundle));
+                return EmbeddedDashboard::staged(bundle, out_dir);
             }
             None => dashboard.join("app-dist"),
         };
@@ -188,7 +326,7 @@ fn embed_dashboard(
             )
             .into());
         }
-        return Ok(EmbeddedDashboard::staged(bundle));
+        return EmbeddedDashboard::staged(bundle, out_dir);
     }
 
     // Fingerprint before building: an input edited mid-build then records a
@@ -199,7 +337,7 @@ fn embed_dashboard(
         && record.inputs_fingerprint == inputs_fingerprint
         && let Some(bundle) = dashboard_bundle::open(&store, &record.bundle_digest)?
     {
-        return Ok(EmbeddedDashboard::staged(bundle));
+        return EmbeddedDashboard::staged(bundle, out_dir);
     }
 
     let staging = dashboard_bundle::prepare_staging(&store)
@@ -223,7 +361,7 @@ fn embed_dashboard(
             store.display()
         )
     })?;
-    Ok(EmbeddedDashboard::staged(bundle))
+    EmbeddedDashboard::staged(bundle, out_dir)
 }
 
 fn required_bundle_digest_env() -> Result<String, Box<dyn Error>> {
@@ -331,28 +469,18 @@ fn generated_module(
          tracedecay_api::StaticDashboardAssets {{"
     );
     let _ = writeln!(code, "    assets: &[");
-    for relative in &dashboard.asset_paths {
-        let content_type = match relative.rsplit('.').next().unwrap_or("") {
-            "html" => "text/html; charset=utf-8",
-            "js" | "mjs" => "application/javascript",
-            "css" => "text/css",
-            "json" | "map" => "application/json",
-            "svg" => "image/svg+xml",
-            "png" => "image/png",
-            "ico" => "image/x-icon",
-            "woff2" => "font/woff2",
-            "woff" => "font/woff",
-            "ttf" => "font/ttf",
-            "txt" => "text/plain; charset=utf-8",
-            _ => "application/octet-stream",
-        };
-        let include_path = format!("{}/{relative}", dashboard.include_root);
+    for asset in &dashboard.assets {
         let _ = writeln!(
             code,
-            "        tracedecay_api::StaticDashboardAsset {{ path: {relative:?}, \
-             contents: include_bytes!(concat!(env!({:?}), {include_path:?})), \
-             content_type: {content_type:?} }},",
-            dashboard.include_env,
+            "        tracedecay_api::StaticDashboardAsset {{ path: {:?}, \
+             contents: include_bytes!(concat!(env!({:?}), {:?})), \
+             content_type: {:?}, \
+             encoding: tracedecay_api::StaticAssetEncoding::{} }},",
+            asset.relative,
+            asset.include_env,
+            asset.include_path,
+            asset.content_type,
+            asset.encoding,
         );
     }
     let _ = writeln!(code, "    ],");
