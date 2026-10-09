@@ -2277,10 +2277,12 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
     let mut graph_kinds = released
         .iter()
         .map(|release| release.kind)
-        .filter(|kind| matches!(
-            kind,
-            ResidentOwnerKindV1::GraphCatalog | ResidentOwnerKindV1::GraphEngine
-        ))
+        .filter(|kind| {
+            matches!(
+                kind,
+                ResidentOwnerKindV1::GraphCatalog | ResidentOwnerKindV1::GraphEngine
+            )
+        })
         .collect::<Vec<_>>();
     graph_kinds.sort();
     assert_eq!(

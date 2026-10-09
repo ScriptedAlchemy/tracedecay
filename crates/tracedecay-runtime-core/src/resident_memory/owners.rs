@@ -945,10 +945,6 @@ mod tests {
             .map(|release| release.kind)
             .collect::<Vec<_>>();
         kinds.sort();
-        eprintln!(
-            "STEADY_RSS_PROOF before={before} after={after} \
-             released_catalog={CATALOG_MIB} released_engine={ENGINE_MIB} worktrees=2"
-        );
         assert_eq!(before, 2 * (CATALOG_MIB + ENGINE_MIB));
         assert_eq!(
             kinds,
