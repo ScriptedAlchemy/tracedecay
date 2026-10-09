@@ -2896,3 +2896,89 @@ async fn persist_caps_occurrence_index_text_and_measures_user_sessions_per_n() {
         previous_family_bytes = family_bytes;
     }
 }
+
+#[tokio::test]
+async fn occurrence_replay_accepts_existing_full_text_and_rejects_changed_content() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let session_id = fixture_session("session.projector.existing-full-text");
+    let text = "canonical message ".repeat(8_000);
+    assert!(derived_text_for_index(&text).len() < text.len());
+    let (observation, write) = fixture_observation_with_text(&session_id, 0, text.clone());
+    Box::pin(persist_fixture(&runtime, observation, write)).await;
+    let store = temporal_store(&runtime);
+    let sequence = session_effect_sequence(&runtime, &session_id).await;
+    store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(sequence, 0).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let recovery = store
+        .session_refresh_recovery(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, batch) = store
+        .materialize_session_temporal_refresh_batch_for_test(&recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch.occurrences().len(), 1);
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    super::persist::persist_occurrences(&transaction, &batch, &ExecutionControl::default())
+        .await
+        .unwrap();
+    // Master persisted the full sanitized body before the derived-index cap.
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE session_occurrences SET index_text = ?2 WHERE session_id = ?1",
+                params![session_id.as_str(), &text],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    super::persist::persist_occurrences(&transaction, &batch, &ExecutionControl::default())
+        .await
+        .expect("unchanged canonical content must replay across the index cap");
+    let mut rows = transaction.query(
+        "SELECT index_text, sanitized_content_bytes FROM session_occurrences WHERE session_id = ?1",
+        params![session_id.as_str()],
+    ).await.unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), text);
+    assert_eq!(
+        row.get::<i64>(1).unwrap(),
+        i64::try_from(text.len()).unwrap()
+    );
+    drop(rows);
+    transaction.execute(
+        "UPDATE session_occurrences SET index_text = index_text || 'corrupt' WHERE session_id = ?1",
+        params![session_id.as_str()],
+    ).await.unwrap();
+    super::persist::persist_occurrences(&transaction, &batch, &ExecutionControl::default())
+        .await
+        .expect_err("matching digest cannot excuse changed stored text");
+    transaction
+        .execute(
+            "UPDATE session_occurrences SET index_text = ?2 WHERE session_id = ?1",
+            params![session_id.as_str(), &text],
+        )
+        .await
+        .unwrap();
+    assert_eq!(transaction.execute(
+        "UPDATE session_occurrences SET sanitized_content_digest = '0000000000000000000000000000000000000000000000000000000000000000' WHERE session_id = ?1",
+        params![session_id.as_str()],
+    ).await.unwrap(), 1);
+    super::persist::persist_occurrences(&transaction, &batch, &ExecutionControl::default())
+        .await
+        .expect_err("a divergent canonical digest must still reject replay");
+}

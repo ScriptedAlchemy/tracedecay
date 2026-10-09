@@ -143,7 +143,7 @@ pub async fn run_doctor(
 
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let daemon_listening = tracedecay_daemon_control::daemon_socket_connectable(profile);
-    let independent = launch_independent_doctor_checks(
+    let mut independent = launch_independent_doctor_checks(
         profile,
         build_version,
         &project_path,
@@ -168,16 +168,13 @@ pub async fn run_doctor(
     dc.replay_from(join_doctor_check(independent.watcher).await?);
     let upload_enabled = join_doctor_check(independent.upload).await?;
     check_user_config(&mut dc, profile.data_dir(), upload_enabled.as_ref());
-    let worldwide = matches!(upload_enabled.as_ref(), Ok(UploadSetting::Resolved(true)))
-        .then(|| spawn_doctor_check(move || (network.fetch_worldwide_total)()));
+    independent.network.admit_worldwide(upload_enabled.as_ref());
     dc.replay_from(join_doctor_check(independent.external_tools).await?);
     dc.replay_from(join_doctor_check(independent.hosts).await?);
-    let latest = join_doctor_check(independent.latest_version).await?;
-    let worldwide = match worldwide {
-        Some(handle) => Some(join_doctor_check(handle).await?),
-        None => None,
-    };
-    render_network(&mut dc, upload_enabled.as_ref(), worldwide, latest);
+    independent
+        .network
+        .report(&mut dc, upload_enabled.as_ref())
+        .await?;
     print_summary(&dc);
 
     let completion = doctor_result(&dc, pending_reset);
@@ -198,9 +195,7 @@ struct IndependentDoctorChecks {
     upload: tokio::task::JoinHandle<tracedecay_domain::errors::Result<UploadSetting>>,
     external_tools: tokio::task::JoinHandle<DoctorCounters>,
     hosts: tokio::task::JoinHandle<DoctorCounters>,
-    latest_version: tokio::task::JoinHandle<
-        Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError>,
-    >,
+    network: DoctorNetworkChecks,
 }
 
 fn launch_independent_doctor_checks(
@@ -263,7 +258,7 @@ fn launch_independent_doctor_checks(
         hosts: spawn_doctor_check(move || {
             collect_quiet(|dc| check_host_integrations(dc, &profile_for_hosts, &project_for_hosts))
         }),
-        latest_version: spawn_doctor_check(move || (network.fetch_latest_version)()),
+        network: DoctorNetworkChecks::start(network),
     }
 }
 
@@ -1438,33 +1433,46 @@ fn json_bool(value: &serde_json::Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Overlaps the two network probes for tests. Production launches the
-/// GitHub probe with the other independent checks and renders afterward.
-#[cfg(test)]
-#[tracing::instrument(name = "doctor.check.network", level = "trace", skip_all)]
-fn check_network(
-    dc: &mut DoctorCounters,
-    upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
-    network: AdmittedDoctorNetworkProbes,
-) {
-    let (worldwide, latest) = match upload_enabled {
-        Ok(UploadSetting::Resolved(true)) => std::thread::scope(|scope| {
-            let worldwide = scope.spawn(|| (network.fetch_worldwide_total)());
-            let latest = scope.spawn(|| (network.fetch_latest_version)());
-            (
-                Some(worldwide.join().unwrap_or_else(|_| None)),
-                latest.join().unwrap_or_else(|_| {
-                    Err(
-                        tracedecay_dashboard_api::cloud::ReleaseLookupError::NetworkUnreachable {
-                            detail: "GitHub release probe thread failed".to_owned(),
-                        },
-                    )
-                }),
-            )
-        }),
-        _ => (None, (network.fetch_latest_version)()),
-    };
-    render_network(dc, upload_enabled, worldwide, latest);
+struct DoctorNetworkChecks {
+    latest: tokio::task::JoinHandle<
+        Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError>,
+    >,
+    worldwide: Option<tokio::task::JoinHandle<Option<u64>>>,
+    fetch_worldwide_total: fn() -> Option<u64>,
+}
+
+impl DoctorNetworkChecks {
+    fn start(network: AdmittedDoctorNetworkProbes) -> Self {
+        Self {
+            latest: spawn_doctor_check(move || (network.fetch_latest_version)()),
+            worldwide: None,
+            fetch_worldwide_total: network.fetch_worldwide_total,
+        }
+    }
+
+    fn admit_worldwide(
+        &mut self,
+        upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
+    ) {
+        if matches!(upload_enabled, Ok(UploadSetting::Resolved(true))) {
+            self.worldwide = Some(spawn_doctor_check(self.fetch_worldwide_total));
+        }
+    }
+
+    #[tracing::instrument(name = "doctor.check.network", level = "trace", skip_all)]
+    async fn report(
+        self,
+        dc: &mut DoctorCounters,
+        upload_enabled: Result<&UploadSetting, &tracedecay_domain::errors::TraceDecayError>,
+    ) -> tracedecay_domain::errors::Result<()> {
+        let latest = join_doctor_check(self.latest).await?;
+        let worldwide = match self.worldwide {
+            Some(handle) => Some(join_doctor_check(handle).await?),
+            None => None,
+        };
+        render_network(dc, upload_enabled, worldwide, latest);
+        Ok(())
+    }
 }
 
 fn render_network(

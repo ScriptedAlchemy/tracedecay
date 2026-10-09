@@ -12,10 +12,10 @@ Usage: scripts/check-distribution-acceptance.sh [OPTIONS]
 
 Build and exercise the release distribution from packaged crate archives.
 The gate packages every workspace crate, extracts the produced .crate archives
-into an isolated temporary directory, release-builds the packaged CLI, and
-tests the packaged library and that CLI. The production binary this gate
-proves is the one it builds from the extracted package; it never
-release-builds the source tree.
+into an isolated temporary directory, builds the packaged CLI with
+`--profile dist`, and tests the packaged library and that CLI. The
+production binary this gate proves is the one it builds from the extracted
+package; it never builds the source tree.
 
 Options:
   --repo PATH                      Repository root (default: parent of this script)
@@ -634,6 +634,33 @@ for name, spec in workspace_manifest.get("patch", {}).get("crates-io", {}).items
                 f"distribution acceptance: workspace path patch {name} is not staged at {patched}"
             )
         print(f'{json.dumps(name)} = {{ path = {json.dumps(str(patched))} }}')
+# Extracted packages do not see workspace Cargo.toml profiles. Copy
+# [profile.dist] from that manifest so `--profile dist` matches shipping.
+dist_profile = workspace_manifest.get("profile", {}).get("dist")
+if not isinstance(dist_profile, dict):
+    raise SystemExit(
+        "distribution acceptance: workspace Cargo.toml omitted [profile.dist]"
+    )
+required = ("inherits", "lto", "codegen-units", "strip")
+missing = [key for key in required if key not in dist_profile]
+if missing:
+    raise SystemExit(
+        "distribution acceptance: [profile.dist] missing " + ", ".join(missing)
+    )
+print()
+print("[profile.dist]")
+for key, value in dist_profile.items():
+    if isinstance(value, bool):
+        rendered = "true" if value else "false"
+    elif isinstance(value, int):
+        rendered = str(value)
+    elif isinstance(value, str):
+        rendered = json.dumps(value)
+    else:
+        raise SystemExit(
+            f"distribution acceptance: [profile.dist] {key} has unsupported type"
+        )
+    print(f"{key} = {rendered}")
 PY
 
 verify_feature_wiring \
@@ -655,10 +682,10 @@ if [[ $skip_packaged_runtime_battery == true ]]; then
   exit 0
 fi
 
-echo "distribution acceptance: compiling packaged CLI with release facilities"
+echo "distribution acceptance: compiling packaged CLI with dist profile"
 TRACEDECAY_RELEASE_GIT_SHA="$source_git_sha" cargo build \
   --manifest-path "$cli_package/Cargo.toml" \
-  --release \
+  --profile dist \
   "${release_cli_cargo_args[@]}" \
   --bin tracedecay \
   --config "$patch_config"
@@ -666,7 +693,7 @@ executable_suffix=""
 if [[ ${OS:-} == "Windows_NT" ]]; then
   executable_suffix=".exe"
 fi
-packaged_cli_bin="$target_directory/release/tracedecay${executable_suffix}"
+packaged_cli_bin="$target_directory/dist/tracedecay${executable_suffix}"
 [[ -x $packaged_cli_bin ]] ||
   die "packaged tracedecay CLI build did not produce $packaged_cli_bin"
 assert_binary_source_sha \
@@ -723,7 +750,7 @@ install_root="$work/install"
 echo "distribution acceptance: staging the packaged CLI as the installed binary"
 # `cargo install --path` rebuilds the same extracted CLI we just compiled.
 # Copy that artifact into the cargo-install layout so later MCP/LSP checks
-# exercise the packaged binary without a third release compile.
+# exercise the packaged binary without a third dist compile.
 mkdir -p -- "$install_root/bin"
 cp -- "$packaged_cli_bin" \
   "$install_root/bin/tracedecay${executable_suffix}"
@@ -884,14 +911,14 @@ RS
 cp -- "$staged/Cargo.lock" "$test_api_probe/Cargo.lock"
 echo "distribution acceptance: proving production package omits test APIs"
 test_api_stderr="$work/test-api-probe.stderr"
-# Same production features and lockfile as the packaged CLI release build,
-# which already compiled this graph into the shared release directory (repo
+# Same production features and lockfile as the packaged CLI dist build,
+# which already compiled this graph into the shared dist directory (repo
 # `target-dir`). Only the probe itself is compiled. A dev-profile check paid
 # a second metadata compile of the whole graph. The expected refusal is still
 # E0599 on the test-only associated item.
 if CARGO_NET_OFFLINE=true cargo check \
   --manifest-path "$test_api_probe/Cargo.toml" \
-  --release \
+  --profile dist \
   --config "$patch_config" \
   2>"$test_api_stderr"; then
   die "production package exposed test-transport APIs"

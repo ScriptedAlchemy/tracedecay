@@ -117,7 +117,7 @@ jobs:
       - name: Build release binary for packaging
         uses: ./.github/actions/build-cli
         with:
-          config: release
+          config: dist
           dest: target/${{ matrix.target }}/release
           cache-key: release-${{ matrix.target }}
 
