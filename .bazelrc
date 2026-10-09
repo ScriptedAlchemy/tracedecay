@@ -1,3 +1,7 @@
+# Windows otherwise copies every file in runfiles and dependency link trees,
+# duplicating the Rust sysroot and rlibs until the runner disk is exhausted.
+startup --windows_enable_symlinks
+
 common --enable_bzlmod
 common --announce_rc
 common --show_progress_rate_limit=15
@@ -48,6 +52,9 @@ build:windows --action_env=PATH
 build:windows --enable_runfiles
 
 test --test_output=errors
+# Rust's test harness starts a worker per available CPU. Account for that
+# pool so Bazel does not schedule several full-host suites at once.
+test --default_test_resources=cpu=HOST_CPUS
 
 # Blocking Clippy policy over every Rust target, matching
 # `cargo clippy --workspace --all-targets -- -D warnings`.
@@ -68,6 +75,8 @@ test:ci --test_summary=terse
 # Suites spawn host tools (ast-grep, node, git, and rust-analyzer through
 # the rustup proxy, which needs its homes to find the pinned toolchain).
 test:ci --test_env=PATH
+# Let the launcher resolve default toolchain homes before it isolates HOME.
+test:ci --test_env=HOME
 test:ci --test_env=RUSTUP_HOME
 test:ci --test_env=CARGO_HOME
 

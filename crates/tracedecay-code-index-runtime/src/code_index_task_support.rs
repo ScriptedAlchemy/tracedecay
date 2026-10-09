@@ -23,11 +23,17 @@ pub fn code_index_search_unavailable(
     code_index_search_unavailable_for_generation(None, reason, lane_reason)
 }
 
-pub fn code_index_scope_unavailable() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
-    code_index_search_unavailable(
-        tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-        "scope_unavailable",
-    )
+pub fn code_index_scope_unavailable(
+    error: crate::mcp_admission::CodeIndexScopeUnavailableV1,
+) -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
+    let reason = error.search_reason();
+    let lane_reason = match error {
+        crate::mcp_admission::CodeIndexScopeUnavailableV1::AuthorityUnavailable => {
+            "scope_unavailable"
+        }
+        crate::mcp_admission::CodeIndexScopeUnavailableV1::NotApplicable => reason.as_str(),
+    };
+    code_index_search_unavailable(reason, lane_reason)
 }
 
 pub async fn generation_for_hydration(

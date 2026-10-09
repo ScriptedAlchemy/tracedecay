@@ -1784,7 +1784,12 @@ impl ProjectOpenInputs<'_> {
         error: TraceDecayError,
     ) -> Result<()> {
         let failed_key = core.current_key.lock().await.clone();
-        let retain_core = !self.cancellation.is_cancelled() && failed_key == opened.key;
+        // A retiring store owner can settle after this attempt. Caching a
+        // degraded core would bypass composition on every later request and
+        // make its missing owners permanent instead of using admission retry.
+        let retain_core = !self.cancellation.is_cancelled()
+            && failed_key == opened.key
+            && !project_open_admission::is_observability_retiring(&error);
         let (core_retained, failed_full_server) = if retain_core {
             reclaim_core_after_failed_upgrade(
                 self.store_administration,
@@ -1842,6 +1847,11 @@ impl ProjectOpenInputs<'_> {
                 Some(("error", error.to_string())),
                 self.started,
             );
+            self.store_administration
+                .project_servers()
+                .lock()
+                .await
+                .mark_degraded_core_if(&opened.key, |current| Arc::ptr_eq(current, resolved));
             return Ok(());
         }
         retire_failed_project_open_owner(

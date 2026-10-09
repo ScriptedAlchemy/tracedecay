@@ -119,6 +119,20 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         true
     }
 
+    pub(super) fn mark_degraded_core_if<F>(&mut self, key: &ProjectServerKey, matches: F) -> bool
+    where
+        F: FnOnce(&Server) -> bool,
+    {
+        let Some(entry) = self.servers.get_mut(key) else {
+            return false;
+        };
+        if entry.publication != ProjectServerPublication::Core || !matches(&entry.server) {
+            return false;
+        }
+        entry.publication = ProjectServerPublication::DegradedCore;
+        true
+    }
+
     pub(super) fn replace_ready_if<F>(
         &mut self,
         key: &ProjectServerKey,
@@ -275,8 +289,11 @@ impl<Server> DatabaseOwnerRegistry<Server> {
                 .servers
                 .iter()
                 .filter(|(_, entry)| {
-                    entry.publication == ProjectServerPublication::RegisteredHostIngest
-                        && !is_leased(&entry.server)
+                    matches!(
+                        entry.publication,
+                        ProjectServerPublication::RegisteredHostIngest
+                            | ProjectServerPublication::DegradedCore
+                    ) && !is_leased(&entry.server)
                 })
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(key, _)| key.clone())?;
@@ -288,7 +305,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         Some((candidate, true, retired))
     }
 
-    /// Removes one fully published least-recently-used idle owner after the
+    /// Removes one settled least-recently-used idle owner after the
     /// canonical graph registry reports project-admission pressure. The caller
     /// must transfer the owner directly to retirement and wait before opening.
     #[tracing::instrument(name = "daemon.owner_registry.retire_lru", level = "trace", skip_all)]
@@ -315,8 +332,11 @@ impl<Server> DatabaseOwnerRegistry<Server> {
                 entries
                     .iter()
                     .all(|(_, entry)| {
-                        entry.publication == ProjectServerPublication::RegisteredHostIngest
-                            && !is_leased(&entry.server)
+                        matches!(
+                            entry.publication,
+                            ProjectServerPublication::RegisteredHostIngest
+                                | ProjectServerPublication::DegradedCore
+                        ) && !is_leased(&entry.server)
                     })
                     .then(|| {
                         let last_used = entries

@@ -51,6 +51,7 @@ use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
 use crate::support::{PartitionedSealV1, RUST_SOURCE, cold_generation, id, reseal_manifest};
 
+mod attribution_equivalence;
 mod parallel_equivalence;
 
 #[derive(Clone, Default)]
@@ -1102,7 +1103,9 @@ fn published_generation_serves_current_conservative_test_attribution() {
         .expect("test generation publishes");
     let generation = store.generation(&generation);
     let authority = generation
-        .test_attribution_authority()
+        .prepare_test_attribution(
+            &tracedecay_code_index::production::UninterruptibleCodeIndexControlV1,
+        )
         .expect("attribution authority");
 
     let read = authority.read_test_attribution(&generation.manifest().generation_id);
@@ -1191,7 +1194,9 @@ fn root_feedback_entry_test() {
         .expect("test generation publishes");
     let generation = store.generation(&generation);
     let authority = generation
-        .test_attribution_authority()
+        .prepare_test_attribution(
+            &tracedecay_code_index::production::UninterruptibleCodeIndexControlV1,
+        )
         .expect("attribution authority");
 
     let read = authority.read_test_attribution(&generation.manifest().generation_id);
@@ -1809,8 +1814,10 @@ fn verified_content_addressed_lexical_source_resumes_from_a_persisted_cursor() {
 
 #[test]
 fn verified_lexical_source_pages_a_large_file_and_resumes_after_cancellation() {
-    let mut source_text = String::with_capacity(1_500_000);
-    for ordinal in 0..24_000_u32 {
+    // Exceed the authenticated segment and page bounds without making
+    // parser throughput part of the cancellation and resume contract.
+    let mut source_text = String::with_capacity(128 * 1024);
+    for ordinal in 0..2_048_u32 {
         source_text.push_str(&format!(
             "pub fn bounded_item_{ordinal}() -> u32 {{ {ordinal} }}\n"
         ));

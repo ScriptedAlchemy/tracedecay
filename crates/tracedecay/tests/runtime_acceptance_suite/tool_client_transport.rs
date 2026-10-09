@@ -329,9 +329,17 @@ fn generic_tool_accepts_slow_byte_stream() {
         tool_command(&home, &project, &socket, "slow"),
         CHILD_TIMEOUT,
     );
-    server.join().expect("join fake daemon");
-    assert!(!result.killed_by_harness, "slow response hung");
-    assert!(result.output.status.success());
+    let served = server.join();
+    assert!(
+        !result.killed_by_harness && result.output.status.success(),
+        "slow response failed after {:?} (killed={}): status={} stdout={} stderr={}",
+        result.elapsed,
+        result.killed_by_harness,
+        result.output.status,
+        String::from_utf8_lossy(&result.output.stdout),
+        String::from_utf8_lossy(&result.output.stderr),
+    );
+    served.expect("join fake daemon");
     assert!(String::from_utf8_lossy(&result.output.stdout).contains("slow-ok"));
 }
 

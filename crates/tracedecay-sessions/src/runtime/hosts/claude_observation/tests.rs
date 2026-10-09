@@ -310,7 +310,15 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
     // Native separators are retained. Unlike '/', '\\' does not join the
     // directory and filename into one high-entropy token for redaction.
     let expected_transcript = if cfg!(windows) {
-        serde_json::to_string(&fixture.transcript)
+        let path = fixture
+            .temp
+            .path()
+            .join("home")
+            .join(".claude")
+            .join("projects")
+            .join("project-scope")
+            .join(format!("{session_id}.jsonl"));
+        serde_json::to_string(&path)
             .unwrap()
             .replace(&escaped[1..escaped.len() - 1], "/fixture")
     } else {

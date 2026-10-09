@@ -40,8 +40,7 @@ minimumReleaseAge: 0
 # the Cargo sources it compiles.
 verifyDepsBeforeRun: error
 
-# Installs the crates of the root and sdks/codegen Cargo workspaces into
-# `.pnpm/crates` and writes the source replacement in each `.cargo/config.toml`,
-# so `cargo` builds offline against sources from pnpm's store.
+# Installs the root Cargo workspace sources into `.pnpm/crates` and writes
+# the source replacement in `.cargo/config.toml` for Bazel dependency inputs.
 cargo:
   enabled: true

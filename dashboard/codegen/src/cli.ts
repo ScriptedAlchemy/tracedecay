@@ -22,16 +22,16 @@ import { generateContracts, OUTPUT_FILES, type JsonSchema } from "./generate.ts"
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DASHBOARD_ROOT = resolve(HERE, "..", "..");
 const REPOSITORY_ROOT = resolve(DASHBOARD_ROOT, "..");
-const SCHEMA_OUTPUT_ENV = "TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT";
 const RUST_SCHEMA_FILE = "codegen/schemas/dashboard-contracts.schema.json";
 const SDK_SOURCE_DIR = "sdks/typescript/src";
 const SDK_RUST_OPERATIONS_FILE = "crates/tracedecay-sdk/src/operations.rs";
 
-function cargo(args: string[], cwd: string, env: NodeJS.ProcessEnv = process.env): void {
-  const result = spawnSync("cargo", args, { cwd, env, stdio: "inherit" });
+function bazelRun(target: string, args: string[]): void {
+  const command = ["run", target, "--", ...args];
+  const result = spawnSync("bazel", command, { cwd: REPOSITORY_ROOT, stdio: "inherit" });
   if (result.error) throw result.error;
   if (result.status !== 0) {
-    throw new Error(`cargo ${args.join(" ")} failed with status ${result.status ?? "unknown"}`);
+    throw new Error(`bazel ${command.join(" ")} failed with status ${result.status ?? "unknown"}`);
   }
 }
 
@@ -39,21 +39,7 @@ function exportRustBundle(): { bundle: JsonSchema; source: string } {
   const temporaryDirectory = mkdtempSync(join(tmpdir(), "tracedecay-dashboard-contracts-"));
   const output = join(temporaryDirectory, "dashboard.schema.json");
   try {
-    cargo(
-      [
-        "test",
-        "--quiet",
-        "-p",
-        "tracedecay-dashboard-api",
-        "--lib",
-        "contract_schema::tests::writes_dashboard_contract_schema",
-        "--",
-        "--ignored",
-        "--exact",
-      ],
-      REPOSITORY_ROOT,
-      { ...process.env, [SCHEMA_OUTPUT_ENV]: output },
-    );
+    bazelRun("//sdks/codegen:dashboard_schema", [output]);
     const source = readFileSync(output, "utf8");
     return { bundle: JSON.parse(source) as JsonSchema, source };
   } finally {
@@ -65,12 +51,7 @@ function exportRustBundle(): { bundle: JsonSchema; source: string } {
 function exportSdkSources(): Record<string, string> {
   const temporaryRoot = mkdtempSync(join(tmpdir(), "tracedecay-sdk-contracts-"));
   try {
-    // Cargo reads .cargo/config.toml from its working directory, and the SDK
-    // codegen workspace has its own pnpm-vendored sources and lockfile.
-    cargo(
-      ["run", "--quiet", "--locked", "--bin", "generate", "--", temporaryRoot],
-      join(REPOSITORY_ROOT, "sdks", "codegen"),
-    );
+    bazelRun("//sdks/codegen:generate", [temporaryRoot]);
     return {
       ...Object.fromEntries(
         readdirSync(join(temporaryRoot, SDK_SOURCE_DIR)).map((name) => [

@@ -1309,9 +1309,8 @@ async fn runtimeless_last_alias_drop_keeps_the_store_retiring_until_the_drain_co
 }
 
 #[tokio::test]
-async fn registered_shutdown_reports_a_blocked_producer_flush() {
-    let (_project, project_id, database, _runtime) =
-        runtime("observability-shutdown-failure").await;
+async fn registered_persistence_failure_releases_only_after_join_and_writer_fence() {
+    let (_project, project_id, database, _runtime) = runtime("observability-shutdown-fenced").await;
     let identity = ObservabilityProducerIdentityV1 {
         authorized_scope_ref: project_id.as_str().to_owned(),
         process_boot_id: "daemon:shutdown-failure".to_owned(),
@@ -1343,15 +1342,124 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
         .expect("enqueue blocked event");
     tokio::task::yield_now().await;
 
-    let error = registered
-        .shutdown()
-        .await
-        .expect_err("blocked flush must fail the registered shutdown");
+    let retained = registered.producer();
+    assert!(!retained.shutdown_settled());
+    let shutdown = tokio::spawn(registered.shutdown());
+    // Hold the writer past persistence's deadline, then release it within
+    // shutdown's existing budget so its fence can observe transaction closure.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!retained.shutdown_settled());
     blocker.commit().await.expect("release registered writer");
+    let error = shutdown
+        .await
+        .expect("shutdown task")
+        .expect_err("successful fencing must preserve the persistence failure");
+    assert!(retained.shutdown_settled());
+    assert_eq!(
+        retained
+            .try_emit(envelope(&project_id, "shutdown:after-fence"))
+            .unwrap_err(),
+        "observability_producer_closed",
+    );
     assert!(
         error
             .to_string()
             .contains("observability_persistence_deadline"),
+        "unexpected shutdown error: {error}"
+    );
+    let start_called = Arc::new(AtomicBool::new(false));
+    let observed_start = Arc::clone(&start_called);
+    let replacement_identity = ObservabilityProducerIdentityV1 {
+        process_boot_id: "daemon:shutdown-failure-replacement".to_owned(),
+        ..identity.clone()
+    };
+    let replacement_mount = store_mount(&replacement_identity);
+    let replacement = registry.acquire_or_start(&database, &replacement_mount, || {
+        observed_start.store(true, Ordering::Release);
+        BoundedObservabilityProducerV1::start(database.clone(), replacement_identity.clone(), 1)
+            .map_err(StoreObservabilityMountErrorV1::Unavailable)
+    });
+    let replacement = replacement.expect("settled store can reopen without resetting data");
+    assert!(start_called.load(Ordering::Acquire));
+    replacement
+        .producer()
+        .try_emit(envelope(&project_id, "replacement:accepted"))
+        .unwrap();
+    replacement.shutdown().await.expect("replacement drains");
+}
+
+#[tokio::test]
+async fn registered_blocked_writer_retries_settlement_only_on_mount_demand() {
+    assert_blocked_writer_retirement(
+        ObservabilityProducerDeadlinesV1 {
+            persistence: Duration::from_millis(50),
+            shutdown: Duration::from_millis(250),
+        },
+        "observability_persistence_deadline",
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn registered_aborted_worker_keeps_unsettled_coverage_failed_closed() {
+    assert_blocked_writer_retirement(
+        ObservabilityProducerDeadlinesV1 {
+            persistence: Duration::from_millis(50),
+            shutdown: Duration::from_millis(50),
+        },
+        "observability_shutdown_deadline",
+        false,
+    )
+    .await;
+}
+
+async fn assert_blocked_writer_retirement(
+    deadlines: ObservabilityProducerDeadlinesV1,
+    expected_error: &str,
+    worker_settled: bool,
+) {
+    let (_project, project_id, database, _runtime) =
+        runtime("observability-shutdown-failure").await;
+    let identity = ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: project_id.as_str().to_owned(),
+        process_boot_id: "daemon:shutdown-failure".to_owned(),
+        producer_revision: "producer.v1".to_owned(),
+        configuration_revision: digest('e').as_str().to_owned(),
+        policy_revision: digest('f').as_str().to_owned(),
+    };
+    let producer = BoundedObservabilityProducerV1::start_with_deadlines(
+        database.clone(),
+        identity.clone(),
+        1,
+        deadlines,
+    )
+    .expect("producer");
+    let registry = StoreObservabilityRegistryV1::default();
+    let registered = registry
+        .acquire_or_start(&database, &store_mount(&identity), || Ok(producer))
+        .expect("registered observability producer");
+    let blocker = database
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    registered
+        .producer()
+        .try_emit(envelope(&project_id, "shutdown:blocked"))
+        .expect("enqueue blocked event");
+    tokio::task::yield_now().await;
+
+    let retained = registered.producer();
+    let error = registered
+        .shutdown()
+        .await
+        .expect_err("blocked flush must fail the registered shutdown");
+    assert!(
+        !retained.shutdown_settled(),
+        "an unfinished writer fence cannot release the store"
+    );
+    assert!(
+        error.to_string().contains(expected_error),
         "unexpected shutdown error: {error}"
     );
     let start_called = Arc::new(AtomicBool::new(false));
@@ -1366,9 +1474,87 @@ async fn registered_shutdown_reports_a_blocked_producer_flush() {
         BoundedObservabilityProducerV1::start(database.clone(), replacement_identity.clone(), 1)
             .map_err(StoreObservabilityMountErrorV1::Unavailable)
     });
+    assert_eq!(
+        retained
+            .try_emit(envelope(&project_id, "closed:while-blocked"))
+            .unwrap_err(),
+        "observability_producer_closed"
+    );
+    if !worker_settled {
+        assert!(
+            !retained.shutdown_joined(),
+            "abort never proves coverage settlement"
+        );
+        assert!(matches!(
+            failed,
+            Err(StoreObservabilityMountErrorV1::ShutdownFailed)
+        ));
+        assert!(!start_called.load(Ordering::Acquire));
+        blocker.commit().await.expect("release registered writer");
+        assert!(retained.finish_shutdown_settlement().await.is_err());
+        assert!(!retained.shutdown_settled());
+        return;
+    }
+    assert!(
+        retained.shutdown_joined(),
+        "worker closed before fence retry"
+    );
     assert!(matches!(
         failed,
-        Err(StoreObservabilityMountErrorV1::ShutdownFailed)
+        Err(StoreObservabilityMountErrorV1::Retiring)
     ));
     assert!(!start_called.load(Ordering::Acquire));
+    registry.join_retirement_drains().await;
+    assert!(
+        !retained.shutdown_settled(),
+        "blocked recheck must not release ownership"
+    );
+
+    // The same logical project in another registered store remains independent.
+    let (_other_project, other_id, other_database, _other_runtime) =
+        runtime("observability-shutdown-failure").await;
+    assert_eq!(project_id, other_id);
+    let other = registry
+        .acquire_or_start(&other_database, &store_mount(&identity), || {
+            BoundedObservabilityProducerV1::start(other_database.clone(), identity.clone(), 1)
+                .map_err(StoreObservabilityMountErrorV1::Unavailable)
+        })
+        .expect("foreign exact store is not retiring");
+
+    blocker.commit().await.expect("release registered writer");
+    tokio::task::yield_now().await;
+    assert!(
+        !retained.shutdown_settled(),
+        "release alone must not trigger a retry loop"
+    );
+    let retry = registry.acquire_or_start(&database, &replacement_mount, || {
+        panic!("writer settlement must precede replacement")
+    });
+    assert!(matches!(
+        retry,
+        Err(StoreObservabilityMountErrorV1::Retiring)
+    ));
+    registry.join_retirement_drains().await;
+    assert!(retained.shutdown_settled());
+    assert_eq!(
+        retained
+            .try_emit(envelope(&project_id, "closed:after-retry"))
+            .unwrap_err(),
+        "observability_producer_closed"
+    );
+    other
+        .producer()
+        .try_emit(envelope(&other_id, "foreign:still-active"))
+        .unwrap();
+    let replacement = registry
+        .acquire_or_start(&database, &replacement_mount, || {
+            BoundedObservabilityProducerV1::start(database.clone(), replacement_identity.clone(), 1)
+                .map_err(StoreObservabilityMountErrorV1::Unavailable)
+        })
+        .expect("settled exact store reopens without reset");
+    replacement.shutdown().await.expect("replacement drains");
+    other
+        .shutdown()
+        .await
+        .expect("foreign owner drains independently");
 }
