@@ -742,10 +742,9 @@ async fn admit_scheduled_file(
     cancellation: &ObservationCancellation,
     outcome: &mut PiCaptureOutcome,
 ) -> TranscriptIngestResult<Option<JsonlObservationAdmissionProgress>> {
-    let header = match {
-        let path = path.to_path_buf();
-        run_blocking_transcript_section(move || read_session_header(&path)).await
-    } {
+    let path_buf = path.to_path_buf();
+    let header = match run_blocking_transcript_section(move || read_session_header(&path_buf)).await
+    {
         Ok(HeaderRead::Header(header)) => header,
         Ok(HeaderRead::Incomplete) => {
             outcome.deferred = true;

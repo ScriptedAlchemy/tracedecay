@@ -597,13 +597,12 @@ impl CursorComposerSource {
         if context.cancellation.is_cancelled() {
             return;
         }
-        if !{
-            run_blocking_transcript_section({
-                let path = self.state_db_path.clone();
-                move || path.is_file()
-            })
-            .await
-        } {
+        let state_db_is_file = run_blocking_transcript_section({
+            let path = self.state_db_path.clone();
+            move || path.is_file()
+        })
+        .await;
+        if !state_db_is_file {
             return;
         }
         let ro = match open_readonly_immutable(&self.state_db_path).await {
