@@ -82,6 +82,11 @@ impl SessionActivityRow {
     /// The folder whose Git history the session ran against. A provider that
     /// records a project id rather than a folder (Claude) ran in the project
     /// store's own admitted root.
+    ///
+    /// The recorded path is honored whenever it is a rooted path on any host:
+    /// a POSIX-absolute path (`/home/...`) is rooted on Windows too, so a
+    /// session recorded under another platform stays attributed to its own
+    /// folder instead of silently inheriting this project's root.
     pub(super) fn folder<'a>(
         &'a self,
         project_root: Option<&'a std::path::Path>,
@@ -91,7 +96,7 @@ impl SessionActivityRow {
             return None;
         }
         let path = std::path::Path::new(project_path);
-        if path.is_absolute() {
+        if path.has_root() {
             Some(path)
         } else {
             project_root
@@ -1048,4 +1053,49 @@ fn decode_session_activity_row(row: &Row) -> Result<SessionActivityRow, String> 
             .get(6)
             .map_err(|e| format!("failed to decode message_max_ts: {e}"))?,
     })
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::SessionActivityRow;
+    use std::path::Path;
+
+    fn row(project_path: &str) -> SessionActivityRow {
+        SessionActivityRow {
+            provider: "cursor".to_owned(),
+            session_id: "s".to_owned(),
+            project_path: project_path.to_owned(),
+            started_at: Some(1),
+            ended_at: Some(2),
+            message_min_ts: None,
+            message_max_ts: None,
+        }
+    }
+
+    #[test]
+    fn folder_honors_rooted_recorded_path_on_every_platform() {
+        // A POSIX-absolute recorded folder is rooted even on Windows, where
+        // `is_absolute` alone would report false and silently re-attribute the
+        // session to this project's root instead of settling it as a
+        // non-worktree row.
+        let project_root = Path::new("project-root");
+        let row = row("/posix-style/recorded/folder");
+        assert_eq!(
+            row.folder(Some(project_root)),
+            Some(Path::new("/posix-style/recorded/folder"))
+        );
+    }
+
+    #[test]
+    fn folder_falls_back_to_project_root_for_non_path_tokens() {
+        let project_root = Path::new("project-root");
+        let row = row("proj_cli");
+        assert_eq!(row.folder(Some(project_root)), Some(project_root));
+    }
+
+    #[test]
+    fn folder_rejects_empty_recorded_path() {
+        let project_root = Path::new("project-root");
+        assert_eq!(row("   ").folder(Some(project_root)), None);
+    }
 }
