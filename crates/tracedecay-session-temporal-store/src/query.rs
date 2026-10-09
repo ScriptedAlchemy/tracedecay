@@ -9,7 +9,10 @@ use tracedecay_domain::{
     UtcMicros,
 };
 use tracedecay_runtime_core::db::engine::{Row, params, params_from_iter};
-use tracedecay_store::{SessionFrozenWatermarksV1, SessionStoreError, SessionStoreResult};
+use tracedecay_store::{
+    CanonicalBodyError, LOAD_CANONICAL_BODY_SQL, SessionFrozenWatermarksV1, SessionStoreError,
+    SessionStoreResult, collect_body_refs, parse_stored_observation, unpack_body,
+};
 
 use crate::sql::{
     SHARED_GENERATION_TABLES, SharedGenerationTable, discard_candidate_rows_sql,
@@ -255,9 +258,50 @@ pub(super) async fn read_observation(
     let encoded: String = row
         .get(1)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let observation =
-        serde_json::from_str(&encoded).map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let observation = decode_stored_observation(conn, &encoded, PERSIST_OPERATION).await?;
     Ok((sequence, observation))
+}
+
+pub(super) async fn decode_stored_observation(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    encoded: &str,
+    operation: &'static str,
+) -> SessionStoreResult<DurableObservationV1> {
+    let hashes = collect_body_refs(encoded).map_err(|error| storage(operation, error))?;
+    let mut bodies = HashMap::new();
+    for hash in hashes {
+        let mut rows = conn
+            .query(LOAD_CANONICAL_BODY_SQL, params![hash.as_str()])
+            .await
+            .map_err(|error| storage(operation, error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| storage(operation, error))?
+            .ok_or_else(|| {
+                storage(
+                    operation,
+                    CanonicalBodyError::Missing {
+                        content_hash: hash.clone(),
+                    },
+                )
+            })?;
+        let encoding: String = row.get(0).map_err(|error| storage(operation, error))?;
+        let blob: Vec<u8> = row.get(1).map_err(|error| storage(operation, error))?;
+        bodies.insert(
+            hash.clone(),
+            unpack_body(&hash, &encoding, &blob).map_err(|error| storage(operation, error))?,
+        );
+    }
+    parse_stored_observation(encoded, |hash| {
+        bodies
+            .get(hash)
+            .cloned()
+            .ok_or_else(|| CanonicalBodyError::Missing {
+                content_hash: hash.to_owned(),
+            })
+    })
+    .map_err(|error| storage(operation, error))
 }
 
 /// First prefetch width. A batch of full `observation_json` bodies is bounded
@@ -346,8 +390,7 @@ pub(super) async fn read_observations(
             let encoded: String = row
                 .get(2)
                 .map_err(|error| storage(PERSIST_OPERATION, error))?;
-            let observation = serde_json::from_str(&encoded)
-                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let observation = decode_stored_observation(conn, &encoded, PERSIST_OPERATION).await?;
             observations.insert(observation_id, (sequence, observation));
         }
     }

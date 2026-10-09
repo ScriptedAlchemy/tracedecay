@@ -746,7 +746,7 @@ pub async fn canonical_parent_message_resolver(
             }
             let encoded: String = row.get(1).map_err(|error| storage(operation, error))?;
             let observation: tracedecay_domain::DurableObservationV1 =
-                serde_json::from_str(&encoded).map_err(|error| storage(operation, error))?;
+                crate::query::decode_stored_observation(conn, &encoded, operation).await?;
             let envelope = if retain_canonical_outputs {
                 Some(
                     observation_envelope_from_payload(observation.payload())

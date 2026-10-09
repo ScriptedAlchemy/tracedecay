@@ -681,7 +681,9 @@ async fn open_occurrence_content(
     }
     control.checkpoint()?;
     let observation: DurableObservationV1 =
-        serde_json::from_str(&observation_json).map_err(hydration_failure)?;
+        crate::query::decode_stored_observation(conn, &observation_json, "hydrate observation")
+            .await
+            .map_err(hydration_failure)?;
     if observation.observation_id().as_str() != source_observation_id
         || observation.source().provider().as_str() != provider
         || observation.source().session_id().as_str() != session_id

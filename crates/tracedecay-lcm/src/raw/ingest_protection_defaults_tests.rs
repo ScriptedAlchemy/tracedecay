@@ -1,7 +1,9 @@
 use tracedecay_runtime_core::db::engine::TestConnection;
-use tracedecay_store::SessionMessageRecord;
+use tracedecay_store::{CANONICAL_BODIES_TABLE_SQL, SessionMessageRecord};
 
-const RAW_MESSAGE_TEST_SCHEMA: &str = "CREATE TABLE lcm_raw_messages (
+const RAW_MESSAGE_TEST_SCHEMA: &str = concat!(
+    CANONICAL_BODIES_TABLE_SQL,
+    "CREATE TABLE lcm_raw_messages (
     store_id INTEGER PRIMARY KEY,
     provider TEXT NOT NULL,
     message_id TEXT NOT NULL,
@@ -22,7 +24,8 @@ const RAW_MESSAGE_TEST_SCHEMA: &str = "CREATE TABLE lcm_raw_messages (
     tool_names TEXT,
     source_path TEXT,
     source_offset INTEGER
-);";
+);"
+);
 
 #[tokio::test]
 async fn exact_identity_reader_rejects_tampered_inline_content() {
