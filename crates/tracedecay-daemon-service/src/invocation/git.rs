@@ -1,6 +1,7 @@
 //! Git index transaction daemon invocation handlers (`execute_git_read`/`execute_git_preview`/`execute_git_apply`).
 
 use super::*;
+use crate::project_runtime::ProjectRuntimePublicationStateV1;
 use tracedecay_domain::GitIndexPreviewV1;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -186,6 +187,7 @@ pub(super) async fn execute_git_read(
     wire_request_id: String,
     project_root: Option<&Path>,
     owner: Option<DaemonGitInvocationOwner>,
+    publication: Option<ProjectRuntimePublicationStateV1>,
     surface_operation: ApplicationSurfaceOperation,
     request: GitReadSurfaceRequest,
     observed_at: UtcMicros,
@@ -194,10 +196,7 @@ pub(super) async fn execute_git_read(
     request_cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> DaemonInvocationResponse {
     let Some(owner) = owner else {
-        // The route reaching here already passed project resolution and an
-        // admitted project open; the git transaction owner registers behind
-        // the core publication, so a miss here is a retryable mounting state.
-        return runtime_mounting_problem(wire_request_id);
+        return missing_registered_owner_problem(publication, wire_request_id);
     };
     let Some(project_root) = project_root.map(Path::to_path_buf) else {
         return concealed_application_problem(wire_request_id);
@@ -491,13 +490,14 @@ pub(super) async fn execute_git_preview(
     operation_events: &OperationEventAuthority,
     wire_request_id: String,
     owner: Option<DaemonGitInvocationOwner>,
+    publication: Option<ProjectRuntimePublicationStateV1>,
     request: GitPreviewSurfaceRequest,
     _observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     let Some(owner) = owner else {
-        return runtime_mounting_problem(wire_request_id);
+        return missing_registered_owner_problem(publication, wire_request_id);
     };
     // Snapshot, preview input, and the built request are too large to live in
     // this async state machine: constructing that future on the socket poll
@@ -525,13 +525,14 @@ pub(super) async fn execute_git_apply(
     operation_events: &OperationEventAuthority,
     wire_request_id: String,
     owner: Option<DaemonGitInvocationOwner>,
+    publication: Option<ProjectRuntimePublicationStateV1>,
     request: GitApplySurfaceRequest,
     _observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     let Some(owner) = owner else {
-        return runtime_mounting_problem(wire_request_id);
+        return missing_registered_owner_problem(publication, wire_request_id);
     };
     let join_id = wire_request_id.clone();
     let prepared = match tokio::task::spawn_blocking(move || {

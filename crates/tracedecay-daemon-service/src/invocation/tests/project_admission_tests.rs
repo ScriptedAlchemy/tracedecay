@@ -696,3 +696,98 @@ async fn missing_work_owner_stops_retrying_after_publication() {
         }
     }
 }
+
+#[tokio::test]
+async fn git_status_preserves_terminal_publication_refusals() {
+    let service = DaemonInvocationService::default();
+    let project_root = PathBuf::from("/projects/git-status-publication");
+    DaemonLspOwnerRegistrar::new(&service)
+        .register_factory_for_project(
+            project_root.clone(),
+            UserProfileId::new("profile.test.git-publication").unwrap(),
+            ProjectId::new("project.test.git-publication").unwrap(),
+            unavailable_lsp_session_factory(),
+        )
+        .await
+        .unwrap();
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    let reset = ApplicationProblem::from_detail(
+        tracedecay_contracts::ApplicationProblemDetailV1::ResetRequired {
+            authority: "profile sessions".to_owned(),
+            found_version: Some(6),
+            required_version: Some(9),
+            reason: "Unsupported session schema".to_owned(),
+            remedy: "tracedecay wipe --stale --yes".to_owned(),
+        },
+    );
+    for expected in [
+        None,
+        Some(ApplicationProblemKind::ExecutionFailed),
+        Some(ApplicationProblemKind::ResetRequired),
+    ] {
+        let publication = service
+            .project_runtimes
+            .begin_publication(&project_root)
+            .unwrap();
+        match expected {
+            Some(ApplicationProblemKind::ExecutionFailed) => {
+                assert!(
+                    service
+                        .project_runtimes
+                        .mark_publication_failed(&publication)
+                );
+            }
+            Some(ApplicationProblemKind::ResetRequired) => {
+                assert!(service.project_runtimes.mark_publication_reset_required(
+                    &publication,
+                    reset.detail().unwrap().clone(),
+                ));
+            }
+            _ => {}
+        }
+        let now = now_micros();
+        let response = service
+            .invoke(
+                &registry,
+                Some(&project_root),
+                None,
+                None,
+                None,
+                DaemonInvocationRequest {
+                    protocol: tracedecay_daemon_protocol::DAEMON_INVOCATION_PROTOCOL.to_owned(),
+                    revision: tracedecay_daemon_protocol::DAEMON_INVOCATION_REVISION,
+                    request_id: "request.git-publication".to_owned(),
+                    delivery_route: None,
+                    payload: DaemonInvocationPayload::GitRead {
+                        surface_operation: ApplicationSurfaceOperation::GitStatus,
+                        request: GitReadSurfaceRequest {
+                            request: tracedecay_contracts::git::GitReadRequestV1::Status,
+                            max_entries: tracedecay_contracts::GIT_QUERY_DEFAULT_MAX_ENTRIES,
+                            max_bytes: tracedecay_contracts::GIT_QUERY_DEFAULT_MAX_BYTES,
+                        },
+                        observed_at: now,
+                        deadline: Deadline::new(UtcMicros(now.0 + 30_000_000)).unwrap(),
+                        cancellation: CancellationContext::active("cancel.git-publication")
+                            .unwrap(),
+                    },
+                },
+            )
+            .await;
+        let problem = application_problem_from(response);
+        assert_eq!(
+            problem.kind(),
+            expected.unwrap_or(ApplicationProblemKind::Unavailable)
+        );
+        if expected.is_some() {
+            assert_eq!(problem.retry(), RetryDirective::Never);
+        } else {
+            assert_eq!(
+                problem.diagnostic().unwrap().code,
+                tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE
+            );
+        }
+        if expected == Some(ApplicationProblemKind::ResetRequired) {
+            assert_eq!(problem.detail(), reset.detail());
+        }
+    }
+}

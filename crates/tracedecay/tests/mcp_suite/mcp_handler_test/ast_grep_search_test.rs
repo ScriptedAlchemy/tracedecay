@@ -151,7 +151,7 @@ async fn ast_grep_search_returns_the_call_and_rejects_text_lookalikes() {
 - src/checkout.rs:6
   > reserve_stock(sku, 0)
 
-_1 matches across 1 files._
+_1 matches; 1 files scanned._
 "
     );
 
@@ -304,7 +304,7 @@ async fn ast_grep_search_caps_results_and_refuses_invalid_arguments() {
 - src/calls.rs:2
   > reserve_stock(0, 0)
 
-_1 matches across 1 files._ Results capped. Narrow with `path_glob` or `max_results`.
+_1 matches; 1 files scanned._ Results capped. Narrow with `path_glob` or `max_results`.
 "
     );
 

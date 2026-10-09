@@ -1222,15 +1222,13 @@ pub enum ProfileStorageAction {
         #[arg(long)]
         json: bool,
     },
-    /// Reset a project graph store whose open failed with the typed
-    /// ResetRequired state (an incompatible schema this binary cannot upgrade
-    /// in place). Only the refused graph database is deleted; the store
-    /// directory, session archive, and transcripts are preserved, and the
-    /// next open recreates the graph at the canonical schema and re-ingests
-    /// from those transcripts. A store already at the canonical schema is
-    /// refused untouched. Requires the global `--yes` confirmation and an
-    /// exclusive maintenance lease (the daemon cannot open a refused store,
-    /// so recovery runs offline).
+    /// Reset a project store refused with ResetRequired. An incompatible graph
+    /// database is deleted while its canonical store directory, session archive,
+    /// and transcripts are preserved; the next open rebuilds from those transcripts.
+    /// With --project-root, a refused retired checkout-local .tracedecay directory
+    /// is deleted in full, including any data inside it. A canonical graph already
+    /// at the current schema is preserved. Requires --yes and an exclusive
+    /// maintenance lease; stop the daemon before resetting and restart it afterwards.
     #[command(name = "reset-project-store")]
     ResetProjectStore {
         /// Project root whose refused store should be reset; identity

@@ -88,3 +88,7 @@ rust_test(
         + ["//tests:fixtures"],
     data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
+
+exports_files(["src/bin/generate.rs", "src/codegen.rs", "src/operations.rs"],
+    visibility = ["//visibility:public"],
+)

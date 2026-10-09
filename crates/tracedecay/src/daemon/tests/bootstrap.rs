@@ -2254,6 +2254,34 @@ async fn exhausted_code_runtime_capacity_backs_off_at_resource_cadence() {
     );
 }
 
+#[tokio::test]
+async fn project_server_capacity_refusal_reuses_the_failed_open() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("server-capacity");
+    let state = match tasks.start(route.clone(), async {
+        Err(super::super::project_server_capacity_error())
+    }) {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        _ => panic!("first open must run"),
+    };
+    super::super::ProjectOpenTasks::wait_for_completion(state)
+        .await
+        .expect_err("capacity refusal");
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let retried = Arc::clone(&attempts);
+    let claim = tasks.start(route, async move {
+        retried.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    });
+    let super::super::ProjectOpenTaskClaim::Failed(failure) = claim else {
+        panic!("resource refusal must be cached without reconstructing the project")
+    };
+    assert!(
+        matches!(failure.to_error(), tracedecay_domain::errors::TraceDecayError::ProjectRoute { reason_code, retryable: true, .. } if reason_code == super::super::PROJECT_SERVER_CAPACITY_REASON_CODE)
+    );
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
 #[test]
 fn authority_verdicts_back_off_unless_a_migration_can_clear_them() {
     assert_eq!(
