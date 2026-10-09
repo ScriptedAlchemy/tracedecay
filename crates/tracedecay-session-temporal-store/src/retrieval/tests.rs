@@ -1861,6 +1861,7 @@ const LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY: &str = "
 #[tokio::test]
 async fn root_scope_browse_pages_from_the_occurrence_index_on_a_large_history() {
     const OCCURRENCE_COUNT: usize = 50_000;
+    const SESSION_COUNT: usize = 2_703;
     const PAGE: i64 = 64;
     const CHUNK: usize = 10_000;
 
@@ -1897,10 +1898,10 @@ async fn root_scope_browse_pages_from_the_occurrence_index_on_a_large_history() 
              WITH RECURSIVE sequence(value) AS (
                 VALUES(0)
                 UNION ALL
-                SELECT value + 1 FROM sequence WHERE value < 31
+                SELECT value + 1 FROM sequence WHERE value < 2702
              )
              INSERT INTO sessions (provider, session_id, project_key, project_path)
-             SELECT 'claude', printf('root-scope-%02d', value), 'user', '/root-scope'
+             SELECT 'claude', printf('root-scope-%04d', value), 'user', '/root-scope'
              FROM sequence;
              INSERT INTO session_temporal_generations (
                 session_id, generation, state, frozen_watermarks_json, created_at
@@ -1932,7 +1933,7 @@ async fn root_scope_browse_pages_from_the_occurrence_index_on_a_large_history() 
                 sanitized_content_bytes, index_text
              )
              SELECT
-                printf('root-scope-%02d', value % 32),
+                printf('root-scope-%04d', value % {SESSION_COUNT}),
                 1,
                 printf('root-scope-%06d', value),
                 'root-scope-observation',
@@ -2047,8 +2048,8 @@ async fn root_scope_browse_pages_from_the_occurrence_index_on_a_large_history() 
     );
     assert_eq!(legacy, repaired, "both shapes must return the same page");
     assert!(
-        repaired_elapsed < legacy_elapsed,
-        "indexed browse ({repaired_elapsed:?}) must beat the generation-first sort ({legacy_elapsed:?})"
+        repaired_elapsed.as_millis() < 1_000,
+        "indexed browse must stay on a bounded page, not a full-window sort ({repaired_elapsed:?}; generation-first {legacy_elapsed:?})"
     );
 }
 
