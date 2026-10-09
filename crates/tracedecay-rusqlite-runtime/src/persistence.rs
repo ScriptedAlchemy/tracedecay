@@ -14,11 +14,34 @@ use crate::{
 
 pub(crate) struct RuntimeWriterPersistence<E> {
     executor: E,
+    ledger_schema_ready: bool,
 }
 
 impl<E> RuntimeWriterPersistence<E> {
     pub(crate) const fn new(executor: E) -> Self {
-        Self { executor }
+        Self {
+            executor,
+            ledger_schema_ready: false,
+        }
+    }
+
+    /// Marks the ledger tables as already installed on this writer's
+    /// connection. The worker calls this after the one open-time install so
+    /// request-path lookups never parse `CREATE TABLE`.
+    pub(crate) fn mark_ledger_schema_ready(&mut self) {
+        self.ledger_schema_ready = true;
+    }
+
+    fn ensure_ledger_schema(
+        &mut self,
+        transaction: &Transaction<'_>,
+    ) -> Result<(), StorageRuntimeErrorV1> {
+        if self.ledger_schema_ready {
+            return Ok(());
+        }
+        ledger::initialize_schema(transaction).map_err(map_ledger_error)?;
+        self.ledger_schema_ready = true;
+        Ok(())
     }
 }
 
@@ -29,7 +52,7 @@ impl<E: StorageOperationExecutor> RuntimeWriterPersistence<E> {
         binding: &StoreRuntimeBindingV1,
         idempotency: &IdempotencyIdentityV1,
     ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1> {
-        ledger::initialize_schema(transaction).map_err(map_ledger_error)?;
+        self.ensure_ledger_schema(transaction)?;
         ledger::lookup_receipt(transaction, binding, idempotency).map_err(map_ledger_error)
     }
 
@@ -227,5 +250,55 @@ mod tests {
             )
             .unwrap();
         assert_eq!(marker_exists, 0);
+    }
+
+    fn deny_schema_change(
+        context: rusqlite::hooks::AuthContext<'_>,
+    ) -> rusqlite::hooks::Authorization {
+        match context.action {
+            rusqlite::hooks::AuthAction::CreateTable { .. }
+            | rusqlite::hooks::AuthAction::CreateIndex { .. }
+            | rusqlite::hooks::AuthAction::CreateTempTable { .. }
+            | rusqlite::hooks::AuthAction::CreateTempIndex { .. } => {
+                rusqlite::hooks::Authorization::Deny
+            }
+            _ => rusqlite::hooks::Authorization::Allow,
+        }
+    }
+
+    #[test]
+    fn lookup_after_schema_install_does_not_run_ddl() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let request = request(metadata("operation.schema.once", "key.schema.once", 's'));
+        let binding = request.binding().clone();
+        let mut persistence = RuntimeWriterPersistence::new(MarkerExecutor);
+        {
+            let transaction = connection.transaction().unwrap();
+            assert!(
+                persistence
+                    .lookup_idempotency(
+                        &transaction,
+                        &binding,
+                        &request.envelope().metadata.idempotency,
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            transaction.commit().unwrap();
+        }
+
+        connection.authorizer(Some(deny_schema_change)).unwrap();
+        let transaction = connection.transaction().unwrap();
+        assert!(
+            persistence
+                .lookup_idempotency(
+                    &transaction,
+                    &binding,
+                    &request.envelope().metadata.idempotency,
+                )
+                .unwrap()
+                .is_none()
+        );
+        transaction.commit().unwrap();
     }
 }

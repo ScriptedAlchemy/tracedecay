@@ -15,7 +15,7 @@ use tracedecay_store::StoreShardScopeV1;
 use super::failure::{
     IngestPassBounds, IngestPassCoverage, IngestPassOutcome, ProviderRunFold,
     TranscriptCatchUpFailure, allocate_pass_byte_budgets, observation_catch_up_failure,
-    scheduling_write_required,
+    scheduling_write_required, warn_transcript_catch_up_failure,
 };
 use super::scheduler::{
     USER_CATCH_UP_PROVIDERS, USER_INGEST_PROVIDER_FRONTIER_KEY, default_ingest_pass_bounds,
@@ -168,6 +168,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                 deferred_by_byte_cap: false,
             },
             committable_frontier: None,
+            failures: Vec::new(),
         });
     };
     let pass = match discovery_state {
@@ -189,6 +190,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                         deferred_by_byte_cap: true,
                     },
                     committable_frontier: None,
+                    failures: Vec::new(),
                 });
             }
         },
@@ -205,6 +207,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
     let mut bytes_consumed = 0u64;
     let mut deferred_by_byte_cap = discovery.is_truncated();
     let mut frontier_committable = true;
+    let mut failures = Vec::new();
     for path in &discovery.paths {
         if remaining == Some(0) {
             deferred_by_byte_cap = true;
@@ -217,16 +220,39 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
         let Some(pending) = codex::PendingTranscript::observe(discovery_state, path)? else {
             continue;
         };
-        let progress =
-            codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
-                path,
-                session_id.as_deref(),
-                &registered_roots,
-                admission,
-                remaining,
-                cancellation,
-            )
-            .await?;
+        if let Some(failure) = pending.cached_source_failure(path) {
+            failures.push(failure);
+            frontier_committable = false;
+            continue;
+        }
+        let progress = match codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
+            path,
+            session_id.as_deref(),
+            &registered_roots,
+            admission,
+            remaining,
+            cancellation,
+        )
+        .await
+        {
+            Ok(progress) => progress,
+            Err(error) if error.is_cancelled() => return Err(error),
+            Err(error) => {
+                let failure = warn_transcript_catch_up_failure(
+                    "codex",
+                    "observation",
+                    &error,
+                    "Codex transcript catch-up failed",
+                );
+                if failure.retryable {
+                    return Err(error);
+                }
+                pending.record_source_failure(path, &error, failure)?;
+                failures.push(failure);
+                frontier_committable = false;
+                continue;
+            }
+        };
         pending.admitted(path, progress.source_deferred, progress.covered_through)?;
         deferred_by_byte_cap |= progress.source_deferred;
         frontier_committable &= !progress.source_deferred;
@@ -249,12 +275,14 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
             deferred_by_byte_cap,
         },
         committable_frontier: frontier_committable.then_some(next_frontier),
+        failures,
     })
 }
 
 pub(super) struct CodexUserIngestOutcome {
     pub(super) outcome: BoundedProviderOutcome,
     pub(super) committable_frontier: Option<codex::CodexDiscoveryFrontier>,
+    pub(super) failures: Vec<TranscriptCatchUpFailure>,
 }
 
 pub(super) struct BoundedProviderOutcome {

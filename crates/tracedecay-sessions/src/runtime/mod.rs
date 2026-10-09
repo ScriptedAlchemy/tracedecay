@@ -13,6 +13,9 @@ pub mod ingest;
 mod native_ingest_source;
 pub use native_ingest_source::native_ingest_source_identity;
 mod observation;
+pub use jsonl_observation_admission::{
+    SharedJsonlPageReleaseV1, release_unpinned_shared_jsonl_pages,
+};
 pub use observation::snapshot_observation;
 pub(in crate::runtime) use observation::{ingest_byte_budget, jsonl_observation_admission};
 mod jsonl_io;

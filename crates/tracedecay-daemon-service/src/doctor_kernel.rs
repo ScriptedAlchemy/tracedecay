@@ -116,7 +116,7 @@ async fn observation_authority_audit_passed(
 async fn observation_authority_audit_ok(
     registry: &tracedecay_global_db::RegisteredGlobalDb,
 ) -> Option<bool> {
-    match registry.read_snapshot().await {
+    match registry.health_read_snapshot().await {
         Ok(snapshot) => Some(observation_authority_audit_passed(&snapshot).await),
         Err(_) => None,
     }

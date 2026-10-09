@@ -816,10 +816,9 @@ async fn stage_projection_rebuild_batch_transaction(
         .await
         .map_err(|error| storage("read projection rebuild batch", error))?
     {
-        page.push(decode_observation_row(
-            &row,
-            "read projection rebuild batch",
-        )?);
+        page.push(
+            decode_observation_row(transaction, &row, "read projection rebuild batch").await?,
+        );
     }
     drop(rows);
 
@@ -1638,7 +1637,13 @@ async fn read_staged_output_state(
         .get(1)
         .map_err(|error| storage("read staged projection output state", error))?;
     Ok(Some(RebuildOutputState {
-        latest_observation: decode_json(&json, "decode staged projection output state")?,
+        latest_observation: crate::observation::decode_observation_json(
+            conn,
+            &json,
+            "decode staged projection output state",
+        )
+        .await
+        .map_err(|error| storage("decode staged projection output state", error))?,
         latest_sequence,
         projector_owned: row
             .get::<i64>(2)
@@ -2513,7 +2518,11 @@ async fn activate_rebuild_messages(
     )
     .await
     .map(|_| ())
-    .map_err(|error| storage("activate rebuilt projection messages", error))
+    .map_err(|error| storage("activate rebuilt projection messages", error))?;
+    crate::observation::compact_lcm_bodies(conn)
+        .await
+        .map(|_| ())
+        .map_err(|error| storage("compact rebuilt projection message bodies", error))
 }
 
 async fn activate_rebuild_provenance(

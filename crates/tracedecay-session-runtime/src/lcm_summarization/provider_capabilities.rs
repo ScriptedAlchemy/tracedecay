@@ -22,7 +22,7 @@ use tracedecay_runtime_core::db::{
 
 use super::cursor_agent::{CursorAgentSummaryConfig, summarize_with_cursor_agent};
 use super::{
-    AuthoritativeSummary, LcmPredecessorRangeState, MESSAGE_ENVELOPE_COLUMN,
+    AuthoritativeSummary, LcmPredecessorRangeState, MESSAGE_OBSERVATION_COLUMN,
     SummaryResolutionError, decode_message_envelope,
 };
 
@@ -215,7 +215,7 @@ async fn claude_summary_pair_is_exact(
     let mut rows = snapshot
         .query(
             &format!(
-                "SELECT {MESSAGE_ENVELOPE_COLUMN}
+                "SELECT {MESSAGE_OBSERVATION_COLUMN}
                  FROM lcm_raw_messages AS message
                  WHERE provider = ?1 AND session_id = ?2 AND message_id = ?3
                    AND kind = 'compaction'"
@@ -232,10 +232,12 @@ async fn claude_summary_pair_is_exact(
         return Ok(false);
     };
     let Some(boundary) = decode_message_envelope(
+        snapshot,
         row.get::<Option<String>>(0)
             .map_err(|error| LcmError::Db(error.to_string()))?
             .as_deref(),
-    )?
+    )
+    .await?
     else {
         return Ok(false);
     };

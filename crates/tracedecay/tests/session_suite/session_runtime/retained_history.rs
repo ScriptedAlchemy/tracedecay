@@ -556,6 +556,61 @@ async fn retained_history_worker_wakes_again_after_idle() {
 }
 
 #[tokio::test]
+async fn blocked_history_is_not_rewoken_by_ensure() {
+    let temp = TempDir::new().unwrap();
+    let authority = profile_authority(&temp, "history-blocked-rewake").await;
+    let ingestor = Arc::new(ScriptedHistoricalIngestor::new([
+        SessionHistoricalIngestOutcome::Blocked {
+            reason_code: "transcript_source_contract_invalid",
+            made_progress: false,
+        },
+        SessionHistoricalIngestOutcome::Complete,
+    ]));
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+
+    let first = registry
+        .ensure_profile_with_history(
+            authority.database().db_path().to_path_buf(),
+            authority.database.clone(),
+            ingestor.clone(),
+        )
+        .await;
+    assert!(
+        registry
+            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
+            .await
+    );
+    assert_eq!(ingestor.passes.load(Ordering::Acquire), 1);
+    assert_eq!(
+        first.serving_status().state,
+        SessionProjectionServingState::Stale {
+            reason: SessionProjectionStaleReason::HistoricalBlocked {
+                reason_code: "transcript_source_contract_invalid".to_owned(),
+            },
+        }
+    );
+
+    let second = registry
+        .ensure_profile_with_history(
+            authority.database().db_path().to_path_buf(),
+            authority.database.clone(),
+            ingestor.clone(),
+        )
+        .await;
+    assert!(first.same_route(&second));
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        ingestor.passes.load(Ordering::Acquire),
+        1,
+        "a blocked historical ingest must not re-run because the owner was re-ensured"
+    );
+
+    registry.shutdown().await;
+}
+
+#[tokio::test]
 async fn history_only_retry_does_not_admit_projection_snapshots() {
     let temp = TempDir::new().unwrap();
     let authority = profile_authority(&temp, "history-only-retry").await;

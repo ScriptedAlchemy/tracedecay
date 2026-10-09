@@ -114,8 +114,16 @@ fn system_path_dirs() -> Vec<PathBuf> {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
         let mut dirs = vec![root.join("System32"), root];
-        if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            dirs.push(PathBuf::from(program_files).join("Git").join("cmd"));
+        // Git for Windows is needed by child processes that spawn `git` (the
+        // daemon's Git-correlation reads). Bazel test environments may not
+        // carry `ProgramFiles`, so fall back to the default install location;
+        // probe the binary so a missing install adds no dead PATH entry.
+        let program_files = std::env::var_os("ProgramFiles")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
+        let git_cmd = program_files.join("Git").join("cmd");
+        if git_cmd.join("git.exe").is_file() {
+            dirs.push(git_cmd);
         }
         dirs
     }

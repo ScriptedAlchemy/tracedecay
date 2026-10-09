@@ -40,6 +40,20 @@ fn blocks() -> Vec<Vec<u8>> {
 /// none once the owner dropped. Blocks that outlive the heap stay
 /// valid in the process heap.
 #[test]
+fn process_allocator_purges_immediately_and_decommits() {
+    mimalloc_v3::configure_purge();
+    assert_eq!(
+        mimalloc_v3::purge_delay_ms(),
+        0,
+        "a daemon must purge on collect, not after the 10 ms default delay"
+    );
+    assert!(
+        mimalloc_v3::purge_decommits(),
+        "purge must decommit so macOS phys_footprint can fall"
+    );
+}
+
+#[test]
 fn an_owner_heap_charges_its_own_pages_and_returns_them_whole() {
     mimalloc_v3::install();
     let heap = OwnerHeapV1::new().expect("mimalloc provides owner heaps");

@@ -289,6 +289,20 @@ fn maximal_tool_definitions_are_assembled_once_per_process() {
     );
 }
 
+#[test]
+fn search_cli_definition_matches_the_advertised_contract() {
+    let definition = cli_tool_definition("tracedecay_search").expect("search CLI definition");
+    let advertised = get_tool_definitions_ref()
+        .expect("advertised catalog")
+        .iter()
+        .find(|definition| definition.name == "tracedecay_search")
+        .expect("advertised search");
+    assert_eq!(
+        serde_json::to_value(definition).unwrap(),
+        serde_json::to_value(advertised).unwrap(),
+    );
+}
+
 /// Caching the registry must not freeze anything session-scoped into it.
 ///
 /// The per-session passes mutate the vector they are handed, so every caller

@@ -3243,6 +3243,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(doctor)* independent `tracedecay doctor` checks run concurrently, and
+  health reads use the reserved reader lane without waiting on DB locks.
+
 - *(admission)* `NotApplicable` is a terminal no-op in the shared replay-pass
   decision. A closed status that leaves the spool unchanged now stops until
   the next kick instead of entering the retryable backoff arm.
@@ -3263,6 +3266,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   becomes `GraphReplayPoolBusy`, so directory/symlink UnsafeState can win
   and busy deferrals stay typed instead of Storage/Unavailable
   ([#918](https://github.com/ScriptedAlchemy/tracedecay/issues/918)).
+
+### Performance Improvements
+
+- *(rusqlite)* install the writer ledger schema once at connection open and
+  reuse cached ledger statements, so request-path lookups no longer parse
+  `CREATE TABLE`.
 
 ### Removed
 

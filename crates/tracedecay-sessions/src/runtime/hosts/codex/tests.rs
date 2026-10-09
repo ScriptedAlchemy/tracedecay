@@ -177,8 +177,10 @@ mod goal_event_tests {
         let renamed_native = native("Gauss", "reviewer");
         let first_path = write_rollout("first.jsonl", &first_native);
         let renamed_path = write_rollout("renamed.jsonl", &renamed_native);
-        let first_meta = session_meta_with_provenance(&first_path).unwrap();
-        let renamed_meta = session_meta_with_provenance(&renamed_path).unwrap();
+        let first_meta = session_meta_with_provenance(&first_path).unwrap().unwrap();
+        let renamed_meta = session_meta_with_provenance(&renamed_path)
+            .unwrap()
+            .unwrap();
         assert_eq!(first_meta.native_thread_id.as_deref(), Some("child-thread"));
         assert_eq!(
             renamed_meta.native_thread_id.as_deref(),
@@ -241,7 +243,7 @@ mod goal_event_tests {
         );
         std::fs::write(&path, contents).unwrap();
 
-        let meta = session_meta_with_provenance(&path).unwrap();
+        let meta = session_meta_with_provenance(&path).unwrap().unwrap();
         assert_eq!(meta.meta.session_id, "rollout-filename");
         assert!(meta.native_thread_id.is_none());
         assert_eq!(meta.meta.agent_id.as_deref(), Some("mutable-label"));

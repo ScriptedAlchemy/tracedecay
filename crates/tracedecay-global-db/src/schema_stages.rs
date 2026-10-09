@@ -37,6 +37,8 @@ use tracedecay_sessions::runtime::git_correlation::{
 };
 use tracedecay_store::StoreShardScopeV1;
 
+const CANONICAL_BODY_RECLAIM_PAGES: u64 = 4096;
+
 const REGISTRY_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS projects (
         path TEXT PRIMARY KEY,
@@ -1070,6 +1072,7 @@ pub async fn converge_registered_schema(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_domain::errors::Result<()> {
+    observation::converge_canonical_bodies(database).await?;
     if convergence.lcm_status_performance_indexes {
         converge_migration_batches(
             database,
@@ -1243,6 +1246,9 @@ pub(crate) async fn ensure_attached_registered_schema(
         transaction.commit().await?;
     }
     validate_admitted_authority_schema(&read_connection, configuration_fresh.is_some()).await?;
+    database
+        .run_incremental_vacuum(CANONICAL_BODY_RECLAIM_PAGES)
+        .await?;
     Ok(match refused_authority {
         Some(refused) => RegisteredSchemaAttachmentV1::SessionsRefused(refused),
         None => RegisteredSchemaAttachmentV1::Admitted(RegisteredSchemaConvergence {
@@ -1331,6 +1337,7 @@ async fn inspect_workflow_schema_for_admission(
         .query(
             "SELECT type, name, sql FROM sqlite_master
              WHERE name NOT LIKE 'sqlite_%'
+               AND name NOT LIKE 'td_runtime_%'
              ORDER BY type, name",
             (),
         )

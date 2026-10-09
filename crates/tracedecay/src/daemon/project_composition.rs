@@ -20,6 +20,7 @@ use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
 };
 
 mod code_index_activation;
+mod full_owner_mount;
 #[cfg(test)]
 mod future_size_tests;
 mod runtime;
@@ -28,6 +29,7 @@ use code_index_activation::{
     CodeIndexActivationMountInputs, code_index_activation_hint_sink, code_index_activation_mount,
     code_index_freshness_probe_sink, code_index_hook_sink, code_index_reconcile_sink,
 };
+use full_owner_mount::join_independent_full_owner_mounts;
 pub(in crate::daemon) use runtime::ProductionProjectCompositionRuntime;
 use runtime::bind_verified_project_graph_runtime;
 use session_database_admission::{join_independent_session_opens, log_session_database_admission};
@@ -1468,11 +1470,6 @@ impl ProjectOpenInputs<'_> {
     /// Mount the full server's dependent owners: the source-edit lane, Git
     /// index transactions, the production owners, the owners that depend on
     /// them, and the HTTP application router.
-    ///
-    /// The widest project-open phase: the two owner registrations it awaits
-    /// are the largest leaves of the open (each ~20 KB, ~80 KB when
-    /// instrumented), so its caller boxes this phase rather than doubling it
-    /// into its own state.
     #[tracing::instrument(name = "daemon.project.compose.full_owners", level = "trace", skip_all)]
     async fn mount_full_server_owners(
         &self,
@@ -1495,57 +1492,63 @@ impl ProjectOpenInputs<'_> {
         // project root. Core publication already registered it; the full
         // upgrade reuses that owner and marks its mutation gate ready after
         // Git transaction authority exists.
-        let source_edit_mutation_ready = if opened.project_database_is_read_only {
-            None
-        } else {
-            Some(
-                core_source_edit_mutation.ok_or_else(|| TraceDecayError::Config {
-                    message: "writable project did not install source edit preview authority"
-                        .to_owned(),
-                })?,
-            )
-        };
-        self.log_phase("source_edit_preview_ready", None, full_setup_started);
-        let dependent_owners = if opened.project_database_is_read_only {
-            None
-        } else {
-            let source_edit_mutation_ready =
-                source_edit_mutation_ready.ok_or_else(|| TraceDecayError::Config {
-                    message: "writable project did not install source edit preview authority"
-                        .to_owned(),
-                })?;
-            let state = project_open_owners::register_project_open_production_owners(
-                self.invocation,
-                self.store_administration.git_index_transaction_services(),
-                self.store_administration.native_integration_services(),
-                self.canonical_project_path,
-                &core.project_id,
-                full_server,
-                source_edit_mutation_ready,
-            )
-            .await?;
-            self.log_phase("independent_owners_registered", None, full_setup_started);
-            Some(state)
-        };
-        project_open_cancellation_checkpoint(self.cancellation)?;
-        if let Some(dependent_owners) = dependent_owners {
-            project_open_owners::register_project_open_dependent_owners(
-                self.invocation,
-                self.canonical_project_path,
-                full_server,
-                dependent_owners,
-            )
-            .await?;
-            self.log_phase("production_owners_registered", None, full_setup_started);
-            mount_http_application_router(
-                self.http_application_registry,
-                self.store_administration.owner_profile()?,
-                &core.project_id,
-                self.canonical_project_path,
-            )
-            .await?;
-            self.log_phase("http_application_mounted", None, full_setup_started);
+        if opened.project_database_is_read_only {
+            self.log_phase("source_edit_preview_ready", None, full_setup_started);
+            return Ok(());
         }
+        let source_edit_mutation_ready =
+            core_source_edit_mutation.ok_or_else(|| TraceDecayError::Config {
+                message: "writable project did not install source edit preview authority"
+                    .to_owned(),
+            })?;
+        self.log_phase("source_edit_preview_ready", None, full_setup_started);
+        project_open_cancellation_checkpoint(self.cancellation)?;
+        let http_registry = self.http_application_registry.clone();
+        let http_owner = self.store_administration.owner_profile()?.clone();
+        let http_project_id = core.project_id.clone();
+        let http_project_path = self.canonical_project_path.to_path_buf();
+        join_independent_full_owner_mounts(
+            async {
+                let state = project_open_owners::register_project_open_production_owners(
+                    self.invocation,
+                    self.store_administration.git_index_transaction_services(),
+                    self.store_administration.native_integration_services(),
+                    self.canonical_project_path,
+                    &core.project_id,
+                    full_server,
+                    source_edit_mutation_ready,
+                )
+                .await?;
+                self.log_phase("independent_owners_registered", None, full_setup_started);
+                project_open_cancellation_checkpoint(self.cancellation)?;
+                project_open_owners::register_project_open_dependent_owners(
+                    self.invocation,
+                    self.canonical_project_path,
+                    full_server,
+                    state,
+                )
+                .await?;
+                self.log_phase("production_owners_registered", None, full_setup_started);
+                Ok(())
+            },
+            async move {
+                mount_http_application_router(
+                    &http_registry,
+                    &http_owner,
+                    &http_project_id,
+                    &http_project_path,
+                )
+                .await?;
+                log_project_open_phase(
+                    &http_project_path,
+                    "http_application_mounted",
+                    None,
+                    full_setup_started,
+                );
+                Ok(())
+            },
+        )
+        .await?;
         Ok(())
     }
 

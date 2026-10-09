@@ -377,6 +377,8 @@ pub struct AdminCliStorageReportV1 {
     pub unregistered_dir_count: usize,
     pub unregistered_bytes: u64,
     pub global_db_bytes: u64,
+    #[serde(default)]
+    pub user_sessions_db_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_profile_size: Option<Value>,
     pub coverage: Value,
@@ -486,7 +488,7 @@ mod tests {
                 json!({
                     "profile_root": "/profile", "stores": [], "code_generation_retention": [],
                     "code_generation_retention_availability": [], "unregistered_dir_count": 0,
-                    "unregistered_bytes": 0, "global_db_bytes": 0,
+                    "unregistered_bytes": 0, "global_db_bytes": 0, "user_sessions_db_bytes": 0,
                     "coverage": {"state": "complete", "next_cursor": null},
                 }),
             ),

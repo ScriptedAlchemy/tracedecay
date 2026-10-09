@@ -121,6 +121,72 @@ async fn stale_fresh_evidence_cannot_create_configuration_schema() {
     );
 }
 
+/// The writer installs its ledger objects when the connection opens, before
+/// admission inspects the store. Empty ledger tables must not count against
+/// freshness.
+#[tokio::test]
+async fn empty_writer_ledger_keeps_the_store_fresh() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+        &directory.path().join("fresh-ledger.db"),
+    );
+    connection
+        .execute_batch(tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA)
+        .await
+        .unwrap();
+
+    let fresh = fresh_configuration_store_evidence(&*connection)
+        .await
+        .unwrap()
+        .expect("an empty writer ledger is not application schema");
+    ensure_configuration_schema(&*connection, Some(&fresh))
+        .await
+        .unwrap();
+}
+
+/// A store whose application tables are gone but whose writer ledger still
+/// holds commit receipts is not fresh: fresh admission would reinstall the
+/// schema while retaining a commit history that predates it.
+#[tokio::test]
+async fn retained_writer_receipts_keep_the_store_non_fresh() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+        &directory.path().join("receipts.db"),
+    );
+    connection
+        .execute_batch(tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA)
+        .await
+        .unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO td_runtime_writer_checkpoint_v1 (
+                shard_json, incarnation, authority_epoch, commit_sequence,
+                watermark_json, transaction_scope_json, original_receipt_json,
+                operation_id, durability_json, committed_at_micros
+             ) VALUES ('{}', 1, 1, 1, '{}', '{}', '{}', 'operation.1', '{}', 1);",
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        fresh_configuration_store_evidence(&*connection)
+            .await
+            .unwrap()
+            .is_none(),
+        "retained commit receipts are an existing store, not a fresh one"
+    );
+    assert_reset_required(ensure_configuration_schema(&*connection, None).await);
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM td_runtime_writer_checkpoint_v1"
+        )
+        .await,
+        1,
+        "refusal must not discard the retained receipt"
+    );
+}
+
 #[tokio::test]
 async fn non_fresh_store_missing_configuration_schema_is_unchanged() {
     let directory = tempfile::tempdir().unwrap();
@@ -386,4 +452,26 @@ async fn released_configuration_shape_with_credential_rows_stays_reset_required(
         1,
         "refusal must not discard the unknown row"
     );
+}
+
+#[tokio::test]
+async fn writer_ledger_tables_do_not_deny_fresh_store_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+        &directory.path().join("configuration-admission.db"),
+    );
+    // The store writer installs its ledger tables when the connection opens,
+    // before registered admission classifies the store.
+    connection
+        .execute_batch(tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA)
+        .await
+        .unwrap();
+
+    let fresh = fresh_configuration_store_evidence(&*connection)
+        .await
+        .unwrap()
+        .expect("a store holding only writer-ledger internals is fresh");
+    ensure_configuration_schema(&*connection, Some(&fresh))
+        .await
+        .unwrap();
 }

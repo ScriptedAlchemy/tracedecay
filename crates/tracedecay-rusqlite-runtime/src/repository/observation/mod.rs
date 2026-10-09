@@ -5,17 +5,19 @@
 //! and a replay verifies, and [`rows`] the single projection every read decodes
 //! through.
 
-use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ObservationCollisionOutcomeV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectionGenerationId,
-    SanitizationReceiptV1, classify_observation_collision,
+    CanonicalObservationIdV1, DurableObservationV1, ObservationCollisionOutcomeV1,
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
+    ProjectionGenerationId, SanitizationReceiptV1, classify_observation_collision,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
-    ObservationCoverageReason, ObservationCursorAdvance, ObservationReadOperationV1,
-    ObservationReadResultV1, PROJECTION_TERMINAL_RETRY_MICROS, ProjectionRebuildProgressV1,
-    ProjectionRebuildStateV1, SESSION_MESSAGE_PROJECTOR_VERSION,
+    AnchoredObservationWrite, CanonicalBodyError, CursorAdvanceLedgerDisagreementV1,
+    CursorAdvanceLedgerIdentityV1, LOAD_CANONICAL_BODY_SQL, ObservationCoverageReason,
+    ObservationCursorAdvance, ObservationReadOperationV1, ObservationReadResultV1,
+    PROJECTION_TERMINAL_RETRY_MICROS, ProjectionRebuildProgressV1, ProjectionRebuildStateV1,
+    SESSION_MESSAGE_PROJECTOR_VERSION, UPSERT_CANONICAL_BODY_SQL, parse_stored_observation,
+    slim_stored_json,
 };
 
 use crate::operation::StorageOperationError;
@@ -37,8 +39,10 @@ use cursor_authority::{
     RECORD_CURSOR_ADVANCE_SQL,
 };
 use rows::{
-    decode_nonnegative, decode_observation_row, encoded_observation_row, observation_row_projection,
+    EncodedObservationRow, decode_nonnegative, decode_observation_row, encoded_observation_row,
+    observation_row_projection,
 };
+use tracedecay_store::StoredObservationRowV1;
 
 #[derive(Clone, Default)]
 pub struct ObservationExecutor;
@@ -52,7 +56,7 @@ impl ObservationExecutor {
         let observation = write.observation();
         let source_json = encode(observation.source())?;
         let scope_json = encode(observation.scope())?;
-        let observation_json = encode(observation)?;
+        let observation_json = encode_stored_observation(savepoint, observation)?;
         let committed_cursor_json = encode(write.next_cursor())?;
         let receipt = observation.receipt();
         let receipt_json = encode(receipt)?;
@@ -73,7 +77,8 @@ impl ObservationExecutor {
             )
             .optional()?;
         if let Some((stored_digest, stored_receipt_id, stored_observation)) = existing {
-            let stored_observation = decode(stored_observation)?;
+            let stored_observation =
+                decode_stored_observation_on_savepoint(savepoint, stored_observation)?;
             let collision = classify_observation_collision(&stored_observation, observation);
             if collision == ObservationCollisionOutcomeV1::ExactDuplicate
                 && stored_observation.identity() != observation.identity()
@@ -262,7 +267,9 @@ impl ObservationExecutor {
                         encoded_observation_row,
                     )
                     .optional()?;
-                let value = row.map(decode_observation_row).transpose()?;
+                let value = row
+                    .map(|row| decode_hydrated_observation_row(snapshot, row))
+                    .transpose()?;
                 if value
                     .as_ref()
                     .is_some_and(|row| row.observation.observation_id() != observation_id)
@@ -312,7 +319,7 @@ impl ObservationExecutor {
                 )?;
                 let mut observations = Vec::new();
                 for row in rows {
-                    observations.push(decode_observation_row(row?)?);
+                    observations.push(decode_hydrated_observation_row(snapshot, row?)?);
                 }
                 Ok(ObservationReadResultV1::Replay(observations))
             }
@@ -512,6 +519,95 @@ fn canonical_ledger_receipt(
         return Ok(None);
     }
     Ok(Some(receipt))
+}
+
+fn encode_stored_observation(
+    savepoint: &Savepoint<'_>,
+    observation: &DurableObservationV1,
+) -> rusqlite::Result<String> {
+    let encoded = encode(observation)?;
+    let (slim, bodies) = slim_stored_json(&encoded).map_err(|error| invalid(error.to_string()))?;
+    for body in &bodies {
+        savepoint.execute(
+            UPSERT_CANONICAL_BODY_SQL,
+            params![
+                body.content_hash.as_str(),
+                body.encoding,
+                body.blob.as_slice(),
+                body.uncompressed_bytes
+            ],
+        )?;
+    }
+    Ok(slim)
+}
+
+fn decode_stored_observation(
+    connection: &Connection,
+    json: &str,
+) -> rusqlite::Result<DurableObservationV1> {
+    parse_stored_observation(
+        json,
+        |hash| -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+            let (encoding, blob, uncompressed): (String, Vec<u8>, i64) = connection
+                .query_row(LOAD_CANONICAL_BODY_SQL, [hash], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()?
+                .ok_or_else(|| CanonicalBodyError::Missing {
+                    content_hash: hash.to_owned(),
+                })?;
+            tracedecay_store::unpack_body(hash, &encoding, &blob, uncompressed).map_err(Into::into)
+        },
+    )
+    .map_err(|error| match error.downcast::<rusqlite::Error>() {
+        Ok(error) => *error,
+        Err(error) => {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, error)
+        }
+    })
+}
+
+fn decode_stored_observation_on_savepoint(
+    savepoint: &Savepoint<'_>,
+    json: String,
+) -> rusqlite::Result<DurableObservationV1> {
+    decode_stored_observation(savepoint, &json)
+}
+
+fn decode_hydrated_observation_row(
+    snapshot: &Transaction<'_>,
+    row: EncodedObservationRow,
+) -> rusqlite::Result<StoredObservationRowV1> {
+    let (
+        sequence,
+        json,
+        cursor,
+        anchor,
+        generation,
+        availability,
+        capture,
+        repository_anchor,
+        owner,
+        queued,
+    ) = row;
+    let json = if tracedecay_store::stored_json_needs_hydrate(&json) {
+        let observation = decode_stored_observation(snapshot, &json)?;
+        encode(&observation)?
+    } else {
+        json
+    };
+    decode_observation_row((
+        sequence,
+        json,
+        cursor,
+        anchor,
+        generation,
+        availability,
+        capture,
+        repository_anchor,
+        owner,
+        queued,
+    ))
 }
 
 fn observation_source_cursor_conflict(

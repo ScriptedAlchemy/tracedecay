@@ -98,3 +98,31 @@ fn retained_parses_are_charged_what_releasing_them_returns() {
         "the pool was charged {charged} bytes and releasing it returned {freed}"
     );
 }
+
+/// Reproducible idle-after-ingest heap: a transient payload is charged at
+/// peak and the shipped allocator returns it on collect. Prints the
+/// before/peak/after numbers the PR body cites.
+#[test]
+fn idle_collect_returns_a_transient_ingest_heap() {
+    process_allocator::configure_process_allocator();
+    const CHUNKS: usize = 64;
+    const CHUNK_BYTES: usize = 1024 * 1024;
+    let before = anon_bytes();
+    let payload = (0..CHUNKS)
+        .map(|_| vec![7_u8; CHUNK_BYTES])
+        .collect::<Vec<_>>();
+    let peak = anon_bytes();
+    assert!(
+        peak >= before + 32 * MIB,
+        "the ingest-shaped payload must be visible in RssAnon: before={before} peak={peak}"
+    );
+    drop(payload);
+    let _ = release_process_allocator_memory_v1();
+    let after = anon_bytes();
+    let returned = peak.saturating_sub(after);
+    eprintln!("HEAP_PROOF before={before} peak={peak} after={after} returned={returned}");
+    assert!(
+        after <= peak.saturating_sub(16 * MIB),
+        "idle collect must return the transient heap: before={before} peak={peak} after={after}"
+    );
+}

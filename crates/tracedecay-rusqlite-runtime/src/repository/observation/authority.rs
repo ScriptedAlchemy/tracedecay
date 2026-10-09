@@ -254,8 +254,10 @@ fn cline_alias_transition_is_valid(
     else {
         return Ok(false);
     };
-    let candidate_observation: DurableObservationV1 = decode(anchor_json)?;
-    let current_observation: DurableObservationV1 = decode(current_json)?;
+    let candidate_observation: DurableObservationV1 =
+        super::decode_stored_observation(connection, anchor_json.as_str())?;
+    let current_observation: DurableObservationV1 =
+        super::decode_stored_observation(connection, current_json.as_str())?;
     if prove_cline_native_source_transition(&current_observation, &candidate_observation).is_some()
     {
         // Pending successor: leave current alias and predecessor availability

@@ -2,7 +2,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
-    CanonicalObservationRelationsV1, ComponentVersion, ObservationId,
+    CanonicalObservationRelationsV1, ComponentVersion, DurableObservationV1, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass, SanitizationReceiptId,

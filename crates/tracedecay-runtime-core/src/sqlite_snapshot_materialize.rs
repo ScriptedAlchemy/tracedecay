@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
+use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
 
 use super::control::SnapshotReadControl;
@@ -35,6 +36,15 @@ pub async fn materialize(path: &Path, control: SnapshotReadControl) -> io::Resul
     tokio::task::spawn_blocking(move || {
         control.checkpoint()?;
         let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(io::Error::other)?;
+        // The scratch copy is exclusive, but a busy handler would still hide a
+        // lock that should fail closed. Folding is an explicit journal-mode
+        // change, not a close-time checkpoint.
+        connection
+            .busy_timeout(Duration::ZERO)
+            .map_err(io::Error::other)?;
+        connection
+            .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
             .map_err(io::Error::other)?;
         let mode = fold_wal_in_place(&connection, &control)?;
         if !mode.eq_ignore_ascii_case("delete") {
