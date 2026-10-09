@@ -161,6 +161,40 @@ RUNTIME_BINARIES = (
 NO_DEFAULT_FEATURES = "!no-default-features"
 
 
+def expand_feature_names(feature_table, roots):
+    """Transitively expand Cargo feature names, ignoring dep: and dep/feat edges."""
+    seen = set()
+    stack = list(roots)
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        for item in feature_table.get(name, []):
+            if item.startswith("dep:") or "/" in item:
+                continue
+            stack.append(item)
+    return seen
+
+
+def normalize_default_alias(feats, feature_table):
+    """Add `default` when it is only an alias for features already enabled.
+
+    Cargo's `default = ["production"]` (and similar) is a name, not extra
+    code. Bazel previously compiled a second rlib for the same cfg set
+    because one context listed `default` and another listed only the
+    implied features. No workspace crate gates on `feature = "default"`.
+    An empty `default` is left untouched so a true lean build stays lean.
+    """
+    feats = set(feats)
+    if "default" in feats or "default" not in feature_table:
+        return feats
+    implied = expand_feature_names(feature_table, ["default"]) - {"default"}
+    if implied and implied <= feats:
+        feats.add("default")
+    return feats
+
+
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -562,6 +596,14 @@ def main():
     with ThreadPoolExecutor() as pool:
         walked = dict(zip(walks, pool.map(lambda key: feature_map(*key), walks)))
     contexts = {key: walked[resolution(key)] for key in contexts}
+
+    feature_tables = {p["name"]: p.get("features") or {} for p in meta["packages"]}
+    for fmap in contexts.values():
+        for member in list(fmap):
+            table = feature_tables.get(member)
+            if table is None:
+                continue
+            fmap[member] = normalize_default_alias(fmap[member], table)
 
     base = {n: frozenset(contexts[(n, "normal,build", frozenset())][n]) for n in members}
 

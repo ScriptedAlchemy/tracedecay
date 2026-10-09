@@ -33,10 +33,16 @@ build "--strategy_regexp=Compiling Rust bin build_script_build_.*=local"
 # runs. Compile Rust in the real execroot so that path stays readable.
 build --strategy=Rustc=local
 build --strategy=RustcMetadata=local
-# ld.bfd peaks near 4 GB per link. Cap parallelism so links do not
-# OOM-kill each other on 8-core/32 GB workers.
-build --jobs=4
-build:linux "--@rules_rust//rust/settings:extra_rustc_flag=-Clink-arg=-fuse-ld=bfd"
+# rustc's bundled rust-lld is the Cargo default for *-linux-gnu. Forcing
+# ld.bfd made every link several times slower and needed --jobs=4 to stay
+# under ~4 GB per link. rust-lld stays well under that, so the job cap
+# can follow the host.
+build --jobs=HOST_CPUS
+build:linux "--@rules_rust//rust/settings:extra_rustc_flag=-Csplit-debuginfo=unpacked"
+# Skip LLVM bitcode in rlibs. Thin LTO (dist) re-enables it below; other
+# configs never ran LTO, so the bitcode was paid compile cost with no
+# optimization benefit.
+build "--@rules_rust//rust/settings:extra_rustc_flag=-Cembed-bitcode=no"
 # MSVC encodes narrow string literals in the host ANSI code page unless told
 # otherwise, so tree-sitter grammars that spell symbol names as universal
 # character names become invalid UTF-8 (see .cargo/config.toml).
@@ -72,6 +78,9 @@ build:dist --@rules_rust//rust/settings:per_crate_rustc_flag=external/@-Copt-lev
 build:dist --@rules_rust//rust/settings:lto=thin
 build:dist --@rules_rust//rust/settings:extra_rustc_flag=-Ccodegen-units=1
 build:dist --@rules_rust//rust/settings:extra_rustc_flag=-Cstrip=symbols
+# Last -C embed-bitcode wins; thin LTO needs the bitcode the generic build
+# flag above turned off.
+build:dist --@rules_rust//rust/settings:extra_rustc_flag=-Cembed-bitcode=yes
 
 # Hosted CI: keep going past one failure so a run reports every red target.
 build:ci --keep_going

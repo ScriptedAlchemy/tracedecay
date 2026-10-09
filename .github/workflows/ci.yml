@@ -154,6 +154,9 @@ jobs:
       - name: Test Bazel workspace provenance
         run: python3 scripts/test-bazel-workspace-status.py
 
+      - name: Test Bazel default-feature alias collapse
+        run: python3 scripts/test-gen-builds-default-alias.py
+
       - name: Test the real-repository hot-path benchmark harness
         run: python3 scripts/test-bench-hot-paths.py
 
@@ -452,7 +455,11 @@ jobs:
     name: Clippy
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-26.04-arm
+    # Same image as Test Linux so rustc action keys can restore that job's
+    # disk cache (proc-macros, build scripts, grammar cc, matching rlibs)
+    # when this job's own prefix misses. ARM isolated Clippy from that
+    # cache and paid a cold 55–61m `//...` on recent PRs.
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -460,7 +467,8 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
-          cache-key: ci-linux-arm64
+          cache-key: ci-linux-clippy
+          extra-restore-keys: ci-linux-test
 
       - name: Run blocking Clippy policy
         run: bazel build --config=ci --config=clippy //...
