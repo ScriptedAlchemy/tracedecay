@@ -518,7 +518,10 @@ async fn idle_release_drops_unpinned_prepared_pages_and_keeps_pinned_ones() {
         cache.retained_bytes
     };
     assert!(
-        before >= unpinned.retained_bytes.saturating_add(pinned.retained_bytes),
+        before
+            >= unpinned
+                .retained_bytes
+                .saturating_add(pinned.retained_bytes),
         "ingest left prepared pages in the cache: {before}"
     );
 
@@ -546,10 +549,7 @@ async fn idle_release_drops_unpinned_prepared_pages_and_keeps_pinned_ones() {
                 .any(|page| page.key.path == std::fs::canonicalize(&pinned_path).unwrap()),
         )
     };
-    assert!(
-        after.1,
-        "a pinned in-flight page must survive idle release"
-    );
+    assert!(after.1, "a pinned in-flight page must survive idle release");
     assert!(
         after.0 < before,
         "idle release must shrink retained cache bytes from {before} to {}",
