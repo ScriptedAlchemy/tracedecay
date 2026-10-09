@@ -905,3 +905,113 @@ fn lcm_project_store_wins_over_global_accounting_override() {
         server.stop();
     });
 }
+
+#[test]
+fn lcm_large_session_pages_preserve_continuation_and_timeline_counts() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_without_memory().await;
+        let session_id = "session-dashboard-paged";
+        let session = SessionRecord {
+            provider: "cursor".to_owned(),
+            session_id: session_id.to_owned(),
+            project_key: fixture.host_runtime.project_id().as_str().to_owned(),
+            project_path: fixture.project_root.display().to_string(),
+            title: Some("Paged dashboard session".to_owned()),
+            started_at: Some(1_700_001_000),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        };
+        assert!(
+            fixture
+                .host_runtime
+                .upsert_session_for_test(HostAdmissionScope::Project, &session)
+                .await
+                .unwrap()
+        );
+        for ordinal in 1..=70_u64 {
+            fixture
+                .host_runtime
+                .seed_session_message_observation_for_test(
+                    tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
+                        project_id: fixture.host_runtime.project_id().as_str(),
+                        provider: "cursor",
+                        session_id,
+                        message_id: &format!("paged-message-{ordinal}"),
+                        role: "user",
+                        content: "A small canonical message.",
+                        model: None,
+                        timestamp: 1_700_001_000 + ordinal as i64,
+                        ordinal,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        fixture
+            .host_runtime
+            .materialize_session_temporal_refresh_for_test(session_id)
+            .await
+            .unwrap();
+        let agent = http_agent();
+        let base = format!(
+            "{}/api/plugins/hermes-lcm/session/{session_id}?limit=100",
+            fixture.base_url
+        );
+        let (status, first) = get_json(&agent, &base);
+        assert_eq!(status, 200);
+        let first_messages = first["payload"]["messages"]
+            .as_array()
+            .unwrap_or_else(|| panic!("large session must serve a bounded page: {first}"));
+        assert_eq!(first_messages.len(), 64);
+        let cursor = first["payload"]["next_cursor"]
+            .as_str()
+            .expect("bounded page continuation");
+        let second_url = url::Url::parse_with_params(&base, &[("cursor", cursor)]).unwrap();
+        let (status, second) = get_json(&agent, second_url.as_str());
+        assert_eq!(status, 200);
+        let second_messages = second["payload"]["messages"]
+            .as_array()
+            .unwrap_or_else(|| panic!("continuation must serve remaining messages: {second}"));
+        assert_eq!(second_messages.len(), 6);
+        assert!(second["payload"]["next_cursor"].is_null());
+        let ids = first_messages
+            .iter()
+            .chain(second_messages)
+            .map(|message| message["message_id"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            ids.len(),
+            70,
+            "continuation must neither skip nor repeat messages"
+        );
+        let (status, timeline) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/hermes-lcm/timeline?bucket=day&limit=400",
+                fixture.base_url,
+            ),
+        );
+        assert_eq!(status, 200);
+        assert!(
+            timeline["payload"].is_object(),
+            "timeline must drain bounded pages: {timeline}"
+        );
+        assert_eq!(timeline["coverage"]["examined"], 70, "{timeline}");
+        let counted: u64 = timeline["payload"]["buckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|bucket| bucket["count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(
+            counted, 70,
+            "timeline buckets must include both canonical pages"
+        );
+    });
+}
