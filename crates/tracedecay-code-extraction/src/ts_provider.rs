@@ -1,7 +1,8 @@
 //! Tree-sitter grammar provider.
 //!
-//! All grammars are served from the bundled tree-sitter crate via a
-//! lazily-initialised lookup table.
+//! Grammars are registered from the enabled `lang-*` / bundle features only.
+//! Calling a bundle's `all_languages()` would keep every native parse table in
+//! the final link; selective registration lets the linker drop unused ones.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -47,57 +48,213 @@ fn has_grammar_bundle() -> bool {
 static LANGUAGES: LazyLock<HashMap<&'static str, Language>> =
     LazyLock::new(|| crate::observe::measure_grammar_table_init(build_language_table));
 
-/// Grammars served by another registration: Rust by the patched fork below,
-/// Markdown by `markdown_grammar` (the large bundle's copy is never used).
-/// Only bundle tiers have anything to filter.
-#[cfg(any(feature = "medium-grammars", feature = "large-grammars"))]
-fn is_bundle_only_grammar(name: &str) -> bool {
-    !matches!(name, "rust" | "markdown")
-}
-
 fn build_language_table() -> HashMap<&'static str, Language> {
-    let languages = std::iter::empty::<(&'static str, Language)>();
+    let mut languages = HashMap::new();
 
+    // Always-on product languages when the medium bundle is linked (lite tier).
+    // Registered individually so optional medium grammars (lua, php, …) are not
+    // pulled into the binary unless their `lang-*` feature is on.
     #[cfg(feature = "medium-grammars")]
-    let languages = languages.chain(
-        tracedecay_medium_treesitters::all_languages()
-            .into_iter()
-            .filter(|(name, _)| is_bundle_only_grammar(name))
-            .map(|(name, lang_fn)| (name, lang_fn.into())),
+    {
+        use tracedecay_medium_treesitters::languages::{
+            tree_sitter_c, tree_sitter_c_sharp, tree_sitter_cpp, tree_sitter_go, tree_sitter_java,
+            tree_sitter_javascript, tree_sitter_kotlin_sg, tree_sitter_python, tree_sitter_scala,
+            tree_sitter_swift, tree_sitter_typescript,
+        };
+
+        languages.insert("python", tree_sitter_python::LANGUAGE.into());
+        languages.insert("javascript", tree_sitter_javascript::LANGUAGE.into());
+        languages.insert(
+            "typescript",
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        );
+        languages.insert("tsx", tree_sitter_typescript::LANGUAGE_TSX.into());
+        languages.insert("go", tree_sitter_go::LANGUAGE.into());
+        languages.insert("java", tree_sitter_java::LANGUAGE.into());
+        languages.insert("c", tree_sitter_c::LANGUAGE.into());
+        languages.insert("cpp", tree_sitter_cpp::LANGUAGE.into());
+        languages.insert("c_sharp", tree_sitter_c_sharp::LANGUAGE.into());
+        languages.insert("swift", tree_sitter_swift::LANGUAGE.into());
+        languages.insert("scala", tree_sitter_scala::LANGUAGE.into());
+        languages.insert("kotlin", tree_sitter_kotlin_sg::LANGUAGE.into());
+    }
+
+    if has_grammar_bundle() {
+        languages.insert("rust", rust_grammar::LANGUAGE.into());
+    }
+
+    #[cfg(feature = "lang-bash")]
+    languages.insert(
+        "bash",
+        tracedecay_medium_treesitters::languages::tree_sitter_bash::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-dart")]
+    languages.insert(
+        "dart",
+        tracedecay_medium_treesitters::languages::tree_sitter_dart_orchard::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-php")]
+    languages.insert(
+        "php",
+        tracedecay_medium_treesitters::languages::tree_sitter_php::LANGUAGE_PHP.into(),
+    );
+    #[cfg(feature = "lang-ruby")]
+    languages.insert(
+        "ruby",
+        tracedecay_medium_treesitters::languages::tree_sitter_ruby::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-lua")]
+    languages.insert(
+        "lua",
+        tracedecay_medium_treesitters::languages::tree_sitter_lua::LANGUAGE.into(),
     );
 
-    #[cfg(feature = "large-grammars")]
-    let languages = languages.chain(
-        tracedecay_large_treesitters::all_languages()
-            .into_iter()
-            .filter(|(name, _)| is_bundle_only_grammar(name))
-            .map(|(name, lang_fn)| (name, lang_fn.into())),
+    #[cfg(feature = "lang-pascal")]
+    languages.insert(
+        "pascal",
+        tracedecay_large_treesitters::languages::tree_sitter_pascal::LANGUAGE.into(),
     );
-
-    let languages = languages.chain(
-        std::iter::once(("rust", rust_grammar::LANGUAGE.into())).filter(|_| has_grammar_bundle()),
+    #[cfg(feature = "lang-protobuf")]
+    languages.insert(
+        "protobuf",
+        tracedecay_large_treesitters::protobuf::LANGUAGE.into(),
     );
+    #[cfg(feature = "lang-powershell")]
+    languages.insert(
+        "powershell",
+        tracedecay_large_treesitters::languages::tree_sitter_powershell::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-nix")]
+    languages.insert(
+        "nix",
+        tracedecay_large_treesitters::languages::tree_sitter_nix::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-vbnet")]
+    languages.insert(
+        "vbnet",
+        tracedecay_large_treesitters::languages::tree_sitter_vb_dotnet::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-zig")]
+    languages.insert(
+        "zig",
+        tracedecay_large_treesitters::languages::tree_sitter_zig::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-objc")]
+    languages.insert(
+        "objc",
+        tracedecay_large_treesitters::languages::tree_sitter_objc::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-perl")]
+    languages.insert(
+        "perl",
+        tracedecay_large_treesitters::languages::tree_sitter_perl::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-batch")]
+    languages.insert(
+        "batch",
+        tracedecay_large_treesitters::languages::tree_sitter_batch::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-fortran")]
+    languages.insert(
+        "fortran",
+        tracedecay_large_treesitters::languages::tree_sitter_fortran::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-cobol")]
+    languages.insert("cobol", tracedecay_large_treesitters::cobol::LANGUAGE.into());
+    #[cfg(feature = "lang-msbasic2")]
+    languages.insert(
+        "msbasic2",
+        tracedecay_large_treesitters::languages::tree_sitter_msbasic2::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-gwbasic")]
+    languages.insert(
+        "gwbasic",
+        tracedecay_large_treesitters::languages::tree_sitter_gwbasic::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-qbasic")]
+    languages.insert(
+        "qbasic",
+        tracedecay_large_treesitters::languages::tree_sitter_qbasic::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-dockerfile")]
+    languages.insert(
+        "dockerfile",
+        tracedecay_large_treesitters::dockerfile::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-glsl")]
+    languages.insert(
+        "glsl",
+        tracedecay_large_treesitters::languages::tree_sitter_glsl::LANGUAGE_GLSL.into(),
+    );
+    #[cfg(feature = "lang-r")]
+    languages.insert(
+        "r",
+        tracedecay_large_treesitters::languages::tree_sitter_r::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-sql")]
+    languages.insert(
+        "sql",
+        tracedecay_large_treesitters::languages::tree_sitter_sequel::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-julia")]
+    languages.insert(
+        "julia",
+        tracedecay_large_treesitters::languages::tree_sitter_julia::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-haskell")]
+    languages.insert(
+        "haskell",
+        tracedecay_large_treesitters::languages::tree_sitter_haskell::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-ocaml")]
+    languages.insert(
+        "ocaml",
+        tracedecay_large_treesitters::languages::tree_sitter_ocaml::LANGUAGE_OCAML.into(),
+    );
+    #[cfg(feature = "lang-clojure")]
+    languages.insert(
+        "clojure",
+        tracedecay_large_treesitters::languages::tree_sitter_clojure_orchard::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-erlang")]
+    languages.insert(
+        "erlang",
+        tracedecay_large_treesitters::languages::tree_sitter_erlang::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-elixir")]
+    languages.insert(
+        "elixir",
+        tracedecay_large_treesitters::languages::tree_sitter_elixir::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-fsharp")]
+    languages.insert(
+        "fsharp",
+        tracedecay_large_treesitters::languages::tree_sitter_fsharp::LANGUAGE_FSHARP.into(),
+    );
+    #[cfg(feature = "lang-quint")]
+    languages.insert("quint", tracedecay_large_treesitters::quint::LANGUAGE.into());
+    #[cfg(feature = "lang-toml")]
+    languages.insert(
+        "toml",
+        tracedecay_large_treesitters::languages::tree_sitter_toml_ng::LANGUAGE.into(),
+    );
+    #[cfg(feature = "lang-lean")]
+    languages.insert("lean", tracedecay_large_treesitters::lean::language().into());
 
     #[cfg(feature = "lang-markdown")]
-    let languages = languages.chain(std::iter::once((
-        "markdown",
-        markdown_grammar::LANGUAGE.into(),
-    )));
+    languages.insert("markdown", markdown_grammar::LANGUAGE.into());
 
     #[cfg(feature = "lang-wgsl")]
-    let languages = languages.chain(std::iter::once(("wgsl", wgsl_grammar::LANGUAGE.into())));
+    languages.insert("wgsl", wgsl_grammar::LANGUAGE.into());
 
     #[cfg(feature = "lang-json")]
-    let languages = languages.chain(std::iter::once(("json", tree_sitter_json::LANGUAGE.into())));
+    languages.insert("json", tree_sitter_json::LANGUAGE.into());
 
     // HLSL uses the newer LanguageFn API.
     #[cfg(feature = "lang-hlsl")]
-    let languages = languages.chain(std::iter::once((
-        "hlsl",
-        tree_sitter_hlsl::LANGUAGE_HLSL.into(),
-    )));
+    languages.insert("hlsl", tree_sitter_hlsl::LANGUAGE_HLSL.into());
 
-    languages.collect()
+    languages
 }
 
 /// Every distinct node-kind name of every registered grammar, as the grammar's
@@ -239,6 +396,18 @@ mod tests {
         );
     }
 
+    /// A gateway language whose feature is off must not appear even when the
+    /// large bundle dependency is linked for other languages.
+    #[test]
+    #[cfg(all(feature = "large-grammars", not(feature = "lang-cobol")))]
+    fn cobol_is_not_registered_without_its_lang_feature() -> Result<(), String> {
+        let Err(err) = super::try_language("cobol") else {
+            return Err("cobol should not be registered without lang-cobol".into());
+        };
+        assert!(err.contains("unknown language key"));
+        Ok(())
+    }
+
     /// A build without the large bundle registers none of its grammars, so a
     /// `lite` build that only wants Markdown cannot reach them.
     #[test]
@@ -260,6 +429,18 @@ mod tests {
     fn markdown_is_not_registered_without_its_feature() -> Result<(), String> {
         let Err(err) = super::try_language("markdown") else {
             return Err("markdown should not be registered when lang-markdown is disabled".into());
+        };
+        assert!(err.contains("unknown language key"));
+        Ok(())
+    }
+
+    /// Optional medium grammars stay out of lite builds that only enable the
+    /// medium bundle for the always-on product languages.
+    #[test]
+    #[cfg(all(feature = "medium-grammars", not(feature = "lang-lua")))]
+    fn lua_is_not_registered_without_its_lang_feature() -> Result<(), String> {
+        let Err(err) = super::try_language("lua") else {
+            return Err("lua should not be registered without lang-lua".into());
         };
         assert!(err.contains("unknown language key"));
         Ok(())

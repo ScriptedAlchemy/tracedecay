@@ -26,13 +26,16 @@ test-helpers = []
 # crate (byte-identical parser/scanner sources to the copy vendored in the
 # large bundle), so `lite` never links the large bundle.
 lite = ["medium-grammars", "lang-markdown", "lang-json"]
-# The two grammar bundles are the only compile-time registration points: every
-# `lang-*` feature names the bundle that ships its grammar, and `ts_provider`
-# builds the lookup from whichever bundles are enabled.
+# The two grammar bundles supply native parse tables. Every `lang-*` feature
+# names the bundle that ships its grammar, and `ts_provider` registers only the
+# languages whose features are on so unused tables can be linker-GC'd.
 medium-grammars = ["dep:tracedecay-medium-treesitters"]
 large-grammars = ["dep:tracedecay-large-treesitters"]
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
-full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]
+# Shipping `full` keeps modern / common systems languages. Heaviest niche
+# grammars (COBOL, Lean, OCaml, F#, Fortran, Julia, Haskell, BASIC family,
+# Quint) stay available as individual `lang-*` features for source builds.
+full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-clojure", "lang-erlang", "lang-elixir", "lang-toml"]
 lang-dart = ["medium-grammars"]
 lang-pascal = ["large-grammars"]
 lang-php = ["medium-grammars"]
