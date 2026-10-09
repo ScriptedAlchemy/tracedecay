@@ -36,6 +36,7 @@ serde_json = "1"
 sha2 = "0.11"
 shell-words = "1.1"
 thiserror = "2"
+flate2 = "1"
 tiktoken-rs = { version = "0.12", optional = true }
 tokio = { version = "1", features = ["full"] }
 gix = { version = "=0.87.1", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
@@ -75,6 +76,9 @@ libc = "0.2"
 # Linux-only extended-attribute probe in `agents::mod` (host install provenance).
 [target.'cfg(target_os = "linux")'.dependencies]
 xattr = "1"
+
+[build-dependencies]
+flate2 = "1"
 
 [dev-dependencies]
 tempfile = "3"
