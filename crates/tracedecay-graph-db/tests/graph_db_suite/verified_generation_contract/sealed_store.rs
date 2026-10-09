@@ -871,6 +871,177 @@ fn sealed_point_read_completes_while_staging_snapshot_gate_is_held() {
     );
 }
 
+// Pause the reader at the production lock-wait span, after its first sealed
+// probe has missed and before it acquires the staging gate.
+struct PauseSnapshotRead {
+    reached: mpsc::Sender<()>,
+    resume: std::sync::Mutex<mpsc::Receiver<()>>,
+    paused: AtomicBool,
+}
+
+impl tracing::Subscriber for PauseSnapshotRead {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.name() == "graph_db.lock.wait"
+    }
+
+    fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        struct SnapshotReadLabel(bool);
+        impl tracing::field::Visit for SnapshotReadLabel {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0 |=
+                    field.name() == "label" && value == "graph_db.lock.wait.snapshot_gate.read";
+            }
+            fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+        }
+        let mut label = SnapshotReadLabel(false);
+        attributes.record(&mut label);
+        if label.0 && !self.paused.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.reached.send(()).unwrap();
+            self.resume.lock().unwrap().recv().unwrap();
+        }
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, _: &tracing::Event<'_>) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[test]
+fn point_read_observes_sealed_store_installed_before_staging_gate_acquisition() {
+    for read_relation in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+        let mut authority = RelationalAuthority::default();
+        let identity = projection("sealed-store:gate-adopt", "code");
+        let manifest = rich_manifest(identity.clone(), "adopted-g1", "adopted");
+        let record = stage_sealed_manifest(
+            &mut authority,
+            &registered.binding,
+            &manifest,
+            "publish:adopted-g1",
+            None,
+            '8',
+        );
+        stage_rows_before_publish(&registered, temp.path(), &manifest);
+        let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+        let database = registered
+            .registry
+            .resolve(registration(registered.binding.clone(), temp.path()))
+            .unwrap();
+        // The end-state a staging release leaves behind: duplicate rows gone,
+        // the proven artifact on disk.
+        let (control, probe) = control_and_probe();
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+        assert_eq!(
+            registered
+                .registry
+                .release_sealed_generation_staging_rows(
+                    registration(registered.binding.clone(), temp.path()),
+                    &mut authority,
+                    &context,
+                    &record.publication.key.projection,
+                )
+                .unwrap(),
+            SealedStagingRelease::Released {
+                entities: 2,
+                relations: 1,
+            }
+        );
+        assert_eq!(
+            database
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap(),
+            (0, 0)
+        );
+        // Unseat the reader so the point read's un-gated probe misses, exactly
+        // as it does before this process installs a sealed store.
+        database
+            .discard_sealed_generation_reader(&manifest.identity())
+            .unwrap();
+        assert!(!commit.snapshot.serves_from_sealed_store());
+
+        let (reached_tx, reached_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let reader_snapshot = commit.snapshot.clone();
+        let reader_identity = identity.clone();
+        let reader = std::thread::spawn(move || {
+            tracing::subscriber::with_default(
+                PauseSnapshotRead {
+                    reached: reached_tx,
+                    resume: std::sync::Mutex::new(resume_rx),
+                    paused: AtomicBool::new(false),
+                },
+                || {
+                    if read_relation {
+                        let relation = reader_snapshot
+                            .relation(
+                                &GraphRelationRef::new(
+                                    reader_identity,
+                                    GraphRelationId::new("relation:a-b").unwrap(),
+                                ),
+                                Arc::new(TestCancellation),
+                            )?
+                            .expect("the adopted relation must resolve");
+                        assert_eq!(relation.from.identity.as_str(), "entity:a");
+                        assert_eq!(relation.to.identity.as_str(), "entity:b");
+                    } else {
+                        let entity = reader_snapshot
+                            .entity(
+                                &GraphEntityRef::new(
+                                    reader_identity,
+                                    GraphEntityId::new("entity:a").unwrap(),
+                                ),
+                                Arc::new(TestCancellation),
+                            )?
+                            .expect("the adopted entity must resolve");
+                        assert_eq!(
+                            entity
+                                .properties
+                                .get(&GraphPropertyName::new("marker").unwrap()),
+                            Some(&GraphProperty::String("adopted".to_owned()))
+                        );
+                    }
+                    Ok::<_, GraphDbError>(())
+                },
+            )
+        });
+        reached_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let republished = registered
+            .registry
+            .publish_verified(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &record.publication.key,
+                Some(Arc::new(manifest.clone()).into()),
+            )
+            .unwrap();
+        assert!(republished.snapshot.serves_from_sealed_store());
+        registered
+            .registry
+            .release_sealed_generation_staging_rows(
+                registration(registered.binding.clone(), temp.path()),
+                &mut authority,
+                &context,
+                &record.publication.key.projection,
+            )
+            .unwrap();
+        assert_eq!(
+            database
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap(),
+            (0, 0)
+        );
+        resume_tx.send(()).unwrap();
+        reader.join().unwrap().unwrap();
+    }
+}
+
 /// Generations carrying Bytes properties seal in compact form and read every
 /// byte back exactly: the compact dictionary carries a typed Bytes entry, so
 /// no size threshold or replay fallback stands between a Bytes row and the

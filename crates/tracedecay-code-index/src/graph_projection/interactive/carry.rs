@@ -32,7 +32,7 @@ use super::catalog::{
 use super::models::{
     CatalogLayerV1, CatalogSymbol, DeltaEntityV1, DeltaRelationV1, InteractiveCatalog, SortedMap,
     SymbolIds, derived_simple_name, fold_file_dependencies, frozen_ids, rank_largest_files,
-    unresolved_callee_name,
+    source_order_indices, unresolved_callee_name,
 };
 use crate::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
 use crate::lineage::LineageSymbolRecordV1;
@@ -1027,10 +1027,13 @@ impl<'a> CatalogCarry<'a> {
         .map_err(|_| corrupt("code graph catalog carry drives the dependency census below zero"))?;
         let file_dependencies =
             fold_file_dependencies(&dependency_edge_counts, &files, dependency_edges);
+        let symbols = parent.symbols.edited(symbol_edits);
+        let source_order = source_order_indices(&symbols);
         let catalog = InteractiveCatalog {
             generation,
             layer: Some(layer),
-            symbols: parent.symbols.edited(symbol_edits),
+            symbols,
+            source_order,
             by_qualified_name: parent.by_qualified_name.edited(list_edits(
                 &parent.by_qualified_name,
                 self.by_qualified_name,

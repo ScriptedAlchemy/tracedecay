@@ -11,7 +11,7 @@ seq	phase	decision	evidence	result
 10	dashboard	build script stages bundle only when digest matches	TRACEDECAY_DASHBOARD_BUNDLE_SHA256 abf66b3e via check-dashboard-bundle.py	VERIFIED
 11	escapes	#[path] and include_str! outside package become compile_data filegroups	missing-input errors on tests/common and agent-hosts templates	VERIFIED
 12	linker	gold and parallel ld.bfd OOM on full-workspace test links	dmesg oom-kill ld.bfd at 4 GB each over 8 jobs	VERIFIED
-13	linker	force bfd plus cap --jobs=4	-Clink-arg=-fuse-ld=bfd and jobs cap in .bazelrc	VERIFIED
+13	linker	force bfd plus cap --jobs=4	-Clink-arg=-fuse-ld=bfd and jobs cap in .bazelrc	SUPERSEDED by 24
 14	scope	pnpm lane stays intact until Bazel proven	cargo check -p tracedecay-cli green and bazel build //... green	VERIFIED
 15	verify	bazel build //... covers the workspace	677 targets built end to end	VERIFIED
 16	verify	shipped binary serves the embedded Bazel dashboard	tracedecay --version + dashboard index 200 on demo project	VERIFIED
@@ -22,3 +22,4 @@ seq	phase	decision	evidence	result
 21	drift	member cfg() target gates evaluated for a generic Linux host	cfg(not(any(windows,linux))) resolves False; host-dependent gates abort	VERIFIED
 22	drift	foreign Cargo target families resolve false on the Linux lane	cfg(target_family = "wasm") drops the dep in nested gates	VERIFIED
 23	drift	obsolete generated BUILD files removed by regeneration	orphaned banner-owned file unlinked, handwritten files keep content	VERIFIED
+24	linker	rust-lld (Cargo default) plus HOST_CPUS; skip non-LTO bitcode	.bazelrc drops fuse-ld=bfd; embed-bitcode=no except dist	VERIFIED

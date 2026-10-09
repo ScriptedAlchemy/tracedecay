@@ -129,15 +129,14 @@ fn build_observation(seed: &DashboardSessionMessageSeedV1<'_>) -> Result<Durable
     .map_err(|error| fixture_error("durable observation", error))
 }
 
-/// Persists one canonical message observation and projects it into the
-/// session-temporal observation effects the refresh scheduler discovers from.
-pub async fn seed_session_message_observation_for_test(
-    project_database: &RegisteredGlobalDb,
-    seed: DashboardSessionMessageSeedV1<'_>,
-) -> Result<()> {
-    let observation = build_observation(&seed)?;
+/// Match the host admission projector's bounded transaction window.
+const FIXTURE_BATCH_ITEMS: usize = 32;
+
+fn anchored_observation_write(
+    seed: &DashboardSessionMessageSeedV1<'_>,
+) -> Result<AnchoredObservationWrite> {
+    let observation = build_observation(seed)?;
     let identity = observation.identity();
-    let observation_id = observation.observation_id().clone();
     let next_cursor = ObservationSourceCursorV1::for_ordering(
         observation.source().clone(),
         observation.scope().clone(),
@@ -179,18 +178,62 @@ pub async fn seed_session_message_observation_for_test(
         authorization,
     )
     .map_err(|error| fixture_error("retrieval anchor", error))?;
+    AnchoredObservationWrite::new(write, anchor, projection)
+        .map_err(|error| fixture_error("anchored write", error))
+}
+
+/// Persists and projects a fixture observation corpus through the production
+/// batch persist/project authorities.
+pub async fn seed_session_message_observations_for_test(
+    project_database: &RegisteredGlobalDb,
+    seeds: &[DashboardSessionMessageSeedV1<'_>],
+) -> Result<()> {
     let store = project_database.observation_store();
-    store
-        .persist_observation(
-            AnchoredObservationWrite::new(write, anchor, projection)
-                .map_err(|error| fixture_error("anchored write", error))?,
-        )
-        .await
-        .map_err(|error| fixture_error("persist observation", error))?;
-    store
-        .project_observation(&observation_id)
-        .await
-        .map_err(|error| fixture_error("project observation", error))?;
+    for chunk in seeds.chunks(FIXTURE_BATCH_ITEMS) {
+        let writes = chunk
+            .iter()
+            .map(anchored_observation_write)
+            .collect::<Result<Vec<_>>>()?;
+        let count = writes.len();
+        if count == 0 {
+            continue;
+        }
+        let outcomes = store
+            .persist_observations(writes)
+            .await
+            .map_err(|error| fixture_error("persist observation page", error))?;
+        if outcomes.len() != count {
+            return Err(fixture_error(
+                "persist observation page",
+                format!("expected {count} outcomes, got {}", outcomes.len()),
+            ));
+        }
+        let projected = store
+            .project_queued_observations(count)
+            .await
+            .map_err(|error| fixture_error("project observation page", error))?
+            .ok_or_else(|| {
+                fixture_error(
+                    "project observation page",
+                    "registered batched projector is unavailable",
+                )
+            })?;
+        if projected.items.len() != count {
+            return Err(fixture_error(
+                "project observation page",
+                format!(
+                    "expected {count} projected items, got {}",
+                    projected.items.len()
+                ),
+            ));
+        }
+        if projected.has_more {
+            return Err(fixture_error(
+                "project observation page",
+                "fixture page must fully project before the next page",
+            ));
+        }
+    }
     Ok(())
 }
 

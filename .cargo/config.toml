@@ -65,18 +65,21 @@ KACHE_BASE_DIR = { value = ".", relative = true }
 # unpacked) keep their platform defaults. `split-debuginfo=unpacked` leaves
 # debuginfo in the object files instead of linking it into every binary; it
 # is linker-agnostic and a no-op for profiles that build without debuginfo.
-# Deliberately no linker flags here: rustc already links
-# x86_64-unknown-linux-gnu with its bundled rust-lld, and driver-only flags
-# such as `-B` would land on the raw linker command
+# `embed-bitcode=no` skips LLVM bitcode in rlibs for the ordinary dev and
+# `--release` graphs (neither uses LTO). `[profile.dist]` thin LTO still
+# needs bitcode; those invocations pass `-C embed-bitcode=yes`, which
+# rustc resolves last. Deliberately no linker flags here: rustc already
+# links x86_64-unknown-linux-gnu with its bundled rust-lld, and driver-only
+# flags such as `-B` would land on the raw linker command
 # line, and fail, for anyone who sets `target.<triple>.linker` or
 # CARGO_TARGET_<TRIPLE>_LINKER to a linker executable directly. Developers
 # who want mold locally opt in through their own linker config or RUSTFLAGS
 # (a user-set RUSTFLAGS env var replaces these flags entirely).
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "split-debuginfo=unpacked"]
+rustflags = ["-C", "split-debuginfo=unpacked", "-C", "embed-bitcode=no"]
 
 [target.aarch64-unknown-linux-gnu]
-rustflags = ["-C", "split-debuginfo=unpacked"]
+rustflags = ["-C", "split-debuginfo=unpacked", "-C", "embed-bitcode=no"]
 
 # Local macOS links of the tracedecay executable go through this wrapper,
 # which ad-hoc signs the product binary as `dev.tracedecay.cli` with

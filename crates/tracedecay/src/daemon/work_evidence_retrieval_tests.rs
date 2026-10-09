@@ -57,19 +57,21 @@ async fn registered_project_session_hydrates_provider_qualified_task_evidence() 
         attempt.attempt_id().as_str(),
         session_id.as_str(),
     );
-    crate::dashboard::observation_seed::seed_session_message_observation_for_test(
+    crate::dashboard::observation_seed::seed_session_message_observations_for_test(
         database.as_ref(),
-        crate::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
-            project_id: project_id.as_str(),
-            provider: "codex",
-            session_id: session_id.as_str(),
-            message_id: "message.work-task-session.1",
-            role: "assistant",
-            content: &format!("{query_text} completed with durable provider evidence"),
-            model: Some("gpt-5.6"),
-            timestamp: 101,
-            ordinal: 1,
-        },
+        &[
+            crate::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
+                project_id: project_id.as_str(),
+                provider: "codex",
+                session_id: session_id.as_str(),
+                message_id: "message.work-task-session.1",
+                role: "assistant",
+                content: &format!("{query_text} completed with durable provider evidence"),
+                model: Some("gpt-5.6"),
+                timestamp: 101,
+                ordinal: 1,
+            },
+        ],
     )
     .await
     .expect("seed canonical provider observation");
