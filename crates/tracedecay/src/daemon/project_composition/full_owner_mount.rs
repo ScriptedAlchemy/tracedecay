@@ -17,7 +17,8 @@ where
     HttpMount: Future<Output = Result<Http>> + Send + 'static,
     Http: Send + 'static,
 {
-    let http_task = tokio::spawn(tracing::Instrument::instrument(
+    let mut http_tasks = tokio::task::JoinSet::new();
+    http_tasks.spawn(tracing::Instrument::instrument(
         http_mount,
         tracing::trace_span!("daemon.project.open.http_application"),
     ));
@@ -27,9 +28,15 @@ where
             tracing::trace_span!("daemon.project.open.production_owners")
         ),
         async {
-            http_task.await.map_err(|error| TraceDecayError::Config {
-                message: format!("http application mount task failed: {error}"),
-            })?
+            http_tasks
+                .join_next()
+                .await
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "http application mount task missing".to_owned(),
+                })?
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("http application mount task failed: {error}"),
+                })?
         }
     )
 }
@@ -133,5 +140,62 @@ mod tests {
             .await
             .expect("peer mount must be cancelled within the lifecycle tripwire")
             .expect("peer cancellation receipt");
+    }
+
+    #[tokio::test]
+    async fn failed_owner_mount_cancels_spawned_http_mount() {
+        let (entered, http_entered) = oneshot::channel();
+        let (dropped, drop_receipt) = oneshot::channel();
+        let error = join_independent_full_owner_mounts(
+            async move {
+                http_entered.await.expect("HTTP mount started");
+                Err::<(), _>(TraceDecayError::Config {
+                    message: "owner mount failed".to_owned(),
+                })
+            },
+            async move {
+                let _drop_receipt = DropReceipt(Some(dropped));
+                entered.send(()).expect("signal HTTP mount started");
+                std::future::pending::<tracedecay_domain::errors::Result<()>>().await
+            },
+        )
+        .await
+        .expect_err("owner failure must fail the pair");
+        assert!(
+            matches!(error, TraceDecayError::Config { message } if message == "owner mount failed")
+        );
+        tokio::time::timeout(Duration::from_secs(2), drop_receipt)
+            .await
+            .expect("owner failure must cancel the spawned HTTP mount")
+            .expect("HTTP cancellation receipt");
+    }
+
+    #[tokio::test]
+    async fn cancelling_full_mount_cancels_spawned_http_mount() {
+        let (entered, http_entered) = oneshot::channel();
+        let (dropped, drop_receipt) = oneshot::channel();
+        let joined = tokio::spawn(join_independent_full_owner_mounts(
+            std::future::pending::<tracedecay_domain::errors::Result<()>>(),
+            async move {
+                let _drop_receipt = DropReceipt(Some(dropped));
+                entered.send(()).expect("signal HTTP mount started");
+                std::future::pending::<tracedecay_domain::errors::Result<()>>().await
+            },
+        ));
+        tokio::time::timeout(Duration::from_secs(2), http_entered)
+            .await
+            .expect("HTTP mount must start")
+            .expect("HTTP start receipt");
+        joined.abort();
+        assert!(
+            joined
+                .await
+                .expect_err("full mount cancelled")
+                .is_cancelled()
+        );
+        tokio::time::timeout(Duration::from_secs(2), drop_receipt)
+            .await
+            .expect("full mount cancellation must cancel the spawned HTTP mount")
+            .expect("HTTP cancellation receipt");
     }
 }
