@@ -99,8 +99,7 @@ async fn context_after_restart_waits_for_the_retained_generation_to_seat() {
     let (mount_paused, release_mount) =
         CodeIndexSchedulerRegistryV1::pause_next_cold_mount_before_final_commit(
             project.canonicalize().unwrap(),
-        )
-        .await;
+        );
     let restarted = Arc::new(open(isolation.path(), &project).await);
     tokio::time::timeout(Duration::from_secs(30), mount_paused)
         .await

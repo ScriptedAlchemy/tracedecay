@@ -112,7 +112,7 @@ fn invalid_authority_result_retains_exact_settled_curation_receipt() {
             error: MemoryApplicationError::InvalidAuthorityResult {
                 invariant: "curation receipt owner",
             },
-            authority_result: expected,
+            authority_result: Box::new(expected),
         }),
         1,
     )
@@ -191,7 +191,7 @@ fn memory_curator_rejects_more_than_256_operations_before_validation() {
         })).collect::<Vec<_>>()
     });
     let (accepted, rejected) = validate_memory_curation_ops(&output, &BTreeMap::new(), 0.8);
-    assert!(accepted.is_empty());
+    assert_eq!(accepted.len(), 0);
     assert_eq!(rejected.len(), 1);
     assert!(
         rejected[0]["rejected_reason"]
@@ -343,7 +343,7 @@ fn memory_curator_accepts_all_six_canonical_operations_with_exact_cas() {
     );
 
     assert_eq!(accepted.len(), 6);
-    assert!(rejected.is_empty());
+    assert_eq!(rejected.len(), 0);
 }
 
 #[test]
@@ -379,7 +379,7 @@ fn memory_curator_rejects_stale_or_missing_destructive_cas() {
         0.8,
     );
 
-    assert!(accepted.is_empty());
+    assert_eq!(accepted.len(), 0);
     assert_eq!(rejected.len(), 2);
 }
 
@@ -410,7 +410,7 @@ fn memory_curator_repair_rejects_invalid_source_labels_tags_and_review_snapshots
     }]});
 
     let (accepted, rejected) = validate_memory_curation_ops(&output, &allowed, 0.8);
-    assert!(accepted.is_empty());
+    assert_eq!(accepted.len(), 0);
     assert_eq!(rejected.len(), 2);
 }
 
@@ -435,6 +435,6 @@ fn memory_curator_quarantines_legacy_operations() {
         0.8,
     );
 
-    assert!(accepted.is_empty());
+    assert_eq!(accepted.len(), 0);
     assert_eq!(rejected.len(), 2);
 }

@@ -171,6 +171,62 @@ fn checkpoint_header_json_len(bytes: &[u8]) -> usize {
 }
 
 #[test]
+fn preparation_commits_empty_records_and_reset_invalidates_its_extent() {
+    let root = TestDir::new("prepared-records");
+    let (spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    assert_eq!(report.next_sequence, 1);
+    spool.prepare().unwrap();
+    let revision = records_file_revision(&root.0).unwrap().unwrap();
+    assert_eq!(revision.length, 0);
+    assert_eq!(
+        CommitLockV1::acquire(&root.0, COMMIT_WAIT)
+            .unwrap()
+            .synced_through(revision.identity)
+            .unwrap(),
+        Some(0)
+    );
+    let (mut spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(11)).unwrap();
+    assert_eq!((report.pending_records, report.next_sequence), (0, 1));
+    assert!(
+        !report.checkpoint_rewritten,
+        "first callback must reuse the prepared records checkpoint"
+    );
+    let barriers = tracedecay_private_fs::framed_log::sync_latency::inject(&root.0, Duration::ZERO);
+    let record = spool
+        .append(envelope(1, 9), &binding(), UtcMicros(11))
+        .unwrap();
+    assert_eq!(record.sequence, 1);
+    spool.commit().unwrap();
+    assert_eq!(
+        barriers.syncs(),
+        1,
+        "prepared capture only syncs record data"
+    );
+    drop(barriers);
+
+    HookSpoolV1::reset(&root.0, config(), UtcMicros(12)).unwrap();
+    assert_eq!(
+        CommitLockV1::acquire(&root.0, COMMIT_WAIT)
+            .unwrap()
+            .synced_through(revision.identity)
+            .unwrap(),
+        None,
+        "reset must invalidate the prepared file's extent"
+    );
+    let (spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(13)).unwrap();
+    assert_eq!((report.pending_records, report.next_sequence), (0, 1));
+    spool.prepare().unwrap();
+    let revision = records_file_revision(&root.0).unwrap().unwrap();
+    assert_eq!(
+        CommitLockV1::acquire(&root.0, COMMIT_WAIT)
+            .unwrap()
+            .synced_through(revision.identity)
+            .unwrap(),
+        Some(0)
+    );
+}
+
+#[test]
 fn checksum_is_real_sha256() {
     assert_eq!(
         hook_spool_checksum(b"abc"),

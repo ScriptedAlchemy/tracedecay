@@ -1865,7 +1865,7 @@ impl GraphRowDigestSum {
         }
         let hash = hasher.finalize();
         let mut lanes = [0_u64; 4];
-        for (lane, bytes) in lanes.iter_mut().zip(hash.chunks_exact(8)) {
+        for (lane, bytes) in lanes.iter_mut().zip(hash.as_chunks::<8>().0.iter()) {
             let mut word = [0_u8; 8];
             word.copy_from_slice(bytes);
             *lane = u64::from_be_bytes(word);
@@ -1953,7 +1953,7 @@ impl GraphRowDigestSum {
 
     fn to_bytes(self) -> [u8; 40] {
         let mut bytes = [0_u8; 40];
-        for (slot, lane) in bytes.chunks_exact_mut(8).zip(self.lanes) {
+        for (slot, lane) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(self.lanes) {
             slot.copy_from_slice(&lane.to_be_bytes());
         }
         bytes[32..].copy_from_slice(&self.rows.to_be_bytes());
@@ -1975,7 +1975,7 @@ impl GraphRowDigestSum {
             return Err(corrupt());
         }
         let mut sum = Self::default();
-        for (lane, word) in sum.lanes.iter_mut().zip(bytes.chunks_exact(8)) {
+        for (lane, word) in sum.lanes.iter_mut().zip(bytes.as_chunks::<8>().0.iter()) {
             let mut buffer = [0_u8; 8];
             buffer.copy_from_slice(word);
             *lane = u64::from_be_bytes(buffer);

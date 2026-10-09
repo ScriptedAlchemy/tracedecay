@@ -297,7 +297,7 @@ async fn call_chain(
             .await
             {
                 Ok(graph) => graph,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             let from_occurrence = match SymbolOccurrenceId::new(from.to_owned()) {
                 Ok(occurrence) => occurrence,
@@ -407,7 +407,7 @@ async fn strata(
             .await
             {
                 Ok(graph) => graph,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             let graph_generation = graph.reader.generation().as_str().to_owned();
             let (snapshot, cache_state) = match state
@@ -543,7 +543,7 @@ async fn node_facts(
             .await
             {
                 Ok(graph) => graph,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             let occurrence = match parse_occurrence::<FactMatchesMeasurementV1>(&state, &node_id) {
                 Ok(occurrence) => occurrence,
@@ -651,7 +651,7 @@ async fn node_tests(
             .await
             {
                 Ok(graph) => graph,
-                Err(response) => return response,
+                Err(response) => return *response,
             };
             let occurrence = match parse_occurrence::<TestMapMeasurementV1>(&state, &node_id) {
                 Ok(occurrence) => occurrence,
@@ -832,7 +832,7 @@ async fn node_sessions(
         .await
         {
             Ok(graph) => graph,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
         let occurrence = match parse_occurrence::<NodeSessionsMeasurementV1>(&state, &node_id) {
             Ok(occurrence) => occurrence,
@@ -920,22 +920,22 @@ async fn admitted_graph<T: Serialize>(
     state: &DashboardState,
     control: &DashboardHttpRequestControlV1,
     operation: impl Into<GraphReadAdmissionOperation>,
-) -> std::result::Result<AdmittedGraphReadV1, Response> {
+) -> std::result::Result<AdmittedGraphReadV1, Box<Response>> {
     let (Some(admission), Some(projection)) = (
         state.code_graph_read_admission.as_ref(),
         state.code_graph_projection_read_port.as_ref(),
     ) else {
-        return Err(unmeasured_response::<T>(
+        return Err(Box::new(unmeasured_response::<T>(
             state,
             StatusCode::SERVICE_UNAVAILABLE,
             "graph_authority_unavailable",
             "the exact-project verified code graph authority is unavailable",
-        ));
+        )));
     };
     let operation = operation
         .into()
         .resolve()
-        .map_err(|error| graph_error_response::<T>(state, error))?;
+        .map_err(|error| Box::new(graph_error_response::<T>(state, error)))?;
     // Admission and projection-open are the per-request store-open cost every
     // structure route pays before any graph work; separate spans let a flat
     // profile distinguish them from the traversal itself.
@@ -950,7 +950,7 @@ async fn admitted_graph<T: Serialize>(
         tracing::trace_span!("dashboard_api.graph.structure_admission"),
     )
     .await
-    .map_err(|error| graph_error_response::<T>(state, error))?;
+    .map_err(|error| Box::new(graph_error_response::<T>(state, error)))?;
     let cancellation = crate::graph::application_graph_cancellation(control.cancellation());
     let verified = tracing::Instrument::instrument(
         projection.open(crate::graph::CodeGraphReadRequest::new(
@@ -961,11 +961,11 @@ async fn admitted_graph<T: Serialize>(
         tracing::trace_span!("dashboard_api.graph.structure_open"),
     )
     .await
-    .map_err(|error| graph_error_response::<T>(state, error))?;
+    .map_err(|error| Box::new(graph_error_response::<T>(state, error)))?;
     let freshness = verified.freshness();
     let reader = verified
         .reader_with_cancellation(&context, control.observed_at(), Arc::clone(&cancellation))
-        .map_err(|error| graph_error_response::<T>(state, error))?;
+        .map_err(|error| Box::new(graph_error_response::<T>(state, error)))?;
     Ok(AdmittedGraphReadV1 {
         reader,
         cancellation,

@@ -6,11 +6,11 @@
 # Used by the `host-stock-integration` CI job and runnable locally:
 #
 #   npm install --global @opencode/cli@<pinned>
-#   cargo build -p tracedecay-cli --bin tracedecay
+#   bazel build //crates/tracedecay-cli:tracedecay
 #   scripts/opencode_stock_integration.sh
 #
 # Environment:
-#   TRACEDECAY_BIN  tracedecay binary to install/test (default: target/debug/tracedecay)
+#   TRACEDECAY_BIN  tracedecay binary to install/test (default: bazel-bin/crates/tracedecay-cli/tracedecay)
 #   OPENCODE_BIN    stock opencode binary (default: opencode on PATH)
 #
 # Everything runs in a throwaway HOME and a throwaway initialized project; no

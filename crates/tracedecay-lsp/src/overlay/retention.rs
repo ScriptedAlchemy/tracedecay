@@ -56,7 +56,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(overlays.snapshots_for_root(&workspace, &parent).is_empty());
+        assert_eq!(overlays.snapshots_for_root(&workspace, &parent).len(), 0);
         assert_eq!(overlays.snapshots_for_root(&workspace, &nested).len(), 1);
     }
 }

@@ -7,11 +7,11 @@
 # `claude-integration` CI job and runnable locally:
 #
 #   npm install --global @anthropic-ai/claude-code@<pinned>
-#   cargo build -p tracedecay-cli --bin tracedecay
+#   bazel build //crates/tracedecay-cli:tracedecay
 #   scripts/claude_stock_integration.sh
 #
 # Environment:
-#   TRACEDECAY_BIN  tracedecay binary to install/test (default: target/debug/tracedecay)
+#   TRACEDECAY_BIN  tracedecay binary to install/test (default: bazel-bin/crates/tracedecay-cli/tracedecay)
 #   CLAUDE_BIN      stock claude binary (default: claude on PATH)
 #
 # Everything runs in a throwaway HOME and a throwaway project. No model calls

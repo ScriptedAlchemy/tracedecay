@@ -91,6 +91,15 @@ const ADJACENCY_SEED_CHUNK: usize = 4_096;
 /// v12 stores oversized records as bounded DEFLATE bytes, preserving every field.
 pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v12";
 
+/// Resident graph data a read actually needs before opening its reader.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodeGraphReadinessRequirement {
+    /// Occurrence-seeded point reads do not consult the interactive catalog.
+    Engine,
+    /// Name, file, and census reads need the engine and interactive catalog.
+    Catalog,
+}
+
 /// Every semantic edge kind, at its [`relation_edge_kind_index`].
 const RELATION_EDGE_KINDS: [RelationEdgeKindV1; 9] = [
     RelationEdgeKindV1::Calls,
@@ -602,11 +611,20 @@ impl CodeGraphProjectionStore {
     /// once when nothing released is warming; the reader then answers the
     /// store's state as before.
     pub fn await_rewarm(&self, budget: Duration) -> Result<(), CodeGraphRewarmPendingV1> {
+        self.await_rewarm_for(budget, CodeGraphReadinessRequirement::Catalog)
+    }
+
+    /// Waits only for the resident data required by this read.
+    pub fn await_rewarm_for(
+        &self,
+        budget: Duration,
+        requirement: CodeGraphReadinessRequirement,
+    ) -> Result<(), CodeGraphRewarmPendingV1> {
         let started = Instant::now();
         let mut woke = false;
         loop {
             let epoch = self.warm_clock.epoch();
-            let Some(pending) = self.rewarm_in_flight(woke) else {
+            let Some(pending) = self.rewarm_in_flight(woke, requirement) else {
                 return Ok(());
             };
             let left = budget.saturating_sub(started.elapsed());
@@ -622,7 +640,11 @@ impl CodeGraphProjectionStore {
     /// measured warm-up it still needs; `None` when no released owner is
     /// warming. An engine still cold after a settled warm failed it, which
     /// the reader answers.
-    fn rewarm_in_flight(&self, woke: bool) -> Option<CodeGraphRewarmPendingV1> {
+    fn rewarm_in_flight(
+        &self,
+        woke: bool,
+        requirement: CodeGraphReadinessRequirement,
+    ) -> Option<CodeGraphRewarmPendingV1> {
         let engine = match self.snapshot.serving_engine_resident() {
             Ok(true) => None,
             Ok(false) if woke || !self.released.load(AtomicOrdering::Acquire) => return None,
@@ -632,6 +654,11 @@ impl CodeGraphProjectionStore {
             }
             Err(_) => return None,
         };
+        if requirement == CodeGraphReadinessRequirement::Engine {
+            return engine.map(|remaining| CodeGraphRewarmPendingV1 {
+                retry_after: remaining.max(Duration::from_millis(1)),
+            });
+        }
         let catalog = match (self.interactive_catalog.residency(), engine) {
             (CatalogResidency::Resident | CatalogResidency::Unreleased, None) => return None,
             (CatalogResidency::Resident | CatalogResidency::Unreleased, Some(_)) => Duration::ZERO,

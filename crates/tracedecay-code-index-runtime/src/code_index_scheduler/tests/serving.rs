@@ -3240,15 +3240,13 @@ fn generation_record_index_matches_linear_scan_lookups() {
         index.chunk_position_for_file_symbol(&missing_file, &missing_symbol),
         None
     );
-    assert!(
-        index
-            .incident_edge_positions(&missing_symbol, false)
-            .is_empty()
+    assert_eq!(
+        index.incident_edge_positions(&missing_symbol, false).len(),
+        0
     );
-    assert!(
-        index
-            .incident_edge_positions(&missing_symbol, true)
-            .is_empty()
+    assert_eq!(
+        index.incident_edge_positions(&missing_symbol, true).len(),
+        0
     );
 
     let same_generation = scheduler.latest_complete().expect("same latest generation");
@@ -4784,14 +4782,15 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             },
         )
         .await;
-    assert!(
-        !facets
+    assert_ne!(
+        facets
             .evidence()
             .payload
             .as_ref()
             .expect("facet page")
             .items
-            .is_empty()
+            .len(),
+        0
     );
 
     let timeline_operation =
@@ -4884,14 +4883,15 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             },
         )
         .await;
-    assert!(
-        !references
+    assert_ne!(
+        references
             .evidence()
             .payload
             .as_ref()
             .expect("references page")
             .items
-            .is_empty()
+            .len(),
+        0
     );
 
     let warming_text = {
@@ -7032,12 +7032,10 @@ async fn retained_attribution_demand_wakes_same_generation_without_foreground_de
 
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     let root = canonical_existing_identity(fixture.path()).unwrap();
-    let (recovered, release) = registry
-        .pause_next_retained_graph_recovery(
-            root.clone(),
-            super::super::registry::RetainedGraphRecoveryPauseV1::BeforeSuccessor,
-        )
-        .await;
+    let (recovered, release) = registry.pause_next_retained_graph_recovery(
+        root.clone(),
+        super::super::registry::RetainedGraphRecoveryPauseV1::BeforeSuccessor,
+    );
     registry
         .mount_worktree(
             test_project_id(),

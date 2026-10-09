@@ -472,13 +472,6 @@ fn timeline_json(
     })
 }
 
-pub(super) fn is_aggregate_request(request: &DashboardLcmReadRequestV1) -> bool {
-    matches!(
-        request,
-        DashboardLcmReadRequestV1::Overview { .. } | DashboardLcmReadRequestV1::Timeline { .. }
-    )
-}
-
 pub(super) fn timeline_view_coverage(
     request: &DashboardLcmReadRequestV1,
     page: &DashboardLcmCanonicalPageV1,

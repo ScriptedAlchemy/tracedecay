@@ -129,10 +129,11 @@ mod identity_root_canonicalization_tests {
         .unwrap();
         assert_eq!(roots, vec![primary.canonicalize().unwrap()]);
         let foreign = tracedecay_domain::ProjectId::new("project-foreign".to_owned()).unwrap();
-        assert!(
+        assert_eq!(
             enrolled_project_roots([primary.clone()], &foreign)
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
         let marker = repository_identity_path(&primary).unwrap();
         fs::write(&marker, b"invalid identity marker").unwrap();
@@ -150,10 +151,11 @@ mod identity_root_canonicalization_tests {
             vec![root.clone()]
         );
         let foreign = tracedecay_domain::ProjectId::new("project-foreign".to_owned()).unwrap();
-        assert!(
+        assert_eq!(
             enrolled_project_roots([root.clone()], &foreign)
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
         assert!(!root.join(".git").exists());
     }
@@ -168,6 +170,6 @@ mod enrolled_project_roots_tests {
     fn empty_candidates_yield_no_roots() {
         let project_id = ProjectId::new("proj_0123456789abcdef").expect("project id");
         let roots = enrolled_project_roots(Vec::<PathBuf>::new(), &project_id).expect("filter");
-        assert!(roots.is_empty());
+        assert_eq!(roots.len(), 0);
     }
 }

@@ -24,6 +24,7 @@ STANDARD_GITHUB_HOSTED_RUNNERS = frozenset(
         "windows-2025",
         "windows-2022",
         "macos-latest",
+        "macos-26",
         "macos-15",
         "macos-15-intel",
         "macos-14",

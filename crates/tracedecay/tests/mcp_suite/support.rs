@@ -1693,8 +1693,8 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
     };
     let source =
         ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
-    let source_frontier = u64::try_from(ordinal).unwrap().saturating_add(1);
-    let range = ObservationSourceRangeV1::new(source_frontier - 1, source_frontier).unwrap();
+    let source_end = u64::try_from(ordinal).unwrap().saturating_add(1);
+    let range = ObservationSourceRangeV1::new(source_end - 1, source_end).unwrap();
     let stable_record_id =
         ObservationId::new(format!("record.mcp.{session_id}.{message_id}")).unwrap();
     let relations = CanonicalObservationRelationsV1::new(session_id.clone())
@@ -1795,7 +1795,7 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
         durability: base_anchor.durability().clone(),
     })
     .unwrap();
-    observation_store
+    let committed = observation_store
         .persist_observation(
             AnchoredObservationWrite::new(write, anchor.clone(), projection_generation).unwrap(),
         )
@@ -1847,7 +1847,7 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
     .unwrap();
     TemporalLcmProjectionInput {
         occurrence,
-        source_frontier,
+        source_frontier: committed.receipt().sequence(),
     }
 }
 

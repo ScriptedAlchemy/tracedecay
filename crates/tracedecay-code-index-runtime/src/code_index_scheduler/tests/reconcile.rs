@@ -569,7 +569,7 @@ fn committed_one_file_edit_reuses_unchanged_rows_across_the_new_head_tree() {
         .filter(|chunk| chunk.sanitized_text.as_str().contains("fn committed_edit"))
         .map(|chunk| chunk.sanitized_text.as_str().to_owned())
         .collect::<Vec<_>>();
-    assert!(!chunks.is_empty());
+    assert_ne!(chunks.len(), 0);
     assert!(chunks.iter().all(|text| text.contains("{ 2 }")));
 }
 
@@ -641,7 +641,7 @@ fn committed_revert_recaptures_the_reverted_file() {
         })
         .map(|chunk| chunk.sanitized_text.as_str().to_owned())
         .collect::<Vec<_>>();
-    assert!(!chunks.is_empty());
+    assert_ne!(chunks.len(), 0);
     assert!(chunks.iter().all(|text| text.contains("{ 1 }")));
     assert!(chunks.iter().all(|text| !text.contains("{ 99 }")));
 }
@@ -1200,12 +1200,10 @@ async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() 
 
     let restarted = CodeIndexSchedulerRegistryV1::new(1);
     let remount_root = canonical_existing_identity(fixture.path()).expect("canonical remount root");
-    let (recovery_entered, release_successor) = restarted
-        .pause_next_retained_graph_recovery(
-            remount_root.clone(),
-            RetainedGraphRecoveryPauseV1::BeforeSuccessor,
-        )
-        .await;
+    let (recovery_entered, release_successor) = restarted.pause_next_retained_graph_recovery(
+        remount_root.clone(),
+        RetainedGraphRecoveryPauseV1::BeforeSuccessor,
+    );
     restarted
         .mount_worktree(
             test_project_id(),
@@ -2033,7 +2031,7 @@ async fn paused_cold_mount_rejects_a_root_retiring_before_final_commit() {
     let registry = CodeIndexSchedulerRegistryV1::new(2);
     let root = canonical_existing_identity(fixture.path()).expect("canonical root");
     let (cold_commit_entered, release_cold_commit) =
-        CodeIndexSchedulerRegistryV1::pause_next_cold_mount_before_final_commit(root.clone()).await;
+        CodeIndexSchedulerRegistryV1::pause_next_cold_mount_before_final_commit(root.clone());
     let cold_registry = registry.clone();
     let cold_root = fixture.path().to_path_buf();
     let cold_store = store.path().to_path_buf();
@@ -2123,7 +2121,7 @@ fn empty_generation_restart_preserves_project_identity() {
     .expect("open scheduler");
     published(scheduler.reconcile_now().expect("publish empty generation"));
     let generation = scheduler.latest_complete().expect("published generation");
-    assert!(generation.generation().chunks().chunks().is_empty());
+    assert_eq!(generation.generation().chunks().chunks().len(), 0);
     assert_eq!(generation.generation().manifest().project_id, project_id);
     drop(generation);
     drop(scheduler);
@@ -3115,9 +3113,8 @@ async fn sealed_publication_identity_answers_before_the_generation_seats() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
-    let (projection_started, release_projection) = registry
-        .pause_next_published_text_projection(canonical_root)
-        .await;
+    let (projection_started, release_projection) =
+        registry.pause_next_published_text_projection(canonical_root);
     registry
         .mount_worktree(
             test_project_id(),
@@ -3916,9 +3913,8 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
-    let (projection_started, release_projection) = registry
-        .pause_next_published_text_projection(canonical_root)
-        .await;
+    let (projection_started, release_projection) =
+        registry.pause_next_published_text_projection(canonical_root);
     registry
         .mount_worktree(
             test_project_id(),
@@ -4041,9 +4037,8 @@ async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_with
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
-    let (projection_started, release_projection) = registry
-        .pause_next_published_text_projection(canonical_root)
-        .await;
+    let (projection_started, release_projection) =
+        registry.pause_next_published_text_projection(canonical_root);
     registry
         .mount_worktree(
             test_project_id(),
@@ -4147,9 +4142,8 @@ async fn edit_during_text_projection_seals_its_successor_before_the_projection_f
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
-    let (projection_started, release_projection) = registry
-        .pause_next_opened_published_text_projection(canonical_root)
-        .await;
+    let (projection_started, release_projection) =
+        registry.pause_next_opened_published_text_projection(canonical_root);
     registry
         .mount_worktree(
             test_project_id(),
@@ -9656,7 +9650,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     };
     assert!(unresolved.is_empty(), "unexpected skips: {unresolved:?}");
     assert_eq!(report.inserted, 1);
-    assert!(report.rejected.is_empty());
+    assert_eq!(report.rejected.len(), 0);
     assert_eq!(
         published_generation, generation,
         "records must publish under the code-index generation"

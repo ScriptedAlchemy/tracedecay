@@ -21,6 +21,8 @@ use super::*;
 #[cfg(unix)]
 use tracedecay_application::pr_tracking::acquire_manual_branch_lifecycle;
 use tracedecay_code_index_runtime::CodeIndexSchedulerRegistryV1;
+#[cfg(feature = "test-helpers")]
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexWorktreeSchedulerV1;
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_code_index_runtime::git_transactions;
 use tracedecay_daemon_identity::profile_identity;
@@ -888,6 +890,29 @@ impl ProductionProjectCompositionHarnessV1 {
             .await)
     }
 
+    /// Uses the registry's existing test handle to fence source-proof renewal
+    /// while a production read observes the previous publication.
+    #[cfg(feature = "test-helpers")]
+    pub async fn project_scheduler_handle(
+        &self,
+        project_root: &Path,
+    ) -> Result<Arc<std::sync::Mutex<CodeIndexWorktreeSchedulerV1>>> {
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        resources
+            .invocation
+            .code_index_schedulers
+            .scheduler_handle(project_root)
+            .await
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition project scheduler is not mounted".to_owned(),
+            })
+    }
+
     pub async fn project_data_root(&self, project_root: impl AsRef<Path>) -> Result<PathBuf> {
         Ok(self
             .server(project_root)?
@@ -1729,3 +1754,6 @@ mod lcm_preserved_profile_journey_test;
 
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod idle_history_reads_journey_test;
+
+#[cfg(test)]
+mod source_body_readiness_journey_test;

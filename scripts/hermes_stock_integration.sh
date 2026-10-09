@@ -5,11 +5,11 @@
 #
 #   git clone https://github.com/NousResearch/hermes-agent.git /tmp/hermes-upstream
 #   git -C /tmp/hermes-upstream checkout <pinned ref>
-#   cargo build -p tracedecay-cli --bin tracedecay
+#   bazel build //crates/tracedecay-cli:tracedecay
 #   scripts/hermes_stock_integration.sh
 #
 # Environment:
-#   TRACEDECAY_BIN        tracedecay binary to install/test (default: target/debug/tracedecay)
+#   TRACEDECAY_BIN        tracedecay binary to install/test (default: bazel-bin/crates/tracedecay-cli/tracedecay)
 #   HERMES_UPSTREAM_DIR  stock hermes-agent checkout (default: /tmp/hermes-upstream)
 #
 # Everything is offline and deterministic: a throwaway user HOME (and its

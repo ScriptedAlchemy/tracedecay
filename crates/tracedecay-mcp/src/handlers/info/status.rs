@@ -1677,6 +1677,6 @@ mod tests {
 
         assert_eq!(state["status"], "unavailable");
         assert_eq!(state["coverage"], "partial");
-        assert!(state["providers"].as_array().unwrap().is_empty());
+        assert_eq!(state["providers"].as_array().unwrap().len(), 0);
     }
 }

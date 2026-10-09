@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
-DEFAULT_BIN = REPO_ROOT / "target" / "release" / "tracedecay"
+DEFAULT_BIN = REPO_ROOT / "bazel-bin" / "crates" / "tracedecay-cli" / "tracedecay"
 DEFAULT_LOG = "/tmp/tracedecay_matrix.log"
 DEFAULT_REPOS = ROOT / "repos.toml"
 DEFAULT_STDERR_DIR = "/tmp/tracedecay_matrix_stderr"
@@ -347,7 +347,7 @@ def load_probe_set(languages: list[str], discovered: dict) -> dict:
 def main() -> int:
     if not BIN.exists():
         print(f"error: tracedecay binary not found at {BIN}", file=sys.stderr)
-        print(f"hint: run `cargo build --release` first", file=sys.stderr)
+        print("hint: run `bazel build --config=release //crates/tracedecay-cli:tracedecay` first", file=sys.stderr)
         return 2
 
     sys.path.insert(0, str(ROOT))

@@ -40,7 +40,7 @@ fn ensure_background_cpu_authority() {
 }
 
 use super::artifact::{
-    attest_build, command_output, git_snapshot, validate_git_snapshots, workload_identity,
+    command_output, git_snapshot, measure_build_identity, validate_git_snapshots, workload_identity,
 };
 use super::metrics::{
     aggregate_samples, cpu_identity, elapsed_ns, memory_total_kib, preflight_platform,
@@ -1267,7 +1267,8 @@ pub(super) async fn run() {
         "benchmark evidence requires a clean worktree before execution"
     );
     let identity_before = workload_identity();
-    let attested_build = attest_build(&git_before);
+    let measured_build = measure_build_identity(&git_before)
+        .expect("benchmark must use the release evidence runner");
     for repetition in 0..WARMUP_REPETITIONS {
         let fixture = Fixture::new(repetition).await;
         let source = fixture.source();
@@ -1373,14 +1374,15 @@ pub(super) async fn run() {
     let result = BenchmarkResult {
         schema_version: RESULT_SCHEMA_VERSION,
         workload_id: WORKLOAD_ID.to_string(),
-        evidence_status: attested_build.evidence_status,
+        evidence_status: measured_build.evidence_status,
         workload_identity: identity_before,
-        build_identity: attested_build.build_identity,
+        build_identity: measured_build.build_identity,
         git_before,
         git_after,
         command: BENCHMARK_COMMAND.to_string(),
         rustc: command_output("rustc", &["-Vv"]),
-        cargo: command_output("cargo", &["-V"]),
+        bazel: std::env::var("TRACEDECAY_BENCHMARK_BAZEL_VERSION")
+            .expect("benchmark Bazel version"),
         kernel: command_output("uname", &["-srmo"]),
         cpu_identity: cpu_identity(),
         logical_cpu_count: std::thread::available_parallelism()

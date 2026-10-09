@@ -402,6 +402,34 @@ impl HostAdmissionTestRuntimeV1 {
         Arc::clone(&self.session_registry)
     }
 
+    /// Joins this profile's owners and closes their stores before an offline
+    /// fixture mutation. Other runtimes sharing the profile must be dropped first.
+    pub async fn shutdown(self) -> Result<()> {
+        let Self {
+            session_registry,
+            profile_database,
+            profile_registered,
+            project_registered,
+            _database_scope: database_scope,
+            ..
+        } = self;
+        drop((profile_database, profile_registered, project_registered));
+        session_registry.cancel_store_opens_for_shutdown();
+        session_registry.cancel_terminal_tasks();
+        session_registry.cancel_memory_graph_reconciliation_tasks();
+        let terminal = session_registry.shutdown_terminal_tasks().await;
+        let reconciliation = session_registry
+            .shutdown_memory_graph_reconciliation_tasks()
+            .await;
+        terminal.map_err(|message| TraceDecayError::Config { message })?;
+        reconciliation.map_err(|message| TraceDecayError::Config { message })?;
+        session_registry
+            .close_retained_graph_runtimes_for_shutdown()
+            .await?;
+        drop((session_registry, database_scope));
+        Ok(())
+    }
+
     #[doc(hidden)]
     pub async fn checkpoint_session_database_for_test(
         &self,

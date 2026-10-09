@@ -44,7 +44,7 @@ pub async fn generation_for_hydration(
     cancellation: Option<tracedecay_contracts::CancellationSignal>,
 ) -> Result<
     code_index_scheduler::LatestCompleteCodeIndexV1,
-    tracedecay_query::code_search::CodeIndexSearchOutcomeV1,
+    Box<tracedecay_query::code_search::CodeIndexSearchOutcomeV1>,
 > {
     let generation = schedulers
         .generation_for_controlled(
@@ -60,16 +60,16 @@ pub async fn generation_for_hydration(
         .await;
     match generation {
         Ok(Some(generation)) => Ok(generation),
-        Ok(None) => Err(code_index_search_unavailable_for_generation(
+        Ok(None) => Err(Box::new(code_index_search_unavailable_for_generation(
             Some(generation_id.as_str().to_owned()),
             tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
             "generation_changed_before_hydration",
-        )),
-        Err(reason) => Err(code_index_search_unavailable_for_generation(
+        ))),
+        Err(reason) => Err(Box::new(code_index_search_unavailable_for_generation(
             Some(generation_id.as_str().to_owned()),
             reason,
             reason.as_str(),
-        )),
+        ))),
     }
 }
 

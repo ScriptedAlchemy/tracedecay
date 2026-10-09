@@ -379,7 +379,7 @@ impl ProjectFeedbackObservationSinkV1 {
         }
         let _ = self
             .dropped_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 Some(count.saturating_add(dropped))
             });
     }
@@ -1953,7 +1953,7 @@ fn retain_removed_boot_accounting(ledger: &mut StoredFeedbackObservationLedgerV1
 }
 
 fn saturating_add(counter: &AtomicU64, increment: u64) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
         Some(count.saturating_add(increment))
     });
 }

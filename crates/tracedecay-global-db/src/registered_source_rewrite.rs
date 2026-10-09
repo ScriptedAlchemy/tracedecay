@@ -15,6 +15,12 @@ use tracedecay_store::{ProjectionStoreError, ProjectionStoreResult};
 use super::RegisteredGlobalDb;
 use super::observation_projection::{ensure_projection_output_state_cache, retire_source_record};
 
+/// Unoffered-record reads are keyset-paginated at this page size. The exact-
+/// SQL engine refuses a query that materializes more rows than its hard cap,
+/// and one long host session can hold more unoffered records than that cap,
+/// which made rewrite completion fail deterministically for those sources.
+const UNOFFERED_RECORD_PAGE_SIZE: i64 = 1_000;
+
 /// One record a source layout offered, under the identity admission derived.
 pub struct ObservationSourcePresenceV1 {
     pub observation_id: CanonicalObservationIdV1,
@@ -207,31 +213,57 @@ impl RegisteredGlobalDb {
                 .map_err(|error| storage("release source rewrite completion", error))?;
             return Ok(0);
         }
-        let mut rows = transaction
-            .query(
-                "SELECT observation_id FROM observation_source_presence
-                 WHERE source_key = ?1 AND generation <> ?2",
-                params![key.as_str(), generation.as_str()],
-            )
-            .await
-            .map_err(|error| storage("read unoffered source records", error))?;
-        let mut unoffered = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| storage("read unoffered source records", error))?
-        {
-            unoffered.push(
-                row.get::<String>(0)
-                    .map_err(|error| storage("read unoffered source records", error))?,
-            );
-        }
-        drop(rows);
         ensure_projection_output_state_cache(&transaction).await?;
         let mut retired = 0_u64;
-        for observation_id in &unoffered {
-            if retire_source_record(&transaction, observation_id).await? {
-                retired += 1;
+        // Keyset-paginate the unoffered ids instead of materializing the whole
+        // set in one statement: a single rewritten source can hold more
+        // unoffered records than the engine's per-query materialization cap,
+        // and one oversized read wedged every completion attempt forever.
+        // `retire_source_record` never touches `observation_source_presence`,
+        // so the ordered id cursor stays stable across pages; the settle
+        // deletes below remain the authoritative cleanup.
+        let mut after_observation_id = String::new();
+        loop {
+            let mut rows = transaction
+                .query(
+                    "SELECT observation_id FROM observation_source_presence
+                     WHERE source_key = ?1 AND generation <> ?2
+                       AND observation_id > ?3
+                     ORDER BY observation_id
+                     LIMIT ?4",
+                    params![
+                        key.as_str(),
+                        generation.as_str(),
+                        after_observation_id,
+                        UNOFFERED_RECORD_PAGE_SIZE
+                    ],
+                )
+                .await
+                .map_err(|error| storage("read unoffered source records", error))?;
+            let mut page = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| storage("read unoffered source records", error))?
+            {
+                page.push(
+                    row.get::<String>(0)
+                        .map_err(|error| storage("read unoffered source records", error))?,
+                );
+            }
+            drop(rows);
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            after_observation_id = page[page_len - 1].clone();
+            for observation_id in &page {
+                if retire_source_record(&transaction, observation_id).await? {
+                    retired += 1;
+                }
+            }
+            if (page_len as i64) < UNOFFERED_RECORD_PAGE_SIZE {
+                break;
             }
         }
         for sql in [

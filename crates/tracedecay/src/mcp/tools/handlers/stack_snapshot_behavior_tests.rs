@@ -39,17 +39,19 @@ struct CaptureTransport {
 }
 
 impl McpTransport for CaptureTransport {
-    async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        Ok(self.incoming.take())
+    fn read_line(&mut self) -> impl std::future::Future<Output = std::io::Result<Option<String>>> {
+        std::future::poll_fn(move |_| std::task::Poll::Ready(Ok(self.incoming.take())))
     }
 
-    async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        self.output.push_str(line);
-        Ok(())
+    fn write_line(&mut self, line: &str) -> impl std::future::Future<Output = std::io::Result<()>> {
+        std::future::poll_fn(move |_| {
+            self.output.push_str(line);
+            std::task::Poll::Ready(Ok(()))
+        })
     }
 
-    async fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+    fn flush(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> {
+        std::future::ready(Ok(()))
     }
 }
 

@@ -721,7 +721,7 @@ impl RowMultisetDigest {
     fn row_limbs(row: &[u8]) -> [u64; 4] {
         let hash: [u8; 32] = Sha256::digest(row).into();
         let mut limbs = [0_u64; 4];
-        for (limb, chunk) in limbs.iter_mut().zip(hash.chunks_exact(8)) {
+        for (limb, chunk) in limbs.iter_mut().zip(hash.as_chunks::<8>().0.iter()) {
             let mut bytes = [0_u8; 8];
             bytes.copy_from_slice(chunk);
             *limb = u64::from_be_bytes(bytes);
@@ -766,7 +766,7 @@ impl RowMultisetDigest {
 
     pub(crate) fn digest(&self) -> String {
         let mut bytes = [0_u8; 32];
-        for (chunk, limb) in bytes.chunks_exact_mut(8).zip(self.sum) {
+        for (chunk, limb) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(self.sum) {
             chunk.copy_from_slice(&limb.to_be_bytes());
         }
         encode_tagged_lowercase_hex(ROW_MULTISET_TAG, &bytes)

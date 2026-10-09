@@ -170,8 +170,34 @@ async fn seed_real_page_fixture_in_session(
     session_id: String,
     finalize: bool,
 ) -> RealPageFixture {
-    let message_id = format!("message.page.{rank:02}");
-    let text = format!("canonical content {rank}");
+    seed_real_page_fixtures_in_session(
+        database,
+        root,
+        rank..rank + 1,
+        provider,
+        session_id,
+        finalize,
+    )
+    .await
+    .pop()
+    .expect("one seeded page fixture")
+}
+
+async fn seed_real_page_fixtures_in_session(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    root: &TemporalAuthorizedRoot,
+    ranks: std::ops::Range<usize>,
+    provider: String,
+    session_id: String,
+    finalize: bool,
+) -> Vec<RealPageFixture> {
+    // Match the host admission projector's bounded transaction window.
+    const BATCH_ITEMS: usize = 32;
+    let rank = ranks
+        .clone()
+        .next_back()
+        .expect("at least one fixture rank");
+    let scalar = ranks.len() == 1;
     assert!(
         database
             .upsert_session(&SessionRecord {
@@ -197,97 +223,144 @@ async fn seed_real_page_fixture_in_session(
     let session = SessionId::new(session_id.clone()).expect("session");
     let source = ObservationSourceIdentityV1::for_provider(provider_id.clone(), session.clone())
         .expect("observation source");
-    let ordinal = u64::try_from(rank).expect("ordinal");
-    let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).expect("source range");
-    let record_id = ObservationId::new(format!("record.page.{rank:02}")).expect("record id");
-    let projected_message_id = if provider == "claude" {
-        record_id.as_str().to_owned()
-    } else {
-        message_id.clone()
-    };
-    let relations = CanonicalObservationRelationsV1::new(session)
-        .with_message_id(ObservationId::new(message_id.clone()).expect("message id"));
-    let envelope = CanonicalObservationEnvelopeV1::new(
-        provider_id,
-        "message",
-        record_id.clone(),
-        relations,
-        vec![CanonicalObservationFactV1::Message {
-            role: CanonicalMessageRoleV1::Assistant,
-            content: json!(text),
-            model: Some("fixture-model".to_owned()),
-            timestamp: Some(i64::try_from(rank).expect("timestamp")),
-        }],
-        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
-    )
-    .expect("canonical message envelope");
-    let payload = serde_json::to_value(envelope).expect("canonical payload");
-    let observation = DurableObservationV1::new(
-        ObservationIdentityMaterialV1::for_native_record(
-            source,
-            ObservationScopeV1::Profile,
-            ObservationSourceGenerationV1::new(1).expect("generation"),
-            range,
-            ObservationOrderingDomainV1::SnapshotOrder,
-            record_id,
-        )
-        .expect("observation identity"),
-        SanitizationReceiptV1::new(
-            SanitizationReceiptRefV1::new(
-                SanitizationReceiptId::new(format!("receipt.page.{rank:02}")).expect("receipt id"),
-                tracedecay_domain::ComponentVersion::new("sanitizer.page-fixture.v1")
-                    .expect("sanitizer"),
-            )
-            .expect("receipt reference"),
-            SanitizerDispositionV1::Accepted,
-            SensitivityV1::NonSensitive,
-            Some(PayloadReferenceV1::for_payload(&payload).expect("payload reference")),
-        )
-        .expect("receipt"),
-        RetentionClass::new("retention.page-fixture").expect("retention"),
-        payload,
-    )
-    .expect("durable observation");
     let store = database.observation_store();
-    let previous_cursor = store
-        .get_source_cursor(observation.source(), observation.scope())
+    let mut previous_cursor = store
+        .get_source_cursor(&source, &ObservationScopeV1::Profile)
         .await
         .expect("source cursor");
-    let next_cursor = ObservationSourceCursorV1::for_ordering(
-        observation.source().clone(),
-        observation.scope().clone(),
-        observation.identity().generation(),
-        observation.identity().ordering_domain(),
-        observation.identity().position().end(),
-    )
-    .expect("next cursor");
-    let write = ObservationWrite::new(observation.clone(), previous_cursor, next_cursor)
-        .expect("observation write");
-    let projection_generation =
-        ProjectionGenerationId::new("projection.page-fixture.v1").expect("projection generation");
-    let authorization = build_observation_resolution_authorization_v1(
-        write.observation(),
-        tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
-    )
-    .expect("resolution authorization");
-    let anchor = build_observation_retrieval_anchor(
-        write.observation(),
-        projection_generation.clone(),
-        UtcMicros(1),
-        authorization,
-    )
-    .expect("retrieval anchor");
-    store
-        .persist_observation(
-            AnchoredObservationWrite::new(write, anchor, projection_generation)
-                .expect("anchored observation"),
+    let last_rank = rank;
+    let mut pending_writes = Vec::new();
+    let mut fixtures = Vec::with_capacity(ranks.len());
+    for rank in ranks {
+        let message_id = format!("message.page.{rank:02}");
+        let text = format!("canonical content {rank}");
+        let ordinal = u64::try_from(rank).expect("ordinal");
+        let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).expect("source range");
+        let record_id = ObservationId::new(format!("record.page.{rank:02}")).expect("record id");
+        let projected_message_id = if provider == "claude" {
+            record_id.as_str().to_owned()
+        } else {
+            message_id.clone()
+        };
+        let relations = CanonicalObservationRelationsV1::new(session.clone())
+            .with_message_id(ObservationId::new(message_id.clone()).expect("message id"));
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider_id.clone(),
+            "message",
+            record_id.clone(),
+            relations,
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!(text),
+                model: Some("fixture-model".to_owned()),
+                timestamp: Some(i64::try_from(rank).expect("timestamp")),
+            }],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
         )
-        .await
-        .expect("persist canonical observation");
-    store
-        .project_observation(observation.observation_id())
-        .await
-        .expect("project canonical observation");
+        .expect("canonical message envelope");
+        let payload = serde_json::to_value(envelope).expect("canonical payload");
+        let observation = DurableObservationV1::new(
+            ObservationIdentityMaterialV1::for_native_record(
+                source.clone(),
+                ObservationScopeV1::Profile,
+                ObservationSourceGenerationV1::new(1).expect("generation"),
+                range,
+                ObservationOrderingDomainV1::SnapshotOrder,
+                record_id,
+            )
+            .expect("observation identity"),
+            SanitizationReceiptV1::new(
+                SanitizationReceiptRefV1::new(
+                    SanitizationReceiptId::new(format!("receipt.page.{rank:02}"))
+                        .expect("receipt id"),
+                    tracedecay_domain::ComponentVersion::new("sanitizer.page-fixture.v1")
+                        .expect("sanitizer"),
+                )
+                .expect("receipt reference"),
+                SanitizerDispositionV1::Accepted,
+                SensitivityV1::NonSensitive,
+                Some(PayloadReferenceV1::for_payload(&payload).expect("payload reference")),
+            )
+            .expect("receipt"),
+            RetentionClass::new("retention.page-fixture").expect("retention"),
+            payload,
+        )
+        .expect("durable observation");
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            observation.identity().generation(),
+            observation.identity().ordering_domain(),
+            observation.identity().position().end(),
+        )
+        .expect("next cursor");
+        let write = ObservationWrite::new(
+            observation.clone(),
+            previous_cursor.take(),
+            next_cursor.clone(),
+        )
+        .expect("observation write");
+        let projection_generation = ProjectionGenerationId::new("projection.page-fixture.v1")
+            .expect("projection generation");
+        let authorization = build_observation_resolution_authorization_v1(
+            write.observation(),
+            tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
+        )
+        .expect("resolution authorization");
+        let anchor = build_observation_retrieval_anchor(
+            write.observation(),
+            projection_generation.clone(),
+            UtcMicros(1),
+            authorization,
+        )
+        .expect("retrieval anchor");
+        previous_cursor = Some(next_cursor);
+        let write = AnchoredObservationWrite::new(write, anchor, projection_generation)
+            .expect("anchored observation");
+        if scalar {
+            store
+                .persist_observation(write)
+                .await
+                .expect("persist canonical observation");
+            store
+                .project_observation(observation.observation_id())
+                .await
+                .expect("project canonical observation");
+        } else {
+            pending_writes.push(write);
+            if pending_writes.len() == BATCH_ITEMS || rank == last_rank {
+                let count = pending_writes.len();
+                let outcomes = store
+                    .persist_observations(std::mem::take(&mut pending_writes))
+                    .await
+                    .expect("persist canonical observation page");
+                assert_eq!(outcomes.len(), count);
+                let projected = store
+                    .project_queued_observations(count)
+                    .await
+                    .expect("project canonical observation page")
+                    .expect("registered batched projector");
+                assert_eq!(projected.items.len(), count);
+                assert!(
+                    !projected.has_more,
+                    "fixture page must fully project before the next page"
+                );
+            }
+        }
+        fixtures.push(RealPageFixture {
+            provider: provider.clone(),
+            session_id: session_id.clone(),
+            message_id,
+            projected_message_id,
+            text,
+            anchor_id: derive_exact_observation_anchor_id(
+                observation.scope(),
+                observation.observation_id(),
+            )
+            .expect("canonical anchor id"),
+            active_generation: 0,
+        });
+    }
     let active_generation = if finalize {
         database
             .lcm_protect_session_raw_messages(&provider, &session_id)
@@ -312,19 +385,10 @@ async fn seed_real_page_fixture_in_session(
         0
     };
 
-    RealPageFixture {
-        provider,
-        session_id,
-        message_id,
-        projected_message_id,
-        text,
-        anchor_id: derive_exact_observation_anchor_id(
-            observation.scope(),
-            observation.observation_id(),
-        )
-        .expect("canonical anchor id"),
-        active_generation,
+    for fixture in &mut fixtures {
+        fixture.active_generation = active_generation;
     }
+    fixtures
 }
 
 #[tokio::test]
@@ -1556,19 +1620,48 @@ async fn small_lookup_reads_a_session_larger_than_the_response_budget() {
     .await;
     let root = real_page_root("root.page");
     let session_id = "session.page.large".to_owned();
-    let mut expected_messages = BTreeMap::new();
-    for rank in 0..RECORDS {
-        let fixture = seed_real_page_fixture_in_session(
+    let mut fixtures = seed_real_page_fixtures_in_session(
+        harness.registered.as_ref(),
+        &root,
+        0..RECORDS - 1,
+        "codex".to_owned(),
+        session_id.clone(),
+        false,
+    )
+    .await;
+    // The scalar fixture replaces the session row before its last projection;
+    // retain that final metadata instead of merging all message timestamps.
+    fixtures.push(
+        seed_real_page_fixture_in_session(
             harness.registered.as_ref(),
             &root,
-            rank,
+            RECORDS - 1,
             "codex".to_owned(),
             session_id.clone(),
-            rank + 1 == RECORDS,
+            true,
         )
-        .await;
-        expected_messages.insert(fixture.projected_message_id, fixture.text);
-    }
+        .await,
+    );
+    let stored_session = harness
+        .registered
+        .get_session("codex", &session_id)
+        .await
+        .expect("fixture session read")
+        .expect("fixture session");
+    assert_eq!(stored_session.started_at, Some(1499));
+    assert_eq!(stored_session.ended_at, Some(1499));
+    assert_eq!(
+        stored_session.title.as_deref(),
+        Some("fixture session 1499")
+    );
+    assert_eq!(
+        stored_session.project_path,
+        tracedecay_sessions::runtime::shared::durable_project_path_key("/fixture/1499"),
+    );
+    let expected_messages = fixtures
+        .into_iter()
+        .map(|fixture| (fixture.projected_message_id, fixture.text))
+        .collect::<BTreeMap<_, _>>();
     let root = registered_profile_retrieval_root(&harness.registered);
     let scope = root
         .identity()

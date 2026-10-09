@@ -114,6 +114,9 @@ jobs:
         working-directory: benchmark_data/runtime
         run: python3 -m unittest discover -s tests -p 'test_*.py'
 
+      - name: Test benchmark result publication
+        run: python3 scripts/test-claude-observation-benchmark-publication.py
+
   # The cheap repository gates in one job: commit lint, cache lineage, the
   # release guards, and rustfmt. Each used to hold its own ubuntu-latest
   # runner for a couple of minutes of work; on 20 free slots that is three
@@ -189,21 +192,17 @@ jobs:
           bash tests/release_pr_integrity_test.sh
           bash tests/dashboard_bundle_check_test.sh
 
-      # Judge formatting with the toolchain `rust-toolchain.toml` pins, not
-      # whatever `stable` is on the runner: rustfmt's output changes between
-      # releases (1.98.1 breaks a chain 1.97.1 keeps inline), and
-      # `dtolnay/rust-toolchain@stable` exports `RUSTUP_TOOLCHAIN`, which
-      # overrides the file. Installing through rustup with no override keeps
-      # the pin in one place.
-      - name: Install the repository's pinned toolchain
-        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: ci-format-linux
+
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: bazel build --config=ci //:rustfmt_check
 
       # Manifest edits that skip a gen_builds.py rerun leave stale BUILD
       # files; compare the committed files against a fresh generation.
       - name: Check generated Bazel BUILD files are current
-        run: python3 scripts/bazel/gen_builds.py --check
+        run: bazel run //scripts:bazel/gen_builds.py -- --check
 
       - name: Test and check dev skill host copies
         run: |
@@ -228,7 +227,7 @@ jobs:
     name: Test macOS
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-os == 'true' }}
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 330
     steps:
       # Full history: the search-quality workload fixture pins a

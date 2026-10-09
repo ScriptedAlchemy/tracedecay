@@ -232,11 +232,43 @@ pub(super) async fn validate_candidate_frontier(
         }
         expected.insert(occurrence_id.clone());
     }
-    if expected.is_empty() && source_frontier != base_frontier {
-        return Err(storage_message(
-            ACTIVATE_OPERATION,
-            "candidate generation has no canonical message outputs past its base frontier",
-        ));
+    if source_frontier != base_frontier {
+        // Discovery targets an effect belonging to this session. Skipped
+        // effects prove an empty advance, but an earlier effect or another
+        // session's effect cannot prove the requested endpoint.
+        let mut target_effect = conn
+            .query(
+                "SELECT EXISTS (
+                     SELECT 1 FROM session_temporal_observation_effects
+                     WHERE session_id = ?1 AND observation_sequence = ?2
+                 )",
+                params![
+                    session_id,
+                    i64::try_from(source_frontier)
+                        .map_err(|error| storage(ACTIVATE_OPERATION, error))?
+                ],
+            )
+            .await
+            .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
+        let supported = match target_effect
+            .next()
+            .await
+            .map_err(|error| storage(ACTIVATE_OPERATION, error))?
+        {
+            Some(row) => {
+                row.get::<i64>(0)
+                    .map_err(|error| storage(ACTIVATE_OPERATION, error))?
+                    != 0
+            }
+            None => false,
+        };
+        drop(target_effect);
+        if !supported {
+            return Err(storage_message(
+                ACTIVATE_OPERATION,
+                "candidate source frontier has no observation effect for this session",
+            ));
+        }
     }
     require_unsettled_message_ids(conn, session_id, generation, &parent_resolver).await?;
 

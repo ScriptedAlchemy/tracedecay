@@ -969,7 +969,7 @@ mod tests {
         let mut debounce = OverlayDiagnosticDebouncer::default();
         assert!(debounce.schedule_refresh("file:///root/a.rs", 1, 0));
         assert!(debounce.schedule_refresh("file:///root/a.rs", 2, 40));
-        assert!(debounce.take_due(114).is_empty());
+        assert_eq!(debounce.take_due(114).len(), 0);
         assert_eq!(
             debounce.take_due(115),
             vec![DebouncedDiagnostic {

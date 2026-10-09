@@ -778,7 +778,7 @@ async fn proposal_validation_does_not_wait_for_the_writer_lane() {
     .expect("read-only validation must not wait for writer authority")
     .unwrap();
     assert_eq!(validated.0.len(), 1);
-    assert!(validated.1.is_empty());
+    assert_eq!(validated.1.len(), 0);
     let fact = memory
         .get_project_memory_fact(
             tracedecay_store::ProjectMemoryFactIdV1::new(owner, existing_fact_id)
@@ -907,7 +907,7 @@ async fn proposal_validation_quarantines_fields_outside_the_public_receipt_contr
         )
         .await
         .unwrap();
-        assert!(validated.0.is_empty());
+        assert_eq!(validated.0.len(), 0);
         assert_eq!(validated.1.len(), 1);
     }
 }
@@ -958,7 +958,7 @@ async fn proposal_validation_canonicalizes_public_evidence_before_commit() {
         .await
         .unwrap();
         assert_eq!(validated.0.len(), 1);
-        assert!(validated.1.is_empty());
+        assert_eq!(validated.1.len(), 0);
         let item = validated.0[0]["item"].clone();
         assert_eq!(item["content"], "Canonical evidence reaches the store");
         assert_eq!(item["category"], "project");

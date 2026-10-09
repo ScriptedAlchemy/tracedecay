@@ -479,8 +479,7 @@ fn repository_control_may_exist(directory: &Path) -> bool {
     }
     directory
         .canonicalize()
-        .ok()
-        .is_some_and(|canonical| canonical.ancestors().any(git_control_exists_or_unknown))
+        .is_ok_and(|canonical| canonical.ancestors().any(git_control_exists_or_unknown))
 }
 
 fn git_control_exists_or_unknown(candidate: &Path) -> bool {

@@ -120,7 +120,8 @@ fn symbol_count(payload: &Value, name: &str) -> usize {
         .count()
 }
 fn generation_index_len(data_root: &Path, project: &Path) -> usize {
-    let scope = scoped_code_index_store_root(&data_root.join("code-index-v1"), project);
+    let project = tracedecay_runtime_core::path_safety::canonical_root_identity(project);
+    let scope = scoped_code_index_store_root(&data_root.join("code-index-v1"), &project);
     let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
         &fs::read(scope.join("active-code-generation-v1.json")).expect("active generation pointer"),
     )

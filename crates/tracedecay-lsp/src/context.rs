@@ -854,7 +854,7 @@ mod tests {
         .collect();
         adapter.update_subscriptions(&root, &subscriptions);
         assert_eq!(adapter.poll_changes(&root, &subscriptions, 1).len(), 1);
-        assert!(adapter.poll_changes(&root, &subscriptions, 1).is_empty());
+        assert_eq!(adapter.poll_changes(&root, &subscriptions, 1).len(), 0);
     }
 
     #[test]
@@ -885,7 +885,7 @@ mod tests {
             second[0].document_uri.as_deref(),
             Some("file:///root/16.rs")
         );
-        assert!(adapter.poll_changes(&root, &subscriptions, 16).is_empty());
+        assert_eq!(adapter.poll_changes(&root, &subscriptions, 16).len(), 0);
     }
 
     /// A poll or subscription change that lands while a peer session updates

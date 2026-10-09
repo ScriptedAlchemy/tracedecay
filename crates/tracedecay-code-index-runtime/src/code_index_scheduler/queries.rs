@@ -4561,7 +4561,7 @@ mod tests {
         let RetrievalPortOutcome::Completed(evidence) = outcome else {
             panic!("a continuation is not a budget omission");
         };
-        assert!(evidence.omissions.is_empty());
+        assert_eq!(evidence.omissions.len(), 0);
         assert_eq!(evidence.page.returned, 1);
         assert_eq!(evidence.page.total, Some(3));
         assert_eq!(evidence.page.expires_at, None);

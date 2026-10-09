@@ -573,14 +573,10 @@ where
     match outcome {
         DashboardLcmReadOutcomeV1::Ready(page) => {
             let timeline_coverage = aggregates::timeline_view_coverage(&request, &page);
-            let coverage = if aggregates::is_aggregate_request(&request) {
-                DashboardCoverageV1::complete(
-                    aggregates::returned_count(&page),
-                    "canonical hydrated records",
-                )
-            } else {
-                DashboardCoverageV1::unknown()
-            };
+            let coverage = DashboardCoverageV1::complete(
+                aggregates::returned_count(&page),
+                "canonical hydrated records",
+            );
             match aggregates::render_canonical_payload(
                 request,
                 page,

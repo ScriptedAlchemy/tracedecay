@@ -872,15 +872,15 @@ fn check_attr_filter_paths(
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty())
         .collect::<Vec<_>>();
-    let mut records = fields.chunks_exact(3);
+    let (records, remainder) = fields.as_chunks::<3>();
     let mut filtered = BTreeSet::new();
-    for record in records.by_ref() {
+    for record in records {
         let value = record[2];
         if value != b"unspecified" && value != b"unset" && value != b"false" {
             filtered.insert(String::from_utf8_lossy(record[0]).into_owned());
         }
     }
-    if !records.remainder().is_empty() {
+    if !remainder.is_empty() {
         return Err(());
     }
     Ok(filtered)

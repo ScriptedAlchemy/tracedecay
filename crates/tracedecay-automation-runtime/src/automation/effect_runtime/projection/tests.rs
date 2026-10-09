@@ -66,7 +66,7 @@ fn all_noop_curation_projects_accepted_effects_without_mutation_or_anchors() {
     assert_eq!(projected.accepted_operations, 2);
     assert_eq!(projected.facts_added, 0);
     assert_eq!(projected.facts_removed, 0);
-    assert!(projected.changed_fact_ids.is_empty());
+    assert_eq!(projected.changed_fact_ids.len(), 0);
     assert!(projected.replay_fact_id.is_none());
     assert!(projected.replay_event_id.is_none());
 

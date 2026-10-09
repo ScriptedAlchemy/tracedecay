@@ -912,15 +912,13 @@ pub(crate) struct FakeCodexAppServer {
 
 impl FakeCodexAppServer {
     pub(crate) fn new_memory_curator(fact_id: FactId, last_event_id: FactEventId) -> Self {
-        Self::new_memory_curator_answering_after(fact_id, last_event_id, Duration::ZERO)
+        let server = Self::new_memory_curator_held(fact_id, last_event_id);
+        server.release_turn();
+        server
     }
 
-    /// A curator backend that holds each turn for `delay` before answering.
-    pub(crate) fn new_memory_curator_answering_after(
-        fact_id: FactId,
-        last_event_id: FactEventId,
-        delay: Duration,
-    ) -> Self {
+    /// A curator backend whose answer waits for the test's explicit release.
+    pub(crate) fn new_memory_curator_held(fact_id: FactId, last_event_id: FactEventId) -> Self {
         let temp = tempdir_or_panic();
         let script_path = temp.path().join("codex.py");
         let bin = fake_codex_bin(temp.path());
@@ -948,7 +946,12 @@ for line in sys.stdin:
             "result": {"thread": {"id": "thread-dashboard", "model": "dashboard-fake-model"}}
         }), flush=True)
     elif method == "turn/start":
-        time.sleep(__TURN_DELAY_SECONDS__)
+        with open(__TURN_STARTED__, "w") as started:
+            started.write("started")
+        while not os.path.exists(__TURN_RELEASE__):
+            if not os.path.isdir(os.path.dirname(__TURN_RELEASE__)):
+                sys.exit(44)
+            time.sleep(0.01)
         payload = {
             "ops": [{
                 "op": "normalize_tags",
@@ -981,10 +984,37 @@ for line in sys.stdin:
             &serde_json::to_string(last_event_id.as_str())
                 .unwrap_or_else(|error| panic!("encode fake curator event id: {error}")),
         )
-        .replace("__TURN_DELAY_SECONDS__", &delay.as_secs_f64().to_string());
+        .replace(
+            "__TURN_STARTED__",
+            &serde_json::to_string(&temp.path().join("turn-started")).unwrap(),
+        )
+        .replace(
+            "__TURN_RELEASE__",
+            &serde_json::to_string(&temp.path().join("turn-release")).unwrap(),
+        );
         write_file(&script_path, &script);
         install_fake_codex_launcher(&script_path, &bin);
         Self { _temp: temp, bin }
+    }
+
+    pub(crate) fn wait_for_turn(&self) {
+        crate::common::poll_until(
+            Instant::now() + Duration::from_secs(60),
+            Duration::from_millis(25),
+            || {
+                self._temp
+                    .path()
+                    .join("turn-started")
+                    .try_exists()
+                    .expect("read curator turn marker")
+                    .then_some(())
+            },
+            || "curator did not reach its held turn".to_owned(),
+        );
+    }
+
+    pub(crate) fn release_turn(&self) {
+        write_file(&self._temp.path().join("turn-release"), "release");
     }
 }
 

@@ -27,7 +27,8 @@ Daemon CPU and memory come from /proc, so they are typed `unsupported` off
 Linux instead of reported as zero.
 
 Usage:
-  scripts/bench-hot-paths.py --bin target/release/tracedecay
+  bazel build --config=release //crates/tracedecay-cli:tracedecay
+  scripts/bench-hot-paths.py --bin bazel-bin/crates/tracedecay-cli/tracedecay
   scripts/bench-hot-paths.py --bin ./tracedecay --samples 40 --out target/bench-hot-paths/run1
 
 Exit status: 0 when the run completed (whatever the numbers), 2 on a harness

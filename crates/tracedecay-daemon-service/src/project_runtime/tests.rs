@@ -577,17 +577,17 @@ async fn one_project_s_components_are_not_another_s() {
 #[tokio::test]
 async fn a_sole_component_is_only_answered_while_exactly_one_project_holds_it() {
     let registry = ProjectRuntimeRegistryV1::default();
-    assert!(registry.sole::<Component>().await.is_none(), "none held");
+    assert!(registry.sole::<Component>().is_none(), "none held");
 
     registry.publish(root("alpha"), component(1)).await.unwrap();
     assert_eq!(
-        registry.sole::<Component>().await.as_ref().and_then(mark),
+        registry.sole::<Component>().as_ref().and_then(mark),
         Some(1)
     );
 
     registry.publish(root("beta"), component(2)).await.unwrap();
     assert!(
-        registry.sole::<Component>().await.is_none(),
+        registry.sole::<Component>().is_none(),
         "answering while two projects hold one would attach a request to \
          whichever project sorted first"
     );
@@ -1193,7 +1193,7 @@ async fn cancelled_shutdown_caller_does_not_abandon_the_registry_drain() {
     tokio::time::timeout(std::time::Duration::from_secs(2), registry.shut_down_all())
         .await
         .expect("a replacement shutdown caller must observe the completed background drain");
-    assert!(registry.is_empty().await);
+    assert!(registry.is_empty());
 }
 
 #[tokio::test]
@@ -1243,7 +1243,7 @@ async fn cancelled_publication_releases_while_shutdown_drain_is_waiting() {
         .await
         .expect("separate reservation cleanup must unblock shutdown")
         .expect("shutdown task");
-    assert!(registry.is_empty().await);
+    assert!(registry.is_empty());
 }
 
 #[tokio::test]
@@ -1254,7 +1254,7 @@ async fn shutting_down_empties_the_registry() {
 
     registry.shut_down_all().await;
 
-    assert!(registry.is_empty().await);
+    assert!(registry.is_empty());
     assert!(!registry.holds::<Component>(&root("alpha")).await);
     assert_eq!(
         registry.register(root("late"), component(3)).await,
@@ -1267,7 +1267,7 @@ async fn shutting_down_empties_the_registry() {
         "publishing must report closed admission"
     );
     assert!(
-        registry.is_empty().await,
+        registry.is_empty(),
         "a delayed publisher must not resurrect the drained registry"
     );
 }
@@ -1347,7 +1347,7 @@ async fn daemon_shutdown_does_not_wait_for_drained_runtime_deallocation() {
     tokio::time::timeout(std::time::Duration::from_secs(2), registry.shut_down_all())
         .await
         .expect("shutdown must not park behind a drained runtime's deallocation");
-    assert!(registry.is_empty().await);
+    assert!(registry.is_empty());
     assert!(
         dropped.try_recv().is_err(),
         "the drained runtime is still being released off the shutdown path"

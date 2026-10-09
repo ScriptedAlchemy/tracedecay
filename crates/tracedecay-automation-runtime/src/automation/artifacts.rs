@@ -40,7 +40,7 @@ impl<'a> ImprovementArtifactWriter<'a> {
         }
     }
 
-    async fn write(
+    fn write(
         &mut self,
         kind: AutomationRunArtifactKind,
         payload: &Value,
@@ -108,65 +108,55 @@ pub(crate) async fn write_improvement_artifacts(
     };
     let mut writer = ImprovementArtifactWriter::new(dashboard_root, run_id, &created_at);
 
-    let trace_ref = writer
-        .write(
-            AutomationRunArtifactKind::Traces,
-            &traces_payload(&ctx),
-            Some(format!("{task_key} trace and hash references")),
-        )
-        .await?;
+    let trace_ref = writer.write(
+        AutomationRunArtifactKind::Traces,
+        &traces_payload(&ctx),
+        Some(format!("{task_key} trace and hash references")),
+    )?;
 
-    let feedback_ref = writer
-        .write(
-            AutomationRunArtifactKind::Feedback,
-            &feedback_payload(&ctx, &trace_ref),
-            Some("feedback derived from validation outcomes".to_string()),
-        )
-        .await?;
+    let feedback_ref = writer.write(
+        AutomationRunArtifactKind::Feedback,
+        &feedback_payload(&ctx, &trace_ref),
+        Some("feedback derived from validation outcomes".to_string()),
+    )?;
 
     let evals = generated_eval_payloads(&ctx);
-    let generated_evals_ref = writer
-        .write(
-            AutomationRunArtifactKind::GeneratedEvals,
-            &generated_evals_payload(&ctx, (&trace_ref, &feedback_ref), &evals),
-            Some("evals generated from validation outcomes".to_string()),
-        )
-        .await?;
+    let generated_evals_ref = writer.write(
+        AutomationRunArtifactKind::GeneratedEvals,
+        &generated_evals_payload(&ctx, (&trace_ref, &feedback_ref), &evals),
+        Some("evals generated from validation outcomes".to_string()),
+    )?;
 
     let gate = improvement_gate_payload(&ctx, &evals);
-    let validation_gate_ref = writer
-        .write(
-            AutomationRunArtifactKind::ValidationGate,
-            &validation_gate_payload(
-                &ctx,
-                (&trace_ref, &feedback_ref, &generated_evals_ref),
-                &evals,
-                &gate,
-            ),
-            Some(format!(
-                "{} accepted, {} rejected",
-                record.accepted_count, record.rejected_count
-            )),
-        )
-        .await?;
+    let validation_gate_ref = writer.write(
+        AutomationRunArtifactKind::ValidationGate,
+        &validation_gate_payload(
+            &ctx,
+            (&trace_ref, &feedback_ref, &generated_evals_ref),
+            &evals,
+            &gate,
+        ),
+        Some(format!(
+            "{} accepted, {} rejected",
+            record.accepted_count, record.rejected_count
+        )),
+    )?;
 
-    let optimizer_diagnosis_ref = writer
-        .write(
-            AutomationRunArtifactKind::OptimizerDiagnosis,
-            &optimizer_diagnosis_payload(
-                &ctx,
-                (
-                    &trace_ref,
-                    &feedback_ref,
-                    &generated_evals_ref,
-                    &validation_gate_ref,
-                ),
-                &evals,
-                &gate,
+    let optimizer_diagnosis_ref = writer.write(
+        AutomationRunArtifactKind::OptimizerDiagnosis,
+        &optimizer_diagnosis_payload(
+            &ctx,
+            (
+                &trace_ref,
+                &feedback_ref,
+                &generated_evals_ref,
+                &validation_gate_ref,
             ),
-            Some("optimizer diagnosis derived from validation outcomes".to_string()),
-        )
-        .await?;
+            &evals,
+            &gate,
+        ),
+        Some("optimizer diagnosis derived from validation outcomes".to_string()),
+    )?;
 
     let codex_handoff = codex_handoff_payload(
         &ctx,
@@ -180,13 +170,11 @@ pub(crate) async fn write_improvement_artifacts(
         &evals,
         &gate,
     );
-    writer
-        .write(
-            AutomationRunArtifactKind::CodexHandoff,
-            &codex_handoff,
-            Some(format!("{task_key} review handoff")),
-        )
-        .await?;
+    writer.write(
+        AutomationRunArtifactKind::CodexHandoff,
+        &codex_handoff,
+        Some(format!("{task_key} review handoff")),
+    )?;
 
     writer.finish(&publication_identity).await
 }

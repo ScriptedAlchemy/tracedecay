@@ -1629,7 +1629,7 @@ mod tests {
     #[test]
     fn store_window_empty_set_preserves_cursor() {
         let (window, next) = select_store_window(&[], Some("s:005"), 8);
-        assert!(window.is_empty());
+        assert_eq!(window.len(), 0);
         assert_eq!(next.as_deref(), Some("s:005"));
     }
 

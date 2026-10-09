@@ -60,12 +60,19 @@ fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), Code
 /// the read waits for it within what is left of its budget, so a re-warm
 /// that finishes in time serves the read instead of refusing it. Past the
 /// budget it answers the measured warm-up still needed.
+#[tracing::instrument(
+    name = "daemon.code_index.read.await_rewarm",
+    level = "trace",
+    skip_all,
+    fields(readiness = ?request.readiness)
+)]
 async fn await_rewarm(
     store: &Arc<CodeGraphProjectionStore>,
     request: &CodeGraphReadRequest<'_>,
 ) -> Result<(), CodeGraphReadError> {
     // A zero budget never blocks: it starts the re-warm and reports it.
-    if store.await_rewarm(Duration::ZERO).is_ok() {
+    let requirement = request.readiness;
+    if store.await_rewarm_for(Duration::ZERO, requirement).is_ok() {
         return Ok(());
     }
     let now = now_micros();
@@ -81,7 +88,7 @@ async fn await_rewarm(
     let budget =
         Duration::from_micros(u64::try_from(expires_at.0.saturating_sub(now.0)).unwrap_or(0));
     let waiting = Arc::clone(store);
-    let wait = tokio::task::spawn_blocking(move || waiting.await_rewarm(budget));
+    let wait = tokio::task::spawn_blocking(move || waiting.await_rewarm_for(budget, requirement));
     let settled = match request.live_cancellation {
         Some(signal) => tokio::select! {
             biased;

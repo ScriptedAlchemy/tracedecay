@@ -441,7 +441,7 @@ mod stderr_tracing_tests {
             let filter = parse(value);
             assert_eq!(filter.level_for_target("tracedecay"), LevelFilter::WARN);
             assert_eq!(filter.max_level(), LevelFilter::WARN);
-            assert!(filter.unparsed().is_empty());
+            assert_eq!(filter.unparsed().len(), 0);
         }
     }
 

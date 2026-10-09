@@ -274,7 +274,7 @@ fn transaction_preview(
             &GitIndexPreviewV1::repository_snapshot_digest(&snapshot).unwrap(),
         )
         .unwrap();
-        assert!(!hunks.is_empty());
+        assert_ne!(hunks.len(), 0);
         hunks
     } else {
         Vec::new()

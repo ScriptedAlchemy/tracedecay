@@ -1407,7 +1407,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         &cancellation,
     )
     .await;
-    assert!(!hunks_input.hunks.is_empty());
+    assert_ne!(hunks_input.hunks.len(), 0);
     let request = tracedecay_daemon_service::application_surface::GitPreviewSurfaceRequest {
         operation: GitIndexTransactionOperationV1::StageHunks,
         preview_input_id: Some(hunks_input.preview_input_id.clone()),

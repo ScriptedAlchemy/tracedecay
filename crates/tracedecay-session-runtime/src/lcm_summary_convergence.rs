@@ -136,6 +136,8 @@ async fn backfill_queue(
     // An idle pass must not take the writer. The probe is only a hint: the
     // page re-reads the authoritative frontier under the writer transaction.
     let snapshot = database
+        .read_connection()
+        .background()
         .read_snapshot()
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
@@ -171,6 +173,8 @@ async fn requeue_parked_sessions(
 ) -> Result<tracedecay_lcm::summary_convergence::LcmParkedRequeuePage, LcmError> {
     let binding = crate::lcm_summarization::summarizer_binding_identity(database)?;
     let snapshot = database
+        .read_connection()
+        .background()
         .read_snapshot()
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
@@ -208,6 +212,8 @@ async fn rewrite_predecessor_ranges(
     database: &RegisteredGlobalDbLeaseV1,
 ) -> Result<tracedecay_lcm::summary_convergence::LcmPredecessorRangeRewritePage, LcmError> {
     let snapshot = database
+        .read_connection()
+        .background()
         .read_snapshot()
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
@@ -238,6 +244,8 @@ async fn load_candidate(
     now_unix_ms: i64,
 ) -> Result<Option<LcmSummaryConvergenceCandidate>, LcmError> {
     let snapshot = database
+        .read_connection()
+        .background()
         .read_snapshot()
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
@@ -250,6 +258,8 @@ async fn load_session_candidate(
     session_id: &str,
 ) -> Result<Option<LcmSummaryConvergenceCandidate>, LcmError> {
     let snapshot = database
+        .read_connection()
+        .background()
         .read_snapshot()
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
@@ -259,6 +269,8 @@ async fn load_session_candidate(
 
 async fn load_next_retry(database: &RegisteredGlobalDbLeaseV1) -> Result<Option<i64>, LcmError> {
     let snapshot = database
+        .read_connection()
+        .background()
         .read_snapshot()
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
@@ -621,8 +633,48 @@ fn duration_millis(duration: Duration) -> Result<i64, LcmError> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_retryable;
+    use super::{is_retryable, load_candidate};
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_lcm::LcmError;
+    use tracedecay_runtime_core::db::engine::{Error as EngineError, params};
+
+    #[tokio::test]
+    async fn convergence_reads_leave_foreground_reader_capacity_available() {
+        let harness = RegisteredGlobalDbHarness::open("lcm-convergence-reader-admission").await;
+        let database = &harness.registered;
+        assert!(load_candidate(database, 0).await.unwrap().is_none());
+
+        let background = database.read_connection().background();
+        let mut held = Vec::new();
+        loop {
+            match background.read_snapshot().await {
+                Ok(snapshot) => held.push(snapshot),
+                Err(EngineError::Runtime(reason)) => {
+                    assert_eq!(reason, "exact SQL reader lane is saturated");
+                    break;
+                }
+                Err(error) => panic!("unexpected background admission failure: {error}"),
+            }
+        }
+        assert!(!held.is_empty(), "idle background reads must be admitted");
+
+        let foreground = database.read_snapshot().await.unwrap();
+        let mut rows = foreground.query("SELECT 1", params![]).await.unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            1
+        );
+        drop(rows);
+        foreground.commit().await.unwrap();
+        assert!(
+            matches!(load_candidate(database, 0).await, Err(LcmError::Db(reason)) if reason.contains("exact SQL reader lane is saturated")),
+            "background convergence must not consume the foreground reservation"
+        );
+        for snapshot in held {
+            snapshot.commit().await.unwrap();
+        }
+        assert!(load_candidate(database, 0).await.unwrap().is_none());
+    }
 
     #[test]
     fn convergence_error_classification_preserves_retry_truth() {

@@ -52,7 +52,7 @@ impl Database {
             });
         }
         let _writer = self.writer().await;
-        let connection = self.open_writer_connection_unguarded(OPERATION).await?;
+        let connection = self.open_writer_connection_unguarded(OPERATION)?;
         let mut rows = connection
             .checkpoint_wal_truncate()
             .await

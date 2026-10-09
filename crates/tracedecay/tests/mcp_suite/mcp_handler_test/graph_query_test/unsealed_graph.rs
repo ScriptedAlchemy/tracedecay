@@ -45,8 +45,7 @@ async fn graph_reads_refuse_as_unavailable_until_the_graph_seals() {
     let (mount_paused, release_mount) =
         CodeIndexSchedulerRegistryV1::pause_next_cold_mount_before_final_commit(
             project.canonicalize().unwrap(),
-        )
-        .await;
+        );
     let harness = Box::pin(
         ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
             isolation.path(),

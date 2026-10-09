@@ -50,7 +50,7 @@ impl CancelAfter {
 impl GraphCancellation for CancelAfter {
     fn is_cancelled(&self) -> bool {
         self.remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
             .is_err()

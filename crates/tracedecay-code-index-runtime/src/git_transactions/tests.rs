@@ -766,10 +766,11 @@ fn nonterminal_key_is_recovery_only_and_startup_recovery_is_idempotent() {
         recovered[0].outcome,
         GitIndexReceiptOutcomeV1::AbortedNoChange
     );
-    assert!(
+    assert_eq!(
         port.recover_startup(fixture_time(21))
             .expect("idempotent startup recovery")
-            .is_empty()
+            .len(),
+        0
     );
     assert_eq!(recovery_calls.load(Ordering::SeqCst), 1);
 }

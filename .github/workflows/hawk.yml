@@ -47,8 +47,10 @@ jobs:
           cache-workspace-crates: "false"
           cache-on-failure: true
 
+      # Same single-pin rule as the ci.yml format gate: rust-toolchain.toml
+      # selects the compiler so hawk's diagnostics match the build toolchain.
       - name: Install Rust toolchain
-        run: rustup toolchain install 1.97.1
+        run: rustup show active-toolchain || rustup toolchain install
 
       - name: Install Hawk
         run: |
@@ -58,6 +60,6 @@ jobs:
       # hawk.toml selects the shipped CLI as the production entry point.
       - name: Hawk
         run: >
-          cargo +1.97.1 hawk check
+          cargo hawk check
           --target-dir target/hawk
           -D warnings

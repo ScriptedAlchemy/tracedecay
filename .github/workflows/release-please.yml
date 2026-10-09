@@ -145,6 +145,11 @@ jobs:
             pnpm-lock.yaml
             Cargo.lock
 
+      - uses: ./.github/actions/setup-bazel
+        if: steps.release.outputs.prs_created == 'true'
+        with:
+          cache-key: release-metadata-ubuntu-latest
+
       - name: Update release PR generated metadata
         if: steps.release.outputs.prs_created == 'true'
         env:

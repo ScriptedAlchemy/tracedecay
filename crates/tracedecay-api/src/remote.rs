@@ -92,14 +92,14 @@ pub enum RemoteHttpBoundaryError {
 }
 
 enum RemoteHttpRejection {
-    Response(Response),
+    Response(Box<Response>),
     Contract(ApplicationContractError),
 }
 
 impl IntoResponse for RemoteHttpRejection {
     fn into_response(self) -> Response {
         match self {
-            Self::Response(response) => response,
+            Self::Response(response) => *response,
             Self::Contract(error) => {
                 // Contract construction failures are internal and may contain
                 // implementation details; consume them at the HTTP boundary
@@ -480,7 +480,7 @@ fn concealed_authentication_response() -> Result<Response, ApplicationContractEr
 
 fn concealed_authentication_rejection() -> RemoteHttpRejection {
     match concealed_authentication_response() {
-        Ok(response) => RemoteHttpRejection::Response(response),
+        Ok(response) => RemoteHttpRejection::Response(Box::new(response)),
         Err(error) => RemoteHttpRejection::Contract(error),
     }
 }

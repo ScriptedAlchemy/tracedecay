@@ -256,7 +256,7 @@ impl RuntimeRequestProbeV1 for DelayedInterruptionProbe {
     fn interruption(&self) -> Option<RuntimeInterruptionV1> {
         if self
             .checks_before_interruption
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
             .is_ok()

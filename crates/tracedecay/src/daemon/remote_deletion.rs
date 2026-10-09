@@ -67,7 +67,7 @@ pub(super) async fn resume_remote_account_deletion_for_boot(
     {
         Ok(receipt) => Ok(RemoteDeletionBootMode::DeletionOnly(receipt)),
         Err(error) if error.receipt.tombstone_recorded => {
-            Ok(RemoteDeletionBootMode::DeletionOnly(error.receipt))
+            Ok(RemoteDeletionBootMode::DeletionOnly(*error.receipt))
         }
         Err(error) => Err(error.source),
     }
@@ -220,12 +220,12 @@ pub(super) async fn dispatch_remote_deletion(
                 Ok(receipt) => receipt,
                 Err(error) => {
                     tracing::warn!(error = %error.source, "remote deletion request failed");
-                    error.receipt
+                    *error.receipt
                 }
             },
             Ok(None) | Err(_) => RemoteDeletionReceipt::authority_unavailable(request),
         },
-        Err(receipt) => receipt,
+        Err(receipt) => *receipt,
     };
     if receipt.tombstone_recorded
         && let Some(target) = receipt.target
@@ -239,7 +239,7 @@ pub(super) async fn dispatch_remote_deletion(
 
 #[derive(Debug)]
 pub(super) struct RemoteDeletionExecutionError {
-    pub(super) receipt: RemoteDeletionReceipt,
+    pub(super) receipt: Box<RemoteDeletionReceipt>,
     pub(super) source: tracedecay_domain::errors::TraceDecayError,
 }
 
@@ -271,7 +271,10 @@ impl RemoteDeletionExecutionError {
             phase,
             retryable,
         });
-        Self { receipt, source }
+        Self {
+            receipt: Box::new(receipt),
+            source,
+        }
     }
 }
 
@@ -310,17 +313,17 @@ async fn execute_remote_deletion(
 
 async fn parse_remote_deletion_request(
     request: Request<Body>,
-) -> Result<RemoteDeletionHttpRequest, RemoteDeletionReceipt> {
+) -> Result<RemoteDeletionHttpRequest, Box<RemoteDeletionReceipt>> {
     if !has_json_content_type(request.headers()) {
-        return Err(RemoteDeletionReceipt::invalid_request());
+        return Err(Box::new(RemoteDeletionReceipt::invalid_request()));
     }
     let body = tracing::Instrument::instrument(
         to_bytes(request.into_body(), MAX_REMOTE_DELETION_BODY_BYTES),
         tracing::trace_span!("daemon.remote.deletion_parse"),
     )
     .await
-    .map_err(|_| RemoteDeletionReceipt::invalid_request())?;
-    serde_json::from_slice(&body).map_err(|_| RemoteDeletionReceipt::invalid_request())
+    .map_err(|_| Box::new(RemoteDeletionReceipt::invalid_request()))?;
+    serde_json::from_slice(&body).map_err(|_| Box::new(RemoteDeletionReceipt::invalid_request()))
 }
 
 fn has_json_content_type(headers: &HeaderMap) -> bool {

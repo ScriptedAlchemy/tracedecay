@@ -7,6 +7,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphProjectionError, CodeGraphProjectionStore,
+    CodeGraphReadinessRequirement,
 };
 pub use tracedecay_contracts::retrieval::CodeGraphReadFreshnessV1;
 use tracedecay_contracts::{
@@ -67,6 +68,7 @@ pub struct CodeGraphReadRequest<'a> {
     pub context: &'a RequestContext,
     pub observed_at: UtcMicros,
     pub cancellation: Arc<dyn GraphCancellation>,
+    pub readiness: CodeGraphReadinessRequirement,
     pub deadline: Option<Deadline>,
     pub live_cancellation: Option<&'a CancellationSignal>,
 }
@@ -81,9 +83,15 @@ impl<'a> CodeGraphReadRequest<'a> {
             context,
             observed_at,
             cancellation,
+            readiness: CodeGraphReadinessRequirement::Catalog,
             deadline: None,
             live_cancellation: None,
         }
+    }
+
+    pub fn with_readiness(mut self, readiness: CodeGraphReadinessRequirement) -> Self {
+        self.readiness = readiness;
+        self
     }
 
     pub fn with_deadline(mut self, deadline: Deadline) -> Self {

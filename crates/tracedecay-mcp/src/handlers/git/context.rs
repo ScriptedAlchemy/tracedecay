@@ -2186,11 +2186,11 @@ mod blast_gate_tests {
         let covered_gate = blast_test_gate(&rows, &covered, &annotates, true);
         assert_eq!(covered_gate.verdict, "pass");
         assert_eq!(covered_gate.exit_code, 0);
-        assert!(covered_gate.untested.is_empty());
+        assert_eq!(covered_gate.untested.len(), 0);
         let unfinished = blast_test_gate(&rows, &calls, &annotates, false);
         assert_eq!(unfinished.verdict, "incomplete");
         assert_eq!(unfinished.exit_code, 0);
-        assert!(unfinished.untested.is_empty());
+        assert_eq!(unfinished.untested.len(), 0);
     }
 }
 

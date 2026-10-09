@@ -26,7 +26,8 @@ Usage:
     python3 scripts/hermes_plugin_unit_check.py [plugin_dir]
 
 plugin_dir defaults to a fresh install generated into a temp HOME via the
-tracedecay binary named by $TRACEDECAY_BIN (default: target/debug/tracedecay).
+tracedecay binary named by $TRACEDECAY_BIN
+(default: bazel-bin/crates/tracedecay-cli/tracedecay).
 """
 
 import copy
@@ -54,7 +55,7 @@ def generate_plugin(work: Path) -> Path:
     """Generates the plugin into a throwaway HOME using the real installer."""
     repo_root = Path(__file__).resolve().parent.parent
     bin_path = Path(
-        os.environ.get("TRACEDECAY_BIN", repo_root / "target" / "debug" / "tracedecay")
+        os.environ.get("TRACEDECAY_BIN", repo_root / "bazel-bin" / "crates" / "tracedecay-cli" / "tracedecay")
     )
     assert bin_path.is_file(), f"tracedecay binary not found at {bin_path}"
     home = work / "home"

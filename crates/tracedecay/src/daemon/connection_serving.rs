@@ -174,7 +174,14 @@ fn serve_routed_rmcp_connection_inner(
             Ok(running) => running,
             // The client left before a request settled the handshake; every
             // frame it sent was already answered or refused on the wire.
-            Err(rmcp::service::ServerInitializeError::ConnectionClosed(_)) => return Ok(()),
+            Err(error)
+                if matches!(
+                    *error,
+                    rmcp::service::ServerInitializeError::ConnectionClosed(_)
+                ) =>
+            {
+                return Ok(());
+            }
             Err(error) => {
                 return Err(TraceDecayError::Config {
                     message: format!("rmcp server initialization failed: {error}"),

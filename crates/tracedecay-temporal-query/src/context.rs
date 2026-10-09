@@ -16,7 +16,9 @@ use super::resolution::summary::SummaryOmission;
 use crate::execution::TemporalPortError;
 
 const CANONICAL_CONTEXT_FORMAT: &str = "tracedecay.compact_context.v1";
-const MAX_CONTEXT_RECORDS: usize = 64;
+/// Maximum hydrated records accepted by one compact context assembly.
+/// Paged consumers must bound selection before hydration and retain continuation.
+pub const MAX_CONTEXT_RECORDS: usize = 64;
 const MAX_CONTEXT_ANCHORS: usize = 256;
 const MAX_CONTEXT_FRAME_ITEMS: usize = 256;
 const MAX_CONTEXT_OUTPUT_BYTES: u64 = 1024 * 1024;
