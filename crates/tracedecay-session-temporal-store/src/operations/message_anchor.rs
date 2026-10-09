@@ -238,8 +238,13 @@ async fn resolve_canonical_observations(
         let observation_raw = row
             .get::<Option<String>>(0)?
             .ok_or_else(|| unavailable(first_unresolved, "missing_observation_authority"))?;
-        let observation = serde_json::from_str::<DurableObservationV1>(&observation_raw)
-            .map_err(|_| unavailable(first_unresolved, "unverifiable_observation"))?;
+        let observation = crate::query::decode_stored_observation(
+            conn,
+            &observation_raw,
+            "resolve canonical observation",
+        )
+        .await
+        .map_err(|_| unavailable(first_unresolved, "unverifiable_observation"))?;
         if observation.source().provider().as_str() != provider
             || observation.source().session_id().as_str() != session_id
         {
