@@ -737,8 +737,8 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
 }
 
 /// Sends one host request through this session's tool surface: a tool search
-/// is answered here from the daemon's session catalog, and a `tools/list` or
-/// `initialize` answer is narrowed to the session's advertised tools.
+/// is answered here from the daemon's session catalog, a `tools/list` answer
+/// stubs pruned tools, and a stub `tools/call` hydrates the full schema.
 async fn send_host_request(
     surface: &mut ToolSurface,
     socket_path: &Path,
@@ -757,6 +757,9 @@ async fn send_host_request(
     let mut responses =
         send_daemon_request_with_project_open_retry(socket_path, handshake, request).await?;
     surface.rewrite(request.parsed.as_ref(), &mut responses);
+    if let Some(changed) = surface.unfreeze_call(request.parsed.as_ref()) {
+        responses.push(changed);
+    }
     Ok(responses)
 }
 
