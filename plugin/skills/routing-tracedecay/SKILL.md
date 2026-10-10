@@ -7,7 +7,8 @@ description: Pick the one TraceDecay tool for the moment you are in, then stop.
 
 Use this when you know the kind of question and not the tool. One row is one
 call. After that call answers the question, stop. Do not open a file you have
-not already located.
+not already located. If the opening call is not in the current tools/list,
+call `tracedecay_tool_search` with that name first, then make the call.
 
 | Moment | Skill | Opening call |
 | --- | --- | --- |
