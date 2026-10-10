@@ -38,11 +38,11 @@ lines are reduced to `quote:<chars>c`). Those sanitized rows are safe to cite.
 | `no text` | Calls whose stored result has Null content (Codex and Cursor Composer redact host output). They add no bytes or tokens. |
 | `calls 0 used` | Non-error calls where no result line was used |
 | `rerequests` | Later same-tool calls that asked for an already-returned path/symbol/quote. Not counted as use. |
-| `after cut` | Those rerequests whose original result's fact recorded `cut: true`. `null` when cut state is unknown, never an estimated 0. |
+| `after cut` | Those rerequests whose original result's fact recorded `cut: true`. A call with no rerequest adds 0. `null` when a rerequested result's cut state is unknown, never an estimated 0. |
 | `bytes` | Exact UTF-8 bytes of the result text, including each line's real newline. Not `len(line)+1`. |
 | `used bytes` / `unused bytes` | Bytes of used lines / all other lines |
 | `unused %` | `unused bytes / bytes` |
-| `tokens` | Stored `token_count` on the tool_result fact. `null` when missing. Tool-body `token_count` is ignored because `source_read` writes chars/4 there. Never tiktoken or an MCP trailer. |
+| `tokens` | Stored `token_count` on the tool_result fact: ingest's o200k count of the same text the meter scores. `null` when missing. The meter never tokenizes or estimates. Tool-body `token_count` is ignored because `source_read` writes chars/4 there, and MCP metrics trailers are ignored. |
 | `used tokens` / `unused tokens` | The stored total when every line is used or every line is unused. Mixed lines are `null` (splitting would be an estimate). |
 | `unused tokens %` | `unused tokens / tokens`, or `null` when either side is unmeasured |
 
@@ -89,8 +89,10 @@ The rules are conservative: a line counts as used only on direct evidence.
    query back never counts as use.
 6. Re-request: a later call of the same `tracedecay_*` tool whose arguments
    share a novelty-filtered anchor is a `rerequest`, not use. Re-request after
-   a cut is counted only when the original result's fact records `cut`.
-   Unknown cut state is `null`, never a guessed 0.
+   a cut is counted only when the original result's fact records
+   `cut: true`. Ingest omits `cut` when the output carries no truncation
+   evidence, so a rerequested result without it is `null`, never a guessed 0.
+   A call with no rerequest adds 0 whatever its cut state.
 7. Tokens: only a stored `token_count` on the tool_result fact. A failed or
    absent count is `null`. Tool-body `token_count` is ignored. Used/unused
    tokens are filled only when every line is used or every line is unused.
@@ -112,13 +114,16 @@ without results contributes no rows. Calls made through a shell command
 Two provider gaps limit coverage today:
 
 - Codex stores `function_call_output` results with Null content, so those
-  calls land in `no text`.
+  calls land in `no text`. Ingest still counts the host-recorded output into
+  their `token_count`, but the meter cannot see that text, so it adds neither
+  bytes nor tokens for them.
 - Current Codex rollouts record MCP calls as `event_msg.item_completed`
   `McpToolCall` items. Capture does not project those items, so the calls
   do not appear at all.
 
-Token columns stay `null` until stored `tool_result` facts carry a real
-`token_count` (#3397, draft #3400). Do not estimate.
+Stored `tool_result` facts carry a real `token_count` only from #3400
+(#3397) on. History ingested before it has none, so its token columns stay
+`null`. Do not estimate.
 
 ## Tests
 

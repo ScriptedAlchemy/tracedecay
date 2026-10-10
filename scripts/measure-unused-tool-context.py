@@ -45,7 +45,8 @@ docs/development/unused-tool-context.md):
 * Re-request: a later call of the *same* `tracedecay_*` tool whose arguments
   share a novelty-filtered anchor is counted separately and is not use.
 * Re-request after a cut: counted only when the original result's fact
-  records `cut`. If cut state is unknown, the count is null, never 0.
+  records `cut: true`. A call with no re-request is 0 whatever its cut
+  state; a re-request whose cut state is unknown is null, never 0.
 * Tokens: only a stored non-negative `token_count` on the tool_result fact.
   Tool-body `token_count` and MCP `tracedecay_metrics` trailer numbers are
   never token sources. Mixed used/unused lines leave used/unused tokens
@@ -283,9 +284,8 @@ def analyze(events: list[Event], session: str = "") -> tuple[list[CallReport], i
         if report.text_stored and not result.is_error:
             score_lines(report, result.text, before, later_use)
             report.rerequest_calls = count_rerequests(result.text, before, later_rerequest)
-            report.rerequest_after_cut = (
-                None if result.cut is None else (report.rerequest_calls if result.cut else 0)
-            )
+            if result.cut is not None or report.rerequest_calls == 0:
+                report.rerequest_after_cut = report.rerequest_calls if result.cut else 0
             report.total_tokens = result.tokens
             report.used_tokens, report.unused_tokens = attribute_tokens(
                 result.tokens, report.used_lines, report.lines
@@ -511,7 +511,7 @@ def aggregate(reports: list[CallReport]) -> list[dict]:
         row["calls_zero_used"] += report.used_lines == 0
         row["rerequest_calls"] += report.rerequest_calls
         row["calls_without_tokens"] += report.total_tokens is None
-        row["calls_without_cut"] += report.rerequest_after_cut is None
+        row["rerequests_without_cut"] += report.rerequest_after_cut is None
         for key in ("total_bytes", "used_bytes", "lines", "used_lines"):
             row[key] += getattr(report, key)
         measured = tokens[report.tool]

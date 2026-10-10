@@ -160,9 +160,7 @@ class MatchingRules(unittest.TestCase):
         self.assertIsNone(report.used_tokens)
         self.assertIsNone(report.unused_tokens)
 
-    def test_chars_div_four_and_metrics_trailer_are_not_tokens(self) -> None:
-        self.assertFalse(hasattr(measure, "estimate_tokens"))
-        self.assertFalse(hasattr(measure.CallReport, "total_chars"))
+    def test_only_a_stored_integer_token_count_is_a_token_count(self) -> None:
         self.assertIsNone(measure.stored_token_count({"after": 9}))
         self.assertIsNone(measure.stored_token_count({"token_count": "12"}))
         self.assertEqual(measure.stored_token_count({"token_count": 12}), 12)
@@ -192,7 +190,9 @@ class MatchingRules(unittest.TestCase):
         first, _ = measure.analyze(events)[0]
         self.assertEqual(first.rerequest_calls, 1)
         self.assertIsNone(first.rerequest_after_cut)
-        self.assertIsNone(measure.aggregate([first])[0]["rerequest_after_cut"])
+        row = measure.aggregate([first])[0]
+        self.assertIsNone(row["rerequest_after_cut"])
+        self.assertEqual(row["rerequests_without_cut"], 1)
 
     def test_rerequest_after_recorded_cut_is_counted(self) -> None:
         events = [
@@ -207,6 +207,13 @@ class MatchingRules(unittest.TestCase):
         row = measure.aggregate([first, second])[0]
         self.assertEqual(row["rerequest_after_cut"], 1)
 
+    def test_unknown_cut_without_rerequest_is_zero(self) -> None:
+        events = [Call("c1", SEARCH, "{}"), Result("c1", RESULT)]
+        (report,), _ = measure.analyze(events)
+        self.assertEqual(report.rerequest_after_cut, 0)
+        row = measure.aggregate([report])[0]
+        self.assertEqual((row["rerequest_after_cut"], row["rerequests_without_cut"]), (0, 0))
+
     def test_recorded_cut_without_rerequest_is_zero(self) -> None:
         events = [Call("c1", SEARCH, "{}"), Result("c1", RESULT, cut=True)]
         (report,), _ = measure.analyze(events)
@@ -219,8 +226,6 @@ class MatchingRules(unittest.TestCase):
         self.assertIsNone(row["total_tokens"])
         table = measure.render([row], {"sessions_with_calls": 1})
         self.assertIn("| null | null | null | null |", table)
-        self.assertNotIn("total_chars", json.dumps(row))
-        self.assertNotIn("chars / 4", table)
         coverage = measure.token_count_coverage([row])
         self.assertEqual(coverage["scored_non_error_calls"], 2)
         self.assertEqual(coverage["calls_with_token_count"], 1)
@@ -395,7 +400,7 @@ class HostResultShapes(unittest.TestCase):
     def claude_events(self, tokens: int | None) -> list:
         result_fact = {"kind": "tool_result", "invocation_id": "toolu_01", "content": self.CLAUDE_BLOCKS}
         if tokens is not None:
-            result_fact |= {"token_count": tokens, "cut": False}
+            result_fact["token_count"] = tokens
         rows = [
             lcm_row(1, "assistant", '{"query":"config"}', [
                 {"kind": "tool_invocation", "invocation_id": "toolu_01", "name": SEARCH, "arguments": {"query": "config"}}
@@ -435,7 +440,7 @@ class HostResultShapes(unittest.TestCase):
                 {"kind": "tool_invocation", "invocation_id": "call_1", "name": "tracedecay__tracedecay_search", "arguments": '{"query":"config"}'}
             ]),
             lcm_row(2, "tool", "null", [
-                {"kind": "tool_result", "invocation_id": "call_1", "content": None, "success": True, "token_count": 412, "cut": False}
+                {"kind": "tool_result", "invocation_id": "call_1", "content": None, "success": True, "token_count": 412}
             ]),
         ]
         (report,), unpaired = measure.analyze(measure.events_from_messages(rows), "codex")
