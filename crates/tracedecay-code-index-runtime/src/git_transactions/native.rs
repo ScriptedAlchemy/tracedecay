@@ -127,6 +127,8 @@ impl NativeGitIndexPreviewAssembler {
         runner: &FixedGitIndexRunner,
         lock: &NativeIndexLock,
     ) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
+        let checkpoint = || runner.check_cancelled().map_err(map_native_error);
+        checkpoint()?;
         if template.project_id != self.project_id
             || template.repository_id != self.repository_id
             || template.worktree_id.as_ref() != Some(&self.worktree_id)
@@ -138,8 +140,9 @@ impl NativeGitIndexPreviewAssembler {
         // sent callers to recapture and retry a read that fails identically.
         let status = self
             .read_authority()
-            .status()
+            .status_within(runner.command_bounds())
             .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
+        checkpoint()?;
         let index_bytes = runner.index_bytes().map_err(map_native_error)?;
         let index_checksum = canonical_sha256(&index_bytes)
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
@@ -153,7 +156,9 @@ impl NativeGitIndexPreviewAssembler {
             .filter(|entry| matches!(entry, GitStatusEntryV1::Tracked(_)))
             .collect::<Vec<_>>();
         let tracked_digest = runner.tracked_worktree_digest().map_err(map_native_error)?;
+        checkpoint()?;
         let untracked_name_digest = runner.untracked_name_digest().map_err(map_native_error)?;
+        checkpoint()?;
         let ignored_collision_digest = runner.ignored_name_digest().map_err(map_native_error)?;
 
         let index_state = if status.coverage.records(GitDegradationV1::SplitIndex) {
@@ -187,8 +192,11 @@ impl NativeGitIndexPreviewAssembler {
             _ => RepositoryWorkingTreeStateV1::Unreadable,
         };
 
+        checkpoint()?;
         let configuration_digest = runner.configuration_digest().map_err(map_native_error)?;
+        checkpoint()?;
         let attributes_digest = runner.attributes_digest().map_err(map_native_error)?;
+        checkpoint()?;
         let head = runner.head_state().map_err(map_native_error)?;
         RepositoryStateSnapshotV1::new(
             self.project_id.clone(),
@@ -835,7 +843,7 @@ fn unsupported_selected_paths(
             return Some(unreadable);
         }
     }
-    let filtered_paths = match check_attr_filter_paths(runner.repository_root(), paths) {
+    let filtered_paths = match check_attr_filter_paths(runner, paths) {
         Ok(filtered_paths) => filtered_paths,
         Err(()) => return Some(unreadable),
     };
@@ -846,13 +854,13 @@ fn unsupported_selected_paths(
 }
 
 fn check_attr_filter_paths(
-    repository_root: &Path,
+    runner: &FixedGitIndexRunner,
     paths: &[String],
 ) -> Result<BTreeSet<String>, ()> {
     if paths.is_empty() {
         return Ok(BTreeSet::new());
     }
-    let mut command = read_git_command(repository_root);
+    let mut command = runner.command().map_err(|_| ())?;
     command.args([
         "check-attr",
         "-z",
@@ -863,7 +871,7 @@ fn check_attr_filter_paths(
         "--",
     ]);
     command.args(paths);
-    let output = command.output().map_err(|_| ())?;
+    let output = runner.run_bounded(command).map_err(|_| ())?;
     if !output.status.success() {
         return Err(());
     }
@@ -1237,6 +1245,7 @@ fn map_native_error(error: NativeGitIndexError) -> GitIndexTransactionPortError 
         NativeGitIndexError::IndexLocked | NativeGitIndexError::PartialHunkSelectionUnsupported => {
             GitIndexTransactionPortError::Unsupported
         }
+        NativeGitIndexError::Cancelled => GitIndexTransactionPortError::NativeFailure,
         NativeGitIndexError::PatchDoesNotMatchHunk
         | NativeGitIndexError::CandidateTreeMismatch
         | NativeGitIndexError::StaleRepositoryState => GitIndexTransactionPortError::StalePreview,
@@ -1271,6 +1280,7 @@ pub fn capture_exact_snapshot(
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
     captured_at: UtcMicros,
+    request_bounds: Option<&tracedecay_runtime_core::git::GitCommandBounds>,
 ) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
     // Same canonical root the daemon owner mounts; alias paths must not mint a
     // divergent snapshot that later fails exact preview CAS.
@@ -1282,11 +1292,13 @@ pub fn capture_exact_snapshot(
         repository_id,
         worktree_id,
     );
-    let runner = FixedGitIndexRunner::new(&repository_root).map_err(map_native_error)?;
-    let status = assembler
-        .read_authority()
-        .status()
-        .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
+    let mut runner = FixedGitIndexRunner::new(&repository_root).map_err(map_native_error)?;
+    if let Some(bounds) = request_bounds {
+        runner = runner.with_command_bounds(bounds.clone());
+    }
+    let checkpoint = || runner.check_cancelled().map_err(map_native_error);
+    checkpoint()?;
+    let head = runner.head_state().map_err(map_native_error)?;
     let lock = runner.acquire_index_lock().map_err(map_native_error)?;
     let tree = runner
         .index_tree_under_lock(&lock)
@@ -1297,7 +1309,7 @@ pub fn capture_exact_snapshot(
         Some(assembler.worktree_id.clone()),
         1,
         tree.format(),
-        status.head,
+        head,
         RepositoryIndexSnapshotV1 {
             checksum: canonical_sha256(&b"placeholder".as_slice())
                 .map_err(|_| GitIndexTransactionPortError::NativeFailure)?,
@@ -1340,6 +1352,7 @@ pub fn capture_exact_snapshot_for_test(
         repository_id,
         worktree_id,
         captured_at,
+        None,
     )
     .map_err(test_snapshot_error)
 }
@@ -1393,6 +1406,93 @@ mod tests {
             .expect("Git output is UTF-8")
             .trim()
             .to_owned()
+    }
+
+    #[test]
+    fn cancelled_snapshot_releases_the_index_lock() {
+        let (directory, _assembler, runner) = repository_fixture();
+        let lock_path = runner.index_lock_path();
+        let cancel = tracedecay_runtime_core::cancellation::CancellationToken::new();
+        let watch = cancel.clone();
+        let watch_path = lock_path.clone();
+        let watcher = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while !watch_path.exists() {
+                if started.elapsed() > std::time::Duration::from_secs(5) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            watch.cancel();
+        });
+        let result = capture_exact_snapshot(
+            directory.path(),
+            ProjectId::new("project.fixture").expect("project id"),
+            RepositoryId::new("repository.fixture").expect("repository id"),
+            WorktreeId::new("worktree.fixture").expect("worktree id"),
+            UtcMicros(1),
+            Some(&tracedecay_runtime_core::git::GitCommandBounds {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+                cancel: Some(cancel),
+                ..tracedecay_runtime_core::git::GitCommandBounds::default()
+            }),
+        );
+        let _ = watcher.join();
+        assert!(
+            matches!(result, Err(GitIndexTransactionPortError::NativeFailure)),
+            "cancellation after acquiring the real index lock must fail closed, got {result:?}"
+        );
+        assert!(
+            !lock_path.exists(),
+            "the real index.lock must be gone after the cancelled snapshot returns"
+        );
+        runner
+            .acquire_index_lock()
+            .expect("cancelled snapshot must drop the real index lock");
+    }
+
+    #[test]
+    fn unbounded_snapshot_captures_a_listing_beyond_the_default_read_limit() {
+        let (directory, _assembler, _runner) = repository_fixture();
+        let blob = git_value(directory.path(), &["rev-parse", "HEAD:packet.txt"]);
+        let segment = "d".repeat(240);
+        let mut index_info = String::new();
+        for entry in 0..18_000 {
+            std::fmt::Write::write_fmt(
+                &mut index_info,
+                format_args!("100644 {blob}\t{segment}/{segment}/{segment}/{segment}/{entry}\n"),
+            )
+            .expect("format index entry");
+        }
+        let mut update = Command::new("git")
+            .current_dir(directory.path())
+            .args(["update-index", "--index-info"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("git update-index starts");
+        std::io::Write::write_all(
+            &mut update.stdin.take().expect("update-index stdin"),
+            index_info.as_bytes(),
+        )
+        .expect("write index info");
+        assert!(update.wait().expect("update-index exits").success());
+        git(
+            directory.path(),
+            &["commit", "--quiet", "-m", "wide listing"],
+        );
+
+        let snapshot = capture_exact_snapshot(
+            directory.path(),
+            ProjectId::new("project.fixture").expect("project id"),
+            RepositoryId::new("repository.fixture").expect("repository id"),
+            WorktreeId::new("worktree.fixture").expect("worktree id"),
+            UtcMicros(1),
+            None,
+        );
+        assert!(
+            snapshot.is_ok(),
+            "a snapshot without a request budget must not inherit read-request limits: {snapshot:?}"
+        );
     }
 
     fn repository_fixture() -> (TempDir, NativeGitIndexPreviewAssembler, FixedGitIndexRunner) {

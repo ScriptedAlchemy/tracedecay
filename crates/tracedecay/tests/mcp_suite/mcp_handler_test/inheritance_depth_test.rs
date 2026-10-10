@@ -17,7 +17,7 @@ use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_mcp::JsonRpcResponse;
 
 use crate::common::fixture::git_run;
-use crate::support::{refusal_problem, test_temp_dir};
+use crate::support::{harness_wait_for_readiness, refusal_problem, test_temp_dir};
 
 const HIERARCHY: &str = "\
 pub trait Left {}
@@ -100,47 +100,16 @@ async fn open_project(files: &[(&str, &str)]) -> OpenedProject {
         root,
         _dir: dir,
     };
-    wait_for_graph(&project).await;
+    // `ready` counts a graph parked and released for memory as served, so
+    // each inheritance read below must re-warm it on its own.
+    harness_wait_for_readiness(
+        &project.harness,
+        &project.root,
+        "ready",
+        Duration::from_secs(20),
+    )
+    .await;
     project
-}
-
-async fn wait_for_graph(project: &OpenedProject) {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let response = call_tool(
-                project,
-                "tracedecay_status",
-                json!({
-                    "format": "json",
-                    "include_branch_diagnostics": false,
-                    "include_storage_health": false,
-                    "include_session_ingest": false,
-                    "include_staleness": false,
-                }),
-            )
-            .await;
-            let status = json_body(&response);
-            let freshness = &status["code_index_freshness"];
-            let serving = &freshness["worktree"]["code_graph_serving"];
-            match (
-                freshness["status"].as_str(),
-                serving["state"].as_str(),
-                serving["reason"].as_str(),
-                freshness["worktree"]["staleness_state"].as_str(),
-            ) {
-                (Some("current"), Some("ready"), _, _) => break,
-                (Some("warming"), _, _, _)
-                | (Some("stale"), Some("ready"), _, Some("verifying"))
-                | (_, Some("pending"), _, _)
-                | (_, Some("unavailable"), Some("generation_unavailable"), _) => {
-                    tokio::task::yield_now().await;
-                }
-                other => panic!("graph readiness became {other:?}: {status}"),
-            }
-        }
-    })
-    .await
-    .expect("graph did not become current");
 }
 
 async fn call_tool(project: &OpenedProject, tool: &str, arguments: Value) -> JsonRpcResponse {
