@@ -529,6 +529,77 @@ pub(crate) fn open_writer(
     Ok(connection)
 }
 
+/// The pathname SQLite is handed, spelled for its Windows VFS.
+///
+/// A `\\?\`-prefixed (extended-length/UNC-form) path makes the win32 VFS
+/// treat the database as UNC (`winIsUNCPath`), which puts every WAL
+/// shared-memory lock through the shared-handle emulation: read-lock
+/// ownership then lives in per-connection masks rather than real OS byte
+/// locks, and a failed `UnlockFile` there leaves a mask bit set forever —
+/// an error the VFS cannot see because its own bookkeeping is what lies.
+/// The classic per-handle path instead conflicts against real OS locks,
+/// so a lock the VFS records is a lock it genuinely holds.
+///
+/// Only a verbatim *disk* path is shortened, and only when the conversion
+/// cannot change which object the name resolves to. Removing the prefix
+/// switches on Win32 name parsing — trailing dots/spaces are stripped, `.`
+/// and `..` components are resolved, `/` becomes a separator, and reserved
+/// DOS-device components get special treatment — so any component with those
+/// semantics keeps the verbatim spelling rather than risk opening a different
+/// file. The classic `CreateFileW` limit is checked in UTF-16 code units and
+/// leaves room for SQLite's `-wal`/`-shm` sidecars.
+fn sqlite_host_path(path: &Path) -> PathBuf {
+    // Only Windows gives `\\?\` verbatim-path semantics; elsewhere that byte
+    // sequence is a legitimate relative filename and must pass through.
+    if !cfg!(windows) {
+        return path.to_path_buf();
+    }
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let Some(rest) = text.strip_prefix(r"\\?\") else {
+        return path.to_path_buf();
+    };
+    let bytes = rest.as_bytes();
+    let is_verbatim_disk =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    if is_verbatim_disk
+        && rest.encode_utf16().count() + 4 <= 259
+        && rest.split('\\').all(win32_name_stable_component)
+    {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Whether a single path component reads identically under verbatim and
+/// classic Win32 name parsing. Compiled on every host because the reference
+/// in `sqlite_host_path` is not cfg-gated, though the `cfg!(windows)` guard
+/// short-circuits before it runs.
+fn win32_name_stable_component(component: &str) -> bool {
+    // Reserved DOS device names are matched on the part before the first
+    // '.', per the Win32 namespace rules.
+    const DOS_DEVICES: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "COM\u{b9}", "COM\u{b2}", "COM\u{b3}", "LPT0", "LPT1", "LPT2", "LPT3",
+        "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT\u{b9}", "LPT\u{b2}", "LPT\u{b3}",
+    ];
+    if component.is_empty()
+        || component == "."
+        || component == ".."
+        || component.ends_with('.')
+        || component.ends_with(' ')
+        || component.contains('/')
+    {
+        return false;
+    }
+    let stem = component.split('.').next().unwrap_or(component);
+    !DOS_DEVICES
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device))
+}
+
 fn open_raw(
     path: &Path,
     mode: ConnectionMode,
@@ -538,6 +609,7 @@ fn open_raw(
         {
             let fresh_writer = mode == ConnectionMode::Writer
                 && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0);
+            let path = sqlite_host_path(path);
             let flags = match mode {
                 ConnectionMode::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY,
                 ConnectionMode::Writer | ConnectionMode::Maintenance => {
@@ -545,7 +617,7 @@ fn open_raw(
                 }
             } | OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
-            let connection = Connection::open_with_flags(path, flags)
+            let connection = Connection::open_with_flags(&path, flags)
                 .map_err(|source| policy("open", source))?;
 
             Ok((connection, fresh_writer))
@@ -606,7 +678,7 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
     {
         let _span = tracing::trace_span!("rusqlite.connection.open_immutable").entered();
         {
-            let uri = immutable_health_uri(path)?;
+            let uri = immutable_health_uri(&sqlite_host_path(path))?;
             let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
