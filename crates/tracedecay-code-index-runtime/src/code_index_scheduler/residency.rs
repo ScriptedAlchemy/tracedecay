@@ -40,6 +40,7 @@ use tracedecay_runtime_core::resident_memory::{
 
 use super::reconcile::ReconcilePassesV1;
 use super::registry::{CodeIndexSchedulerRegistryV1, ServingGenerationSlot};
+use super::serving::ParkedGraphReleaseCallback;
 use super::{DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1};
 
 /// Whether a serving read renews its worktree's residency lease.
@@ -286,7 +287,7 @@ impl WorktreeResidencyV1 {
         }
         let residency = Arc::downgrade(self);
         let owners = Arc::downgrade(owners);
-        let retry: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let retry: ParkedGraphReleaseCallback = Arc::new(move || {
             if let (Some(residency), Some(owners)) = (residency.upgrade(), owners.upgrade()) {
                 residency.release_decode_when_parked(&owners);
             }

@@ -376,6 +376,8 @@ pub struct LatestCompleteCodeIndexV1 {
     pub(super) record_index: Arc<OnceLock<queries::GenerationRecordIndexV1>>,
 }
 
+pub(super) type ParkedGraphReleaseCallback = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone)]
 pub struct LatestCodeTextGenerationV1 {
     pub(super) metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
@@ -420,7 +422,7 @@ pub struct LatestCodeTextGenerationV1 {
     pub(super) park_release_after_catalog_warm_armed: Arc<AtomicBool>,
     /// Bound by the parked worktree so the first catalog warm can retry
     /// park-release on this owner without a cadence arrival.
-    pub(super) parked_graph_release: Arc<RwLock<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    pub(super) parked_graph_release: Arc<RwLock<Option<ParkedGraphReleaseCallback>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2232,7 +2234,7 @@ impl LatestCodeTextGenerationV1 {
         }
     }
 
-    pub(super) fn bind_parked_graph_release(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+    pub(super) fn bind_parked_graph_release(&self, hook: ParkedGraphReleaseCallback) {
         *self
             .parked_graph_release
             .write()
