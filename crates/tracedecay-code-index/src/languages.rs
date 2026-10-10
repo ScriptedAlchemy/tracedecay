@@ -279,11 +279,15 @@ impl StaticLanguageRegistry {
             // TypeScript v13 (Svelte and Astro v9) extracts exported, nested,
             // dotted, and `module` namespaces, and retains a member call on a
             // computed receiver as a disclosed caller gap.
+            // TypeScript v14 (Svelte and Astro v10) extracts CommonJS
+            // `module.exports` / `exports.foo` assignments as public consts,
+            // so a JS config that only assigns the export object binds a
+            // symbol grain and appears in the indexed-file census.
             // Go v10 records method sets for seal-time interface satisfaction.
             let extractor_revision = match language.as_str() {
                 "rust" => 19,
-                "typescript" => 13,
-                "svelte" | "astro" => 9,
+                "typescript" => 14,
+                "svelte" | "astro" => 10,
                 "go" => 10,
                 "java" => 8,
                 "ruby" | "protobuf" | "python" => 7,
