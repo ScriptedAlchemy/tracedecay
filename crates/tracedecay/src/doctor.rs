@@ -331,7 +331,6 @@ fn render_daemon_status(
     dc: &mut DoctorCounters,
     status: &serde_json::Value,
 ) -> tracedecay_domain::errors::Result<DoctorDaemonFindingsV1> {
-    crate::daemon::reject_stalled_project_open_status(status)?;
     render_project_open_status(dc, status)?;
     let schema_convergences = render_schema_convergences(dc, status)?;
     Ok(match canonical_daemon_doctor_report(status)? {
@@ -498,9 +497,6 @@ fn render_project_open_status(
             .as_deref()
             .map_or_else(String::new, |detail| format!(": {detail}")),
     );
-    if project_open.state == ProjectOpenStatusStateV1::Stalled {
-        return Err(crate::daemon::stalled_project_open_error(&project_open));
-    }
     if project_open.state == ProjectOpenStatusStateV1::Completed {
         dc.pass(&message);
     } else if project_open.reason == ProjectOpenStatusReasonV1::UnrepairableVerdict {
