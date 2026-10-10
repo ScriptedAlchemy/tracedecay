@@ -37,7 +37,8 @@ async fn cancellation_returns_before_a_read_worker_settles_but_shutdown_joins_it
             },
         })
         .expect("dispatch control");
-    let cancellation = prepared.control.cancellation();
+    let control = prepared.control;
+    let cancellation = control.cancellation();
     let worker_started = Arc::new(tokio::sync::Notify::new());
     let worker_release = Arc::new(tokio::sync::Notify::new());
     let worker_finished = Arc::new(AtomicBool::new(false));
@@ -45,9 +46,9 @@ async fn cancellation_returns_before_a_read_worker_settles_but_shutdown_joins_it
     let release = Arc::clone(&worker_release);
     let finished = Arc::clone(&worker_finished);
     let runner_authority = Arc::clone(&authority);
+    let runner_control = control.clone();
     let runner = tokio::spawn(async move {
-        prepared
-            .control
+        runner_control
             .run_retained(runner_authority.registry(), async move {
                 started.notify_one();
                 release.notified().await;
@@ -73,7 +74,7 @@ async fn cancellation_returns_before_a_read_worker_settles_but_shutdown_joins_it
     );
     assert!(!worker_finished.load(Ordering::Acquire));
 
-    let settled = cancelled.wait_for_settlement();
+    let settled = control.settle_cancelled(&cancelled);
     tokio::pin!(settled);
     assert!(
         tokio::time::timeout(Duration::from_millis(100), &mut settled)

@@ -120,8 +120,7 @@ impl<T> RetainedDispatchOutcome<T> {
         self.settlement.snapshot()
     }
 
-    /// Wait for retained request resources before acknowledging transport cancellation.
-    pub async fn wait_for_settlement(&self) {
+    async fn wait_for_settlement(&self) {
         loop {
             let completed = self.settlement.completion.notified();
             tokio::pin!(completed);
@@ -569,6 +568,15 @@ impl DispatchControl {
 
     pub fn cancellation(&self) -> tracedecay_contracts::CancellationSignal {
         self.cancellation.clone()
+    }
+
+    /// Holds a cancelled dispatch's reply until its retained worker releases
+    /// what it owns, but never past the request deadline: a worker that
+    /// ignores cancellation must not withhold the typed terminal.
+    pub async fn settle_cancelled<T>(&self, outcome: &RetainedDispatchOutcome<T>) {
+        if self.cancellation.is_cancelled() {
+            let _ = tokio::time::timeout_at(self.deadline_at, outcome.wait_for_settlement()).await;
+        }
     }
 
     #[tracing::instrument(name = "mcp.server.dispatch.settlement", level = "trace", skip_all)]
