@@ -1203,6 +1203,8 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
         "the catalog holds {held} bytes, less than the {served_id_bytes} bytes of ids it serves"
     );
 
+    // A live reader retains the catalog owner; the release waits for it.
+    drop(reader);
     assert_eq!(
         store.release_interactive_catalog(),
         CodeGraphCatalogReleaseV1::Released { bytes: held }
@@ -1223,8 +1225,9 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
 
     // A read whose budget ends after its first look cannot rebuild the
     // catalog itself; it answers warming and the rebuild runs on its own.
+    let reopened = self::reader(&store);
     assert_eq!(
-        reader
+        reopened
             .symbols_page(
                 None,
                 10,
@@ -1251,12 +1254,43 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
     assert_eq!(store.interactive_catalog_scan_builds(), 2);
     assert_eq!(store.interactive_catalog_bytes(), Some(held));
     let after = occurrences(
-        &reader
+        &reopened
             .symbols_page(None, 10, request())
             .expect("the rebuilt catalog serves")
             .symbols,
     );
     assert_eq!(after, before);
+}
+
+/// A parked release cannot evict the catalog under an admitted read: the
+/// owner stays retained while a reader lives and frees when the last one
+/// drops. Cloned readers — the path `metered` takes — share one hold.
+///
+/// Fails if the release evicts a ready catalog a live reader is about to
+/// walk, or keeps it after every reader is gone.
+#[test]
+fn a_release_answers_busy_while_a_reader_holds_the_catalog() {
+    let store = store_for(production_manifest());
+    let reader = reader(&store);
+    reader
+        .symbols_page(None, 10, request())
+        .expect("warm catalog");
+    let metered = reader.clone();
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Busy
+    );
+    drop(reader);
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Busy,
+        "a clone holds the same lease"
+    );
+    drop(metered);
+    assert!(matches!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Released { .. }
+    ));
 }
 
 /// Holds the catalog build gate for `hold`, the way a corpus-sized scan
@@ -1296,6 +1330,7 @@ fn a_read_waits_for_a_rewarm_that_finishes_within_its_budget() {
             .expect("warm catalog")
             .symbols,
     );
+    drop(reader);
     assert!(matches!(
         store.release_interactive_catalog(),
         CodeGraphCatalogReleaseV1::Released { .. }
@@ -1314,8 +1349,9 @@ fn a_read_waits_for_a_rewarm_that_finishes_within_its_budget() {
         "the read waited {waited:?} for a 1 s re-warm"
     );
     assert_eq!(store.serving_warmth(), Ok(CodeGraphServingWarmthV1::Warm));
+    let reopened = self::reader(&store);
     let after = occurrences(
-        &reader
+        &reopened
             .symbols_page(None, 10, request())
             .expect("the re-warmed catalog serves the read")
             .symbols,

@@ -101,7 +101,56 @@ pub(super) struct InteractiveCatalogCache {
     /// [`InteractiveCatalog::retained_bytes`] of the ready catalog, measured
     /// once when it is built.
     ready_bytes: std::sync::atomic::AtomicU64,
+    /// Live readers holding this cache. A memory release answers Busy while
+    /// any reader is assembled: evicting the ready catalog under an admitted
+    /// read turns every later catalog lookup into the typed warming answer
+    /// the reader could not have waited out.
+    readers: std::sync::atomic::AtomicUsize,
     clock: Arc<WarmClock>,
+}
+
+/// One assembled reader's hold on the catalog cache.
+///
+/// Mirrors the engine release, which already stays pinned while a reader is
+/// open: the catalog owner is retained across the complete read, so a park
+/// release cannot evict it between a readiness wait and the reader's next
+/// catalog lookup.
+pub struct InteractiveCatalogReaderLeaseV1 {
+    cache: Arc<InteractiveCatalogCache>,
+}
+
+impl InteractiveCatalogReaderLeaseV1 {
+    fn retain(cache: &Arc<InteractiveCatalogCache>) -> Arc<Self> {
+        cache
+            .readers
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Arc::new(Self {
+            cache: Arc::clone(cache),
+        })
+    }
+}
+
+impl Drop for InteractiveCatalogReaderLeaseV1 {
+    fn drop(&mut self) {
+        self.cache
+            .readers
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+impl fmt::Debug for InteractiveCatalogReaderLeaseV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InteractiveCatalogReaderLeaseV1")
+            .field(
+                "readers",
+                &self
+                    .cache
+                    .readers
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish()
+    }
 }
 
 /// What a catalog read would wait on, as [`InteractiveCatalogCache::residency`]
@@ -141,6 +190,7 @@ impl InteractiveCatalogCache {
             build: Mutex::new(()),
             scan_builds: std::sync::atomic::AtomicUsize::new(0),
             ready_bytes: std::sync::atomic::AtomicU64::new(0),
+            readers: std::sync::atomic::AtomicUsize::new(0),
             clock,
         }
     }
@@ -174,6 +224,24 @@ impl InteractiveCatalogCache {
         }
     }
 
+    /// Retain the ready catalog for a read that is being admitted,
+    /// atomically with the Ready check: [`Self::release`] holds the state
+    /// write lock while it inspects the reader count, so either the release
+    /// already evicted — this sees `Released` and returns `None` — or the
+    /// reader is counted first and the release answers
+    /// [`CodeGraphCatalogReleaseV1::Busy`].
+    pub(super) fn retain_ready_reader(
+        cache: &Arc<Self>,
+    ) -> Option<Arc<InteractiveCatalogReaderLeaseV1>> {
+        let Ok(state) = cache.state.read() else {
+            return None;
+        };
+        if !matches!(&*state, InteractiveCatalogState::Ready(_)) {
+            return None;
+        }
+        Some(InteractiveCatalogReaderLeaseV1::retain(cache))
+    }
+
     /// Return a ready catalog to cold. Never waits on a build or a reader.
     pub(super) fn release(&self) -> CodeGraphCatalogReleaseV1 {
         let Ok(_build) = self.build.try_lock() else {
@@ -182,6 +250,9 @@ impl InteractiveCatalogCache {
         let Ok(mut state) = self.state.try_write() else {
             return CodeGraphCatalogReleaseV1::Busy;
         };
+        if self.readers.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            return CodeGraphCatalogReleaseV1::Busy;
+        }
         if !matches!(&*state, InteractiveCatalogState::Ready(_)) {
             return CodeGraphCatalogReleaseV1::NotReady;
         }
@@ -227,6 +298,8 @@ pub struct CodeGraphInteractiveReader {
     projection_node_count: usize,
     cancellation: Arc<dyn GraphCancellation>,
     catalog: Arc<InteractiveCatalogCache>,
+    /// Retains the catalog owner while this reader lives; shared by clones.
+    catalog_lease: Arc<InteractiveCatalogReaderLeaseV1>,
     meter: Option<Arc<GraphReadMeter>>,
 }
 
@@ -236,6 +309,7 @@ impl fmt::Debug for CodeGraphInteractiveReader {
             .debug_struct("CodeGraphInteractiveReader")
             .field("generation", &self.generation)
             .field("projection_node_count", &self.projection_node_count)
+            .field("catalog_lease", &self.catalog_lease)
             .finish_non_exhaustive()
     }
 }
@@ -394,6 +468,7 @@ impl CodeGraphInteractiveReader {
             snapshot,
             projection_node_count,
             cancellation,
+            catalog_lease: InteractiveCatalogReaderLeaseV1::retain(&catalog),
             catalog,
             meter: None,
         }

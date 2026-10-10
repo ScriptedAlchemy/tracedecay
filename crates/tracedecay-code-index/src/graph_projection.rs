@@ -49,7 +49,7 @@ pub use self::interactive::{
     CodeGraphReadCostMeter, CodeGraphRelationKeyV1, CodeGraphRelationKeysV1,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
     CodeGraphSymbolPredicate, CodeGraphSymbolRefV1, CodeGraphSymbolSearchPageV1,
-    CodeGraphSymbolSummaryV1, UnresolvedCallerGapsV1,
+    CodeGraphSymbolSummaryV1, InteractiveCatalogReaderLeaseV1, UnresolvedCallerGapsV1,
 };
 pub use self::layered::{
     CodeGraphLayeredBuildV1, CodeGraphLayeredDeclineV1, CodeGraphLayeredReportV1,
@@ -612,6 +612,38 @@ impl CodeGraphProjectionStore {
     /// store's state as before.
     pub fn await_rewarm(&self, budget: Duration) -> Result<(), CodeGraphRewarmPendingV1> {
         self.await_rewarm_for(budget, CodeGraphReadinessRequirement::Catalog)
+    }
+
+    /// Like [`Self::await_rewarm_for`] for the catalog, except the confirmed
+    /// ready state is retained for the caller: the returned lease keeps the
+    /// catalog resident until the read it feeds is dropped, so a parked
+    /// release cannot evict it between this wait and the read's later
+    /// catalog lookups. `Ok(None)` means nothing was pending, as
+    /// `await_rewarm_for` reports — the read answers the store's state.
+    pub fn await_catalog_and_retain(
+        &self,
+        budget: Duration,
+    ) -> Result<Option<Arc<InteractiveCatalogReaderLeaseV1>>, CodeGraphRewarmPendingV1> {
+        let started = Instant::now();
+        let mut woke = false;
+        loop {
+            if let Some(lease) =
+                InteractiveCatalogCache::retain_ready_reader(&self.interactive_catalog)
+            {
+                return Ok(Some(lease));
+            }
+            let epoch = self.warm_clock.epoch();
+            let Some(pending) = self.rewarm_in_flight(woke, CodeGraphReadinessRequirement::Catalog)
+            else {
+                return Ok(None);
+            };
+            let left = budget.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                return Err(pending);
+            }
+            self.warm_clock.wait_past(epoch, left);
+            woke = true;
+        }
     }
 
     /// Waits only for the resident data required by this read.

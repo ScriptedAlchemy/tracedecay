@@ -13,8 +13,8 @@ use std::time::Duration;
 use serde::Serialize;
 
 use tracedecay_code_index::graph_projection::{
-    CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphReadinessRequirement,
-    CodeGraphSymbolRefV1, UnresolvedCallerGapsV1,
+    CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphSymbolRefV1,
+    InteractiveCatalogReaderLeaseV1, UnresolvedCallerGapsV1,
 };
 use tracedecay_contracts::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
@@ -1644,6 +1644,10 @@ struct PreparedGraphCallableQueryV1 {
     latest: LatestCodeTextGenerationV1,
     /// Counts every store read on [`Self::cost`].
     reader: CodeGraphInteractiveReader,
+    /// The catalog retain the readiness wait confirmed: holds the catalog
+    /// resident across the whole read so a parked release cannot evict it
+    /// between that wait and the reader's catalog lookups.
+    _catalog_retain: Option<Arc<InteractiveCatalogReaderLeaseV1>>,
     cost: CodeGraphReadCostMeter,
     query: PreparedQueryV1,
     /// Absent only when the scope unmounted between resolving `latest` and
@@ -1964,14 +1968,16 @@ impl CodeIndexSchedulerRegistryV1 {
         // request that spent its budget mid-warm, was cancelled, or lost
         // the wait task answers the typed unavailable rather than opening
         // a reader on a store it never waited out.
+        let mut catalog_retain = None;
         if let Some(budget) = remaining_generation_resolution_wait(context.request) {
             let waiting = Arc::clone(&store);
-            match tokio::task::spawn_blocking(move || {
-                waiting.await_rewarm_for(budget, CodeGraphReadinessRequirement::Catalog)
-            })
-            .await
+            match tokio::task::spawn_blocking(move || waiting.await_catalog_and_retain(budget))
+                .await
             {
-                Ok(Ok(())) => {}
+                // The wait leaves the ready catalog retained for this read;
+                // without one a parked release could evict it between the
+                // readiness confirmation and the reader's catalog lookups.
+                Ok(Ok(retain)) => catalog_retain = retain,
                 Ok(Err(_pending)) => return Err(CallableCodeCursorError::Unavailable),
                 Err(join_error) => {
                     tracing::warn!(
@@ -1997,6 +2003,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(PreparedGraphCallableQueryV1 {
             latest,
             reader,
+            _catalog_retain: catalog_retain,
             cost,
             query,
             cursor_retention,

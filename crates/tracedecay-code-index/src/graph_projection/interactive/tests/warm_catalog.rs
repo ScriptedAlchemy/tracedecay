@@ -149,7 +149,15 @@ fn background_marked_catalog_refuses_without_scanning_on_the_request_path() {
             "code graph interactive catalog is warming in the background".to_owned()
         )
     );
-    assert_eq!(store.interactive_catalog_scan_builds(), 0);
+    // The marked warm has no runner, so the refused read restarts it in the
+    // background: exactly one scan runs, on the restart's own thread.
+    store
+        .await_rewarm_for(
+            Duration::from_secs(30),
+            crate::graph_projection::CodeGraphReadinessRequirement::Catalog,
+        )
+        .expect("the restarted warm settles");
+    assert_eq!(store.interactive_catalog_scan_builds(), 1);
 }
 
 /// A marked background warm whose runner never starts — a memory release
