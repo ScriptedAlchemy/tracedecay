@@ -1932,8 +1932,7 @@ impl CommandStartupPolicy {
                 action:
                     SessionsAction::Import { .. }
                     | SessionsAction::GitSync { .. }
-                    | SessionsAction::Unfinished { .. }
-                    | SessionsAction::UnusedContext { .. },
+                    | SessionsAction::Unfinished { .. },
             }
             | Commands::Storage { .. }
             | Commands::Wipe { .. }

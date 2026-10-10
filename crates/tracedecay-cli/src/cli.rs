@@ -1186,24 +1186,6 @@ pub enum SessionsAction {
         #[arg(long, conflicts_with = "project_id")]
         project_path: Option<String>,
     },
-    /// Measure returned tool context that later turns never open, edit, quote, or cite
-    UnusedContext {
-        /// Spot-check examples kept per tool
-        #[arg(long, default_value_t = 3)]
-        examples: usize,
-        /// Maximum sessions to scan, most recently ingested first
-        #[arg(long, default_value_t = 500)]
-        session_limit: usize,
-        /// Output the typed report as JSON
-        #[arg(long)]
-        json: bool,
-        /// Registered project id whose session store should be measured
-        #[arg(long)]
-        project_id: Option<String>,
-        /// Registered project root path or alias whose session store should be measured
-        #[arg(long, conflicts_with = "project_id")]
-        project_path: Option<String>,
-    },
 }
 
 #[derive(Subcommand)]

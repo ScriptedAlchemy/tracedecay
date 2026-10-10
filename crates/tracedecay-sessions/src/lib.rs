@@ -42,7 +42,6 @@ mod provider;
 pub mod repository_provenance;
 pub mod runtime;
 pub mod serving;
-pub mod unused_context;
 mod workflow;
 
 pub use authorization::{

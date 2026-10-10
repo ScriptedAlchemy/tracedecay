@@ -404,35 +404,6 @@ fn parser_rejection(owner: &str, example: &str) -> Option<String> {
 }
 
 #[test]
-fn sessions_unused_context_parses_examples_and_session_limit() {
-    let cli = Cli::try_parse_from([
-        "tracedecay",
-        "sessions",
-        "unused-context",
-        "--json",
-        "--examples",
-        "4",
-        "--session-limit",
-        "50",
-        "--project-path",
-        "/tmp/project",
-    ])
-    .expect("unused-context should parse");
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Sessions {
-            action: crate::cli::SessionsAction::UnusedContext {
-                examples: 4,
-                session_limit: 50,
-                json: true,
-                project_path: Some(ref path),
-                ..
-            }
-        }) if path == "/tmp/project"
-    ));
-}
-
-#[test]
 fn every_help_example_is_accepted_by_the_parser() {
     let mut found = Vec::new();
     collect_help_examples(

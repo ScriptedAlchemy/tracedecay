@@ -32,7 +32,6 @@ mod session_authorities;
 pub mod skills;
 pub mod support;
 mod token_budget;
-pub(crate) mod unused_context;
 mod verified_read;
 pub mod work;
 pub mod workflow;

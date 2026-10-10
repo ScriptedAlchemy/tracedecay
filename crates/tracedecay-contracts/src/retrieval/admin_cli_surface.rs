@@ -62,13 +62,6 @@ pub enum AdminCliSurfaceRequestV1 {
     SessionsUnfinished {
         limit: usize,
     },
-    /// Measure how much returned tool context later sessions never reuse.
-    SessionsUnusedContext {
-        /// Maximum spot-check examples kept per tool.
-        example_limit: usize,
-        /// Maximum sessions to scan, most recently ingested first.
-        session_limit: usize,
-    },
     /// Import hook analytics JSONL into the accounting ledger.
     AnalyticsSync {
         scope: AdminCliScopeV1,
@@ -129,8 +122,7 @@ impl AdminCliSurfaceRequestV1 {
             | Self::SessionsGitSync { .. }
             | Self::SessionsSyncStatus { .. }
             | Self::SessionsSyncCancel { .. }
-            | Self::SessionsUnfinished { .. }
-            | Self::SessionsUnusedContext { .. } => OwnerStoresV1::ProjectSessions,
+            | Self::SessionsUnfinished { .. } => OwnerStoresV1::ProjectSessions,
             Self::CostSummary { .. }
             | Self::AnalyticsSync { .. }
             | Self::AnalyticsDiagnostics { .. }
@@ -153,7 +145,6 @@ pub enum AdminCliResultV1 {
     CostSummary(AdminCliCostSummaryV1),
     SessionSync(AdminCliSessionSyncV1),
     SessionsUnfinished(AdminCliUnfinishedSessionsV1),
-    SessionsUnusedContext(AdminCliUnusedContextReportV1),
     AnalyticsSync(AdminCliAnalyticsImportV1),
     RegistryUpdate(AdminCliRegistryUpdateV1),
     RegistryList(AdminCliRegistryListV1),
@@ -276,79 +267,6 @@ impl From<SessionSyncOutcomeV1> for AdminCliSessionSyncV1 {
 pub struct AdminCliUnfinishedSessionsV1 {
     /// Workflow state rows exactly as the session store serializes them.
     pub items: Vec<Value>,
-}
-
-/// How later turns reused one returned context unit.
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UnusedContextUsageKindV1 {
-    Opened,
-    Edited,
-    Quoted,
-    Cited,
-}
-
-/// One addressable unit returned by a tool, plus whether later turns reused it.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdminCliUnusedContextExampleV1 {
-    pub tool: String,
-    pub used: bool,
-    pub usage: Vec<UnusedContextUsageKindV1>,
-    pub provider: String,
-    pub session_id: String,
-    pub message_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub symbol: Option<String>,
-    pub preview: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence: Option<String>,
-    pub returned_tokens: u64,
-    pub returned_bytes: u64,
-}
-
-/// Per-tool used versus ignored returned context.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdminCliUnusedContextToolRatioV1 {
-    pub tool: String,
-    pub result_count: u64,
-    pub unit_count: u64,
-    pub returned_tokens: u64,
-    pub used_tokens: u64,
-    pub unused_tokens: u64,
-    pub returned_bytes: u64,
-    pub used_bytes: u64,
-    pub unused_bytes: u64,
-    /// `unused_tokens / returned_tokens` when anything was returned.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unused_ratio: Option<f64>,
-}
-
-/// Session-history measurement of returned tool context that later turns never reuse.
-///
-/// `meter` is the TraceDecay MCP trailer heuristic (`chars/4`), not provider
-/// billing. The body is distinct from every other admin-CLI result so the
-/// untagged result enum can decode it.
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdminCliUnusedContextReportV1 {
-    pub meter: String,
-    pub sessions_scanned: u64,
-    pub messages_scanned: u64,
-    pub tool_results_scanned: u64,
-    pub returned_tokens: u64,
-    pub used_tokens: u64,
-    pub unused_tokens: u64,
-    pub returned_bytes: u64,
-    pub used_bytes: u64,
-    pub unused_bytes: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unused_ratio: Option<f64>,
-    pub tools: Vec<AdminCliUnusedContextToolRatioV1>,
-    pub examples: Vec<AdminCliUnusedContextExampleV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -527,23 +445,6 @@ mod tests {
                 json!({"status": "accepted", "operation_id": "session-sync.a", "idempotency_key": "session-sync.a", "accepted_at": 7}),
             ),
             ("sessions_unfinished", json!({"items": []})),
-            (
-                "sessions_unused_context",
-                json!({
-                    "meter": "chars_div_4",
-                    "sessions_scanned": 0,
-                    "messages_scanned": 0,
-                    "tool_results_scanned": 0,
-                    "returned_tokens": 0,
-                    "used_tokens": 0,
-                    "unused_tokens": 0,
-                    "returned_bytes": 0,
-                    "used_bytes": 0,
-                    "unused_bytes": 0,
-                    "tools": [],
-                    "examples": [],
-                }),
-            ),
             ("analytics_sync", json!({"imported": 0, "sources": []})),
             ("registry_update", json!({"previous": 1, "current": 2})),
             (
@@ -607,7 +508,6 @@ mod tests {
                 AdminCliResultV1::CostSummary(_) => "cost_summary",
                 AdminCliResultV1::SessionSync(_) => "session_sync",
                 AdminCliResultV1::SessionsUnfinished(_) => "sessions_unfinished",
-                AdminCliResultV1::SessionsUnusedContext(_) => "sessions_unused_context",
                 AdminCliResultV1::AnalyticsSync(_) => "analytics_sync",
                 AdminCliResultV1::RegistryUpdate(_) => "registry_update",
                 AdminCliResultV1::RegistryList(_) => "registry_list",
@@ -681,7 +581,7 @@ mod tests {
         );
         assert_eq!(
             refused(json!({"action": "vacuum"})),
-            "unknown variant `vacuum`, expected one of `cost_summary`, `sessions_import`, `sessions_git_sync`, `sessions_sync_status`, `sessions_sync_cancel`, `sessions_unfinished`, `sessions_unused_context`, `analytics_sync`, `analytics_diagnostics`, `registry_update`, `registry_list`, `registry_context`, `registry_empty`, `registry_project_tokens`, `registry_gc`, `storage_report`, `gain_query`"
+            "unknown variant `vacuum`, expected one of `cost_summary`, `sessions_import`, `sessions_git_sync`, `sessions_sync_status`, `sessions_sync_cancel`, `sessions_unfinished`, `analytics_sync`, `analytics_diagnostics`, `registry_update`, `registry_list`, `registry_context`, `registry_empty`, `registry_project_tokens`, `registry_gc`, `storage_report`, `gain_query`"
         );
     }
 }
