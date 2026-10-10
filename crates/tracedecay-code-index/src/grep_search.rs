@@ -7,9 +7,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::{Regex, RegexBuilder};
 use tracedecay_domain::IndexPathPolicyV1;
 
-use crate::parallelism::{
-    CodeIndexParallelismErrorV1, install, with_background_cpu_permit_cancellable,
-};
+use crate::parallelism::{CodeIndexParallelismErrorV1, install_interactive};
 use crate::source_walk::{forward_slash_relative, source_walk};
 
 const MAX_HITS_PER_FILE: usize = 20;
@@ -111,7 +109,7 @@ pub fn search_tree_with_cancel(
                 message: error.message,
             }
         })?;
-    install(|| {
+    install_interactive(|| {
         let mut result = GrepSearchResult::default();
         let max_results = query.max_results.max(1);
         // Bound retained source and reads to the existing owner's worker width.
@@ -138,15 +136,7 @@ pub fn search_tree_with_cancel(
             }
             let scans = batch
                 .par_iter()
-                .map(|entry| {
-                    with_background_cpu_permit_cancellable(&is_cancelled, || {
-                        scan_grep_file(entry, project_root, &matcher, query, &is_cancelled)
-                    })
-                    .unwrap_or_else(|| GrepSearchResult {
-                        cancelled: true,
-                        ..GrepSearchResult::default()
-                    })
-                })
+                .map(|entry| scan_grep_file(entry, project_root, &matcher, query, &is_cancelled))
                 .collect::<Vec<_>>();
             for scan in scans {
                 result.files_scanned += scan.files_scanned;
@@ -363,8 +353,7 @@ fn looks_binary(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::*;
 
@@ -421,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_releases_queued_cpu_demand_before_capacity_is_available() {
+    fn foreground_scan_admits_while_background_cpu_and_index_pool_are_held() {
         let project = tempfile::tempdir().unwrap();
         std::fs::write(project.path().join("fixture.txt"), "HIT_TOKEN\n").unwrap();
         let runtime = crate::parallelism::CodeIndexWorkerRuntimeV1::build(
@@ -432,41 +421,54 @@ mod tests {
         .unwrap();
         let authority = runtime.background_cpu();
         let held = authority.acquire();
-        let cancellation = Arc::new(AtomicBool::new(false));
+        let (pool_started_tx, pool_started_rx) = std::sync::mpsc::channel();
+        let (pool_release_tx, pool_release_rx) = std::sync::mpsc::channel::<()>();
+        let pool_holder = {
+            let runtime = runtime.clone();
+            std::thread::spawn(move || {
+                let _entered = runtime.enter();
+                crate::parallelism::install(move || {
+                    pool_started_tx.send(()).unwrap();
+                    pool_release_rx.recv().unwrap();
+                })
+                .unwrap();
+            })
+        };
+        pool_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("indexing pool holder must start");
+
         let (sender, receiver) = std::sync::mpsc::channel();
         let worker = {
-            let cancellation = Arc::clone(&cancellation);
+            let project_root = project.path().to_path_buf();
             std::thread::spawn(move || {
                 let _entered = runtime.enter();
                 sender
                     .send(search_tree_with_cancel(
-                        project.path(),
+                        &project_root,
                         &query("HIT_TOKEN"),
                         &no_exclusions(),
-                        || cancellation.load(Ordering::Acquire),
+                        || false,
                     ))
                     .unwrap();
             })
         };
-        let admission_deadline = Instant::now() + Duration::from_secs(2);
-        while authority.waiting_work_units() == 0 && Instant::now() < admission_deadline {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        let was_queued = authority.waiting_work_units() > 0;
-        cancellation.store(true, Ordering::Release);
         let result = receiver.recv_timeout(Duration::from_secs(1));
-        let queued_after_cancellation = authority.waiting_work_units();
+        let queued_during_scan = authority.waiting_work_units();
+        pool_release_tx.send(()).unwrap();
         drop(held);
+        pool_holder.join().unwrap();
         worker.join().unwrap();
-        assert!(was_queued, "the scan must reach blocked CPU admission");
         let result = result
-            .expect("cancelled scan must settle while capacity is still held")
+            .expect(
+                "foreground grep must settle while background CPU and the indexing pool stay held",
+            )
             .unwrap();
-        assert!(result.cancelled);
-        assert!(result.hits.is_empty());
-        assert_eq!(result.files_scanned, 0);
-        assert_eq!(queued_after_cancellation, 0);
-        assert!(authority.try_acquire().is_some());
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].file.as_ref(), "fixture.txt");
+        assert!(!result.cancelled);
+        assert_eq!(queued_during_scan, 0);
+        assert_eq!(result.files_scanned, 1);
     }
 
     #[test]
