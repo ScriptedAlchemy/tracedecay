@@ -401,6 +401,94 @@ fn rust_constructor_and_typed_receiver_calls_bind_through_the_crate_path() {
         RelationEdgeKindV1::Calls,
     );
     assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+    let builder = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.qualified_name == "crates/widgets/src/builder.rs::Builder"
+                && symbol.kind == "struct"
+        })
+        .expect("Builder struct definition")
+        .occurrence
+        .clone();
+    assert_resolved_edge(&generation, &caller, &builder, RelationEdgeKindV1::TypeOf);
+}
+
+/// `GrafeoDB::open` in grafeo-cli must be a caller of the struct, not only of
+/// the associated function. Otherwise callers of `GrafeoDB` is empty-complete
+/// while rg still finds the construction sites.
+#[test]
+fn rust_associated_open_is_a_caller_of_the_struct() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.grafeo.lib",
+            "crates/engine/src/lib.rs",
+            "pub struct GrafeoDB;\nimpl GrafeoDB {\n    pub fn open(_path: &str) -> GrafeoDB { GrafeoDB }\n}\n",
+        ),
+        (
+            "file.grafeo.cli",
+            "crates/cli/src/data.rs",
+            "pub fn load(path: &str) -> engine::GrafeoDB {\n    engine::GrafeoDB::open(path)\n}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/cli/src/data.rs::load");
+    let database = symbol_occurrence(&generation, "crates/engine/src/lib.rs::GrafeoDB");
+    let open = symbol_occurrence(&generation, "crates/engine/src/lib.rs::GrafeoDB::open");
+    assert_resolved_edge(&generation, &caller, &open, RelationEdgeKindV1::Calls);
+    assert_resolved_edge(&generation, &caller, &database, RelationEdgeKindV1::TypeOf);
+}
+
+#[test]
+fn rust_generic_associated_calls_seal_exact_owner_and_member_tokens() {
+    let source = concat!(
+        "pub struct Factory<T>(core::marker::PhantomData<T>);\n",
+        "impl<T> Factory<T> { pub fn new() -> Self { Self(core::marker::PhantomData) } }\n",
+        "pub struct Flag<const CHECK: bool>;\n",
+        "impl<const CHECK: bool> Flag<CHECK> { pub fn new() -> Self { Self } }\n",
+        "pub fn café() {}\n",
+        "pub fn assemble() {\n",
+        "    Factory::<fn() -> u8>::new();\n",
+        "    Flag::<{ 1 > 0 }>::new();\n",
+        "    café();\n",
+        "}\n",
+    );
+    let generation =
+        published_rust_workspace(&[("file.generic.calls", "crates/app/src/lib.rs", source)]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/lib.rs::assemble");
+    let observed = generation
+        .edges()
+        .iter()
+        .filter(|edge| {
+            edge.from_occurrence == caller
+                && matches!(
+                    edge.kind,
+                    RelationEdgeKindV1::Calls | RelationEdgeKindV1::TypeOf
+                )
+                && edge.authority == EdgeAuthorityV1::SyntaxExact
+        })
+        .map(|edge| {
+            let target = generation
+                .symbols()
+                .symbols
+                .iter()
+                .find(|symbol| symbol.occurrence == edge.to_occurrence)
+                .expect("edge target");
+            let token = &source
+                [edge.evidence_span.start_byte as usize..edge.evidence_span.end_byte as usize];
+            (target.qualified_name.as_str(), token)
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        observed,
+        BTreeSet::from([
+            ("crates/app/src/lib.rs::Factory", "Factory"),
+            ("crates/app/src/lib.rs::Factory<T>::new", "new"),
+            ("crates/app/src/lib.rs::Flag", "Flag"),
+            ("crates/app/src/lib.rs::Flag<CHECK>::new", "new"),
+            ("crates/app/src/lib.rs::café", "café"),
+        ])
+    );
 }
 
 #[test]
@@ -1411,6 +1499,88 @@ fn resolved_callers<'a>(
         .collect::<Vec<_>>();
     callers.sort_unstable();
     callers
+}
+
+#[test]
+fn rust_value_call_binds_the_function_not_the_same_named_struct() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.namespaces.lib",
+            "crates/app/src/lib.rs",
+            "pub struct helper;\n\nfn helper() {}\n\nfn caller() { helper(); }\n",
+        ),
+        (
+            "file.namespaces.other",
+            "crates/app/src/other.rs",
+            "pub fn unrelated() {}\n",
+        ),
+    ]);
+    let function = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.qualified_name == "crates/app/src/lib.rs::helper" && symbol.kind == "function"
+        })
+        .expect("missing fn helper")
+        .occurrence
+        .clone();
+    assert_eq!(
+        resolved_callers(&generation, &function),
+        ["crates/app/src/lib.rs::caller"],
+        "a `helper()` site invokes the function namespace; the same-named \
+         tuple struct must not render the call ambiguous"
+    );
+}
+
+#[test]
+fn rust_generic_call_binds_the_function_past_a_named_field_struct() {
+    let generation = published_rust_workspace(&[(
+        "file.generic.lib",
+        "crates/app/src/lib.rs",
+        "pub struct helper<T: Fn(u8)> /* note /* ( */ still braced */ { pub value: T }\n\nfn helper<T>() {}\n\nfn caller() { helper::<u32>(); }\n",
+    )]);
+    let function = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.qualified_name == "crates/app/src/lib.rs::helper" && symbol.kind == "function"
+        })
+        .expect("missing fn helper")
+        .occurrence
+        .clone();
+    assert_eq!(
+        resolved_callers(&generation, &function),
+        ["crates/app/src/lib.rs::caller"],
+        "a named-field struct cannot be constructed by a call, so \
+         `helper::<u32>()` names the generic function"
+    );
+}
+
+#[test]
+fn rust_tuple_struct_constructor_keeps_the_generic_call_ambiguous() {
+    let generation = published_rust_workspace(&[(
+        "file.tuple.lib",
+        "crates/app/src/lib.rs",
+        "pub struct helper<T> /* documented inline */ (pub T);\n\nfn helper<T>() {}\n\nfn caller() { helper::<u8>(0); }\n",
+    )]);
+    let function = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.qualified_name == "crates/app/src/lib.rs::helper" && symbol.kind == "function"
+        })
+        .expect("missing fn helper")
+        .occurrence
+        .clone();
+    assert_eq!(
+        resolved_callers(&generation, &function),
+        Vec::<&str>::new(),
+        "`helper::<u8>(0)` spells tuple-struct construction and generic \
+         invocation identically; it must stay ambiguous, never guess"
+    );
 }
 
 #[test]

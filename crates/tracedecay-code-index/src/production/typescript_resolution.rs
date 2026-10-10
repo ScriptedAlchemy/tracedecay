@@ -12,9 +12,11 @@
 //! `types`, `source`, then the conventional `index`/`src/index`), and
 //! `export … from` chains through barrels, including same-module
 //! `export { a as b }` clauses and `export default <name>` that forward a
-//! declaration or a local import (`export *` never forwards `default`), and
-//! member calls through module namespaces (`import * as ns`, `export * as
-//! ns`).
+//! declaration or a local import (`export *` never forwards `default`),
+//! CommonJS `require`/`module.exports`, published paths whose source tree is
+//! declared by `babel src -d <out>` in `package.json` scripts or by a
+//! tsconfig `rootDir`/`outDir` pair, and member calls through module
+//! namespaces (`import * as ns`, `export * as ns`).
 //!
 //! A specifier that matches no alias and no workspace package is an external
 //! dependency and binds nothing. A specifier that names a project module but
@@ -113,6 +115,46 @@ struct TsConfigV1 {
     base_url: Option<String>,
 }
 
+/// One declared compile mapping from a published tree to its indexed source.
+///
+/// `package.json` `files` / `main` / `exports` name published paths; they do
+/// not say those paths were emitted from `src/`. Only an explicit compiler
+/// mapping (`babel src -d .`, tsconfig `rootDir`/`outDir`) may rewrite a
+/// missing relative specifier.
+struct BuildMappingV1 {
+    /// The manifest/tsconfig directory that declared the mapping. A package
+    /// directory that does not contain it (a nested or sibling package) is a
+    /// claim boundary: its own build decides which source emitted its files,
+    /// so this mapping never rewrites them.
+    dir: String,
+    /// Project-relative source tree (`src`, `packages/pkg/src`).
+    source_root: String,
+    /// Project-relative output tree; empty means the package/tsconfig dir.
+    output_root: String,
+}
+
+impl BuildMappingV1 {
+    fn source_path(&self, published: &str) -> Option<String> {
+        let remainder = if self.output_root.is_empty() {
+            published.to_owned()
+        } else if published == self.output_root {
+            String::new()
+        } else {
+            published
+                .strip_prefix(&self.output_root)?
+                .strip_prefix('/')?
+                .to_owned()
+        };
+        if remainder.is_empty() {
+            Some(self.source_root.clone())
+        } else if self.source_root.is_empty() {
+            Some(remainder)
+        } else {
+            Some(format!("{}/{}", self.source_root, remainder))
+        }
+    }
+}
+
 struct NodePackageV1 {
     dir: String,
     /// Project-relative entry specifiers for the bare package name, in the
@@ -132,6 +174,9 @@ pub(super) struct TypeScriptModuleIndexV1 {
     /// tsconfig directory to the merged rules of every `tsconfig*.json` and
     /// `jsconfig.json` beside it.
     tsconfigs: BTreeMap<String, TsConfigV1>,
+    /// Declared published-to-source rewrites from package scripts and
+    /// tsconfig `rootDir`/`outDir`. Longer output roots win.
+    build_mappings: Vec<BuildMappingV1>,
 }
 
 impl TypeScriptModuleIndexV1 {
@@ -143,6 +188,7 @@ impl TypeScriptModuleIndexV1 {
         let mut packages = Vec::new();
         let mut by_package_name: HashMap<String, Option<usize>> = HashMap::new();
         let mut tsconfigs: BTreeMap<String, TsConfigV1> = BTreeMap::new();
+        let mut build_mappings = Vec::new();
         for (index, file) in files.iter().enumerate() {
             let path = file.logical_path();
             let language = file.language();
@@ -163,10 +209,18 @@ impl TypeScriptModuleIndexV1 {
                         .or_insert(Some(packages.len()));
                 }
                 packages.push(package);
+                build_mappings.extend(package_script_mappings(
+                    dir,
+                    &file.as_ref().artifacts.symbols,
+                ));
             } else if (name.starts_with("tsconfig") && name.ends_with(".json"))
                 || name == "jsconfig.json"
             {
                 let config = tsconfig(dir, &file.as_ref().artifacts.symbols);
+                if let Some(mapping) = tsconfig_build_mapping(dir, &file.as_ref().artifacts.symbols)
+                {
+                    build_mappings.push(mapping);
+                }
                 let merged = tsconfigs.entry(dir.to_owned()).or_default();
                 merged.extends.extend(config.extends);
                 merged.aliases.extend(config.aliases);
@@ -175,11 +229,13 @@ impl TypeScriptModuleIndexV1 {
                 }
             }
         }
+        build_mappings.sort_by_key(|left| std::cmp::Reverse(left.output_root.len()));
         Self {
             sources,
             packages,
             by_package_name,
             tsconfigs,
+            build_mappings,
         }
     }
 
@@ -194,8 +250,10 @@ impl TypeScriptModuleIndexV1 {
             || specifier.starts_with("./")
             || specifier.starts_with("../")
         {
+            let published = join_normalized(from_dir, specifier);
             return self
-                .probe(&join_normalized(from_dir, specifier))
+                .probe(&published)
+                .or_else(|| self.probe_declared_build_source(&published))
                 .map_or(ModuleTargetV1::Unresolved, ModuleTargetV1::File);
         }
         let mut names_project_code = false;
@@ -581,6 +639,32 @@ impl TypeScriptModuleIndexV1 {
         }
     }
 
+    /// Rewrite a missing published path through a declared compiler mapping.
+    /// `require("../../webpack")` after `babel src -d .` binds `src/webpack`;
+    /// an undeclared `./foo` or `./dist/foo` stays unresolved.
+    fn probe_declared_build_source(&self, published: &str) -> Option<usize> {
+        for mapping in &self.build_mappings {
+            // A published file inside a package the mapping's directory does
+            // not sit in belongs to that package's own build: neither a root
+            // `src -d .` reaching into a nested package nor a `src -d ..`
+            // reaching into a sibling may rewrite it.
+            if self.packages.iter().any(|package| {
+                path_within(&package.dir, published) && !path_within(&package.dir, &mapping.dir)
+            }) {
+                continue;
+            }
+            let Some(source) = mapping.source_path(published) else {
+                continue;
+            };
+            if source != published
+                && let Some(found) = self.probe(&source)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+
     /// Node/TypeScript file probing over the indexed set: the path itself, the
     /// TypeScript source behind a `.js` specifier, an added extension, then the
     /// directory `index`.
@@ -756,6 +840,16 @@ pub(super) enum ModuleTargetV1 {
     Unresolved,
 }
 
+/// `child` lies under `parent` at a directory boundary; the project root
+/// `""` contains every path.
+fn path_within(parent: &str, child: &str) -> bool {
+    parent.is_empty()
+        || child == parent
+        || (child.len() > parent.len()
+            && child.starts_with(parent)
+            && child.as_bytes()[parent.len()] == b'/')
+}
+
 /// `(parent directory, file name)` of a project-relative path; the root's
 /// parent is `""`.
 pub(super) fn split_parent(path: &str) -> (&str, &str) {
@@ -838,6 +932,261 @@ fn node_package(
             subpath_exports,
         },
     )
+}
+
+fn project_join(dir: &str, declared: &str) -> String {
+    let declared = declared.trim_start_matches("./");
+    if declared.is_empty() || declared == "." {
+        dir.to_owned()
+    } else {
+        join_normalized(dir, declared)
+    }
+}
+
+/// `babel src -d .` / `babel src --out-dir dist` as a shell command, not as
+/// another command's arguments (`echo babel src -d dist`).
+fn babel_src_to_out(script: &str) -> Option<(String, String)> {
+    // Escapes, substitutions, and comments require shell interpretation;
+    // only literal compiler commands declare a mapping here.
+    if script
+        .bytes()
+        .any(|byte| matches!(byte, b'`' | b'\\' | b'$' | b'#'))
+    {
+        return None;
+    }
+    shell_simple_commands(script)?
+        .into_iter()
+        .find_map(babel_command_src_to_out)
+}
+
+/// Separators inside quotes remain arguments to their original command.
+/// Keep each command byte-exact so quoted or concatenated compiler words
+/// can fail closed without hiding an unrelated literal compiler command.
+fn shell_simple_commands(script: &str) -> Option<Vec<&str>> {
+    let bytes = script.as_bytes();
+    let mut commands = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    let mut quote = None;
+    while index < bytes.len() {
+        if let Some(delimiter) = quote {
+            if bytes[index] == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(bytes[index], b'\'' | b'"') {
+            quote = Some(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let separator = match bytes[index] {
+            b';' => 1,
+            b'&' if bytes.get(index + 1) == Some(&b'&') => 2,
+            b'&' => 1,
+            b'|' if bytes.get(index + 1) == Some(&b'|') => 2,
+            b'|' => 1,
+            _ => 0,
+        };
+        if separator == 0 {
+            index += 1;
+            continue;
+        }
+        commands.push(script[start..index].trim());
+        index += separator;
+        start = index;
+    }
+    if quote.is_some() {
+        return None;
+    }
+    commands.push(script[start..].trim());
+    commands.retain(|command| !command.is_empty());
+    Some(commands)
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    let Some((key, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_babel_command_word(token: &str) -> bool {
+    token == "babel" || token.ends_with("/babel")
+}
+
+/// Package-runner prefixes that exec a binary without making it the command
+/// word (`npx babel`, `yarn babel`); runner flags such as `npx -y` sit
+/// between them.
+fn is_runner_word(token: &str) -> bool {
+    matches!(token, "npx" | "yarn" | "pnpm" | "bun" | "bunx")
+}
+
+fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
+    if command.contains(['\'', '"', '<', '>', '(', ')']) {
+        return None;
+    }
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let mut index = 0;
+    while index < tokens.len() && is_env_assignment(tokens[index]) {
+        index += 1;
+    }
+    if let Some(runner) = tokens.get(index).filter(|token| is_runner_word(token)) {
+        index += 1;
+        while let Some(flag) = tokens.get(index).copied() {
+            if !flag.starts_with('-') {
+                break;
+            }
+            if *runner != "npx" || !matches!(flag, "-y" | "--yes" | "--no-install") {
+                return None;
+            }
+            index += 1;
+        }
+    }
+    let command_word = tokens.get(index)?;
+    if !is_babel_command_word(command_word) {
+        return None;
+    }
+    // Only options with known arity may precede or follow the source.
+    // Unknown options cannot consume a positional directory by guesswork.
+    let mut source = None;
+    let mut output = None;
+    let mut watch = false;
+    let mut skip_initial_build = false;
+    let mut verbose = false;
+    let mut quiet = false;
+    let mut index = index + 1;
+    while index < tokens.len() {
+        match tokens[index] {
+            // `babel … --help` / `--version` print instead of compiling; no
+            // output is produced and no mapping is declared.
+            "--help" | "-h" | "--version" | "-V" => return None,
+            "-d" | "--out-dir" => {
+                if output.is_some() {
+                    return None;
+                }
+                index += 1;
+                output = tokens.get(index).copied();
+            }
+            // Commander consumes the next non-option word even when its
+            // value is invalid; it cannot then serve as the source path.
+            "--source-maps" | "-s" => {
+                if let Some(value) = tokens
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with('-'))
+                {
+                    if !matches!(*value, "true" | "false" | "1" | "0" | "inline" | "both") {
+                        return None;
+                    }
+                    index += 1;
+                }
+            }
+            "--compact" => {
+                if let Some(value) = tokens
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with('-'))
+                {
+                    if !matches!(*value, "auto" | "true" | "false" | "1" | "0") {
+                        return None;
+                    }
+                    index += 1;
+                }
+            }
+            "--presets"
+            | "--plugins"
+            | "--extensions"
+            | "-x"
+            | "--ignore"
+            | "--only"
+            | "--config-file"
+            | "--env-name"
+            | "--root-mode"
+            | "--source-map-target"
+            | "--source-file-name"
+            | "--source-root"
+            | "--filename" => {
+                index += 1;
+                if !tokens
+                    .get(index)
+                    .is_some_and(|value| !value.starts_with('-'))
+                {
+                    return None;
+                }
+            }
+            // `--out-file`/`-o` writes one file and `--out-file-extension`
+            // renames emitted paths; neither fits the directory mapping.
+            "--watch" | "-w" => watch = true,
+            "--skip-initial-build" => skip_initial_build = true,
+            "--verbose" => verbose = true,
+            "--quiet" => quiet = true,
+            "--copy-files"
+            | "-D"
+            | "--no-copy-ignored"
+            | "--no-babelrc"
+            | "--delete-dir-on-start"
+            | "--minified" => {}
+            flag if flag.starts_with('-') => return None,
+            token if source.is_none() => source = Some(token),
+            _ => return None,
+        }
+        index += 1;
+    }
+    if (skip_initial_build && !watch) || (verbose && quiet) {
+        return None;
+    }
+    match (source, output) {
+        (Some(source), Some(output)) if !output.is_empty() && !output.starts_with('-') => {
+            Some((source.to_owned(), output.to_owned()))
+        }
+        _ => None,
+    }
+}
+
+fn package_script_mappings(
+    dir: &str,
+    symbols: &[Arc<LineageSymbolRecordV1>],
+) -> Vec<BuildMappingV1> {
+    let Some(Value::Object(scripts)) = pair_value(symbols, "scripts") else {
+        return Vec::new();
+    };
+    scripts
+        .values()
+        .filter_map(Value::as_str)
+        .filter_map(babel_src_to_out)
+        .map(|(source, output)| BuildMappingV1 {
+            dir: dir.to_owned(),
+            source_root: project_join(dir, &source),
+            output_root: project_join(dir, &output),
+        })
+        .collect()
+}
+
+fn tsconfig_build_mapping(
+    dir: &str,
+    symbols: &[Arc<LineageSymbolRecordV1>],
+) -> Option<BuildMappingV1> {
+    let options = pair_value(symbols, "compilerOptions")?;
+    // A config that never emits JavaScript cannot declare a published tree:
+    // `noEmit` type-checks only and `emitDeclarationOnly` writes just `.d.ts`.
+    if ["noEmit", "emitDeclarationOnly"]
+        .iter()
+        .any(|key| options.get(key).and_then(Value::as_bool) == Some(true))
+    {
+        return None;
+    }
+    let root_dir = options.get("rootDir")?.as_str()?;
+    let out_dir = options.get("outDir")?.as_str()?;
+    Some(BuildMappingV1 {
+        dir: dir.to_owned(),
+        source_root: project_join(dir, root_dir),
+        output_root: project_join(dir, out_dir),
+    })
 }
 
 fn tsconfig(dir: &str, symbols: &[Arc<LineageSymbolRecordV1>]) -> TsConfigV1 {
@@ -924,7 +1273,7 @@ pub(super) fn unique_local_import<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{AliasRuleV1, join_normalized, split_parent};
+    use super::{AliasRuleV1, BuildMappingV1, babel_src_to_out, join_normalized, split_parent};
 
     #[test]
     fn join_normalized_folds_dots_and_clamps_at_the_root() {
@@ -935,6 +1284,10 @@ mod tests {
         assert_eq!(join_normalized("src", "./lib"), "src/lib");
         assert_eq!(join_normalized("src", "../../escape"), "escape");
         assert_eq!(join_normalized("", "./index"), "index");
+        assert_eq!(
+            join_normalized("src", &join_normalized("manual/webpack", "../../webpack")),
+            "src/webpack"
+        );
     }
 
     #[test]
@@ -956,5 +1309,147 @@ mod tests {
             vec!["apps/web/src/lib/x".to_owned()]
         );
         assert!(rule.expand("@other/x").is_empty());
+    }
+
+    #[test]
+    fn babel_src_to_out_reads_compile_and_chained_scripts() {
+        assert_eq!(
+            babel_src_to_out("babel src -d ."),
+            Some(("src".to_owned(), ".".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("rm -rf webpack index.js; babel src -d .; echo done"),
+            Some(("src".to_owned(), ".".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("babel src --out-dir dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(babel_src_to_out("BABEL_ENV=production yarn compile"), None);
+        assert_eq!(babel_src_to_out("echo babel src -d dist"), None);
+        assert_eq!(babel_src_to_out("printf babel src -d dist"), None);
+        assert_eq!(
+            babel_src_to_out("echo babel src -d dist && echo still not a compiler"),
+            None
+        );
+        assert_eq!(
+            babel_src_to_out("echo 'placeholder; babel src -d dist ;'"),
+            None
+        );
+        assert_eq!(
+            babel_src_to_out("babel --presets env src -d dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("babel src -d dist --copy-files"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("babel src -d dist && echo \"done\""),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(babel_src_to_out("npx --help babel src -d dist"), None);
+        assert_eq!(babel_src_to_out("babel src lib -d dist"), None);
+        assert_eq!(
+            babel_src_to_out("NODE_ENV=production ./node_modules/.bin/babel src --out-dir dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("npx babel src -d dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("npx -y babel src --out-dir dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("yarn babel src -d dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(babel_src_to_out("echo npx babel src -d dist"), None);
+    }
+
+    #[test]
+    fn babel_mapping_preserves_literal_unicode_paths_and_option_values() {
+        assert_eq!(
+            babel_src_to_out("babel --copy-files --presets env café -d généré && echo \"done\""),
+            Some(("café".to_owned(), "généré".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("echo 'ignored; babel fake -d wrong' && babel src -d dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("babel src -d dist --source-maps --source-root ."),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("babel src --source-maps inline -d dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        for script in [
+            "babel --source-maps inline src -d dist",
+            "babel -s 1 src -d dist",
+            "babel --compact auto src -d dist",
+            "babel src -d dist --compact --minified",
+            "babel src -d dist --watch --skip-initial-build",
+            "babel src -d dist --skip-initial-build -w",
+        ] {
+            assert_eq!(
+                babel_src_to_out(script),
+                Some(("src".to_owned(), "dist".to_owned())),
+                "script: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn babel_mapping_refuses_ambiguous_shell_words_and_option_arity() {
+        for script in [
+            "\"ignored\"babel src -d dist",
+            "babel 'other' src -d dist",
+            "babel src -d dist && echo 'unfinished",
+            "babel src -d dist > output.log",
+            "npx --call babel src -d dist",
+            "npx --version babel src -d dist",
+            "babel --unknown env src -d dist",
+            "babel --presets --copy-files src -d dist",
+            "babel src -d first -d second",
+            "babel src -d --copy-files",
+            "babel --source-maps inline -d dist",
+            "babel src -d dist --no-code",
+            "babel src -d dist --out-file-extension .mjs",
+            "babel src -o bundle.js",
+            "babel --compact auto -d dist",
+            "babel --source-maps src -d dist",
+            "babel --source-maps invalid src -d dist",
+            "babel --compact src -d dist",
+            "babel src -d dist --source-maps invalid",
+            "babel src -d dist --compact invalid",
+            "babel src -d dist --root .",
+            "babel src -d dist --copy-ignored",
+            "babel src -d dist --no-compact",
+            "babel src -d dist --skip-initial-build",
+            "babel src -d dist --verbose --quiet",
+        ] {
+            assert_eq!(babel_src_to_out(script), None, "script: {script}");
+        }
+    }
+
+    #[test]
+    fn declared_mapping_rewrites_published_root_and_out_dir() {
+        let root = BuildMappingV1 {
+            dir: String::new(),
+            source_root: "src".to_owned(),
+            output_root: String::new(),
+        };
+        assert_eq!(root.source_path("webpack"), Some("src/webpack".to_owned()));
+        let dist = BuildMappingV1 {
+            dir: String::new(),
+            source_root: "src".to_owned(),
+            output_root: "dist".to_owned(),
+        };
+        assert_eq!(dist.source_path("dist/foo"), Some("src/foo".to_owned()));
+        assert_eq!(dist.source_path("foo"), None);
     }
 }

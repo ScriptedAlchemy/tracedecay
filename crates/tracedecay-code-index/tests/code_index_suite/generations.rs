@@ -6,7 +6,7 @@ use tracedecay_code_index::generations::{
 };
 use tracedecay_code_index::intake::INTAKE_DIGEST_SEPARATOR;
 use tracedecay_code_index::intake::ValidatedCodeSnapshotV1;
-use tracedecay_code_index::languages::StaticLanguageRegistry;
+use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_domain::{
     ChunkerRevision, ContentDigest, DomainError, FileOccurrenceId, LanguageId, PrivacyDomainId,
     RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
@@ -88,6 +88,78 @@ fn immutable_generation_seals_are_deterministic_and_parent_bound() {
     assert_eq!(child.parent_generation, Some(first.generation_id.clone()));
     assert_ne!(child.seal.expected_digest, first.seal.expected_digest);
     assert!(first.generation_id < child.generation_id);
+}
+
+#[test]
+fn retained_call_graph_revisions_reextract_unchanged_sources() {
+    let current_registry = StaticLanguageRegistry::new();
+    let previous_revisions = [
+        ("rust", 19),
+        ("typescript", 14),
+        ("svelte", 10),
+        ("astro", 10),
+    ];
+    let previous_descriptors = previous_revisions
+        .iter()
+        .map(|(language, revision)| {
+            let mut descriptor = current_registry
+                .descriptor(&id::<LanguageId>(language))
+                .expect("compiled language")
+                .clone();
+            descriptor.extractor_revision = id(&format!("extractor.{language}.v{revision}"));
+            descriptor
+        })
+        .collect();
+    let previous = GenerationPlanner::new(
+        id::<tracedecay_domain::ProjectId>("project.incremental"),
+        id::<RepositoryId>("repository.incremental"),
+        StaticLanguageRegistry::try_from_descriptors(previous_descriptors)
+            .expect("previous published descriptors"),
+        id::<ChunkerRevision>("chunker.daemon.v4"),
+        id::<PrivacyDomainId>("privacy.incremental"),
+        3,
+    );
+    let current = GenerationPlanner::new(
+        id::<tracedecay_domain::ProjectId>("project.incremental"),
+        id::<RepositoryId>("repository.incremental"),
+        current_registry,
+        id::<ChunkerRevision>(
+            tracedecay_code_index::production::DAEMON_CODE_INDEX_CHUNKER_REVISION,
+        ),
+        id::<PrivacyDomainId>("privacy.incremental"),
+        3,
+    );
+    let prior_snapshot = snapshot(
+        previous_revisions
+            .iter()
+            .enumerate()
+            .map(|(index, (language, _))| {
+                let mut source = file(&format!("file.{index}"), &format!("src/{language}"), 'a');
+                source.language = Some(id::<LanguageId>(language));
+                source
+            })
+            .collect(),
+    );
+    let unchanged = validated(prior_snapshot.clone());
+    let prior = previous
+        .plan_generation(&unchanged, None, UtcMicros(3_000))
+        .expect("previous sealed generation");
+    let plan = current
+        .plan_increment(&prior, &prior_snapshot, &unchanged, &BTreeSet::new())
+        .expect("normal upgrade without source changes");
+    assert!(plan.is_full_rebuild());
+    assert_eq!(plan.carried_forward, 0);
+    assert_eq!(plan.reextract, unchanged.snapshot.files.len() as u64);
+    assert!(
+        plan.rebuild_triggers
+            .contains(&RebuildTriggerV1::ChunkerRevision)
+    );
+    for (language, _) in previous_revisions {
+        assert!(
+            plan.rebuild_triggers
+                .contains(&RebuildTriggerV1::ExtractorRevision(id(language)))
+        );
+    }
 }
 
 #[test]

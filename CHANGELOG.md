@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+* **callers:** keep import and `new` sites instead of an empty complete page, scope `require` rows to module top level, and bind `exports.Name` / `module.exports.Name` assignments ([#3301](https://github.com/ScriptedAlchemy/tracedecay/issues/3301))
+
 ## [1.0.0-beta.78](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.77...v1.0.0-beta.78) (2026-10-10)
 
 

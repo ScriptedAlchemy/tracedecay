@@ -284,10 +284,13 @@ impl StaticLanguageRegistry {
             // so a JS config that only assigns the export object binds a
             // symbol grain and appears in the indexed-file census.
             // Go v10 records method sets for seal-time interface satisfaction.
+            // Rust v20 retains associated owner uses and parser-positioned
+            // generic call paths. TypeScript v15 (Svelte and Astro v11)
+            // retains constructor uses and CommonJS re-export evidence.
             let extractor_revision = match language.as_str() {
-                "rust" => 19,
-                "typescript" => 14,
-                "svelte" | "astro" => 10,
+                "rust" => 20,
+                "typescript" => 15,
+                "svelte" | "astro" => 11,
                 "go" => 10,
                 "java" => 8,
                 "ruby" | "protobuf" | "python" => 7,
@@ -492,7 +495,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v19");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v20");
 
         assert_eq!(
             registry
