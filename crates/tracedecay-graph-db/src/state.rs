@@ -1107,6 +1107,7 @@ pub(crate) fn labeled_projection_nodes(
     Ok(nodes)
 }
 
+#[cfg(test)]
 #[tracing::instrument(name = "graph_db.projection.labeled_nodes", level = "trace", skip_all)]
 fn labeled_projection_nodes_checked(
     database: &GrafeoDB,
