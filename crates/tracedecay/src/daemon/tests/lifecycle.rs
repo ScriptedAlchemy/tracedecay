@@ -639,10 +639,13 @@ async fn tools_list_answers_under_general_saturation() {
     let tools = response["result"]["tools"]
         .as_array()
         .unwrap_or_else(|| panic!("tools/list carried no tool array: {response}"));
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
     assert!(
-        tools.len() > 100,
-        "saturated daemon served a degraded catalog of {} tools",
-        tools.len()
+        names.contains(&"tracedecay_tool_search") && names.contains(&"tracedecay_search"),
+        "saturated daemon must still serve the default handshake, not a degraded catalog: {names:?}"
     );
     drop(general);
     server.await.expect("discovery server task");
