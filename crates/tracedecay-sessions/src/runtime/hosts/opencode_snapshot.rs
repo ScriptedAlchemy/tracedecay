@@ -1,14 +1,20 @@
 use std::path::{Path, PathBuf};
 
+use rusqlite::types::ValueRef;
+use rusqlite::{Connection, Row};
 use tracedecay_domain::ObservationSourceGenerationV1;
+use tracedecay_domain::canonical_text::canonical_framed_sha256_bytes;
 
-use super::opencode::scan_error;
+use super::opencode::{install_progress_handler, scan_error};
 use crate::runtime::host_scan::HostScanBudget;
 use crate::runtime::source::{HostCoverageReason, TranscriptIngestError, TranscriptIngestResult};
 
 const PROVIDER: &str = "opencode";
-/// A verified snapshot establishes the physical source identity before admission.
-/// Content changes are identified by each record's existing payload digest.
+/// A verified snapshot establishes the physical source identity before
+/// admission. `generation` is a database-wide content digest: an in-place row
+/// edit leaves the database file identity intact yet still produces a new
+/// batch generation, which arms the rewrite sweep that re-admits changed
+/// records.
 pub(super) struct OpenCodeDatabase {
     pub(super) reader: tracedecay_rusqlite_runtime::VerifiedReader,
     pub(super) generation: ObservationSourceGenerationV1,
@@ -94,8 +100,13 @@ fn inspect_database(
         }
     };
     let identity = reader.file_identity();
-    let generation =
-        ObservationSourceGenerationV1::new(identity).map_err(TranscriptIngestError::from)?;
+    let Some(content_generation) =
+        fingerprint_database(reader.connection(), identity, path, &mut budget)?
+    else {
+        return Ok((OpenedOpenCodeDatabase::Stopped, budget));
+    };
+    let generation = ObservationSourceGenerationV1::new(content_generation)
+        .map_err(TranscriptIngestError::from)?;
     Ok((
         OpenedOpenCodeDatabase::Ready(Box::new(OpenCodeDatabase {
             reader,
@@ -103,6 +114,92 @@ fn inspect_database(
             source_file_identity: identity,
         })),
         budget,
+    ))
+}
+
+/// One ordered pass over the message and part rows folds the database into
+/// a database-wide content digest seeded by the file identity. The pass is
+/// bounded by the open budget's deadline and cancellation rather than its
+/// unit count: the batch generation must cover every row before any record
+/// can admit, so a partial fingerprint cannot be charged incrementally.
+fn fingerprint_database(
+    connection: &Connection,
+    file_identity: u64,
+    path: &Path,
+    budget: &mut HostScanBudget,
+) -> TranscriptIngestResult<Option<u64>> {
+    install_progress_handler(connection, path, budget)?;
+    let file_identity = file_identity.to_le_bytes();
+    let mut digest = canonical_framed_sha256_bytes(
+        b"tracedecay.opencode.database-generation.seed.v1",
+        &[&file_identity[..]],
+    );
+    for (query, columns) in [
+        (
+            "SELECT m.session_id, m.rowid, m.id, m.data, s.parent_id, s.directory
+             FROM message m JOIN session s ON s.id = m.session_id
+             ORDER BY m.session_id, m.rowid",
+            &[0_usize, 1, 2, 3, 4, 5][..],
+        ),
+        (
+            "SELECT m.session_id, p.rowid, p.id, p.message_id, p.data
+             FROM part p JOIN message m ON m.id = p.message_id
+             JOIN session s ON s.id = m.session_id
+             ORDER BY m.session_id, p.rowid",
+            &[0_usize, 1, 2, 3, 4][..],
+        ),
+    ] {
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|error| scan_error("prepare database generation query", path, error))?;
+        let mut rows = statement
+            .query([])
+            .map_err(|error| scan_error("query database generation rows", path, error))?;
+        loop {
+            let row = match rows.next() {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(error) => {
+                    if !budget.checkpoint() {
+                        return Ok(None);
+                    }
+                    return Err(scan_error("read database generation row", path, error));
+                }
+            };
+            let frame = row_frame(row, columns, path)?;
+            digest = canonical_framed_sha256_bytes(
+                b"tracedecay.opencode.database-generation.fold.v1",
+                &[&digest[..], &frame[..]],
+            );
+        }
+    }
+    let mut generation = [0_u8; 8];
+    generation.copy_from_slice(&digest[..8]);
+    Ok(Some(u64::from_le_bytes(generation).max(1)))
+}
+
+/// One framed digest of a row's payload-shaping columns. Each column
+/// contributes a type tag plus its bytes so `NULL`, empty, and numeric values
+/// never collide.
+fn row_frame(row: &Row<'_>, columns: &[usize], path: &Path) -> TranscriptIngestResult<[u8; 32]> {
+    let mut parts = Vec::with_capacity(columns.len().saturating_mul(2));
+    for &column in columns {
+        let value = row
+            .get_ref(column)
+            .map_err(|error| scan_error("decode database generation value", path, error))?;
+        match value {
+            ValueRef::Null => parts.extend([vec![0_u8], Vec::new()]),
+            ValueRef::Integer(value) => parts.extend([vec![1_u8], value.to_le_bytes().to_vec()]),
+            ValueRef::Real(value) => parts.extend([vec![2_u8], value.to_le_bytes().to_vec()]),
+            ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+                parts.extend([vec![3_u8], bytes.to_vec()]);
+            }
+        }
+    }
+    let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+    Ok(canonical_framed_sha256_bytes(
+        b"tracedecay.opencode.database-generation.row.v1",
+        &parts,
     ))
 }
 
