@@ -321,36 +321,79 @@ pub(crate) fn write_file(path: &Path, content: &str) {
     }
 }
 
-/// Resolves `rg` to an absolute path through the same PATH authority
-/// production uses for `git`, so the suite does not pay a per-spawn PATH
-/// walk (which can transiently fail under nextest's process-per-test load).
-pub(crate) fn rg_program() -> PathBuf {
-    tracedecay_runtime_core::git::find_executable_on_path("rg")
-        .expect("ripgrep must be installed to ground-truth file searches")
-}
-
-/// Ground-truth paths for a word search. Exit 1 is "no hits", not a tool
-/// failure.
+/// Ground-truth paths for a whole-word search. Matches `rg -l -w` on ASCII
+/// identifiers without requiring a host `rg` in the Bazel sandbox.
 pub(crate) fn rg_word_paths(root: &Path, query: &str) -> Vec<String> {
-    let output = Command::new(rg_program())
-        .args(["-l", "-w", "--glob", "!**/.git/**", "--", query])
-        .current_dir(root)
-        .output()
-        .unwrap_or_else(|error| {
-            panic!("rg must be available to ground-truth graph search: {error}")
-        });
-    assert!(
-        output.status.success() || output.status.code() == Some(1),
-        "rg -w {query} failed in {}: {}",
-        root.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let mut paths: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_owned)
-        .collect();
+    let mut paths = Vec::new();
+    collect_whole_word_paths(root, root, query, &mut paths);
     paths.sort();
     paths
+}
+
+fn is_ascii_word_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn contains_whole_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    let mut start = 0;
+    while start + needle.len() <= haystack.len() {
+        let Some(rel) = haystack[start..]
+            .windows(needle.len())
+            .position(|window| window == needle)
+        else {
+            break;
+        };
+        let idx = start + rel;
+        let before_ok = idx == 0 || !is_ascii_word_char(haystack[idx - 1]);
+        let after = idx + needle.len();
+        let after_ok = after == haystack.len() || !is_ascii_word_char(haystack[after]);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
+}
+
+fn collect_whole_word_paths(root: &Path, dir: &Path, query: &str, out: &mut Vec<String>) {
+    let entries = fs::read_dir(dir).unwrap_or_else(|error| {
+        panic!("read {}: {error}", dir.display());
+    });
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!("read {} entry: {error}", dir.display());
+        });
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        let file_type = entry.file_type().unwrap_or_else(|error| {
+            panic!("stat {}: {error}", path.display());
+        });
+        if file_type.is_dir() {
+            collect_whole_word_paths(root, &path, query, out);
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if contains_whole_word(&contents, query) {
+            out.push(
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
 }
 
 pub(crate) async fn setup_project(
@@ -1261,4 +1304,15 @@ pub(crate) fn commit_all(project: &Path, message: &str) {
             message,
         ],
     );
+}
+
+#[test]
+fn rg_word_paths_match_identifier_boundaries_and_skip_git() {
+    let tmp = tempdir_or_panic();
+    let root = tmp.path();
+    write_file(&root.join("src/a.rs"), "fn dashboard() {}\n");
+    write_file(&root.join("src/b.rs"), "fn dashboards() {}\n");
+    write_file(&root.join(".git/config"), "dashboard\n");
+    assert_eq!(rg_word_paths(root, "dashboard"), vec!["src/a.rs".to_owned()]);
+    assert!(rg_word_paths(root, "connectGateway").is_empty());
 }

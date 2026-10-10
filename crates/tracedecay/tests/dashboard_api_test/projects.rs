@@ -365,11 +365,12 @@ fn project_scoped_graph_search_refuses_a_non_launch_project() {
         let rg_other = rg_word_paths(&target_root, "connectGateway");
         assert!(
             rg_other.iter().any(|path| path == "src/core/gateway.js"),
-            "rg must see connectGateway in the other enrolled repo: {rg_other:?}"
+            "whole-word walk must see connectGateway in the other enrolled repo: {rg_other:?}"
         );
+        let rg_launch = rg_word_paths(&fixture.project_root, "connectGateway");
         assert!(
-            rg_word_paths(&fixture.project_root, "connectGateway").is_empty(),
-            "rg must not see connectGateway in the launch project"
+            rg_launch.is_empty(),
+            "whole-word walk must not see connectGateway in the launch project: {rg_launch:?}"
         );
 
         let (status, search) = get_json(
