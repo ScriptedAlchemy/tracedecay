@@ -1449,6 +1449,47 @@ async fn planted_terminal_publication_park_suppresses_later_wakes() {
     fixture.registry.shutdown().await;
 }
 
+/// Issue #3401: one Python function whose suite is only a comment used to
+/// fail chunk identity (`clone_body_empty_span`) and park the worktree with
+/// `retries_on_wake: false`, so `init --wait` never saw a first generation.
+/// The stub is not a clone candidate; neighboring files must still converge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_python_clone_body_does_not_park_the_worktree() {
+    let fixture = Fixture::mount_prepared("project.empty-clone-body", |project| {
+        fs::write(
+            project.join("src/hooks.py"),
+            "def pending():\n    # leftover from a generator\n\ndef publish(value):\n    return value\n",
+        )
+        .expect("write python stub");
+        run_git_in(project, &["add", "."]);
+        run_git_in(project, &["commit", "-qm", "python stub"]);
+    })
+    .await;
+    let ready = fixture
+        .registry
+        .wait_for_readiness(
+            &fixture.project,
+            CodeIndexReadinessTargetV1::Fresh,
+            SETTLE_DEADLINE,
+        )
+        .await
+        .expect("readiness read");
+    let CodeIndexReadinessWaitReadV1::Reached { reading } = ready else {
+        panic!("an empty Python suite must not block the first generation: {ready:?}");
+    };
+    assert_eq!(
+        reading.staleness_state,
+        Some(CodeIndexStalenessStateV1::Fresh),
+        "empty clone-body input must converge, not park: {reading:?}"
+    );
+    assert!(
+        reading.latest_generation_id.is_some(),
+        "the first generation must become available: {reading:?}"
+    );
+    assert_eq!(reading.parked, None, "{reading:?}");
+    fixture.registry.shutdown().await;
+}
+
 fn run_git_in(root: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
