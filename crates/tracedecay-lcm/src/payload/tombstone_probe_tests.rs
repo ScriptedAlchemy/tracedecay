@@ -63,10 +63,6 @@ impl<'a> RowVisitCounter<'a> {
 }
 
 impl QueryExecutor for RowVisitCounter<'_> {
-    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
-        self.inner.backend_kind()
-    }
-
     async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
     where
         P: IntoParams,

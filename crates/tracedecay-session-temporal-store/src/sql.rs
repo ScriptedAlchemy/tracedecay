@@ -165,14 +165,6 @@ pub(super) enum TemporalSqlRead<'a> {
 }
 
 impl<'a> TemporalSqlRead<'a> {
-    pub(super) fn backend_kind(&self) -> engine::BackendKind {
-        match self {
-            #[cfg(test)]
-            Self::EngineConnection(read) => read.backend_kind(),
-            Self::Registered(read) => engine::QueryExecutor::backend_kind(*read),
-        }
-    }
-
     #[cfg(test)]
     pub(super) const fn engine_connection(read: &'a engine::Connection) -> Self {
         Self::EngineConnection(read)
@@ -195,10 +187,6 @@ impl<'a> TemporalSqlRead<'a> {
 }
 
 impl engine::QueryExecutor for TemporalSqlRead<'_> {
-    fn backend_kind(&self) -> engine::BackendKind {
-        TemporalSqlRead::backend_kind(self)
-    }
-
     async fn query<P>(&self, sql: &str, params: P) -> engine::Result<engine::Rows>
     where
         P: engine::IntoParams,
@@ -208,10 +196,6 @@ impl engine::QueryExecutor for TemporalSqlRead<'_> {
 }
 
 impl crate::handle::SessionTemporalQuery for TemporalSqlRead<'_> {
-    fn backend_kind(&self) -> engine::BackendKind {
-        TemporalSqlRead::backend_kind(self)
-    }
-
     fn query<P>(
         &self,
         sql: &str,

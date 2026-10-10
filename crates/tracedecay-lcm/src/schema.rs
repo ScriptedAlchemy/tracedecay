@@ -1,9 +1,8 @@
 #[cfg(test)]
 use crate::retrieval_content::projected_content_hash;
-use tracedecay_runtime_core::db::engine::{BackendKind, Executor, QueryExecutor, params};
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
-use tracedecay_runtime_core::db::native_search::{SearchIndex, normalize_schema_sql};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_store::CANONICAL_BODIES_TABLE_SQL;
 
 use super::{LcmError, LcmRawMessage, raw};
@@ -212,20 +211,6 @@ pub const RAW_FTS_CONTENT_COLUMN_FILTER: &str = "index_text : ";
 /// Returns whether the raw-message FTS table and all three synchronization
 /// triggers use the current five-column contracts.
 pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) -> Option<bool> {
-    if conn.backend_kind() == BackendKind::NativeTurso {
-        let mut rows = conn.query(
-            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1 AND tbl_name = ?2",
-            params![SearchIndex::RawMessage.index_name(), SearchIndex::RawMessage.table_name()],
-        ).await.ok()?;
-        let Some(row) = rows.next().await.ok()? else {
-            return Some(false);
-        };
-        let sql: String = row.get(0).ok()?;
-        return Some(
-            normalize_schema_sql(&sql)
-                == normalize_schema_sql(SearchIndex::RawMessage.create_sql()),
-        );
-    }
     let mut rows = conn
         .query(
             "SELECT type, name, tbl_name, COALESCE(sql, '')
@@ -302,15 +287,6 @@ fn compact_sql(sql: &str) -> String {
 /// because the index is derived entirely from the content table. Doctor never
 /// invokes this mutation.
 pub async fn rebuild_raw_fts(conn: &(impl Executor + ?Sized)) -> Option<()> {
-    if conn.backend_kind() == BackendKind::NativeTurso {
-        conn.execute_batch("DROP INDEX IF EXISTS lcm_raw_messages_fts;")
-            .await
-            .ok()?;
-        conn.execute_batch(SearchIndex::RawMessage.create_sql())
-            .await
-            .ok()?;
-        return Some(());
-    }
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS lcm_raw_messages_fts_insert;
          DROP TRIGGER IF EXISTS lcm_raw_messages_fts_delete;
@@ -335,7 +311,8 @@ pub async fn rebuild_raw_fts(conn: &(impl Executor + ?Sized)) -> Option<()> {
 /// unit fixtures install that fixture shape here.
 #[cfg(test)]
 pub async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
-    crate::test_support::ensure_session_generation_schema(conn).await?;
+    conn.execute_batch(crate::test_support::SESSION_GENERATION_SCHEMA)
+        .await?;
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
@@ -523,11 +500,7 @@ pub async fn ensure_lcm_schema_in_transaction(
     .await?;
     ensure_raw_identity_schema(conn).await?;
     ensure_payload_gc_candidates(conn).await?;
-    conn.execute_batch(match conn.backend_kind() {
-        BackendKind::Sqlite => RAW_FTS_DDL,
-        BackendKind::NativeTurso => SearchIndex::RawMessage.create_sql(),
-    })
-    .await?;
+    conn.execute_batch(RAW_FTS_DDL).await?;
     super::summary_convergence::ensure_schema(conn).await?;
     super::summary_convergence::retire_predecessor_range_rewrite(conn).await?;
     for sql in LCM_STATUS_PERFORMANCE_INDEX_SQL {

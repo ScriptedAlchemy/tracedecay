@@ -20,10 +20,6 @@ use tracedecay_session_temporal_store::{
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 
 impl SessionTemporalQuery for RegisteredGlobalDbWriteTransaction<'_> {
-    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
-        tracedecay_runtime_core::db::engine::QueryExecutor::backend_kind(self)
-    }
-
     fn query<P>(
         &self,
         sql: &str,

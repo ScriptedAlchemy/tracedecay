@@ -11,5 +11,3 @@ target
 .claude/worktrees
 mockups
 vendor
-# Separate pinned engine experiment; run its standalone Bazel module explicitly.
-benchmark_data/storage-concurrency/turso-prototype

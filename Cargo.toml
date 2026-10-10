@@ -46,7 +46,6 @@ members = [
     "crates/tracedecay-source-edit",
     "crates/tracedecay-temporal-query",
     "crates/tracedecay-rusqlite-runtime",
-    "crates/tracedecay-turso-runtime",
     "crates/tracedecay-store",
     "crates/tracedecay-store-runtime",
     "crates/tracedecay-tool-catalog",
@@ -85,10 +84,6 @@ grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be
 grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be4713a5c2ee9df7e4639671c1e1244b7680f103", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file"] }
 grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "be4713a5c2ee9df7e4639671c1e1244b7680f103", default-features = false, features = ["wal"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
-# Native engine and parser share one source revision. The core API exposes
-# request-local progress cancellation; the high-level binding does not.
-turso_core = { git = "https://github.com/tursodatabase/turso.git", rev = "2829ee1662bd01d79f60c2c170af684a2b50af86", default-features = false, features = ["fs", "json", "fts", "uuid"] }
-turso_parser = { git = "https://github.com/tursodatabase/turso.git", rev = "2829ee1662bd01d79f60c2c170af684a2b50af86" }
 # Pinned once: the MCP git handlers and the root's edit/lifecycle readers must
 # resolve the same object database and status implementation, so a feature
 # added for one is never missing for the other.

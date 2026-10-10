@@ -19,40 +19,13 @@ pub struct Transaction {
     /// An owned async operation holds this gate until the writer acknowledges
     /// its command. Dropping the caller cannot release serialization early or
     /// truncate an already admitted statement batch.
-    runtime: Runtime,
-}
-
-enum Runtime {
-    Sqlite(Arc<Mutex<Option<RuntimeTransaction>>>),
-    Native(Arc<super::native::NativeTransaction>),
+    runtime: Arc<Mutex<Option<RuntimeTransaction>>>,
 }
 
 impl Transaction {
-    pub(super) fn from_native(runtime: Arc<super::native::NativeTransaction>) -> Self {
-        Self {
-            runtime: Runtime::Native(runtime),
-        }
-    }
-
-    pub fn backend_kind(&self) -> super::BackendKind {
-        match &self.runtime {
-            Runtime::Sqlite(_) => super::BackendKind::Sqlite,
-            Runtime::Native(_) => super::BackendKind::NativeTurso,
-        }
-    }
-
-    fn sqlite_runtime(&self) -> Result<Arc<Mutex<Option<RuntimeTransaction>>>> {
-        match &self.runtime {
-            Runtime::Sqlite(transaction) => Ok(Arc::clone(transaction)),
-            Runtime::Native(_) => Err(Error::invalid_operation(
-                "operation requires a SQLite transaction",
-            )),
-        }
-    }
-
     pub(super) fn from_runtime(runtime: RuntimeTransaction) -> Self {
         Self {
-            runtime: Runtime::Sqlite(Arc::new(Mutex::new(Some(runtime)))),
+            runtime: Arc::new(Mutex::new(Some(runtime))),
         }
     }
 
@@ -60,10 +33,7 @@ impl Transaction {
     where
         P: IntoParams,
     {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime.execute(sql.to_owned(), params.into_params()?).await;
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
         tokio::spawn(async move {
             runtime
@@ -86,17 +56,7 @@ impl Transaction {
         skip_all
     )]
     pub async fn execute_statements(&self, statements: Vec<WriteStatement>) -> Result<Vec<u64>> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime
-                .execute_statements(
-                    statements
-                        .into_iter()
-                        .map(WriteStatement::into_parts)
-                        .collect(),
-                )
-                .await;
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         let statements = statements
             .into_iter()
             .map(WriteStatement::into_exact)
@@ -120,12 +80,7 @@ impl Transaction {
     }
 
     pub async fn attach_database(&self, path: &Path, database_name: &str) -> Result<()> {
-        if matches!(&self.runtime, Runtime::Native(_)) {
-            return Err(Error::invalid_operation(
-                "native Turso database attachment is unsupported",
-            ));
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         let filename = path.to_str().ok_or_else(|| {
             super::Error::invalid_operation("SQLite attachment path is not valid UTF-8")
         })?;
@@ -148,10 +103,7 @@ impl Transaction {
     where
         P: IntoParams,
     {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime.query(sql.to_owned(), params.into_params()?).await;
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
         let rows = tokio::spawn(async move {
             runtime
@@ -169,10 +121,7 @@ impl Transaction {
     }
 
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime.execute_batch(sql.to_owned(), false).await;
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
         tokio::spawn(async move {
             runtime
@@ -192,10 +141,7 @@ impl Transaction {
     /// Executes one separately authorized authority-revalidated batch without the ordinary
     /// statement deadline.
     pub async fn execute_authority_revalidated_batch(&self, sql: &str) -> Result<()> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime.execute_batch(sql.to_owned(), true).await;
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
         tokio::spawn(async move {
             runtime
@@ -213,10 +159,7 @@ impl Transaction {
     }
 
     pub async fn validate(&self, sql: &str) -> Result<()> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime.validate(sql.to_owned()).await;
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, ())?;
         tokio::spawn(async move {
             runtime
@@ -233,10 +176,7 @@ impl Transaction {
     }
 
     pub async fn commit(self) -> Result<()> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime.finish(true).await;
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         tokio::spawn(async move {
             let transaction = runtime
                 .lock()
@@ -254,10 +194,7 @@ impl Transaction {
     }
 
     pub async fn rollback(self) -> Result<()> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime.finish(false).await;
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         tokio::spawn(async move {
             let transaction = runtime
                 .lock()

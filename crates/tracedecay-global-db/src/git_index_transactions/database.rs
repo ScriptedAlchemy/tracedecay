@@ -16,12 +16,6 @@ pub(crate) enum GitMutationReadSnapshot {
 }
 
 impl QueryExecutor for GitMutationReadSnapshot {
-    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
-        match self {
-            Self::Registered(snapshot) => snapshot.backend_kind(),
-        }
-    }
-
     async fn query<P>(
         &self,
         sql: &str,
@@ -37,12 +31,6 @@ impl QueryExecutor for GitMutationReadSnapshot {
 }
 
 impl QueryExecutor for GitMutationWriteTransaction<'_> {
-    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
-        match self {
-            Self::Registered(transaction) => transaction.backend_kind(),
-        }
-    }
-
     async fn query<P>(
         &self,
         sql: &str,

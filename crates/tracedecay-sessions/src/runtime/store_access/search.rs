@@ -62,10 +62,7 @@ pub fn interleave_workflow_search_results(
     merged
 }
 
-pub fn session_fts_query(
-    query: &str,
-    backend: tracedecay_runtime_core::db::engine::BackendKind,
-) -> String {
+pub fn session_fts_query(query: &str) -> String {
     query
         .split_whitespace()
         .filter_map(|word| {
@@ -73,15 +70,7 @@ pub fn session_fts_query(
             if sanitized.is_empty() {
                 None
             } else {
-                let quoted =
-                    tracedecay_runtime_core::db::native_search::quote_term(backend, &sanitized);
-                Some(
-                    if backend == tracedecay_runtime_core::db::engine::BackendKind::Sqlite {
-                        format!("{quoted}*")
-                    } else {
-                        quoted
-                    },
-                )
+                Some(format!("\"{sanitized}\"*"))
             }
         })
         .collect::<Vec<_>>()

@@ -268,11 +268,6 @@ fn reset_required(reason: impl Into<String>) -> TraceDecayError {
 }
 
 pub(super) async fn require_exact_final_shape(conn: &impl QueryExecutor) -> Result<()> {
-    if conn.backend_kind() == crate::db::engine::BackendKind::NativeTurso {
-        return Err(database_error(
-            "native final-memory schema inventory verification is not implemented; registered native admission remains unavailable".to_owned(),
-        ));
-    }
     require_final_shape_inventory(&read_inventory(conn).await?)
 }
 

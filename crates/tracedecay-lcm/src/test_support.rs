@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tracedecay_runtime_core::db::engine::{BackendKind, Executor, Value, params};
+use tracedecay_runtime_core::db::engine::{Executor, Value, params};
 
 fn sqlite_value(value: &Value) -> rusqlite::types::Value {
     match value {
@@ -58,7 +58,8 @@ pub(crate) fn sqlite_vm_steps(database_path: &Path, sql: &str, values: &[Value])
 /// queries touch and seed one active generation per session. The canonical
 /// publication-only columns (`summary_anchor_id`, `source_horizon_json`,
 /// `publication_json`) default here because no LCM read consults them.
-const SESSION_GENERATION_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS session_temporal_generations (
+pub(crate) const SESSION_GENERATION_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS session_temporal_generations (
     session_id TEXT NOT NULL,
     generation INTEGER NOT NULL,
     state TEXT NOT NULL
@@ -101,10 +102,7 @@ const SESSION_GENERATION_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS session_temp
  );
  CREATE INDEX IF NOT EXISTS idx_session_summary_sources_source
     ON session_summary_sources(source_kind, source_id, summary_id);
-";
-
-const SQLITE_SUMMARY_SEARCH_SCHEMA: &str =
-    " CREATE VIRTUAL TABLE IF NOT EXISTS session_summary_nodes_fts USING fts5(
+ CREATE VIRTUAL TABLE IF NOT EXISTS session_summary_nodes_fts USING fts5(
     summary_text, content='session_summary_nodes', content_rowid='rowid'
  );
  CREATE TRIGGER IF NOT EXISTS session_summary_nodes_fts_insert_v1
@@ -112,22 +110,6 @@ const SQLITE_SUMMARY_SEARCH_SCHEMA: &str =
         INSERT INTO session_summary_nodes_fts(rowid, summary_text)
         VALUES (NEW.rowid, NEW.summary_text);
     END;";
-
-/// Test fixtures retain canonical temporal rows while installing the exact
-/// attached engine's search authority; native stores cannot execute FTS5 DDL.
-pub(crate) async fn ensure_session_generation_schema(
-    conn: &(impl Executor + ?Sized),
-) -> Result<(), crate::LcmError> {
-    conn.execute_batch(SESSION_GENERATION_SCHEMA).await?;
-    let search_schema = match conn.backend_kind() {
-        BackendKind::Sqlite => SQLITE_SUMMARY_SEARCH_SCHEMA,
-        BackendKind::NativeTurso => {
-            tracedecay_runtime_core::db::native_search::SearchIndex::Summary.create_sql()
-        }
-    };
-    conn.execute_batch(search_schema).await?;
-    Ok(())
-}
 
 /// Generation every fixture session is active in.
 pub(crate) const FIXTURE_GENERATION: i64 = 1;

@@ -22,13 +22,6 @@ pub enum Error {
         extended_code: Option<i32>,
         message: String,
     },
-    NativeTurso {
-        message: String,
-        deterministic: bool,
-        transient_read: bool,
-        transaction_retry: bool,
-    },
-    Cancelled,
     Busy,
     InvalidOperation(String),
     StatementBatch {
@@ -63,11 +56,7 @@ impl fmt::Display for Error {
             Self::Sqlite {
                 operation, message, ..
             } => write!(formatter, "SQLite {operation} failed: {message}"),
-            Self::NativeTurso { message, .. } => {
-                write!(formatter, "native Turso failed: {message}")
-            }
-            Self::Cancelled => formatter.write_str("database operation cancelled"),
-            Self::Busy => formatter.write_str("database runtime is busy"),
+            Self::Busy => formatter.write_str("SQLite runtime is busy"),
             Self::InvalidOperation(message) => formatter.write_str(message),
             Self::StatementBatch { index, source } => {
                 write!(
@@ -167,11 +156,7 @@ impl Error {
     /// something else changes the durable state.
     pub const fn is_deterministic_refusal(&self) -> bool {
         match self {
-            Self::InvalidOperation(_)
-            | Self::NativeTurso {
-                deterministic: true,
-                ..
-            } => true,
+            Self::InvalidOperation(_) => true,
             Self::StatementBatch { source, .. } => source.is_deterministic_refusal(),
             _ => matches!(self.sqlite_code(), Some(SQLITE_CONSTRAINT)),
         }
@@ -188,23 +173,12 @@ impl Error {
         }
     }
 
-    /// True when the whole native transaction must restart from a fresh snapshot.
-    /// Retrying the failing statement in place would retain its conflicting state.
-    pub const fn requires_transaction_retry(&self) -> bool {
-        match self {
-            Self::NativeTurso {
-                transaction_retry, ..
-            } => *transaction_retry,
-            Self::StatementBatch { source, .. } => source.requires_transaction_retry(),
-            _ => false,
-        }
-    }
-
-    /// True when a held, interrupted or temporarily unavailable read can be tried again.
+    /// True when this failure says the database could not be read right now
+    /// (held, interrupted, an I/O fault, or a file that would not open), so
+    /// the same read can succeed later without anything changing.
     pub const fn is_transient_read_failure(&self) -> bool {
         match self {
-            Self::NativeTurso { transient_read, .. } => *transient_read,
-            Self::TransactionExpired | Self::Cancelled => true,
+            Self::TransactionExpired => true,
             Self::StatementBatch { source, .. } => source.is_transient_read_failure(),
             _ => {
                 self.is_busy_or_locked()
@@ -226,33 +200,6 @@ const SQLITE_CONSTRAINT: i32 = 19;
 const SQLITE_INTERRUPT: i32 = 9;
 const SQLITE_IOERR: i32 = 10;
 const SQLITE_CANTOPEN: i32 = 14;
-
-impl From<tracedecay_turso_runtime::Error> for Error {
-    fn from(error: tracedecay_turso_runtime::Error) -> Self {
-        use tracedecay_turso_runtime::Error as Native;
-        let deterministic = error.is_deterministic_refusal();
-        let transient_read = error.is_transient_read_failure();
-        let transaction_retry = error.requires_transaction_retry();
-        match error {
-            Native::InvalidOperation(message)
-            | Native::Denied(message)
-            | Native::Authority(message)
-            | Native::Unsupported(message) => Self::InvalidOperation(message),
-            Native::RequestLimitExceeded | Native::QueryLimitExceeded => {
-                Self::InvalidOperation(error.to_string())
-            }
-            Native::Busy => Self::Busy,
-            Native::Cancelled => Self::Cancelled,
-            Native::DeadlineExceeded => Self::TransactionExpired,
-            Native::Engine(error) => Self::NativeTurso {
-                message: error.to_string(),
-                deterministic,
-                transient_read,
-                transaction_retry,
-            },
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

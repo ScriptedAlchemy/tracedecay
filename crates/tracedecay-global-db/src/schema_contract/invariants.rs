@@ -126,7 +126,7 @@ pub async fn ensure_authority_invariant_schema(
     let trigger_contracts_were_intact = trigger_contracts_intact(conn).await?;
     if !trigger_contracts_were_intact {
         for invariant in INVARIANTS {
-            for trigger in invariant.triggers_for(conn.backend_kind()) {
+            for trigger in invariant.triggers {
                 replace_trigger(conn, trigger).await?;
             }
         }

@@ -1,7 +1,0 @@
-2026-10-09 source verification before local commit
-Command: rg -n last_insert_rowid|lastrowid|InsertTracker crates --glob *.rs
-Exit 1 (1 means no matches)
-
-Unchanged SQLite ledger/worker scope check against parent HEAD 6e0790ee8bd08422f84fbd76d4aaf30bbed447fb
-Command: git diff -- crates/tracedecay-rusqlite-runtime/src/ledger crates/tracedecay-rusqlite-runtime/src/persistence.rs crates/tracedecay-rusqlite-runtime/src/writer/worker.rs
-Exit 0; diff bytes 0

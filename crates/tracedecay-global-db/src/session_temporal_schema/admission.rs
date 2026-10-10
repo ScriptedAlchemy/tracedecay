@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use tracedecay_runtime_core::db::engine::{BackendKind, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use crate::configuration::FreshConfigurationStoreEvidence;
 use crate::registered::RefusedAuthorityV1;
@@ -9,9 +9,6 @@ use crate::schema_contract::{
     validate_session_temporal_schema_contract,
 };
 use crate::{global_db_operation_error, global_db_operation_message};
-use tracedecay_runtime_core::db::native_search::{
-    SearchIndex, normalize_schema_sql as normalize_native_schema_sql,
-};
 
 use super::{
     MIGRATION_NAME, OPERATION, SESSION_TEMPORAL_AUTHORITY, SESSION_TEMPORAL_SCHEMA_VERSION,
@@ -118,13 +115,7 @@ async fn validate_temporal_namespace_tables(
     let expected = TEMPORAL_TABLE_COLUMNS
         .iter()
         .map(|(table, _)| *table)
-        .filter(|table| conn.backend_kind() == BackendKind::Sqlite || !table.ends_with("_fts"))
-        .chain(
-            TEMPORAL_FTS_SHADOW_TABLES
-                .iter()
-                .copied()
-                .filter(|_| conn.backend_kind() == BackendKind::Sqlite),
-        )
+        .chain(TEMPORAL_FTS_SHADOW_TABLES.iter().copied())
         .collect::<BTreeSet<_>>();
     let mut rows = conn
         .query(
@@ -186,38 +177,6 @@ pub(super) fn session_temporal_reset_required(
 pub(super) async fn validate_temporal_fts_contracts(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
-    if conn.backend_kind() == BackendKind::NativeTurso {
-        for index in [SearchIndex::Occurrence, SearchIndex::Summary] {
-            let mut rows = conn.query(
-                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1 AND tbl_name = ?2",
-                params![index.index_name(), index.table_name()],
-            ).await.map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?
-            else {
-                return Err(global_db_operation_message(
-                    OPERATION,
-                    format!("native search index '{}' is missing", index.index_name()),
-                ));
-            };
-            let sql: String = row
-                .get(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            if normalize_native_schema_sql(&sql) != normalize_native_schema_sql(index.create_sql())
-            {
-                return Err(global_db_operation_message(
-                    OPERATION,
-                    format!(
-                        "native search index '{}' has an incompatible contract",
-                        index.index_name()
-                    ),
-                ));
-            }
-        }
-        return Ok(());
-    }
     for (table, expected_sql) in TEMPORAL_FTS_CONTRACTS {
         let mut rows = conn
             .query(
@@ -264,21 +223,6 @@ fn normalize_schema_sql(sql: &str) -> String {
 pub(super) async fn validate_temporal_fts_match(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
-    if conn.backend_kind() == BackendKind::NativeTurso {
-        for index in [SearchIndex::Occurrence, SearchIndex::Summary] {
-            conn.query(
-                &format!(
-                    "SELECT rowid FROM {} WHERE fts_match({}, ?1) LIMIT 1",
-                    index.table_name(),
-                    index.columns().join(", ")
-                ),
-                params!["__tracedecay_temporal_fts_probe__"],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        }
-        return Ok(());
-    }
     for (table, _) in TEMPORAL_FTS_CONTRACTS {
         conn.query(
             &format!("SELECT rowid FROM {table} WHERE {table} MATCH ?1 LIMIT 1"),

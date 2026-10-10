@@ -15,8 +15,7 @@ use crate::memory::diff::{
 use crate::memory::encoding::HolographicEncoder;
 use tracedecay_domain::{FactId, FactOwnerV1};
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
-use tracedecay_runtime_core::db::engine::{BackendKind, QueryExecutor, params};
-use tracedecay_runtime_core::db::native_search;
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     FactStoreError, FactStoreResult, ProjectMemoryFactProjectionV1, ProjectMemoryFactV1,
 };
@@ -60,55 +59,21 @@ async fn candidates_tx(
     proposed_fact_id: &FactId,
     content: &str,
 ) -> FactStoreResult<Vec<ProjectMemoryFactV1>> {
-    let backend = transaction.backend_kind();
     let match_query = project_memory_tokens(content)
         .into_iter()
-        .map(|token| native_search::quote_term(backend, &token))
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" OR ");
     if match_query.is_empty() {
         return Ok(Vec::new());
     }
     let key = OwnerKey::new(owner)?;
-    let source = match backend {
-        BackendKind::Sqlite => {
-            "memory_v2_assertion_payloads_fts
+    let mut rows = transaction
+        .query(
+            "SELECT current_facts.fact_id
+             FROM memory_v2_assertion_payloads_fts
              JOIN memory_v2_assertion_payloads AS payloads
-               ON payloads.rowid = memory_v2_assertion_payloads_fts.rowid"
-        }
-        BackendKind::NativeTurso => {
-            "hits JOIN memory_v2_assertion_payloads AS payloads ON payloads.rowid = hits.payload_rowid"
-        }
-    };
-    let predicate = native_search::predicate(
-        backend,
-        "memory_v2_assertion_payloads_fts",
-        &["payloads.content"],
-        "?1",
-    );
-    let rank = native_search::score(
-        backend,
-        "bm25(memory_v2_assertion_payloads_fts)",
-        &["payloads.content"],
-        "?1",
-    );
-    let native_hits = String::from(
-        "SELECT rowid AS payload_rowid, fts_score(content, ?1) AS rank
-         FROM memory_v2_assertion_payloads WHERE fts_match(content, ?1)",
-    );
-    let predicate = if backend == BackendKind::NativeTurso {
-        "1 = 1".to_owned()
-    } else {
-        predicate
-    };
-    let rank = if backend == BackendKind::NativeTurso {
-        "hits.rank".to_owned()
-    } else {
-        rank
-    };
-    let candidates = format!(
-        "SELECT current_facts.fact_id, {rank} AS rank
-             FROM {source}
+               ON payloads.rowid = memory_v2_assertion_payloads_fts.rowid
              JOIN memory_v2_current_facts AS current_facts
                ON current_facts.active_assertion_id = payloads.assertion_id
               AND current_facts.fact_id = payloads.fact_id
@@ -118,28 +83,15 @@ async fn candidates_tx(
                ON facts.fact_id = current_facts.fact_id
               AND facts.owner_kind = current_facts.owner_kind
               AND facts.project_id = current_facts.project_id
-             WHERE {predicate}
+             WHERE memory_v2_assertion_payloads_fts MATCH ?1
                AND current_facts.owner_kind = ?2
                AND current_facts.project_id = ?3
                AND facts.owner_json = ?4
                AND current_facts.payload_access = 'eligible'
-               AND current_facts.fact_id <> ?5"
-    );
-    let sql = match backend {
-        BackendKind::Sqlite => format!(
-            "{candidates}
-             ORDER BY rank ASC, current_facts.fact_id ASC LIMIT ?6"
-        ),
-        // Sort actual native scores after materialization; direct FTS score
-        // pushdown in Turso 0.8 otherwise selects the wrong bounded candidates.
-        BackendKind::NativeTurso => format!(
-            "WITH hits AS MATERIALIZED ({native_hits}), authorized AS MATERIALIZED ({candidates})
-             SELECT fact_id FROM authorized ORDER BY rank DESC, fact_id ASC LIMIT ?6"
-        ),
-    };
-    let mut rows = transaction
-        .query(
-            &sql,
+               AND current_facts.fact_id <> ?5
+             ORDER BY bm25(memory_v2_assertion_payloads_fts) ASC,
+                      current_facts.fact_id ASC
+             LIMIT ?6",
             params![
                 match_query,
                 key.kind,

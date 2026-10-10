@@ -399,10 +399,10 @@ pub(super) async fn query_candidate_clause(
     let root_project_key =
         root_project_key.map(|project_key| SqlValue::Text(project_key.to_string()));
     let temporal_mode = SqlValue::Text(snapshot_request.temporal_mode().as_str().to_string());
-    let occurrence_match_query = match clause.channel {
-        CandidateChannel::Lexical => fts_all_terms(&clause.value, conn.backend_kind()),
-        CandidateChannel::LexicalRelaxed => fts_drop_one_terms(&clause.value, conn.backend_kind()),
-        _ => fts_phrase(&clause.value, conn.backend_kind()),
+    let occurrence_fts_query = match clause.channel {
+        CandidateChannel::Lexical => fts_all_terms(&clause.value),
+        CandidateChannel::LexicalRelaxed => fts_drop_one_terms(&clause.value),
+        _ => fts_phrase(&clause.value),
     };
     let (sql, params) = match (scope, clause.channel) {
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Scope) => {
@@ -431,14 +431,14 @@ pub(super) async fn query_candidate_clause(
         // rows through the index and no retained-row text scan. That is a
         // measured empty channel, not a budget refusal.
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::ExactMessage) => (
-            root_exact_candidate_query(conn.backend_kind()),
+            ROOT_EXACT_CANDIDATE_QUERY,
             vec![
                 root_project_key.clone().ok_or_else(|| {
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
                 })?,
                 provider,
                 SqlValue::Text(clause.value.clone()),
-                SqlValue::Text(fts_phrase(&clause.value, conn.backend_kind())),
+                SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
                 SqlValue::Text(cursor.stable_id.clone()),
@@ -458,13 +458,13 @@ pub(super) async fn query_candidate_clause(
             | CandidateChannel::Lexical
             | CandidateChannel::LexicalRelaxed,
         ) => (
-            root_occurrence_fts_query(conn.backend_kind()),
+            ROOT_OCCURRENCE_FTS_QUERY,
             vec![
                 root_project_key.clone().ok_or_else(|| {
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
                 })?,
                 provider,
-                SqlValue::Text(occurrence_match_query.clone()),
+                SqlValue::Text(occurrence_fts_query.clone()),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
                 SqlValue::Text(cursor.stable_id.clone()),
@@ -525,12 +525,12 @@ pub(super) async fn query_candidate_clause(
             )
         }
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Summary) => (
-            root_summary_candidate_query(conn.backend_kind()),
+            ROOT_SUMMARY_CANDIDATE_QUERY,
             vec![
                 root_project_key.ok_or_else(|| {
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
                 })?,
-                SqlValue::Text(fts_phrase(&clause.value, conn.backend_kind())),
+                SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
                 SqlValue::Text(cursor.stable_id.clone()),
@@ -547,7 +547,7 @@ pub(super) async fn query_candidate_clause(
             TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
             CandidateChannel::Span | CandidateChannel::Burst,
         ) => (
-            root_derived_candidate_query(conn.backend_kind()),
+            ROOT_DERIVED_CANDIDATE_QUERY,
             vec![
                 root_project_key.clone().ok_or_else(|| {
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
@@ -558,7 +558,7 @@ pub(super) async fn query_candidate_clause(
                     _ => unreachable!("derived candidate channel"),
                 }),
                 provider,
-                SqlValue::Text(fts_phrase(&clause.value, conn.backend_kind())),
+                SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
                 SqlValue::Text(cursor.stable_id.clone()),
@@ -617,12 +617,12 @@ pub(super) async fn query_candidate_clause(
             | CandidateChannel::Lexical
             | CandidateChannel::LexicalRelaxed,
         ) => (
-            occurrence_fts_query(conn.backend_kind()),
+            OCCURRENCE_FTS_QUERY,
             vec![
                 SqlValue::Text(session_id.as_str().to_string()),
                 SqlValue::Integer(generation),
                 provider,
-                SqlValue::Text(occurrence_match_query),
+                SqlValue::Text(occurrence_fts_query),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.stable_id.clone()),
                 SqlValue::Integer(source_stable_cap),
@@ -675,11 +675,11 @@ pub(super) async fn query_candidate_clause(
             )
         }
         (TemporalRetrievalScope::Session(session_id), CandidateChannel::Summary) => (
-            summary_candidate_query(conn.backend_kind()),
+            SUMMARY_CANDIDATE_QUERY,
             vec![
                 SqlValue::Text(session_id.as_str().to_string()),
                 SqlValue::Integer(generation),
-                SqlValue::Text(fts_phrase(&clause.value, conn.backend_kind())),
+                SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.stable_id.clone()),
                 SqlValue::Integer(source_stable_cap),
@@ -694,7 +694,7 @@ pub(super) async fn query_candidate_clause(
             TemporalRetrievalScope::Session(session_id),
             CandidateChannel::Span | CandidateChannel::Burst,
         ) => (
-            derived_candidate_query(conn.backend_kind()),
+            DERIVED_CANDIDATE_QUERY,
             vec![
                 SqlValue::Text(session_id.as_str().to_string()),
                 SqlValue::Integer(generation),
@@ -704,7 +704,7 @@ pub(super) async fn query_candidate_clause(
                     _ => unreachable!("derived candidate channel"),
                 }),
                 provider,
-                SqlValue::Text(fts_phrase(&clause.value, conn.backend_kind())),
+                SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.stable_id.clone()),
                 SqlValue::Integer(limit),
@@ -805,11 +805,8 @@ pub(super) const fn candidate_score(channel: CandidateChannel) -> i64 {
     }
 }
 
-pub(super) fn fts_phrase(
-    value: &str,
-    backend: tracedecay_runtime_core::db::engine::BackendKind,
-) -> String {
-    tracedecay_runtime_core::db::native_search::quote_term(backend, value)
+pub(super) fn fts_phrase(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 /// Strict lexical tier: every term must match the same message.
@@ -818,10 +815,7 @@ pub(super) fn fts_phrase(
 /// them, in which case that operator stands. Each term is quoted, so a term
 /// FTS5 would otherwise read as syntax (`NEAR`, `(`, `*`) matches as the word
 /// it is.
-pub(super) fn fts_all_terms(
-    value: &str,
-    backend: tracedecay_runtime_core::db::engine::BackendKind,
-) -> String {
+pub(super) fn fts_all_terms(value: &str) -> String {
     let mut expression = String::new();
     let mut term_precedes = false;
     for token in value.split_whitespace() {
@@ -836,7 +830,7 @@ pub(super) fn fts_all_terms(
         } else if !expression.is_empty() {
             expression.push(' ');
         }
-        expression.push_str(&fts_phrase(token, backend));
+        expression.push_str(&fts_phrase(token));
         term_precedes = true;
     }
     expression
@@ -847,13 +841,10 @@ pub(super) fn fts_all_terms(
 /// The plan reaches this channel only for a plain conjunction of bounded width;
 /// a typed boolean expression already says what to match and is answered
 /// strictly.
-fn fts_drop_one_terms(
-    value: &str,
-    backend: tracedecay_runtime_core::db::engine::BackendKind,
-) -> String {
+fn fts_drop_one_terms(value: &str) -> String {
     let terms = value.split_whitespace().collect::<Vec<_>>();
     if terms.len() < 2 || terms.iter().copied().any(is_fts_boolean_operator) {
-        return fts_all_terms(value, backend);
+        return fts_all_terms(value);
     }
     (0..terms.len())
         .map(|dropped| {
@@ -861,7 +852,7 @@ fn fts_drop_one_terms(
                 .iter()
                 .enumerate()
                 .filter(|(index, _)| *index != dropped)
-                .map(|(_, term)| fts_phrase(term, backend))
+                .map(|(_, term)| fts_phrase(term))
                 .collect::<Vec<_>>()
                 .join(" AND ");
             format!("({kept})")

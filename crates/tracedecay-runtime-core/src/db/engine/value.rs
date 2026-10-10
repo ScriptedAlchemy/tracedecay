@@ -160,26 +160,3 @@ fn type_mismatch(column: i32, expected: &'static str, value: &Value) -> Error {
         actual: value.kind(),
     }
 }
-
-impl From<tracedecay_turso_runtime::Value> for Value {
-    fn from(value: tracedecay_turso_runtime::Value) -> Self {
-        match value {
-            tracedecay_turso_runtime::Value::Null => Self::Null,
-            tracedecay_turso_runtime::Value::Integer(value) => Self::Integer(value),
-            tracedecay_turso_runtime::Value::Real(value) => Self::Real(value),
-            tracedecay_turso_runtime::Value::Text(value) => Self::Text(value),
-            tracedecay_turso_runtime::Value::Blob(value) => Self::Blob(value),
-        }
-    }
-}
-impl From<Value> for tracedecay_turso_runtime::Value {
-    fn from(value: Value) -> Self {
-        match value {
-            Value::Null => Self::Null,
-            Value::Integer(value) => Self::Integer(value),
-            Value::Real(value) => Self::Real(value),
-            Value::Text(value) => Self::Text(value),
-            Value::Blob(value) => Self::Blob(value),
-        }
-    }
-}

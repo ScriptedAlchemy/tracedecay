@@ -112,10 +112,6 @@ impl Deref for TestConnection {
 // `Connection`; `Deref` alone does not carry trait bounds, so schema helpers
 // generic over `Executor` could not accept it.
 impl QueryExecutor for TestConnection {
-    fn backend_kind(&self) -> super::BackendKind {
-        self.connection.backend_kind()
-    }
-
     async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
     where
         P: IntoParams,
@@ -167,77 +163,5 @@ impl ReaderQueryExecutor for NoReads {
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
         unreachable!("engine test SQL does not use the product read contract")
-    }
-}
-
-/// Isolated native-engine fixture using the same guarded facade as registered stores.
-pub struct NativeTestConnection {
-    connection: Connection,
-}
-
-impl NativeTestConnection {
-    pub fn open(path: &Path) -> EngineResult<Self> {
-        Self::open_with_write_authority(path, Arc::new(AllowTestWrites))
-    }
-
-    pub fn open_with_write_authority(
-        path: &Path,
-        authority: Arc<dyn ExactSqlWriteAuthority>,
-    ) -> EngineResult<Self> {
-        let database = tracedecay_turso_runtime::Database::open(path)?;
-        let mut hasher = Sha256::new();
-        hasher.update(b"tracedecay.native-engine-test.identity.v1\0");
-        hasher.update(path.as_os_str().as_encoded_bytes());
-        let digest = hex::encode(hasher.finalize());
-        let binding = serde_json::from_value(serde_json::json!({
-            "shard_id": {
-                "brain_id": format!("brain.{}", &digest[..32]),
-                "profile_id": format!("profile.{}", &digest[32..]),
-                "scope": { "kind": "project", "project_id": format!("project.{}", &digest[..32]) }
-            },
-            "incarnation": 1,
-            "authority_epoch": 1
-        }))
-        .map_err(|error| super::Error::Runtime(format!("native test binding failed: {error}")))?;
-        Ok(Self {
-            connection: Connection::attach_native(database, binding, authority),
-        })
-    }
-}
-
-impl Deref for NativeTestConnection {
-    type Target = Connection;
-    fn deref(&self) -> &Self::Target {
-        &self.connection
-    }
-}
-
-impl QueryExecutor for NativeTestConnection {
-    fn backend_kind(&self) -> super::BackendKind {
-        self.connection.backend_kind()
-    }
-    async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
-    where
-        P: IntoParams,
-    {
-        self.connection.query(sql, params).await
-    }
-}
-
-impl Executor for NativeTestConnection {
-    async fn execute<P>(&self, sql: &str, params: P) -> EngineResult<u64>
-    where
-        P: IntoParams,
-    {
-        self.connection.execute(sql, params).await
-    }
-    async fn execute_statements(
-        &self,
-        statements: Vec<super::WriteStatement>,
-    ) -> EngineResult<Vec<u64>> {
-        self.connection.execute_statements(statements).await
-    }
-    async fn execute_batch(&self, sql: &str) -> EngineResult<()> {
-        self.connection.execute_batch(sql).await
     }
 }

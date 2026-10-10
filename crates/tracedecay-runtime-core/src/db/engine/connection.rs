@@ -20,14 +20,8 @@ const READER_WAIT: Duration = Duration::from_secs(5);
 const HEALTH_READER_WAIT: Duration = Duration::ZERO;
 
 #[derive(Clone)]
-enum Runtime {
-    Sqlite(Arc<ExactSqlHandle>),
-    Native(Arc<super::native::NativeHandle>),
-}
-
-#[derive(Clone)]
 pub struct Connection {
-    runtime: Runtime,
+    runtime: Arc<ExactSqlHandle>,
     binding: StoreRuntimeBindingV1,
     /// Priority every read issued through this handle is admitted under.
     ///
@@ -44,10 +38,6 @@ pub struct ReadConnection {
 }
 
 impl ReadConnection {
-    pub fn backend_kind(&self) -> super::BackendKind {
-        self.connection.backend_kind()
-    }
-
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
@@ -79,60 +69,10 @@ impl ReadConnection {
 }
 
 impl Connection {
-    pub fn attach_native(
-        database: tracedecay_turso_runtime::Database,
-        binding: StoreRuntimeBindingV1,
-        authority: Arc<dyn tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority>,
-    ) -> Self {
-        Self {
-            runtime: Runtime::Native(Arc::new(super::native::NativeHandle::new(
-                database,
-                authority,
-                tracedecay_store::AdmissionConfigV1::default().readers,
-            ))),
-            binding,
-            read_priority: OperationPriorityV1::Foreground,
-        }
-    }
-
-    pub fn attach_native_with_reader_budget(
-        database: tracedecay_turso_runtime::Database,
-        binding: StoreRuntimeBindingV1,
-        authority: Arc<dyn tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority>,
-        budget: tracedecay_store::ReaderBudgetV1,
-    ) -> Result<Self> {
-        budget
-            .validate()
-            .map_err(|error| Error::invalid_operation(error.to_string()))?;
-        Ok(Self {
-            runtime: Runtime::Native(Arc::new(super::native::NativeHandle::new(
-                database, authority, budget,
-            ))),
-            binding,
-            read_priority: OperationPriorityV1::Foreground,
-        })
-    }
-
-    pub fn backend_kind(&self) -> super::BackendKind {
-        match &self.runtime {
-            Runtime::Sqlite(_) => super::BackendKind::Sqlite,
-            Runtime::Native(_) => super::BackendKind::NativeTurso,
-        }
-    }
-
-    fn sqlite_runtime(&self) -> Result<Arc<ExactSqlHandle>> {
-        match &self.runtime {
-            Runtime::Sqlite(runtime) => Ok(Arc::clone(runtime)),
-            Runtime::Native(_) => Err(Error::invalid_operation(
-                "operation requires a SQLite runtime",
-            )),
-        }
-    }
-
     pub fn attach(runtime: ExactSqlHandle) -> Self {
         Self {
             binding: runtime.binding().clone(),
-            runtime: Runtime::Sqlite(Arc::new(runtime)),
+            runtime: Arc::new(runtime),
             read_priority: OperationPriorityV1::Foreground,
         }
     }
@@ -152,11 +92,14 @@ impl Connection {
         }
     }
 
-    /// The same store, with every read this handle issues admitted as background work.
+    /// The same store and the same writer, with every read this handle issues
+    /// admitted as background work.
     ///
-    /// The returned handle shares the attached runtime and its write authority.
-    /// Only admission of non-transactional `query`/`read_snapshot` calls changes;
-    /// those reads use the unreserved slice of the general lane.
+    /// Writes are unaffected: the returned handle shares this one's runtime, so
+    /// `execute`, `execute_batch`, and every transaction still reach the same
+    /// serialized writer. Only the reader-pool admission of non-transactional
+    /// `query`/`read_snapshot` calls changes, and those then admit against the
+    /// unreserved slice of the general lane.
     ///
     /// Background maintenance that runs on a *write* connection needs this:
     /// [`Self::attach`] defaults to `Foreground`, so a bulk sweep driven from
@@ -166,7 +109,7 @@ impl Connection {
     #[must_use]
     pub fn background_reads(&self) -> Self {
         Self {
-            runtime: self.runtime.clone(),
+            runtime: Arc::clone(&self.runtime),
             binding: self.binding.clone(),
             read_priority: OperationPriorityV1::Background,
         }
@@ -176,11 +119,8 @@ impl Connection {
     where
         P: IntoParams,
     {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime.execute(sql.to_owned(), params.into_params()?).await;
-        }
         let statement = statement(sql, params)?;
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         runtime
             .execute_async(statement)
             .await
@@ -194,13 +134,8 @@ impl Connection {
     where
         P: IntoParams,
     {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime
-                .execute_returning(sql.to_owned(), params.into_params()?)
-                .await;
-        }
         let statement = statement(sql, params)?;
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         runtime
             .execute_returning_async(statement)
             .await
@@ -210,21 +145,11 @@ impl Connection {
 
     #[tracing::instrument(name = "runtime_core.db.execute_statements", level = "trace", skip_all)]
     pub async fn execute_statements(&self, statements: Vec<WriteStatement>) -> Result<Vec<u64>> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime
-                .execute_statements(
-                    statements
-                        .into_iter()
-                        .map(WriteStatement::into_parts)
-                        .collect(),
-                )
-                .await;
-        }
         let statements = statements
             .into_iter()
             .map(WriteStatement::into_exact)
             .collect::<Vec<_>>();
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         // Once admitted, a batch continues through its first error even if its
         // caller stops waiting. Separate dispatches preserve writer interleaving.
         tokio::spawn(async move {
@@ -247,13 +172,8 @@ impl Connection {
     where
         P: IntoParams,
     {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime
-                .query(sql.to_owned(), params.into_params()?, self.read_priority)
-                .await;
-        }
         let statement = statement(sql, params)?;
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
         let rows = tokio::task::spawn_blocking(move || {
             runtime.query_with_priority(statement, priority, READER_WAIT)
@@ -264,19 +184,13 @@ impl Connection {
     }
 
     pub async fn checkpoint_wal_truncate(&self) -> Result<Rows> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime.checkpoint().await;
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         let rows = runtime.checkpoint_wal_truncate_async().await?;
         Ok(Rows::from_exact(rows))
     }
 
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime.execute_batch(sql.to_owned()).await;
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
         runtime
             .execute_batch_async(sql)
@@ -286,12 +200,7 @@ impl Connection {
     }
 
     pub async fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome> {
-        if matches!(&self.runtime, Runtime::Native(_)) {
-            return Err(Error::invalid_operation(
-                "native Turso connection memory release is unsupported",
-            ));
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         tokio::spawn(async move { runtime.release_connection_memory_async().await })
             .await
             .map_err(join_error)?
@@ -300,12 +209,8 @@ impl Connection {
 
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            runtime.validate(sql.to_owned()).await?;
-            return Statement::for_connection(self, sql);
-        }
         let statement = statement(sql, ())?;
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         runtime.validate_async(statement).await?;
         Statement::for_connection(self, sql)
     }
@@ -316,21 +221,12 @@ impl Connection {
     /// saturated, which is the only moment the numbers matter.
     #[must_use]
     pub fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot> {
-        match &self.runtime {
-            Runtime::Sqlite(runtime) => runtime.reader_pool_occupancy(),
-            Runtime::Native(_) => None,
-        }
+        self.runtime.reader_pool_occupancy()
     }
 
     #[tracing::instrument(name = "runtime_core.db.snapshot.read", level = "trace", skip_all)]
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime
-                .snapshot(self.read_priority)
-                .await
-                .map(ReadSnapshot::from_native);
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
         tokio::task::spawn_blocking(move || {
             runtime.begin_read_snapshot_with_priority(priority, READER_WAIT)
@@ -342,13 +238,7 @@ impl Connection {
     }
 
     pub(crate) async fn health_read_snapshot(&self) -> Result<ReadSnapshot> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime
-                .snapshot(OperationPriorityV1::Health)
-                .await
-                .map(ReadSnapshot::from_native);
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || runtime.begin_health_read_snapshot(HEALTH_READER_WAIT))
             .await
             .map_err(join_error)?
@@ -367,38 +257,23 @@ impl Connection {
         &self,
         behavior: TransactionBehavior,
     ) -> Result<Transaction> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            let native_behavior = match behavior {
-                #[cfg(any(test, feature = "test-helpers"))]
-                TransactionBehavior::Deferred => {
-                    tracedecay_turso_runtime::TransactionBehavior::Deferred
-                }
-                TransactionBehavior::Immediate => {
-                    tracedecay_turso_runtime::TransactionBehavior::Immediate
-                }
-            };
-            return runtime
-                .transaction(false, native_behavior)
-                .await
-                .map(Transaction::from_native);
-        }
         match behavior {
             #[cfg(any(test, feature = "test-helpers"))]
             TransactionBehavior::Deferred => {
-                let runtime = self.sqlite_runtime()?;
+                let runtime = Arc::clone(&self.runtime);
                 runtime
                     .begin_deferred_async()
                     .await
                     .map_err(Error::from)
-                    .map(Transaction::from_runtime)
+                    .map(|transaction| Transaction::from_runtime(transaction))
             }
             TransactionBehavior::Immediate => {
-                let runtime = self.sqlite_runtime()?;
+                let runtime = Arc::clone(&self.runtime);
                 runtime
                     .begin_immediate_async()
                     .await
                     .map_err(Error::from)
-                    .map(Transaction::from_runtime)
+                    .map(|transaction| Transaction::from_runtime(transaction))
             }
         }
     }
@@ -414,21 +289,12 @@ impl Connection {
     /// cancel.
     #[tracing::instrument(name = "runtime_core.db.txn.long_lease", level = "trace", skip_all)]
     pub async fn authorized_long_lease_transaction(&self) -> Result<Transaction> {
-        if let Runtime::Native(runtime) = &self.runtime {
-            return runtime
-                .transaction(
-                    true,
-                    tracedecay_turso_runtime::TransactionBehavior::Immediate,
-                )
-                .await
-                .map(Transaction::from_native);
-        }
-        let runtime = self.sqlite_runtime()?;
+        let runtime = Arc::clone(&self.runtime);
         runtime
             .begin_authorized_long_lease_immediate_async()
             .await
             .map_err(Error::from)
-            .map(Transaction::from_runtime)
+            .map(|transaction| Transaction::from_runtime(transaction))
     }
 }
 

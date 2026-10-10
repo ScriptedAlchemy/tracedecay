@@ -1,8 +1,7 @@
-use tracedecay_runtime_core::db::engine::{BackendKind, Executor, params};
+use tracedecay_runtime_core::db::engine::{Executor, params};
 
 use crate::schema_contract::validate_session_graph_publication_schema_contract;
 use crate::{global_db_operation_error, global_db_operation_message};
-use tracedecay_runtime_core::db::native_search::SearchIndex;
 
 #[path = "session_temporal_schema/admission.rs"]
 mod admission;
@@ -648,9 +647,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     );
     CREATE INDEX IF NOT EXISTS idx_session_summary_availability_generation
         ON session_summary_availability(session_id, generation, availability);
-";
 
-const SQLITE_TEMPORAL_SEARCH_DDL: &str = r"
     CREATE VIRTUAL TABLE IF NOT EXISTS session_occurrences_fts USING fts5(
         index_text,
         content='session_occurrences',
@@ -680,16 +677,7 @@ pub(crate) async fn drop_empty_session_temporal_schema(
         .iter()
         .map(|(table, _)| *table)
         .partition(|table| table.ends_with("_fts"));
-    for table in fts {
-        let kind = match conn.backend_kind() {
-            BackendKind::Sqlite => "TABLE",
-            BackendKind::NativeTurso => "INDEX",
-        };
-        conn.execute_batch(&format!("DROP {kind} IF EXISTS {table}"))
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    }
-    for table in tables.into_iter().rev() {
+    for table in fts.into_iter().chain(tables.into_iter().rev()) {
         conn.execute_batch(&format!("DROP TABLE IF EXISTS {table}"))
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -705,16 +693,6 @@ pub(crate) async fn install_session_temporal_schema(
     conn.execute_batch(TEMPORAL_SCHEMA_DDL)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    match conn.backend_kind() {
-        BackendKind::Sqlite => conn.execute_batch(SQLITE_TEMPORAL_SEARCH_DDL).await,
-        BackendKind::NativeTurso => {
-            conn.execute_batch(SearchIndex::Occurrence.create_sql())
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            conn.execute_batch(SearchIndex::Summary.create_sql()).await
-        }
-    }
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
     conn.execute_batch(tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -736,9 +714,6 @@ async fn validate_temporal_table_shapes(
     conn: &impl Executor,
 ) -> tracedecay_domain::errors::Result<()> {
     for &(table, expected_columns) in TEMPORAL_TABLE_COLUMNS {
-        if conn.backend_kind() == BackendKind::NativeTurso && table.ends_with("_fts") {
-            continue;
-        }
         let mut rows = conn
             .query(
                 "SELECT name FROM pragma_table_info(?1) ORDER BY cid",

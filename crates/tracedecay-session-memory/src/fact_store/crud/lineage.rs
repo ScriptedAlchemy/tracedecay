@@ -12,7 +12,7 @@ use tracedecay_domain::{
     FactLineageEventKindV1, FactLineageEventV1, PayloadAccessState, UtcMicros,
 };
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
-use tracedecay_runtime_core::db::engine::{BackendKind, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     FactCommitOutcome, FactCommitReceipt, FactStoreError, FactStoreResult, FactWriteBatch,
 };
@@ -464,12 +464,10 @@ pub(super) async fn publish_current_projection(
         .await
         .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
     if requires_payload_purge(projection.access) {
-        if transaction.backend_kind() == BackendKind::Sqlite {
-            transaction
-                .execute_batch("PRAGMA secure_delete = ON;")
-                .await
-                .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-        }
+        transaction
+            .execute_batch("PRAGMA secure_delete = ON;")
+            .await
+            .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
         transaction
             .execute(
                 "DELETE FROM memory_v2_assertion_payloads

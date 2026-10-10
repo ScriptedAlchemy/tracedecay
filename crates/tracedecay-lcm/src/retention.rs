@@ -494,14 +494,6 @@ enum RetentionReadConnection {
 }
 
 impl QueryExecutor for RetentionReadConnection {
-    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
-        match self {
-            Self::Database(connection) => connection.backend_kind(),
-            #[cfg(test)]
-            Self::Connection(connection) => connection.backend_kind(),
-        }
-    }
-
     async fn query<P>(
         &self,
         sql: &str,
@@ -549,14 +541,6 @@ impl RetentionWriteTransaction<'_> {
 }
 
 impl QueryExecutor for RetentionWriteTransaction<'_> {
-    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
-        match self {
-            Self::Database(transaction) => transaction.backend_kind(),
-            #[cfg(test)]
-            Self::Connection(transaction) => transaction.backend_kind(),
-        }
-    }
-
     async fn query<P>(
         &self,
         sql: &str,

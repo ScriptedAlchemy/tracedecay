@@ -798,10 +798,6 @@ impl<T> CancellableSchemaTransaction<'_, T> {
 }
 
 impl<T: QueryExecutor + Sync> QueryExecutor for CancellableSchemaTransaction<'_, T> {
-    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
-        self.transaction.backend_kind()
-    }
-
     async fn query<P>(&self, sql: &str, params: P) -> engine::Result<Rows>
     where
         P: IntoParams,

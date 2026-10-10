@@ -62,8 +62,8 @@ use super::sql::{TemporalSqlRead, TemporalSqlRows};
 use super::store::execution_control_graph_cancellation;
 use candidates::*;
 use cursors::*;
+use queries::ROOT_OCCURRENCE_FTS_COUNT_QUERY;
 pub(crate) use queries::partial_summary_invalidation_exists;
-use queries::root_occurrence_fts_count_query;
 use records::*;
 use rows::*;
 
@@ -420,11 +420,11 @@ impl<'a> SessionTemporalReadPort<'a> {
         let mut rows = self
             .read
             .query(
-                root_occurrence_fts_count_query(self.read.backend_kind()),
+                ROOT_OCCURRENCE_FTS_COUNT_QUERY,
                 vec![
                     Value::Text(project_key.to_string()),
                     provider,
-                    Value::Text(fts_all_terms(&clause.value, self.read.backend_kind())),
+                    Value::Text(fts_all_terms(&clause.value)),
                     integer(stable_cap.min(metadata_cap))?,
                     integer(anchor_cap)?,
                     integer(metadata_cap)?,

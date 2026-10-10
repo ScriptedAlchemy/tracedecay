@@ -33,7 +33,7 @@ pub async fn grep(
     retrieval_filters: LcmGrepFilters,
     git_scope_session_ids: Option<&[(String, String)]>,
 ) -> Result<LcmGrepOutcome, LcmError> {
-    let query_plan = grep_query_plan(&request.query, conn.backend_kind());
+    let query_plan = grep_query_plan(&request.query);
     if query_plan.is_empty() {
         return Ok(LcmGrepOutcome::default());
     }
@@ -224,11 +224,11 @@ pub(super) async fn raw_grep_hits(
     let content_query = if query_plan.fts_query.is_empty() {
         String::new()
     } else {
-        let field = match conn.backend_kind() {
-            BackendKind::Sqlite => crate::schema::RAW_FTS_CONTENT_COLUMN_FILTER,
-            BackendKind::NativeTurso => "index_text:",
-        };
-        format!("{field}({})", query_plan.fts_query)
+        format!(
+            "{}({})",
+            crate::schema::RAW_FTS_CONTENT_COLUMN_FILTER,
+            query_plan.fts_query
+        )
     };
     let mut values = vec![Value::Text(content_query)];
     let mut filters = Vec::new();
@@ -251,46 +251,15 @@ pub(super) async fn raw_grep_hits(
         request.sort,
         RAW_GREP_RECENCY_EXPR,
         Some(RAW_ROLE_PENALTY_CASE),
-        conn.backend_kind(),
     );
-    let source = match conn.backend_kind() {
-        BackendKind::Sqlite => {
-            "lcm_raw_messages_fts JOIN lcm_raw_messages r ON r.store_id = lcm_raw_messages_fts.rowid"
-        }
-        BackendKind::NativeTurso => {
-            "indexed_hits JOIN lcm_raw_messages r ON r.store_id = indexed_hits.hit_rowid"
-        }
-    };
-    let predicate = tracedecay_runtime_core::db::native_search::predicate(
-        conn.backend_kind(),
-        "lcm_raw_messages_fts",
-        &[
-            "r.index_text",
-            "r.role",
-            "r.kind",
-            "r.model",
-            "r.tool_names",
-        ],
-        "?",
-    );
-    let predicate = if conn.backend_kind() == BackendKind::NativeTurso {
-        "1 = 1".to_owned()
-    } else {
-        predicate
-    };
-    let prefix = if conn.backend_kind() == BackendKind::NativeTurso {
-        "WITH indexed_hits AS MATERIALIZED (SELECT store_id AS hit_rowid, fts_score(index_text, role, kind, model, tool_names, ?1) AS rank FROM lcm_raw_messages
-           WHERE fts_match(index_text, role, kind, model, tool_names, ?1)) "
-    } else {
-        ""
-    };
     let sql = format!(
-        "{prefix}SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text, r.role,
+        "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text, r.role,
                 COALESCE(NULLIF(s.parent_session_id, ''), r.session_id),
                 COALESCE(s.is_subagent, 0)
-         FROM {source}
+         FROM lcm_raw_messages_fts
+         JOIN lcm_raw_messages r ON r.store_id = lcm_raw_messages_fts.rowid
          LEFT JOIN sessions s ON s.provider = r.provider AND s.session_id = r.session_id
-         WHERE {predicate}
+         WHERE lcm_raw_messages_fts MATCH ?
            {filter_sql}
          ORDER BY {order_by}
          LIMIT ?"
@@ -343,41 +312,12 @@ pub(super) async fn summary_grep_hits(
     } else {
         format!(" AND {}", filters.join(" AND "))
     };
-    let order_by = grep_order_by(
-        request.sort,
-        SUMMARY_GREP_RECENCY_EXPR,
-        None,
-        conn.backend_kind(),
-    );
-    let source = match conn.backend_kind() {
-        BackendKind::Sqlite => {
-            "session_summary_nodes_fts JOIN session_summary_nodes n ON n.rowid = session_summary_nodes_fts.rowid"
-        }
-        BackendKind::NativeTurso => {
-            "indexed_hits JOIN session_summary_nodes n ON n.rowid = indexed_hits.hit_rowid"
-        }
-    };
-    let predicate = tracedecay_runtime_core::db::native_search::predicate(
-        conn.backend_kind(),
-        "session_summary_nodes_fts",
-        &["n.summary_text"],
-        "?",
-    );
-    let predicate = if conn.backend_kind() == BackendKind::NativeTurso {
-        "1 = 1".to_owned()
-    } else {
-        predicate
-    };
-    let prefix = if conn.backend_kind() == BackendKind::NativeTurso {
-        "WITH indexed_hits AS MATERIALIZED (SELECT rowid AS hit_rowid, fts_score(summary_text, ?1) AS rank FROM session_summary_nodes
-           WHERE fts_match(summary_text, ?1)) "
-    } else {
-        ""
-    };
+    let order_by = grep_order_by(request.sort, SUMMARY_GREP_RECENCY_EXPR, None);
     let sql = format!(
-        "{prefix}SELECT n.provider, n.session_id, n.summary_id, n.summary_text
-         FROM {source}
-         WHERE {predicate}
+        "SELECT n.provider, n.session_id, n.summary_id, n.summary_text
+         FROM session_summary_nodes_fts
+         JOIN session_summary_nodes n ON n.rowid = session_summary_nodes_fts.rowid
+         WHERE session_summary_nodes_fts MATCH ?
            {filter_sql}
          ORDER BY {order_by}, n.summary_id
          LIMIT ?"
@@ -470,7 +410,6 @@ async fn raw_like_grep_hits(
         request.sort,
         RAW_GREP_RECENCY_EXPR,
         Some(RAW_ROLE_PENALTY_CASE),
-        conn.backend_kind(),
     );
     let sql = format!(
         "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text, r.role,
@@ -686,12 +625,7 @@ async fn summary_like_grep_hits(
     }
 
     values.push(Value::Integer(fetch_limit as i64));
-    let order_by = grep_order_by(
-        request.sort,
-        SUMMARY_GREP_RECENCY_EXPR,
-        None,
-        conn.backend_kind(),
-    );
+    let order_by = grep_order_by(request.sort, SUMMARY_GREP_RECENCY_EXPR, None);
     let sql = format!(
         "SELECT n.provider, n.session_id, n.summary_id, n.summary_text, 0.0 AS rank
          FROM session_summary_nodes n

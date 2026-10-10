@@ -14,14 +14,12 @@ use std::path::Path;
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
-use tracedecay_runtime_core::db::engine::{BackendKind, Error as EngineError, IntoParams, Rows};
+use tracedecay_runtime_core::db::engine::{Error as EngineError, IntoParams, Rows};
 
 use crate::relations::{SessionRelationGraphStore, SessionRelationScope};
 
 /// Read-only SQL the session-temporal store can issue on a snapshot or txn.
 pub trait SessionTemporalQuery: Send + Sync {
-    fn backend_kind(&self) -> BackendKind;
-
     fn query<P>(
         &self,
         sql: &str,
@@ -52,10 +50,6 @@ pub trait SessionTemporalWriteTxn: SessionTemporalExec {
 }
 
 impl SessionTemporalQuery for DatabaseEngineReadSnapshot {
-    fn backend_kind(&self) -> BackendKind {
-        tracedecay_runtime_core::db::engine::QueryExecutor::backend_kind(self)
-    }
-
     fn query<P>(
         &self,
         sql: &str,

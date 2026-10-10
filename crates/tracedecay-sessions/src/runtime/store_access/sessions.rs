@@ -5,9 +5,7 @@ use std::path::Path;
 use serde_json::Value as JsonValue;
 
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_runtime_core::db::engine::{
-    BackendKind, Error as EngineError, FromValue, QueryExecutor, Row, Value,
-};
+use tracedecay_runtime_core::db::engine::{Error as EngineError, FromValue, Row, Value};
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
 
 use crate::runtime::SessionMessageSearchResult;
@@ -668,9 +666,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         limit: usize,
     ) -> tracedecay_domain::errors::Result<Vec<SessionMessageSearchResult>> {
         const OPERATION: &str = "search registered session messages";
-        let snapshot = self.read_snapshot().await?;
-        let backend = snapshot.backend_kind();
-        let fts_query = session_fts_query(query, backend);
+        let fts_query = session_fts_query(query);
         if fts_query.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
@@ -680,29 +676,8 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map(str::to_lowercase)
             .collect::<Vec<_>>();
         let fetch_limit = rerank_fetch_limit(limit, SESSION_MESSAGE_SEARCH_MAX_FETCH);
-        let columns = ["index_text", "role", "kind", "model", "tool_names"];
-        let native_rank =
-            tracedecay_runtime_core::db::native_search::score(backend, "", &columns, "?1");
-        let native_predicate =
-            tracedecay_runtime_core::db::native_search::predicate(backend, "", &columns, "?1");
-        // Standalone indexed hits retain native score context; joined fts_score
-        // calls yield zero and direct FTS score-order pushdown ignores sorting.
-        let native_hits = format!(
-            "WITH hits AS MATERIALIZED (SELECT store_id, {native_rank} AS rank
-            FROM lcm_raw_messages WHERE {native_predicate}) "
-        );
-        let (source, rank, predicate) = match backend {
-            BackendKind::Sqlite => (
-                "lcm_raw_messages_fts JOIN lcm_raw_messages m ON lcm_raw_messages_fts.rowid = m.store_id",
-                "bm25(lcm_raw_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)",
-                "lcm_raw_messages_fts MATCH ?1",
-            ),
-            BackendKind::NativeTurso => (
-                "hits JOIN lcm_raw_messages m ON m.store_id = hits.store_id",
-                "hits.rank",
-                "1 = 1",
-            ),
-        };
+        let snapshot = self.read_snapshot().await?;
+
         let mut sql = format!(
             "SELECT
                 s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
@@ -716,10 +691,11 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                    AND p.output_message_id = m.message_id
                  ORDER BY p.output_ordinal
                  LIMIT 1) AS observation_id,
-                {rank} AS rank
-             FROM {source}
+                bm25(lcm_raw_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0) AS rank
+             FROM lcm_raw_messages_fts
+             JOIN lcm_raw_messages m ON lcm_raw_messages_fts.rowid = m.store_id
              JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-             WHERE {predicate}",
+             WHERE lcm_raw_messages_fts MATCH ?1",
             message_record_select_columns("m")
         );
         let mut query_params = vec![
@@ -744,13 +720,10 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         ));
         let _ = write!(
             sql,
-            " ORDER BY rank {}, m.store_id ASC LIMIT ?{}",
-            tracedecay_runtime_core::db::native_search::order(backend),
+            " ORDER BY bm25(lcm_raw_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)
+              LIMIT ?{}",
             query_params.len()
         );
-        if backend == BackendKind::NativeTurso {
-            sql.insert_str(0, &native_hits);
-        }
 
         let mut transcript_results = Vec::new();
         let mut transcript_observations = BTreeMap::new();
@@ -767,11 +740,9 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 .map_err(|message| session_db_operation_message(OPERATION, message))?;
             let message = row_to_message(&row, 13)
                 .map_err(|message| session_db_operation_message(OPERATION, message))?;
-            let score = tracedecay_runtime_core::db::native_search::relevance(
-                backend,
-                row.get::<f64>(27)
-                    .map_err(|error| session_db_operation_error(OPERATION, error))?,
-            );
+            let score = -row
+                .get::<f64>(27)
+                .map_err(|error| session_db_operation_error(OPERATION, error))?;
             if let Some(observation_id) = row
                 .get::<Option<String>>(26)
                 .map_err(|error| session_db_operation_error(OPERATION, error))?

@@ -25,7 +25,6 @@ tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
-tracedecay-turso-runtime = { path = "../tracedecay-turso-runtime" }
 tracedecay-store = { path = "../tracedecay-store" }
 
 getrandom = "0.2"

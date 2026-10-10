@@ -10,9 +10,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::handle::{SessionTemporalAccess, SessionTemporalQuery, SessionTemporalRegisteredDb};
-use tracedecay_runtime_core::db::engine::{BackendKind, Error as EngineError};
-use tracedecay_runtime_core::db::native_search::{SearchIndex, normalize_schema_sql};
+use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
+use tracedecay_runtime_core::db::engine::Error as EngineError;
 
 use crate::schema_constants::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
 
@@ -130,11 +129,6 @@ fn required_table_names() -> impl Iterator<Item = &'static str> {
         .copied()
         .chain(TEMPORAL_TABLE_COLUMNS.iter().map(|(table, _)| *table))
         .chain(REQUIRED_FTS_SHADOW_TABLES.iter().copied())
-}
-
-fn required_table_names_for(backend: BackendKind) -> impl Iterator<Item = &'static str> {
-    required_table_names()
-        .filter(move |name| backend == BackendKind::Sqlite || !name.contains("_fts"))
 }
 
 const REQUIRED_INDEXES: &[&str] = &[
@@ -797,6 +791,16 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         let cache = session_temporal_health_cache_cell(database_path);
         let mut cached = cache.lock().await;
         let before = session_temporal_store_fingerprint(database_path).ok();
+        if let (Some(fingerprint), Some(observed)) = (before, cached.as_ref())
+            && observed.fingerprint == fingerprint
+            && observed.observed_at.elapsed() <= SESSION_TEMPORAL_HEALTH_CACHE_TTL
+        {
+            let cached_report = observed.report.clone();
+            drop(cached);
+            return self
+                .relation_health_from_health_snapshot(cached_report)
+                .await;
+        }
         let snapshot = match self.health_read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -807,23 +811,9 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 );
             }
         };
-        if snapshot.backend_kind() == BackendKind::Sqlite
-            && let (Some(fingerprint), Some(observed)) = (before, cached.as_ref())
-            && observed.fingerprint == fingerprint
-            && observed.observed_at.elapsed() <= SESSION_TEMPORAL_HEALTH_CACHE_TTL
-        {
-            let cached_report = observed.report.clone();
-            drop(cached);
-            return self
-                .with_relation_graph_health(&snapshot, cached_report)
-                .await;
-        }
         let report = diagnose_snapshot(&snapshot).await;
         let after = session_temporal_store_fingerprint(database_path).ok();
-        // The SQLite database/WAL fingerprint does not cover native MVCC logs.
-        if snapshot.backend_kind() == BackendKind::Sqlite
-            && let Some(fingerprint) = after.filter(|fingerprint| before == Some(*fingerprint))
-        {
+        if let Some(fingerprint) = after.filter(|fingerprint| before == Some(*fingerprint)) {
             *cached = Some(CachedSessionTemporalHealth {
                 fingerprint,
                 observed_at: Instant::now(),
@@ -832,6 +822,23 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         } else {
             *cached = None;
         }
+        self.with_relation_graph_health(&snapshot, report).await
+    }
+
+    async fn relation_health_from_health_snapshot(
+        &self,
+        report: SessionTemporalHealthReport,
+    ) -> SessionTemporalHealthReport {
+        let snapshot = match self.health_read_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return unavailable_report_with_detail(
+                    classify_engine_error(&error),
+                    "relation_graph",
+                    &error,
+                );
+            }
+        };
         self.with_relation_graph_health(&snapshot, report).await
     }
 }
@@ -860,7 +867,7 @@ async fn diagnose_snapshot(
             status: SessionTemporalHealthStatus::Unavailable,
             findings: vec![finding(
                 SessionTemporalHealthFindingKind::MigrationGap,
-                required_table_names_for(conn.backend_kind()).count() as u64,
+                required_table_names().count() as u64,
             )],
             reason: None,
         };
@@ -869,7 +876,7 @@ async fn diagnose_snapshot(
     let mut status = SessionTemporalHealthStatus::Complete;
     let mut findings = Vec::new();
     let mut partial_reasons = BTreeSet::new();
-    let missing_tables = required_table_names_for(conn.backend_kind())
+    let missing_tables = required_table_names()
         .filter(|table| !inventory.tables.contains(*table))
         .count() as u64;
     if missing_tables > 0 {
@@ -897,7 +904,6 @@ async fn diagnose_snapshot(
 
     let missing_triggers = REQUIRED_TRIGGERS
         .iter()
-        .filter(|(name, _)| conn.backend_kind() == BackendKind::Sqlite || !name.contains("_fts"))
         .filter(|(name, expected)| match inventory.triggers.get(*name) {
             Some(actual) => normalize_sql(actual) != normalize_sql(expected),
             None => true,
@@ -942,41 +948,7 @@ async fn diagnose_snapshot(
         }
     }
 
-    if conn.backend_kind() == BackendKind::NativeTurso {
-        status = SessionTemporalHealthStatus::Partial;
-        partial_reasons.insert("native_search: posting_membership_check_unavailable".to_owned());
-        for (index, kind) in [
-            (
-                SearchIndex::Occurrence,
-                SessionTemporalHealthFindingKind::OccurrenceFtsCorruption,
-            ),
-            (
-                SearchIndex::Summary,
-                SessionTemporalHealthFindingKind::SummaryFtsCorruption,
-            ),
-        ] {
-            match native_search_index_readable(conn, index).await {
-                Ok(true) => {}
-                Ok(false) => merge_finding(&mut findings, kind, 1),
-                Err(error) if error.is_busy_or_locked() => {
-                    return unavailable_report_with_detail(
-                        SessionTemporalHealthStatus::Locked,
-                        "native_search",
-                        &error,
-                    );
-                }
-                Err(error) => {
-                    merge_finding(&mut findings, kind, 1);
-                    partial_reasons.insert(format!("native_search: {error}"));
-                }
-            }
-        }
-    }
-
     for check in CHECKS {
-        if conn.backend_kind() == BackendKind::NativeTurso && is_fts_finding(check.kind) {
-            continue;
-        }
         if check
             .tables
             .iter()
@@ -1008,35 +980,6 @@ async fn diagnose_snapshot(
         reason: (!partial_reasons.is_empty())
             .then(|| partial_reasons.into_iter().collect::<Vec<_>>().join("; ")),
     }
-}
-
-async fn native_search_index_readable(
-    conn: &impl crate::handle::SessionTemporalQuery,
-    index: SearchIndex,
-) -> tracedecay_runtime_core::db::engine::Result<bool> {
-    let mut rows = conn
-        .query(
-            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1 AND tbl_name = ?2",
-            [index.index_name(), index.table_name()],
-        )
-        .await?;
-    let Some(row) = rows.next().await? else {
-        return Ok(false);
-    };
-    let sql: String = row.get(0)?;
-    if normalize_schema_sql(&sql) != normalize_schema_sql(index.create_sql()) {
-        return Ok(false);
-    }
-    conn.query(
-        &format!(
-            "SELECT rowid FROM {} WHERE fts_match({}, ?1) LIMIT 1",
-            index.table_name(),
-            index.columns().join(", ")
-        ),
-        ["tracedecay_health_probe_token"],
-    )
-    .await?;
-    Ok(true)
 }
 
 async fn diagnose_health_check(

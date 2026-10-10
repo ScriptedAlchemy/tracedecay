@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use tracedecay_runtime_core::db::engine::{BackendKind, QueryExecutor, Value, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, Value, params};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_temporal_query::context::OrderedTextContextAssembler;
 
@@ -81,7 +81,7 @@ pub async fn expand_query(
             .map(str::trim)
             .filter(|query| !query.is_empty())
         {
-            let query_plan = grep_query_plan(query, conn.backend_kind());
+            let query_plan = grep_query_plan(query);
             if !query_plan.is_empty() {
                 let grep_request = LcmGrepRequest {
                     provider: request.provider.clone(),
@@ -723,8 +723,8 @@ impl GrepQueryPlan {
     }
 }
 
-fn grep_query_plan(query: &str, backend: BackendKind) -> GrepQueryPlan {
-    let fts_query = sanitize_fts_query(query, backend);
+fn grep_query_plan(query: &str) -> GrepQueryPlan {
+    let fts_query = sanitize_fts5_query(query);
     let terms = extract_search_terms(query);
     let mut like_terms = Vec::new();
     for term in terms {
@@ -746,74 +746,47 @@ fn grep_query_plan(query: &str, backend: BackendKind) -> GrepQueryPlan {
     }
 }
 
-fn sanitize_fts_query(query: &str, backend: BackendKind) -> String {
+fn sanitize_fts5_query(query: &str) -> String {
     if query.is_empty() {
         return String::new();
     }
+
     let mut result = String::new();
-    let mut buffer = String::new();
+    let mut quote_buffer = String::new();
     let mut in_quote = false;
-    let mut operand_precedes = false;
-    let emit = |result: &mut String, value: &str, quoted: bool, operand_precedes: &mut bool| {
-        if value.is_empty() {
-            return;
-        }
-        if backend == BackendKind::Sqlite {
-            if !result.is_empty() {
-                result.push(' ');
-            }
-            if quoted {
-                result.push('"');
-            }
-            result.push_str(value);
-            if quoted {
-                result.push('"');
-            }
-            return;
-        }
-        if !quoted && matches!(value, "AND" | "OR" | "NOT") {
-            if !result.is_empty() {
-                result.push(' ');
-            }
-            result.push_str(value);
-            *operand_precedes = false;
-        } else {
-            if *operand_precedes {
-                result.push_str(" AND ");
-            } else if !result.is_empty() {
-                result.push(' ');
-            }
-            result.push_str(&tracedecay_runtime_core::db::native_search::quote_term(
-                backend, value,
-            ));
-            *operand_precedes = true;
-        }
-    };
     for ch in query.chars() {
         if ch == '"' {
-            emit(&mut result, &buffer, in_quote, &mut operand_precedes);
-            buffer.clear();
-            in_quote = !in_quote;
-        } else if in_quote {
-            buffer.push(ch);
-        } else if ch.is_whitespace() || is_fts5_special_char(ch) {
-            emit(&mut result, &buffer, false, &mut operand_precedes);
-            buffer.clear();
-        } else {
-            buffer.push(ch);
+            if in_quote {
+                result.push('"');
+                result.push_str(&quote_buffer);
+                result.push('"');
+                quote_buffer.clear();
+                in_quote = false;
+            } else {
+                if result
+                    .chars()
+                    .last()
+                    .is_some_and(|last| !last.is_whitespace())
+                {
+                    result.push(' ');
+                }
+                in_quote = true;
+                quote_buffer.clear();
+            }
+            continue;
+        }
+        if in_quote {
+            quote_buffer.push(ch);
+            continue;
+        }
+        result.push(if is_fts5_special_char(ch) { ' ' } else { ch });
+    }
+    if in_quote && !quote_buffer.is_empty() {
+        for ch in quote_buffer.chars() {
+            result.push(if is_fts5_special_char(ch) { ' ' } else { ch });
         }
     }
-    if in_quote {
-        for token in buffer
-            .split(is_fts5_special_char)
-            .flat_map(str::split_whitespace)
-        {
-            emit(&mut result, token, false, &mut operand_precedes);
-        }
-    } else {
-        emit(&mut result, &buffer, false, &mut operand_precedes);
-    }
-    result
+    result.trim().to_string()
 }
 
 fn is_fts5_special_char(ch: char) -> bool {
@@ -1028,24 +1001,16 @@ fn grep_order_by(
     sort: LcmGrepSort,
     recency_column: &str,
     role_penalty_expr: Option<&str>,
-    backend: BackendKind,
 ) -> String {
-    let rank_order = tracedecay_runtime_core::db::native_search::order(backend);
     let (leading, trailing) = match sort {
-        LcmGrepSort::Relevance => (
-            format!("rank {rank_order}"),
-            format!("{recency_column} DESC"),
-        ),
+        LcmGrepSort::Relevance => ("rank ASC".to_string(), format!("{recency_column} DESC")),
         LcmGrepSort::Hybrid => (
             format!(
-                "(rank / (1 + (MAX(0.0, ((strftime('%s','now') - {recency_column}) / 3600.0)) * {AGE_DECAY_RATE}))) {rank_order}"
+                "(rank / (1 + (MAX(0.0, ((strftime('%s','now') - {recency_column}) / 3600.0)) * {AGE_DECAY_RATE})))"
             ),
             format!("{recency_column} DESC"),
         ),
-        LcmGrepSort::Recency => (
-            format!("{recency_column} DESC"),
-            format!("rank {rank_order}"),
-        ),
+        LcmGrepSort::Recency => (format!("{recency_column} DESC"), "rank ASC".to_string()),
     };
     match role_penalty_expr {
         Some(penalty) => format!("{leading}, {penalty} ASC, {trailing}"),
@@ -1094,10 +1059,6 @@ mod tests {
     }
 
     impl QueryExecutor for CountingQuery<'_> {
-        fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
-            self.inner.backend_kind()
-        }
-
         async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
         where
             P: IntoParams,
@@ -1284,277 +1245,6 @@ mod tests {
             raw_message: None,
             raw_message_metadata: None,
             summary_node: None,
-        }
-    }
-
-    async fn native_query_test_store() -> (
-        tempfile::TempDir,
-        tracedecay_runtime_core::db::engine::NativeTestConnection,
-    ) {
-        use tracedecay_runtime_core::db::engine::NativeTestConnection;
-        let temp = tempfile::tempdir().expect("native query directory");
-        let conn =
-            NativeTestConnection::open(&temp.path().join("native-query.db")).expect("native store");
-        conn.execute_batch("CREATE TABLE sessions (
-            provider TEXT NOT NULL, session_id TEXT NOT NULL, project_key TEXT NOT NULL,
-            project_path TEXT NOT NULL, parent_session_id TEXT, is_subagent INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY(provider,session_id));
-            INSERT INTO sessions VALUES('cursor','session-a','/p','/p',NULL,0),('foreign','session-a','/foreign','/foreign',NULL,0);").await.expect("sessions");
-        schema::ensure_lcm_schema(&conn)
-            .await
-            .expect("actual native LCM schema");
-        (temp, conn)
-    }
-
-    #[tokio::test]
-    async fn native_grep_preserves_boolean_body_and_provider_scope() {
-        let (temp, conn) = native_query_test_store().await;
-        // Refresh an existing trigger through the guarded main-schema path.
-        conn.execute_batch(
-            "DROP TRIGGER main.lcm_summary_convergence_raw_insert;
-            CREATE TRIGGER lcm_summary_convergence_raw_insert AFTER INSERT ON lcm_raw_messages
-            BEGIN SELECT 1; END;",
-        )
-        .await
-        .expect("pre-refresh trigger fixture");
-        crate::summary_convergence::ensure_schema(&conn)
-            .await
-            .expect("native canonical trigger refresh");
-        test_support::seed_active_generation(&conn, "session-a").await;
-        for (provider, id, ordinal, text, model) in [
-            ("cursor", "both", 1, "alpha beta useful explanation", None),
-            ("cursor", "alpha", 2, "alpha useful explanation", None),
-            ("cursor", "beta", 3, "beta useful explanation", None),
-            (
-                "cursor",
-                "metadata-only",
-                4,
-                "unrelated body",
-                Some("alpha beta"),
-            ),
-            ("cursor", "emoji", 5, "alarm 🚨 useful explanation", None),
-            ("cursor", "cjk", 6, "中文 useful explanation", None),
-            (
-                "foreign",
-                "foreign-newer",
-                100,
-                "alpha beta useful explanation",
-                None,
-            ),
-        ] {
-            let message = tracedecay_store::SessionMessageRecord {
-                provider: provider.to_owned(),
-                message_id: id.to_owned(),
-                session_id: "session-a".to_owned(),
-                role: "assistant".to_owned(),
-                timestamp: Some(ordinal),
-                ordinal,
-                text: text.to_owned(),
-                kind: Some("message".to_owned()),
-                model: model.map(str::to_owned),
-                tool_names: None,
-                source_path: None,
-                source_offset: None,
-                metadata_json: None,
-            };
-            let mut rollback = payload::PayloadFileRollback::begin_cancellation_safe(temp.path());
-            raw::upsert_raw_message_with_payload_tracked(
-                &conn,
-                temp.path(),
-                &message,
-                &mut rollback,
-            )
-            .await
-            .expect("canonical native message ingest");
-            rollback.disarm();
-        }
-        for (query, expected) in [
-            ("alpha beta", vec!["both"]),
-            ("alpha OR beta", vec!["beta", "alpha", "both"]),
-            ("alpha NOT beta", vec!["alpha"]),
-            ("\"alpha beta\"", vec!["both"]),
-            ("🚨", vec!["emoji"]),
-            ("中文", vec!["cjk"]),
-        ] {
-            let session_scope = matches!(query, "🚨" | "中文");
-            let outcome = grep(
-                &conn,
-                LcmGrepRequest {
-                    provider: "cursor".to_owned(),
-                    query: query.to_owned(),
-                    scope: if session_scope {
-                        LcmScope::Session
-                    } else {
-                        LcmScope::All
-                    },
-                    session_id: session_scope.then(|| "session-a".to_owned()),
-                    include_summaries: false,
-                    limit: 10,
-                    sort: LcmGrepSort::Recency,
-                    source: None,
-                    role: None,
-                    start_time: None,
-                    end_time: None,
-                    git_filter: Default::default(),
-                },
-                LcmGrepFilters::default(),
-                None,
-            )
-            .await
-            .unwrap_or_else(|error| panic!("native production grep {query:?}: {error}"));
-            let ids = outcome
-                .hits
-                .iter()
-                .map(|hit| hit.message_id.as_deref().expect("raw identity"))
-                .collect::<Vec<_>>();
-            assert_eq!(ids, expected, "query {query}");
-        }
-        let outcome = grep(
-            &conn,
-            LcmGrepRequest {
-                provider: "cursor".to_owned(),
-                query: "alpha beta".to_owned(),
-                scope: LcmScope::All,
-                session_id: None,
-                include_summaries: false,
-                limit: 1,
-                sort: LcmGrepSort::Recency,
-                source: None,
-                role: None,
-                start_time: None,
-                end_time: None,
-                git_filter: Default::default(),
-            },
-            LcmGrepFilters::default(),
-            None,
-        )
-        .await
-        .expect("authorized bounded native grep");
-        assert_eq!(outcome.hits.len(), 1);
-        assert_eq!(outcome.hits[0].message_id.as_deref(), Some("both"));
-        conn.execute(
-            "DELETE FROM lcm_raw_messages WHERE provider = 'cursor' AND message_id = 'both'",
-            (),
-        )
-        .await
-        .expect("canonical delete");
-        let outcome = grep(
-            &conn,
-            LcmGrepRequest {
-                provider: "cursor".to_owned(),
-                query: "alpha beta".to_owned(),
-                scope: LcmScope::All,
-                session_id: None,
-                include_summaries: false,
-                limit: 10,
-                sort: LcmGrepSort::Recency,
-                source: None,
-                role: None,
-                start_time: None,
-                end_time: None,
-                git_filter: Default::default(),
-            },
-            LcmGrepFilters::default(),
-            None,
-        )
-        .await
-        .expect("native grep after delete");
-        assert!(outcome.hits.is_empty());
-    }
-
-    #[tokio::test]
-    async fn native_raw_and_summary_grep_rank_all_sort_modes_before_limit() {
-        for summaries in [false, true] {
-            let (temp, conn) = native_query_test_store().await;
-            test_support::seed_active_generation(&conn, "session-a").await;
-            let now = current_timestamp();
-            let strong = "orchard orchard orchard orchard";
-            let weak = format!("orchard {}", "ordinary ".repeat(30));
-            for (provider, id, text, time) in [
-                ("cursor", "strong", strong, now - 3_600),
-                ("cursor", "weak", weak.as_str(), now),
-                ("foreign", "foreign-newest", strong, now + 100),
-            ] {
-                if summaries {
-                    let hash = crate::retrieval_content::projected_content_hash(text);
-                    conn.execute(
-                        "INSERT INTO session_summary_nodes (
-                        summary_id,provider,conversation_id,session_id,depth,summary_text,
-                        summary_hash,summary_token_count,source_token_count,created_at)
-                        VALUES(?1,?2,'conversation-a','session-a',0,?3,?4,1,1,?5)",
-                        params![id, provider, text, hash, time],
-                    )
-                    .await
-                    .expect("canonical native summary row");
-                    test_support::mark_summary_available(&conn, "session-a", id).await;
-                } else {
-                    let record = tracedecay_store::SessionMessageRecord {
-                        provider: provider.to_owned(),
-                        message_id: id.to_owned(),
-                        session_id: "session-a".to_owned(),
-                        role: "assistant".to_owned(),
-                        timestamp: Some(time),
-                        ordinal: time,
-                        text: text.to_owned(),
-                        kind: Some("message".to_owned()),
-                        model: None,
-                        tool_names: None,
-                        source_path: None,
-                        source_offset: None,
-                        metadata_json: None,
-                    };
-                    let mut rollback =
-                        payload::PayloadFileRollback::begin_cancellation_safe(temp.path());
-                    raw::upsert_raw_message_with_payload_tracked(
-                        &conn,
-                        temp.path(),
-                        &record,
-                        &mut rollback,
-                    )
-                    .await
-                    .expect("canonical native ranked message ingest");
-                    rollback.disarm();
-                }
-            }
-            for (sort, expected) in [
-                (LcmGrepSort::Relevance, "strong"),
-                (LcmGrepSort::Hybrid, "strong"),
-                (LcmGrepSort::Recency, "weak"),
-            ] {
-                let outcome = grep(
-                    &conn,
-                    LcmGrepRequest {
-                        provider: "cursor".to_owned(),
-                        query: "orchard".to_owned(),
-                        scope: LcmScope::Session,
-                        session_id: Some("session-a".to_owned()),
-                        include_summaries: summaries,
-                        limit: 1,
-                        sort,
-                        source: None,
-                        role: None,
-                        start_time: None,
-                        end_time: None,
-                        git_filter: Default::default(),
-                    },
-                    LcmGrepFilters::default(),
-                    None,
-                )
-                .await
-                .expect("native ranked production grep");
-                assert_eq!(
-                    outcome.hits.len(),
-                    1,
-                    "summaries={summaries}, sort={sort:?}"
-                );
-                let id = if summaries {
-                    outcome.hits[0].node_id.as_deref()
-                } else {
-                    outcome.hits[0].message_id.as_deref()
-                };
-                assert_eq!(id, Some(expected), "summaries={summaries}, sort={sort:?}");
-                assert_eq!(outcome.hits[0].provider, "cursor");
-            }
         }
     }
 
@@ -2084,7 +1774,7 @@ mod tests {
     }
 
     async fn insert_query_test_summary(
-        conn: &(impl Executor + ?Sized),
+        conn: &TestConnection,
         node_id: &str,
         depth: i64,
         summary_text: &str,
