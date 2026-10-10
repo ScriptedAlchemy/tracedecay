@@ -339,7 +339,7 @@ jobs:
           # Alphabetical a–g member crates. New crates land in workspace-b
           # via the catch-all until listed here for balance.
           - shard: workspace-a
-            cache_key: ci-linux-test-workspace
+            cache_key: ci-linux-workspace-test
             save_cache: "false"
             test_resources: --default_test_resources=cpu=1
             targets: >-
@@ -369,7 +369,7 @@ jobs:
               //crates/tracedecay-graph-query/...
               -//crates/tracedecay-cli:refresh_memory_journey
           - shard: workspace-b
-            cache_key: ci-linux-test-workspace
+            cache_key: ci-linux-workspace-test
             save_cache: "true"
             test_resources: --default_test_resources=cpu=1
             targets: >-
@@ -432,7 +432,7 @@ jobs:
           cache-key: ${{ matrix.cache_key }}
           # Workspace prefixes are cold until workspace-b saves; fall back to
           # the root family for shared rustc outputs.
-          extra-restore-keys: ${{ matrix.cache_key == 'ci-linux-test-workspace' && 'ci-linux-test' || '' }}
+          extra-restore-keys: ${{ matrix.cache_key == 'ci-linux-workspace-test' && 'ci-linux-test' || '' }}
           test-tools: "true"
 
       # Root suites exercise latency-sensitive daemon journeys. Finish their
