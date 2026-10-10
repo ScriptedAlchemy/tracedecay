@@ -1,12 +1,11 @@
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use crate::common::{
     canonicalize_test_dir, create_runtime, get_json, http_agent, isolated_profile_under_home,
     pick_free_port, tempdir_or_panic, wait_for_dashboard,
 };
-use crate::dashboard_api_support::{post_json_body, write_file};
+use crate::dashboard_api_support::{post_json_body, rg_word_paths, write_file};
 use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -832,29 +831,6 @@ async fn start_dashboard_fixture_seeded(
     }
 }
 
-/// Ground-truth paths for a word search. Exit 1 is "no hits", not a tool failure.
-fn rg_word_paths(root: &Path, query: &str) -> Vec<String> {
-    let output = Command::new("rg")
-        .args(["-l", "-w", "--glob", "!**/.git/**", "--", query])
-        .current_dir(root)
-        .output()
-        .unwrap_or_else(|error| {
-            panic!("rg must be available to ground-truth graph search: {error}")
-        });
-    assert!(
-        output.status.success() || output.status.code() == Some(1),
-        "rg -w {query} failed in {}: {}",
-        root.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let mut paths: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    paths.sort();
-    paths
-}
-
 #[test]
 fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
     let runtime = create_runtime();
@@ -972,6 +948,14 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
         assert_eq!(empty["payload"]["total"], 0, "{empty}");
         assert_eq!(empty["payload"]["results"], serde_json::json!([]), "{empty}");
         assert_eq!(empty["scope"]["project_id"], bound_project);
+        // The miss is a complete scan of the seeded generation, not an empty
+        // index: coverage must name the real indexed-symbol denominator.
+        assert_eq!(empty["payload"]["indexed_symbols"], 4, "{empty}");
+        assert_eq!(empty["coverage"]["completeness"], "complete", "{empty}");
+        assert_eq!(empty["coverage"]["eligible"], 4, "{empty}");
+        assert_eq!(empty["coverage"]["examined"], 4, "{empty}");
+        assert_eq!(empty["coverage"]["matched"], 0, "{empty}");
+        assert_eq!(empty["coverage"]["denominator"], 4, "{empty}");
 
         let (status, wrong) = get_json(
             &agent,

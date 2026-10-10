@@ -231,15 +231,16 @@ fn graph_search_complete_zero(
     state: &DashboardState,
     read: graph_service::GraphServiceReadV1<graph_service::GraphSearchPayloadV1>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSearchPayloadV1>>> {
-    // The match-set denominator is zero findings. `complete_zero_findings`
-    // requires complete coverage, and `DashboardCoverageV1::complete` is the
-    // only constructor that can say that. This is not the indexed-symbol
-    // count; the search payload does not carry one, and inventing it would
-    // look like a second graph read. The domain state is the empty-in-bound
-    // project signal; wrong-project / empty-scope stay on the unavailable path.
+    // A completed miss examined every symbol in the bound generation, so the
+    // coverage denominator is the indexed population the search page carried —
+    // never `0`, which would claim the index itself was empty. `matched` is
+    // the finding count, not the population: zero findings live here and in
+    // the payload. Wrong-project / empty-scope stay on the unavailable path.
+    let mut coverage = DashboardCoverageV1::complete(read.payload.indexed_symbols, "symbols");
+    coverage.matched = Some(0);
     let mut envelope = DashboardEnvelopeV1::complete_zero_findings(
         scope_from_state(state),
-        DashboardCoverageV1::complete(0, "symbols"),
+        coverage,
         Some(read.payload),
     );
     envelope.freshness = graph_service::graph_envelope_freshness(read.freshness);

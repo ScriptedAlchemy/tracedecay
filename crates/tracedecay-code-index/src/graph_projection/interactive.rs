@@ -1374,6 +1374,7 @@ impl CodeGraphInteractiveReader {
             symbols: self.served_from_catalog(symbols),
             has_more,
             total,
+            indexed_symbols: catalog.symbols.len() as u64,
         })
     }
 

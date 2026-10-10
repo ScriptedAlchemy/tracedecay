@@ -362,25 +362,14 @@ fn project_scoped_graph_search_refuses_a_non_launch_project() {
             &target_root.join("src/core/gateway.js"),
             "export function connectGateway() { return true; }\n",
         );
-        let rg_other = std::process::Command::new("rg")
-            .args(["-n", "-w", "--", "connectGateway"])
-            .current_dir(&target_root)
-            .output()
-            .unwrap_or_else(|error| panic!("rg must be available: {error}"));
-        let rg_other_text = String::from_utf8_lossy(&rg_other.stdout);
+        let rg_other = rg_word_paths(&target_root, "connectGateway");
         assert!(
-            rg_other.status.success() && rg_other_text.contains("src/core/gateway.js"),
-            "rg must see connectGateway in the other enrolled repo: {rg_other_text}"
+            rg_other.iter().any(|path| path == "src/core/gateway.js"),
+            "rg must see connectGateway in the other enrolled repo: {rg_other:?}"
         );
-        let rg_launch = std::process::Command::new("rg")
-            .args(["-n", "-w", "--", "connectGateway"])
-            .current_dir(&fixture.project_root)
-            .output()
-            .unwrap_or_else(|error| panic!("rg must be available: {error}"));
         assert!(
-            rg_launch.status.code() == Some(1),
-            "rg must not see connectGateway in the launch project: {}",
-            String::from_utf8_lossy(&rg_launch.stdout)
+            rg_word_paths(&fixture.project_root, "connectGateway").is_empty(),
+            "rg must not see connectGateway in the launch project"
         );
 
         let (status, search) = get_json(

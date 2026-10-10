@@ -1507,6 +1507,7 @@ function graphSearchPayload(query = ''): Record<string, unknown> {
     limit: 100,
     offset: 0,
     total: 1043,
+    indexed_symbols: 12_873,
     has_more: true,
     count: results.length,
     results,
