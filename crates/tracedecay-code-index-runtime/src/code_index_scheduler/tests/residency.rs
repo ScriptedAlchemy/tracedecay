@@ -90,7 +90,7 @@ async fn a_parked_worktree_releases_its_decode_and_search_still_answers() {
     let anchors = search_anchors(&without_decode);
     assert!(
         !anchors.is_empty(),
-        "search must still rank the parked generation: {without_decode:?}"
+        "search must still rank the parked generation: {anchors:?}"
     );
     assert_eq!(
         decoded_kinds(&owners.report(Instant::now())),
