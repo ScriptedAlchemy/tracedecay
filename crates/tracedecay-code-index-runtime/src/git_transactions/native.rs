@@ -140,7 +140,7 @@ impl NativeGitIndexPreviewAssembler {
         // sent callers to recapture and retry a read that fails identically.
         let status = self
             .read_authority()
-            .status()
+            .status_within(runner.command_bounds())
             .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
         checkpoint()?;
         let index_bytes = runner.index_bytes().map_err(map_native_error)?;
@@ -1298,11 +1298,7 @@ pub fn capture_exact_snapshot(
     }
     let checkpoint = || runner.check_cancelled().map_err(map_native_error);
     checkpoint()?;
-    let status = assembler
-        .read_authority()
-        .status()
-        .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
-    checkpoint()?;
+    let head = runner.head_state().map_err(map_native_error)?;
     let lock = runner.acquire_index_lock().map_err(map_native_error)?;
     let tree = runner
         .index_tree_under_lock(&lock)
@@ -1313,7 +1309,7 @@ pub fn capture_exact_snapshot(
         Some(assembler.worktree_id.clone()),
         1,
         tree.format(),
-        status.head,
+        head,
         RepositoryIndexSnapshotV1 {
             checksum: canonical_sha256(&b"placeholder".as_slice())
                 .map_err(|_| GitIndexTransactionPortError::NativeFailure)?,

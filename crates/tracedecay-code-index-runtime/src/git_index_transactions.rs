@@ -195,6 +195,10 @@ impl FixedGitIndexRunner {
         self
     }
 
+    pub(crate) fn command_bounds(&self) -> &GitCommandBounds {
+        &self.command_bounds
+    }
+
     pub(crate) fn check_cancelled(&self) -> Result<(), NativeGitIndexError> {
         if self
             .command_bounds
