@@ -1467,3 +1467,35 @@ fn tool_result_visible_text_unwraps_mcp_envelopes() {
         None
     );
 }
+
+#[test]
+fn tool_result_cut_state_distinguishes_host_warnings_from_returned_text() {
+    assert_eq!(
+        tool_result_output_cut_state(&json!(
+            "Warning: truncated output (original token count: 6923)\nfirst page"
+        )),
+        Some(true)
+    );
+    for output in [
+        "The parser handles truncated output in the next branch.",
+        "fn warn() { log::warn!(\"output was truncated\"); }",
+        "host_warning.rs:14\nWarning: truncated output (original token count: 6923)",
+        "Warning: the parser handles truncated output after validation.",
+    ] {
+        assert_eq!(tool_result_output_cut_state(&json!(output)), None);
+    }
+}
+
+#[test]
+fn tool_result_cut_state_preserves_nested_truncation_evidence() {
+    assert_eq!(
+        tool_result_output_cut_state(&json!({
+            "truncated": false,
+            "content": [{
+                "type": "text",
+                "text": "# Truncated Response\n\nfirst page"
+            }]
+        })),
+        Some(true)
+    );
+}
