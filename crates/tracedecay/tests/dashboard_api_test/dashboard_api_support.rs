@@ -321,6 +321,38 @@ pub(crate) fn write_file(path: &Path, content: &str) {
     }
 }
 
+/// Resolves `rg` to an absolute path through the same PATH authority
+/// production uses for `git`, so the suite does not pay a per-spawn PATH
+/// walk (which can transiently fail under nextest's process-per-test load).
+pub(crate) fn rg_program() -> PathBuf {
+    tracedecay_runtime_core::git::find_executable_on_path("rg")
+        .expect("ripgrep must be installed to ground-truth file searches")
+}
+
+/// Ground-truth paths for a word search. Exit 1 is "no hits", not a tool
+/// failure.
+pub(crate) fn rg_word_paths(root: &Path, query: &str) -> Vec<String> {
+    let output = Command::new(rg_program())
+        .args(["-l", "-w", "--glob", "!**/.git/**", "--", query])
+        .current_dir(root)
+        .output()
+        .unwrap_or_else(|error| {
+            panic!("rg must be available to ground-truth graph search: {error}")
+        });
+    assert!(
+        output.status.success() || output.status.code() == Some(1),
+        "rg -w {query} failed in {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut paths: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    paths.sort();
+    paths
+}
+
 pub(crate) async fn setup_project(
     profile: &ProfileRoot,
     project_root: &Path,

@@ -1,12 +1,11 @@
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use crate::common::{
     canonicalize_test_dir, create_runtime, get_json, http_agent, isolated_profile_under_home,
     pick_free_port, tempdir_or_panic, wait_for_dashboard,
 };
-use crate::dashboard_api_support::{post_json_body, write_file};
+use crate::dashboard_api_support::{post_json_body, rg_word_paths, write_file};
 use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -830,29 +829,6 @@ async fn start_dashboard_fixture_seeded(
         base_url,
         server,
     }
-}
-
-/// Ground-truth paths for a word search. Exit 1 is "no hits", not a tool failure.
-fn rg_word_paths(root: &Path, query: &str) -> Vec<String> {
-    let output = Command::new("rg")
-        .args(["-l", "-w", "--glob", "!**/.git/**", "--", query])
-        .current_dir(root)
-        .output()
-        .unwrap_or_else(|error| {
-            panic!("rg must be available to ground-truth graph search: {error}")
-        });
-    assert!(
-        output.status.success() || output.status.code() == Some(1),
-        "rg -w {query} failed in {}: {}",
-        root.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let mut paths: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    paths.sort();
-    paths
 }
 
 #[test]
