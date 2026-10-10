@@ -1644,9 +1644,7 @@ struct PreparedGraphCallableQueryV1 {
     latest: LatestCodeTextGenerationV1,
     /// Counts every store read on [`Self::cost`].
     reader: CodeGraphInteractiveReader,
-    /// The catalog retain the readiness wait confirmed: holds the catalog
-    /// resident across the whole read so a parked release cannot evict it
-    /// between that wait and the reader's catalog lookups.
+    /// Holds the catalog across admission, warming, and the complete read.
     _catalog_retain: Option<Arc<InteractiveCatalogReaderLeaseV1>>,
     cost: CodeGraphReadCostMeter,
     query: PreparedQueryV1,
@@ -1974,10 +1972,7 @@ impl CodeIndexSchedulerRegistryV1 {
             match tokio::task::spawn_blocking(move || waiting.await_catalog_and_retain(budget))
                 .await
             {
-                // The wait leaves the ready catalog retained for this read;
-                // without one a parked release could evict it between the
-                // readiness confirmation and the reader's catalog lookups.
-                Ok(Ok(retain)) => catalog_retain = retain,
+                Ok(Ok(retain)) => catalog_retain = Some(retain),
                 Ok(Err(_pending)) => return Err(CallableCodeCursorError::Unavailable),
                 Err(join_error) => {
                     tracing::warn!(

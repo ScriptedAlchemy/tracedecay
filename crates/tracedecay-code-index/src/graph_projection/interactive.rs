@@ -120,7 +120,7 @@ pub struct InteractiveCatalogReaderLeaseV1 {
 }
 
 impl InteractiveCatalogReaderLeaseV1 {
-    fn retain(cache: &Arc<InteractiveCatalogCache>) -> Arc<Self> {
+    pub(super) fn retain(cache: &Arc<InteractiveCatalogCache>) -> Arc<Self> {
         cache
             .readers
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -222,24 +222,6 @@ impl InteractiveCatalogCache {
             }
             Ok(_) | Err(TryLockError::WouldBlock) | Err(TryLockError::Poisoned(_)) => None,
         }
-    }
-
-    /// Retain the ready catalog for a read that is being admitted,
-    /// atomically with the Ready check: [`Self::release`] holds the state
-    /// write lock while it inspects the reader count, so either the release
-    /// already evicted — this sees `Released` and returns `None` — or the
-    /// reader is counted first and the release answers
-    /// [`CodeGraphCatalogReleaseV1::Busy`].
-    pub(super) fn retain_ready_reader(
-        cache: &Arc<Self>,
-    ) -> Option<Arc<InteractiveCatalogReaderLeaseV1>> {
-        let Ok(state) = cache.state.read() else {
-            return None;
-        };
-        if !matches!(&*state, InteractiveCatalogState::Ready(_)) {
-            return None;
-        }
-        Some(InteractiveCatalogReaderLeaseV1::retain(cache))
     }
 
     /// Return a ready catalog to cold. Never waits on a build or a reader.

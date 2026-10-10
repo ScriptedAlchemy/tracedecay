@@ -614,36 +614,16 @@ impl CodeGraphProjectionStore {
         self.await_rewarm_for(budget, CodeGraphReadinessRequirement::Catalog)
     }
 
-    /// Like [`Self::await_rewarm_for`] for the catalog, except the confirmed
-    /// ready state is retained for the caller: the returned lease keeps the
-    /// catalog resident until the read it feeds is dropped, so a parked
-    /// release cannot evict it between this wait and the read's later
-    /// catalog lookups. `Ok(None)` means nothing was pending, as
-    /// `await_rewarm_for` reports — the read answers the store's state.
+    /// Retains the catalog before waiting so a concurrent warm cannot publish
+    /// a ready catalog that a parked release evicts before the reader opens.
+    /// Cold or failed stores still answer their typed state through the reader.
     pub fn await_catalog_and_retain(
         &self,
         budget: Duration,
-    ) -> Result<Option<Arc<InteractiveCatalogReaderLeaseV1>>, CodeGraphRewarmPendingV1> {
-        let started = Instant::now();
-        let mut woke = false;
-        loop {
-            if let Some(lease) =
-                InteractiveCatalogCache::retain_ready_reader(&self.interactive_catalog)
-            {
-                return Ok(Some(lease));
-            }
-            let epoch = self.warm_clock.epoch();
-            let Some(pending) = self.rewarm_in_flight(woke, CodeGraphReadinessRequirement::Catalog)
-            else {
-                return Ok(None);
-            };
-            let left = budget.saturating_sub(started.elapsed());
-            if left.is_zero() {
-                return Err(pending);
-            }
-            self.warm_clock.wait_past(epoch, left);
-            woke = true;
-        }
+    ) -> Result<Arc<InteractiveCatalogReaderLeaseV1>, CodeGraphRewarmPendingV1> {
+        let retain = InteractiveCatalogReaderLeaseV1::retain(&self.interactive_catalog);
+        self.await_rewarm_for(budget, CodeGraphReadinessRequirement::Catalog)?;
+        Ok(retain)
     }
 
     /// Waits only for the resident data required by this read.

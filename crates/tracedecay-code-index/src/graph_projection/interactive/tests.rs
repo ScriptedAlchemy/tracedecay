@@ -1293,6 +1293,35 @@ fn a_release_answers_busy_while_a_reader_holds_the_catalog() {
     ));
 }
 
+#[test]
+fn catalog_admission_retains_a_catalog_that_warms_after_the_wait() {
+    let store = store_for(production_manifest());
+    let retain = store
+        .await_catalog_and_retain(Duration::from_secs(5))
+        .expect("cold admission has no released warm to wait for");
+    store
+        .warm_interactive_catalog_with_cancellation(None, request())
+        .expect("the concurrent first warm finishes before the reader opens");
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Busy
+    );
+    let admitted = reader(&store);
+    assert!(
+        !admitted
+            .symbols_page(None, 10, request())
+            .unwrap()
+            .symbols
+            .is_empty()
+    );
+    drop(admitted);
+    drop(retain);
+    assert!(matches!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Released { .. }
+    ));
+}
+
 /// Holds the catalog build gate for `hold`, the way a corpus-sized scan
 /// keeps a warm running, while `during` runs on another thread.
 fn with_catalog_warm_held<T: Send + 'static>(
