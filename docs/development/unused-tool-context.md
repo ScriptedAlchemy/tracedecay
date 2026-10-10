@@ -38,7 +38,7 @@ lines are reduced to `quote:<chars>c`). Those sanitized rows are safe to cite.
 | `calls 0 used` | Non-error calls where no result line was used |
 | `rerequests` | Later same-tool calls that asked for an already-returned path/symbol/quote. Not counted as use. |
 | `after cut` | Those rerequests whose original result recorded an explicit cut. `null` when cut state is unknown, never an estimated 0. |
-| `bytes` | UTF-8 bytes of the result text after removing the MCP envelope |
+| `bytes` | Exact UTF-8 bytes of the result text after removing the MCP envelope, including each line's real newline. Not `len(line)+1`. |
 | `used bytes` / `unused bytes` | Bytes of used lines / all other lines |
 | `unused %` | `unused bytes / bytes` |
 | `tokens` | Stored `token_count` on the tool_result fact. `null` when missing. Tool-body `token_count` is ignored because `source_read` writes chars/4 there. Never tiktoken or an MCP trailer. |
@@ -56,9 +56,10 @@ That share is the number to cite; do not fill the missing token columns.
 
 The rules are conservative: a line counts as used only on direct evidence.
 
-1. A result is split into lines. A line is used when one of its anchors occurs
-   in agent-authored content recorded after the result. Blank and structural
-   lines are unused.
+1. A result is walked as physical lines, keeping each line's actual
+   separator (`\n`, `\r\n`, or none). Empty text is 0 bytes. A line is used
+   when one of its anchors occurs in agent-authored content recorded after
+   the result. Blank and structural lines are unused.
 2. Agent-authored content is the assistant's visible text and the argument
    values of every later tool call (Read, Edit, Grep, Bash, tracedecay tools,
    and so on). Hidden reasoning, user messages, and tool results are not
@@ -107,17 +108,22 @@ without results contributes no rows. Calls made through a shell command
 python3 scripts/test-measure-unused-tool-context.py
 ```
 
-## Published run
+## Corpus classes
 
-`docs/development/unused-tool-context-run.json` is the raw meter output from the
-#3372 corpus (table + examples in
-`docs/development/unused-tool-context-run.md`). That environment had no operator
-session store. 73 Cursor desktop transcripts on this repo contained
-`0` `tracedecay_*` calls. The scored rows are live `tracedecay tool` calls
-against four enrolled repos, imported through `tracedecay sessions import`.
-**token_count_coverage was 0%** — stored `tool_result` facts do not carry
-`token_count`, so token columns stay `null`. Re-request after a cut is `null`
-because those results do not record `cut`.
+#3372 ratios must come from naturally captured agent sessions discovered
+through `sessions_for` and loaded through `lcm_load_session`. Constructed
+or imported CLI-call transcripts test the scorer and the production tools;
+they are not issue-completion evidence.
+
+`docs/development/unused-tool-context-cli-experiment.md` (raw JSON beside
+it) is one such experiment: live `tracedecay tool` calls recorded as
+Cursor transcripts and imported. Do not cite its unused % on #3372 or
+#3373.
+
+Token columns stay `null` until stored `tool_result` facts carry a real
+`token_count` (#3397 / draft #3400). Do not estimate. After that lands,
+re-run the meter on naturally captured sessions and post the new raw
+output.
 
 The tests score synthetic transcripts and pin each rule: a read of a returned
 path is used, an unreferenced result is unused, query echoes and earlier
@@ -126,4 +132,5 @@ that repeats a returned path is a rerequest rather than use, a rerequest
 after a recorded cut is counted and an unknown cut is null, missing token
 counts are null, mixed-use results do not split tokens, JSON keys and
 partial words do not match, parallel results in one row keep their own
-content, and error results add no bytes.
+content, error results add no bytes, and byte totals match the returned
+text for empty, terminated, unterminated, and multibyte results.

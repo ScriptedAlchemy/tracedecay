@@ -1,6 +1,13 @@
-# Unused returned tool context — live run
+# Unused returned tool context — CLI-call experiment
 
-Raw meter JSON: `docs/development/unused-tool-context-run.json`.
+This file is a scorer experiment, not #3372 completion evidence. The
+rows are constructed: live `tracedecay tool` CLI calls were recorded as
+Cursor transcripts, imported with `tracedecay sessions import`, then
+measured. They do not show how agents consumed returned context in
+naturally captured sessions. Do not cite these unused % values on #3372
+or #3373.
+
+Raw meter JSON: `docs/development/unused-tool-context-cli-experiment.json`.
 
 ## Provenance
 
@@ -8,7 +15,7 @@ Raw meter JSON: `docs/development/unused-tool-context-run.json`.
 - 73 Cursor desktop cloud-agent transcripts on `ScriptedAlchemy/tracedecay` were scanned: **0 `tracedecay_*` MCP calls**.
 - Scored rows are live `tracedecay tool` calls against four enrolled repos (`orders`, `orders-broken`, `policy`, `hooks`), recorded as Cursor transcripts, imported with `tracedecay sessions import`, then measured by `scripts/measure-unused-tool-context.py`.
 - 8 sessions, **432** scored calls (**386** non-error).
-- **token_count_coverage = 0%** (0/386). Stored `tool_result` facts have no `token_count` field; token columns stay `null`. Do not estimate.
+- **token_count_coverage = 0%** (0/386). Stored `tool_result` facts have no `token_count` field; token columns stay `null`. Recording real counts is #3397 / draft #3400 — do not estimate here.
 - Re-request after a cut is **null**: imported results do not record `cut`.
 
 ## Per-tool used / unused (bytes)
