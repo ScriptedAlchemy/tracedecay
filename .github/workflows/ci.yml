@@ -297,9 +297,11 @@ jobs:
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
   # Root suites and the full-daemon memory journey keep the global
-  # HOST_CPUS reservation. Workspace shards reserve one CPU per test and
-  # set local_test_jobs=1 so a suite still runs alone (no multi-suite
-  # libtest pile-up) while jobs=4 rustc can use the leftover cores.
+  # HOST_CPUS reservation. Workspace shards reserve one CPU per test so
+  # suites can overlap jobs=4 rustc (run 37978596669: workspace-a 36m /
+  # workspace-b 41m build). local_test_jobs=1 re-serialized suites and
+  # pushed those shards back to ~74m on run 38016717191. Workspace shards
+  # use a separate disk-cache prefix so their feature variants are saved.
   # root-b and workspace-b catch unlisted targets in their groups.
   linux-test:
     name: Test Linux (${{ matrix.shard }})
@@ -314,6 +316,8 @@ jobs:
       matrix:
         include:
           - shard: root-a
+            cache_key: ci-linux-test
+            save_cache: "false"
             test_resources: ""
             targets: >-
               //crates/tracedecay:mcp_suite
@@ -322,6 +326,8 @@ jobs:
               //crates/tracedecay:storage_suite
               //crates/tracedecay-cli:refresh_memory_journey
           - shard: root-b
+            cache_key: ci-linux-test
+            save_cache: "true"
             test_resources: ""
             targets: >-
               --
@@ -333,7 +339,9 @@ jobs:
           # Alphabetical a–g member crates. New crates land in workspace-b
           # via the catch-all until listed here for balance.
           - shard: workspace-a
-            test_resources: --default_test_resources=cpu=1 --local_test_jobs=1
+            cache_key: ci-linux-test-workspace
+            save_cache: "false"
+            test_resources: --default_test_resources=cpu=1
             targets: >-
               --
               //crates/tracedecay-agent-hosts/...
@@ -361,7 +369,9 @@ jobs:
               //crates/tracedecay-graph-query/...
               -//crates/tracedecay-cli:refresh_memory_journey
           - shard: workspace-b
-            test_resources: --default_test_resources=cpu=1 --local_test_jobs=1
+            cache_key: ci-linux-test-workspace
+            save_cache: "true"
+            test_resources: --default_test_resources=cpu=1
             targets: >-
               --
               //...
@@ -419,7 +429,10 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
-          cache-key: ci-linux-test
+          cache-key: ${{ matrix.cache_key }}
+          # Workspace prefixes are cold until workspace-b saves; fall back to
+          # the root family for shared rustc outputs.
+          extra-restore-keys: ${{ matrix.cache_key == 'ci-linux-test-workspace' && 'ci-linux-test' || '' }}
           test-tools: "true"
 
       # Root suites exercise latency-sensitive daemon journeys. Finish their
@@ -440,11 +453,10 @@ jobs:
             bazel-testlogs/**/test.log
             bazel-testlogs/**/test.xml
 
-      # Matrix shards share github.job, so they would race the same save key.
-      # root-b compiles most //crates/tracedecay test binaries; one write
-      # keeps the 10 GiB Actions cache from holding several copies.
+      # Matrix shards share github.job; root-b and workspace-b write distinct
+      # prefixes so they do not race one 10 GiB key.
       - name: Save compiled Bazel actions
-        if: always() && !cancelled() && github.ref == 'refs/heads/master' && matrix.shard == 'root-b' && steps.bazel.outputs.disk-cache-key != ''
+        if: always() && !cancelled() && github.ref == 'refs/heads/master' && matrix.save_cache == 'true' && steps.bazel.outputs.disk-cache-key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
