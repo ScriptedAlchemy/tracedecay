@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use tracedecay_domain::{
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
@@ -189,32 +190,37 @@ pub async fn capture_snapshot_observations<R, D, B, L>(
     load_fn: L,
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome>
 where
-    R: SnapshotAdmissionRecord,
-    D: FnOnce() -> FileDiscoveryReport,
-    B: Fn(&Path) -> TranscriptIngestResult<u64>,
-    L: Fn(&Path) -> TranscriptIngestResult<Option<Vec<SnapshotAdmissionBatch<R>>>>,
+    R: SnapshotAdmissionRecord + Send + 'static,
+    D: FnOnce() -> FileDiscoveryReport + Send + 'static,
+    B: Fn(&Path) -> TranscriptIngestResult<u64> + Send + Sync + 'static,
+    L: Fn(&Path) -> TranscriptIngestResult<Option<Vec<SnapshotAdmissionBatch<R>>>>
+        + Send
+        + Sync
+        + 'static,
 {
     ensure_snapshot_admission_active(provider, cancellation)?;
-    let discovery = {
-        let _span =
-            tracing::trace_span!("sessions.observation.snapshot_discover_blocking").entered();
-        run_blocking_transcript_section(discover)
-    };
+    let discovery = { run_blocking_transcript_section(provider, discover).await? };
     ensure_snapshot_admission_active(provider, cancellation)?;
     let mut runner = SnapshotAdmissionRunner::new(provider, max_new_bytes);
     if discovery.is_truncated() {
         runner.defer();
     }
+    let input_bytes_fn = Arc::new(input_bytes_fn);
+    let load_fn = Arc::new(load_fn);
     for path in discovery.paths {
         ensure_snapshot_admission_active(provider, cancellation)?;
         let input_bytes = {
-            let _span =
-                tracing::trace_span!("sessions.observation.snapshot_bytes_blocking").entered();
-            run_blocking_transcript_section(|| input_bytes_fn(&path))
+            let input_bytes_fn = Arc::clone(&input_bytes_fn);
+            let path = path.clone();
+            run_blocking_transcript_section(provider, move || input_bytes_fn(&path)).await?
         }?;
         ensure_snapshot_admission_active(provider, cancellation)?;
+        let load_fn = Arc::clone(&load_fn);
+        let path = path.clone();
         runner
-            .admit_batch(facade, input_bytes, &scope, cancellation, || load_fn(&path))
+            .admit_batch(facade, input_bytes, &scope, cancellation, move || {
+                load_fn(&path)
+            })
             .await?;
     }
     Ok(runner.finish())
@@ -253,19 +259,17 @@ impl SnapshotAdmissionRunner {
         load: F,
     ) -> TranscriptIngestResult<()>
     where
-        R: SnapshotAdmissionRecord,
-        F: FnOnce() -> TranscriptIngestResult<Option<Vec<SnapshotAdmissionBatch<R>>>>,
+        R: SnapshotAdmissionRecord + Send + 'static,
+        F: FnOnce() -> TranscriptIngestResult<Option<Vec<SnapshotAdmissionBatch<R>>>>
+            + Send
+            + 'static,
     {
         ensure_snapshot_admission_active(self.provider, cancellation)?;
         if !self.budget.try_consume(input_bytes) {
             return Ok(());
         }
         ensure_snapshot_admission_active(self.provider, cancellation)?;
-        let loaded = {
-            let _span =
-                tracing::trace_span!("sessions.observation.snapshot_parse_blocking").entered();
-            run_blocking_transcript_section(load)
-        }?;
+        let loaded = { run_blocking_transcript_section(self.provider, load).await? }?;
         ensure_snapshot_admission_active(self.provider, cancellation)?;
         let Some(batches) = loaded else {
             return Ok(());
@@ -718,6 +722,8 @@ pub fn snapshot_cursor_covers_range(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::admission::HostAdmission;
     use crate::admission::test_support::{MemoryHostAdmission, PanicHostAdmission};
@@ -826,22 +832,25 @@ mod tests {
             .source_identity()
             .unwrap();
         let mut runner = SnapshotAdmissionRunner::new("test", Some(12));
-        let mut loads = 0;
+        let loads = Arc::new(AtomicUsize::new(0));
         runner
-            .admit_batch(&admission, 4, &scope, &cancellation, || {
-                loads += 1;
-                Ok(Some(vec![SnapshotAdmissionBatch::new(
-                    generation,
-                    vec![
-                        source_record_at("api_history", 0),
-                        source_record_at("ui_messages", 0),
-                        source_record_at("api_history", 1),
-                    ],
-                )]))
+            .admit_batch(&admission, 4, &scope, &cancellation, {
+                let loads = Arc::clone(&loads);
+                move || {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(vec![SnapshotAdmissionBatch::new(
+                        generation,
+                        vec![
+                            source_record_at("api_history", 0),
+                            source_record_at("ui_messages", 0),
+                            source_record_at("api_history", 1),
+                        ],
+                    )]))
+                }
             })
             .await
             .unwrap();
-        assert_eq!(loads, 1);
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
         let api_cursor = admission
             .get_source_cursor(&api, &scope)
             .await
@@ -865,23 +874,33 @@ mod tests {
             })
             .collect::<Vec<_>>();
         runner
-            .admit_batch(&admission, 4, &scope, &cancellation, || {
-                loads += 1;
-                Ok(Some(vec![
-                    SnapshotAdmissionBatch::for_source(
-                        api.clone(),
-                        generation,
-                        vec![
-                            source_record_at("api_history", 0),
-                            source_record_at("api_history", 1),
-                        ],
-                    ),
-                    SnapshotAdmissionBatch::for_source(ui.clone(), changed, replacement_ui.clone()),
-                ]))
+            .admit_batch(&admission, 4, &scope, &cancellation, {
+                let loads = Arc::clone(&loads);
+                let api = api.clone();
+                let ui = ui.clone();
+                let replacement_ui = replacement_ui.clone();
+                move || {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(vec![
+                        SnapshotAdmissionBatch::for_source(
+                            api.clone(),
+                            generation,
+                            vec![
+                                source_record_at("api_history", 0),
+                                source_record_at("api_history", 1),
+                            ],
+                        ),
+                        SnapshotAdmissionBatch::for_source(
+                            ui.clone(),
+                            changed,
+                            replacement_ui.clone(),
+                        ),
+                    ]))
+                }
             })
             .await
             .unwrap();
-        assert_eq!(loads, 2);
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
         assert_eq!(
             admission
                 .get_source_cursor(&api, &scope)
@@ -899,18 +918,22 @@ mod tests {
         assert_eq!(ui_cursor.position(), 3);
         let before_retry = admission.capture_call_counts();
         runner
-            .admit_batch(&admission, 4, &scope, &cancellation, || {
-                loads += 1;
-                Ok(Some(vec![SnapshotAdmissionBatch::for_source(
-                    ui.clone(),
-                    changed,
-                    replacement_ui.clone(),
-                )]))
+            .admit_batch(&admission, 4, &scope, &cancellation, {
+                let loads = Arc::clone(&loads);
+                let ui = ui.clone();
+                move || {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(vec![SnapshotAdmissionBatch::for_source(
+                        ui,
+                        changed,
+                        replacement_ui,
+                    )]))
+                }
             })
             .await
             .unwrap();
         assert_eq!(admission.capture_call_counts(), before_retry);
-        assert_eq!(loads, 3);
+        assert_eq!(loads.load(Ordering::SeqCst), 3);
         let outcome = runner.finish();
         assert_eq!(outcome.bytes_consumed, 12);
         assert!(!outcome.deferred_by_byte_cap);
@@ -931,19 +954,23 @@ mod tests {
             .unwrap();
         let mut runner = SnapshotAdmissionRunner::new("test", None);
         let error = runner
-            .admit_batch(&admission, 5, &scope, &cancellation, || {
-                Ok(Some(vec![
-                    SnapshotAdmissionBatch::for_source(
-                        api.clone(),
-                        generation,
-                        vec![source_record_at("api_history", 0)],
-                    ),
-                    SnapshotAdmissionBatch::for_source(
-                        ui.clone(),
-                        generation,
-                        vec![source_record_at("api_history", 1)],
-                    ),
-                ]))
+            .admit_batch(&admission, 5, &scope, &cancellation, {
+                let api = api.clone();
+                let ui = ui.clone();
+                move || {
+                    Ok(Some(vec![
+                        SnapshotAdmissionBatch::for_source(
+                            api,
+                            generation,
+                            vec![source_record_at("api_history", 0)],
+                        ),
+                        SnapshotAdmissionBatch::for_source(
+                            ui,
+                            generation,
+                            vec![source_record_at("api_history", 1)],
+                        ),
+                    ]))
+                }
             })
             .await
             .unwrap_err();
@@ -960,7 +987,7 @@ mod tests {
         );
         assert_eq!(empty.source_identity(), Some(&ui));
         runner
-            .admit_batch(&admission, 3, &scope, &cancellation, || {
+            .admit_batch(&admission, 3, &scope, &cancellation, move || {
                 Ok(Some(vec![empty]))
             })
             .await
@@ -1109,11 +1136,14 @@ mod tests {
             None,
             || discovery(vec![PathBuf::from("session.snapshot")]),
             |_| Ok(1),
-            |_| {
-                Ok(Some(vec![SnapshotAdmissionBatch::new(
-                    ObservationSourceGenerationV1::new(1).expect("generation"),
-                    vec![record.clone()],
-                )]))
+            {
+                let record = record.clone();
+                move |_| {
+                    Ok(Some(vec![SnapshotAdmissionBatch::new(
+                        ObservationSourceGenerationV1::new(1).expect("generation"),
+                        vec![record.clone()],
+                    )]))
+                }
             },
         )
         .await
@@ -1144,7 +1174,7 @@ mod tests {
             None,
             || discovery(vec![PathBuf::from("session-window.snapshot")]),
             |_| Ok(1),
-            |_| {
+            move |_| {
                 Ok(Some(vec![SnapshotAdmissionBatch::new(
                     generation,
                     records.clone(),
@@ -1205,9 +1235,12 @@ mod tests {
             ObservationScopeV1::Profile,
             &cancellation,
             None,
-            || discovery(vec![path.clone()]),
+            {
+                let path = path.clone();
+                move || discovery(vec![path])
+            },
             |_| Ok(1),
-            |_| {
+            move |_| {
                 Ok(Some(vec![SnapshotAdmissionBatch::new(
                     generation,
                     vec![test_record()],
@@ -1246,9 +1279,9 @@ mod tests {
             ObservationScopeV1::Profile,
             &ObservationCancellation::default(),
             None,
-            || discovery(vec![path]),
+            move || discovery(vec![path]),
             |_| Ok(1),
-            |_| {
+            move |_| {
                 Ok(Some(vec![SnapshotAdmissionBatch::new(
                     generation,
                     vec![test_record()],

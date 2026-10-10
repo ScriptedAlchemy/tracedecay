@@ -50,12 +50,14 @@ const MAX_SCAN_DEPTH: u8 = 9;
 pub const CWD_PROBE_LINES: usize = 8;
 
 /// Claude Code transcript locator and scope filter.
+#[derive(Clone)]
 pub struct ClaudeSource {
     projects_dir: PathBuf,
     user_scope: Option<UserClaudeScope>,
     project_matchers: ProjectRootMatcherCache,
 }
 
+#[derive(Clone)]
 struct UserClaudeScope {
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,

@@ -379,18 +379,15 @@ pub(crate) async fn capture_opencode_observations(
             if let Some(materialized) = materialized {
                 page_fully_processed = materialized.fully_processed;
                 runner
-                    .admit_batch(
-                        facade,
-                        materialized.input_bytes,
-                        &scope,
-                        cancellation,
-                        || {
+                    .admit_batch(facade, materialized.input_bytes, &scope, cancellation, {
+                        let generation = database.generation;
+                        move || {
                             Ok(Some(vec![SnapshotAdmissionBatch::new(
-                                database.generation,
+                                generation,
                                 materialized.records,
                             )]))
-                        },
-                    )
+                        }
+                    })
                     .await?;
             }
             if page_fully_processed && cursor != previous_cursor {

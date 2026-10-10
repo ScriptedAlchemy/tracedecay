@@ -194,12 +194,18 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                 });
             }
         },
-        None => std::sync::Arc::new(source::run_blocking_transcript_section(|| {
-            source.discover_transcript_paths_with_frontier(
-                TranscriptDiscoveryBounds::default_walk(),
-                frontier,
-            )
-        })?),
+        None => std::sync::Arc::new(
+            source::run_blocking_transcript_section("codex", {
+                let source = source.clone();
+                move || {
+                    source.discover_transcript_paths_with_frontier(
+                        TranscriptDiscoveryBounds::default_walk(),
+                        frontier,
+                    )
+                }
+            })
+            .await??,
+        ),
     };
     let next_frontier = pass.next_frontier;
     let discovery = &pass.report;
@@ -217,7 +223,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
         if cancellation.is_cancelled() {
             return Err(source::TranscriptIngestError::Cancelled { provider: "codex" });
         }
-        let Some(pending) = codex::PendingTranscript::observe(discovery_state, path)? else {
+        let Some(pending) = codex::PendingTranscript::observe(discovery_state, path).await? else {
             continue;
         };
         if let Some(failure) = pending.cached_source_failure(path) {
