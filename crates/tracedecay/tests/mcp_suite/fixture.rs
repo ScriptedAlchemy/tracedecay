@@ -28,6 +28,7 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 use tracedecay_domain::errors::Result as TdResult;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_runtime_core::path_safety::{canonical_existing_identity, canonical_root_identity};
 use tracedecay_runtime_core::storage::{PrivateStoreIo, default_profile_project_id};
 
 /// Store schema versions admitted by recorded version rather than by the
@@ -83,7 +84,7 @@ fn schema_template_dir_name(
 
 const EMPTY_FLAVOR: &str = "empty";
 
-static TEMPLATE_ROOT: OnceCell<Option<PathBuf>> = OnceCell::const_new();
+static TEMPLATE_ROOT: OnceCell<std::result::Result<PathBuf, String>> = OnceCell::const_new();
 
 /// Writes the shared production-composition fixture sources: cross-file calls,
 /// structs, impls, a test file, and doc comments.
@@ -141,7 +142,14 @@ pub async fn init_project_from_template_with_options(
     project_root: &Path,
     options: TraceDecayOpenOptions,
 ) -> TdResult<TraceDecay> {
-    init_project_from_template_root(template_root().await, project_root, options).await
+    match template_root().await {
+        Ok(template) => {
+            init_project_from_template_root(Some(template), project_root, options).await
+        }
+        Err(error) => Err(config_error(format!(
+            "mcp suite store template is unavailable: {error}"
+        ))),
+    }
 }
 
 async fn init_project_from_template_root(
@@ -222,31 +230,49 @@ fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::
     Ok(())
 }
 
-async fn template_root() -> Option<&'static Path> {
-    TEMPLATE_ROOT
+async fn template_root() -> std::result::Result<&'static Path, &'static str> {
+    match TEMPLATE_ROOT
         .get_or_init(|| async {
             ensure_template(
                 &crate::common::fixture::cargo_target_tmpdir(),
                 StoreSchemaVersions::CURRENT,
             )
             .await
+            .map_err(|error| error.to_string())
         })
         .await
-        .as_deref()
+    {
+        Ok(path) => Ok(path.as_path()),
+        Err(error) => Err(error.as_str()),
+    }
+}
+
+/// Plain, resolved directory used for the shared template tree.
+///
+/// Bazel Windows `TEST_TMPDIR` / `CARGO_TARGET_TMPDIR` keep `/` separators.
+/// `std::fs::canonicalize` then spells `\\?\C:\...`. Joining a `/` component
+/// onto that verbatim root, or asking private-fs to extend a ≥260-char path
+/// that still contains `/`, is rejected as
+/// `long Windows security path must have an exact absolute spelling`.
+fn host_exact_template_root(path: &Path) -> PathBuf {
+    canonical_root_identity(path)
 }
 
 /// Returns the shared template dir, building it if this is the first test
 /// process to need it. nextest runs one process per test, so an exclusive
 /// file lock serializes the build machine-wide: exactly one process builds,
 /// every concurrent process blocks briefly and then finds READY.
-async fn ensure_template(tmp_root: &Path, versions: StoreSchemaVersions) -> Option<PathBuf> {
-    let template_dir_name = template_dir_name(versions)?;
+async fn ensure_template(tmp_root: &Path, versions: StoreSchemaVersions) -> io::Result<PathBuf> {
+    let tmp_root = host_exact_template_root(tmp_root);
+    let template_dir_name = template_dir_name(versions).ok_or_else(|| {
+        io::Error::other("mcp suite store template schema fingerprint is unavailable")
+    })?;
     let shared = tmp_root.join(&template_dir_name);
     if shared.join("READY").is_file() {
-        return Some(shared);
+        return Ok(shared);
     }
 
-    fs::create_dir_all(tmp_root).ok()?;
+    fs::create_dir_all(&tmp_root)?;
     let lock_path = tmp_root.join(format!("{template_dir_name}.lock"));
     let lock_file = tokio::task::spawn_blocking(move || -> io::Result<fs::File> {
         let file = fs::OpenOptions::new()
@@ -258,13 +284,12 @@ async fn ensure_template(tmp_root: &Path, versions: StoreSchemaVersions) -> Opti
         Ok(file)
     })
     .await
-    .ok()?
-    .ok()?;
+    .map_err(|error| io::Error::other(error))??;
 
     // Another process may have finished the build while we waited.
     if shared.join("READY").is_file() {
         let _ = lock_file.unlock();
-        return Some(shared);
+        return Ok(shared);
     }
 
     let build = shared.with_file_name(format!("{template_dir_name}-build-{}", std::process::id()));
@@ -272,19 +297,19 @@ async fn ensure_template(tmp_root: &Path, versions: StoreSchemaVersions) -> Opti
     let built = build_template(&build).await;
     let result = match built {
         Ok(()) => match fs::rename(&build, &shared) {
-            Ok(()) => Some(shared),
+            Ok(()) => Ok(shared),
             // Rename failed (e.g. leftover partial dir); the private build
             // tree is still a valid template for this process.
             Err(_) if shared.join("READY").is_file() => {
                 let _ = fs::remove_dir_all(&build);
-                Some(shared)
+                Ok(shared)
             }
-            Err(_) => Some(build),
+            Err(_) => Ok(build),
         },
         Err(err) => {
             eprintln!("[mcp_suite::fixture] template build failed: {err}");
             let _ = fs::remove_dir_all(&build);
-            None
+            Err(err)
         }
     };
     let _ = lock_file.unlock();
@@ -296,8 +321,12 @@ async fn build_template(dest: &Path) -> io::Result<()> {
     // branch detection walking up from the fixture project cannot find this
     // repo's .git and bootstrap branch metadata that a TempDir-based test
     // project would never have.
+    let dest = host_exact_template_root(dest);
     let scratch = tempfile::TempDir::new()?;
-    let scratch_root = scratch.path().canonicalize()?;
+    // Plain host identity, not `canonicalize`'s Windows `\\?\` spelling:
+    // init and private-fs joins onto a verbatim root preserve `/` and then
+    // fail the exact-absolute long-path check.
+    let scratch_root = canonical_existing_identity(scratch.path())?;
 
     let root = scratch_root.join(EMPTY_FLAVOR);
     let project = root.join("project");
@@ -516,6 +545,23 @@ fn sqlite_master_shape_fingerprint(database_path: &Path) -> io::Result<String> {
                 .map(|(name, sql)| (name.as_str(), sql.as_str())),
         ),
     )
+}
+
+#[test]
+fn host_exact_template_root_uses_plain_canonical_identity() {
+    let scratch = tempfile::TempDir::new().unwrap();
+    let created = scratch.path().join("template-root");
+    fs::create_dir_all(&created).unwrap();
+    // Bazel Windows tmp dirs keep `/`; the helper must still name the
+    // same directory without a verbatim prefix.
+    let mixed = PathBuf::from(created.to_string_lossy().replace('\\', "/"));
+    let exact = host_exact_template_root(&mixed);
+    assert_eq!(exact, canonical_root_identity(&created));
+    assert!(
+        !exact.to_string_lossy().starts_with(r"\\?\"),
+        "template roots must be plain host paths, got {}",
+        exact.display()
+    );
 }
 
 /// A column constant that admission checks is part of the template key. A warm

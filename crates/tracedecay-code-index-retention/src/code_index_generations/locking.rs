@@ -223,6 +223,9 @@ pub fn acquire_generation_segments_publication_lock(
                 });
             }
             Err(error) if tracedecay_private_fs::is_lock_contended(&error) => {
+                if is_cancelled() {
+                    return Err(CodeGenerationRetentionErrorV1::Cancelled);
+                }
                 std::thread::park_timeout(GRAPH_REPLAY_POOL_ACQUIRE_POLL);
             }
             Err(error) => return Err(storage(error)),
@@ -250,7 +253,7 @@ fn lock_file(
                     return Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy);
                 }
                 GenerationScopeFence::PassBusy => {
-                    park_until_retry(deadline)?;
+                    park_until_retry(deadline, is_cancelled)?;
                     continue;
                 }
                 fence => fence,
@@ -272,7 +275,7 @@ fn lock_file(
             Err(error) if tracedecay_private_fs::is_lock_contended(&error) => {
                 #[cfg(windows)]
                 drop(scope_fence);
-                park_until_retry(deadline)?;
+                park_until_retry(deadline, is_cancelled)?;
             }
             Err(error) => return Err(storage(error)),
         }
@@ -355,7 +358,13 @@ fn scope_retention_pending(
     }
 }
 
-fn park_until_retry(deadline: Instant) -> Result<(), CodeGenerationRetentionErrorV1> {
+fn park_until_retry(
+    deadline: Instant,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if is_cancelled() {
+        return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
     if Instant::now() >= deadline {
         return Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy);
     }
