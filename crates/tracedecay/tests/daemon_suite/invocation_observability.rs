@@ -1582,9 +1582,13 @@ async fn capacity_reuse_settles_observability_before_store_retirement() {
         .settle_registered_store_retirement(&path)
         .await
         .expect("capacity reuse waits for the dropped alias drain");
+    let remount_identity = ObservabilityProducerIdentityV1 {
+        process_boot_id: "capacity-settle-remount".to_owned(),
+        ..identity
+    };
     let remounted = registry
-        .acquire_or_start(&database, &store_mount(&identity), || {
-            BoundedObservabilityProducerV1::start(database.clone(), identity.clone(), 1)
+        .acquire_or_start(&database, &store_mount(&remount_identity), || {
+            BoundedObservabilityProducerV1::start(database.clone(), remount_identity.clone(), 1)
                 .map_err(StoreObservabilityMountErrorV1::Unavailable)
         })
         .expect("settled store remounts without a leftover ClientLease");
