@@ -186,7 +186,7 @@ pub(super) fn verify_release_attestation(
     let listing: Option<AttestationListing> = cloud::get_release_json(
         &url,
         provenance.authorization.as_deref(),
-        Duration::from_secs(30),
+        cloud::UPGRADE_RELEASE_LOOKUP_TIMEOUT,
     )
     .map_err(|error| AttestationRefusal::LookupFailed {
         digest: digest_hex.clone(),
