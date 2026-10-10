@@ -735,12 +735,17 @@ impl CodeGraphInteractiveReader {
         let cancellation = self.read_cancellation(request_cancellation)?;
         require_positive(max_relations, "code graph relation key limit")?;
         let starts = seeds.iter().map(|seed| seed.0.clone()).collect::<Vec<_>>();
-        // Admit only the requested kinds at the store. A reverse walk that
-        // read every inbound kind and filtered after counted dropped
-        // Uses/TypeOf rows as `adjacency_rows` and then claimed a complete
-        // empty callers page.
+        // Incoming store kind filters drop Uses/TypeOf rows that a full
+        // inbound fan-out still returns. Match `semantic_neighbors`: read
+        // every inbound kind, then keep the kinds this walk asked for.
+        // Callers must not treat the unrequested kinds as a complete empty
+        // page — the walk names Uses/TypeOf/Annotates as well as Calls.
         let admitted: BTreeSet<RelationEdgeKindV1> = kinds.iter().copied().collect();
-        let edge_kinds = code_relation_kinds(kinds)?;
+        let edge_kinds = if reverse {
+            code_relation_kinds(&[])?
+        } else {
+            code_relation_kinds(kinds)?
+        };
         let edge_rows = if reverse {
             self.snapshot.incoming_relations_truncated(
                 &starts,

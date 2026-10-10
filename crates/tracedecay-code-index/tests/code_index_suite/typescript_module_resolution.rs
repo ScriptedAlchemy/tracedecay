@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tracedecay_code_index::{
     graph_projection::{
         CODE_GRAPH_PROJECTOR_REVISION, CodeGraphInteractiveReader, CodeGraphProjectionStore,
-        code_graph_projection_identity,
+        CodeGraphSymbolRefV1, code_graph_projection_identity,
     },
     production::CodeIndexPublishedGenerationV1,
 };
@@ -490,6 +490,30 @@ fn type_imported_class_has_usage_callers() {
         .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
         .collect::<std::collections::BTreeMap<_, _>>();
     let graph = reader(&generation);
+    let start = CodeGraphSymbolRefV1::for_occurrence(&target).expect("compiler symbol ref");
+    let keys = graph
+        .relation_keys(
+            std::slice::from_ref(&start),
+            &[
+                RelationEdgeKindV1::Calls,
+                RelationEdgeKindV1::Uses,
+                RelationEdgeKindV1::TypeOf,
+                RelationEdgeKindV1::Annotates,
+            ],
+            true,
+            10_000,
+            Arc::new(NeverCancelled),
+        )
+        .expect("relation keys")
+        .per_seed
+        .into_iter()
+        .flatten()
+        .map(|key| format!("{:?}", key.kind))
+        .collect::<Vec<_>>();
+    assert!(
+        keys.iter().any(|kind| kind.contains("Uses")),
+        "callers relation_keys must keep Uses: keys={keys:?} inbound={inbound:?}"
+    );
     let walked = graph
         .callers(
             std::slice::from_ref(&target),
