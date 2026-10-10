@@ -67,6 +67,7 @@ tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
+tracedecay-tokenizer = { path = "../tracedecay-tokenizer" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracing = "0.1"
 tree-sitter = "0.26"

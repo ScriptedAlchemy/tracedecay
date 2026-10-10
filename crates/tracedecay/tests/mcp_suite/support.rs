@@ -1700,11 +1700,11 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
     let relations = CanonicalObservationRelationsV1::new(session_id.clone())
         .with_message_id(ObservationId::new(message_id).unwrap());
     let facts = match role {
-        CanonicalMessageRoleV1::Tool => vec![CanonicalObservationFactV1::ToolResult {
-            invocation_id: None,
-            content: Value::String(text),
-            success: Some(true),
-        }],
+        CanonicalMessageRoleV1::Tool => vec![tracedecay_capture::accounted_tool_result(
+            None,
+            Value::String(text),
+            Some(true),
+        )],
         _ => vec![CanonicalObservationFactV1::Message {
             role,
             content: Value::String(text),

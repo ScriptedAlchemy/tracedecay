@@ -106,6 +106,16 @@ fn complete_payload(results: Value, enriched: u64) -> Value {
     })
 }
 
+fn response_after(text: &str) -> u64 {
+    tracedecay_mcp::tools::response_trailers::response_token_count(
+        &tracedecay_mcp::ToolResult::new(
+            json!({"content": [{"type": "text", "text": text}]}),
+            Vec::new(),
+        ),
+    )
+    .expect("tokenizer")
+}
+
 fn assert_markdown(response: &Value, text: &str, touched_bytes: Option<u64>) {
     assert!(
         response["error"].is_null(),
@@ -122,7 +132,7 @@ fn assert_markdown(response: &Value, text: &str, touched_bytes: Option<u64>) {
             let footer = format!(
                 "\ntracedecay_metrics: before={} after={}",
                 bytes / 4,
-                text.len() / 4
+                response_after(text)
             );
             assert_eq!(
                 content.get(1).and_then(|item| item["text"].as_str()),
@@ -154,7 +164,7 @@ fn assert_json_payload(response: &Value, expected: Value, touched_bytes: Option<
             let footer = format!(
                 "\ntracedecay_metrics: before={} after={}",
                 bytes / 4,
-                text.len() / 4
+                response_after(text)
             );
             assert_eq!(
                 content.get(1).and_then(|item| item["text"].as_str()),
