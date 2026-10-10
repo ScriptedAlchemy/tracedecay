@@ -20,12 +20,14 @@ impl FixedGitIndexRunner {
     /// Bind worktree identity without reading every clean HEAD blob.
     ///
     /// The path domain is still HEAD ∪ index ∪ non-ignored untracked names, so
-    /// staging an already-bound path does not change the digest. A HEAD tree
-    /// object id is reused only when Git itself still compares that path: the
-    /// dirty set comes from `git diff HEAD` with fsmonitor and ignoreStat
-    /// disabled, and assume-unchanged / skip-worktree paths are read as
-    /// worktree bytes. Request cancel and deadline are checked between Git
-    /// children and paths so a hunks deadline can drop the real index lock.
+    /// staging an already-bound path does not change the digest. Content may
+    /// reuse a HEAD tree object id only when Git still compares that path and
+    /// the worktree is still a regular file. Mode, type, and absence always
+    /// come from the worktree: `core.filemode=false` makes `git diff HEAD`
+    /// omit chmod-only edits, so the dirty set is not mode evidence.
+    /// Assume-unchanged / skip-worktree paths are read as worktree bytes.
+    /// Request cancel and deadline are checked between Git children and paths
+    /// so a hunks deadline can drop the real index lock.
     pub fn tracked_worktree_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         self.check_cancelled()?;
         let (has_head, head_entries) = self.head_tree_entries()?;
@@ -55,16 +57,16 @@ impl FixedGitIndexRunner {
                 std::str::from_utf8(&path).map_err(|_| NativeGitIndexError::MalformedOutput {
                     operation: "ls-tree",
                 })?;
+            let absolute = self.repository_root.join(path_text);
+            let kind = classify_worktree_path(&absolute)?;
             let entry = if !read_worktree.contains(&path)
                 && let Some(head) = head_entries.get(&path)
+                && kind.is_regular_file()
+                && matches!(head.kind, "file" | "executable")
             {
-                if head.kind == "unsupported" {
-                    ("unsupported", Vec::new())
-                } else {
-                    (head.kind, head.oid.clone())
-                }
+                (kind.as_str(), head.oid.clone())
             } else {
-                self.worktree_manifest_bytes(&self.repository_root.join(path_text))?
+                self.worktree_manifest_bytes(&absolute)?
             };
             manifest.push((path_text.to_owned(), entry.0, entry.1));
         }
@@ -380,13 +382,56 @@ struct HeadTreeEntry {
     oid: Vec<u8>,
 }
 
+#[derive(Clone, Copy)]
+enum WorktreeKind {
+    File,
+    Executable,
+    Symlink,
+    Unsupported,
+    Absent,
+}
+
+impl WorktreeKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Executable => "executable",
+            Self::Symlink => "symlink",
+            Self::Unsupported => "unsupported",
+            Self::Absent => "absent",
+        }
+    }
+
+    const fn is_regular_file(self) -> bool {
+        matches!(self, Self::File | Self::Executable)
+    }
+}
+
+fn classify_worktree_path(absolute: &Path) -> Result<WorktreeKind, NativeGitIndexError> {
+    match std::fs::symlink_metadata(absolute) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Ok(WorktreeKind::Symlink),
+        Ok(metadata) if metadata.is_file() => Ok(
+            if worktree_mode(absolute)
+                .is_some_and(|mode| mode.as_str() == GitFileModeV1::EXECUTABLE)
+            {
+                WorktreeKind::Executable
+            } else {
+                WorktreeKind::File
+            },
+        ),
+        Ok(_) => Ok(WorktreeKind::Unsupported),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(WorktreeKind::Absent),
+        Err(error) => Err(NativeGitIndexError::Io(error.to_string())),
+    }
+}
+
 impl FixedGitIndexRunner {
     fn worktree_manifest_bytes(
         &self,
         absolute: &Path,
     ) -> Result<(&'static str, Vec<u8>), NativeGitIndexError> {
-        match std::fs::symlink_metadata(absolute) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+        match classify_worktree_path(absolute)? {
+            WorktreeKind::Symlink => {
                 let target = std::fs::read_link(absolute)
                     .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
                 Ok((
@@ -394,24 +439,15 @@ impl FixedGitIndexRunner {
                     target.to_string_lossy().into_owned().into_bytes(),
                 ))
             }
-            Ok(metadata) if metadata.is_file() => Ok((
-                if worktree_mode(absolute)
-                    .is_some_and(|mode| mode.as_str() == GitFileModeV1::EXECUTABLE)
-                {
-                    "executable"
-                } else {
-                    "file"
-                },
+            kind @ (WorktreeKind::File | WorktreeKind::Executable) => Ok((
+                kind.as_str(),
                 self.read_file_chunks(
                     std::fs::File::open(absolute)
                         .map_err(|error| NativeGitIndexError::Io(error.to_string()))?,
                 )?,
             )),
-            Ok(_) => Ok(("unsupported", Vec::new())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(("absent", Vec::new()))
-            }
-            Err(error) => Err(NativeGitIndexError::Io(error.to_string())),
+            WorktreeKind::Unsupported => Ok(("unsupported", Vec::new())),
+            WorktreeKind::Absent => Ok(("absent", Vec::new())),
         }
     }
 }

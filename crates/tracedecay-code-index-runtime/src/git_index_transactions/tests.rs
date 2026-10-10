@@ -777,6 +777,47 @@ fn tracked_worktree_digest_changes_when_skip_worktree_bytes_change() {
 
 #[cfg(unix)]
 #[test]
+fn tracked_worktree_digest_observes_executable_mode_when_filemode_is_false() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (directory, runner) = committed_file("source.rs", b"committed\n");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["config", "--local", "core.filemode", "false"])
+            .status()
+            .expect("core.filemode=false starts")
+            .success()
+    );
+    let before = runner
+        .tracked_worktree_digest()
+        .expect("digest before hidden mode change");
+    let path = directory.path().join("source.rs");
+    let mut permissions = fs::metadata(&path).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).expect("chmod +x");
+    assert_git_diff_head_hides(directory.path(), "source.rs");
+    let after = runner
+        .tracked_worktree_digest()
+        .expect("digest after hidden mode change");
+    assert_ne!(
+        before, after,
+        "core.filemode=false is not mode evidence; the digest must bind worktree executable identity"
+    );
+    let mut restored = fs::metadata(&path).expect("metadata").permissions();
+    restored.set_mode(0o644);
+    fs::set_permissions(&path, restored).expect("chmod 0644");
+    assert_eq!(
+        before,
+        runner
+            .tracked_worktree_digest()
+            .expect("digest after restoring mode"),
+        "restoring the worktree mode must recover the prior identity"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn tracked_worktree_digest_preserves_mode_symlink_and_absent_identity() {
     use std::os::unix::fs::{PermissionsExt, symlink};
 
