@@ -476,6 +476,13 @@ pub enum Commands {
         /// Useful for profiling index work vs. JSON-RPC / stdio overhead.
         #[arg(long)]
         timings: bool,
+        /// Serve the full catalog with `_meta["anthropic/alwaysLoad"]` on the
+        /// core tools so Claude Code's native tool search can defer the rest.
+        /// Also selected by TRACEDECAY_MCP_CLAUDE_CODE_TOOL_SEARCH=1. Drop this
+        /// flag under ANTHROPIC_BASE_URL proxies, Foundry, or
+        /// CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS.
+        #[arg(long)]
+        claude_code_tool_search: bool,
     },
     /// Manage the long-running TraceDecay daemon used by MCP clients
     #[command(long_about = DAEMON_LONG_ABOUT, after_help = DAEMON_AFTER_HELP)]

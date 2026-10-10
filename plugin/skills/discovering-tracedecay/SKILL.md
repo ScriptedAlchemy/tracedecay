@@ -5,12 +5,14 @@ description: Find the supported TraceDecay operation for a code-intelligence, me
 
 # Discovering TraceDecay
 
-The session lists a core tool set plus `tracedecay_tool_search`. Tools outside
-that list are not registered until you search. Call `tracedecay_tool_search`
-with keywords or an exact tool name to load them into tools/list. An empty
-query names every tool that is still unloaded. Every catalog tool also answers
-a direct `tools/call` by name. Use live tool descriptions and
-`tracedecay tool <name> --help` for arguments.
+Default `tracedecay serve` lists a core tool set plus `tracedecay_tool_search`.
+Tools outside that list are not registered until you search. Call
+`tracedecay_tool_search` with keywords or an exact tool name to load them into
+tools/list. An empty query names every tool that is still unloaded. The Claude
+Code plugin instead lists every tool and marks the core set
+`_meta["anthropic/alwaysLoad"]`; use Claude's native ToolSearch for the rest.
+Every catalog tool also answers a direct `tools/call` by name. Use live tool
+descriptions and `tracedecay tool <name> --help` for arguments.
 
 This is capability discovery, not a prerequisite for ordinary reads, local
 edits, or clarification. When the moment is clear and the tool is not, read

@@ -79,6 +79,7 @@ pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
+    claude_code_tool_search: bool,
 ) -> Result<()> {
     let mut transport = StdioTransport::new();
     proxy_transport_to_daemon_with_drain_bound(
@@ -87,6 +88,7 @@ pub async fn proxy_stdio_to_daemon(
         replay_line,
         &mut transport,
         None,
+        claude_code_tool_search,
     )
     .await
 }
@@ -97,9 +99,10 @@ pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
+    claude_code_tool_search: bool,
 ) -> Result<()> {
     let mut transport = StdioTransport::new();
-    let mut surface = ToolSurface::from_env()?;
+    let mut surface = ToolSurface::from_serve(claude_code_tool_search)?;
     if let Some(line) = replay_line {
         proxy_one_request(socket_path, handshake, &line, &mut surface, &mut transport).await?;
     }
@@ -151,8 +154,15 @@ pub async fn proxy_transport_to_daemon(
     replay_line: Option<String>,
     transport: &mut impl McpDuplexTransport,
 ) -> Result<()> {
-    proxy_transport_to_daemon_with_drain_bound(socket_path, handshake, replay_line, transport, None)
-        .await
+    proxy_transport_to_daemon_with_drain_bound(
+        socket_path,
+        handshake,
+        replay_line,
+        transport,
+        None,
+        false,
+    )
+    .await
 }
 
 /// `drain_bound` overrides the per-request bound derived by
@@ -164,6 +174,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
     replay_line: Option<String>,
     transport: &mut impl McpDuplexTransport,
     drain_bound: Option<Duration>,
+    claude_code_tool_search: bool,
 ) -> Result<()> {
     let (mut reader, mut writer) = transport.split();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -198,7 +209,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
         &mut eof_rx,
         &mut writer,
         drain_bound,
-        ToolSurface::from_env()?,
+        ToolSurface::from_serve(claude_code_tool_search)?,
     );
     let result = tokio::try_join!(read_host, proxy);
     drop(eof_tx);
@@ -748,8 +759,7 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
 }
 
 /// Sends one host request through this session's tool surface: search answers
-/// from the daemon catalog, stubs hydrate on call, and `tools/list` follows
-/// the session advertisement.
+/// from the daemon catalog, and `tools/list` follows the session advertisement.
 async fn send_host_request(
     surface: &mut ToolSurface,
     socket_path: &Path,
@@ -775,9 +785,6 @@ async fn send_host_request(
         send_daemon_request_with_project_open_retry(socket_path, handshake, request, cancellation)
             .await?;
     surface.rewrite(request.parsed.as_ref(), &mut responses);
-    if let Some(changed) = surface.unfreeze_call(request.parsed.as_ref()) {
-        responses.push(changed);
-    }
     Ok(responses)
 }
 

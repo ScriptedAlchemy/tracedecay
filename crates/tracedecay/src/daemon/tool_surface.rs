@@ -5,12 +5,18 @@
 //! Hosts register only the tools `tools/list` names, so a tool missing from
 //! the list is uncallable from the model until the host re-lists. The serve
 //! proxy is the one process that lives for a host session, so the session's
-//! advertised set lives here. Two advertisements remain measurable while
-//! host-native deferral is researched: [`ToolAdvertisement::Stubs`] keeps
-//! every catalog name (core tools full, the rest stubs that hydrate on
-//! call); [`ToolAdvertisement::Search`] lists [`CORE_TOOL_NAMES`] plus
-//! [`TOOL_SEARCH_NAME`] and loads matches on demand. `tools/call` is never
-//! filtered. Each served list logs a SHA-256 of the sorted tool names.
+//! advertised set lives here.
+//!
+//! Default serve ([`ToolAdvertisement::Search`]) lists [`CORE_TOOL_NAMES`] plus
+//! [`TOOL_SEARCH_NAME`]. Search ranks an exact name first, loads matches into
+//! the session list, announces `notifications/tools/list_changed`, and returns
+//! the full schemas in its result text so a host that ignores `list_changed`
+//! can still call them. [`ToolAdvertisement::ClaudeNativeFull`] is selected
+//! only by `--claude-code-tool-search` or
+//! [`CLAUDE_CODE_TOOL_SEARCH_ENV`]; it serves the full catalog and sets
+//! `_meta["anthropic/alwaysLoad"]` on the core tools so Claude Code's native
+//! tool search can defer the rest. `tools/call` is never filtered. Each served
+//! list logs a SHA-256 of the sorted tool names.
 
 use std::collections::BTreeSet;
 
@@ -22,39 +28,44 @@ use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// How one serve session advertises tools that are not in the core set.
 ///
-/// Both remain until host-native deferral (Claude Code `defer_loading` /
-/// tool search, Codex, Cursor, VS Code) decides the shipped list. Default
-/// serve is [`Self::Search`]. [`Self::Stubs`] is selected with
-/// `TRACEDECAY_MCP_TOOL_ADVERTISEMENT=stubs`.
+/// Default serve is [`Self::Search`]. [`Self::ClaudeNativeFull`] is selected
+/// only by an explicit CLI flag or [`CLAUDE_CODE_TOOL_SEARCH_ENV`], never by
+/// guessing the host from `clientInfo` or proxy environment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ToolAdvertisement {
-    /// Every catalog name; non-core tools are stubs until called.
-    Stubs,
     /// Core tools plus [`TOOL_SEARCH_NAME`]; other tools load on search.
     Search,
+    /// Full catalog; core tools carry `_meta["anthropic/alwaysLoad"]`.
+    ClaudeNativeFull,
 }
 
-const ADVERTISEMENT_ENV: &str = "TRACEDECAY_MCP_TOOL_ADVERTISEMENT";
+/// Explicit env that selects [`ToolAdvertisement::ClaudeNativeFull`].
+pub(super) const CLAUDE_CODE_TOOL_SEARCH_ENV: &str = "TRACEDECAY_MCP_CLAUDE_CODE_TOOL_SEARCH";
+const ANTHROPIC_ALWAYS_LOAD: &str = "anthropic/alwaysLoad";
 
 impl ToolAdvertisement {
     fn from_env() -> Result<Self> {
-        match std::env::var(ADVERTISEMENT_ENV) {
+        match std::env::var(CLAUDE_CODE_TOOL_SEARCH_ENV) {
             Err(std::env::VarError::NotPresent) => Ok(Self::Search),
-            Ok(value) if value.is_empty() || value == "search" => Ok(Self::Search),
-            Ok(value) if value == "stubs" => Ok(Self::Stubs),
+            Ok(value) if value.is_empty() || value == "0" || value == "false" => Ok(Self::Search),
+            Ok(value) if value == "1" || value == "true" => Ok(Self::ClaudeNativeFull),
             Ok(value) => Err(TraceDecayError::Config {
                 message: format!(
-                    "{ADVERTISEMENT_ENV} must be \"stubs\" or \"search\", got {value:?}"
+                    "{CLAUDE_CODE_TOOL_SEARCH_ENV} must be \"1\", \"true\", \"0\", or \"false\", \
+                     got {value:?}"
                 ),
             }),
             Err(std::env::VarError::NotUnicode(_)) => Err(TraceDecayError::Config {
-                message: format!("{ADVERTISEMENT_ENV} must be \"stubs\" or \"search\""),
+                message: format!(
+                    "{CLAUDE_CODE_TOOL_SEARCH_ENV} must be \"1\", \"true\", \"0\", or \"false\""
+                ),
             }),
         }
     }
 }
 
-/// The tools a session lists with full schemas before any search.
+/// The tools a session lists with full schemas before any search, and the
+/// tools Claude Code must keep loaded when native tool search is on.
 ///
 /// Every `anthropic/alwaysLoad` tool plus every tool with at least 100
 /// recorded calls across local Claude Code and Codex transcripts (October
@@ -85,26 +96,38 @@ pub(super) const TOOL_SEARCH_NAME: &str = "tracedecay_tool_search";
 /// Matches loaded per search, so one broad query cannot re-inflate the list.
 const MAX_LOADED_PER_SEARCH: usize = 8;
 const TOOL_LIST_CHANGED: &str = "notifications/tools/list_changed";
-/// Chars of the original description carried into a stub (char-safe cap).
-const STUB_DESC_CHARS: usize = 200;
-/// Model-facing note appended to every stub: one call by name hydrates the
-/// full schema from the next `tools/list` on.
-pub(super) const STUB_NOTE: &str = "[This tool is available but its full schema was elided to save \
-     context. To use it, call it by name with your best-guess arguments; its complete schema will \
-     be provided from the next turn onward.]";
 const SEARCH_INSTRUCTIONS_NOTE: &str = "\n\nThis session lists a core tool set. Call \
      `tracedecay_tool_search` with keywords or a tool name to load any other TraceDecay \
      tool into tools/list; every tool also answers a direct tools/call by name.";
-const STUB_INSTRUCTIONS_NOTE: &str = "\n\nThis session lists a core tool set with full schemas. Other \
-     catalog tools are stubs (name, a short description, and an accept-anything schema). Call a \
-     stub by name to use it; its complete schema is sent on the next tools/list.";
+
+/// Initialize instructions for Claude Code native tool search: a category
+/// map under 2,048 characters, not the default steering paragraph.
+pub(super) const CLAUDE_CATEGORY_GUIDE: &str = "\
+TraceDecay groups tools by task. Core tools set _meta[\"anthropic/alwaysLoad\"] \
+and stay loaded. Claude Code native tool search defers the rest; call a tool \
+by name or use ToolSearch.\n\
+Core: active_project, status, storage_status, grep, search, context, node, \
+source_body, source_lines, source_outline, callers, files, diff_context, \
+test_map, fact_store_search, message_search, lcm_grep.\n\
+Impact and blast radius: impact, affected, affected_tests.\n\
+Call chains: callees, call_chain.\n\
+Git, PR, and branch: git_diff, pr_context, branch_*.\n\
+Code health: health, complexity, coupling, hotspots, circular, god_class, \
+gini, largest, dsm, dependency_depth, recursion.\n\
+Edits: str_replace, ast_grep_rewrite.\n\
+Tests: run_affected_tests.\n\
+Work and workflows: work_*, workflow_*.\n\
+Memory: fact_store_*.\n\
+Configuration: configuration_*.\n\
+Diagnostics: diagnostics, diagnose, runtime.\n\
+Same operations: tracedecay tool <name> (--help for parameters). Do not query \
+.tracedecay databases.";
 
 /// One host session's advertised tool set.
 #[derive(Debug)]
 pub(super) struct ToolSurface {
     advertisement: ToolAdvertisement,
     loaded: BTreeSet<String>,
-    catalog: BTreeSet<String>,
     last_roster_sha256: Option<String>,
 }
 
@@ -113,13 +136,23 @@ impl ToolSurface {
         Self {
             advertisement,
             loaded: BTreeSet::new(),
-            catalog: BTreeSet::new(),
             last_roster_sha256: None,
         }
     }
 
     pub(super) fn from_env() -> Result<Self> {
         Ok(Self::with_advertisement(ToolAdvertisement::from_env()?))
+    }
+
+    /// `--claude-code-tool-search` wins; otherwise the explicit env is read.
+    pub(super) fn from_serve(claude_code_tool_search: bool) -> Result<Self> {
+        if claude_code_tool_search {
+            Ok(Self::with_advertisement(
+                ToolAdvertisement::ClaudeNativeFull,
+            ))
+        } else {
+            Self::from_env()
+        }
     }
 
     fn advertises_full(&self, name: &str) -> bool {
@@ -150,8 +183,9 @@ impl ToolSurface {
         Some((id, query))
     }
 
-    /// Narrows the daemon's `tools/list` answer to this session's tools and
-    /// notes the tool search in the `initialize` instructions.
+    /// Narrows the daemon's `tools/list` answer to this session's tools, or
+    /// marks core tools for Claude Code native deferral, and rewrites
+    /// `initialize` instructions for the selected advertisement.
     pub(super) fn rewrite(&mut self, request: Option<&JsonRpcRequest>, responses: &mut [String]) {
         let Some(request) = request else {
             return;
@@ -170,10 +204,6 @@ impl ToolSurface {
                 .pointer_mut("/result/tools")
                 .and_then(Value::as_array_mut)
             {
-                self.catalog = tools
-                    .iter()
-                    .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
-                    .collect();
                 match self.advertisement {
                     ToolAdvertisement::Search => {
                         tools.retain(|tool| {
@@ -183,12 +213,9 @@ impl ToolSurface {
                         });
                         tools.push(tool_search_definition());
                     }
-                    ToolAdvertisement::Stubs => {
+                    ToolAdvertisement::ClaudeNativeFull => {
                         for tool in tools.iter_mut() {
-                            let name = tool["name"].as_str().unwrap_or_default();
-                            if !self.advertises_full(name) {
-                                *tool = stub_tool(tool);
-                            }
+                            mark_core_always_load(tool);
                         }
                     }
                 }
@@ -208,10 +235,12 @@ impl ToolSurface {
             } else if let Some(Value::String(instructions)) =
                 message.pointer_mut("/result/instructions")
             {
-                instructions.push_str(match self.advertisement {
-                    ToolAdvertisement::Search => SEARCH_INSTRUCTIONS_NOTE,
-                    ToolAdvertisement::Stubs => STUB_INSTRUCTIONS_NOTE,
-                });
+                match self.advertisement {
+                    ToolAdvertisement::Search => instructions.push_str(SEARCH_INSTRUCTIONS_NOTE),
+                    ToolAdvertisement::ClaudeNativeFull => {
+                        *instructions = CLAUDE_CATEGORY_GUIDE.to_owned();
+                    }
+                }
             } else {
                 continue;
             }
@@ -224,6 +253,8 @@ impl ToolSurface {
     ///
     /// Searching the session's own listing keeps the answer to tools this
     /// session can call: a projectless session never loads project-bound tools.
+    /// The result text includes each match's full schema so a host that ignores
+    /// `list_changed` can still bind the tool.
     pub(super) fn answer_search(
         &mut self,
         id: &Value,
@@ -300,39 +331,28 @@ impl ToolSurface {
             .map(|(_, name, description)| format!("- {name}: {}", summary(description)))
             .collect::<Vec<_>>()
             .join("\n");
+        let matched_tools = matches
+            .iter()
+            .filter_map(|(_, name, _)| tools.iter().find(|tool| tool["name"] == *name).cloned())
+            .collect::<Vec<_>>();
+        let schemas = match serde_json::to_string(&matched_tools) {
+            Ok(schemas) => schemas,
+            Err(error) => {
+                return vec![tool_result(
+                    id,
+                    &format!("Matching tool schemas failed to serialize: {error}"),
+                    true,
+                )];
+            }
+        };
         let text = format!(
-            "Matching TraceDecay tools (now in tools/list):\n{listed}\n\nIf your host does not \
-             refresh its tool list, call the tool by name or run `tracedecay tool <name> --help` \
-             from a shell."
+            "Matching TraceDecay tools (now in tools/list):\n{listed}\n\nFull schemas:\n{schemas}"
         );
         let mut lines = vec![tool_result(id, &text, false)];
         if newly_loaded {
             lines.push(list_changed_line());
         }
         lines
-    }
-
-    /// Hydrates a stub the host just called so the next `tools/list` carries
-    /// its full schema, and announces the change.
-    pub(super) fn unfreeze_call(&mut self, request: Option<&JsonRpcRequest>) -> Option<String> {
-        if self.advertisement != ToolAdvertisement::Stubs {
-            return None;
-        }
-        let request = request.filter(|request| request.method == "tools/call")?;
-        let name = request
-            .params
-            .as_ref()
-            .and_then(|params| params.get("name"))
-            .and_then(Value::as_str)?;
-        if self.advertises_full(name) {
-            return None;
-        }
-        if !self.catalog.is_empty() && !self.catalog.contains(name) {
-            return None;
-        }
-        self.loaded
-            .insert(name.to_owned())
-            .then(|| list_changed_line())
     }
 }
 
@@ -353,28 +373,30 @@ fn list_changed_line() -> String {
     )
 }
 
-/// Name + truncated description + accept-anything schema, so the model can
-/// still reach the tool. Stub bytes are a pure function of the original tool.
-fn stub_tool(tool: &Value) -> Value {
-    let name = tool.get("name").and_then(Value::as_str).unwrap_or_default();
-    let desc = tool
-        .get("description")
+fn mark_core_always_load(tool: &mut Value) {
+    let name = tool
+        .get("name")
         .and_then(Value::as_str)
-        .unwrap_or_default();
-    let head: String = desc.chars().take(STUB_DESC_CHARS).collect();
-    let description = if head.is_empty() {
-        STUB_NOTE.to_string()
-    } else {
-        format!("{head}\n\n{STUB_NOTE}")
-    };
-    json!({
-        "name": name,
-        "description": description,
-        "inputSchema": { "type": "object", "additionalProperties": true },
-    })
+        .unwrap_or_default()
+        .to_owned();
+    if !CORE_TOOL_NAMES.contains(&name.as_str()) {
+        return;
+    }
+    match tool.get_mut("_meta") {
+        Some(Value::Object(map)) => {
+            map.insert(ANTHROPIC_ALWAYS_LOAD.to_owned(), json!(true));
+        }
+        _ => {
+            tool["_meta"] = json!({ ANTHROPIC_ALWAYS_LOAD: true });
+        }
+    }
 }
 
 /// An exact name wins; otherwise a term in the name outweighs one in the prose.
+///
+/// Codex BM25 tool search can miss an exact name (openai/codex#21503), so a
+/// single-term query that equals the catalog name or its `tracedecay_`-stripped
+/// short name is scored above any description match.
 fn search_score(name: &str, description: &str, terms: &[String]) -> usize {
     let short = name.strip_prefix("tracedecay_").unwrap_or(name);
     if terms.len() == 1 && (terms[0] == name || terms[0] == short) {
@@ -415,20 +437,16 @@ fn tool_result(id: &Value, text: &str, is_error: bool) -> String {
 fn tool_search_definition() -> Value {
     json!({
         "name": TOOL_SEARCH_NAME,
-        "description": "Find and load TraceDecay tools that are not in the tool list yet. The \
-            list starts with a core set (grep, search, context, source reads, callers, diff \
-            context, test mapping, files, session and fact recall); the rest cover impact and \
-            blast radius, call chains, git, PR and branch context, code health, refactors and \
-            edits, test runs, workflows, work items, memory, configuration, and diagnostics. \
-            Pass keywords or an exact tool name as `query`: the best matches are added to \
-            tools/list and announced with notifications/tools/list_changed. Without a query, \
-            lists every tool not loaded yet.",
+        "description": "Find and load TraceDecay tools not in this list. Pass keywords or an \
+            exact tool name as `query`. Matches are added to tools/list, announced with \
+            notifications/tools/list_changed, and returned as full schemas in this result. \
+            An empty query lists every tool not loaded yet.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Keywords (e.g. \"impact blast radius\") or an exact tool name."
+                    "description": "Keywords or an exact tool name."
                 }
             },
             "additionalProperties": false
@@ -469,6 +487,22 @@ mod tests {
             .collect()
     }
 
+    fn tools_of(responses: &[String]) -> Vec<Value> {
+        let message: Value = serde_json::from_str(&responses[0]).expect("json");
+        message["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .to_vec()
+    }
+
+    fn search_text(answer: &[String]) -> String {
+        let message: Value = serde_json::from_str(&answer[0]).expect("json");
+        message["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .to_owned()
+    }
+
     #[test]
     fn core_tools_are_cataloged_and_cover_always_load() {
         let definitions = tracedecay_mcp::get_maximal_tool_definitions().expect("tool definitions");
@@ -488,7 +522,7 @@ mod tests {
             let always_load = definition
                 .meta
                 .as_ref()
-                .and_then(|meta| meta.get("anthropic/alwaysLoad"))
+                .and_then(|meta| meta.get(ANTHROPIC_ALWAYS_LOAD))
                 .and_then(Value::as_bool)
                 == Some(true);
             assert!(
@@ -500,7 +534,16 @@ mod tests {
     }
 
     #[test]
-    fn search_loads_matches_into_the_session_list_and_announces_once() {
+    fn claude_category_guide_stays_under_the_instruction_cap() {
+        assert!(
+            CLAUDE_CATEGORY_GUIDE.chars().count() < 2_048,
+            "Claude initialize instructions must stay under 2,048 chars, got {}",
+            CLAUDE_CATEGORY_GUIDE.chars().count()
+        );
+    }
+
+    #[test]
+    fn search_loads_matches_into_the_session_list_and_returns_full_schemas() {
         let list = request(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
         let mut surface = ToolSurface::with_advertisement(ToolAdvertisement::Search);
         let mut responses = listing();
@@ -508,8 +551,13 @@ mod tests {
         assert_eq!(listed(&responses), ["tracedecay_grep", TOOL_SEARCH_NAME]);
 
         let answer = surface.answer_search(&json!(3), "blast radius", &listing());
-        assert!(answer[0].contains("tracedecay_impact"), "{answer:?}");
-        assert!(!answer[0].contains("tracedecay_git_diff"), "{answer:?}");
+        let text = search_text(&answer);
+        assert!(text.contains("tracedecay_impact"), "{text}");
+        assert!(!text.contains("tracedecay_git_diff"), "{text}");
+        assert!(
+            text.contains(r#""inputSchema""#) && text.contains(r#""node_id""#),
+            "search must return the full schema in result text: {text}"
+        );
         assert_eq!(answer.len(), 2, "{answer:?}");
         assert!(answer[1].contains(TOOL_LIST_CHANGED), "{answer:?}");
         let mut responses = listing();
@@ -521,6 +569,50 @@ mod tests {
 
         let again = surface.answer_search(&json!(4), "tracedecay_impact", &listing());
         assert_eq!(again.len(), 1, "a repeat load must not announce a change");
+    }
+
+    #[test]
+    fn exact_name_outranks_description_matches() {
+        assert_eq!(
+            search_score(
+                "tracedecay_git_diff",
+                "unrelated",
+                &["tracedecay_git_diff".to_owned()]
+            ),
+            1_000
+        );
+        assert_eq!(
+            search_score("tracedecay_git_diff", "unrelated", &["git_diff".to_owned()]),
+            1_000
+        );
+        let description_hits = search_score(
+            "tracedecay_impact",
+            "git_diff git_diff git_diff blast radius",
+            &["git_diff".to_owned()],
+        );
+        assert!(
+            description_hits < 1_000,
+            "description matches must not beat an exact name: {description_hits}"
+        );
+
+        let mut surface = ToolSurface::with_advertisement(ToolAdvertisement::Search);
+        let crowded = vec![format!(
+            "{}\n",
+            json!({"jsonrpc": "2.0", "id": 2, "result": {"tools": [
+                {"name": "tracedecay_impact",
+                 "description": "git_diff git_diff git_diff blast radius of a change.",
+                 "inputSchema": {"type": "object"}},
+                {"name": "tracedecay_git_diff", "description": "Show a diff.",
+                 "inputSchema": {"type": "object", "properties": {"ref": {"type": "string"}}}},
+            ]}})
+        )];
+        let text = search_text(&surface.answer_search(&json!(3), "tracedecay_git_diff", &crowded));
+        let impact_at = text.find("tracedecay_impact");
+        let git_at = text.find("tracedecay_git_diff");
+        assert!(
+            git_at.is_some_and(|git| impact_at.is_none_or(|impact| git < impact)),
+            "exact name must be listed first: {text}"
+        );
     }
 
     #[test]
@@ -570,25 +662,10 @@ mod tests {
         assert!(surface.loaded.is_empty());
     }
 
-    fn is_stub(tool: &Value) -> bool {
-        tool["inputSchema"] == json!({"type": "object", "additionalProperties": true})
-            && tool["description"]
-                .as_str()
-                .is_some_and(|description| description.contains(STUB_NOTE))
-    }
-
-    fn tools_of(responses: &[String]) -> Vec<Value> {
-        let message: Value = serde_json::from_str(&responses[0]).expect("json");
-        message["result"]["tools"]
-            .as_array()
-            .expect("tools")
-            .to_vec()
-    }
-
     #[test]
-    fn rewrite_stubs_pruned_tools_and_keeps_every_name() {
+    fn claude_native_full_keeps_every_name_and_marks_core_always_load() {
         let list = request(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
-        let mut surface = ToolSurface::with_advertisement(ToolAdvertisement::Stubs);
+        let mut surface = ToolSurface::with_advertisement(ToolAdvertisement::ClaudeNativeFull);
         let mut responses = listing();
         surface.rewrite(Some(&list), &mut responses);
         assert_eq!(
@@ -600,67 +677,42 @@ mod tests {
             ]
         );
         let tools = tools_of(&responses);
-        assert!(!is_stub(&tools[0]), "{tools:?}");
-        assert!(is_stub(&tools[1]), "{tools:?}");
-        assert!(is_stub(&tools[2]), "{tools:?}");
+        assert_eq!(tools[0]["_meta"][ANTHROPIC_ALWAYS_LOAD], json!(true));
+        assert!(
+            tools[1].get("_meta").is_none()
+                || tools[1]["_meta"].get(ANTHROPIC_ALWAYS_LOAD) != Some(&json!(true)),
+            "non-core tools must stay deferrable: {}",
+            tools[1]
+        );
+        assert!(!listed(&responses).contains(&TOOL_SEARCH_NAME.to_owned()));
     }
 
     #[test]
-    fn stub_tool_truncates_description_char_safe() {
-        let long: String = "é".repeat(STUB_DESC_CHARS + 50);
-        let stub = stub_tool(&json!({
-            "name": "tracedecay_impact",
-            "description": long,
-            "inputSchema": {"type": "object", "properties": {"node_id": {"type": "string"}}},
-        }));
-        let description = stub["description"].as_str().expect("description");
-        assert!(description.starts_with(&"é".repeat(STUB_DESC_CHARS)));
-        assert!(!description.starts_with(&"é".repeat(STUB_DESC_CHARS + 1)));
-        assert!(description.ends_with(STUB_NOTE));
-    }
-
-    #[test]
-    fn calling_a_stub_hydrates_its_full_schema_and_announces_once() {
-        let list = request(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
-        let call = request(&json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {"name": "tracedecay_impact", "arguments": {"node_id": "n1"}}
-        }));
-        let mut surface = ToolSurface::with_advertisement(ToolAdvertisement::Stubs);
-        let mut responses = listing();
-        surface.rewrite(Some(&list), &mut responses);
-        assert!(is_stub(&tools_of(&responses)[1]));
-
-        let changed = surface.unfreeze_call(Some(&call)).expect("list_changed");
-        assert!(changed.contains(TOOL_LIST_CHANGED), "{changed}");
-        assert!(surface.unfreeze_call(Some(&call)).is_none());
-
-        let mut responses = listing();
-        surface.rewrite(Some(&list), &mut responses);
-        let tools = tools_of(&responses);
-        assert!(!is_stub(&tools[1]), "{tools:?}");
+    fn claude_native_full_replaces_initialize_instructions() {
+        let initialize = request(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}));
+        let mut surface = ToolSurface::with_advertisement(ToolAdvertisement::ClaudeNativeFull);
+        let mut responses = vec![format!(
+            "{}\n",
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"instructions": "long default"}})
+        )];
+        surface.rewrite(Some(&initialize), &mut responses);
+        let message: Value = serde_json::from_str(&responses[0]).expect("json");
         assert_eq!(
-            tools[1]["inputSchema"]["properties"]["node_id"]["type"],
-            "string"
+            message["result"]["instructions"].as_str(),
+            Some(CLAUDE_CATEGORY_GUIDE)
         );
     }
 
     #[test]
-    fn stubs_advertisement_does_not_answer_tool_search() {
+    fn claude_native_full_does_not_answer_tool_search() {
         let call = request(&json!({
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
             "params": {"name": TOOL_SEARCH_NAME, "arguments": {"query": "impact"}}
         }));
-        let mut surface = ToolSurface::with_advertisement(ToolAdvertisement::Stubs);
-        let mut responses = listing();
-        let list = request(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
-        surface.rewrite(Some(&list), &mut responses);
+        let surface = ToolSurface::with_advertisement(ToolAdvertisement::ClaudeNativeFull);
         assert!(surface.search_request(Some(&call)).is_none());
-        assert!(surface.unfreeze_call(Some(&call)).is_none());
     }
 
     #[test]

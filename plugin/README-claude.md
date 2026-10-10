@@ -11,7 +11,14 @@ Claude Code.
   It is one plugin, not one plugin per language, and forwards to the
   daemon-owned gateway rather than embedding analyzer logic.
 - **MCP server** (`.mcp.json`): the `graph` stdio server exposing the code
-  graph, search, call-graph, impact, memory, and session-recall tools.
+  graph, search, call-graph, impact, memory, and session-recall tools. It
+  launches `tracedecay serve --claude-code-tool-search`, which sends the full
+  catalog and sets `_meta["anthropic/alwaysLoad"]` on the core tools so Claude
+  Code's native tool search can defer the rest. Drop that flag (use plain
+  `tracedecay serve`) when `ANTHROPIC_BASE_URL` proxies, Foundry, or
+  `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` disable native tool search; the
+  default core list plus `tracedecay_tool_search` then stays under host tool
+  caps.
 - **Skills** (`skills/`): one skill per common workflow, searching for code,
   reading code cheaply, mapping architecture, impact analysis, reviewing diffs,
   recalling project memory and session context, and more. Claude Code
