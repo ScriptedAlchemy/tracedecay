@@ -249,7 +249,10 @@ async fn a_parked_worktree_releases_catalog_and_engine_and_reports_warming() {
 /// wake, so park-release retries from the settle signal (#3328).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_parked_worktree_releases_graph_owners_after_the_first_catalog_warm() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn park_first_warm_target() -> u32 { 3 }\n")]);
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn park_first_warm_target() -> u32 { 3 }\n",
+    )]);
     let store = TempDir::new().expect("store root");
     let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
     let (registry, _scope) = mounted_text_query_worktree_at(
