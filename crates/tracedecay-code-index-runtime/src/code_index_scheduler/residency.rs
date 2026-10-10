@@ -194,14 +194,12 @@ impl WorktreeResidencyV1 {
                     .collect(),
             );
             let superseded = HeldDecodesV1::release(self.publication.release_superseded_decodes());
-            released.extend(
-                [serving, superseded]
-                    .into_iter()
-                    .filter_map(|release| match release {
-                        ResidentOwnerReleaseV1::Released { bytes } => Some(bytes),
-                        ResidentOwnerReleaseV1::Busy | ResidentOwnerReleaseV1::Empty => None,
-                    }),
-            );
+            released.extend([serving, superseded].into_iter().filter_map(
+                |release| match release {
+                    ResidentOwnerReleaseV1::Released { bytes } => Some(bytes),
+                    ResidentOwnerReleaseV1::Busy | ResidentOwnerReleaseV1::Empty => None,
+                },
+            ));
             if !released.is_empty() {
                 tracing::info!(
                     event = "code_index_serving_decode_released_on_park",
