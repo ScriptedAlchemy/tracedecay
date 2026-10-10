@@ -238,7 +238,7 @@ impl ToolSurface {
                 match self.advertisement {
                     ToolAdvertisement::Search => instructions.push_str(SEARCH_INSTRUCTIONS_NOTE),
                     ToolAdvertisement::ClaudeNativeFull => {
-                        *instructions = CLAUDE_CATEGORY_GUIDE.to_owned();
+                        CLAUDE_CATEGORY_GUIDE.clone_into(instructions);
                     }
                 }
             } else {

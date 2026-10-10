@@ -760,8 +760,7 @@ async fn send_host_request(
             cancellation,
         )
         .await?;
-        // A cancel that landed during the fetch must not still mutate the
-        // session list or answer the cancelled search id.
+        // A cancel during the fetch must settle without loading tools.
         if cancellation.borrow().is_some() {
             let response = JsonRpcResponse::error_with_data(
                 id,

@@ -246,7 +246,7 @@ pub fn runtime_project_root(stdout: &[u8], id: i64) -> String {
         .unwrap_or_else(|| panic!("missing runtime response in stdout:\n{stdout}"));
     let text = runtime_response["result"]["content"][0]["text"]
         .as_str()
-        .expect("runtime tool should return text content");
+        .unwrap_or_else(|| panic!("runtime tool should return text content: {runtime_response}"));
     let runtime: Value = serde_json::from_str(text).unwrap();
     runtime["database"]["project_root"]
         .as_str()
