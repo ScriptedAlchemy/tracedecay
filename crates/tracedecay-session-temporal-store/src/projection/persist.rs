@@ -9,7 +9,7 @@ use tracedecay_domain::{
     derive_exact_observation_anchor_id,
 };
 use tracedecay_lcm::retrieval_content::{derived_text_for_index, projected_content_hash};
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{IntoValue, params};
 use tracedecay_store::{
     SessionMessageProjection, SessionStoreError, SessionStoreResult,
     SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
@@ -202,6 +202,52 @@ pub(super) async fn persist_occurrences(
     batch: &SessionTemporalProjectionBatchV1,
     control: &ExecutionControl,
 ) -> SessionStoreResult<()> {
+    // The ensure_* statements merge each dimension row with MIN(), so one
+    // statement per distinct id carrying the batch-wide minimum is identical
+    // to one statement per occurrence. Collecting first keeps every value
+    // the interleaved per-occurrence calls would have submitted.
+    let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
+    let session_id = batch.session_id().as_str();
+    let mut thread_rows = BTreeMap::<&str, (String, i64)>::new();
+    let mut turn_rows = BTreeMap::<&str, (i64, String, i64)>::new();
+    let mut agent_rows = BTreeMap::<String, i64>::new();
+    for occurrence in batch.occurrences() {
+        if let (Some(thread_id), Some(grouping)) =
+            (&occurrence.thread_id, &occurrence.thread_grouping)
+        {
+            let grouping_json = serde_json::to_string(grouping)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let entry = thread_rows
+                .entry(thread_id.as_str())
+                .or_insert((grouping_json.clone(), occurrence.knowledge_at.0));
+            if grouping_json < entry.0 {
+                entry.0 = grouping_json;
+            }
+            entry.1 = entry.1.min(occurrence.knowledge_at.0);
+        }
+        if let (Some(turn_id), Some(grouping)) = (&occurrence.turn_id, &occurrence.turn_grouping) {
+            let grouping_json = serde_json::to_string(grouping)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let ordinal = i64::from(occurrence.projection_output_ordinal.value());
+            let entry = turn_rows.entry(turn_id.as_str()).or_insert((
+                ordinal,
+                grouping_json.clone(),
+                occurrence.knowledge_at.0,
+            ));
+            entry.0 = entry.0.min(ordinal);
+            if grouping_json < entry.1 {
+                entry.1 = grouping_json;
+            }
+            entry.2 = entry.2.min(occurrence.knowledge_at.0);
+        }
+        if let Some(agent_id) = &occurrence.agent_id {
+            let entry = agent_rows
+                .entry(agent_id.as_str().to_owned())
+                .or_insert(occurrence.knowledge_at.0);
+            *entry = (*entry).min(occurrence.knowledge_at.0);
+        }
+    }
+
     let mut occurrences_by_source = BTreeMap::<_, Vec<_>>::new();
     for occurrence in batch.occurrences() {
         occurrences_by_source
@@ -218,6 +264,17 @@ pub(super) async fn persist_occurrences(
             )
         })?;
         let canonical = canonical_occurrence_projection(conn, batch, first).await?;
+        if let Some(parent_agent_id) = canonical.envelope.relations().parent_agent_id() {
+            let created_at = occurrences
+                .iter()
+                .map(|occurrence| occurrence.knowledge_at.0)
+                .min()
+                .unwrap_or(0);
+            let entry = agent_rows
+                .entry(parent_agent_id.as_str().to_owned())
+                .or_insert(created_at);
+            *entry = (*entry).min(created_at);
+        }
         for occurrence in occurrences {
             checkpoint_relation_rebuild_control(control)?;
             let ordinal = usize::try_from(occurrence.projection_output_ordinal.value())
@@ -231,6 +288,128 @@ pub(super) async fn persist_occurrences(
             persist_occurrence(conn, batch, occurrence, &canonical, output).await?;
         }
     }
+
+    // Dimension rows land in the same transaction as the occurrences, so
+    // issuing them after the inserts changes nothing observable; the shared
+    // commit publishes both atomically.
+    for (thread_id, (grouping_json, created_at)) in thread_rows {
+        checkpoint_relation_rebuild_control(control)?;
+        ensure_thread(
+            conn,
+            session_id,
+            generation,
+            thread_id,
+            &grouping_json,
+            created_at,
+        )
+        .await?;
+    }
+    for (turn_id, (ordinal, grouping_json, created_at)) in turn_rows {
+        checkpoint_relation_rebuild_control(control)?;
+        ensure_turn(
+            conn,
+            session_id,
+            generation,
+            turn_id,
+            &grouping_json,
+            ordinal,
+            created_at,
+        )
+        .await?;
+    }
+    for (agent_id, created_at) in agent_rows {
+        checkpoint_relation_rebuild_control(control)?;
+        ensure_agent(conn, session_id, generation, &agent_id, created_at).await?;
+    }
+    persist_turn_members(conn, batch).await?;
+    Ok(())
+}
+
+/// One multi-row insert for every turn membership the batch projects; the
+/// rows are append-only and keyed per occurrence, so `INSERT OR IGNORE`
+/// preserves the per-row insert path's idempotence.
+async fn persist_turn_members(
+    conn: &impl crate::handle::SessionTemporalExec,
+    batch: &SessionTemporalProjectionBatchV1,
+) -> SessionStoreResult<()> {
+    let rows = batch
+        .occurrences()
+        .iter()
+        .filter_map(|occurrence| {
+            occurrence.turn_id.as_ref().map(|turn_id| {
+                (
+                    turn_id.as_str(),
+                    occurrence.occurrence_id.as_str(),
+                    i64::from(occurrence.projection_output_ordinal.value()),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
+    let session_id = batch.session_id().as_str();
+    let values = rows
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let base = index * 5;
+            format!(
+                "(?{}, ?{}, ?{}, ?{}, ?{})",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "INSERT OR IGNORE INTO session_turn_members (
+            session_id, generation, turn_id, occurrence_id, ordinal
+         ) VALUES {values}"
+    );
+    let session_id = session_id.to_owned();
+    let mut bound =
+        Vec::<tracedecay_runtime_core::db::engine::Value>::with_capacity(rows.len() * 5);
+    for (turn_id, occurrence_id, ordinal) in rows {
+        bound.push(
+            session_id
+                .clone()
+                .into_value()
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+        );
+        bound.push(
+            generation
+                .into_value()
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+        );
+        bound.push(
+            turn_id
+                .to_owned()
+                .into_value()
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+        );
+        bound.push(
+            occurrence_id
+                .to_owned()
+                .into_value()
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+        );
+        bound.push(
+            ordinal
+                .into_value()
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+        );
+    }
+    conn.execute(
+        sql.as_str(),
+        tracedecay_runtime_core::db::engine::params_from_iter(bound),
+    )
+    .await
+    .map_err(|error| storage(PERSIST_OPERATION, error))?;
     Ok(())
 }
 
@@ -264,50 +443,6 @@ async fn persist_occurrence(
     let role = output.message().role.clone();
 
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
-    if let (Some(thread_id), Some(grouping)) = (&occurrence.thread_id, &occurrence.thread_grouping)
-    {
-        ensure_thread(
-            conn,
-            batch.session_id().as_str(),
-            generation,
-            thread_id.as_str(),
-            &serde_json::to_string(grouping).map_err(|error| storage(PERSIST_OPERATION, error))?,
-            occurrence.knowledge_at.0,
-        )
-        .await?;
-    }
-    if let (Some(turn_id), Some(grouping)) = (&occurrence.turn_id, &occurrence.turn_grouping) {
-        ensure_turn(
-            conn,
-            batch.session_id().as_str(),
-            generation,
-            turn_id.as_str(),
-            &serde_json::to_string(grouping).map_err(|error| storage(PERSIST_OPERATION, error))?,
-            i64::from(occurrence.projection_output_ordinal.value()),
-            occurrence.knowledge_at.0,
-        )
-        .await?;
-    }
-    if let Some(agent_id) = &occurrence.agent_id {
-        ensure_agent(
-            conn,
-            batch.session_id().as_str(),
-            generation,
-            agent_id.as_str(),
-            occurrence.knowledge_at.0,
-        )
-        .await?;
-    }
-    if let Some(parent_agent_id) = envelope.relations().parent_agent_id() {
-        ensure_agent(
-            conn,
-            batch.session_id().as_str(),
-            generation,
-            parent_agent_id.as_str(),
-            occurrence.knowledge_at.0,
-        )
-        .await?;
-    }
 
     let thread_grouping = occurrence
         .thread_grouping
@@ -409,22 +544,6 @@ async fn persist_occurrence(
         )
         .await?;
         return Ok(false);
-    }
-    if let Some(turn_id) = &occurrence.turn_id {
-        conn.execute(
-            "INSERT OR IGNORE INTO session_turn_members (
-                session_id, generation, turn_id, occurrence_id, ordinal
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                batch.session_id().as_str(),
-                generation,
-                turn_id.as_str(),
-                occurrence.occurrence_id.as_str(),
-                i64::from(occurrence.projection_output_ordinal.value()),
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
     }
     Ok(true)
 }

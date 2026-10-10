@@ -66,7 +66,7 @@ pub struct SessionTemporalCursorKeyProvider {
 /// and material are checked exactly as the provisioning transaction checks
 /// them, so callers that probe on a read snapshot never skip validation a
 /// writer-lane caller would have run.
-async fn read_active_session_cursor_key(
+pub(super) async fn read_active_session_cursor_key(
     connection: &impl crate::handle::SessionTemporalQuery,
 ) -> SessionStoreResult<Option<SignedCursorKeyRefV1>> {
     let mut active_rows = connection

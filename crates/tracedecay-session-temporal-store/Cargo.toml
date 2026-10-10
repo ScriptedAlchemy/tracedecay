@@ -11,6 +11,7 @@ include = ["/src/**"]
 [features]
 # Exposes package-owned fixture constructors to dependent package tests only.
 test-helpers = [
+    "dep:futures-util",
     "tracedecay-graph-db/test-helpers",
     "tracedecay-runtime-core/test-helpers",
     "tracedecay-sessions/test-helpers",
@@ -22,7 +23,7 @@ test-transport = [
 ]
 
 [dependencies]
-futures-util = "0.3.33"
+futures-util = { version = "0.3.33", optional = true }
 getrandom = "0.2"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
