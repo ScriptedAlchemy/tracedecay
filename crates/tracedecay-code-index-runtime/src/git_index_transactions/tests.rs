@@ -686,14 +686,30 @@ fn tracked_worktree_digest_does_not_read_clean_head_bytes() {
     use std::os::unix::fs::PermissionsExt;
 
     let (directory, runner) = committed_file("secret.txt", b"must-not-read\n");
+    let clean = runner
+        .tracked_worktree_digest()
+        .expect("clean HEAD digest");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["update-index", "--assume-unchanged", "--", "secret.txt"])
+            .status()
+            .expect("assume-unchanged starts")
+            .success()
+    );
     let path = directory.path().join("secret.txt");
+    fs::write(&path, b"hidden worktree drift\n").expect("hide worktree drift");
     let original = fs::metadata(&path).expect("metadata").permissions();
     let mut locked = original.clone();
     locked.set_mode(0o000);
     fs::set_permissions(&path, locked).expect("deny worktree reads");
     let digest = runner.tracked_worktree_digest();
     fs::set_permissions(&path, original).expect("restore worktree reads");
-    digest.expect("clean HEAD identity must not read worktree bytes");
+    assert_eq!(
+        clean,
+        digest.expect("clean HEAD identity must bind the tree object, not worktree bytes"),
+        "an assume-unchanged worktree edit must not change HEAD identity"
+    );
 }
 
 #[cfg(unix)]
