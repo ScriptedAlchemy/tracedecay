@@ -887,7 +887,7 @@ pub enum DaemonAction {
     Stop,
     /// Restart the installed daemon service (e.g. after a version mismatch)
     Restart,
-    /// Print daemon service/socket status
+    /// Print daemon readiness; exit 0 only when this build is serving
     Status,
 }
 

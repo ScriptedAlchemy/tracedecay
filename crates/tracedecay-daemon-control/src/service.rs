@@ -1677,8 +1677,32 @@ fn uninstall_service_under_lease(
     Ok(service_path)
 }
 
+/// Display and readiness share the same authenticated initialize observation.
+#[derive(Debug)]
+pub struct DaemonServiceStatus {
+    process: DaemonProcessProofV1,
+    display: String,
+}
+
+impl DaemonServiceStatus {
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.process.version_matches()
+    }
+}
+
+impl std::fmt::Display for DaemonServiceStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.display)
+    }
+}
+
 #[tracing::instrument(name = "daemon.service.status", level = "trace", skip_all)]
-pub fn service_status(profile: &ProfileRoot, socket_path: &Path, expected_version: &str) -> String {
+pub fn service_status(
+    profile: &ProfileRoot,
+    socket_path: &Path,
+    expected_version: &str,
+) -> DaemonServiceStatus {
     let transport_path = if cfg!(unix) {
         socket_path.to_path_buf()
     } else {
@@ -1721,9 +1745,10 @@ pub fn service_status(profile: &ProfileRoot, socket_path: &Path, expected_versio
     };
     let transport_kind = if cfg!(unix) { "socket" } else { "endpoint" };
     let transport = daemon_transport_display(&transport_path);
-    format!(
+    let display = format!(
         "state: {state}\nservice: {service}\nservice manager: {service_manager}\n{transport_kind}: {transport} ({socket_state})\nprotocol: {process:?}\n{detail}logs: {logs}\n",
-    )
+    );
+    DaemonServiceStatus { process, display }
 }
 
 /// The daemon's own state, from the one socket probe status already made.
