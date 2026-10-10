@@ -4486,6 +4486,19 @@ async fn wait_for_current_graph(host: &impl AnalysisToolHost) {
                 freshness["worktree"]["staleness_state"].as_str(),
             ) {
                 (Some("current"), Some("ready"), _, _) => break,
+                (Some("current"), Some("warming"), _, _) => {
+                    // Status observes residency; only a graph read reopens a parked engine.
+                    let read =
+                        handle_tool_call(host, "tracedecay_files", json!({"format": "json"}), None)
+                            .await
+                            .expect("production graph read must reopen the current generation");
+                    assert_ne!(read.value["isError"], true, "{}", read.value);
+                    let payload: Value = serde_json::from_str(extract_text(&read.value))
+                        .expect("production file inventory JSON");
+                    if payload["freshness"]["state"] == "fresh" {
+                        break;
+                    }
+                }
                 (Some("warming"), _, _, _)
                 | (Some("stale"), Some("ready"), _, Some("verifying"))
                 | (_, Some("pending"), _, _)

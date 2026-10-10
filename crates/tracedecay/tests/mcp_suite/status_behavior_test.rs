@@ -103,6 +103,14 @@ async fn sealed_json_status(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
 ) -> Value {
+    // A status read must not keep an idle graph resident. Demand it through
+    // the graph transport before asserting the resident-owner inventory.
+    tool_text(
+        harness
+            .call_tool(project_root, "tracedecay_files", json!({"format": "json"}))
+            .await
+            .expect("production graph read must reopen the sealed generation"),
+    );
     let payload = parse_status(
         &call_status(
             harness,
