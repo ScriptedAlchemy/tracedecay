@@ -1476,7 +1476,7 @@ fn rust_generic_call_binds_the_function_past_a_named_field_struct() {
     let generation = published_rust_workspace(&[(
         "file.generic.lib",
         "crates/app/src/lib.rs",
-        "pub struct helper { pub value: u8 }\n\nfn helper<T>() {}\n\nfn caller() { helper::<u32>(); }\n",
+        "pub struct helper<T: Fn(u8)> { pub value: T }\n\nfn helper<T>() {}\n\nfn caller() { helper::<u32>(); }\n",
     )]);
     let function = generation
         .symbols()

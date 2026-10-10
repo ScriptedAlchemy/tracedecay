@@ -2159,9 +2159,10 @@ fn strip_turbofish(path: &str) -> String {
 }
 
 /// Whether a Rust `struct` symbol declares a tuple body — `Name(...)`, the
-/// only struct shape a call expression can construct. The first `{`, `(`,
-/// or `;` after the name inside the symbol's own span decides; generics
-/// and where clauses carry none of the three bytes.
+/// only struct shape a call expression can construct. After the name an
+/// optional balanced `<...>` parameter list is skipped (bounds can spell
+/// `Fn(u8)` parentheses that are not a body), then `(` declares the tuple
+/// body while `{`, `;`, or a `where` clause do not.
 fn rust_tuple_struct(source: &str, symbol: &SymbolRow) -> bool {
     let Some(after_name) = symbol_name_span(source, symbol)
         .and_then(|name| usize::try_from(name.end_byte).ok())
@@ -2170,12 +2171,25 @@ fn rust_tuple_struct(source: &str, symbol: &SymbolRow) -> bool {
     else {
         return false;
     };
-    matches!(
-        after_name
-            .bytes()
-            .find(|byte| matches!(byte, b'{' | b'(' | b';')),
-        Some(b'(')
-    )
+    let rest = after_name.trim_start();
+    let rest = if let Some(generics) = rest.strip_prefix('<') {
+        let mut depth = 1usize;
+        let mut index = 0;
+        let bytes = generics.as_bytes();
+        while index < bytes.len() && depth > 0 {
+            match bytes[index] {
+                b'<' => depth += 1,
+                // `->` in a bound (`Fn() -> u8`) is not the list's close.
+                b'>' if index == 0 || bytes[index - 1] != b'-' => depth -= 1,
+                _ => {}
+            }
+            index += 1;
+        }
+        &generics[index..]
+    } else {
+        rest
+    };
+    rest.trim_start().starts_with('(')
 }
 
 /// Whether the source at a Rust call site invokes a value call
@@ -2235,10 +2249,23 @@ fn reference_evidence_span(
     if rust_call && source_at_site.starts_with(reference_name) {
         // The site token may be longer than the normalized name
         // (`Factory::<u32>::new`); evidence covers the whole callee token
-        // through its argument list opener.
+        // through its argument list opener, which sits outside any
+        // turbofish (`helper::<fn(u8)>()` stops after the `>`).
+        let mut depth = 0usize;
         let end = raw_source_at_site
             .bytes()
-            .position(|byte| matches!(byte, b'(' | b'!' | b'['))
+            .position(|byte| match byte {
+                b'<' => {
+                    depth += 1;
+                    false
+                }
+                b'>' => {
+                    depth = depth.saturating_sub(1);
+                    false
+                }
+                b'(' | b'!' | b'[' => depth == 0,
+                _ => false,
+            })
             .unwrap_or(reference_name.len())
             .max(reference_name.len());
         return Some(SourceSpan {
