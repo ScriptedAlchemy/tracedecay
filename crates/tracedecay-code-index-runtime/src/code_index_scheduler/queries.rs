@@ -1960,13 +1960,28 @@ impl CodeIndexSchedulerRegistryV1 {
         // decode; their re-warm runs in the background, so a callable
         // admitted while they warm would refuse a cold store instead of
         // waiting. Wait within what the request still admits, as project
-        // graph reads do, then open the reader on the warmed store.
+        // graph reads do, then open the reader on the warmed store. A
+        // request that spent its budget mid-warm, was cancelled, or lost
+        // the wait task answers the typed unavailable rather than opening
+        // a reader on a store it never waited out.
         if let Some(budget) = remaining_generation_resolution_wait(context.request) {
             let waiting = Arc::clone(&store);
-            let _ = tokio::task::spawn_blocking(move || {
+            match tokio::task::spawn_blocking(move || {
                 waiting.await_rewarm_for(budget, CodeGraphReadinessRequirement::Catalog)
             })
-            .await;
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(_pending)) => return Err(CallableCodeCursorError::Unavailable),
+                Err(join_error) => {
+                    tracing::warn!(
+                        event = "code_graph_rewarm_wait_failed",
+                        error = %join_error,
+                        "a callable's graph re-warm wait did not finish"
+                    );
+                    return Err(CallableCodeCursorError::Unavailable);
+                }
+            }
         }
         let cost = CodeGraphReadCostMeter::start();
         let reader = store
