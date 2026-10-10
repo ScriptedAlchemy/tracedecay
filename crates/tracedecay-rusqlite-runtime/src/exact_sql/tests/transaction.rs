@@ -209,74 +209,72 @@ fn immediate_transaction_commit_reports_only_after_commit() {
     assert_eq!(committed.rows[0].values, vec![ExactSqlValue::Integer(41)]);
 }
 
+/// Fails if any exact SQL lane lets `ATTACH`/`DETACH` past its authorizer.
+/// The writer connection also caps attachments at zero, so an authorizer
+/// regression would still fail at run time; only `SQLITE_AUTH` proves the
+/// statement was refused at prepare.
 #[test]
-fn transaction_attachment_is_exact_and_auto_detached() {
-    let fixture = fixture('a', 'a');
-    let source_path = fixture._directory.path().join("source.sqlite3");
-    rusqlite::Connection::open(&source_path)
-        .unwrap()
-        .execute_batch(
-            "CREATE TABLE source_rows(value INTEGER NOT NULL);
-                 INSERT INTO source_rows VALUES (7);",
-        )
-        .unwrap();
-    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
-    let attachment =
-        || ExactSqlAttachment::new(source_path.to_string_lossy(), "source_input").unwrap();
+fn attach_and_detach_are_denied_on_every_exact_sql_lane() {
+    fn assert_not_authorized<T: std::fmt::Debug>(
+        lane: &str,
+        sql: &str,
+        result: Result<T, ExactSqlError>,
+    ) {
+        let error = result.expect_err("ATTACH/DETACH must be refused");
+        assert!(
+            matches!(
+                error,
+                ExactSqlError::Sqlite {
+                    code: Some(rusqlite::ffi::SQLITE_AUTH),
+                    ..
+                }
+            ),
+            "{lane} must deny `{sql}` at the authorizer, got {error:?}"
+        );
+    }
 
-    let transaction = channel.begin_immediate().unwrap();
-    transaction.attach_database(attachment()).unwrap();
-    let rows = transaction
-        .query(statement(
-            "SELECT value FROM source_input.source_rows",
-            vec![],
-        ))
-        .unwrap();
-    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(7)]);
-    transaction.commit().unwrap();
-
-    let transaction = channel.begin_immediate().unwrap();
-    transaction
-        .attach_database(attachment())
-        .expect("commit must detach the prior exact input");
-    transaction.rollback().unwrap();
-
-    let transaction = channel.begin_immediate().unwrap();
-    transaction
-        .attach_database(attachment())
-        .expect("rollback must detach the prior exact input");
-    drop(transaction);
-
-    let transaction = channel.begin_immediate().unwrap();
-    transaction
-        .attach_database(attachment())
-        .expect("dropping a transaction must detach the prior exact input");
-    transaction.rollback().unwrap();
-}
-
-#[test]
-fn caller_sql_cannot_attach_database() {
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
-
-    channel
-        .execute(statement(
-            "ATTACH DATABASE ?1 AS caller_input",
+    let denied = [
+        ("ATTACH DATABASE ':memory:' AS denied_input", vec![]),
+        // SQLite reports a parameter-bound filename as an unknown action.
+        (
+            "ATTACH DATABASE ?1 AS denied_input",
             vec![ExactSqlValue::Text(":memory:".to_owned())],
-        ))
-        .unwrap_err();
-    let databases = channel
-        .query(
-            statement("PRAGMA database_list", vec![]),
-            Duration::from_secs(1),
-        )
+        ),
+        ("DETACH DATABASE denied_input", vec![]),
+    ];
+    let transaction = channel.begin_immediate().unwrap();
+    for (sql, params) in denied {
+        assert_not_authorized(
+            "one-shot writer",
+            sql,
+            channel.execute(statement(sql, params.clone())),
+        );
+        if params.is_empty() {
+            assert_not_authorized("writer batch", sql, channel.execute_batch(sql.to_owned()));
+        }
+        assert_not_authorized(
+            "writer transaction",
+            sql,
+            transaction.execute(statement(sql, params.clone())),
+        );
+        assert_not_authorized(
+            "reader",
+            sql,
+            channel.query(statement(sql, params), Duration::from_secs(1)),
+        );
+    }
+    let databases = transaction
+        .query(statement("PRAGMA database_list", vec![]))
         .unwrap();
-    assert!(databases.rows.iter().all(|row| {
-        !matches!(
-            row.values.get(1),
-            Some(ExactSqlValue::Text(name)) if name == "caller_input"
-        )
-    }));
+    assert!(
+        databases.rows.iter().all(|row| {
+            !matches!(row.values.get(1), Some(ExactSqlValue::Text(name)) if name == "denied_input")
+        }),
+        "no denied database may be attached: {databases:?}"
+    );
+    transaction.rollback().unwrap();
 }
 
 #[test]

@@ -17,13 +17,12 @@ use rusqlite::{Connection, DropBehavior, ErrorCode, Transaction, TransactionBeha
 
 use super::guard::with_exact_sql_guard;
 use super::{
-    EXACT_SQL_TRANSACTION_IDLE_LIMIT, EXACT_SQL_TRANSACTION_LIMIT, ExactSqlAttachment,
-    ExactSqlCommitReceipt, ExactSqlError, ExactSqlRollbackReceipt, ExactSqlRows, ExactSqlStatement,
-    ExactSqlWriteAuthority, ExactSqlWriteIntent, ExecutionPolicy, MAX_EXACT_SQL_ATTACHMENTS,
-    SqlRequest, SqlResult, TransactionPolicy, attach_database, detach_database,
-    execute_query_unchecked, execute_request, sqlite_error, verify_write_authority,
+    EXACT_SQL_TRANSACTION_IDLE_LIMIT, EXACT_SQL_TRANSACTION_LIMIT, ExactSqlCommitReceipt,
+    ExactSqlError, ExactSqlRollbackReceipt, ExactSqlRows, ExactSqlStatement,
+    ExactSqlWriteAuthority, ExactSqlWriteIntent, ExecutionPolicy, SqlRequest, SqlResult,
+    TransactionPolicy, execute_query_unchecked, execute_request, sqlite_error,
+    verify_write_authority,
 };
-use rusqlite::limits::Limit;
 
 pub(crate) enum WriterCommand {
     Dispatch {
@@ -217,10 +216,6 @@ impl DeferredReply {
 }
 
 pub(crate) enum TransactionCommand {
-    Attach {
-        attachment: ExactSqlAttachment,
-        reply: async_channel::Sender<Result<(), ExactSqlError>>,
-    },
     Dispatch {
         request: SqlRequest,
         execution_policy: ExecutionPolicy,
@@ -333,49 +328,36 @@ pub(crate) fn run_writer_command(
             }
             // The begin is answered at once: the caller drives the transaction
             // that follows. Only its terminal answer waits for the telemetry.
-            let completion = {
-                let before = connection.total_changes();
-                match begin_transaction_with_busy_retry(
-                    connection,
-                    behavior,
-                    shutdown_requested,
-                    || reply.is_closed(),
-                ) {
-                    // The whole writer-thread hold of one interactive
-                    // transaction, caller think-time included. Every queued
-                    // write and command behind it waits inside this span, so
-                    // it, not SQLite execution, is what explains begin
-                    // latency elsewhere while an interactive lease is open.
-                    Ok(transaction) if reply.try_send(Ok(())).is_ok() => Some({
-                        let _span =
-                            tracing::trace_span!("rusqlite.exact_sql.transaction").entered();
-                        run_transaction(
-                            transaction,
-                            receiver,
-                            before,
-                            shutdown_requested,
-                            &lease,
-                            authority,
-                            policy,
-                        )
-                    }),
-                    Ok(_) => None,
-                    Err(error) => {
-                        return DeferredReply::new(
-                            reply,
-                            Err(sqlite_error("begin exact SQL transaction", error)),
-                        );
-                    }
+            let before = connection.total_changes();
+            match begin_transaction_with_busy_retry(
+                connection,
+                behavior,
+                shutdown_requested,
+                || reply.is_closed(),
+            ) {
+                // The whole writer-thread hold of one interactive
+                // transaction, caller think-time included. Every queued
+                // write and command behind it waits inside this span, so
+                // it, not SQLite execution, is what explains begin
+                // latency elsewhere while an interactive lease is open.
+                Ok(transaction) if reply.try_send(Ok(())).is_ok() => {
+                    let _span = tracing::trace_span!("rusqlite.exact_sql.transaction").entered();
+                    run_transaction(
+                        transaction,
+                        receiver,
+                        before,
+                        shutdown_requested,
+                        &lease,
+                        authority,
+                        policy,
+                    )
                 }
-            };
-            let Some(completion) = completion else {
-                return DeferredReply::none();
-            };
-            let (cleanup, terminal) = completion.finish(connection);
-            if cleanup.is_err() {
-                shutdown_requested.store(true, Ordering::Release);
+                Ok(_) => DeferredReply::none(),
+                Err(error) => DeferredReply::new(
+                    reply,
+                    Err(sqlite_error("begin exact SQL transaction", error)),
+                ),
             }
-            terminal
         }
         WriterCommand::CheckpointWalTruncate { reply, authority } => {
             if let Err(error) =
@@ -403,7 +385,6 @@ pub(crate) fn run_writer_command(
                         None,
                         crate::connection::authorize_writer,
                         false,
-                        None,
                         || execute_query_unchecked(connection, statement),
                     )
                 }
@@ -462,11 +443,9 @@ fn release_rolled_back(
     transaction: Transaction<'_>,
     before: u64,
     lease: &TransactionLeaseState,
-    attachments: Vec<ExactSqlAttachment>,
-    previous_attachment_limit: Option<i32>,
-) -> TransactionCompletion {
+) -> DeferredReply {
     lease.settle(discard_transaction(transaction, before));
-    TransactionCompletion::abandoned(attachments, previous_attachment_limit)
+    DeferredReply::none()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -478,31 +457,17 @@ fn run_transaction(
     lease: &TransactionLeaseState,
     authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     policy: TransactionPolicy,
-) -> TransactionCompletion {
-    let mut attachments = Vec::new();
-    let mut previous_attachment_limit = None;
+) -> DeferredReply {
     let mut idle_deadline = lease_now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
     let mut transaction_deadline = lease_now() + EXACT_SQL_TRANSACTION_LIMIT;
     loop {
         if shutdown_requested.load(Ordering::Acquire) {
-            return release_rolled_back(
-                transaction,
-                before,
-                lease,
-                attachments,
-                previous_attachment_limit,
-            );
+            return release_rolled_back(transaction, before, lease);
         }
         let now = lease_now();
         if now >= idle_deadline || now >= transaction_deadline {
             lease.expire();
-            return release_rolled_back(
-                transaction,
-                before,
-                lease,
-                attachments,
-                previous_attachment_limit,
-            );
+            return release_rolled_back(transaction, before, lease);
         }
         let wait = idle_deadline
             .saturating_duration_since(now)
@@ -511,101 +476,9 @@ fn run_transaction(
         let command = match receiver.recv_timeout(wait) {
             Ok(command) => command,
             Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => {
-                return TransactionCompletion::abandoned(attachments, previous_attachment_limit);
-            }
+            Err(RecvTimeoutError::Disconnected) => return DeferredReply::none(),
         };
         match command {
-            TransactionCommand::Attach { attachment, reply } => {
-                if lease_now() >= transaction_deadline {
-                    lease.expire();
-                    let _ = reply.try_send(Err(ExactSqlError::TransactionExpired));
-                    return release_rolled_back(
-                        transaction,
-                        before,
-                        lease,
-                        attachments,
-                        previous_attachment_limit,
-                    );
-                }
-                if attachments.iter().any(|attached: &ExactSqlAttachment| {
-                    attached
-                        .database_name()
-                        .eq_ignore_ascii_case(attachment.database_name())
-                }) {
-                    let _ = reply.try_send(Err(ExactSqlError::InvalidAttachment));
-                    continue;
-                }
-                if let Err(error) =
-                    verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::Execute)
-                {
-                    let _ = reply.try_send(Err(error));
-                    return release_rolled_back(
-                        transaction,
-                        before,
-                        lease,
-                        attachments,
-                        previous_attachment_limit,
-                    );
-                }
-                if previous_attachment_limit.is_none() {
-                    match transaction
-                        .set_limit(Limit::SQLITE_LIMIT_ATTACHED, MAX_EXACT_SQL_ATTACHMENTS)
-                    {
-                        Ok(previous) => previous_attachment_limit = Some(previous),
-                        Err(error) => {
-                            let _ = reply.try_send(Err(sqlite_error(
-                                "open exact SQL attachment limit",
-                                error,
-                            )));
-                            return release_rolled_back(
-                                transaction,
-                                before,
-                                lease,
-                                attachments,
-                                None,
-                            );
-                        }
-                    }
-                }
-                let result = attach_database(
-                    &transaction,
-                    &attachment,
-                    true,
-                    Some(Arc::clone(shutdown_requested)),
-                    Some(transaction_deadline),
-                );
-                match result {
-                    Ok(()) => {
-                        attachments.push(attachment);
-                        if let Err(error) = verify_write_authority(
-                            authority.as_deref(),
-                            ExactSqlWriteIntent::Execute,
-                        ) {
-                            let _ = reply.try_send(Err(error));
-                            return release_rolled_back(
-                                transaction,
-                                before,
-                                lease,
-                                attachments,
-                                previous_attachment_limit,
-                            );
-                        }
-                        let _ = reply.try_send(Ok(()));
-                        idle_deadline = lease_now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
-                    }
-                    Err(error) => {
-                        let _ = reply.try_send(Err(error));
-                        return release_rolled_back(
-                            transaction,
-                            before,
-                            lease,
-                            attachments,
-                            previous_attachment_limit,
-                        );
-                    }
-                }
-            }
             TransactionCommand::Dispatch {
                 request,
                 execution_policy,
@@ -614,23 +487,11 @@ fn run_transaction(
                 if lease_now() >= transaction_deadline {
                     lease.expire();
                     let _ = reply.try_send(Err(ExactSqlError::TransactionExpired));
-                    return release_rolled_back(
-                        transaction,
-                        before,
-                        lease,
-                        attachments,
-                        previous_attachment_limit,
-                    );
+                    return release_rolled_back(transaction, before, lease);
                 }
                 if let Err(error) = verify_write_authority(authority.as_deref(), request.intent()) {
                     let _ = reply.try_send(Err(error));
-                    return release_rolled_back(
-                        transaction,
-                        before,
-                        lease,
-                        attachments,
-                        previous_attachment_limit,
-                    );
+                    return release_rolled_back(transaction, before, lease);
                 }
                 if execution_policy == ExecutionPolicy::AuthorityRevalidated
                     && policy != TransactionPolicy::AuthorizedLongLease
@@ -649,13 +510,7 @@ fn run_transaction(
                                 "authority-revalidated batch requires attached write authority"
                                     .to_owned(),
                             )));
-                            return release_rolled_back(
-                                transaction,
-                                before,
-                                lease,
-                                attachments,
-                                previous_attachment_limit,
-                            );
+                            return release_rolled_back(transaction, before, lease);
                         };
                         Some((Arc::clone(authority), intent))
                     } else {
@@ -680,46 +535,22 @@ fn run_transaction(
                     // caller keeps its own error and the transaction is
                     // released with the rollback already performed.
                     let _ = reply.try_send(result);
-                    return release_rolled_back(
-                        transaction,
-                        before,
-                        lease,
-                        attachments,
-                        previous_attachment_limit,
-                    );
+                    return release_rolled_back(transaction, before, lease);
                 }
                 if let Err(error) = verify_write_authority(authority.as_deref(), intent) {
                     let _ = reply.try_send(Err(error));
-                    return release_rolled_back(
-                        transaction,
-                        before,
-                        lease,
-                        attachments,
-                        previous_attachment_limit,
-                    );
+                    return release_rolled_back(transaction, before, lease);
                 }
                 if matches!(&result, Err(ExactSqlError::AuthorityDenied(_))) {
                     let _ = reply.try_send(result);
-                    return release_rolled_back(
-                        transaction,
-                        before,
-                        lease,
-                        attachments,
-                        previous_attachment_limit,
-                    );
+                    return release_rolled_back(transaction, before, lease);
                 }
                 if execution_policy == ExecutionPolicy::Bounded
                     && lease_now() >= transaction_deadline
                 {
                     lease.expire();
                     let _ = reply.try_send(Err(ExactSqlError::TransactionExpired));
-                    return release_rolled_back(
-                        transaction,
-                        before,
-                        lease,
-                        attachments,
-                        previous_attachment_limit,
-                    );
+                    return release_rolled_back(transaction, before, lease);
                 }
                 let succeeded = result.is_ok();
                 let _ = reply.try_send(result);
@@ -744,25 +575,13 @@ fn run_transaction(
                 if lease_now() >= transaction_deadline {
                     lease.expire();
                     let _ = reply.try_send(Err(ExactSqlError::TransactionExpired));
-                    return release_rolled_back(
-                        transaction,
-                        before,
-                        lease,
-                        attachments,
-                        previous_attachment_limit,
-                    );
+                    return release_rolled_back(transaction, before, lease);
                 }
                 if let Err(error) =
                     verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::Commit)
                 {
                     let _ = reply.try_send(Err(error));
-                    return release_rolled_back(
-                        transaction,
-                        before,
-                        lease,
-                        attachments,
-                        previous_attachment_limit,
-                    );
+                    return release_rolled_back(transaction, before, lease);
                 }
                 let changed_rows = transaction.total_changes().saturating_sub(before);
                 let result = {
@@ -774,88 +593,12 @@ fn run_transaction(
                             .map_err(|error| sqlite_error("commit immediate transaction", error))
                     }
                 };
-                return TransactionCompletion {
-                    attachments,
-                    previous_attachment_limit,
-                    terminal: Some(TransactionTerminal::Commit { reply, result }),
-                };
+                return DeferredReply::new(reply, result);
             }
             TransactionCommand::Rollback { reply } => {
-                let result = discard_transaction(transaction, before);
-                return TransactionCompletion {
-                    attachments,
-                    previous_attachment_limit,
-                    terminal: Some(TransactionTerminal::Rollback { reply, result }),
-                };
+                return DeferredReply::new(reply, discard_transaction(transaction, before));
             }
         }
-    }
-}
-
-struct TransactionCompletion {
-    attachments: Vec<ExactSqlAttachment>,
-    previous_attachment_limit: Option<i32>,
-    terminal: Option<TransactionTerminal>,
-}
-
-enum TransactionTerminal {
-    Commit {
-        reply: async_channel::Sender<Result<ExactSqlCommitReceipt, ExactSqlError>>,
-        result: Result<ExactSqlCommitReceipt, ExactSqlError>,
-    },
-    Rollback {
-        reply: async_channel::Sender<Result<ExactSqlRollbackReceipt, ExactSqlError>>,
-        result: Result<ExactSqlRollbackReceipt, ExactSqlError>,
-    },
-}
-
-impl TransactionCompletion {
-    fn abandoned(
-        attachments: Vec<ExactSqlAttachment>,
-        previous_attachment_limit: Option<i32>,
-    ) -> Self {
-        Self {
-            attachments,
-            previous_attachment_limit,
-            terminal: None,
-        }
-    }
-
-    /// Detaches what the transaction attached and returns the cleanup outcome
-    /// with the caller's terminal answer, still unsent.
-    fn finish(self, connection: &Connection) -> (Result<(), ExactSqlError>, DeferredReply) {
-        let mut cleanup_error = None;
-        for attachment in self.attachments.into_iter().rev() {
-            if let Err(error) = detach_database(connection, attachment.database_name(), None)
-                && cleanup_error.is_none()
-            {
-                cleanup_error = Some(error);
-            }
-        }
-        if let Some(previous) = self.previous_attachment_limit
-            && let Err(error) = connection.set_limit(Limit::SQLITE_LIMIT_ATTACHED, previous)
-            && cleanup_error.is_none()
-        {
-            cleanup_error = Some(sqlite_error("restore exact SQL attachment limit", error));
-        }
-        let terminal = match self.terminal {
-            Some(TransactionTerminal::Commit { reply, result }) => {
-                let response = match (result, cleanup_error.as_ref()) {
-                    (Ok(_), Some(error)) => Err(error.clone()),
-                    (result, _) => result,
-                };
-                DeferredReply::new(reply, response)
-            }
-            Some(TransactionTerminal::Rollback { reply, result }) => {
-                let response = match (result, cleanup_error.as_ref()) {
-                    (Ok(_), Some(error)) => Err(error.clone()),
-                    (result, _) => result,
-                };
-                DeferredReply::new(reply, response)
-            }
-            None => DeferredReply::none(),
-        };
-        (cleanup_error.map_or(Ok(()), Err), terminal)
     }
 }
 

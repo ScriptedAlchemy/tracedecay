@@ -189,7 +189,6 @@ fn exact_sql_guard_restores_authorizer_after_panic() {
             None,
             crate::connection::authorize_writer,
             true,
-            None,
             || panic!("exact SQL operation panic"),
         );
     }));

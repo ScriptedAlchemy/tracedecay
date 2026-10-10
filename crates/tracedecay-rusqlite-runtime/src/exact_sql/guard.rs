@@ -23,12 +23,6 @@ use super::{
     ExactSqlWriteAuthority, ExactSqlWriteIntent, sqlite_error,
 };
 
-#[derive(Clone)]
-pub(super) enum AuthorizedDatabaseOperation {
-    Attach,
-    Detach(String),
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn with_exact_sql_guard<T, F>(
     connection: &Connection,
@@ -40,7 +34,6 @@ pub(super) fn with_exact_sql_guard<T, F>(
     repeated_authority: Option<(Arc<dyn ExactSqlWriteAuthority>, ExactSqlWriteIntent)>,
     canonical_authorizer: for<'a> fn(rusqlite::hooks::AuthContext<'a>) -> Authorization,
     exact_sql_writer: bool,
-    database_operation: Option<AuthorizedDatabaseOperation>,
     operation: F,
 ) -> Result<T, ExactSqlError>
 where
@@ -48,7 +41,6 @@ where
 {
     let denied = Arc::new(AtomicBool::new(false));
     let hook_denied = Arc::clone(&denied);
-    let authorized_database_operation = database_operation.clone();
     connection
         .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
             if (!allow_transactions && matches!(context.action, AuthAction::Transaction { .. }))
@@ -57,7 +49,7 @@ where
                 hook_denied.store(true, Ordering::Release);
                 Authorization::Deny
             } else if exact_sql_writer {
-                authorize_exact_sql_writer(context, authorized_database_operation.as_ref())
+                authorize_exact_sql_writer(context)
             } else {
                 canonical_authorizer(context)
             }
@@ -144,48 +136,10 @@ where
 /// Temporary **triggers and views** stay denied. A temp trigger can fire on a
 /// durable table and mutate it outside the invariant trigger contract, which
 /// is exactly the authority this channel must not hand out; temp views have no
-/// caller. `ATTACH`/`DETACH` are allowed only while the writer actor runs its
-/// fixed attachment lifecycle operations; caller-provided SQL cannot enable
-/// them. `load_extension`, unrecognized actions, and non-allowlisted pragmas
-/// remain denied unconditionally.
-fn authorize_exact_sql_writer(
-    context: rusqlite::hooks::AuthContext<'_>,
-    database_operation: Option<&AuthorizedDatabaseOperation>,
-) -> Authorization {
-    match context.action {
-        AuthAction::Attach { .. }
-            if matches!(
-                database_operation,
-                Some(AuthorizedDatabaseOperation::Attach)
-            ) =>
-        {
-            return Authorization::Allow;
-        }
-        // SQLite supplies a null authorizer filename when ATTACH binds its
-        // filename parameter. rusqlite preserves that action as Unknown.
-        AuthAction::Unknown {
-            code,
-            arg1: None,
-            arg2: None,
-        } if code == rusqlite::ffi::SQLITE_ATTACH
-            && matches!(
-                database_operation,
-                Some(AuthorizedDatabaseOperation::Attach)
-            ) =>
-        {
-            return Authorization::Allow;
-        }
-        AuthAction::Detach { database_name }
-            if matches!(
-                database_operation,
-                Some(AuthorizedDatabaseOperation::Detach(expected))
-                    if database_name.eq_ignore_ascii_case(expected)
-            ) =>
-        {
-            return Authorization::Allow;
-        }
-        _ => {}
-    }
+/// caller. `ATTACH`/`DETACH`, `load_extension`, unrecognized actions (SQLite
+/// reports a parameter-bound `ATTACH` filename as one), and non-allowlisted
+/// pragmas are denied unconditionally.
+fn authorize_exact_sql_writer(context: rusqlite::hooks::AuthContext<'_>) -> Authorization {
     if matches!(
         context.action,
         AuthAction::Attach { .. }

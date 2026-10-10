@@ -826,24 +826,6 @@ impl tracedecay_sessions::runtime::workflow_index::WorkflowIngestWriteTxn
     }
 }
 
-impl tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor
-    for RegisteredGlobalDbWriteTransaction<'_>
-{
-    #[tracing::instrument(name = "global_db.registered.txn.attach", level = "trace", skip_all)]
-    async fn attach_database(
-        &self,
-        path: &Path,
-        database_name: &str,
-    ) -> tracedecay_runtime_core::db::engine::Result<()> {
-        tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor::attach_database(
-            &self.transaction,
-            path,
-            database_name,
-        )
-        .await
-    }
-}
-
 impl RegisteredGlobalDbWriteTransaction<'_> {
     pub async fn execute<P>(
         &self,
