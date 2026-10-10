@@ -128,6 +128,21 @@ impl Connection {
             .map_err(Into::into)
     }
 
+    /// Executes one autocommit write and materializes its own RETURNING rows.
+    /// Once admitted to the writer, the statement completes if its waiter drops.
+    pub async fn execute_returning<P>(&self, sql: &str, params: P) -> Result<Rows>
+    where
+        P: IntoParams,
+    {
+        let statement = statement(sql, params)?;
+        let runtime = Arc::clone(&self.runtime);
+        runtime
+            .execute_returning_async(statement)
+            .await
+            .map(Rows::from_exact)
+            .map_err(Into::into)
+    }
+
     #[tracing::instrument(name = "runtime_core.db.execute_statements", level = "trace", skip_all)]
     pub async fn execute_statements(&self, statements: Vec<WriteStatement>) -> Result<Vec<u64>> {
         let statements = statements
@@ -200,10 +215,6 @@ impl Connection {
         Statement::for_connection(self, sql)
     }
 
-    pub(crate) fn last_insert_rowid(&self) -> i64 {
-        self.runtime.last_insert_rowid()
-    }
-
     /// Live reader-pool occupancy for the store behind this connection.
     ///
     /// Lock-free and lease-free, so it still answers while the pool is
@@ -254,9 +265,7 @@ impl Connection {
                     .begin_deferred_async()
                     .await
                     .map_err(Error::from)
-                    .map(|transaction| {
-                        Transaction::from_runtime(transaction, Arc::clone(&self.runtime))
-                    })
+                    .map(Transaction::from_runtime)
             }
             TransactionBehavior::Immediate => {
                 let runtime = Arc::clone(&self.runtime);
@@ -264,9 +273,7 @@ impl Connection {
                     .begin_immediate_async()
                     .await
                     .map_err(Error::from)
-                    .map(|transaction| {
-                        Transaction::from_runtime(transaction, Arc::clone(&self.runtime))
-                    })
+                    .map(Transaction::from_runtime)
             }
         }
     }
@@ -287,7 +294,7 @@ impl Connection {
             .begin_authorized_long_lease_immediate_async()
             .await
             .map_err(Error::from)
-            .map(|transaction| Transaction::from_runtime(transaction, Arc::clone(&self.runtime)))
+            .map(Transaction::from_runtime)
     }
 }
 

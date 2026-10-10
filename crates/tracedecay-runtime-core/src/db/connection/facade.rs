@@ -24,9 +24,15 @@ impl DatabaseWriterConnection<'_> {
         self.conn.execute(sql, params).await
     }
 
-    #[must_use]
-    pub fn last_insert_rowid(&self) -> i64 {
-        self.conn.last_insert_rowid()
+    pub async fn execute_returning<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.conn.execute_returning(sql, params).await
     }
 
     #[cfg(any(test, feature = "test-helpers"))]

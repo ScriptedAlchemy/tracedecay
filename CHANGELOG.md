@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **cli:** give explicit upgrade lookups their own GitHub deadline so a 1s advisory budget cannot fail `tracedecay upgrade` ([#3371](https://github.com/ScriptedAlchemy/tracedecay/issues/3371))
 * **git:** settle `git_hunks` within its existing deadline while preserving exact worktree identity and releasing the real index lock on cancellation ([#3360](https://github.com/ScriptedAlchemy/tracedecay/issues/3360))
 * **grep:** admit interactive source scans on their own worker pool so background verification cannot hold the indexing CPU FIFO across the 10s source-search deadline ([#3359](https://github.com/ScriptedAlchemy/tracedecay/issues/3359))
+* **storage:** return inserted IDs from the inserting statement with `INSERT ... RETURNING` and delete the shared last-insert-ID API, so a caller can no longer read another write's ID or one left by a rolled-back write ([#3403](https://github.com/ScriptedAlchemy/tracedecay/pull/3403))
+* **storage:** count in-flight reader opens against the background lease ceiling so parallel background opens cannot take the foreground reader reservation ([#3403](https://github.com/ScriptedAlchemy/tracedecay/pull/3403))
 
 ### Performance Improvements
 

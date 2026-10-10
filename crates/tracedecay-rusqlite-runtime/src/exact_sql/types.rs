@@ -158,13 +158,11 @@ pub struct ExactSqlRows {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExactSqlExecuteResult {
     pub changed_rows: usize,
-    pub last_insert_rowid: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExactSqlBatchResult {
     pub changed_rows: u64,
-    pub last_insert_rowid: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -181,6 +179,7 @@ pub struct ExactSqlRollbackReceipt {
 pub(crate) enum SqlRequest {
     Validate(ExactSqlStatement),
     Execute(ExactSqlStatement),
+    ExecuteReturning(ExactSqlStatement),
     Query(ExactSqlStatement),
     ExecuteBatch(String),
 }
@@ -189,7 +188,7 @@ impl SqlRequest {
     pub(super) fn intent(&self) -> ExactSqlWriteIntent {
         match self {
             Self::Validate(_) => ExactSqlWriteIntent::Validate,
-            Self::Execute(_) => ExactSqlWriteIntent::Execute,
+            Self::Execute(_) | Self::ExecuteReturning(_) => ExactSqlWriteIntent::Execute,
             Self::Query(_) => ExactSqlWriteIntent::Query,
             Self::ExecuteBatch(_) => ExactSqlWriteIntent::ExecuteBatch,
         }

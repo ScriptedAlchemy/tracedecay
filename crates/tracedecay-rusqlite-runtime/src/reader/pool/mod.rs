@@ -939,7 +939,10 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 ReaderLane::General => state.leased_general,
                 ReaderLane::ReservedHealth => state.leased_health,
             };
-            if leased < lease_ceiling {
+            // A worker being opened already owns its future lease. Counting
+            // only checked-out workers lets simultaneous background opens
+            // consume the foreground reservation before any open completes.
+            if leased.saturating_add(state.opening(lane)) < lease_ceiling {
                 if let Some(worker) = state.available(lane).pop_back() {
                     match lane {
                         ReaderLane::General => state.leased_general += 1,

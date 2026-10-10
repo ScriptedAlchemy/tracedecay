@@ -136,11 +136,12 @@ impl ObservationExecutor {
 
         persist_sanitization_receipt(savepoint, receipt)?;
 
-        savepoint.execute(
+        let sequence: i64 = savepoint.query_row(
             "INSERT INTO observations (
                 observation_id, payload_digest, receipt_id,
                 observation_json, committed_cursor_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             RETURNING sequence",
             params![
                 observation.observation_id().as_str(),
                 payload_digest,
@@ -148,8 +149,8 @@ impl ObservationExecutor {
                 observation_json,
                 committed_cursor_json,
             ],
+            |row| row.get(0),
         )?;
-        let sequence = savepoint.last_insert_rowid();
         persist_retrieval_anchor(savepoint, write.retrieval_anchor())?;
         savepoint.execute(
             "INSERT INTO observation_retrieval_anchors (observation_id, anchor_id)

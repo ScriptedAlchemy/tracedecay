@@ -134,13 +134,13 @@ impl RegisteredGlobalDb {
             .writer_connection("append analytics event")
             .await
             .map_err(|error| format!("failed to acquire analytics event writer: {error}"))?;
-        let changed = writer
-            .execute(
+        let mut rows = writer
+            .execute_returning(
                 "INSERT INTO analytics_events
                      (provider, project_id, session_id, timestamp, event_kind, hook_name,
                       tool_name, tool_category, skill_name, hint_category, hint_id, outcome,
                       metadata_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) RETURNING id",
                 tracedecay_runtime_core::db::engine::params![
                     event.provider.as_str(),
                     event.project_id.as_str(),
@@ -159,12 +159,23 @@ impl RegisteredGlobalDb {
             )
             .await
             .map_err(|error| format!("failed to append analytics event: {error}"))?;
-        if changed != 1 {
-            return Err(format!(
-                "analytics event append changed {changed} rows instead of one"
-            ));
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read appended analytics event id: {error}"))?
+            .ok_or_else(|| "analytics append returned no id".to_owned())?;
+        let id = row
+            .get::<i64>(0)
+            .map_err(|error| format!("failed to decode appended analytics event id: {error}"))?;
+        if rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to finish appended analytics event id: {error}"))?
+            .is_some()
+        {
+            return Err("analytics append returned more than one id".to_owned());
         }
-        Ok(writer.last_insert_rowid())
+        Ok(id)
     }
 
     /// Canonical observability append with replay-safe idempotency.

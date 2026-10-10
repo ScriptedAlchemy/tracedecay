@@ -1,5 +1,5 @@
 use std::{
-    sync::atomic::AtomicUsize,
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 

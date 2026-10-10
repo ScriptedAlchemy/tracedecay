@@ -23,6 +23,7 @@ mod repository_attachment;
 mod runtime_actor;
 mod runtime_reader_restart;
 mod runtime_storage;
+mod storage_contention;
 mod transactional_inbox;
 mod work_attempt_storage;
 mod work_duplicate_adjudication_storage;

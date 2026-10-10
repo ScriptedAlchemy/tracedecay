@@ -3,7 +3,7 @@ use std::{path::Path, sync::Arc};
 use tokio::sync::Mutex;
 
 use tracedecay_rusqlite_runtime::exact_sql::{
-    ExactSqlAttachment, ExactSqlHandle, ExactSqlTransaction as RuntimeTransaction,
+    ExactSqlAttachment, ExactSqlTransaction as RuntimeTransaction,
 };
 
 use super::{Error, IntoParams, Result, Rows, WriteStatement, connection::statement};
@@ -20,21 +20,12 @@ pub struct Transaction {
     /// its command. Dropping the caller cannot release serialization early or
     /// truncate an already admitted statement batch.
     runtime: Arc<Mutex<Option<RuntimeTransaction>>>,
-    #[cfg(any(test, feature = "test-helpers"))]
-    connection_runtime: Arc<ExactSqlHandle>,
 }
 
 impl Transaction {
-    pub(super) fn from_runtime(
-        runtime: RuntimeTransaction,
-        connection_runtime: Arc<ExactSqlHandle>,
-    ) -> Self {
-        #[cfg(not(any(test, feature = "test-helpers")))]
-        let _ = connection_runtime;
+    pub(super) fn from_runtime(runtime: RuntimeTransaction) -> Self {
         Self {
             runtime: Arc::new(Mutex::new(Some(runtime))),
-            #[cfg(any(test, feature = "test-helpers"))]
-            connection_runtime,
         }
     }
 
@@ -182,11 +173,6 @@ impl Transaction {
         })
         .await
         .map_err(join_error)?
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn last_insert_rowid(&self) -> i64 {
-        self.connection_runtime.last_insert_rowid()
     }
 
     pub async fn commit(self) -> Result<()> {
