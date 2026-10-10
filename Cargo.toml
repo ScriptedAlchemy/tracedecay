@@ -64,7 +64,7 @@ resolver = "3"
 # inheritance table is the sanctioned single source of truth.
 [workspace.package]
 edition = "2024"
-version = "1.0.0-beta.79"
+version = "1.0.0-beta.80"
 
 [workspace.dependencies]
 # grafeo 0.5.43 from our fork (ScriptedAlchemy/grafeo, main). The
