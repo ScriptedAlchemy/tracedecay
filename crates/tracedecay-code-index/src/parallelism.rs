@@ -910,7 +910,7 @@ mod tests {
             .expect("indexing hold started");
         let observed = {
             let _entered = owner.enter();
-            install_interactive(|| rayon::current_num_threads()).expect("interactive pool")
+            install_interactive(rayon::current_num_threads).expect("interactive pool")
         };
         release_tx.send(()).expect("indexing hold waits");
         holder.join().expect("indexing hold");
