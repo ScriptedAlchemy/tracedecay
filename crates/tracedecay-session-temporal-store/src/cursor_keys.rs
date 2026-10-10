@@ -62,40 +62,14 @@ pub struct SessionTemporalCursorKeyProvider {
     authenticators: Vec<(SignedCursorKeyRefV1, InMemoryCursorAuthenticator)>,
 }
 
-/// Reports whether exactly one active cursor key is already committed, so
-/// callers that only need its existence can probe on a read snapshot instead
-/// of opening a writer-lane transaction for a key they will not mint.
-pub(super) async fn session_cursor_key_is_active(
+/// Reads and fully validates the sole active cursor key: its id, version,
+/// and material are checked exactly as the provisioning transaction checks
+/// them, so callers that probe on a read snapshot never skip validation a
+/// writer-lane caller would have run.
+async fn read_active_session_cursor_key(
     connection: &impl crate::handle::SessionTemporalQuery,
-) -> SessionStoreResult<bool> {
-    let mut rows = connection
-        .query(
-            "SELECT COUNT(*) FROM session_query_cursor_keys WHERE retired_at IS NULL",
-            (),
-        )
-        .await
-        .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
-    let count = rows
-        .next()
-        .await
-        .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?
-        .map(|row| row.get::<i64>(0))
-        .transpose()
-        .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?
-        .unwrap_or(0);
-    match count {
-        0 => Ok(false),
-        1 => Ok(true),
-        _ => Err(SessionStoreError::InvalidStateTransition {
-            context: "active session cursor key count",
-        }),
-    }
-}
-
-pub(super) async fn ensure_active_session_cursor_key_in_transaction(
-    transaction: &impl crate::handle::SessionTemporalExec,
-) -> SessionStoreResult<SignedCursorKeyRefV1> {
-    let mut active_rows = transaction
+) -> SessionStoreResult<Option<SignedCursorKeyRefV1>> {
+    let mut active_rows = connection
         .query(
             "SELECT key_id, key_version, key_material, COUNT(*) OVER ()
              FROM session_query_cursor_keys
@@ -143,9 +117,29 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
             }
         })?;
         drop(active_rows);
-        return Ok(key);
+        return Ok(Some(key));
     }
     drop(active_rows);
+    Ok(None)
+}
+
+/// Reports whether a valid active cursor key is already committed, so
+/// callers that only need its existence can probe on a read snapshot instead
+/// of opening a writer-lane transaction for a key they will not mint. The
+/// probe runs the same id/version/material validation as the provisioning
+/// transaction, so a corrupt key still fails rather than joining refreshes.
+pub(super) async fn session_cursor_key_is_active(
+    connection: &impl crate::handle::SessionTemporalQuery,
+) -> SessionStoreResult<bool> {
+    Ok(read_active_session_cursor_key(connection).await?.is_some())
+}
+
+pub(super) async fn ensure_active_session_cursor_key_in_transaction(
+    transaction: &impl crate::handle::SessionTemporalExec,
+) -> SessionStoreResult<SignedCursorKeyRefV1> {
+    if let Some(key) = read_active_session_cursor_key(transaction).await? {
+        return Ok(key);
+    }
 
     let mut history_rows = transaction
         .query(
