@@ -166,12 +166,14 @@ fn test_fixture_typescript() {
         ref_names(&result, EdgeKind::Calls),
         [
             "console.log",
+            "Map",
             "super",
             "fetch",
             "response.json",
             "this._cache.set",
             "log",
             "this._cache.clear",
+            "UserService",
             "this.tokens.push",
         ]
     );
