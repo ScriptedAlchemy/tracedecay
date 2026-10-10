@@ -303,33 +303,9 @@ def split_evidence(events: list[Event], result_index: int, tool: str) -> tuple[s
     return "\n".join(before), "\n".join(later_use), "\n".join(later_rerequest)
 
 
-def iter_physical_lines(text: str):
-    """Yield `(line_content, physical_utf8_bytes)` with real separators.
-
-    Empty text yields nothing. A terminator is kept on the line it ends;
-    `split("\\n")` is not used, so a trailing newline does not invent an
-    extra empty line and an unterminated line does not gain a byte.
-    """
-    if not text:
-        return
-    index = 0
-    length = len(text)
-    while index < length:
-        end = index
-        while end < length and text[end] not in "\r\n":
-            end += 1
-        sep_end = end
-        if sep_end < length:
-            if text[sep_end] == "\r" and sep_end + 1 < length and text[sep_end + 1] == "\n":
-                sep_end += 2
-            else:
-                sep_end += 1
-        yield text[index:end], len(text[index:sep_end].encode())
-        index = sep_end
-
-
 def score_lines(report: CallReport, text: str, before: str, later: str) -> None:
-    for line, size in iter_physical_lines(text):
+    for line in text.splitlines(keepends=True):
+        size = len(line.encode("utf-8"))
         report.lines += 1
         report.total_bytes += size
         for kind, pattern in anchors(line):
@@ -346,7 +322,7 @@ def score_lines(report: CallReport, text: str, before: str, later: str) -> None:
 def count_rerequests(text: str, before: str, later_rerequest: str) -> int:
     if not later_rerequest:
         return 0
-    for line, _size in iter_physical_lines(text):
+    for line in text.splitlines():
         for _kind, pattern in anchors(line):
             if pattern.search(before):
                 continue
