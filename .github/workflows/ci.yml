@@ -298,11 +298,13 @@ jobs:
 
   # Root suites and the full-daemon memory journey reserve HOST_CPUS.
   # Workspace suites reserve one CPU each so they can overlap jobs=4 rustc.
-  # Two workspace legs still saw ~80m builds when tracedecay action keys
-  # missed (run 38034996917: workspace-a critical path 46m). Three package
-  # groups cut that pole. Each workspace leg saves its own cache prefix
-  # (matrix legs share github.job, so one prefix would race); restore falls
-  # back to the root family and sibling workspace prefixes when cold.
+  # Three package groups keep a cold composition-crate recompile from owning
+  # one runner (two-way still saw ~80m / 46m critical path on 38034996917).
+  # One shared disk-cache prefix only: a 6.9 GiB workspace-only save evicted
+  # ci-linux-test from the repo's 10 GiB Actions cache budget, so every
+  # Linux test leg restored zero hits (38040644518). The v2 suffix starts a
+  # fresh family that is not crowded out by that orphan entry. root-b alone
+  # saves.
   # root-b and workspace-c catch unlisted targets in their groups.
   linux-test:
     name: Test Linux (${{ matrix.shard }})
@@ -317,9 +319,6 @@ jobs:
       matrix:
         include:
           - shard: root-a
-            cache_key: ci-linux-test
-            extra_restore_keys: ""
-            save_cache: "false"
             test_resources: ""
             targets: >-
               //crates/tracedecay:mcp_suite
@@ -328,9 +327,6 @@ jobs:
               //crates/tracedecay:storage_suite
               //crates/tracedecay-cli:refresh_memory_journey
           - shard: root-b
-            cache_key: ci-linux-test
-            extra_restore_keys: ""
-            save_cache: "true"
             test_resources: ""
             targets: >-
               --
@@ -342,9 +338,6 @@ jobs:
           # Three alphabetical package groups. New crates land in workspace-c
           # via the catch-all until listed here for balance.
           - shard: workspace-a
-            cache_key: ci-linux-workspace-a-test
-            extra_restore_keys: ci-linux-test,ci-linux-workspace-b-test,ci-linux-workspace-c-test
-            save_cache: "true"
             test_resources: --default_test_resources=cpu=1
             targets: >-
               --
@@ -361,9 +354,6 @@ jobs:
               //crates/tracedecay-code-index-runtime/...
               -//crates/tracedecay-cli:refresh_memory_journey
           - shard: workspace-b
-            cache_key: ci-linux-workspace-b-test
-            extra_restore_keys: ci-linux-test,ci-linux-workspace-a-test,ci-linux-workspace-c-test
-            save_cache: "true"
             test_resources: --default_test_resources=cpu=1
             targets: >-
               //crates/tracedecay-configuration/...
@@ -387,9 +377,6 @@ jobs:
               //crates/tracedecay-mcp/...
               //crates/tracedecay-mcp-catalog/...
           - shard: workspace-c
-            cache_key: ci-linux-workspace-c-test
-            extra_restore_keys: ci-linux-test,ci-linux-workspace-a-test,ci-linux-workspace-b-test
-            save_cache: "true"
             test_resources: --default_test_resources=cpu=1
             targets: >-
               --
@@ -456,8 +443,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
-          cache-key: ${{ matrix.cache_key }}
-          extra-restore-keys: ${{ matrix.extra_restore_keys }}
+          cache-key: ci-linux-test-v2
           test-tools: "true"
 
       # Root suites exercise latency-sensitive daemon journeys. Finish their
@@ -478,10 +464,11 @@ jobs:
             bazel-testlogs/**/test.log
             bazel-testlogs/**/test.xml
 
-      # Matrix shards share github.job, so two legs under one cache-key
-      # would race one save key; each family saves from a single leg.
+      # Matrix shards share github.job, so they would race the same save key.
+      # One writer keeps the 10 GiB Actions cache from holding several copies
+      # that would evict this prefix (observed: 6.9 GiB workspace-only save).
       - name: Save compiled Bazel actions
-        if: always() && !cancelled() && github.ref == 'refs/heads/master' && matrix.save_cache == 'true' && steps.bazel.outputs.disk-cache-key != ''
+        if: always() && !cancelled() && github.ref == 'refs/heads/master' && matrix.shard == 'root-b' && steps.bazel.outputs.disk-cache-key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
@@ -564,7 +551,7 @@ jobs:
         id: bazel
         with:
           cache-key: ci-linux-clippy
-          extra-restore-keys: ci-linux-test
+          extra-restore-keys: ci-linux-test-v2
 
       - name: Run blocking Clippy policy
         run: bazel build --config=ci --config=clippy //...
