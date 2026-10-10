@@ -26,7 +26,7 @@ use super::fusion::{
 
 /// Immutable comparator/ranking revision shared by the query evaluator,
 /// production authority, and cursor validation.
-pub const QUERY_RANKING_REVISION_V1: &str = "ranking.candidate.own-symbol-definition.v1";
+pub const QUERY_RANKING_REVISION_V1: &str = "ranking.candidate.own-symbol-definition.v2";
 /// Versioned request-local cursor lifetime for the canonical query authority.
 pub const QUERY_CURSOR_TTL_MICROS_V1: u64 = 15 * 60 * 1_000_000;
 
