@@ -2294,16 +2294,16 @@ fn combine_cut_state(a: Option<bool>, b: Option<bool>) -> Option<bool> {
     }
 }
 
-/// Whether output carries a host truncation warning line, such as Codex's
+/// Whether output carries the native host truncation notice, such as Codex's
 /// `Warning: truncated output (original token count: N)`. A line must itself
-/// begin with `warning:` to count: hosts emit the notice as its own line,
-/// including after wrapper headers like `Output:`, while a `warning` or
-/// `truncated` mention inside served content (`// Warning: ...` comments,
-/// prose) is ordinary text.
+/// begin with `warning:` and carry the `truncated output` phrase to count:
+/// hosts emit the notice as its own line, including after wrapper headers like
+/// `Output:`, while warning lines inside served content (`Warning: truncated
+/// values rejected`, `// Warning: ...` comments) describe their own data.
 fn native_truncation_marker(text: &str) -> bool {
     text.lines().any(|line| {
         let line = line.trim_start().to_lowercase();
-        line.starts_with("warning:") && line.contains("truncated")
+        line.starts_with("warning:") && line.contains("truncated output")
     })
 }
 

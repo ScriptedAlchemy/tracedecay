@@ -261,6 +261,7 @@ mod tests {
         for content in [
             json!("// handle truncated output here\nfn parse() {}"),
             json!("// Warning: truncated names are rejected\nfn parse() {}"),
+            json!("Output:\nline one\nWarning: truncated values rejected\nline three"),
         ] {
             let fact = accounted_tool_result(None, content, Some(true));
             let (_, cut, _) = result_fields(&fact);
