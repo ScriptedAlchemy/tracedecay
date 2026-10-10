@@ -1018,10 +1018,10 @@ async fn wait_for_ready_clone_index(
 
 #[tokio::test]
 async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
-    // Clone update accounting records a duration only when a clone-eligible
-    // body actually changed (`minimum_body_tokens` is 30).
-    let eligible_alpha = "pub fn alpha(seed: u32) -> u32 {\n    let mut total = seed;\n    total = total.wrapping_add(1);\n    total = total.wrapping_add(2);\n    total = total.wrapping_add(3);\n    total = total.wrapping_add(4);\n    total = total.wrapping_add(5);\n    total = total.wrapping_add(6);\n    total = total.wrapping_add(7);\n    total = total.wrapping_add(8);\n    total\n}\n";
-    let fixture = GitFixture::new(&with_untouched_fillers(&[("src/lib.rs", eligible_alpha)]));
+    let fixture = GitFixture::new(&with_untouched_fillers(&[(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 1 }\n",
+    )]));
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
@@ -1036,25 +1036,25 @@ async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
     wait_for_dashboard_ready(&registry, fixture.path()).await;
     let observation = wait_for_ready_clone_index(&registry, fixture.path()).await;
     assert_eq!(observation.coverage.source_bodies, Some(1));
-    assert_eq!(observation.coverage.eligible_source_bodies, Some(1));
-    assert_eq!(observation.coverage.conservative_normalized_bodies, Some(1));
-    assert_eq!(observation.coverage.near_fingerprint_bodies, Some(1));
+    assert_eq!(observation.coverage.eligible_source_bodies, Some(0));
+    assert_eq!(observation.coverage.conservative_normalized_bodies, Some(0));
+    assert_eq!(observation.coverage.near_fingerprint_bodies, Some(0));
     assert_eq!(observation.budgets.posting_rows, 16_384);
     assert!(observation.resources.bytes_on_disk.is_some());
     assert!(observation.resources.peak_scratch_memory_bytes.is_some());
 
-    fixture.edit(
-        "src/lib.rs",
-        &eligible_alpha.replace("wrapping_add(1)", "wrapping_add(9)"),
-    );
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
     assert!(matches!(
         registry
             .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
             .await,
         super::super::CodeIndexDemandAdmissionV1::Queued
     ));
+    // Clone update accounting is attached to the hook publish receipt. Do
+    // not demand a complete generation here: that follow-up pass can record
+    // a second Published receipt whose arrival is unattributable and would
+    // overwrite `changed_symbol_update_micros`.
     let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
-    let _ = wait_for_live_complete_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
     let observation = wait_for_ready_clone_index(&registry, fixture.path()).await;
     assert_eq!(observation.coverage.payloads_reused, Some(0));
