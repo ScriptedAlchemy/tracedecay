@@ -451,6 +451,14 @@ pub fn render_graph_tool(
     if let Some(freshness) = worktree {
         open_with_worktree_freshness(&mut rendered, &mut structured, args, freshness)?;
     }
+    if let GraphToolResultV1::DiffContext(_) = &result
+        && let Some(gate) = structured.get("test_gate").cloned()
+        && let Some(object) = rendered.value.as_object_mut()
+    {
+        // Beside the rendered body in every format, like a readiness wait, so
+        // `tracedecay tool` can exit on the gate without parsing the body.
+        object.insert("structuredContent".to_owned(), json!({ "test_gate": gate }));
+    }
     rendered = rendered.with_structured_result(structured);
     ResponseTrailer {
         touched_files: &touched_files,

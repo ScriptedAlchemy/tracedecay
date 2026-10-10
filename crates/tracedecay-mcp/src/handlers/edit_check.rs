@@ -349,4 +349,107 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_longer_signature_names_the_multiline_call_it_cannot_accept() {
+        use std::process::Command;
+        use tracedecay_domain::{
+            CanonicalRelationEdgeV1, EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId,
+        };
+        use tracedecay_runtime_core::git::try_git_program;
+
+        let head = "\
+pub fn local_target(pair: (u32, u32)) {}\n\
+pub fn first() {\n\
+    local_target(\n\
+        (1, 2)\n\
+    );\n\
+}\n\
+pub fn second() { local_target((3, 4), 5); }\n";
+        let working = "\
+pub fn local_target(pair: (u32, u32), extra: u32) {}\n\
+pub fn first() {\n\
+    local_target(\n\
+        (1, 2)\n\
+    );\n\
+}\n\
+pub fn second() { local_target((3, 4), 5); }\n";
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/lib.rs"), head).unwrap();
+        let git = try_git_program().expect("git");
+        for args in [
+            ["init", "-q"].as_slice(),
+            ["add", "."].as_slice(),
+            ["commit", "-qm", "baseline"].as_slice(),
+        ] {
+            let output = Command::new(&git)
+                .args(["-c", "user.name=TraceDecay Test"])
+                .args(["-c", "user.email=tracedecay-test@example.com"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(root.path())
+                .output()
+                .expect("git");
+            assert!(output.status.success(), "{args:?} {output:?}");
+        }
+        std::fs::write(root.path().join("src/lib.rs"), working).unwrap();
+        let mut sites = Vec::new();
+        let mut rest = 0;
+        while let Some(at) = working[rest..].find("local_target(") {
+            let abs = rest + at;
+            if !working[..abs].ends_with("fn ") {
+                sites.push(abs);
+            }
+            rest = abs + "local_target".len();
+        }
+        assert_eq!(sites.len(), 2);
+        let occurrence = |name: &str| SymbolOccurrenceId::new(name).expect("id");
+        let edge = |from: &str, at: usize| CanonicalRelationEdgeV1 {
+            from_occurrence: occurrence(from),
+            to_occurrence: occurrence("target"),
+            kind: RelationEdgeKindV1::Calls,
+            authority: EdgeAuthorityV1::SyntaxExact,
+            evidence_span: SourceSpan {
+                start_byte: at as u64,
+                end_byte: (at + "local_target".len()) as u64,
+            },
+        };
+        let symbol = |id: &str, name: &str, line: u32| GitContextSymbolV1 {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            kind: "function".to_owned(),
+            file: "src/lib.rs".to_owned(),
+            line,
+        };
+        let target = symbol("target", "local_target", 0);
+        let edits = signature_edits(
+            root.path(),
+            &[target.clone()],
+            &[
+                target,
+                symbol("first", "first", 1),
+                symbol("second", "second", 6),
+            ],
+            &[edge("first", sites[0]), edge("second", sites[1])],
+        )
+        .expect("signature edits");
+        let json = serde_json::to_value(&edits).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!([{
+                "symbol": "local_target",
+                "file": "src/lib.rs",
+                "status": "contract_change",
+                "old_parameters": 1,
+                "new_parameters": 2,
+                "incompatible": [{
+                    "name": "first",
+                    "file": "src/lib.rs",
+                    "line": 3,
+                    "arguments": 1
+                }]
+            }])
+        );
+    }
 }
