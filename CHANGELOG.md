@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.81](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.80...v1.0.0-beta.81) (2026-10-10)
+
+
+### Bug Fixes
+
+* **schema:** honor retired source records in projection audits ([#3352](https://github.com/ScriptedAlchemy/tracedecay/issues/3352)) ([fc542d2](https://github.com/ScriptedAlchemy/tracedecay/commit/fc542d298be5e283ba19a0daec9ffbc6988702e8))
+* **search:** require own-symbol evidence for definition priority ([#3356](https://github.com/ScriptedAlchemy/tracedecay/issues/3356)) ([a376a13](https://github.com/ScriptedAlchemy/tracedecay/commit/a376a13e963834e6e0e5ed0aafc819cdf866b102))
+
 ## [1.0.0-beta.80](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.79...v1.0.0-beta.80) (2026-10-10)
 
 
