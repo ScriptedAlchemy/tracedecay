@@ -12,9 +12,12 @@
 //! is not a retry of a failed request: nothing was read or consumed, and the
 //! next wait uses the same deadline ureq handed in.
 
+use std::time::Instant;
+
 use ureq::Agent;
 use ureq::config::Config;
 use ureq::unversioned::resolver::DefaultResolver;
+use ureq::unversioned::transport::time::Duration;
 use ureq::unversioned::transport::{
     Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport,
 };
@@ -59,27 +62,42 @@ fn is_interrupted(error: &ureq::Error) -> bool {
     matches!(error, ureq::Error::Io(io) if io.kind() == std::io::ErrorKind::Interrupted)
 }
 
+fn resume_interrupted<T>(
+    timeout: NextTimeout,
+    mut wait: impl FnMut(NextTimeout) -> Result<T, ureq::Error>,
+) -> Result<T, ureq::Error> {
+    let started = Instant::now();
+    loop {
+        let mut remaining = timeout;
+        if let Duration::Exact(after) = timeout.after {
+            let Some(after) = after
+                .checked_sub(started.elapsed())
+                .filter(|after| !after.is_zero())
+            else {
+                return Err(ureq::Error::Timeout(timeout.reason));
+            };
+            remaining.after = Duration::Exact(after);
+        }
+        match wait(remaining) {
+            Err(error) if is_interrupted(&error) => {}
+            outcome => return outcome,
+        }
+    }
+}
+
 impl<T: Transport> Transport for InterruptResumingTransport<T> {
     fn buffers(&mut self) -> &mut dyn Buffers {
         self.0.buffers()
     }
 
     fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
-        loop {
-            match self.0.transmit_output(amount, timeout) {
-                Err(error) if is_interrupted(&error) => {}
-                outcome => return outcome,
-            }
-        }
+        resume_interrupted(timeout, |remaining| {
+            self.0.transmit_output(amount, remaining)
+        })
     }
 
     fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
-        loop {
-            match self.0.await_input(timeout) {
-                Err(error) if is_interrupted(&error) => {}
-                outcome => return outcome,
-            }
-        }
+        resume_interrupted(timeout, |remaining| self.0.await_input(remaining))
     }
 
     fn is_open(&mut self) -> bool {
@@ -159,9 +177,137 @@ mod tests {
 
     use ureq::Agent;
     use ureq::unversioned::resolver::DefaultResolver;
-    use ureq::unversioned::transport::DefaultConnector;
+    use ureq::unversioned::transport::time::Duration;
+    use ureq::unversioned::transport::{
+        Buffers, DefaultConnector, LazyBuffers, NextTimeout, Transport,
+    };
 
-    use super::{InterruptFirstReadConnector, http_agent_over};
+    use super::{InterruptFirstReadConnector, InterruptResumingTransport, http_agent_over};
+
+    #[derive(Debug)]
+    struct InterruptedWait {
+        buffers: LazyBuffers,
+        pause: std::time::Duration,
+        waits: Vec<NextTimeout>,
+    }
+
+    impl InterruptedWait {
+        fn new(pause: std::time::Duration) -> Self {
+            Self {
+                buffers: LazyBuffers::new(16, 16),
+                pause,
+                waits: Vec::new(),
+            }
+        }
+
+        fn wait(&mut self, timeout: NextTimeout) -> Result<(), ureq::Error> {
+            self.waits.push(timeout);
+            if self.waits.len() == 1 {
+                std::thread::sleep(self.pause);
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted).into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Transport for InterruptedWait {
+        fn buffers(&mut self) -> &mut dyn Buffers {
+            &mut self.buffers
+        }
+
+        fn transmit_output(&mut self, _: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
+            self.wait(timeout)
+        }
+
+        fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
+            self.wait(timeout).map(|()| true)
+        }
+
+        fn is_open(&mut self) -> bool {
+            true
+        }
+    }
+
+    fn global_timeout(after: Duration) -> NextTimeout {
+        NextTimeout {
+            after,
+            reason: ureq::Timeout::Global,
+        }
+    }
+
+    #[test]
+    fn an_expired_read_wait_returns_its_original_timeout() {
+        let mut transport =
+            InterruptResumingTransport(InterruptedWait::new(std::time::Duration::from_millis(15)));
+        let result = transport.await_input(global_timeout(Duration::from_millis(5)));
+        assert!(matches!(
+            result,
+            Err(ureq::Error::Timeout(ureq::Timeout::Global))
+        ));
+        assert_eq!(
+            transport.0.waits.len(),
+            1,
+            "a spent wait must not resume IO"
+        );
+    }
+
+    #[test]
+    fn an_expired_write_wait_returns_its_original_timeout() {
+        let mut transport =
+            InterruptResumingTransport(InterruptedWait::new(std::time::Duration::from_millis(15)));
+        let result = transport.transmit_output(1, global_timeout(Duration::from_millis(5)));
+        assert!(matches!(
+            result,
+            Err(ureq::Error::Timeout(ureq::Timeout::Global))
+        ));
+        assert_eq!(
+            transport.0.waits.len(),
+            1,
+            "a spent wait must not resume IO"
+        );
+    }
+
+    #[test]
+    fn a_resumed_read_wait_uses_only_the_remaining_budget() {
+        let mut transport =
+            InterruptResumingTransport(InterruptedWait::new(std::time::Duration::from_millis(20)));
+        assert!(
+            transport
+                .await_input(global_timeout(Duration::from_secs(2)))
+                .unwrap()
+        );
+        assert_eq!(transport.0.waits.len(), 2);
+        assert!(transport.0.waits[1].after < transport.0.waits[0].after);
+        assert_eq!(transport.0.waits[1].reason, ureq::Timeout::Global);
+    }
+
+    #[test]
+    fn an_unlimited_wait_stays_unlimited_when_resumed() {
+        let mut transport =
+            InterruptResumingTransport(InterruptedWait::new(std::time::Duration::ZERO));
+        assert!(
+            transport
+                .await_input(global_timeout(Duration::NotHappening))
+                .unwrap()
+        );
+        assert_eq!(
+            transport.0.waits,
+            vec![global_timeout(Duration::NotHappening); 2]
+        );
+    }
+
+    #[test]
+    fn a_zero_budget_returns_timeout_without_starting_io() {
+        let mut transport =
+            InterruptResumingTransport(InterruptedWait::new(std::time::Duration::ZERO));
+        let result = transport.await_input(global_timeout(Duration::from_millis(0)));
+        assert!(matches!(
+            result,
+            Err(ureq::Error::Timeout(ureq::Timeout::Global))
+        ));
+        assert!(transport.0.waits.is_empty());
+    }
 
     /// Answers one request per accepted connection with `body`.
     fn serve(body: &'static str, connections: usize) -> String {
