@@ -679,10 +679,12 @@ fn code_index_freshness_projection(
         // sealed generation: waiting cannot change it, so it never reads
         // warming and its reason stays visible even when the read is
         // otherwise authoritative. Retryable refusals stay parked instead.
-        let status = match freshness.staleness_state {
-            Some(CodeIndexStalenessStateV1::Restoring) => FreshnessLabelV1::Restoring,
-            Some(CodeIndexStalenessStateV1::Verifying) => FreshnessLabelV1::Stale,
-            _ => FreshnessLabelV1::Current,
+        let status = if authoritative {
+            FreshnessLabelV1::Current
+        } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Restoring) {
+            FreshnessLabelV1::Restoring
+        } else {
+            FreshnessLabelV1::Stale
         };
         let mut warning =
             format!("the sealed generation's native graph activation was refused: {reason}");
@@ -1038,9 +1040,10 @@ mod tests {
         render_status_md, schema_convergence_status, session_git_evidence_state,
     };
     use tracedecay_contracts::code_index_freshness::{
-        CodeIndexFreshnessCoverageV1, CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReadFailureV1,
-        CodeIndexOmittedSourceV1, CodeIndexOmittedSourcesV1, CodeIndexSourceOmissionReasonV1,
-        CodeIndexStalenessStateV1, GRAPH_PUBLICATION_DEADLINE_REASON,
+        CodeGraphServingReadinessV1, CodeIndexFreshnessCoverageV1, CodeIndexFreshnessPayloadV1,
+        CodeIndexFreshnessReadFailureV1, CodeIndexOmittedSourceV1, CodeIndexOmittedSourcesV1,
+        CodeIndexSourceOmissionReasonV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+        GRAPH_PUBLICATION_DEADLINE_REASON,
     };
     use tracedecay_contracts::retrieval::{StatusCodeIndexFreshnessV1, StatusRetrievalServingV1};
     use tracedecay_contracts::storage::{
@@ -1523,8 +1526,8 @@ mod tests {
         );
         assert!(warning.contains("2 captured source file(s)"), "{warning}");
 
-        // The same refusal seen before the lane owners settle the `fresh`
-        // verdict is still terminal: it must not read warming either.
+        // A terminal graph verdict does not verify the generation's source.
+        // Incomplete source convergence stays stale with the refusal visible.
         let indexing = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
             staleness_state: Some(CodeIndexStalenessStateV1::Indexing),
             omitted_sources: None,
@@ -1533,14 +1536,44 @@ mod tests {
         let (status, warning) = code_index_freshness_projection(&indexing);
         assert_eq!(
             status,
-            FreshnessLabelV1::Current,
-            "a spent publication budget is a terminal verdict, not active warming"
+            FreshnessLabelV1::Stale,
+            "a graph refusal cannot make unverified source current"
         );
         assert!(
             warning
                 .expect("the refusal stays visible")
                 .contains("exceeded its background budget")
         );
+    }
+
+    #[test]
+    fn a_terminal_graph_refusal_preserves_unverified_source_freshness() {
+        let mut freshness = CodeIndexWorktreeFreshnessV1 {
+            latest_generation_id: Some("generation.fixture".to_owned()),
+            rebuild_in_flight: false,
+            coverage: CodeIndexFreshnessCoverageV1::Complete,
+            code_graph_serving: Some(CodeGraphServingReadinessV1::Refused {
+                reason: GRAPH_PUBLICATION_DEADLINE_REASON.to_owned(),
+            }),
+            ..Default::default()
+        };
+        for state in [
+            Some(CodeIndexStalenessStateV1::Stale),
+            Some(CodeIndexStalenessStateV1::Indexing),
+            Some(CodeIndexStalenessStateV1::Refreshing),
+            Some(CodeIndexStalenessStateV1::Verifying),
+            None,
+        ] {
+            freshness.staleness_state = state;
+            let (status, warning) = code_index_freshness_projection(&freshness);
+            assert_eq!(status, FreshnessLabelV1::Stale);
+            assert!(warning.unwrap().contains("exceeded its background budget"));
+        }
+        freshness.staleness_state = Some(CodeIndexStalenessStateV1::Fresh);
+        freshness.coverage = CodeIndexFreshnessCoverageV1::PartialUnverifiedRestore;
+        let (status, warning) = code_index_freshness_projection(&freshness);
+        assert_eq!(status, FreshnessLabelV1::Stale);
+        assert!(warning.unwrap().contains("exceeded its background budget"));
     }
 
     #[test]

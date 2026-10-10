@@ -546,7 +546,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::sync_channel;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::{recovered_generation_digest_chunked, recovered_generation_digest_from_database};
     use crate::{
@@ -961,67 +961,55 @@ mod tests {
             .expect("worker 0 received the stolen encode");
         assert_eq!(stolen_value, 23);
         let polls = drain_polls.load(Ordering::Relaxed);
-        // A 1 ms park over ~40 ms is tens of polls. A busy Idle spin is
-        // orders of magnitude more; a single blocking recv without
-        // re-checking would stay at 1.
-        assert!(
-            (8..=200).contains(&polls),
-            "stolen-encode drain must park, not spin or block: {polls} polls"
-        );
+        assert!(polls > 1, "the pending receive must recheck the request");
     }
 
-    /// `check` must fire while the oldest encode has not produced a result,
-    /// so a spent deadline can abort without waiting for that chunk.
     #[test]
-    fn recv_while_working_cancels_before_the_oldest_result_arrives() {
-        let started = Arc::new(AtomicBool::new(false));
-        let drain_polls = Arc::new(AtomicUsize::new(0));
-        let (sender, receiver) = sync_channel(1);
-        let receiver = Arc::new(std::sync::Mutex::new(Some(receiver)));
-        let cancelled = rayon::ThreadPoolBuilder::new()
-            .num_threads(2)
+    fn idle_rayon_receiver_observes_request_failure_before_the_pending_result() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
             .build()
-            .expect("two-worker rayon pool")
-            .broadcast({
-                let started = Arc::clone(&started);
-                let drain_polls = Arc::clone(&drain_polls);
-                let receiver = Arc::clone(&receiver);
-                move |ctx| {
-                    if ctx.index() == 0 {
-                        let receiver = receiver
-                            .lock()
-                            .expect("receiver lock")
-                            .take()
-                            .expect("single waiter");
-                        while !started.load(Ordering::Acquire) {
-                            std::thread::yield_now();
-                        }
-                        super::recv_while_working(&receiver, &|| {
-                            let polls = drain_polls.fetch_add(1, Ordering::Relaxed) + 1;
-                            if polls >= 8 {
-                                Err(GraphDbError::Cancelled)
-                            } else {
-                                Ok(())
-                            }
-                        })
-                    } else {
-                        started.store(true, Ordering::Release);
-                        std::thread::sleep(Duration::from_millis(80));
-                        let _ = sender.send(29_u32);
-                        Ok(29_u32)
-                    }
-                }
+            .unwrap();
+        for failure in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            let expected = failure.clone();
+            let (sender, receiver) = sync_channel(1);
+            let (release, held) = sync_channel(1);
+            let producer = std::thread::spawn(move || {
+                // Bound cleanup if a broken receiver waits for the held result.
+                let _ = held.recv_timeout(Duration::from_secs(5));
+                sender.send(42).unwrap();
             });
-        assert!(
-            cancelled
-                .iter()
-                .any(|result| matches!(result, Err(GraphDbError::Cancelled))),
-            "{cancelled:?}"
-        );
-        let polls = drain_polls.load(Ordering::Relaxed);
-        assert!(
-            (8..=200).contains(&polls),
-            "empty-channel cancel must observe check before the send: {polls}"
-        );
+            let (result, receiver, elapsed) = pool.install(move || {
+                assert!(matches!(rayon::yield_local(), Some(rayon::Yield::Idle)));
+                let first_poll = Cell::new(None::<Instant>);
+                let parked_for = Cell::new(None);
+                let result = super::recv_while_working(&receiver, &|| {
+                    if let Some(started) = first_poll.get() {
+                        parked_for.set(Some(started.elapsed()));
+                        Err(failure.clone())
+                    } else {
+                        first_poll.set(Some(Instant::now()));
+                        Ok(())
+                    }
+                });
+                (result, receiver, parked_for.get().unwrap())
+            });
+            let _ = release.send(());
+            producer.join().unwrap();
+            drop(receiver);
+            assert_eq!(result, Err(expected));
+            assert!(
+                elapsed >= super::WORKER_RECV_PARK,
+                "an idle worker must park before the next request check: {elapsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn disconnected_proof_worker_is_unavailable() {
+        let (sender, receiver) = sync_channel::<()>(1);
+        drop(sender);
+        let result = super::recv_while_working(&receiver, &|| Ok(()));
+        assert!(matches!(result, Err(GraphDbError::Unavailable { .. })));
     }
 }
