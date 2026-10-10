@@ -263,7 +263,7 @@ pub async fn materialize_session_temporal_refreshes_for_test(
         .await
         .map_err(|error| fixture_error("materialize session refresh", error))?;
     SessionTemporalAccess::new(project_database)
-        .apply_active_session_relation_projection_batch(
+        .apply_active_session_relation_projections_for_test(
             &session_ids,
             std::sync::Arc::new(DashboardFixtureGraphCancellation),
         )

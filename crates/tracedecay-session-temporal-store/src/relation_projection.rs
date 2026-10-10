@@ -106,52 +106,14 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 .read_snapshot()
                 .await
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let generation = active_generation(&snapshot, session_id).await?;
-            // Publication freezes the complete retained graph in its effect journal.
-            // Availability can change without removing historical graph members, so
-            // replay that authority rather than deriving membership from live roots.
-            let mut rows = snapshot
-                .query(
-                    "SELECT projection_json FROM session_relation_effect_journal
-                     WHERE session_id = ?1 AND generation = ?2",
-                    params![
-                        session_id.as_str(),
-                        generation_i64(generation, RECONSTRUCT_OPERATION)?
-                    ],
-                )
-                .await
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let projection = if let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-            {
-                let encoded: String = row
-                    .get(0)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-                serde_json::from_str::<SessionRelationProjection>(&encoded)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-            } else {
-                seed_session_relation_projection(
-                    self.inner(),
+            let (generation, projection) = self
+                .load_active_relation_projection(
                     &snapshot,
+                    &scope,
                     session_id,
                     Arc::clone(&cancellation),
                 )
-                .await?
-            };
-            drop(rows);
-            if projection.scope != scope
-                || projection.session_id != *session_id
-                || projection.generation != generation.value()
-            {
-                return Err(SessionStoreError::ReceiptIdentityMismatch {
-                    context: "active relation projection identity",
-                });
-            }
-            enforce_projection_bounds(&projection, DEFAULT_MAX_ENTITIES, DEFAULT_MAX_RELATIONS)?;
-            super::relations::validate_projection(&projection)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+                .await?;
             drop(snapshot);
             let error = match super::relation_receipts::apply_relation_projection(
                 self.inner(),
@@ -190,26 +152,70 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         }))
     }
 
-    /// Applies every listed session's active-generation relation projection
-    /// through one reader snapshot and one acknowledgement transaction
-    /// instead of each session paying its own snapshot, journal query, and
-    /// receipt transaction. Sessions are independent: a failure leaves the
-    /// unfinished receipts pending for the next pass exactly as the
-    /// per-session apply does.
-    #[tracing::instrument(
-        name = "session_temporal.persist.relation_projection_batch",
-        level = "trace",
-        skip_all
-    )]
-    pub async fn apply_active_session_relation_projection_batch(
+    /// Reads `session_id`'s active generation and the relation projection
+    /// its publication froze, seeding one when the journal holds none, and
+    /// checks the projection's identity and bounds.
+    async fn load_active_relation_projection(
+        &self,
+        snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+        scope: &SessionRelationScope,
+        session_id: &SessionId,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> SessionStoreResult<(SessionProjectionGenerationV1, SessionRelationProjection)> {
+        let generation = active_generation(snapshot, session_id).await?;
+        // Publication freezes the complete retained graph in its effect journal.
+        // Availability can change without removing historical graph members, so
+        // replay that authority rather than deriving membership from live roots.
+        let mut rows = snapshot
+            .query(
+                "SELECT projection_json FROM session_relation_effect_journal
+                 WHERE session_id = ?1 AND generation = ?2",
+                params![
+                    session_id.as_str(),
+                    generation_i64(generation, RECONSTRUCT_OPERATION)?
+                ],
+            )
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let projection = if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        {
+            let encoded: String = row
+                .get(0)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            serde_json::from_str::<SessionRelationProjection>(&encoded)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        } else {
+            seed_session_relation_projection(self.inner(), snapshot, session_id, cancellation)
+                .await?
+        };
+        drop(rows);
+        if projection.scope != *scope
+            || projection.session_id != *session_id
+            || projection.generation != generation.value()
+        {
+            return Err(SessionStoreError::ReceiptIdentityMismatch {
+                context: "active relation projection identity",
+            });
+        }
+        enforce_projection_bounds(&projection, DEFAULT_MAX_ENTITIES, DEFAULT_MAX_RELATIONS)?;
+        super::relations::validate_projection(&projection)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        Ok((generation, projection))
+    }
+
+    /// Applies every listed session's active relation projection through one
+    /// shared snapshot and acknowledgement transaction, for fixtures that
+    /// materialize a large corpus without concurrent publishers.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn apply_active_session_relation_projections_for_test(
         &self,
         session_ids: &[SessionId],
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> SessionStoreResult<usize> {
-        if session_ids.is_empty() {
-            return Ok(0);
-        }
-        let (scope, _relation_store) = self
+    ) -> SessionStoreResult<()> {
+        let (scope, _) = self
             .session_relation_store()
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         let snapshot = self
@@ -218,59 +224,21 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         let mut projections = Vec::with_capacity(session_ids.len());
         for session_id in session_ids {
-            let generation = active_generation(&snapshot, session_id).await?;
-            let mut rows = snapshot
-                .query(
-                    "SELECT projection_json FROM session_relation_effect_journal
-                     WHERE session_id = ?1 AND generation = ?2",
-                    params![
-                        session_id.as_str(),
-                        generation_i64(generation, RECONSTRUCT_OPERATION)?
-                    ],
-                )
-                .await
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let projection = if let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-            {
-                let encoded: String = row
-                    .get(0)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-                serde_json::from_str::<SessionRelationProjection>(&encoded)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-            } else {
-                seed_session_relation_projection(
-                    self.inner(),
+            let (_, projection) = self
+                .load_active_relation_projection(
                     &snapshot,
+                    &scope,
                     session_id,
                     Arc::clone(&cancellation),
                 )
-                .await?
-            };
-            drop(rows);
-            if projection.scope != scope
-                || projection.session_id != *session_id
-                || projection.generation != generation.value()
-            {
-                return Err(SessionStoreError::ReceiptIdentityMismatch {
-                    context: "active relation projection identity",
-                });
-            }
-            enforce_projection_bounds(&projection, DEFAULT_MAX_ENTITIES, DEFAULT_MAX_RELATIONS)?;
-            super::relations::validate_projection(&projection)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+                .await?;
             projections.push(projection);
         }
         drop(snapshot);
-        let outcomes = self
-            .apply_session_relation_projection_items(&projections, cancellation)
-            .await?;
-        let applied = outcomes
+        self.apply_session_relation_projection_items(&projections, cancellation)
+            .await?
             .into_iter()
-            .try_fold(0_usize, |count, outcome| outcome.map(|_| count + 1))?;
-        Ok(applied)
+            .collect()
     }
 
     /// Applies each pre-validated projection through one shared receipt-check
@@ -280,7 +248,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     /// acknowledgement rolls back that item's partial mutation and leaves its
     /// receipt pending for the next recovery pass exactly as the serial apply
     /// does, without poisoning the rest of the shared commit.
-    pub async fn apply_session_relation_projection_items(
+    pub(crate) async fn apply_session_relation_projection_items(
         &self,
         projections: &[SessionRelationProjection],
         cancellation: Arc<dyn GraphCancellation>,
