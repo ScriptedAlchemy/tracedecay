@@ -956,6 +956,8 @@ fn daemon_service_doctor_verdict(
         | tracedecay_daemon_control::DaemonServiceState::RunningDisabled
         | tracedecay_daemon_control::DaemonServiceState::StoppedEnabled
         | tracedecay_daemon_control::DaemonServiceState::StoppedDisabled
+        | tracedecay_daemon_control::DaemonServiceState::StoppingEnabled
+        | tracedecay_daemon_control::DaemonServiceState::StoppingDisabled
         | tracedecay_daemon_control::DaemonServiceState::Masked => DaemonServiceDoctorVerdict::Warn,
     }
 }

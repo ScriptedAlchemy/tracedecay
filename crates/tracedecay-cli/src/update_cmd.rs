@@ -138,12 +138,14 @@ pub(crate) fn restart_daemon_service(
     )?;
     let (stopped_state, desired_state) = match guard.previous_state() {
         daemon_control::DaemonServiceState::RunningEnabled
-        | daemon_control::DaemonServiceState::StoppedEnabled => (
+        | daemon_control::DaemonServiceState::StoppedEnabled
+        | daemon_control::DaemonServiceState::StoppingEnabled => (
             daemon_control::DaemonServiceState::StoppedEnabled,
             daemon_control::DaemonServiceState::RunningEnabled,
         ),
         daemon_control::DaemonServiceState::RunningDisabled
-        | daemon_control::DaemonServiceState::StoppedDisabled => (
+        | daemon_control::DaemonServiceState::StoppedDisabled
+        | daemon_control::DaemonServiceState::StoppingDisabled => (
             daemon_control::DaemonServiceState::StoppedDisabled,
             daemon_control::DaemonServiceState::RunningDisabled,
         ),
