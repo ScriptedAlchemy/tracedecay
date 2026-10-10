@@ -5,9 +5,10 @@
 //! the first read that needed the whole generation set a latch that nothing
 //! cleared. Here that residency is a lease renewed by those reads. The worker
 //! also drops the seated decode, catalog, and engine when it parks after a
-//! publish: exact and lexical serve from the sealed text artifact, and the
-//! next graph read reseats catalog/engine while `code_graph_serving` stays
-//! `ready` (#3328). Once the lease lapses, or under pressure, the inventory
+//! publish: exact and lexical serve from the sealed text artifact,
+//! `code_graph_serving` reports `warming` while catalog/engine are absent,
+//! and the next graph read reseats them (#3328). Once the lease lapses, or
+//! under pressure, the inventory
 //! releases the decode and the graph engine, and the worktree returns to the
 //! state a restart leaves it in: exact and lexical reads keep serving from
 //! the text artifact, graph reads reseat the engine from the durable graph,
@@ -154,8 +155,8 @@ impl WorktreeResidencyV1 {
     /// latched a failure leaves the seat as the only servable generation,
     /// and taking it then turns serve-old into `GenerationUnavailable`.
     /// Catalog and engine still go back after a completed activation:
-    /// `code_graph_serving` stays `ready` and the next graph read reseats
-    /// them. Do not clear `complete_generation_requested`: a demand that
+    /// `code_graph_serving` reports `warming` while they are absent and the
+    /// next graph read reseats them. Do not clear `complete_generation_requested`: a demand that
     /// arrives during the take must still wake a successor pass to
     /// re-decode.
     pub(super) fn release_decode_when_parked(self: &Arc<Self>, owners: &ResidentOwnersV1) {

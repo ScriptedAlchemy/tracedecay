@@ -130,10 +130,10 @@ async fn a_parked_worktree_releases_its_decode_and_search_still_answers() {
     registry.shutdown().await;
 }
 
-/// Park drops catalog and engine after activation. Status stays `ready`;
-/// the next graph read reseats the store (#3328).
+/// Park drops catalog and engine after activation; status reports the typed
+/// warming state until the next graph read reseats the store (#3328).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_parked_worktree_releases_catalog_and_engine_and_stays_ready() {
+async fn a_parked_worktree_releases_catalog_and_engine_and_reports_warming() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn park_graph_target() -> u32 { 7 }\n")]);
     let store = TempDir::new().expect("store root");
     let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
@@ -210,15 +210,17 @@ async fn a_parked_worktree_releases_catalog_and_engine_and_stays_ready() {
         let released = current
             .interactive_graph_store()
             .ok()
-            .is_some_and(|store| store.released_for_memory());
+            .is_some_and(|store| store.interactive_catalog_bytes().is_none());
         let catalog_gone = !graph_copy_kinds(&parked)
             .iter()
             .any(|kind| *kind == ResidentOwnerKindV1::GraphCatalog);
         if catalog_gone && released {
-            assert_eq!(
-                current.code_graph_serving_readiness(),
-                CodeGraphServingReadinessV1::Ready,
-                "memory release of an activated store stays ready"
+            assert!(
+                matches!(
+                    current.code_graph_serving_readiness(),
+                    CodeGraphServingReadinessV1::Warming { .. }
+                ),
+                "a memory release reports warming until a read reseats the store"
             );
             break;
         }

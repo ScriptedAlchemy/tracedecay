@@ -2248,6 +2248,7 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
     let ready =
         Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready);
     let serving = &serving;
+    let resolve_alpha = &resolve_alpha;
     let (fresh_state, ready_state) = (&fresh, &ready);
     let until_ready = |what: &'static str| async move {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -2263,6 +2264,9 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
                 ) && &staleness == fresh_state,
                 "{what}: the graph is warming and the index stays fresh: {graph:?} {staleness:?}"
             );
+            // A released-for-memory store only reseats on a real read; while
+            // first-time warming still owns it the read refuses fast.
+            let _ = resolve_alpha().await;
             assert!(std::time::Instant::now() <= deadline, "{what}: {graph:?}");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -2295,8 +2299,16 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
     );
     assert_eq!(
         serving().await,
-        (ready, fresh),
-        "a memory release of an already-activated store stays ready; the next graph read reseats it"
+        (
+            Some(
+                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Warming {
+                    reason: "code graph engine was released for memory; the next graph read \
+                             re-warms it"
+                        .to_owned(),
+                }
+            ),
+            fresh,
+        )
     );
     assert_eq!(
         tracedecay_daemon_service::doctor_kernel::code_index_read_from_registry(

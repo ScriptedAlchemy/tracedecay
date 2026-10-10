@@ -485,19 +485,6 @@ impl CodeGraphProjectionStore {
         self.interactive_catalog.release()
     }
 
-    /// The verified graph has already activated; engine or catalog is cold
-    /// only because a memory release took them. The next graph read reseats
-    /// them. First-time warming is not this: that store has never served.
-    pub fn released_for_memory(&self) -> bool {
-        if self.released.load(AtomicOrdering::Acquire) {
-            return true;
-        }
-        matches!(
-            self.interactive_catalog.residency(),
-            CatalogResidency::Released | CatalogResidency::Rewarming
-        )
-    }
-
     /// What a graph read would find right now: warm, or the warming state it
     /// would answer because the engine or the catalog is not resident.
     pub fn serving_warmth(&self) -> Result<CodeGraphServingWarmthV1, CodeGraphProjectionError> {

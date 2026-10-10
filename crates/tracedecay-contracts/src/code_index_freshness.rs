@@ -201,14 +201,11 @@ pub enum CodeGraphServingReadinessV1 {
     /// Graph activation completed without a serving projection.
     Refused { reason: String },
     /// The verified graph projection is installed, but the engine or catalog
-    /// its first activation still needs is not resident. Graph reads answer
-    /// the retryable warming state and restore it. A later memory release
-    /// of an already-activated store stays [`Ready`]: the next graph read
-    /// reseats those owners.
+    /// its reads need is not resident: it is still being built, or it was
+    /// released for memory. Graph reads answer the retryable warming state
+    /// and restore it.
     Warming { reason: String },
     /// The verified graph projection is installed for interactive reads.
-    /// Stays `ready` after a memory release of the engine or catalog; the
-    /// next graph read reseats them.
     Ready,
 }
 
