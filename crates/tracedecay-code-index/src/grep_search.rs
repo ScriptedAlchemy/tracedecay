@@ -7,7 +7,9 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::{Regex, RegexBuilder};
 use tracedecay_domain::IndexPathPolicyV1;
 
-use crate::parallelism::{CodeIndexParallelismErrorV1, install, with_background_cpu_permit};
+use crate::parallelism::{
+    CodeIndexParallelismErrorV1, install, with_background_cpu_permit_cancellable,
+};
 use crate::source_walk::{forward_slash_relative, source_walk};
 
 const MAX_HITS_PER_FILE: usize = 20;
@@ -137,8 +139,12 @@ pub fn search_tree_with_cancel(
             let scans = batch
                 .par_iter()
                 .map(|entry| {
-                    with_background_cpu_permit(|| {
+                    with_background_cpu_permit_cancellable(&is_cancelled, || {
                         scan_grep_file(entry, project_root, &matcher, query, &is_cancelled)
+                    })
+                    .unwrap_or_else(|| GrepSearchResult {
+                        cancelled: true,
+                        ..GrepSearchResult::default()
                     })
                 })
                 .collect::<Vec<_>>();
@@ -357,6 +363,9 @@ fn looks_binary(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     fn no_exclusions() -> IndexPathPolicyV1 {
@@ -409,6 +418,55 @@ mod tests {
             search_tree_with_cancel(project.path(), &query("token"), &no_exclusions(), || false);
         crate::parallelism::force_install_failure_for_test(false);
         assert!(matches!(outcome, Err(GrepSearchError::Parallelism(_))));
+    }
+
+    #[test]
+    fn cancellation_releases_queued_cpu_demand_before_capacity_is_available() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("fixture.txt"), "HIT_TOKEN\n").unwrap();
+        let runtime = crate::parallelism::CodeIndexWorkerRuntimeV1::build(
+            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Exact { workers: 1 },
+            1,
+            16 * 1024 * 1024 * 1024,
+        )
+        .unwrap();
+        let authority = runtime.background_cpu();
+        let held = authority.acquire();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = {
+            let cancellation = Arc::clone(&cancellation);
+            std::thread::spawn(move || {
+                let _entered = runtime.enter();
+                sender
+                    .send(search_tree_with_cancel(
+                        project.path(),
+                        &query("HIT_TOKEN"),
+                        &no_exclusions(),
+                        || cancellation.load(Ordering::Acquire),
+                    ))
+                    .unwrap();
+            })
+        };
+        let admission_deadline = Instant::now() + Duration::from_secs(2);
+        while authority.waiting_work_units() == 0 && Instant::now() < admission_deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let was_queued = authority.waiting_work_units() > 0;
+        cancellation.store(true, Ordering::Release);
+        let result = receiver.recv_timeout(Duration::from_secs(1));
+        let queued_after_cancellation = authority.waiting_work_units();
+        drop(held);
+        worker.join().unwrap();
+        assert!(was_queued, "the scan must reach blocked CPU admission");
+        let result = result
+            .expect("cancelled scan must settle while capacity is still held")
+            .unwrap();
+        assert!(result.cancelled);
+        assert!(result.hits.is_empty());
+        assert_eq!(result.files_scanned, 0);
+        assert_eq!(queued_after_cancellation, 0);
+        assert!(authority.try_acquire().is_some());
     }
 
     #[test]

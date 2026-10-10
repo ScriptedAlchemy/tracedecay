@@ -15,7 +15,6 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -151,9 +150,9 @@ impl ProcessBackgroundCpuV1 {
     /// work behind abandoned demand.
     pub fn acquire_cancellable(
         self: &Arc<Self>,
-        cancellation: &AtomicBool,
+        is_cancelled: impl Fn() -> bool,
     ) -> Option<BackgroundCpuPermitV1> {
-        if !self.admit_units_cancellable(1, cancellation) {
+        if !self.admit_units_cancellable(1, is_cancelled) {
             return None;
         }
         Some(BackgroundCpuPermitV1 {
@@ -167,6 +166,24 @@ impl ProcessBackgroundCpuV1 {
     /// itself.
     pub fn with_permit<R>(self: &Arc<Self>, operation: impl FnOnce() -> R) -> R {
         self.with_permits(1, operation)
+    }
+
+    /// Reuse a parent CPU unit or wait in FIFO order while this operation is live.
+    pub fn with_permit_cancellable<R>(
+        self: &Arc<Self>,
+        is_cancelled: impl Fn() -> bool,
+        operation: impl FnOnce() -> R,
+    ) -> Option<R> {
+        if is_cancelled() {
+            return None;
+        }
+        if BACKGROUND_CPU_UNITS.with(Cell::get) > 0 {
+            return Some(operation());
+        }
+        let _permit = self.acquire_cancellable(is_cancelled)?;
+        let _scope = BackgroundCpuScopeV1::enter();
+        BACKGROUND_CPU_UNITS.with(|active| active.set(1));
+        Some(operation())
     }
 
     /// Run a weighted work unit, clamped to the entire process width. Semantic
@@ -260,7 +277,7 @@ impl ProcessBackgroundCpuV1 {
         }
     }
 
-    fn admit_units_cancellable(&self, units: usize, cancellation: &AtomicBool) -> bool {
+    fn admit_units_cancellable(&self, units: usize, is_cancelled: impl Fn() -> bool) -> bool {
         const CANCELLATION_POLL: Duration = Duration::from_millis(5);
 
         let waiter = Arc::new(BackgroundCpuWaiterV1 { units });
@@ -270,7 +287,7 @@ impl ProcessBackgroundCpuV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.waiters.push_back(Arc::clone(&waiter));
         loop {
-            if cancellation.load(Ordering::Acquire) {
+            if is_cancelled() {
                 state.waiters.retain(|queued| !Arc::ptr_eq(queued, &waiter));
                 self.available.notify_all();
                 return false;
@@ -337,7 +354,7 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::sync::{
         Arc, Barrier,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use std::time::Duration;
 
@@ -453,7 +470,11 @@ mod tests {
         let waiter = {
             let authority = Arc::clone(&authority);
             let cancellation = Arc::clone(&cancellation);
-            std::thread::spawn(move || authority.acquire_cancellable(&cancellation).is_none())
+            std::thread::spawn(move || {
+                authority
+                    .acquire_cancellable(|| cancellation.load(Ordering::Acquire))
+                    .is_none()
+            })
         };
         while authority.waiting_work_units() == 0 {
             std::thread::sleep(Duration::from_millis(1));
@@ -462,6 +483,25 @@ mod tests {
         assert!(waiter.join().expect("cancelled waiter"));
         assert_eq!(authority.waiting_work_units(), 0);
         drop(held);
+        assert!(authority.try_acquire().is_some());
+    }
+
+    #[test]
+    fn cancellable_scope_reuses_parent_and_releases_capacity_on_unwind() {
+        let authority = Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::MIN));
+        authority.with_permit(|| {
+            assert_eq!(
+                authority.with_permit_cancellable(|| false, || authority.active_units()),
+                Some(1)
+            );
+            assert_eq!(authority.with_permit_cancellable(|| true, || 2), None);
+        });
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            authority
+                .with_permit_cancellable(|| false, || panic!("injected cancellation scope panic"));
+        }));
+        assert!(panic.is_err());
+        assert_eq!(authority.active_units(), 0);
         assert!(authority.try_acquire().is_some());
     }
 }
