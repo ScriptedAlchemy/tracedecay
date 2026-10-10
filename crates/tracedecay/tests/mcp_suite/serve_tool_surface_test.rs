@@ -70,13 +70,33 @@ fn tool_call(id: i64, name: &str, arguments: &Value) -> Value {
 }
 
 fn listed_names(stdout: &[u8], id: i64) -> BTreeSet<String> {
+    tools_list_cost(stdout, id).names
+}
+
+/// Compact-JSON size of one `tools/list` result, with the MCP token budget
+/// estimator (`json_bytes.div_ceil(4)`).
+struct ToolsListCost {
+    names: BTreeSet<String>,
+    bytes: usize,
+    tokens: usize,
+}
+
+fn tools_list_cost(stdout: &[u8], id: i64) -> ToolsListCost {
     let response = json_rpc_response(stdout, id);
-    response["result"]["tools"]
+    let result = &response["result"];
+    let compact = serde_json::to_string(result)
+        .unwrap_or_else(|error| panic!("tools/list {id} result must serialize: {error}"));
+    let names = result["tools"]
         .as_array()
         .unwrap_or_else(|| panic!("tools/list {id} carried no tool array: {response}"))
         .iter()
         .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
-        .collect()
+        .collect();
+    ToolsListCost {
+        names,
+        bytes: compact.len(),
+        tokens: compact.len().div_ceil(4),
+    }
 }
 
 fn list_changed_count(stdout: &[u8]) -> usize {
@@ -88,7 +108,7 @@ fn list_changed_count(stdout: &[u8]) -> usize {
 }
 
 /// The session catalog `serve --all-tools` lists for `project`.
-fn full_catalog(home: &Path, project: &Path) -> BTreeSet<String> {
+fn full_catalog_cost(home: &Path, project: &Path) -> ToolsListCost {
     let output = run_serve(
         home,
         project,
@@ -96,9 +116,9 @@ fn full_catalog(home: &Path, project: &Path) -> BTreeSet<String> {
         &[initialize(), tools_list(2)],
     );
     assert!(output.status.success(), "{output:?}");
-    let catalog = listed_names(&output.stdout, 2);
-    assert!(!catalog.contains(TOOL_SEARCH), "{catalog:?}");
-    catalog
+    let cost = tools_list_cost(&output.stdout, 2);
+    assert!(!cost.names.contains(TOOL_SEARCH), "{:?}", cost.names);
+    cost
 }
 
 #[tokio::test]
@@ -106,7 +126,8 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
     let home = TempDir::new().unwrap();
     let project = init_project_with_file(home.path(), "pub fn tool_surface_marker() {}\n").await;
     let _daemon = common::spawn_tracedecay_daemon(home.path());
-    let catalog = full_catalog(home.path(), project.path());
+    let before = full_catalog_cost(home.path(), project.path());
+    let catalog = before.names.clone();
     assert!(
         catalog.contains("tracedecay_impact") && catalog.contains("tracedecay_runtime"),
         "--all-tools must list the full session catalog: {catalog:?}"
@@ -141,7 +162,8 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
         "initialize must tell the host how to load more tools: {initialize}"
     );
 
-    let core = listed_names(&output.stdout, 2);
+    let after = tools_list_cost(&output.stdout, 2);
+    let core = after.names.clone();
     assert!(core.contains(TOOL_SEARCH), "{core:?}");
     assert!(
         core.contains("tracedecay_grep") && core.contains("tracedecay_source_body"),
@@ -153,6 +175,32 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
         "the core list ({}) must be a small slice of the catalog ({})",
         core.len(),
         catalog.len()
+    );
+    assert!(
+        before.tokens > 50_000,
+        "the unpruned --all-tools handshake must still carry the expensive catalog ({} tools, {} bytes, {} tokens)",
+        before.names.len(),
+        before.bytes,
+        before.tokens
+    );
+    assert!(
+        after.tokens * 8 < before.tokens,
+        "default tools/list ({after_tools} tools, {after_bytes} bytes, {after_tokens} tokens) must be a small slice of --all-tools ({before_tools} tools, {before_bytes} bytes, {before_tokens} tokens)",
+        after_tools = after.names.len(),
+        after_bytes = after.bytes,
+        after_tokens = after.tokens,
+        before_tools = before.names.len(),
+        before_bytes = before.bytes,
+        before_tokens = before.tokens
+    );
+    eprintln!(
+        "tools/list handshake cost: before (--all-tools) {} tools / {} bytes / {} tokens; after (default) {} tools / {} bytes / {} tokens",
+        before.names.len(),
+        before.bytes,
+        before.tokens,
+        after.names.len(),
+        after.bytes,
+        after.tokens
     );
 
     let runtime = json_rpc_response(&output.stdout, 3);
