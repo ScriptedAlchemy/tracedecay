@@ -107,6 +107,7 @@ fn display() -> CodeIndexSearchDisplayV1 {
         qualified_name: "fixture::hydrate".to_owned(),
         kind: "function".to_owned(),
         path: "src/hydrate.rs".to_owned(),
+        site: None,
     }
 }
 

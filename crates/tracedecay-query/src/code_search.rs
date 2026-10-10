@@ -384,6 +384,29 @@ impl CodeIndexSearchCoverageV1 {
     }
 }
 
+/// The site the serving lane attests for a display match inside `path`.
+///
+/// Hydration may only serve symbol locations and code the index itself
+/// attested: locating the match's name in the current file can land on a
+/// comment, import, or call site, so a text-window lookup is not an
+/// acceptable source authority. `None` means the lane attests no bounded
+/// site for the match and the fields derived from one report as typed
+/// unavailable rather than invented.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum CodeIndexSearchSiteV1 {
+    /// Inclusive 0-based line extent of the named symbol from the
+    /// published generation's extraction-attested lineage record.
+    SymbolLines { start_line: u32, end_line: u32 },
+    /// Byte range over the file's sanitized source plus the bytes that
+    /// range admitted at extraction. Serving verifies the current file
+    /// still carries exactly those bytes at exactly that range before
+    /// mapping the site to lines.
+    ArtifactWindow {
+        source_span: tracedecay_domain::SourceSpan,
+        sanitized_text: tracedecay_domain::BoundedSanitizedText,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeIndexSearchDisplayV1 {
     pub name: String,
@@ -393,6 +416,9 @@ pub struct CodeIndexSearchDisplayV1 {
     /// generation that answered. Savings accounting reads it: the raw-file
     /// counterfactual needs the referenced files on every serving route.
     pub path: String,
+    /// The serving lane's attested site for the match, or `None` when it
+    /// attests no bounded site (for example an unparsed file hit).
+    pub site: Option<CodeIndexSearchSiteV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

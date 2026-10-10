@@ -19,7 +19,7 @@ use tracedecay_domain::{ExactClass, RankedCandidate, RelationEdgeKindV1, Retriev
 use tracedecay_query::retrieval::lexical::{preferred_symbol_tokens, task_is_name_shaped};
 
 use crate::McpToolContext;
-use crate::analysis::{is_ident_byte, line_number_at};
+use crate::analysis::line_number_at;
 #[cfg(test)]
 use crate::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
 use crate::handlers::dependency_hints;
@@ -123,6 +123,24 @@ fn context_search_matches(
                 rank: ranked.final_ordinal.saturating_add(1),
                 utility_micros: ranked.candidate.utility_micros,
             })
+        })
+        .collect()
+}
+
+/// Each display's serving-lane-attested site, keyed by its anchor's wire
+/// form so search-match hydration can resolve them without a second
+/// display lookup.
+fn context_search_sites(
+    complete: &tracedecay_query::code_search::CodeIndexSearchCompletedV1,
+) -> HashMap<String, tracedecay_query::code_search::CodeIndexSearchSiteV1> {
+    complete
+        .display_by_anchor
+        .iter()
+        .filter_map(|(anchor, display)| {
+            display
+                .site
+                .clone()
+                .map(|site| (anchor.as_str().to_owned(), site))
         })
         .collect()
 }
@@ -277,165 +295,171 @@ fn extract_lines(source: &str, start_line: u32, end_line: u32) -> String {
     body
 }
 
-/// Bound for a filesystem window when the graph catalog cannot name a
-/// symbol's line span. The window starts at the identifier and keeps
-/// following blank or more-indented lines; it is not a language parse.
-const SEARCH_MATCH_CODE_WINDOW_LINES: usize = 40;
-
 struct SearchMatchHydration {
     symbols: Vec<PrimitiveSymbolLocationV1>,
     code_blocks: Vec<ContextCodeBlockV1>,
     touched_files: Vec<String>,
+    /// Matches carrying an attested site: the candidates the code stage
+    /// could have served. Drives the stage's admitted/truncated accounting
+    /// instead of raw match count, so file hits and unsited matches cannot
+    /// mark complete output truncated.
+    code_sites: usize,
 }
 
-fn leading_ws_len(line: &str) -> usize {
-    line.as_bytes()
-        .iter()
-        .take_while(|byte| byte.is_ascii_whitespace())
-        .count()
+/// `path`'s sanitized bytes under the same source-shape rule the
+/// doc-coverage lane reads with. Artifact windows index these bytes; a
+/// file that cannot be read or refuses sanitization has no window to
+/// serve.
+fn sanitized_match_source(ctx: &McpToolContext<'_>, path: &str) -> Option<String> {
+    let raw = std::fs::read(ctx.project_root().join(path)).ok()?;
+    let shape = match path.rsplit('.').next() {
+        Some("json" | "toml" | "yaml" | "yml") => {
+            tracedecay_privacy::CodeSourceShapeV1::StructuredData
+        }
+        _ => tracedecay_privacy::CodeSourceShapeV1::CodeOrProse,
+    };
+    let (bytes, _receipt) = tracedecay_privacy::sanitize_code_source_bytes(&raw, shape)
+        .ok()?
+        .into_parts();
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// First 1-based line whose text contains `name` as an identifier token.
-fn first_identifier_line(source: &str, name: &str) -> Option<u32> {
-    if name.is_empty() {
+/// The 0-based inclusive line extent an artifact window serves over the
+/// file's current sanitized `source`, plus the attested code text. The
+/// range must still carry the admitted bytes verbatim: a file that
+/// drifted since extraction has no attested site to serve.
+fn artifact_window_site(
+    source: &str,
+    source_span: &tracedecay_domain::SourceSpan,
+    sanitized_text: &tracedecay_domain::BoundedSanitizedText,
+) -> Option<(u32, u32, String)> {
+    let bytes = source.as_bytes();
+    let start = usize::try_from(source_span.start_byte).ok()?;
+    let end = usize::try_from(source_span.end_byte).ok()?;
+    if start >= end {
         return None;
     }
-    let bytes = source.as_bytes();
-    let needle = name.as_bytes();
-    let mut offset = 0;
-    while offset + needle.len() <= bytes.len() {
-        if bytes[offset..].starts_with(needle) {
-            let before = offset.checked_sub(1).and_then(|index| bytes.get(index));
-            let after = bytes.get(offset + needle.len());
-            if !before.copied().is_some_and(is_ident_byte)
-                && !after.copied().is_some_and(is_ident_byte)
-            {
-                return Some(line_number_at(source, offset));
-            }
-            offset += needle.len();
-        } else {
-            offset += 1;
-        }
+    let slice = bytes.get(start..end)?;
+    if slice != sanitized_text.as_str().as_bytes() {
+        return None;
     }
-    None
-}
-
-fn identifier_window(source: &str, name: &str) -> Option<(u32, u32, String)> {
-    let start_line = first_identifier_line(source, name)?;
-    let start_idx = usize::try_from(start_line.saturating_sub(1)).ok()?;
-    let lines: Vec<&str> = source.lines().collect();
-    let start_text = *lines.get(start_idx)?;
-    let indent = leading_ws_len(start_text);
-    let mut end_idx = start_idx;
-    for (idx, line) in lines
-        .iter()
-        .enumerate()
-        .skip(start_idx.saturating_add(1))
-        .take(SEARCH_MATCH_CODE_WINDOW_LINES.saturating_sub(1))
-    {
-        if line.trim().is_empty() || leading_ws_len(line) > indent {
-            end_idx = idx;
-            continue;
-        }
-        break;
-    }
-    if let Some(closer) = lines.get(end_idx.saturating_add(1)) {
-        if matches!(closer.trim(), "}" | "};" | "}," | ")" | ");" | "]" | "],") {
-            end_idx = end_idx.saturating_add(1);
-        }
-    }
-    let end_line = u32::try_from(end_idx.saturating_add(1)).ok()?;
-    Some((
-        start_line,
-        end_line,
-        extract_lines(
-            source,
-            start_line.saturating_sub(1),
-            end_line.saturating_sub(1),
-        ),
-    ))
+    let start_line = line_number_at(source, start).saturating_sub(1);
+    let end_line = line_number_at(source, end.saturating_sub(1)).saturating_sub(1);
+    Some((start_line, end_line, sanitized_text.as_str().to_owned()))
 }
 
 /// Symbols and code from search matches when the graph catalog cannot
-/// resolve them. Search already named the files; the filesystem supplies
-/// the line window. A missing file or identifier is a typed unavailable
-/// field, not an empty success.
+/// resolve them. Locations and code come only from the site the serving
+/// lane attested for each match — extraction lineage lines, or an artifact
+/// window byte-verified against the current file — never from a text scan
+/// that could name a comment, import, or call site. A site that cannot be
+/// resolved reports typed unavailable fields instead of invented
+/// coordinates, and a file hit names no symbol location at all.
 fn hydrate_context_from_search_matches(
     ctx: &McpToolContext<'_>,
     search_matches: &[ContextSearchMatchV1],
+    sites: &HashMap<String, tracedecay_query::code_search::CodeIndexSearchSiteV1>,
     include_code: bool,
     max_code_blocks: usize,
 ) -> SearchMatchHydration {
-    let mut symbols = Vec::with_capacity(search_matches.len());
+    let mut symbols = Vec::new();
     let mut code_blocks = Vec::new();
-    let mut source_by_path = HashMap::<String, Option<String>>::new();
+    let mut raw_by_path = HashMap::<String, Option<String>>::new();
+    let mut sanitized_by_path = HashMap::<String, Option<String>>::new();
     let mut touched_files = Vec::new();
+    let mut code_sites = 0_usize;
     for search_match in search_matches {
         if !touched_files.iter().any(|path| path == &search_match.file) {
             touched_files.push(search_match.file.clone());
         }
-        let source = match source_by_path.entry(search_match.file.clone()) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut().as_deref(),
-            std::collections::hash_map::Entry::Vacant(entry) => entry
-                .insert(
-                    tracedecay_runtime_core::sync::read_source_file(
-                        &ctx.project_root().join(&search_match.file),
-                    )
-                    .ok(),
-                )
-                .as_deref(),
-        };
-        let (start_line, end_line, unavailable_fields, window) = match source {
-            Some(source) if search_match.kind != "file" => {
-                match identifier_window(source, &search_match.name) {
-                    Some((start_line, end_line, code)) => (
-                        start_line,
-                        end_line,
-                        vec!["attrs_start_line".to_owned()],
-                        Some(code),
-                    ),
-                    None => (
-                        0,
-                        0,
-                        vec![
-                            "start_line".to_owned(),
-                            "end_line".to_owned(),
-                            "attrs_start_line".to_owned(),
-                        ],
-                        None,
-                    ),
+        let site = sites.get(&search_match.anchor_id);
+        if site.is_some() {
+            code_sites += 1;
+        }
+        // Location and code resolve separately: lineage lines stand even
+        // when the source cannot be re-read, while an artifact window
+        // attests both only when its bytes still verify.
+        let mut attested_lines = None;
+        let mut served_code = None;
+        match site {
+            Some(tracedecay_query::code_search::CodeIndexSearchSiteV1::SymbolLines {
+                start_line,
+                end_line,
+            }) => {
+                attested_lines = Some((*start_line, *end_line));
+                if include_code {
+                    let source = raw_by_path
+                        .entry(search_match.file.clone())
+                        .or_insert_with(|| {
+                            tracedecay_runtime_core::sync::read_source_file(
+                                &ctx.project_root().join(&search_match.file),
+                            )
+                            .ok()
+                        })
+                        .as_deref();
+                    if let Some(source) = source {
+                        let code = extract_lines(source, *start_line, *end_line);
+                        if !code.is_empty() {
+                            served_code = Some((*start_line, *end_line, code));
+                        }
+                    }
                 }
             }
-            Some(_) => (1, 1, vec!["attrs_start_line".to_owned()], None),
-            None => (
-                0,
-                0,
-                vec![
-                    "start_line".to_owned(),
-                    "end_line".to_owned(),
-                    "attrs_start_line".to_owned(),
-                ],
-                None,
-            ),
-        };
+            Some(tracedecay_query::code_search::CodeIndexSearchSiteV1::ArtifactWindow {
+                source_span,
+                sanitized_text,
+            }) => {
+                let source = sanitized_by_path
+                    .entry(search_match.file.clone())
+                    .or_insert_with(|| sanitized_match_source(ctx, &search_match.file))
+                    .as_deref();
+                if let Some((start_line, end_line, code)) = source
+                    .and_then(|source| artifact_window_site(source, source_span, sanitized_text))
+                {
+                    attested_lines = Some((start_line, end_line));
+                    served_code = Some((start_line, end_line, code));
+                }
+            }
+            None => {}
+        }
         let node_id = search_match.anchor_id.clone();
-        symbols.push(PrimitiveSymbolLocationV1 {
-            node_id: node_id.clone(),
-            name: search_match.name.clone(),
-            qualified_name: search_match.qualified_name.clone(),
-            kind: search_match.kind.clone(),
-            file: search_match.file.clone(),
-            start_line,
-            end_line,
-            unavailable_fields,
-        });
+        // A file hit names no symbol location; it stays visible in
+        // search_matches and touched_files instead of inventing one.
+        if search_match.kind != "file" {
+            let (start_line, end_line, unavailable_fields) = match attested_lines {
+                Some((start_line, end_line)) => (
+                    user_line(start_line),
+                    user_line(end_line),
+                    vec!["attrs_start_line".to_owned()],
+                ),
+                None => (
+                    0,
+                    0,
+                    vec![
+                        "start_line".to_owned(),
+                        "end_line".to_owned(),
+                        "attrs_start_line".to_owned(),
+                    ],
+                ),
+            };
+            symbols.push(PrimitiveSymbolLocationV1 {
+                node_id: node_id.clone(),
+                name: search_match.name.clone(),
+                qualified_name: search_match.qualified_name.clone(),
+                kind: search_match.kind.clone(),
+                file: search_match.file.clone(),
+                start_line,
+                end_line,
+                unavailable_fields,
+            });
+        }
         if include_code && code_blocks.len() < max_code_blocks {
-            if let Some(code) = window {
+            if let Some((start_line, end_line, code)) = served_code {
                 code_blocks.push(ContextCodeBlockV1 {
                     node_id,
                     file: search_match.file.clone(),
-                    start_line,
-                    end_line,
+                    start_line: user_line(start_line),
+                    end_line: user_line(end_line),
                     code,
                 });
             }
@@ -445,6 +469,7 @@ fn hydrate_context_from_search_matches(
         symbols,
         code_blocks,
         touched_files,
+        code_sites,
     }
 }
 
@@ -532,52 +557,62 @@ where
     // state at serve time, not a snapshot taken before the lanes ran.
     let freshness_payload = ctx.freshness().await;
     let worktree_freshness = worktree_freshness_from_payload(freshness_payload.as_ref());
-    let (complete, code_generation, coverage, freshness, search_matches, lexical_anchors) =
-        match outcome {
-            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => {
-                let search_matches = context_search_matches(&complete, scope_prefix);
-                let lexical_anchors = context_lexical_anchors(&complete, scope_prefix);
-                let code_generation = Some(complete.code_generation.clone());
-                let lanes = lanes_under_scheduler_freshness(
-                    complete.coverage.clone(),
-                    &complete.code_generation,
-                    &worktree_freshness,
-                );
-                let coverage = primitive_search_coverage(&lanes);
-                let freshness = search_freshness(
-                    ServedGenerationV1::Served(&complete.code_generation),
-                    &lanes,
-                    &worktree_freshness,
-                );
-                (
-                    Some(complete),
-                    code_generation,
-                    coverage,
-                    freshness,
-                    search_matches,
-                    lexical_anchors,
-                )
-            }
-            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => (
-                None,
-                unavailable.code_generation,
-                primitive_search_coverage(&unavailable.coverage),
-                search_freshness(
-                    ServedGenerationV1::Unavailable {
-                        reason: unavailable.reason.as_str(),
-                    },
-                    &unavailable.coverage,
-                    &worktree_freshness,
-                ),
-                Vec::new(),
-                requested_anchors
-                    .iter()
-                    .map(|anchor| ContextLexicalAnchorV1::NotServed {
-                        anchor: anchor.clone(),
-                    })
-                    .collect(),
+    let (
+        complete,
+        code_generation,
+        coverage,
+        freshness,
+        search_matches,
+        lexical_anchors,
+        search_sites,
+    ) = match outcome {
+        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => {
+            let search_matches = context_search_matches(&complete, scope_prefix);
+            let search_sites = context_search_sites(&complete);
+            let lexical_anchors = context_lexical_anchors(&complete, scope_prefix);
+            let code_generation = Some(complete.code_generation.clone());
+            let lanes = lanes_under_scheduler_freshness(
+                complete.coverage.clone(),
+                &complete.code_generation,
+                &worktree_freshness,
+            );
+            let coverage = primitive_search_coverage(&lanes);
+            let freshness = search_freshness(
+                ServedGenerationV1::Served(&complete.code_generation),
+                &lanes,
+                &worktree_freshness,
+            );
+            (
+                Some(complete),
+                code_generation,
+                coverage,
+                freshness,
+                search_matches,
+                lexical_anchors,
+                search_sites,
+            )
+        }
+        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => (
+            None,
+            unavailable.code_generation,
+            primitive_search_coverage(&unavailable.coverage),
+            search_freshness(
+                ServedGenerationV1::Unavailable {
+                    reason: unavailable.reason.as_str(),
+                },
+                &unavailable.coverage,
+                &worktree_freshness,
             ),
-        };
+            Vec::new(),
+            requested_anchors
+                .iter()
+                .map(|anchor| ContextLexicalAnchorV1::NotServed {
+                    anchor: anchor.clone(),
+                })
+                .collect(),
+            HashMap::new(),
+        ),
+    };
     let graph = match complete.as_ref() {
         Some(complete) => bind_verified_graph_to_search(graph, &complete.code_generation),
         None => graph,
@@ -625,11 +660,17 @@ where
             ),
         };
     // Search already ranked the sites. When the catalog is still warming,
-    // name lookup admits nothing; hydrate symbols and code from those
-    // matches instead of answering an empty success.
+    // name lookup admits nothing; hydrate symbols and code from the lanes'
+    // attested sites instead of answering an empty success.
     let search_hydration =
         (projection.selected.is_empty() && !search_matches.is_empty()).then(|| {
-            hydrate_context_from_search_matches(ctx, &search_matches, include_code, max_code_blocks)
+            hydrate_context_from_search_matches(
+                ctx,
+                &search_matches,
+                &search_sites,
+                include_code,
+                max_code_blocks,
+            )
         });
     if let Some(hydrated) = search_hydration.as_ref() {
         if include_code && projection.code_blocks.is_empty() {
@@ -662,22 +703,30 @@ where
                 projection.related_omission.is_some(),
             )
         },
+        // Eligible code candidates are the attested sites hydration
+        // resolved, or the graph-selected symbols when projection ran —
+        // not raw search-match count, which counts file hits and unsited
+        // matches that could never yield a block. When no candidate could
+        // be served the stage is a typed unavailable, not an empty `ran`.
         code: if !include_code {
             ContextStageV1::NotRequested
-        } else if !projection.code_blocks.is_empty() {
-            ContextStageV1::ran(
-                max_code_blocks,
-                projection.code_blocks.len(),
-                search_matches.len() > max_code_blocks,
-            )
-        } else if projection.selected.is_empty() && search_matches.is_empty() {
-            ContextStageV1::Skipped
         } else {
-            ContextStageV1::ran(
-                max_code_blocks,
-                projection.code_blocks.len(),
-                search_matches.len() > max_code_blocks,
-            )
+            let code_eligible = search_hydration
+                .as_ref()
+                .map_or(projection.selected.len(), |hydrated| hydrated.code_sites);
+            if projection.code_blocks.is_empty() {
+                if code_eligible == 0 {
+                    ContextStageV1::Skipped
+                } else {
+                    ContextStageV1::Unavailable
+                }
+            } else {
+                ContextStageV1::ran(
+                    max_code_blocks,
+                    projection.code_blocks.len(),
+                    code_eligible > projection.code_blocks.len(),
+                )
+            }
         },
         memory: ContextStageV1::NotRequested,
     };
@@ -930,22 +979,48 @@ mod tests {
     }
 
     #[test]
-    fn first_identifier_line_uses_word_boundaries() {
-        let source = "spread\nfn read() {}\n";
-        assert_eq!(first_identifier_line(source, "read"), Some(2));
-        assert_eq!(first_identifier_line(source, "spread"), Some(1));
-        assert_eq!(first_identifier_line(source, "missing"), None);
-        assert_eq!(first_identifier_line(source, ""), None);
+    fn artifact_window_site_maps_the_attested_bytes_to_lines() {
+        let source = "// noise before the declaration\nfn caller() { widget(); }\nfn widget() -> u32 { 7 }\n";
+        let admitted = "fn widget() -> u32 { 7 }";
+        let start = source.find(admitted).expect("window offset");
+        let span = tracedecay_domain::SourceSpan {
+            start_byte: u64::try_from(start).expect("span start"),
+            end_byte: u64::try_from(start + admitted.len()).expect("span end"),
+        };
+        let text =
+            tracedecay_domain::BoundedSanitizedText::new(admitted).expect("bounded sanitized text");
+
+        let Some((start_line, end_line, code)) = artifact_window_site(source, &span, &text) else {
+            panic!("attested window should serve");
+        };
+
+        assert_eq!(start_line, 2);
+        assert_eq!(end_line, 2);
+        assert_eq!(code, admitted);
     }
 
     #[test]
-    fn identifier_window_keeps_the_indented_body() {
-        let source = "pub fn invoice_total(cents: u32) -> u32 {\n    cents\n}\n";
-        let Some((start, end, code)) = identifier_window(source, "invoice_total") else {
-            panic!("invoice_total should hydrate");
+    fn artifact_window_site_refuses_drifted_or_unbounded_ranges() {
+        let source = "fn widget() {}\n";
+        let text = tracedecay_domain::BoundedSanitizedText::new("fn widget() {}")
+            .expect("bounded sanitized text");
+
+        let drifted = tracedecay_domain::SourceSpan {
+            start_byte: 0,
+            end_byte: 4,
         };
-        assert_eq!(start, 1);
-        assert_eq!(end, 3);
-        assert_eq!(code, source.trim_end());
+        assert_eq!(artifact_window_site(source, &drifted, &text), None);
+
+        let out_of_bounds = tracedecay_domain::SourceSpan {
+            start_byte: 0,
+            end_byte: u64::MAX,
+        };
+        assert_eq!(artifact_window_site(source, &out_of_bounds, &text), None);
+
+        let empty = tracedecay_domain::SourceSpan {
+            start_byte: 3,
+            end_byte: 3,
+        };
+        assert_eq!(artifact_window_site(source, &empty, &text), None);
     }
 }
