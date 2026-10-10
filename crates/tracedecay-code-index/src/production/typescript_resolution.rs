@@ -1062,13 +1062,32 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
         match tokens[index] {
             // `babel … --help` / `--version` print instead of compiling; no
             // output is produced and no mapping is declared.
-            "--help" | "-h" | "--version" | "-V" => return None,
+            // `--no-code` emits nothing; like `--help` no mapping exists.
+            "--help" | "-h" | "--version" | "-V" | "--no-code" => return None,
             "-d" | "--out-dir" => {
                 if output.is_some() {
                     return None;
                 }
                 index += 1;
                 output = tokens.get(index).copied();
+            }
+            // `--source-maps` and `--compact` take an *optional* value from
+            // a fixed set; anything else is a positional, not the mode.
+            "--source-maps" => {
+                if tokens
+                    .get(index + 1)
+                    .is_some_and(|value| matches!(*value, "true" | "false" | "inline" | "both"))
+                {
+                    index += 1;
+                }
+            }
+            "--compact" => {
+                if tokens
+                    .get(index + 1)
+                    .is_some_and(|value| matches!(*value, "auto" | "true" | "false"))
+                {
+                    index += 1;
+                }
             }
             "--presets"
             | "--plugins"
@@ -1082,9 +1101,7 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
             | "--source-map-target"
             | "--source-file-name"
             | "--source-root"
-            | "--out-file-extension"
             | "--root"
-            | "--compact"
             | "--filename" => {
                 index += 1;
                 if !tokens
@@ -1094,18 +1111,19 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
                     return None;
                 }
             }
+            // `--out-file`/`-o` writes one file and `--out-file-extension`
+            // renames emitted paths; neither fits the directory mapping.
             "--copy-files"
             | "--copy-ignored"
             | "--no-copy-ignored"
             | "--no-babelrc"
             | "--verbose"
             | "--quiet"
-            | "--source-maps"
             | "--watch"
             | "--delete-dir-on-start"
             | "--skip-initial-build"
             | "--minified"
-            | "--no-code" => {}
+            | "--no-compact" => {}
             flag if flag.starts_with('-') => return None,
             token if source.is_none() => source = Some(token),
             _ => return None,
@@ -1355,6 +1373,10 @@ mod tests {
             babel_src_to_out("babel src -d dist --source-maps --source-root ."),
             Some(("src".to_owned(), "dist".to_owned()))
         );
+        assert_eq!(
+            babel_src_to_out("babel src --source-maps inline -d dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
     }
 
     #[test]
@@ -1370,6 +1392,11 @@ mod tests {
             "babel --presets --copy-files src -d dist",
             "babel src -d first -d second",
             "babel src -d --copy-files",
+            "babel --source-maps inline -d dist",
+            "babel src -d dist --no-code",
+            "babel src -d dist --out-file-extension .mjs",
+            "babel src -o bundle.js",
+            "babel --compact auto -d dist",
         ] {
             assert_eq!(babel_src_to_out(script), None, "script: {script}");
         }
