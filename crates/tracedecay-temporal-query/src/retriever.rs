@@ -161,6 +161,7 @@ impl TemporalCandidateExport {
                     logical_copy_cluster_id: None,
                     logical_copy_evidence_anchor: None,
                     evidence_role: temporal_evidence_role(ranked.evidence_role.as_deref()),
+                    source_role: Default::default(),
                     retriever: RetrieverKind::Temporal,
                     retriever_revision: retriever_revision.clone(),
                     score_domain: score_domain.clone(),

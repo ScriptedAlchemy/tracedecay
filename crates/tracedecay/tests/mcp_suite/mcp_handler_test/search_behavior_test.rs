@@ -444,3 +444,113 @@ async fn search_names_every_ranked_symbol_including_graph_reached_callees() {
 
     fixture.harness.shutdown().await;
 }
+
+#[tokio::test]
+async fn search_ranks_the_production_definition_ahead_of_the_test_reference() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).expect("production sources");
+        fs::create_dir_all(project.join("tests")).expect("test sources");
+        fs::write(
+            project.join("src/lib.rs"),
+            "pub fn ensure_daemon_running() -> i32 {\n    7\n}\n",
+        )
+        .expect("write production definition");
+        fs::write(
+            project.join("src/caller.rs"),
+            concat!(
+                "pub fn tick() -> i32 {\n",
+                "    ensure_daemon_running();\n",
+                "    ensure_daemon_running();\n",
+                "    ensure_daemon_running();\n",
+                "    0\n",
+                "}\n",
+            ),
+        )
+        .expect("write production body reference");
+        fs::write(
+            project.join("tests/ensure_daemon.rs"),
+            concat!(
+                "#[test]\nfn ensure_daemon_running() {\n",
+                "    let _ = ensure_daemon_running;\n",
+                "    let _ = ensure_daemon_running;\n",
+                "    let _ = ensure_daemon_running;\n",
+                "    let _ = ensure_daemon_running;\n",
+                "    assert_eq!(7, 7);\n",
+                "}\n",
+            ),
+        )
+        .expect("write stronger test reference");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production search server");
+    warm_code_index_search(&server, "ensure_daemon_running").await;
+
+    let response = handle_real_server_tool_call(
+        &server,
+        "tracedecay_search",
+        json!({
+            "query": "ensure_daemon_running",
+            "limit": 5,
+            "prefer_symbol": true,
+            "format": "json",
+        }),
+    )
+    .await;
+    let page: Value = serde_json::from_str(extract_real_server_text(&response)).expect("JSON");
+    let paths: Vec<&str> = page["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("search payload has no results: {page}"))
+        .iter()
+        .map(|row| {
+            row["display"]["path"]
+                .as_str()
+                .unwrap_or_else(|| panic!("search row missing path: {row}"))
+        })
+        .collect();
+    assert_eq!(
+        paths.first().copied(),
+        Some("src/lib.rs"),
+        "production definition must outrank the test reference and production body reference: {page}"
+    );
+    assert_eq!(
+        page["results"][0]["display"]["name"], "ensure_daemon_running",
+        "first hit must be the definition, not a caller: {page}"
+    );
+    assert!(
+        paths.contains(&"tests/ensure_daemon.rs"),
+        "the same-named test reference must still appear: {page}"
+    );
+
+    let capped = handle_real_server_tool_call(
+        &server,
+        "tracedecay_search",
+        json!({
+            "query": "ensure_daemon_running",
+            "limit": 1,
+            "prefer_symbol": true,
+            "format": "json",
+        }),
+    )
+    .await;
+    let capped_page: Value = serde_json::from_str(extract_real_server_text(&capped)).expect("JSON");
+    let capped_paths: Vec<&str> = capped_page["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("capped search payload has no results: {capped_page}"))
+        .iter()
+        .map(|row| {
+            row["display"]["path"]
+                .as_str()
+                .unwrap_or_else(|| panic!("capped search row missing path: {row}"))
+        })
+        .collect();
+    assert_eq!(
+        capped_paths,
+        vec!["src/lib.rs"],
+        "a one-result cap must keep the production definition: {capped_page}"
+    );
+
+    fixture.harness.shutdown().await;
+}

@@ -27,6 +27,7 @@ pub mod ports;
 pub mod prepared_query;
 pub mod query_authority;
 pub mod request;
+mod source_tier;
 mod stage_counters;
 pub mod task_session;
 

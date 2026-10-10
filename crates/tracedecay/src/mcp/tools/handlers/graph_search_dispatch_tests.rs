@@ -34,6 +34,7 @@ fn completed_sparse_search_for_generation(
             .expect("sparse lexical candidate logical evidence"),
             occurrences: Vec::new(),
             exact_class: ExactClass::Approximate,
+            source_role: Default::default(),
             utility_micros: 1,
             contributions: Vec::new(),
             freshness: Vec::new(),

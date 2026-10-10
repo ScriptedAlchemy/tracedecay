@@ -818,6 +818,7 @@ fn lexical_lane_candidate(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: Default::default(),
         retriever,
         retriever_revision,
         score_domain,
