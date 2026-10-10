@@ -375,8 +375,9 @@ fn daemon_first_init_enrolls_a_clean_profile_from_a_linked_worktree() {
     );
     let init_stderr = String::from_utf8_lossy(&initialized.stderr);
     assert!(
-        init_stderr.contains("daemon code-index reconciliation requested"),
-        "successful init must request the daemon-owned scheduler: {init_stderr}"
+        init_stderr.contains("first generation not ready")
+            && init_stderr.contains("code_index_reconciliation_requested"),
+        "successful init must return a typed not-ready receipt: {init_stderr}"
     );
 
     let linked_arg = linked.to_string_lossy().into_owned();

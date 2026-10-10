@@ -174,6 +174,13 @@ fn init_accepts_short_and_long_path_flag_like_dashboard_does() {
             Err(error) => error,
         };
     assert_eq!(conflict.kind(), ErrorKind::ArgumentConflict);
+
+    let wait =
+        Cli::try_parse_from(["tracedecay", "init", "--wait"]).expect("init --wait should parse");
+    assert!(matches!(
+        wait.command,
+        Some(Commands::Init { wait: true, .. })
+    ));
 }
 
 #[test]
