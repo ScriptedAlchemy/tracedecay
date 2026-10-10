@@ -181,13 +181,15 @@ async fn an_idle_worktree_gives_back_its_decode_and_search_still_answers_fresh()
     wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
     // Park drops the publish-time seat. A complete read is what renews it.
     assert!(registry.request_complete_generation(fixture.path()).await);
-    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
-    let generation = seated
-        .generation()
-        .manifest()
-        .generation_id
-        .as_str()
-        .to_owned();
+    let generation = {
+        let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+        seated
+            .generation()
+            .manifest()
+            .generation_id
+            .as_str()
+            .to_owned()
+    };
     let fresh = registry
         .execute_query_search(&scope, core_search_request("main"))
         .await
