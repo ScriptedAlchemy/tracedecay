@@ -3810,6 +3810,37 @@ async fn daemon_reopens_retained_receipts_without_reset() {
     }
 }
 
+#[test]
+fn daemon_status_exits_nonzero_for_a_stopped_daemon_without_starting_it() {
+    let home = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let output = tracedecay_command_with_home(&home_path)
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(stdout.starts_with("state: stopped\n"), "{stdout}");
+    let profile = tracedecay_runtime_core::config::ProfileRoot::new(&home_path);
+    let socket = tracedecay_daemon_control::default_socket_path(profile.data_dir()).unwrap();
+    assert!(!socket.exists(), "status must stay passive");
+}
+
+#[test]
+fn daemon_status_exits_successfully_for_a_ready_foreground_daemon() {
+    let home = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let output = tracedecay_command_with_home(&home_path)
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.starts_with("state: running\n"), "{stdout}");
+    assert!(stdout.contains("protocol: Ready"), "{stdout}");
+}
+
 /// A shell that cannot reach the systemd user manager still reads the serving
 /// daemon's own state as the headline; the manager is a separate line.
 #[cfg(target_os = "linux")]

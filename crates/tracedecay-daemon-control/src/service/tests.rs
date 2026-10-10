@@ -1050,6 +1050,8 @@ fn daemon_status_reports_the_initialize_proof_not_only_the_socket() {
     );
     let status = super::service_status(&profile, &socket, env!("CARGO_PKG_VERSION"));
     server.join().expect("join status server");
+    assert!(status.is_ready());
+    let status = status.to_string();
     assert!(
         status.contains("protocol: Ready"),
         "daemon status must print the initialize proof, got:\n{status}"
@@ -1057,6 +1059,42 @@ fn daemon_status_reports_the_initialize_proof_not_only_the_socket() {
     assert!(
         status.contains("(connectable)"),
         "the same probe may also report the socket, got:\n{status}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_status_is_not_ready_when_no_daemon_is_listening() {
+    let profile_dir = TempDir::new().expect("profile temp dir");
+    let profile = ProfileRoot::new(profile_dir.path());
+    let socket = profile_dir.path().join("missing.sock");
+    let status = super::service_status(&profile, &socket, env!("CARGO_PKG_VERSION"));
+    assert!(!status.is_ready());
+    assert!(status.to_string().starts_with("state: stopped\n"));
+    assert!(!socket.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_status_is_not_ready_when_the_serving_build_is_different() {
+    let profile_dir = TempDir::new().expect("profile temp dir");
+    let profile = ProfileRoot::new(profile_dir.path());
+    let socket = profile_dir.path().join("status.sock");
+    let authority = seed_socket_authority(&socket);
+    let listener = UnixListener::bind(&socket).expect("bind status socket");
+    let server = serve_probe_response(
+        listener,
+        "tracedecay",
+        "different-build",
+        authority.auth_token().to_owned(),
+    );
+    let status = super::service_status(&profile, &socket, env!("CARGO_PKG_VERSION"));
+    server.join().expect("join status server");
+    assert!(!status.is_ready());
+    assert!(
+        status
+            .to_string()
+            .starts_with("state: running a different build\n")
     );
 }
 
