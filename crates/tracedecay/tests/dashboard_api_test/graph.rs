@@ -887,6 +887,46 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
                 .is_some_and(|rows| rows.iter().any(|row| row["id"] == "n-dashboard")),
             "search should include the exact dashboard symbol"
         );
+        let bound_project = search["scope"]["project_id"]
+            .as_str()
+            .expect("bound search must name its launch project")
+            .to_owned();
+
+        let (status, empty) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/search?q=connectGateway_absent_from_this_project&limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{empty}");
+        assert_eq!(
+            empty["domain_state"], "complete_zero_findings",
+            "a bound-project miss must say it is empty, not look like a ready hit list: {empty}"
+        );
+        assert_eq!(empty["payload"]["total"], 0, "{empty}");
+        assert_eq!(empty["payload"]["results"], serde_json::json!([]), "{empty}");
+        assert_eq!(empty["scope"]["project_id"], bound_project);
+
+        let (status, wrong) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/search?q=dashboard&project_id=proj_other_enrolled_repo&limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{wrong}");
+        assert_eq!(wrong["domain_state"], "unknown", "{wrong}");
+        assert_eq!(wrong["payload"], serde_json::Value::Null, "{wrong}");
+        let reasons = wrong["coverage"]["omission_reasons"]
+            .as_array()
+            .expect("wrong-project search must carry omission reasons");
+        assert!(
+            reasons.iter().any(|reason| reason
+                .as_str()
+                .is_some_and(|text| text.starts_with("wrong_project") && text.contains("--path"))),
+            "wrong-project search must be typed and name --path: {wrong}"
+        );
 
         let (status, node) = get_json(
             &agent,

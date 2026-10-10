@@ -635,6 +635,35 @@ fn dashboard_started_while_the_project_opens_mounts_sessions_on_publication() {
     }
 }
 
+/// `tracedecay dashboard` from the user home must name `--path` instead of
+/// stopping at the ambient-root diagnosis. The README launch example is this
+/// command, and operators cannot guess the flag from the inner config error.
+#[test]
+fn dashboard_from_home_tells_the_operator_to_pass_path() {
+    let home = TempDir::new().unwrap();
+    let mut command = tracedecay_command_without_daemon(home.path(), home.path());
+    command.args(["dashboard", "--host", "127.0.0.1", "--port", "0"]);
+    let output = run_with_timeout(command, cli_timeout());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "dashboard from $HOME must refuse\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("ambient user/filesystem root"),
+        "dashboard from $HOME must keep the ambient-root diagnosis\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--path"),
+        "dashboard from $HOME must tell the operator to pass --path\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("tracedecay dashboard listening on"),
+        "an ambient-root refusal must not start a listener\nstdout:\n{stdout}"
+    );
+}
+
 fn refresh_json(output: &Output, step: &str) -> serde_json::Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

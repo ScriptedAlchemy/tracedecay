@@ -122,7 +122,7 @@ tracedecay tool files               # indexed files
 tracedecay tool affected --args -   # impacted tests/files ({"files":[...]})
 tracedecay serve                    # MCP server
 tracedecay doctor                   # read-only installation health check
-tracedecay dashboard [--path PATH] [--open]  # dashboard for one project
+tracedecay dashboard [--path PATH] [--open]  # dashboard for one launch project
 tracedecay monitor                  # live MCP savings/cost TUI
 tracedecay update                   # refresh binary, plugins, daemon
 tracedecay upgrade                  # self-upgrade current channel
@@ -174,13 +174,13 @@ tracedecay dashboard --path /path/to/enrolled/repo --port 8080
 tracedecay dashboard --path /path/to/enrolled/repo --port 0 --open
 ```
 
-The dashboard serves the project selected by `--path`, or the current project
-when that flag is omitted. Pass `--path` when launching from your home directory.
-Its project graph API reports that bound scope; a search query does not select
-a different enrolled repository. Start a dashboard for that repository to query
-its graph.
-
-The dashboard includes graph exploration, project memory, LCM session search, token savings, and cost views. See [docs/dashboard.md](docs/dashboard.md).
+The dashboard binds to one launch project: `--path`, or the current directory.
+Launching from `$HOME` or another ambient root refuses and tells you to pass
+`--path`. Code search covers only that bound project; asking about another
+enrolled repo returns a typed `wrong_project` or `empty_scope` state instead of
+a successful empty hit list. The dashboard includes graph exploration, project
+memory, LCM session search, token savings, and cost views. See
+[docs/dashboard.md](docs/dashboard.md).
 
 ## Privacy
 

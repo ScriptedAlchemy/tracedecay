@@ -240,6 +240,10 @@ fn daemon_project_route_rejects_the_user_profile_root() {
         .expect_err("ambient home route must fail before project open");
 
     assert!(error.to_string().contains("ambient user/filesystem root"));
+    assert!(
+        error.to_string().contains("--path"),
+        "ambient home refusal must tell the operator to pass --path: {error}"
+    );
 }
 
 /// The route names the real directory the way the operator spells it: `..`

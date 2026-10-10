@@ -348,3 +348,42 @@ fn project_scoped_gateway_reports_registry_read_failures_as_unavailable() {
         assert_eq!(gateway["payload"]["status"], "registry_unavailable");
     });
 }
+
+#[test]
+fn project_scoped_graph_search_refuses_a_non_launch_project() {
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_without_memory().await;
+        let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
+        let (_target_root, target_cg) = setup_target_project(&fixture).await;
+        let target_project_id = project_id(&target_cg);
+        drop(target_cg);
+
+        let (status, search) = get_json(
+            &agent,
+            &format!(
+                "{}/api/projects/{target_project_id}/plugins/graph/search?q=connectGateway&limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{search}");
+        assert_eq!(
+            search["domain_state"], "unknown",
+            "a dashboard bound to another project must not return a successful empty search: {search}"
+        );
+        assert_eq!(search["payload"], serde_json::Value::Null, "{search}");
+        let reasons = search["coverage"]["omission_reasons"]
+            .as_array()
+            .expect("wrong-project search must carry omission reasons");
+        assert!(
+            reasons.iter().any(|reason| {
+                reason.as_str().is_some_and(|text| {
+                    text.starts_with("wrong_project")
+                        && text.contains(&target_project_id)
+                        && text.contains("--path")
+                })
+            }),
+            "scoped graph search must name wrong_project, the requested id, and --path: {search}"
+        );
+    });
+}

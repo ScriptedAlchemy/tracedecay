@@ -1,12 +1,14 @@
 import { useEffect } from 'react';
 import { Command, Moon, Sun, X } from 'lucide-react';
 import {
+  projectRegistryPayload,
   registryAnnotation,
   registryReading,
   useProjectEntry,
+  useProjectRegistry,
 } from '../../data/query/projectRegistry.ts';
 import { cn } from '../../ui/cn';
-import { useScope } from '../../data/scope/store.ts';
+import { launchBindingCaption, useScope } from '../../data/scope/store.ts';
 import { channelNumber, type Channel } from '../channels.ts';
 
 function toggleTheme() {
@@ -38,6 +40,9 @@ export function ScopeBar({
   const scope = useScope((s) => s.scope);
   const selectAllProjects = useScope((s) => s.selectAllProjects);
   const reconcileScope = useScope((s) => s.reconcileScope);
+  const registry = useProjectRegistry();
+  const listing = projectRegistryPayload(registry.data);
+  const bindingCaption = scope.kind === 'all' ? launchBindingCaption(listing) : null;
   // The bounded registry read: one project by id, rather than a search through
   // a truncated listing that cannot distinguish "not registered" from "past the
   // end of the page". Its key is rooted at the registry prefix the daemon's
@@ -113,9 +118,27 @@ export function ScopeBar({
             </span>
           </button>
         ) : (
-          <span className="flex min-w-0 shrink-0 items-baseline gap-1.5 border-r border-edge-subtle px-3 py-2">
-            <span className="text-base text-text-secondary">Project:</span>
-            <span className="text-base text-alert">all</span>
+          <span className="flex min-w-0 shrink-0 flex-col justify-center gap-1 border-r border-edge-subtle px-3 py-2">
+            <span className="flex min-w-0 items-baseline gap-1.5">
+              <span className="text-base text-text-secondary">Project:</span>
+              <span className="text-base text-alert">all</span>
+            </span>
+            {bindingCaption ? (
+              <span className="td-legend truncate" data-launch-binding>
+                {bindingCaption}
+              </span>
+            ) : null}
+            {listing?.active_project_id ? (
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="td-legend">Bound ID</span>
+                <span
+                  className="td-value truncate text-xs text-text-secondary"
+                  data-launch-binding-id
+                >
+                  {listing.active_project_id}
+                </span>
+              </span>
+            ) : null}
           </span>
         )}
         {channel ? (

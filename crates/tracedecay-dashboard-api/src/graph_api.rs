@@ -20,6 +20,10 @@ use crate::graph::CodeGraphReadError;
 pub struct SearchParams {
     #[serde(default)]
     q: String,
+    /// Explicit project selector. Omitted means "search the launch project".
+    /// A different id fails closed as `wrong_project` instead of returning
+    /// that project's empty hit list from this listener.
+    project_id: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
@@ -72,13 +76,25 @@ pub async fn search(
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSearchPayloadV1>>> {
     tracing::Instrument::instrument(
         async move {
+            if let Some(refusal) = crate::graph_binding::refuse_graph_search_scope(
+                state.project_id.as_deref(),
+                params.project_id.as_deref(),
+            ) {
+                return Json(graph_search_scope_envelope(&state, refusal));
+            }
             let limit = coerce_limit(params.limit, 50, 200);
             let offset = params.offset.unwrap_or(0).max(0);
-            graph_response(
-                &state,
-                graph_service::search_payload(&state, &control, params.q.trim(), limit, offset)
-                    .await,
-            )
+            match graph_service::search_payload(&state, &control, params.q.trim(), limit, offset)
+                .await
+            {
+                Ok(read) if read.payload.is_complete_zero_in_bound_project() => {
+                    graph_search_complete_zero(&state, read)
+                }
+                Ok(read) => {
+                    graph_ready(&state, Some(read.payload), read.generation, read.freshness)
+                }
+                Err(error) => graph_read_failed(&state, error),
+            }
         },
         tracing::trace_span!("dashboard_api.graph.search"),
     )
@@ -202,6 +218,26 @@ pub async fn path(
         tracing::trace_span!("dashboard_api.graph.path"),
     )
     .await
+}
+
+pub(super) fn graph_search_scope_envelope<T>(
+    state: &DashboardState,
+    refusal: crate::graph_binding::GraphSearchScopeRefusal,
+) -> DashboardEnvelopeV1<Option<T>> {
+    DashboardEnvelopeV1::unavailable(scope_from_state(state), None, refusal.omission_reason())
+}
+
+fn graph_search_complete_zero(
+    state: &DashboardState,
+    read: graph_service::GraphServiceReadV1<graph_service::GraphSearchPayloadV1>,
+) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSearchPayloadV1>>> {
+    let mut envelope = DashboardEnvelopeV1::complete_zero_findings(
+        scope_from_state(state),
+        DashboardCoverageV1::complete(0, "symbols"),
+        Some(read.payload),
+    );
+    envelope.freshness = graph_service::graph_envelope_freshness(read.freshness);
+    Json(envelope.with_version(graph_version(read.generation)))
 }
 
 fn graph_response<T>(
