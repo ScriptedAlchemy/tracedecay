@@ -420,12 +420,6 @@ fn recv_while_working<T>(
     }
 }
 
-#[cfg(test)]
-static STALL_ENCODE: AtomicBool = AtomicBool::new(false);
-
-#[cfg(test)]
-static ENCODE_IS_STALLED: AtomicBool = AtomicBool::new(false);
-
 fn encode_proof_chunk(
     store: &dyn GraphStore,
     chunk: ProofChunk<'_>,
@@ -439,15 +433,6 @@ fn encode_proof_chunk(
             Ok(())
         }
     };
-    #[cfg(test)]
-    {
-        while STALL_ENCODE.load(Ordering::Acquire) {
-            ENCODE_IS_STALLED.store(true, Ordering::Release);
-            worker_check()?;
-            std::thread::sleep(WORKER_RECV_PARK);
-        }
-        ENCODE_IS_STALLED.store(false, Ordering::Release);
-    }
     let mut canonical = CheckedVecWriter::new(&worker_check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
     match chunk {
         ProofChunk::Entities(rows) => {
@@ -562,7 +547,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::sync_channel;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::{recovered_generation_digest_chunked, recovered_generation_digest_from_database};
     use crate::{
@@ -906,21 +891,6 @@ mod tests {
         );
     }
 
-    struct StallEncodeGuard;
-
-    impl Drop for StallEncodeGuard {
-        fn drop(&mut self) {
-            super::STALL_ENCODE.store(false, Ordering::Release);
-            super::ENCODE_IS_STALLED.store(false, Ordering::Release);
-        }
-    }
-
-    fn stall_encodes() -> StallEncodeGuard {
-        super::ENCODE_IS_STALLED.store(false, Ordering::Release);
-        super::STALL_ENCODE.store(true, Ordering::Release);
-        StallEncodeGuard
-    }
-
     /// A one-worker caller must run its own queued send (no deadlock). A
     /// two-worker caller whose local deque is empty while the other worker
     /// owns the send must park on the bounded receive, not spin: rayon-core
@@ -1002,50 +972,57 @@ mod tests {
     }
 
     /// `check` must fire while the oldest encode has not produced a result,
-    /// so a spent deadline can raise abort without waiting for that chunk.
+    /// so a spent deadline can abort without waiting for that chunk.
     #[test]
-    fn parallel_digest_cancels_while_oldest_encode_is_outstanding() {
-        let (_owner, database, manifest) = staged_database();
-        let identity = manifest.identity();
-        let guard = database.read_guard().unwrap();
-        let native = guard.as_ref().unwrap();
-        let _stall = stall_encodes();
-        let drain_polls = AtomicUsize::new(0);
-        let first_stall = std::sync::Mutex::new(None::<Instant>);
-
+    fn recv_while_working_cancels_before_the_oldest_result_arrives() {
+        let started = Arc::new(AtomicBool::new(false));
+        let drain_polls = Arc::new(AtomicUsize::new(0));
+        let (sender, receiver) = sync_channel(1);
+        let receiver = Arc::new(std::sync::Mutex::new(Some(receiver)));
         let cancelled = rayon::ThreadPoolBuilder::new()
             .num_threads(2)
             .build()
             .expect("two-worker rayon pool")
-            .install(|| {
-                recovered_generation_digest_chunked(
-                    native,
-                    &identity,
-                    &|| {
-                        if !super::ENCODE_IS_STALLED.load(Ordering::Acquire) {
-                            return Ok(());
+            .broadcast({
+                let started = Arc::clone(&started);
+                let drain_polls = Arc::clone(&drain_polls);
+                let receiver = Arc::clone(&receiver);
+                move |ctx| {
+                    if ctx.index() == 0 {
+                        let receiver = receiver
+                            .lock()
+                            .expect("receiver lock")
+                            .take()
+                            .expect("single waiter");
+                        while !started.load(Ordering::Acquire) {
+                            std::thread::yield_now();
                         }
-                        let mut first = first_stall.lock().expect("stall window");
-                        let started = *first.get_or_insert_with(Instant::now);
-                        drain_polls.fetch_add(1, Ordering::Relaxed);
-                        if started.elapsed() >= Duration::from_millis(32) {
-                            Err(GraphDbError::Cancelled)
-                        } else {
-                            Ok(())
-                        }
-                    },
-                    16,
-                )
+                        super::recv_while_working(&receiver, &|| {
+                            let polls = drain_polls.fetch_add(1, Ordering::Relaxed) + 1;
+                            if polls >= 8 {
+                                Err(GraphDbError::Cancelled)
+                            } else {
+                                Ok(())
+                            }
+                        })
+                    } else {
+                        started.store(true, Ordering::Release);
+                        std::thread::sleep(Duration::from_millis(80));
+                        let _ = sender.send(29_u32);
+                        Ok(29_u32)
+                    }
+                }
             });
-
         assert!(
-            matches!(cancelled, Err(GraphDbError::Cancelled)),
+            cancelled
+                .iter()
+                .any(|result| matches!(result, Err(GraphDbError::Cancelled))),
             "{cancelled:?}"
         );
         let polls = drain_polls.load(Ordering::Relaxed);
         assert!(
             (8..=200).contains(&polls),
-            "empty-channel drain must poll check on a bounded park: {polls}"
+            "empty-channel cancel must observe check before the send: {polls}"
         );
     }
 }
