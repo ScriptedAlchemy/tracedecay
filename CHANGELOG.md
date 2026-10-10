@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.80](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.79...v1.0.0-beta.80) (2026-10-10)
+
+
+### Bug Fixes
+
+* **http:** retain socket deadlines across interruptions ([#3346](https://github.com/ScriptedAlchemy/tracedecay/issues/3346)) ([cc93661](https://github.com/ScriptedAlchemy/tracedecay/commit/cc936612d21ecf4ca05e905663efde6729f74637))
+* **index:** reject non-callable Rust struct targets ([#3345](https://github.com/ScriptedAlchemy/tracedecay/issues/3345)) ([c016bd0](https://github.com/ScriptedAlchemy/tracedecay/commit/c016bd0643297b3b2c616c450d02fd96d024f9f6))
+* **mcp:** carry cancellation into the files resource ([#3340](https://github.com/ScriptedAlchemy/tracedecay/issues/3340)) ([cb3745a](https://github.com/ScriptedAlchemy/tracedecay/commit/cb3745af24acadaf48ef99657b294492c6076501))
+* **search:** rank production definitions above test files ([#3335](https://github.com/ScriptedAlchemy/tracedecay/issues/3335)) ([701cd79](https://github.com/ScriptedAlchemy/tracedecay/commit/701cd79c27f1483ec490404c641fa20d821365bf))
+* **test:** resume interrupted socket waits in ureq agents ([#3344](https://github.com/ScriptedAlchemy/tracedecay/issues/3344)) ([eec4e3e](https://github.com/ScriptedAlchemy/tracedecay/commit/eec4e3e26e61a6b5a10ffc95d7ab9d1e1c1ffbf6))
+
 ## [1.0.0-beta.79](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.78...v1.0.0-beta.79) (2026-10-10)
 
 
