@@ -383,7 +383,13 @@ async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
     assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(1));
     assert_eq!(payload["search_matches"][0]["name"], "LexicalWidget");
     assert_eq!(payload["search_matches"][0]["file"], "src/lib.rs");
-    assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(0));
+    assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"][0]["name"], "LexicalWidget");
+    assert_eq!(payload["symbols"][0]["file"], "src/lib.rs");
+    assert_eq!(payload["symbols"][0]["kind"], "function");
+    assert_eq!(payload["symbols"][0]["start_line"], 1);
+    assert_eq!(payload["symbols"][0]["end_line"], 1);
+    assert_eq!(payload["code"].as_array().map(Vec::len), Some(0));
     assert_eq!(payload["coverage"]["exact"], "complete");
     assert_eq!(payload["coverage"]["lexical"], "complete");
     assert_eq!(
@@ -453,9 +459,80 @@ async fn tracedecay_context_waits_for_requested_code_graph_admission() {
     .expect("context JSON payload");
 
     assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"][0]["name"], "LexicalWidget");
+    assert_eq!(payload["symbols"][0]["file"], "src/lib.rs");
+    assert_eq!(payload["code"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["code"][0]["file"], "src/lib.rs");
+    assert_eq!(payload["code"][0]["code"], "pub fn LexicalWidget() {}");
     assert_eq!(
         payload["verified_graph_evidence"]["detail"],
         "the exact project code graph is unavailable: ready graph admission result"
+    );
+    cg.close();
+}
+
+#[tokio::test]
+async fn tracedecay_context_hydrates_search_matches_when_catalog_is_warming() {
+    let dir = TempDir::new().expect("warming catalog isolation");
+    let profile = SelectorProfile::new(dir.path());
+    let project = dir.path().join("context-warming-catalog");
+    fs::create_dir_all(project.join("src")).expect("create fixture sources");
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn LexicalWidget() {\n    let ready = true;\n    let _ = ready;\n}\n",
+    )
+    .expect("write warming catalog fixture");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.context-warming-catalog",
+    )
+    .await
+    .expect("registered warming catalog fixture");
+
+    let mut options = lexical_search_options(&cg);
+    options.verified_graph_query_port = None;
+    let result = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "explain LexicalWidget",
+            "include_code": true,
+            "include_memory": false,
+            "format": "json",
+        }),
+        options,
+    )
+    .await
+    .expect("warming catalog must hydrate from search matches");
+    let payload: Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("warming catalog JSON text"),
+    )
+    .expect("warming catalog JSON payload");
+
+    assert_eq!(payload["freshness"], json!({"state": "fresh"}));
+    assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"][0]["name"], "LexicalWidget");
+    assert_eq!(
+        payload["symbols"][0]["qualified_name"],
+        "crate::LexicalWidget"
+    );
+    assert_eq!(payload["symbols"][0]["file"], "src/lib.rs");
+    assert_eq!(payload["symbols"][0]["start_line"], 1);
+    assert_eq!(payload["symbols"][0]["end_line"], 4);
+    assert_eq!(payload["code"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        payload["code"][0]["code"],
+        "pub fn LexicalWidget() {\n    let ready = true;\n    let _ = ready;\n}"
+    );
+    assert_eq!(payload["retrieval"]["code"]["state"], "ran");
+    assert_eq!(
+        payload["verified_graph_evidence"]["reason_code"],
+        "verified-code-graph-read-unavailable"
     );
     cg.close();
 }

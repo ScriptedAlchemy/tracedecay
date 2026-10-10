@@ -12,13 +12,14 @@ use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1}
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextRelatedOmissionV1,
     ContextResultV1, ContextRetrievalPlanV1, ContextRetrievalRouteV1, ContextSearchMatchV1,
-    ContextStageV1, ContextSurfaceRequestV1, LexicalAnchorDropReasonV1,
+    ContextStageV1, ContextSurfaceRequestV1, LexicalAnchorDropReasonV1, PrimitiveSymbolLocationV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ExactClass, RankedCandidate, RelationEdgeKindV1, RetrieverKind};
 use tracedecay_query::retrieval::lexical::{preferred_symbol_tokens, task_is_name_shaped};
 
 use crate::McpToolContext;
+use crate::analysis::{is_ident_byte, line_number_at};
 #[cfg(test)]
 use crate::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
 use crate::handlers::dependency_hints;
@@ -276,6 +277,177 @@ fn extract_lines(source: &str, start_line: u32, end_line: u32) -> String {
     body
 }
 
+/// Bound for a filesystem window when the graph catalog cannot name a
+/// symbol's line span. The window starts at the identifier and keeps
+/// following blank or more-indented lines; it is not a language parse.
+const SEARCH_MATCH_CODE_WINDOW_LINES: usize = 40;
+
+struct SearchMatchHydration {
+    symbols: Vec<PrimitiveSymbolLocationV1>,
+    code_blocks: Vec<ContextCodeBlockV1>,
+    touched_files: Vec<String>,
+}
+
+fn leading_ws_len(line: &str) -> usize {
+    line.as_bytes()
+        .iter()
+        .take_while(|byte| byte.is_ascii_whitespace())
+        .count()
+}
+
+/// First 1-based line whose text contains `name` as an identifier token.
+fn first_identifier_line(source: &str, name: &str) -> Option<u32> {
+    if name.is_empty() {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    let needle = name.as_bytes();
+    let mut offset = 0;
+    while offset + needle.len() <= bytes.len() {
+        if bytes[offset..].starts_with(needle) {
+            let before = offset.checked_sub(1).and_then(|index| bytes.get(index));
+            let after = bytes.get(offset + needle.len());
+            if !before.copied().is_some_and(is_ident_byte)
+                && !after.copied().is_some_and(is_ident_byte)
+            {
+                return Some(line_number_at(source, offset));
+            }
+            offset += needle.len();
+        } else {
+            offset += 1;
+        }
+    }
+    None
+}
+
+fn identifier_window(source: &str, name: &str) -> Option<(u32, u32, String)> {
+    let start_line = first_identifier_line(source, name)?;
+    let start_idx = usize::try_from(start_line.saturating_sub(1)).ok()?;
+    let lines: Vec<&str> = source.lines().collect();
+    let start_text = *lines.get(start_idx)?;
+    let indent = leading_ws_len(start_text);
+    let mut end_idx = start_idx;
+    for (idx, line) in lines
+        .iter()
+        .enumerate()
+        .skip(start_idx.saturating_add(1))
+        .take(SEARCH_MATCH_CODE_WINDOW_LINES.saturating_sub(1))
+    {
+        if line.trim().is_empty() || leading_ws_len(line) > indent {
+            end_idx = idx;
+            continue;
+        }
+        break;
+    }
+    if let Some(closer) = lines.get(end_idx.saturating_add(1)) {
+        if matches!(closer.trim(), "}" | "};" | "}," | ")" | ");" | "]" | "],") {
+            end_idx = end_idx.saturating_add(1);
+        }
+    }
+    let end_line = u32::try_from(end_idx.saturating_add(1)).ok()?;
+    Some((
+        start_line,
+        end_line,
+        extract_lines(
+            source,
+            start_line.saturating_sub(1),
+            end_line.saturating_sub(1),
+        ),
+    ))
+}
+
+/// Symbols and code from search matches when the graph catalog cannot
+/// resolve them. Search already named the files; the filesystem supplies
+/// the line window. A missing file or identifier is a typed unavailable
+/// field, not an empty success.
+fn hydrate_context_from_search_matches(
+    ctx: &McpToolContext<'_>,
+    search_matches: &[ContextSearchMatchV1],
+    include_code: bool,
+    max_code_blocks: usize,
+) -> SearchMatchHydration {
+    let mut symbols = Vec::with_capacity(search_matches.len());
+    let mut code_blocks = Vec::new();
+    let mut source_by_path = HashMap::<String, Option<String>>::new();
+    let mut touched_files = Vec::new();
+    for search_match in search_matches {
+        if !touched_files.iter().any(|path| path == &search_match.file) {
+            touched_files.push(search_match.file.clone());
+        }
+        let source = match source_by_path.entry(search_match.file.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut().as_deref(),
+            std::collections::hash_map::Entry::Vacant(entry) => entry
+                .insert(
+                    tracedecay_runtime_core::sync::read_source_file(
+                        &ctx.project_root().join(&search_match.file),
+                    )
+                    .ok(),
+                )
+                .as_deref(),
+        };
+        let (start_line, end_line, unavailable_fields, window) = match source {
+            Some(source) if search_match.kind != "file" => {
+                match identifier_window(source, &search_match.name) {
+                    Some((start_line, end_line, code)) => (
+                        start_line,
+                        end_line,
+                        vec!["attrs_start_line".to_owned()],
+                        Some(code),
+                    ),
+                    None => (
+                        0,
+                        0,
+                        vec![
+                            "start_line".to_owned(),
+                            "end_line".to_owned(),
+                            "attrs_start_line".to_owned(),
+                        ],
+                        None,
+                    ),
+                }
+            }
+            Some(_) => (1, 1, vec!["attrs_start_line".to_owned()], None),
+            None => (
+                0,
+                0,
+                vec![
+                    "start_line".to_owned(),
+                    "end_line".to_owned(),
+                    "attrs_start_line".to_owned(),
+                ],
+                None,
+            ),
+        };
+        let node_id = search_match.anchor_id.clone();
+        symbols.push(PrimitiveSymbolLocationV1 {
+            node_id: node_id.clone(),
+            name: search_match.name.clone(),
+            qualified_name: search_match.qualified_name.clone(),
+            kind: search_match.kind.clone(),
+            file: search_match.file.clone(),
+            start_line,
+            end_line,
+            unavailable_fields,
+        });
+        if include_code && code_blocks.len() < max_code_blocks {
+            if let Some(code) = window {
+                code_blocks.push(ContextCodeBlockV1 {
+                    node_id,
+                    file: search_match.file.clone(),
+                    start_line,
+                    end_line,
+                    code,
+                });
+            }
+        }
+    }
+    SearchMatchHydration {
+        symbols,
+        code_blocks,
+        touched_files,
+    }
+}
+
 #[tracing::instrument(name = "mcp.graph.context.total", level = "trace", skip_all)]
 pub async fn compute_context<G, F>(
     ctx: &McpToolContext<'_>,
@@ -410,47 +582,67 @@ where
         Some(complete) => bind_verified_graph_to_search(graph, &complete.code_generation),
         None => graph,
     };
-    let (graph, projection, verified_graph_evidence, graph_stage) = match (graph, complete.as_ref())
-    {
-        (Ok(graph), Some(complete)) => {
-            let match_result = {
-                let _span = tracing::trace_span!("mcp.graph.context.graph").entered();
-                context_graph_projection(
-                    ctx,
-                    &graph,
-                    complete,
-                    scope_prefix,
-                    max_nodes,
-                    include_code,
-                    max_code_blocks,
-                )
-            };
-            match match_result {
-                Ok(projection) => {
-                    let stage = ContextStageV1::ran(max_nodes, projection.selected.len(), false);
-                    (Some(graph), projection, None, stage)
+    let (graph, mut projection, verified_graph_evidence, graph_stage) =
+        match (graph, complete.as_ref()) {
+            (Ok(graph), Some(complete)) => {
+                let match_result = {
+                    let _span = tracing::trace_span!("mcp.graph.context.graph").entered();
+                    context_graph_projection(
+                        ctx,
+                        &graph,
+                        complete,
+                        scope_prefix,
+                        max_nodes,
+                        include_code,
+                        max_code_blocks,
+                    )
+                };
+                match match_result {
+                    Ok(projection) => {
+                        let stage =
+                            ContextStageV1::ran(max_nodes, projection.selected.len(), false);
+                        (Some(graph), projection, None, stage)
+                    }
+                    Err(error) => (
+                        None,
+                        ContextGraphProjection::default(),
+                        Some(dependency_hints::unavailable_evidence(&error)),
+                        ContextStageV1::Unavailable,
+                    ),
                 }
-                Err(error) => (
-                    None,
-                    ContextGraphProjection::default(),
-                    Some(dependency_hints::unavailable_evidence(&error)),
-                    ContextStageV1::Unavailable,
-                ),
             }
+            (Ok(graph), None) => (
+                Some(graph),
+                ContextGraphProjection::default(),
+                None,
+                ContextStageV1::Skipped,
+            ),
+            (Err(error), _) => (
+                None,
+                ContextGraphProjection::default(),
+                Some(dependency_hints::unavailable_evidence(&error)),
+                ContextStageV1::Unavailable,
+            ),
+        };
+    // Search already ranked the sites. When the catalog is still warming,
+    // name lookup admits nothing; hydrate symbols and code from those
+    // matches instead of answering an empty success.
+    let search_hydration =
+        (projection.selected.is_empty() && !search_matches.is_empty()).then(|| {
+            hydrate_context_from_search_matches(ctx, &search_matches, include_code, max_code_blocks)
+        });
+    if let Some(hydrated) = search_hydration.as_ref() {
+        if include_code && projection.code_blocks.is_empty() {
+            projection.code_blocks.clone_from(&hydrated.code_blocks);
         }
-        (Ok(graph), None) => (
-            Some(graph),
-            ContextGraphProjection::default(),
-            None,
-            ContextStageV1::Skipped,
-        ),
-        (Err(error), _) => (
-            None,
-            ContextGraphProjection::default(),
-            Some(dependency_hints::unavailable_evidence(&error)),
-            ContextStageV1::Unavailable,
-        ),
-    };
+        projection.touched_files = unique_file_paths(
+            projection
+                .touched_files
+                .iter()
+                .map(String::as_str)
+                .chain(hydrated.touched_files.iter().map(String::as_str)),
+        );
+    }
     let retrieval = ContextRetrievalPlanV1 {
         search: match complete.as_ref() {
             Some(complete) => ContextStageV1::ran(
@@ -472,13 +664,19 @@ where
         },
         code: if !include_code {
             ContextStageV1::NotRequested
-        } else if projection.selected.is_empty() {
+        } else if !projection.code_blocks.is_empty() {
+            ContextStageV1::ran(
+                max_code_blocks,
+                projection.code_blocks.len(),
+                search_matches.len() > max_code_blocks,
+            )
+        } else if projection.selected.is_empty() && search_matches.is_empty() {
             ContextStageV1::Skipped
         } else {
             ContextStageV1::ran(
                 max_code_blocks,
                 projection.code_blocks.len(),
-                projection.selected.len() > max_code_blocks,
+                search_matches.len() > max_code_blocks,
             )
         },
         memory: ContextStageV1::NotRequested,
@@ -488,11 +686,15 @@ where
         graph_coverage: memory_graph_coverage,
         error: memory_matches_error,
     } = memory_outcome;
-    let symbols = projection
-        .selected
-        .iter()
-        .map(primitive_symbol_location)
-        .collect::<Result<Vec<_>>>()?;
+    let symbols = if let Some(hydrated) = search_hydration {
+        hydrated.symbols
+    } else {
+        projection
+            .selected
+            .iter()
+            .map(primitive_symbol_location)
+            .collect::<Result<Vec<_>>>()?
+    };
     let related_symbols = projection
         .related
         .iter()
@@ -725,5 +927,25 @@ mod tests {
         assert!(preview.contains("### Code"));
         assert!(preview.contains("### Test Coverage"));
         assert_eq!(preview.matches("lane truncated").count(), 1);
+    }
+
+    #[test]
+    fn first_identifier_line_uses_word_boundaries() {
+        let source = "spread\nfn read() {}\n";
+        assert_eq!(first_identifier_line(source, "read"), Some(2));
+        assert_eq!(first_identifier_line(source, "spread"), Some(1));
+        assert_eq!(first_identifier_line(source, "missing"), None);
+        assert_eq!(first_identifier_line(source, ""), None);
+    }
+
+    #[test]
+    fn identifier_window_keeps_the_indented_body() {
+        let source = "pub fn invoice_total(cents: u32) -> u32 {\n    cents\n}\n";
+        let Some((start, end, code)) = identifier_window(source, "invoice_total") else {
+            panic!("invoice_total should hydrate");
+        };
+        assert_eq!(start, 1);
+        assert_eq!(end, 3);
+        assert_eq!(code, source.trim_end());
     }
 }
