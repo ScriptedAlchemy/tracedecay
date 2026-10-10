@@ -630,3 +630,34 @@ fn workflow_journals_are_not_claude_session_transcripts() {
         .paths;
     assert_eq!(discovered, vec![session]);
 }
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_claude_transcripts_are_still_session_files() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let projects = root.path().join(".claude/projects/-slug");
+    std::fs::create_dir_all(&projects).unwrap();
+    let session = projects.join("sess-real.jsonl");
+    let agent = projects.join(OsString::from_vec(b"agent-\xff.jsonl".to_vec()));
+    let journal = projects.join("journal.jsonl");
+    std::fs::write(&session, "{\"type\":\"user\"}\n").unwrap();
+    std::fs::write(&agent, "{\"type\":\"assistant\"}\n").unwrap();
+    std::fs::write(&journal, "{\"type\":\"started\",\"agentId\":\"a1\"}\n").unwrap();
+
+    assert!(super::is_claude_session_transcript(&session));
+    assert!(super::is_claude_session_transcript(&agent));
+    assert!(!super::is_claude_session_transcript(&journal));
+    assert!(identify_claude_source(&agent).is_some());
+    assert!(identify_claude_source(&journal).is_none());
+
+    let mut discovered = ClaudeSource::with_home(root.path())
+        .discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
+        .paths;
+    discovered.sort();
+    let mut expected = vec![agent, session];
+    expected.sort();
+    assert_eq!(discovered, expected);
+}

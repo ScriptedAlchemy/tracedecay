@@ -223,7 +223,6 @@ impl ClaudeSource {
 /// from real `{session}.jsonl` / `agent-*.jsonl` files.
 pub fn is_claude_session_transcript(path: &Path) -> bool {
     path.file_name()
-        .and_then(|name| name.to_str())
         .is_some_and(|name| !name.eq_ignore_ascii_case("journal.jsonl"))
 }
 
