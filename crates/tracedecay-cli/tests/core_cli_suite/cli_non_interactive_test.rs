@@ -8,6 +8,7 @@ use crate::common::{
     canonical_existing_path as canonical_temp_path, create_runtime, global_session, hermetic_path,
 };
 use crate::provision_host_cli_fixture;
+use serde_json::json;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
@@ -419,6 +420,218 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
     assert_eq!(payload["query"], "recovery", "{payload:#}");
     assert_eq!(payload["status"], "ok", "{payload:#}");
     assert!(payload["results"].is_array(), "{payload:#}");
+}
+
+fn host_transcript_files(home: &Path) -> Vec<PathBuf> {
+    let roots = [
+        home.join(".claude/projects"),
+        home.join(".codex/sessions"),
+        home.join(".codex/archived_sessions"),
+        home.join(".cursor/projects"),
+        home.join(".cursor/chats"),
+    ];
+    let mut files = Vec::new();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        let mut pending = vec![root];
+        while let Some(dir) = pending.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+fn seed_searchable_session_message(home: &Path, project_root: &Path, text: &str) {
+    let project_id = default_profile_project_id(project_root);
+    create_runtime().block_on(async {
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            profile_root(home),
+            project_root,
+            ProjectId::new(project_id).expect("valid fixture project id"),
+        )
+        .await
+        .expect("registered project runtime");
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &global_session("cursor", "session-search-source", "proj_cli"),
+            )
+            .await
+            .expect("session fixture write");
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &MessageRecordBuilder::new(
+                    "cursor",
+                    "message-search-source",
+                    "session-search-source",
+                    "assistant",
+                    1,
+                    text,
+                    "message",
+                )
+                .build(),
+            )
+            .await
+            .expect("session message fixture write");
+        runtime
+            .checkpoint_session_database_for_test(HostAdmissionScope::Project)
+            .await
+            .expect("session fixture checkpoint");
+        drop(runtime);
+    });
+}
+
+fn sessions_search_json(home: &Path, project_root: &Path, query: &str) -> serde_json::Value {
+    crate::common::poll_until(
+        Instant::now() + cli_timeout(),
+        Duration::from_millis(100),
+        || {
+            let mut command = tracedecay_command_without_daemon(home, project_root);
+            command.args(["sessions", "search", query, "--limit", "3", "--json"]);
+            let output = run_with_timeout(command, cli_timeout());
+            assert!(
+                output.status.success(),
+                "sessions search --json should succeed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .expect("sessions search --json prints one document");
+            (!matches!(payload["status"].as_str(), Some("stale"))).then_some(payload)
+        },
+        || "session search projection did not finish historical convergence".to_owned(),
+    )
+}
+
+fn sessions_search_text(home: &Path, project_root: &Path, query: &str) -> String {
+    let mut command = tracedecay_command_without_daemon(home, project_root);
+    command.args(["sessions", "search", query, "--limit", "3"]);
+    let output = run_with_timeout(command, cli_timeout());
+    assert!(
+        output.status.success(),
+        "sessions search should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn sessions_search_reports_unavailable_when_no_host_transcripts_exist() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    write_git_fixture(&project_root);
+    init_project_fixture(home.path(), &project_root);
+    let transcripts = host_transcript_files(home.path());
+    assert!(
+        transcripts.is_empty(),
+        "isolated home must have no host transcripts: {transcripts:?}"
+    );
+
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let payload = sessions_search_json(home.path(), &project_root, "indexLocalPlugins");
+    assert_eq!(payload["query"], "indexLocalPlugins", "{payload:#}");
+    assert_eq!(payload["status"], "unavailable", "{payload:#}");
+    assert_eq!(payload["outcome"], "unavailable", "{payload:#}");
+    assert_eq!(payload["count"], 0, "{payload:#}");
+    assert_eq!(payload["results"], json!([]), "{payload:#}");
+    let message = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("tracedecay sessions import"),
+        "empty source must name the import that fills it: {payload:#}"
+    );
+    assert_eq!(
+        payload["next_action"]["tool"], "tracedecay sessions import",
+        "{payload:#}"
+    );
+
+    let report = sessions_search_text(home.path(), &project_root, "indexLocalPlugins");
+    assert!(
+        !report.contains("no messages matched"),
+        "a missing source is not a query miss: {report}"
+    );
+    assert!(report.contains("status: unavailable"), "{report}");
+    assert!(report.contains("tracedecay sessions import"), "{report}");
+}
+
+#[test]
+fn sessions_search_reports_complete_zero_when_store_has_no_match() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    write_git_fixture(&project_root);
+    init_project_fixture(home.path(), &project_root);
+    seed_searchable_session_message(
+        home.path(),
+        &project_root,
+        "orchid spool tension stays indexed",
+    );
+
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let payload = sessions_search_json(home.path(), &project_root, "no such nautilus phrase");
+    assert_eq!(payload["query"], "no such nautilus phrase", "{payload:#}");
+    assert_eq!(payload["status"], "complete_zero", "{payload:#}");
+    assert_eq!(payload["outcome"], "complete_zero", "{payload:#}");
+    assert_eq!(payload["count"], 0, "{payload:#}");
+    assert_eq!(payload["results"], json!([]), "{payload:#}");
+
+    let report = sessions_search_text(home.path(), &project_root, "no such nautilus phrase");
+    assert!(
+        report.contains("no messages matched query \"no such nautilus phrase\""),
+        "{report}"
+    );
+    assert!(report.contains("status: complete_zero"), "{report}");
+}
+
+#[test]
+fn sessions_search_returns_a_hit_when_the_store_has_a_match() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    write_git_fixture(&project_root);
+    init_project_fixture(home.path(), &project_root);
+    seed_searchable_session_message(
+        home.path(),
+        &project_root,
+        "orchid spool tension stays indexed",
+    );
+
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let payload = sessions_search_json(home.path(), &project_root, "orchid spool");
+    assert_eq!(payload["query"], "orchid spool", "{payload:#}");
+    assert_eq!(payload["status"], "ok", "{payload:#}");
+    assert!(
+        payload["results"]
+            .as_array()
+            .is_some_and(|results| !results.is_empty()),
+        "{payload:#}"
+    );
+    assert_eq!(
+        payload["results"][0]["message"]["text"], "orchid spool tension stays indexed",
+        "{payload:#}"
+    );
+
+    let report = sessions_search_text(home.path(), &project_root, "orchid spool");
+    assert!(
+        report.contains("orchid spool tension stays indexed"),
+        "{report}"
+    );
 }
 
 fn poll_git_sync(

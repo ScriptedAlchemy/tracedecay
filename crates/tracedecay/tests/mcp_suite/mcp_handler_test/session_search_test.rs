@@ -1184,7 +1184,7 @@ async fn message_search_returns_literal_seeded_messages() {
     .await;
     assert_eq!(miss["query"], "no such nautilus phrase");
     assert_eq!(miss["outcome"], "complete_zero");
-    assert_eq!(miss["status"], "ok");
+    assert_eq!(miss["status"], "complete_zero");
     assert_eq!(miss["count"], 0);
     assert_eq!(miss["results"], json!([]));
     assert_eq!(miss["provider"], "all");
@@ -1295,7 +1295,7 @@ async fn message_search_returns_literal_seeded_messages() {
     assert_eq!(goals["goals"], true);
     assert_eq!(goals["query"], "");
     assert_eq!(goals["outcome"], "complete_zero");
-    assert_eq!(goals["status"], "ok");
+    assert_eq!(goals["status"], "complete_zero");
     assert_eq!(goals["count"], 0);
     assert_eq!(goals["results"], json!([]));
 
