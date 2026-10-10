@@ -330,59 +330,21 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
-    // Commit the fixture before `init`, for two reasons that both end in
-    // `application.retained.authority-unavailable` otherwise: the daemon's
-    // full project open reads an attached git HEAD before it exposes the
-    // registered session authority, and `HostAdmissionTestRuntimeV1::project`
-    // below `git init`s any project root that is not already a repository.
-    // which would move the repository identity out from under the project id
-    // `init` just registered.
+    // Commit the fixture before `init`: the daemon's full project open reads
+    // an attached git HEAD before it exposes the registered session authority.
     write_git_fixture(&project_root);
     init_project_fixture(home.path(), &project_root);
-    let project_id = default_profile_project_id(&project_root);
-
-    create_runtime().block_on(async {
-        let runtime = HostAdmissionTestRuntimeV1::project(
-            profile_root(home.path()),
-            &project_root,
-            ProjectId::new(project_id).expect("valid fixture project id"),
-        )
-        .await
-        .expect("registered project runtime");
-        runtime
-            .upsert_session_for_test(
-                HostAdmissionScope::Project,
-                &global_session("cursor", "session-search", "proj_cli"),
-            )
-            .await
-            .expect("session fixture write");
-        runtime
-            .upsert_session_message_for_test(
-                HostAdmissionScope::Project,
-                &MessageRecordBuilder::new(
-                    "cursor",
-                    "message-search",
-                    "session-search",
-                    "assistant",
-                    1,
-                    "recovery evidence",
-                    "message",
-                )
-                .build(),
-            )
-            .await
-            .expect("session message fixture write");
-        // Same reason as `sessions_unfinished_lists_workflow_state_evidence`:
-        // the daemon below is a separate process opening this database.
-        runtime
-            .checkpoint_session_database_for_test(HostAdmissionScope::Project)
-            .await
-            .expect("session fixture checkpoint");
-        drop(runtime);
-    });
+    let transcript = write_claude_search_transcript(
+        home.path(),
+        &project_root,
+        "session-search-filters",
+        "recovery evidence",
+    );
+    assert_transcript_contains(&transcript, "recovery evidence");
 
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
-    for extra_args in [vec![], vec!["--provider", "cursor"]] {
+    import_sessions_until_searchable(home.path(), &project_root, "recovery");
+    for extra_args in [vec![], vec!["--provider", "claude"]] {
         let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
         command.args(["sessions", "search", "recovery", "--limit", "3"]);
         command.args(extra_args);
@@ -395,31 +357,13 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
         );
     }
 
-    // Socket readiness precedes the daemon's historical session projection.
-    // Wait for that background work, while still rejecting malformed or failed
-    // CLI responses immediately and asserting the final public status below.
-    let payload = crate::common::poll_until(
-        Instant::now() + cli_timeout(),
-        Duration::from_millis(100),
-        || {
-            let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
-            command.args(["sessions", "search", "recovery", "--limit", "3", "--json"]);
-            let output = run_with_timeout(command, cli_timeout());
-            assert!(
-                output.status.success(),
-                "sessions search --json should succeed\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
-                .expect("sessions search --json prints one document");
-            (payload["status"] != "stale").then_some(payload)
-        },
-        || "session search projection did not finish historical convergence".to_owned(),
-    );
+    let payload = sessions_search_json(home.path(), &project_root, "recovery");
     assert_eq!(payload["query"], "recovery", "{payload:#}");
     assert_eq!(payload["status"], "ok", "{payload:#}");
-    assert!(payload["results"].is_array(), "{payload:#}");
+    assert!(
+        search_results_contain(&payload, "recovery evidence"),
+        "filter-omission search must prove a real hit: {payload:#}"
+    );
 }
 
 fn host_transcript_files(home: &Path) -> Vec<PathBuf> {
@@ -455,48 +399,101 @@ fn host_transcript_files(home: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn seed_searchable_session_message(home: &Path, project_root: &Path, text: &str) {
-    let project_id = default_profile_project_id(project_root);
-    create_runtime().block_on(async {
-        let runtime = HostAdmissionTestRuntimeV1::project(
-            profile_root(home),
-            project_root,
-            ProjectId::new(project_id).expect("valid fixture project id"),
-        )
-        .await
-        .expect("registered project runtime");
-        runtime
-            .upsert_session_for_test(
-                HostAdmissionScope::Project,
-                &global_session("cursor", "session-search-source", "proj_cli"),
-            )
-            .await
-            .expect("session fixture write");
-        runtime
-            .upsert_session_message_for_test(
-                HostAdmissionScope::Project,
-                &MessageRecordBuilder::new(
-                    "cursor",
-                    "message-search-source",
-                    "session-search-source",
-                    "assistant",
-                    1,
-                    text,
-                    "message",
-                )
-                .build(),
-            )
-            .await
-            .expect("session message fixture write");
-        runtime
-            .checkpoint_session_database_for_test(HostAdmissionScope::Project)
-            .await
-            .expect("session fixture checkpoint");
-        drop(runtime);
+const SEARCH_HIT_PHRASE: &str = "orchid spool tension stays indexed";
+const SEARCH_MISS_QUERY: &str = "no such nautilus phrase";
+
+/// Writes a Claude Code transcript whose recorded `cwd` is the registered
+/// project. The slug can be dummy; ingest matches on `cwd`, not the folder.
+fn write_claude_search_transcript(
+    home: &Path,
+    project_root: &Path,
+    session: &str,
+    phrase: &str,
+) -> PathBuf {
+    let dir = home.join(".claude/projects/-some-slug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{session}.jsonl"));
+    let cwd = project_root.to_string_lossy();
+    let contents = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "type": "user",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": "u1",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "message": {"role": "user", "content": phrase}
+        }),
+        serde_json::json!({
+            "type": "assistant",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": "u2",
+            "timestamp": "2026-01-01T00:00:05.000Z",
+            "message": {
+                "id": format!("msg_{session}"),
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [{"type": "text", "text": format!("noted {phrase}")}]
+            }
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+fn assert_transcript_contains(path: &Path, phrase: &str) {
+    let contents = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("could not read transcript {}: {error}", path.display()));
+    assert!(
+        contents.contains(phrase),
+        "transcript {} must contain {phrase:?}: {contents}",
+        path.display()
+    );
+}
+
+fn search_results_contain(payload: &serde_json::Value, phrase: &str) -> bool {
+    payload["results"].as_array().is_some_and(|results| {
+        results.iter().any(|hit| {
+            hit["message"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(phrase))
+        })
+    })
+}
+
+fn import_sessions(home: &Path, project_root: &Path) {
+    let mut command = tracedecay_command_without_daemon(home, project_root);
+    command.args(["sessions", "import"]);
+    let output = run_with_timeout(command, cli_timeout());
+    assert!(
+        output.status.success(),
+        "sessions import should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn import_sessions_until_searchable(home: &Path, project_root: &Path, query: &str) {
+    import_sessions(home, project_root);
+    let payload = sessions_search_json_until(home, project_root, query, |payload| {
+        search_results_contain(payload, query)
     });
+    assert_eq!(payload["status"], "ok", "{payload:#}");
 }
 
 fn sessions_search_json(home: &Path, project_root: &Path, query: &str) -> serde_json::Value {
+    sessions_search_json_until(home, project_root, query, |payload| {
+        !matches!(payload["status"].as_str(), Some("stale"))
+    })
+}
+
+fn sessions_search_json_until(
+    home: &Path,
+    project_root: &Path,
+    query: &str,
+    ready: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
     crate::common::poll_until(
         Instant::now() + cli_timeout(),
         Duration::from_millis(100),
@@ -512,7 +509,7 @@ fn sessions_search_json(home: &Path, project_root: &Path, query: &str) -> serde_
             );
             let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
                 .expect("sessions search --json prints one document");
-            (!matches!(payload["status"].as_str(), Some("stale"))).then_some(payload)
+            ready(&payload).then_some(payload)
         },
         || "session search projection did not finish historical convergence".to_owned(),
     )
@@ -577,23 +574,33 @@ fn sessions_search_reports_complete_zero_when_store_has_no_match() {
     let project_root = canonical_temp_path(project.path());
     write_git_fixture(&project_root);
     init_project_fixture(home.path(), &project_root);
-    seed_searchable_session_message(
+    let transcript = write_claude_search_transcript(
         home.path(),
         &project_root,
-        "orchid spool tension stays indexed",
+        "session-search-miss",
+        SEARCH_HIT_PHRASE,
+    );
+    assert_transcript_contains(&transcript, SEARCH_HIT_PHRASE);
+    let transcript_text = std::fs::read_to_string(&transcript).unwrap();
+    assert!(
+        !transcript_text.contains(SEARCH_MISS_QUERY),
+        "miss query must be absent from the transcript: {transcript_text}"
     );
 
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
-    let payload = sessions_search_json(home.path(), &project_root, "no such nautilus phrase");
-    assert_eq!(payload["query"], "no such nautilus phrase", "{payload:#}");
+    import_sessions_until_searchable(home.path(), &project_root, SEARCH_HIT_PHRASE);
+    let payload = sessions_search_json(home.path(), &project_root, SEARCH_MISS_QUERY);
+    assert_eq!(payload["query"], SEARCH_MISS_QUERY, "{payload:#}");
     assert_eq!(payload["status"], "complete_zero", "{payload:#}");
     assert_eq!(payload["outcome"], "complete_zero", "{payload:#}");
     assert_eq!(payload["count"], 0, "{payload:#}");
     assert_eq!(payload["results"], json!([]), "{payload:#}");
 
-    let report = sessions_search_text(home.path(), &project_root, "no such nautilus phrase");
+    let report = sessions_search_text(home.path(), &project_root, SEARCH_MISS_QUERY);
     assert!(
-        report.contains("no messages matched query \"no such nautilus phrase\""),
+        report.contains(&format!(
+            "no messages matched query \"{SEARCH_MISS_QUERY}\""
+        )),
         "{report}"
     );
     assert!(report.contains("status: complete_zero"), "{report}");
@@ -606,32 +613,26 @@ fn sessions_search_returns_a_hit_when_the_store_has_a_match() {
     let project_root = canonical_temp_path(project.path());
     write_git_fixture(&project_root);
     init_project_fixture(home.path(), &project_root);
-    seed_searchable_session_message(
+    let transcript = write_claude_search_transcript(
         home.path(),
         &project_root,
-        "orchid spool tension stays indexed",
+        "session-search-hit",
+        SEARCH_HIT_PHRASE,
     );
+    assert_transcript_contains(&transcript, SEARCH_HIT_PHRASE);
 
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
-    let payload = sessions_search_json(home.path(), &project_root, "orchid spool");
-    assert_eq!(payload["query"], "orchid spool", "{payload:#}");
+    import_sessions_until_searchable(home.path(), &project_root, SEARCH_HIT_PHRASE);
+    let payload = sessions_search_json(home.path(), &project_root, SEARCH_HIT_PHRASE);
+    assert_eq!(payload["query"], SEARCH_HIT_PHRASE, "{payload:#}");
     assert_eq!(payload["status"], "ok", "{payload:#}");
     assert!(
-        payload["results"]
-            .as_array()
-            .is_some_and(|results| !results.is_empty()),
-        "{payload:#}"
-    );
-    assert_eq!(
-        payload["results"][0]["message"]["text"], "orchid spool tension stays indexed",
-        "{payload:#}"
+        search_results_contain(&payload, SEARCH_HIT_PHRASE),
+        "imported transcript must be searchable: {payload:#}"
     );
 
-    let report = sessions_search_text(home.path(), &project_root, "orchid spool");
-    assert!(
-        report.contains("orchid spool tension stays indexed"),
-        "{report}"
-    );
+    let report = sessions_search_text(home.path(), &project_root, SEARCH_HIT_PHRASE);
+    assert!(report.contains(SEARCH_HIT_PHRASE), "{report}");
 }
 
 fn poll_git_sync(
