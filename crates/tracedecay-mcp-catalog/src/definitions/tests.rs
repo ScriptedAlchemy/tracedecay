@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    TOOL_SEARCH_TOOL_NAME, advertise_tool_list_payload, tool_definition_is_always_loaded,
-    tool_list_approx_tokens, ToolListAdvertisement,
+    TOOL_SEARCH_TOOL_NAME, ToolListAdvertisement, advertise_tool_list_payload,
+    tool_definition_is_always_loaded, tool_list_approx_tokens,
 };
 use tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1;
 use tracedecay_daemon_protocol::ApplicationSurfaceRequest;

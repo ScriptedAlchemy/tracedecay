@@ -8,8 +8,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock, RwLock};
 
 use crate::{
-    TOOL_SEARCH_TOOL_NAME, ToolDefinition, ToolListAdvertisement, ToolRegistryMode,
-    ToolResult, advertise_tool_list_payload, ast_grep_available, context_description,
+    ToolDefinition, ToolListAdvertisement, ToolRegistryMode, ToolResult,
+    advertise_tool_list_payload, ast_grep_available, context_description,
     context_warming_description, get_maximal_tool_definitions,
     retain_host_available_tool_definitions, tool_list_advertisement_from_env,
 };
@@ -351,8 +351,8 @@ pub fn execute_tool_search(args: &Value) -> Result<ToolResult, McpDispatchMetada
         .map_or(50, |value| value.clamp(1, 500) as usize);
     let want_json = args.get("format").and_then(Value::as_str) == Some("json");
 
-    let profile_id = ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID)
-        .map_err(|error| {
+    let profile_id =
+        ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID).map_err(|error| {
             McpDispatchMetadataError::Initialization(format!(
                 "invalid MCP discovery profile: {error}"
             ))
@@ -544,7 +544,7 @@ pub fn default_catalog_discovery_authority()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{explore_call_budget, project_catalog_discovery_scope};
+    use crate::{TOOL_SEARCH_TOOL_NAME, explore_call_budget, project_catalog_discovery_scope};
 
     #[test]
     fn catalog_filtered_discovery_uses_the_deterministic_maximal_registry() {

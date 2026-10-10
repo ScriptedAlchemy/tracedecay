@@ -202,7 +202,9 @@ async fn test_tools_list() {
         .unwrap_or_else(|| panic!("tool search result: {loaded_catalog}"))
         .iter()
         .find(|tool| tool["name"] == "tracedecay_retrieve")
-        .unwrap_or_else(|| panic!("tracedecay_retrieve must be reachable via tool search: {loaded_catalog}"));
+        .unwrap_or_else(|| {
+            panic!("tracedecay_retrieve must be reachable via tool search: {loaded_catalog}")
+        });
     assert_eq!(
         retrieve["input_schema"],
         json!({

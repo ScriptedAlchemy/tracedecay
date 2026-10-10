@@ -78,8 +78,8 @@ pub fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
         ) => BranchSensitivity::Sensitive,
         Some(
             McpToolDispatchGroup::Work
-                | McpToolDispatchGroup::Workflow
-                | McpToolDispatchGroup::CatalogDiscovery,
+            | McpToolDispatchGroup::Workflow
+            | McpToolDispatchGroup::CatalogDiscovery,
         ) => BranchSensitivity::Independent,
         None => {
             if RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {

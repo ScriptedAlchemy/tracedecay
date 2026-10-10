@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::support::{
-    jsonrpc_request, response_with_id, run_client_connection_with_messages, spec_initialize_request,
-    successful_tool_text,
+    jsonrpc_request, response_with_id, run_client_connection_with_messages,
+    spec_initialize_request, successful_tool_text,
 };
 
 fn listed_tool_names(listed: &Value) -> BTreeSet<String> {
@@ -110,8 +110,9 @@ async fn default_handshake_is_cheaper_and_every_tool_stays_reachable() {
     );
 
     let search = response_with_id(&responses, json!(3));
-    let catalog: Value = serde_json::from_str(successful_tool_text(&search, "tracedecay_tool_search"))
-        .expect("tool search catalog JSON");
+    let catalog: Value =
+        serde_json::from_str(successful_tool_text(&search, "tracedecay_tool_search"))
+            .expect("tool search catalog JSON");
     let reachable: BTreeSet<String> = catalog["tools"]
         .as_array()
         .unwrap_or_else(|| panic!("tool search catalog: {catalog}"))
