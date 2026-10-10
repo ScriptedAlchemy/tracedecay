@@ -206,6 +206,26 @@ fn generation(outcome: &RuntimeReadOutcomeV1) -> String {
     }
 }
 
+/// Rows durably present in `table`. The writer creates its ledger tables inside
+/// the first committed transaction, so a rolled-back first write leaves none.
+fn persisted_rows(connection: &rusqlite::Connection, table: &str) -> i64 {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if !exists {
+        return 0;
+    }
+    connection
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
 fn durable_sequences(database: &TestDatabase, expected: u64) {
     let connection = database.connect();
     let mut statement = connection
@@ -557,13 +577,11 @@ fn failed_repository_mutation_rolls_back_and_the_same_request_can_retry() {
         "td_runtime_writer_checkpoint_v1",
         "td_runtime_writer_idempotency_v2",
     ] {
-        let count: i64 = database
-            .connect()
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(count, 0, "failed mutation leaked rows into {table}");
+        assert_eq!(
+            persisted_rows(&database.connect(), table),
+            0,
+            "failed mutation leaked rows into {table}"
+        );
     }
     assert_eq!(commit(&writer, request).commit_sequence.0, 1);
     writer.shutdown_and_join().unwrap();
@@ -585,14 +603,10 @@ fn competing_sqlite_writer_lock_returns_an_error_and_resubmit_commits_once() {
     let request = publication(&binding, "generation.lock-retry", 4);
     assert!(run(writer.submit(request.clone(), Probe::for_submit(&request))).is_err());
     assert_eq!(writer.telemetry_snapshot().busy_events, 1);
-    let count: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM td_runtime_writer_idempotency_v2",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(count, 0);
+    assert_eq!(
+        persisted_rows(&connection, "td_runtime_writer_idempotency_v2"),
+        0
+    );
     connection.execute_batch("ROLLBACK").unwrap();
     let receipt = commit(&writer, request.clone());
     assert_eq!(receipt.commit_sequence.0, 1);
