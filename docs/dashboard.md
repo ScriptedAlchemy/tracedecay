@@ -5,8 +5,14 @@ project memory, lossless context, work, configuration, diagnostics, and usage.
 Start it with:
 
 ```bash
-tracedecay dashboard --open
+tracedecay dashboard --path /path/to/enrolled/repo --open
 ```
+
+`--path` selects the enrolled project whose graph the listener serves. It
+otherwise resolves the current project; a home directory is not a code project.
+Graph responses carry that project's scope. Query text does not switch the
+listener to another repository: start a dashboard with that repository's path
+for its graph.
 
 The dashboard uses generated Rust API contracts and the same application
 operations as CLI, MCP, LSP, SDK, hooks, and host integrations. Browser code
