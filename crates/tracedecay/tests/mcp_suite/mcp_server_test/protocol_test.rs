@@ -1348,7 +1348,7 @@ async fn test_resources_read_files() {
             "contents": [{
                 "uri": "tracedecay://files",
                 "mimeType": "text/plain",
-                "text": "status: unavailable\nreason: verified_generation_file_inventory_not_admitted"
+                "text": "status: unavailable\nreason: authority_unavailable"
             }]
         })
     );

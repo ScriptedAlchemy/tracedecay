@@ -639,6 +639,45 @@ pub(super) const ROOT_OCCURRENCE_FTS_COUNT_QUERY: &str = concat!(
     )"
 );
 
+// Newest-first empty-query browse across every active participant. The
+// leading table is the occurrence index on knowledge_at so LIMIT can stop
+// after one keyset page instead of joining every generation to every
+// occurrence and sorting the project. `ROOT_TIME_CANDIDATE_QUERY` keeps the
+// generation-first shape because its window already bounds that join.
+pub(super) const ROOT_SCOPE_CANDIDATE_QUERY: &str = concat!(
+    "
+    SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
+           o.message_id, o.turn_id, o.session_id, o.role,
+           authority_session.provider, frozen.generation
+    FROM session_occurrences AS o
+    INDEXED BY idx_session_occurrences_root_generation_order
+    JOIN session_temporal_generations AS frozen
+      ON frozen.session_id = o.session_id
+     AND frozen.state = 'active'
+     AND +o.generation <= frozen.generation
+    JOIN retrieval_anchors AS authority_anchor
+      ON authority_anchor.anchor_id = o.retrieval_anchor_id
+    JOIN sessions AS authority_session
+      ON authority_session.session_id = o.session_id
+     AND authority_session.provider = o.source_provider
+     AND authority_session.project_key = ?1
+    WHERE ",
+    anchor_owner_authority_predicate!(),
+    "
+      AND (?2 IS NULL OR o.source_provider = ?2)
+      ",
+    occurrence_root_keyset!("?3", "?4", "?5"),
+    "
+      ",
+    occurrence_row_length_bounds!("?6", "?7", "?8", "?9", "authority_session.provider"),
+    "
+      ",
+    root_occurrence_cursor_bound!("?10"),
+    "
+    ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
+    LIMIT ?11"
+);
+
 pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
     "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,

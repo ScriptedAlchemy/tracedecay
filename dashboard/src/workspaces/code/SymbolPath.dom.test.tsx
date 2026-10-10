@@ -142,6 +142,7 @@ function stub(path: unknown) {
             limit: 6,
             offset: 0,
             total: 2,
+            indexed_symbols: 17,
             has_more: false,
             count: 2,
             results: [node('n-a', 'alpha'), node('n-c', 'gamma')],

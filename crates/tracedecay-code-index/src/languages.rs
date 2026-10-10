@@ -279,11 +279,18 @@ impl StaticLanguageRegistry {
             // TypeScript v13 (Svelte and Astro v9) extracts exported, nested,
             // dotted, and `module` namespaces, and retains a member call on a
             // computed receiver as a disclosed caller gap.
+            // TypeScript v14 (Svelte and Astro v10) extracts CommonJS
+            // `module.exports` / `exports.foo` assignments as public consts,
+            // so a JS config that only assigns the export object binds a
+            // symbol grain and appears in the indexed-file census.
             // Go v10 records method sets for seal-time interface satisfaction.
+            // Rust v20 retains associated owner uses and parser-positioned
+            // generic call paths. TypeScript v15 (Svelte and Astro v11)
+            // retains constructor uses and CommonJS re-export evidence.
             let extractor_revision = match language.as_str() {
-                "rust" => 19,
-                "typescript" => 13,
-                "svelte" | "astro" => 9,
+                "rust" => 21,
+                "typescript" => 15,
+                "svelte" | "astro" => 11,
                 "go" => 10,
                 "java" => 8,
                 "ruby" | "protobuf" | "python" => 7,
@@ -488,7 +495,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v19");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v21");
 
         assert_eq!(
             registry

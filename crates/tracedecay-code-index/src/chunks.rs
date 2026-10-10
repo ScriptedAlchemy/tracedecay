@@ -2057,6 +2057,34 @@ fn rust_path_head_is_declared(reference_name: &str, root_modules: &HashSet<&str>
     })
 }
 
+pub(crate) fn rust_ufcs_impl_type_name(owner: &str) -> Option<&str> {
+    let body = owner.strip_prefix('<')?.strip_suffix('>')?;
+    let mut depth = 0_i32;
+    for (index, character) in body.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ if depth == 0 && body[index..].starts_with(" as ") => {
+                let type_name = body[..index].trim();
+                return (!type_name.is_empty()).then_some(type_name);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+pub(crate) fn nominal_rust_impl_owner(owner: &str) -> Option<&str> {
+    if rust_ufcs_impl_type_name(owner).is_some() {
+        return None;
+    }
+    match owner.find('<') {
+        Some(generic_start) if owner.ends_with('>') => Some(&owner[..generic_start]),
+        Some(_) => None,
+        None => Some(owner),
+    }
+}
+
 /// Map a Rust UFCS trait-impl method path `<Type as Trait>::method` to the
 /// type-path form `Type::method` that call sites write (`WalkEventIter::from`,
 /// `Builder::default`). Keeps the intentional `<Type as Trait>` definition
@@ -2135,25 +2163,30 @@ fn reference_evidence_span(
 ) -> Option<SourceSpan> {
     let line_start = offsets.get(reference.line as usize).copied()?;
     let site_start = usize::try_from(line_start.checked_add(u64::from(reference.column))?).ok()?;
-    let source_at_site = source.get(site_start..)?;
+    let raw_source_at_site = source.get(site_start..)?;
     // Typed receiver references name `Type::method`, while the source spells
     // `receiver.method`. Both forms must identify the parser-observed method
     // token so a sealed edge can discharge the same site's limitation.
-    let rust_call =
-        reference.reference_kind == EdgeKind::Calls && reference.file_path.ends_with(".rs");
-    let reference_name = if rust_call
-        && (reference.reference_name.contains('.')
-            || !source_at_site.starts_with(&reference.reference_name))
-    {
-        reference.reference_name.rsplit(['.', ':']).next()?
-    } else {
-        &reference.reference_name
-    };
-    if rust_call && source_at_site.starts_with(reference_name) {
-        return Some(SourceSpan {
-            start_byte: u64::try_from(site_start).ok()?,
-            end_byte: u64::try_from(site_start.checked_add(reference_name.len())?).ok()?,
-        });
+    let rust_call = matches!(reference.reference_kind, EdgeKind::Calls | EdgeKind::TypeOf)
+        && reference.file_path.ends_with(".rs");
+    let source_at_site = raw_source_at_site;
+    if rust_call {
+        let token = if source_at_site.starts_with(&reference.reference_name) {
+            reference.reference_name.as_str()
+        } else if source_at_site
+            .strip_prefix("Self")
+            .is_some_and(|tail| tail.starts_with([':', '<', '(', ' ', '\t', '\r', '\n', '/']))
+        {
+            "Self"
+        } else {
+            reference.reference_name.rsplit(['.', ':']).next()?
+        };
+        if source_at_site.starts_with(token) {
+            return Some(SourceSpan {
+                start_byte: u64::try_from(site_start).ok()?,
+                end_byte: u64::try_from(site_start.checked_add(token.len())?).ok()?,
+            });
+        }
     }
     references_by_site
         .get(&(
@@ -2228,6 +2261,19 @@ fn resolve_file_references(
             .entry(relative_name.to_owned())
             .or_default()
             .push(symbol);
+        // Generic impl declarations retain their written type parameters;
+        // invocation paths name the nominal owner instead.
+        if language == "rust"
+            && symbol.kind == NodeKind::Method.as_str()
+            && let Some((owner, method)) = relative_name.rsplit_once("::")
+            && let Some(nominal) = nominal_rust_impl_owner(owner)
+            && nominal != owner
+        {
+            by_file_relative_name
+                .entry(format!("{nominal}::{method}"))
+                .or_default()
+                .push(symbol);
+        }
         // Dual-index `<Type as Trait>::method` under `Type::method` so
         // type-path calls bind without renaming the definition. Collected
         // first so an inherent `Type::method` already in the map keeps the
@@ -2351,6 +2397,10 @@ fn resolve_file_references(
                     .copied()
                     .filter(|target| {
                         reference_target_kind_is_compatible(reference.reference_kind, &target.kind)
+                            && (language != "rust"
+                                || reference.reference_kind != EdgeKind::Calls
+                                || target.kind != NodeKind::Struct.as_str()
+                                || target.arity.is_some())
                             && (language != "java"
                                 || reference
                                     .argument_count
@@ -2668,6 +2718,16 @@ pub(crate) fn relation_target_kind_is_compatible(
                 | NodeKind::ArrowFunction
                 | NodeKind::Procedure
                 | NodeKind::Macro
+                // `new Foo()` names the class. Without this, constructor
+                // sites never became Calls edges and callers stayed empty.
+                | NodeKind::Class
+                | NodeKind::InnerClass
+                | NodeKind::SealedClass
+                | NodeKind::CaseClass
+                | NodeKind::DataClass
+                // Rust tuple constructors target the struct; Rust resolution
+                // also requires the parser's callable arity evidence.
+                | NodeKind::Struct
         ),
         RelationEdgeKindV1::TypeOf => matches!(
             target_kind,

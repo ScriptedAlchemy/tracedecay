@@ -11,9 +11,9 @@
 
 use std::sync::OnceLock;
 
-#[cfg(any(test, feature = "test-helpers"))]
-use tracedecay_api::StaticDashboardAsset;
 use tracedecay_api::StaticDashboardAssets;
+#[cfg(any(test, feature = "test-helpers"))]
+use tracedecay_api::{StaticAssetEncoding, StaticDashboardAsset};
 
 use crate::version::PACKAGE_VERSION;
 
@@ -203,11 +203,13 @@ pub const FIXTURE_DASHBOARD_ASSETS: StaticDashboardAssets = StaticDashboardAsset
             path: "index.html",
             contents: b"<!doctype html><html><head><title>TraceDecay</title></head><body><script src=\"/static/js/index.fixture.js\"></script>TraceDecay fixture dashboard</body></html>",
             content_type: "text/html; charset=utf-8",
+            encoding: StaticAssetEncoding::Identity,
         },
         StaticDashboardAsset {
             path: "static/js/index.fixture.js",
             contents: b"console.log('tracedecay fixture bundle')",
             content_type: "application/javascript",
+            encoding: StaticAssetEncoding::Identity,
         },
     ],
     cache_tag: "fixture-bundle-1",
@@ -244,7 +246,7 @@ pub fn register_fixture_product_runtime() -> &'static RegisteredProductRuntime {
 mod tests {
     use std::sync::OnceLock;
 
-    use tracedecay_api::{StaticDashboardAsset, StaticDashboardAssets};
+    use tracedecay_api::{StaticAssetEncoding, StaticDashboardAsset, StaticDashboardAssets};
 
     use super::{
         ProductRuntimeError, ProductRuntimeProvider, ProductSourceProvenance,
@@ -260,11 +262,13 @@ mod tests {
                 path: "index.html",
                 contents: b"<html>bundle</html>",
                 content_type: "text/html; charset=utf-8",
+                encoding: StaticAssetEncoding::Identity,
             },
             StaticDashboardAsset {
                 path: "static/app.0123abcd.js",
                 contents: b"console.log('bundle')",
                 content_type: "application/javascript",
+                encoding: StaticAssetEncoding::Identity,
             },
         ],
         cache_tag: "bundle-tag-1",
@@ -375,11 +379,13 @@ mod tests {
                     path: "index.html",
                     contents: b"<html></html>",
                     content_type: "text/html; charset=utf-8",
+                    encoding: StaticAssetEncoding::Identity,
                 },
                 StaticDashboardAsset {
                     path: "",
                     contents: b"",
                     content_type: "application/octet-stream",
+                    encoding: StaticAssetEncoding::Identity,
                 },
             ],
             cache_tag: "bundle-tag-1",
@@ -398,11 +404,13 @@ mod tests {
                     path: "index.html",
                     contents: b"<html>one</html>",
                     content_type: "text/html; charset=utf-8",
+                    encoding: StaticAssetEncoding::Identity,
                 },
                 StaticDashboardAsset {
                     path: "index.html",
                     contents: b"<html>two</html>",
                     content_type: "text/html; charset=utf-8",
+                    encoding: StaticAssetEncoding::Identity,
                 },
             ],
             cache_tag: "bundle-tag-1",
@@ -421,6 +429,7 @@ mod tests {
                 path: "static/app.0123abcd.js",
                 contents: b"console.log('bundle')",
                 content_type: "application/javascript",
+                encoding: StaticAssetEncoding::Identity,
             }],
             cache_tag: "bundle-tag-1",
         };

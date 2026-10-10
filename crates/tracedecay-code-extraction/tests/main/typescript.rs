@@ -758,6 +758,84 @@ export const Greeting: React.FC<Props> = ({ name }) => {
 }
 
 #[test]
+fn test_js_commonjs_exports_are_public_consts() {
+    let babel = r#"
+module.exports = {
+  presets: ["@babel/preset-env", "@babel/preset-react"],
+  plugins: ["@babel/plugin-transform-runtime"]
+};
+"#;
+    let babel_result = TypeScriptExtractor
+        .extract_artifact("babel.config.js", babel)
+        .result;
+    assert!(
+        babel_result.errors.is_empty(),
+        "errors: {:?}",
+        babel_result.errors
+    );
+    let babel_consts: Vec<_> = babel_result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .collect();
+    assert_eq!(babel_consts.len(), 1, "{:?}", babel_result.nodes);
+    assert_eq!(babel_consts[0].name, "module.exports");
+    assert_eq!(babel_consts[0].visibility, Visibility::Pub);
+    assert!(
+        !babel_result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::InitBlock),
+        "an object-only CommonJS export must not need a <module> init block: {:?}",
+        babel_result.nodes
+    );
+
+    let named = r#"
+exports.presets = ["@babel/preset-env"];
+module.exports.plugins = [];
+"#;
+    let named_result = TypeScriptExtractor
+        .extract_artifact("named-exports.js", named)
+        .result;
+    assert!(
+        named_result.errors.is_empty(),
+        "errors: {:?}",
+        named_result.errors
+    );
+    let mut named_consts: Vec<_> = named_result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .map(|n| n.name.as_str())
+        .collect();
+    named_consts.sort_unstable();
+    assert_eq!(
+        named_consts,
+        ["exports.presets", "module.exports.plugins"],
+        "{:?}",
+        named_result.nodes
+    );
+
+    let comments = "// leftover scratch, no declarations\n";
+    let comments_result = TypeScriptExtractor
+        .extract_artifact("scratch.js", comments)
+        .result;
+    assert!(
+        comments_result.errors.is_empty(),
+        "errors: {:?}",
+        comments_result.errors
+    );
+    assert!(
+        !comments_result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Const),
+        "comment-only JavaScript must not grow a fake export: {:?}",
+        comments_result.nodes
+    );
+}
+
+#[test]
 fn test_ts_const_declaration() {
     let source = r#"
 export const MAX_SIZE = 1024;
@@ -1222,5 +1300,112 @@ class Circle {\n\
             ("area", 7, 7),
             ("name", 9, 9)
         ]
+    );
+}
+
+/// A class method's typed parameter is a Uses site of that type. Missing it
+/// is why callers of a type-imported class stayed empty.
+#[test]
+fn test_ts_typed_parameter_is_a_uses_site() {
+    let source = r#"
+import type { Compiler } from './Compiler';
+export default class JsonpTemplatePlugin {
+    apply(compiler: Compiler) {
+        compiler.run();
+    }
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("JsonpTemplatePlugin.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let uses: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| {
+            reference.reference_kind == EdgeKind::Uses && reference.reference_name == "Compiler"
+        })
+        .collect();
+    assert_eq!(
+        uses.len(),
+        1,
+        "apply(compiler: Compiler) must be a Uses ref: {:?}",
+        result.unresolved_refs
+    );
+}
+
+/// A class that constructs another instance of itself (`new RsdoctorRspackPlugin`
+/// inside `registerChildCompiler`) is still a caller of that class.
+#[test]
+fn test_ts_new_expression_inside_owning_class_is_a_calls_site() {
+    let source = r#"
+export class RsdoctorRspackPlugin {
+  registerChildCompiler() {
+    const childPlugin = new RsdoctorRspackPlugin({});
+    return childPlugin;
+  }
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("packages/core/src/rspack-plugin/plugin.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        calls_from(&result, "registerChildCompiler"),
+        ["RsdoctorRspackPlugin"],
+        "same-class constructor sites must be Calls refs, got {:?}",
+        result.unresolved_refs
+    );
+}
+
+/// `new Foo()` is a call site of `Foo`. Missing it is why callers of a class
+/// stayed empty while the disk still had constructor invocations.
+#[test]
+fn test_ts_new_expression_is_a_calls_site() {
+    let source = r#"
+export class URLImportPlugin {}
+
+export function build() {
+    return new URLImportPlugin();
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("factory.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        calls_from(&result, "build"),
+        ["URLImportPlugin"],
+        "constructor sites must be Calls refs, got {:?}",
+        result.unresolved_refs
+    );
+}
+
+/// CommonJS factory files construct plugins at module scope, not inside a
+/// named function. The module-scope owner must still keep the `new`.
+#[test]
+fn test_js_module_scope_new_expression_is_a_calls_site() {
+    let source = r#"
+const URLImportPlugin = require("../../webpack");
+module.exports = (siteId) => {
+  return new URLImportPlugin({ manifestName: `website-${siteId}` });
+};
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("manual/webpack/webpackConfigFactory.js", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let news = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| {
+            reference.reference_kind == EdgeKind::Calls
+                && reference.reference_name == "URLImportPlugin"
+        })
+        .count();
+    assert_eq!(
+        news, 1,
+        "module-scope new URLImportPlugin must be a Calls ref: {:?}",
+        result.unresolved_refs
     );
 }

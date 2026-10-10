@@ -5,7 +5,7 @@ use crate::common::{
     canonicalize_test_dir, create_runtime, get_json, http_agent, isolated_profile_under_home,
     pick_free_port, tempdir_or_panic, wait_for_dashboard,
 };
-use crate::dashboard_api_support::{post_json_body, write_file};
+use crate::dashboard_api_support::{post_json_body, rg_word_paths, write_file};
 use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -58,6 +58,7 @@ use tracedecay_session_memory::context::RegisteredScopeResolver;
 
 struct DashboardFixture {
     _tmp: TempDir,
+    project_root: std::path::PathBuf,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
 }
@@ -824,6 +825,7 @@ async fn start_dashboard_fixture_seeded(
 
     DashboardFixture {
         _tmp: tmp,
+        project_root,
         base_url,
         server,
     }
@@ -881,11 +883,98 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
         assert_eq!(status, 200);
         assert_ready_verified_generation(&search);
         assert_eq!(search["payload"]["query"], "dashboard");
+        let rg_dashboard = rg_word_paths(&fixture.project_root, "dashboard");
         assert!(
-            search["payload"]["results"]
+            rg_dashboard
+                .iter()
+                .any(|path| path == "src/dashboard/mod.rs"),
+            "whole-word walk must see dashboard in the launch fixture: {rg_dashboard:?}"
+        );
+        assert!(
+            search["payload"]["results"].as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["id"] == "n-dashboard" && row["file_path"] == "src/dashboard/mod.rs"
+                })
+            }),
+            "search should include the exact dashboard symbol at the whole-word path: {search}"
+        );
+
+        let (status, route_search) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/search?q=route_graph&limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&route_search);
+        let rg_route = rg_word_paths(&fixture.project_root, "route_graph");
+        assert!(
+            rg_route.iter().any(|path| path == "src/dashboard/mod.rs"),
+            "whole-word walk must see route_graph in the launch fixture: {rg_route:?}"
+        );
+        assert!(
+            route_search["payload"]["results"]
                 .as_array()
-                .is_some_and(|rows| rows.iter().any(|row| row["id"] == "n-dashboard")),
-            "search should include the exact dashboard symbol"
+                .is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row["id"] == "n-route" && row["file_path"] == "src/dashboard/mod.rs"
+                    })
+                }),
+            "search should include route_graph at the whole-word path: {route_search}"
+        );
+
+        let bound_project = search["scope"]["project_id"]
+            .as_str()
+            .expect("bound search must name its launch project")
+            .to_owned();
+
+        assert!(
+            rg_word_paths(&fixture.project_root, "connectGateway").is_empty(),
+            "whole-word walk must not see connectGateway in the launch fixture"
+        );
+        let (status, empty) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/search?q=connectGateway&limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{empty}");
+        assert_eq!(
+            empty["domain_state"], "complete_zero_findings",
+            "a bound-project miss must say it is empty, not look like a ready hit list: {empty}"
+        );
+        assert_eq!(empty["payload"]["total"], 0, "{empty}");
+        assert_eq!(empty["payload"]["results"], serde_json::json!([]), "{empty}");
+        assert_eq!(empty["scope"]["project_id"], bound_project);
+        // The miss is a complete scan of the seeded generation, not an empty
+        // index: coverage must name the real indexed-symbol denominator.
+        assert_eq!(empty["payload"]["indexed_symbols"], 4, "{empty}");
+        assert_eq!(empty["coverage"]["completeness"], "complete", "{empty}");
+        assert_eq!(empty["coverage"]["eligible"], 4, "{empty}");
+        assert_eq!(empty["coverage"]["examined"], 4, "{empty}");
+        assert_eq!(empty["coverage"]["matched"], 0, "{empty}");
+        assert_eq!(empty["coverage"]["denominator"], 4, "{empty}");
+
+        let (status, wrong) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/search?q=dashboard&project_id=proj_other_enrolled_repo&limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{wrong}");
+        assert_eq!(wrong["domain_state"], "unknown", "{wrong}");
+        assert_eq!(wrong["payload"], serde_json::Value::Null, "{wrong}");
+        let reasons = wrong["coverage"]["omission_reasons"]
+            .as_array()
+            .expect("wrong-project search must carry omission reasons");
+        assert!(
+            reasons.iter().any(|reason| reason
+                .as_str()
+                .is_some_and(|text| text.starts_with("wrong_project") && text.contains("--path"))),
+            "wrong-project search must be typed and name --path: {wrong}"
         );
 
         let (status, node) = get_json(

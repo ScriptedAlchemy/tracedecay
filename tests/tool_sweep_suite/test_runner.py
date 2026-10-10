@@ -223,9 +223,9 @@ class ProblemCodeTests(unittest.TestCase):
         runner = load_runner()
         for text, expected_verdict, expected_code in [
             (
-                "status: unavailable\nreason: verified_generation_file_inventory_not_admitted",
+                "status: unavailable\nreason: authority_unavailable",
                 "FAIL",
-                "verified_generation_file_inventory_not_admitted",
+                "authority_unavailable",
             ),
             ("status: unavailable", "FAIL", "tool_sweep.problem_code_missing"),
             ("Project: /isolated/project\nGraph statistics: unavailable", "PASS", None),
@@ -803,7 +803,6 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         self.assertEqual(placement, {
             "task_id": "task.fixture",
             "run_id": "run.fixture",
-            "format": "json",
         })
         self.assertEqual(
             duplicate["second_attempt"]["attempt_id"], "attempt.fixture.second"
@@ -891,6 +890,41 @@ class DispatchMetadataTests(unittest.TestCase):
 
         with self.assertRaises(runner.SweepError):
             runner.tool_policy(definition)
+
+    def test_owner_side_effects_remain_isolated_mutation_targets(self) -> None:
+        import test_orchestrator
+        runner = load_runner()
+        orchestrator = test_orchestrator.load_orchestrator()
+        for effect in (
+            "spawns_process", "binds_server", "schedules_work",
+            "maintains_owner_state", "maintains_profile_state", "records_host_evidence",
+        ):
+            with self.subTest(effect=effect):
+                definition = self.definition()
+                definition["name"] = f"tracedecay_fixture_{effect}"
+                definition["annotations"]["readOnlyHint"] = False
+                definition["_meta"]["tracedecay/dispatch"].update({
+                    "effect": effect,
+                    "read_only": False,
+                    "inverse": {"mode": "unavailable", "reason": "no_verified_inverse"},
+                })
+                self.assertEqual(runner.tool_policy(definition).effect, effect)
+                self.assertEqual(
+                    orchestrator.effect_targets({"tools": [definition]}),
+                    [definition["name"]],
+                )
+                definition["annotations"]["readOnlyHint"] = True
+                with self.assertRaises(runner.SweepError):
+                    runner.tool_policy(definition)
+
+    def test_policy_rejects_retired_and_unknown_effect_classes(self) -> None:
+        runner = load_runner()
+        for effect in ("git_index_commit", "unknown_effect"):
+            with self.subTest(effect=effect):
+                definition = self.definition()
+                definition["_meta"]["tracedecay/dispatch"]["effect"] = effect
+                with self.assertRaises(runner.SweepError):
+                    runner.tool_policy(definition)
 
 class DeadlineTests(unittest.TestCase):
     def test_post_deadline_settlement_cannot_become_a_passing_response(self) -> None:

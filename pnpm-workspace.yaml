@@ -16,6 +16,7 @@ packages:
   - "!mockups/**"
   - "!tests/fixtures/**"
   - "!vendor/**"
+  - "!patches/**"
   - "!.worktrees/**"
   - "!.codex-worktrees/**"
   - "!.claude-worktrees/**"
@@ -40,8 +41,10 @@ minimumReleaseAge: 0
 # the Cargo sources it compiles.
 verifyDepsBeforeRun: error
 
-# Installs the root Cargo workspace sources into `.pnpm/crates` and writes
-# the source replacement in `.cargo/config.toml` for Bazel dependency inputs.
+# Installs the root Cargo workspace sources into `.pnpm/crates`, writes their
+# source replacement to `.pnpm/crates/config.toml` (included from
+# `.cargo/config.toml`), and links the rust-toolchain.toml toolchain into
+# `.pnpm/rust`.
 cargo:
   enabled: true
 

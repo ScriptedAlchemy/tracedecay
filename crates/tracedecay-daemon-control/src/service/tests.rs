@@ -185,6 +185,93 @@ fn launchd_owned_job_requires_a_recognized_activity_state() {
     );
 }
 
+/// Native `launchctl print gui/<uid>/<label>` shape: one-tab job fields and
+/// nested coalitions that carry their own `state =` at two tabs.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn launchctl_print_job(plist: &std::path::Path, state: &str) -> String {
+    format!(
+        "gui/501/com.tracedecay.daemon = {{
+	active count = 1
+	path = {plist}
+	type = LaunchAgent
+	state = {state}
+
+	program = /usr/local/bin/tracedecay
+	arguments = {{
+		0 = /usr/local/bin/tracedecay
+		1 = daemon
+		2 = run
+	}}
+
+	pid = 4242
+	immediate reason = speculative
+	last exit code = (never exited)
+
+	resource coalition = {{
+		ID = 1234
+		type = resource
+		state = active
+	}}
+
+	jetsam coalition = {{
+		ID = 5678
+		type = jetsam
+		state = active
+	}}
+}}
+",
+        plist = plist.display()
+    )
+}
+
+/// launchd is bringing the owned job up but has not exec'd the daemon yet.
+/// Observation reports it running so readiness waits keep polling, and the
+/// startup state never bypasses exact plist ownership.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn launchd_starting_job_is_pending_owned_activity() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let launchctl = fake_service_program(&bin, "launchctl", "#!/bin/sh\nexit 0\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    let write_print = |loaded: &std::path::Path, state: &str, disabled: bool| {
+        write_executable_script(
+            &launchctl,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = print ]; then\ncat <<'JOB'\n{}JOB\nelif [ \"$1\" = print-disabled ]; then\n  echo '\"com.tracedecay.daemon\" => {disabled}'\nfi\n",
+                launchctl_print_job(loaded, state)
+            ),
+        )
+        .unwrap();
+    };
+
+    for state in ["xpcproxy", "spawn scheduled"] {
+        for (disabled, expected) in [
+            (false, DaemonServiceState::RunningEnabled),
+            (true, DaemonServiceState::RunningDisabled),
+        ] {
+            write_print(&plist, state, disabled);
+            assert_eq!(
+                runner.service_state().unwrap(),
+                expected,
+                "owned job state {state:?}, disabled {disabled}"
+            );
+        }
+        write_print(std::path::Path::new("/foreign/daemon.plist"), state, false);
+        assert!(
+            matches!(
+                runner.service_state(),
+                Err(tracedecay_domain::errors::TraceDecayError::ServiceUnitNotOwned { .. })
+            ),
+            "{state:?} must not bypass exact plist ownership"
+        );
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn launchd_stop_refuses_a_foreign_loaded_plist_before_mutating_it() {
@@ -1050,6 +1137,8 @@ fn daemon_status_reports_the_initialize_proof_not_only_the_socket() {
     );
     let status = super::service_status(&profile, &socket, env!("CARGO_PKG_VERSION"));
     server.join().expect("join status server");
+    assert!(status.is_ready());
+    let status = status.to_string();
     assert!(
         status.contains("protocol: Ready"),
         "daemon status must print the initialize proof, got:\n{status}"
@@ -1057,6 +1146,42 @@ fn daemon_status_reports_the_initialize_proof_not_only_the_socket() {
     assert!(
         status.contains("(connectable)"),
         "the same probe may also report the socket, got:\n{status}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_status_is_not_ready_when_no_daemon_is_listening() {
+    let profile_dir = TempDir::new().expect("profile temp dir");
+    let profile = ProfileRoot::new(profile_dir.path());
+    let socket = profile_dir.path().join("missing.sock");
+    let status = super::service_status(&profile, &socket, env!("CARGO_PKG_VERSION"));
+    assert!(!status.is_ready());
+    assert!(status.to_string().starts_with("state: stopped\n"));
+    assert!(!socket.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_status_is_not_ready_when_the_serving_build_is_different() {
+    let profile_dir = TempDir::new().expect("profile temp dir");
+    let profile = ProfileRoot::new(profile_dir.path());
+    let socket = profile_dir.path().join("status.sock");
+    let authority = seed_socket_authority(&socket);
+    let listener = UnixListener::bind(&socket).expect("bind status socket");
+    let server = serve_probe_response(
+        listener,
+        "tracedecay",
+        "different-build",
+        authority.auth_token().to_owned(),
+    );
+    let status = super::service_status(&profile, &socket, env!("CARGO_PKG_VERSION"));
+    server.join().expect("join status server");
+    assert!(!status.is_ready());
+    assert!(
+        status
+            .to_string()
+            .starts_with("state: running a different build\n")
     );
 }
 
@@ -1135,6 +1260,32 @@ fn unreachable_systemd_user_manager_is_an_error_not_a_stopped_unit() {
         "{message}"
     );
     assert!(message.contains("Failed to connect to bus"), "{message}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn install_names_foreground_daemon_when_user_manager_is_unreachable() {
+    let dir = TempDir::new().expect("temp dir");
+    let systemctl = dir.path().join("systemctl");
+    write_executable_script(
+        &systemctl,
+        "#!/bin/sh\necho 'Failed to connect to bus: No medium found' >&2\nexit 1\n",
+    )
+    .expect("fake systemctl");
+    let profile = fixture_profile(dir.path());
+    let runner = ServiceRunner::systemd(&systemctl, &profile).expect("fixture systemd runner");
+    let service_path = dir.path().join("tracedecay.service");
+    let socket = dir.path().join("daemon.sock");
+
+    let error = runner
+        .install(&service_path, true, &socket, TEST_BUILD_VERSION)
+        .expect_err("install cannot talk to an unreachable user manager");
+    let message = error.to_string();
+    assert!(message.contains("Failed to connect to bus"), "{message}");
+    assert!(
+        message.contains("tracedecay daemon run"),
+        "unreachable user-bus install must name the foreground fallback, got: {message}"
+    );
 }
 
 /// The home's default profile keeps the established unit; any other data
@@ -2908,4 +3059,161 @@ fn socket_advice_names_what_it_observed_about_the_unit() {
         ),
         "a profile with no home cannot see the unit, so it must not claim none is installed"
     );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn launchd_termination_preserves_ownership_and_enablement() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let launchctl = fake_service_program(&bin, "launchctl", "#!/bin/sh\nexit 0\n");
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    for (disabled, expected) in [
+        (false, DaemonServiceState::StoppingEnabled),
+        (true, DaemonServiceState::StoppingDisabled),
+    ] {
+        write_executable_script(&launchctl, format!(
+            "#!/bin/sh\nif [ \"$1\" = print ]; then\n  printf 'path = %s\\nstate = SIGTERMed\\n' '{}'\nelif [ \"$1\" = print-disabled ]; then\n  echo '\"com.tracedecay.daemon\" => {disabled}'\nfi\n",
+            plist.display()
+        )).unwrap();
+        let observed = runner.service_state().unwrap();
+        assert_eq!(observed, expected);
+        assert!(!observed.is_running());
+        assert_eq!(observed.is_enabled(), !disabled);
+    }
+    write_executable_script(
+        &launchctl,
+        "#!/bin/sh\necho 'path = /foreign/daemon.plist'\necho 'state = SIGTERMed'\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        runner.service_state(),
+        Err(tracedecay_domain::errors::TraceDecayError::ServiceUnitNotOwned { .. })
+    ));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn launchd_start_replaces_an_owned_terminating_job() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let log = root.path().join("commands");
+    let launchctl = fake_service_program(
+        &bin,
+        "launchctl",
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = print ]; then\n  printf 'path = %s\\nstate = SIGTERMed\\n' '{}'\nelse\n  printf '%s\\n' \"$*\" >> '{}'\nfi\n",
+            plist.display(),
+            log.display()
+        ),
+    );
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    let socket = root.path().join("daemon.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    runner.start(&plist, &socket, TEST_BUILD_VERSION).unwrap();
+    let commands = std::fs::read_to_string(log).unwrap();
+    assert!(commands.contains("bootout gui/501/com.tracedecay.daemon"));
+    assert!(commands.contains("bootstrap gui/501"));
+    assert!(commands.contains("kickstart -k gui/501/com.tracedecay.daemon"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn launchd_termination_is_not_quiescence_while_the_socket_serves() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    std::fs::create_dir_all(profile.data_dir()).unwrap();
+    let socket = profile.data_dir().join("daemon.sock");
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: bin.join("tracedecay"),
+        socket_path: socket.clone(),
+        data_dir_override: None,
+        profile: profile.clone(),
+        remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
+    };
+    let plist = super::write_service_unit(&spec).unwrap();
+    let launchctl = fake_service_program(
+        &bin,
+        "launchctl",
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = print ]; then\n  printf 'path = %s\\nstate = SIGTERMed\\n' '{}'\nfi\n",
+            plist.display()
+        ),
+    );
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let error = super::verify_installed_service_quiesced_under_lease_with_runner(&profile, &runner)
+        .unwrap_err();
+    assert!(error.to_string().contains("connectable"));
+    drop(listener);
+    std::fs::remove_file(&socket).unwrap();
+    assert_eq!(
+        super::verify_installed_service_quiesced_under_lease_with_runner(&profile, &runner)
+            .unwrap(),
+        DaemonServiceState::StoppingEnabled
+    );
+}
+
+/// Post-update restores wait on authenticated readiness; a job launchd is
+/// still spawning must keep that wait pending instead of failing it.
+#[cfg(target_os = "linux")]
+#[test]
+fn readiness_wait_rides_through_launchd_xpcproxy_startup() {
+    let dir = TempDir::new().expect("temp dir");
+    let profile = fixture_profile(dir.path());
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("fake bin dir");
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let spawned = dir.path().join("spawned");
+    let launchctl = fake_service_program(
+        &bin,
+        "launchctl",
+        &format!(
+            "#!/bin/sh\n[ \"$1\" = print ] || exit 0\nif [ -f '{spawned}' ]; then state=running; else : > '{spawned}'; state=xpcproxy; fi\nprintf 'path = %s\\nstate = %s\\n' '{plist}' \"$state\"\n",
+            spawned = spawned.display(),
+            plist = plist.display(),
+        ),
+    );
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    let service_path = super::service_unit_path(&profile).expect("service unit path");
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    let socket_path = dir.path().join("daemon.sock");
+    std::fs::write(
+        &service_path,
+        format!(
+            "[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
+            socket_path.display()
+        ),
+    )
+    .expect("existing service unit");
+    let authority = seed_socket_authority(&socket_path);
+    let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
+    let (_served, _) = serve_identity_probes(
+        listener,
+        vec![TEST_BUILD_VERSION],
+        authority.auth_token().to_owned(),
+    );
+
+    super::wait_for_installed_service_state_with(
+        &profile,
+        &runner,
+        DaemonServiceState::RunningEnabled,
+        TEST_BUILD_VERSION,
+        std::time::Duration::from_secs(10),
+    )
+    .expect("an xpcproxy startup must await readiness, not fail it");
+    assert!(spawned.exists(), "the wait must have observed xpcproxy");
 }

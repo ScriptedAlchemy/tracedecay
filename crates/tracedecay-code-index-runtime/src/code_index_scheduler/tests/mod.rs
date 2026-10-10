@@ -760,6 +760,60 @@ fn install_verified_graph_store_on_text(
     .expect("install interactive graph serving");
 }
 
+/// Install a verified graph whose catalog is marked warming, not ready.
+///
+/// Matches the production first-activation window: the engine is pinned so
+/// park-release has owners to keep, and the catalog scan has not finished.
+fn install_warming_graph_store_on_text(
+    text: &super::LatestCodeTextGenerationV1,
+    latest: &super::LatestCompleteCodeIndexV1,
+) {
+    let generation = latest.generation.manifest().generation_id.clone();
+    let cancellation =
+        tracedecay_contracts::CancellationSignal::active("cancel.callable-graph-projection")
+            .expect("graph cancellation");
+    let publisher =
+        tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore::memory(
+            &cancellation,
+        )
+        .expect("graph publisher");
+    publisher
+        .publish_indexed_with_cancellation(
+            &generation,
+            latest.generation.edges(),
+            latest.generation.chunks().chunks(),
+            &latest.generation.snapshot().files,
+            latest.generation.symbols(),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("publish indexed graph");
+    let graph_store = Arc::new(
+        publisher
+            .verified_store(&generation)
+            .expect("verified graph"),
+    );
+    graph_store
+        .mark_interactive_catalog_warming()
+        .expect("mark first catalog warm");
+    graph_store
+        .warm_serving_engine()
+        .expect("pin the serving engine the first catalog warm reads");
+    let graph_reader = graph_store
+        .evidence_reader_with_cancellation(
+            &generation,
+            Some(latest.generation.snapshot().repository.clone()),
+            latest.source_freshness().expect("source freshness"),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("graph reader");
+    text.install_graph_serving(
+        graph_reader,
+        Some(graph_store),
+        super::CodeGraphServingAuthorityV1::Memory,
+    )
+    .expect("install warming graph serving");
+}
+
 pub(super) fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
     let id = |value: &str| value.to_owned();
     let profile = FusionProfile {
@@ -1102,6 +1156,45 @@ async fn mounted_core_query_worktree_at(
     )
     .expect("resolved scope");
     mount_core_query_authority(&registry, root, &scope, &latest).await;
+    (registry, scope)
+}
+
+/// Mount a worktree and the core query authority from the text seat only.
+///
+/// Exact/lexical search and callers bind the sealed text artifact and the
+/// warm graph, not the seated decode. Tests that pin the decode-free
+/// serving set must not wait on [`wait_for_live_complete_generation`]: that
+/// wait is a complete-generation demand and would re-pin the third copy.
+async fn mounted_text_query_worktree_at(
+    registry: CodeIndexSchedulerRegistryV1,
+    root: &Path,
+    store_root: PathBuf,
+) -> (CodeIndexSchedulerRegistryV1, ResolvedScope) {
+    registry
+        .mount_worktree(test_project_id(), root, store_root)
+        .await
+        .expect("mount daemon-owned scheduler");
+    let text = wait_for_queryable_text_generation(&registry, root).await;
+    wait_for_settled_owner(&registry, root).await;
+    wait_for_worker_phase(
+        &registry,
+        root,
+        crate::code_index_scheduler::CodeIndexWorkerPhaseV1::Parked,
+    )
+    .await;
+    let snapshot = text.metadata().snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree id"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    let authority = query_authority(text.metadata().manifest().privacy_domain.clone());
+    registry
+        .mount_query_authority(root, &scope, authority)
+        .await
+        .expect("mount core query authority from the text seat");
     (registry, scope)
 }
 
@@ -1732,8 +1825,12 @@ async fn wait_for_live_complete_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
 ) -> super::LatestCompleteCodeIndexV1 {
-    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || {
-        registry.latest_complete_serving_for_test(path)
+    // A parked worker may have already given the seat back. Demand it
+    // without opening git so this wait cannot starve on an empty slot,
+    // and so park will not drop the seat while the test still holds it.
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || async {
+        registry.request_complete_generation(path).await;
+        registry.latest_complete_serving_for_test(path).await
     })
     .await
 }

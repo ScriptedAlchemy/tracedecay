@@ -4,8 +4,8 @@ use tracedecay_domain::{
     CandidateContribution, CompactCandidate, EvidenceRole, ExactAdmissionProof,
     ExactAdmissionRuleRevision, ExactClass, ExactFieldV1, FixedPointScore,
     FreshnessCompatibilityV1, FusedCandidate, OccurrenceProvenance, RankingDecision,
-    RankingDecisionKind, RetrievalAnchorId, RetrievalContractError, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, SourceFreshness, UtcMicros,
+    RankingDecisionKind, RetrievalAnchorId, RetrievalContractError, RetrievalSourceRoleV1,
+    RetrieverBatch, RetrieverCoverage, RetrieverKind, SourceFreshness, UtcMicros,
 };
 
 const ZERO_DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -54,6 +54,7 @@ fn candidate(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: RetrievalSourceRoleV1::default(),
         retriever,
         retriever_revision: id("retriever.contract.v1"),
         score_domain: id("score.contract.v1"),
@@ -137,6 +138,7 @@ fn exact_fusion_requires_an_attributed_admission_decision() {
         logical_evidence_id: exact.logical_evidence_id.clone(),
         occurrences: vec![provenance(&exact)],
         exact_class: ExactClass::ExactMessage,
+        source_role: RetrievalSourceRoleV1::default(),
         utility_micros: 1,
         contributions: vec![contribution],
         freshness: vec![freshness()],

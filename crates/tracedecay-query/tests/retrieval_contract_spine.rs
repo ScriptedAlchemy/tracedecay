@@ -5,8 +5,8 @@ use tracedecay_domain::{
     ExactAdmissionRuleRevision, ExactFieldV1, ExactTechnicalTermKindV1, FreshnessVectorDigest,
     PrincipalId, PrivacyDomainId, QueryNormalizationRevision, RepositoryId, RetrievalAnchorId,
     RetrievalBudget, RetrievalContractError, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    SanitizerRevision, SingleRootScopeV1, SourceOccurrenceId, TemporalModeV1, UtcMicros,
-    VectorWatermark,
+    RetrievalSourceRoleV1, SanitizerRevision, SingleRootScopeV1, SourceOccurrenceId,
+    TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{ExactLaneEvidence, ExactLaneRequest, ExactLiteralV1};
 use tracedecay_query::retrieval::ports::{
@@ -137,6 +137,7 @@ fn exact_evidence_matches_the_frozen_generation_and_literal() {
         },
         matched_literals: vec![literal],
         admission_proof: proof,
+        source_role: RetrievalSourceRoleV1::default(),
     };
     evidence
         .validate(&request)

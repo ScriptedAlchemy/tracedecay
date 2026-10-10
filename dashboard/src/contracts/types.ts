@@ -2804,6 +2804,7 @@ export type GraphPathPayloadV1 = {
 export type GraphSearchPayloadV1 = {
   count: number;
   has_more: boolean;
+  indexed_symbols: number;
   limit: number;
   offset: number;
   query: string;

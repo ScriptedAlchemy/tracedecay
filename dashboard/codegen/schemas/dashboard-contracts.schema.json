@@ -14957,6 +14957,12 @@
         "has_more": {
           "type": "boolean"
         },
+        "indexed_symbols": {
+          "description": "Symbols in the served generation — the population a completed scan\nexamined, so an empty hit list can report its real denominator\ninstead of claiming the index was empty.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "limit": {
           "format": "int64",
           "type": "integer"
@@ -14989,6 +14995,7 @@
         "limit",
         "offset",
         "total",
+        "indexed_symbols",
         "has_more",
         "count",
         "results"

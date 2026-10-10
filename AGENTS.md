@@ -88,13 +88,12 @@ unauthorized external action after completing independent, authorized work.
 - pnpm (pinned by `packageManager`) manages the npm packages and the Cargo
   sources. Run `pnpm install` at the repository root after cloning and after
   any `pnpm-lock.yaml` or `Cargo.lock` change. The committed
-  `.cargo/config.toml` replaces crates.io and the pinned git sources with
-  `.pnpm/crates`, so cargo cannot resolve dependencies until that install has
-  run. Two Cargo errors mean "run `pnpm install`": `failed to read root of
-  directory source <repo>/.pnpm/crates/git` before any install, and
-  `no matching package named '<crate>' found` with `location searched:
-  directory source '<repo>/.pnpm/crates/crates-io'` when Cargo.lock names a
-  crate that is not vendored yet. `verifyDepsBeforeRun` guards only the npm
+  `.cargo/config.toml` optionally includes `.pnpm/crates/config.toml`, which
+  that install generates to replace crates.io and the pinned git sources with
+  `.pnpm/crates`. The Cargo error `no matching package named '<crate>' found`
+  with `location searched: directory source '<repo>/.pnpm/crates/crates-io'`
+  means "run `pnpm install`": Cargo.lock names a crate that is not vendored
+  yet. `verifyDepsBeforeRun` guards only the npm
   packages; pnpm reads Cargo.lock as it is and never rewrites it or fails on
   a manifest mismatch.
 - To add, remove, or bump a crate (member or `[workspace.dependencies]`),
@@ -110,7 +109,7 @@ unauthorized external action after completing independent, authorized work.
   `rev` on every crate from that repository, refresh the lock with `-p` for
   each, and run `pnpm install`: pnpm vendors every source Cargo.lock names,
   git included, and rewrites that source's replacement block in
-  `.cargo/config.toml`. Do not use `pnpm add crate:`; from a member
+  `.pnpm/crates/config.toml`. Do not use `pnpm add crate:`; from a member
   directory it regenerates the whole Cargo.lock, at the root it fails, and
   `pnpm remove crate:` is unsupported. `pnpm install` leaves unused
   `.pnpm/crates` directories in place; they are inert once the lock stops

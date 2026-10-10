@@ -1087,12 +1087,15 @@ type MergedLexicalLane = (
     BTreeSet<RetrievalAnchorId>,
 );
 
-/// Canonical merged order: strict routes before alternatives, then the
+/// Canonical merged order: production definitions before every other
+/// source role, then strict routes before alternatives, then the
 /// anchor-tiered score, then stable occurrence identity.
 fn merged_candidate_cmp(left: &MergedCandidate, right: &MergedCandidate) -> std::cmp::Ordering {
-    right
-        .strict
-        .cmp(&left.strict)
+    left.candidate
+        .source_role
+        .admission_rank()
+        .cmp(&right.candidate.source_role.admission_rank())
+        .then_with(|| right.strict.cmp(&left.strict))
         .then_with(|| right.candidate.raw_score.cmp(&left.candidate.raw_score))
         .then_with(|| {
             left.candidate
@@ -1194,6 +1197,12 @@ impl MergedRoutes {
                         ));
                     }
                     if is_alternative && existing.strict {
+                        // The strict route's evidence stands, but the
+                        // alternative's source role still folds: a
+                        // definition-field match under any admitted route
+                        // marks the occurrence a production definition.
+                        existing.evidence.source_role =
+                            existing.evidence.source_role.min(evidence.source_role);
                         existing.matches.push(route_match);
                         continue;
                     }
@@ -1271,6 +1280,9 @@ impl MergedRoutes {
                 .raw_score
                 .checked_add(tier)
                 .map_err(contract_error)?;
+            // The emitted candidate mirrors the aggregated evidence role:
+            // one source-role application after route aggregation.
+            merged.candidate.source_role = merged.evidence.source_role;
         }
         admitted.sort_by(merged_candidate_cmp);
         let eligible = admitted.len() as u64;
@@ -1388,6 +1400,9 @@ fn merge_evidence(
             None => existing.field_scores_micros.push((*field, *score)),
         }
     }
+    // The merged role is the strongest across routes: an occurrence that
+    // any admitted route read as a production definition keeps that tier.
+    existing.source_role = existing.source_role.min(incoming.source_role);
     union_terms(
         &mut existing.matched_whole_terms,
         &incoming.matched_whole_terms,

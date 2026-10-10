@@ -683,7 +683,11 @@ if [[ $skip_packaged_runtime_battery == true ]]; then
 fi
 
 echo "distribution acceptance: compiling packaged CLI with dist profile"
-TRACEDECAY_RELEASE_GIT_SHA="$source_git_sha" cargo build \
+# Checkout rustflags skip LLVM bitcode for non-LTO graphs. A process
+# RUSTFLAGS replaces those flags; thin LTO needs the bitcode back.
+TRACEDECAY_RELEASE_GIT_SHA="$source_git_sha" \
+  RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C embed-bitcode=yes" \
+  cargo build \
   --manifest-path "$cli_package/Cargo.toml" \
   --profile dist \
   "${release_cli_cargo_args[@]}" \
@@ -916,7 +920,9 @@ test_api_stderr="$work/test-api-probe.stderr"
 # `target-dir`). Only the probe itself is compiled. A dev-profile check paid
 # a second metadata compile of the whole graph. The expected refusal is still
 # E0599 on the test-only associated item.
-if CARGO_NET_OFFLINE=true cargo check \
+if CARGO_NET_OFFLINE=true \
+  RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C embed-bitcode=yes" \
+  cargo check \
   --manifest-path "$test_api_probe/Cargo.toml" \
   --profile dist \
   --config "$patch_config" \

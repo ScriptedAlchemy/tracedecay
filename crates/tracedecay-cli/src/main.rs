@@ -1104,10 +1104,7 @@ async fn dispatch_command(
                 .await?;
             Ok(CommandOutcome::Success)
         }
-        CommandFamily::Runtime => {
-            dispatch_runtime_command(profile, command).await?;
-            Ok(CommandOutcome::Success)
-        }
+        CommandFamily::Runtime => dispatch_runtime_command(profile, command).await,
         CommandFamily::Agent => dispatch_agent_command(profile, command, host_bundle)
             .await
             .map(lifecycle_command_outcome),
@@ -1139,6 +1136,7 @@ async fn dispatch_project_command(
             path_flag,
             adopt_project,
             fresh,
+            wait,
         } => {
             // clap enforces that at most one of these is present.
             commands::handle_init(
@@ -1147,6 +1145,7 @@ async fn dispatch_project_command(
                 adopt_project,
                 fresh,
                 assume_yes,
+                wait,
             )
             .await?;
         }
@@ -1259,7 +1258,7 @@ fn open_dashboard_url(url: &str) -> std::io::Result<()> {
 async fn dispatch_runtime_command(
     profile: &ProfileRoot,
     command: Commands,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<CommandOutcome> {
     match command {
         Commands::Tool {
             project,
@@ -1299,6 +1298,13 @@ async fn dispatch_runtime_command(
             open,
         } => {
             let project_path = tracedecay_configuration::resolve_path_with_discovery(profile, path);
+            if profile.is_ambient_project_root(&project_path) {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                    message: tracedecay_runtime_core::config::ambient_project_root_guidance(
+                        &project_path,
+                    ),
+                });
+            }
             let result = tracing::Instrument::instrument(
                 commands::daemon_tool_json(
                     profile,
@@ -1332,7 +1338,13 @@ async fn dispatch_runtime_command(
             match status {
                 "already_running" | "stopping" => {
                     println!("tracedecay dashboard already listening on {url}");
-                    eprintln!("Serving project {}", project_path.display());
+                    eprintln!(
+                        "Dashboard bound to launch project {}",
+                        project_path.display()
+                    );
+                    eprintln!(
+                        "Code search covers this project only; rebound with --path to serve another."
+                    );
                     let port_honored = result
                         .get("requested_port_honored")
                         .and_then(serde_json::Value::as_bool)
@@ -1358,7 +1370,13 @@ async fn dispatch_runtime_command(
                 }
                 _ => {
                     println!("tracedecay dashboard listening on {url}");
-                    eprintln!("Serving project {}", project_path.display());
+                    eprintln!(
+                        "Dashboard bound to launch project {}",
+                        project_path.display()
+                    );
+                    eprintln!(
+                        "Code search covers this project only; rebound with --path to serve another."
+                    );
                 }
             }
             if open {
@@ -1375,7 +1393,7 @@ async fn dispatch_runtime_command(
                 // Allow users to opt out per-project by setting
                 // DISABLE_TRACEDECAY=true. The process exits cleanly so the
                 // host does not retry.
-                return Ok(());
+                return Ok(CommandOutcome::Success);
             }
             // The MCP server is long-lived, so it may run the detached
             // structured-row backfill sweep; one-shot CLI/hook processes never
@@ -1387,18 +1405,16 @@ async fn dispatch_runtime_command(
             )
             .await?;
         }
-        Commands::Daemon { action } => {
-            dispatch_daemon_command(profile, action).await?;
-        }
+        Commands::Daemon { action } => return dispatch_daemon_command(profile, action).await,
         _ => unreachable!("non-runtime command passed to runtime dispatcher"),
     }
-    Ok(())
+    Ok(CommandOutcome::Success)
 }
 
 async fn dispatch_daemon_command(
     profile: &ProfileRoot,
     action: DaemonAction,
-) -> tracedecay_domain::errors::Result<()> {
+) -> tracedecay_domain::errors::Result<CommandOutcome> {
     match action {
         DaemonAction::Run {
             socket,
@@ -1518,20 +1534,23 @@ async fn dispatch_daemon_command(
         DaemonAction::Status => {
             let socket_path =
                 tracedecay_daemon_control::socket_path_or_default(profile.data_dir(), None)?;
-            {
+            let status = {
                 let _span = tracing::trace_span!("cli.daemon.status").entered();
-                print!(
-                    "{}",
-                    tracedecay_daemon_control::service_status(
-                        profile,
-                        &socket_path,
-                        crate::product_runtime::PRODUCT_BUILD_VERSION,
-                    )
+                tracedecay_daemon_control::service_status(
+                    profile,
+                    &socket_path,
+                    crate::product_runtime::PRODUCT_BUILD_VERSION,
                 )
             };
+            print!("{status}");
+            return Ok(if status.is_ready() {
+                CommandOutcome::Success
+            } else {
+                CommandOutcome::Exit(1)
+            });
         }
     }
-    Ok(())
+    Ok(CommandOutcome::Success)
 }
 
 /// A lifecycle that committed everything it could but left a host waiting on

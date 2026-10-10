@@ -71,6 +71,7 @@ const MAX_TRANSCRIPTS_PER_PASS: usize = 512;
 const MAX_TRANSCRIPTS_PER_WORKSPACE: usize = 128;
 const MAX_MESSAGES_PER_SNAPSHOT: usize = 4_096;
 
+#[derive(Clone)]
 pub struct KiroSource {
     agent_dir: PathBuf,
     workspace_storage_dir: PathBuf,
@@ -267,21 +268,30 @@ pub async fn capture_kiro_snapshot_observations(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
+    let source = source.clone();
+    let project_root = project_root.to_path_buf();
     capture_snapshot_observations(
         facade,
         PROVIDER,
         scope,
         cancellation,
         max_new_bytes,
-        || {
-            source.discover_transcript_paths(
-                project_root,
-                TranscriptDiscoveryBounds::from_discovered_units(MAX_TRANSCRIPTS_PER_PASS),
-            )
+        {
+            let source = source.clone();
+            let project_root = project_root.clone();
+            move || {
+                source.discover_transcript_paths(
+                    &project_root,
+                    TranscriptDiscoveryBounds::from_discovered_units(MAX_TRANSCRIPTS_PER_PASS),
+                )
+            }
         },
-        |path| source.snapshot_input_bytes(path),
-        |path| {
-            let Some((generation, messages)) = source.parse_snapshot(path, project_root)? else {
+        {
+            let source = source.clone();
+            move |path| source.snapshot_input_bytes(path)
+        },
+        move |path| {
+            let Some((generation, messages)) = source.parse_snapshot(path, &project_root)? else {
                 return Ok(None);
             };
             let records = normalize_kiro_snapshot_observations(&messages)?;

@@ -1329,7 +1329,7 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
                     permit
                 } else {
                     background_cpu
-                        .acquire_cancellable(task_cancellation.cancellation_flag())
+                        .acquire_cancellable(|| task_cancellation.is_cancelled())
                         .ok_or(TranscriptIngestError::Cancelled { provider })?
                 };
                 if task_cancellation.is_cancelled() {

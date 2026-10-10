@@ -203,10 +203,22 @@ async fn mount_candidate_corpus() -> MountedCorpus {
         .mount_worktree(project_id, &corpus, store)
         .await
         .expect("mount candidate corpus");
+    // The published graph head serves from the text owner alone, so the
+    // whole-generation decode that fills the serving seat waits for a reader
+    // that demands it; polling the seat never stamps that demand.
+    assert!(
+        registry.request_complete_generation(&corpus).await,
+        "complete-generation demand must reach the mounted corpus"
+    );
     let latest = tokio::time::timeout(Duration::from_mins(3), async {
         loop {
+            // `production_query_owners` is the serving path's owner demand:
+            // it warms the seat's owners rather than only watching readiness.
             if let Some(latest) = registry.latest_complete_serving_for_scope(&scope).await
-                && latest.text_generation_handle().query_owners_are_ready()
+                && latest
+                    .text_generation_handle()
+                    .production_query_owners()
+                    .is_ok()
             {
                 return latest;
             }

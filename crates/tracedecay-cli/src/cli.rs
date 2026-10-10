@@ -155,7 +155,7 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize a new TraceDecay project (full index)
+    /// Enroll a project and request background indexing
     #[command(long_about = INIT_LONG_ABOUT, after_help = INIT_AFTER_HELP)]
     Init {
         /// Project path (default: current directory)
@@ -182,6 +182,11 @@ pub enum Commands {
         /// could be adopted at this root.
         #[arg(long)]
         fresh: bool,
+        /// Hold until the first code generation is ready. Without this flag,
+        /// init returns a typed not-ready receipt once reconciliation is
+        /// requested and the index continues in the background.
+        #[arg(long)]
+        wait: bool,
     },
     /// Incremental sync (project must already be initialized with `tracedecay init`)
     #[command(long_about = SYNC_LONG_ABOUT, after_help = SYNC_AFTER_HELP)]
@@ -837,7 +842,7 @@ pub enum LspAction {
 
 #[derive(Subcommand)]
 pub enum DaemonAction {
-    /// Run the foreground daemon process
+    /// Run the foreground daemon process (the no-systemd path)
     Run {
         /// Unix socket path for MCP clients
         #[arg(long)]
@@ -887,7 +892,7 @@ pub enum DaemonAction {
     Stop,
     /// Restart the installed daemon service (e.g. after a version mismatch)
     Restart,
-    /// Print daemon service/socket status
+    /// Print daemon readiness; exit 0 only when this build is serving
     Status,
 }
 

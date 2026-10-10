@@ -2,11 +2,19 @@
 
 The embedded dashboard is the daemon's graphical client for code intelligence,
 project memory, lossless context, work, configuration, diagnostics, and usage.
-Start it with:
+Start it from an enrolled repo, or pass `--path`:
 
 ```bash
 tracedecay dashboard --open
+tracedecay dashboard --path /path/to/enrolled/repo --open
 ```
+
+The listener is bound to that one launch project. `$HOME` and other ambient
+roots are not projects: the command refuses and names `--path`. Code search
+covers only the bound project. A request that names another enrolled repo
+(`?project_id=` or `/api/projects/{id}/plugins/graph/search`) fails closed with
+`wrong_project` instead of returning `total=0`. A listener with no project
+fails closed with `empty_scope`.
 
 The dashboard uses generated Rust API contracts and the same application
 operations as CLI, MCP, LSP, SDK, hooks, and host integrations. Browser code
@@ -47,7 +55,7 @@ Hermes wrapper the same routes are reverse-proxied at
 | Route | Description |
 |---|---|
 | `GET /overview` | Landing analytics: totals, `nodes_by_kind`, `edges_by_kind`, `files_by_language` (extension-bucketed), `top_connected` (12 highest-degree symbols), `largest_files` (by `node_count`). |
-| `GET /search?q=&limit=&offset=` | Paginated symbol search over name, qualified name, signature, and file path (`LIKE`, escaped). Exact-name matches rank first. Results carry full-graph `degree`. `limit` ≤ 200. |
+| `GET /search?q=&limit=&offset=&project_id=` | Paginated symbol search over name, qualified name, signature, and file path (`LIKE`, escaped) **in the launch project only**. Exact-name matches rank first. Results carry full-graph `degree`. `limit` ≤ 200. A `project_id` that is not the launch project returns `domain_state: unknown` with omission reason `wrong_project` (payload null). A bound-project miss is `complete_zero_findings`, not a ready empty list. |
 | `GET /node/{id}` | Single node detail: signature, doc, visibility, span (`start_line`/`end_line`/columns), complexity counters, `degree`. 404 with a `detail` body when missing. |
 | `GET /node/{id}/neighbors?limit=` | Depth-1 neighborhood: `callers` / `callees` (calls edges, hydrated node rows + `degree`), raw `edges` touching the node, and `edges_by_kind` counts. |
 | `GET /subgraph?node_id=&limit_nodes=&limit_edges=` | One-hop subgraph for visualization. Caps default 80 nodes / 120 edges (max 250 / 500); `capped.nodes` / `capped.edges` report truncation. Accepts `q=` instead of `node_id` (best search hit becomes the seed; a query with no hit returns an empty payload). With no seed at all it returns the **default overview slice** (`mode: "default"`): the top-degree hubs plus the edges among them, hubs with no edges to other hubs are pruned in favor of interconnected ones, and isolated nodes only fill leftover capacity (so tiny or edge-free indexes still render). Seeded responses carry `mode: "seeded"`. Nodes carry `degree` so the UI can show collapsed-neighbor counts. |

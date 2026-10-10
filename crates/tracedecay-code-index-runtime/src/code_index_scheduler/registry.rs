@@ -1305,9 +1305,10 @@ pub(super) fn project_graph_publication_phase(
 /// Whether the lane owners alone would let status report this worktree as
 /// terminal (`fresh` / `current`).
 ///
-/// Refused graph activation remains terminal for text serving, preserving the
-/// existing status behavior; strict dogfood can distinguish it from Ready via
-/// the separate typed projection. [`dashboard_terminal_status`] is what
+/// A refused graph is a finished verdict for this sealed generation, not
+/// incomplete coverage: exact and lexical stay seated, and waiting cannot
+/// change the answer. Graph-backed reads still see the typed refusal through
+/// [`CodeGraphServingReadinessV1`]. [`dashboard_terminal_status`] is what
 /// freshness reads use.
 fn dashboard_generation_is_ready(
     latest: Option<&LatestCompleteCodeIndexV1>,
@@ -1319,7 +1320,7 @@ fn dashboard_generation_is_ready(
         text_ready
             && code_graph_serving
                 .as_ref()
-                .is_some_and(CodeGraphServingReadinessV1::is_activated)
+                .is_some_and(CodeGraphServingReadinessV1::is_terminal_verdict)
     } else {
         latest.is_some() || text_ready
     }
@@ -3070,7 +3071,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Record that the serving slot was written. Call this only after the slot
     /// holds the new generation, so a woken waiter observes the seated value.
-    fn record_serving_seat(seats: &tokio::sync::watch::Sender<u64>) {
+    pub(super) fn record_serving_seat(seats: &tokio::sync::watch::Sender<u64>) {
         seats.send_modify(|seats| *seats = seats.wrapping_add(1));
     }
 

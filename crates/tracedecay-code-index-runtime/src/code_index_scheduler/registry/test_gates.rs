@@ -774,6 +774,19 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
+    /// Run the parked worker's decode release against this worktree now, so a
+    /// test can arrange the seat and text-owner state the park site decides
+    /// on without standing up a full projection stall.
+    #[cfg(test)]
+    pub async fn release_decode_when_parked_for_test(&self, project_root: &Path) {
+        let project_root = canonical_existing_identity(project_root).expect("canonical root");
+        let mounted = self.mounted.lock().await;
+        let worktree = mounted.get(&project_root).expect("mounted worktree");
+        worktree
+            .residency
+            .release_decode_when_parked(&self.resident_owners);
+    }
+
     /// Drop only the decoded seat, as a deferred serving decode does once a
     /// published graph head serves from the text owner.
     #[cfg(test)]

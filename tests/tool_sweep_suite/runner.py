@@ -550,7 +550,9 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
         "pub fn sweep_anchor() -> SweepType { SweepType { value: 7 } }\n"
     )
     (root / "src/relocated.rs").write_text("pub fn relocation_marker() -> i32 { 0 }\n")
-    (root / "docs/large.md").write_text("catalog sweep handle source\n" * 8_192)
+    (root / "docs/large.md").write_text(
+        ("catalog sweep handle source " * 8 + "\n") * 8_192
+    )
     _run_checked(["git", "init", "--initial-branch=main", "--quiet"], root, "fixture git init")
     _run_checked(["git", "config", "user.name", "TraceDecay Catalog Sweep"], root, "fixture git config")
     _run_checked(["git", "config", "user.email", "catalog-sweep@example.invalid"], root, "fixture git config")
@@ -1305,6 +1307,7 @@ def prime_fixture_values(
                 "path_glob": "docs/large.md",
                 "max_results": 200,
                 "context_lines": 3,
+                "format": "json",
             },
             deadline("tracedecay_grep"),
         )
@@ -2027,6 +2030,16 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         return {"base": fixture["branch"], "head": fixture["branch"], "format": "json"}
     if name in {"tracedecay_affected", "tracedecay_diff_context"}:
         return {"files": [fixture["file"]], "format": "json"}
+    if name == "tracedecay_config":
+        return {"path": "Cargo.toml", "key": "package.name", "format": "json"}
+    if name in {"tracedecay_signature", "tracedecay_derives"}:
+        return {"node_id": fixture["node_id"], "format": "json"}
+    if name == "tracedecay_signature_search":
+        return {"is_async": False, "format": "json"}
+    if name == "tracedecay_test_map":
+        return {"file": fixture["file"], "format": "json"}
+    if name == "tracedecay_sessions_for":
+        return {"git_ref": "worktree", "value": fixture["root"], "limit": 10, "format": "json"}
     if name == "tracedecay_configuration_get":
         return {"key": fixture["configuration_key"], "format": "json"}
     if name == "tracedecay_configuration_protected_preview":
@@ -2087,7 +2100,6 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         return {
             "horizon": {"since_micros": 0, "until_micros": int(time.time() * 1_000_000)},
             "max_events": 100,
-            "format": "json",
         }
     if name == "tracedecay_work_generate_proposal":
         return dict(fixture["work_generate_arguments"])
@@ -2099,14 +2111,13 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         "tracedecay_work_hydrate_artifacts",
         "tracedecay_work_topology",
     }:
-        return {"page_size": 50, "format": "json"}
+        return {"page_size": 50}
     if name == "tracedecay_work_views":
         return {
             "selection": fixture["work_selection"],
             "mode": {"mode": "current"},
             "continuation": None,
             "observed_at": int(time.time() * 1_000_000),
-            "format": "json",
         }
     if name == "tracedecay_work_retrieve_evidence":
         return {
@@ -2118,7 +2129,6 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
             "expansion": None,
             "continuation": None,
             "observed_at": int(time.time() * 1_000_000),
-            "format": "json",
         }
     if name == "tracedecay_work_compare_proposal":
         return {
@@ -2127,7 +2137,6 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
             "old_version": fixture["work_initial_version"],
             "new_version": fixture["work_admitted_version"],
             "observed_at": int(time.time() * 1_000_000),
-            "format": "json",
         }
     if name == "tracedecay_work_experience":
         return {
@@ -2138,7 +2147,6 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
             "expertise_categories": ["testing"],
             "limit": 10,
             "observed_at": int(time.time() * 1_000_000),
-            "format": "json",
         }
     if name == "tracedecay_work_prepare_graph_mutation":
         return dict(fixture["work_prepare_create_arguments"])
@@ -2148,7 +2156,6 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         return {
             "task_id": fixture["work_task_id"],
             "run_id": fixture["work_run_id"],
-            "format": "json",
         }
     if name == "tracedecay_work_placement_preflight":
         return dict(fixture["work_placement_arguments"])
@@ -2156,7 +2163,6 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         return {
             "task_id": fixture["work_task_id"],
             "run_id": fixture["work_run_id"],
-            "format": "json",
         }
     if name == "tracedecay_github_stack_signal_expand":
         arguments = fixture.get("github_stack_signal_arguments")

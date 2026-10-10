@@ -240,6 +240,10 @@ fn daemon_project_route_rejects_the_user_profile_root() {
         .expect_err("ambient home route must fail before project open");
 
     assert!(error.to_string().contains("ambient user/filesystem root"));
+    assert!(
+        error.to_string().contains("--path"),
+        "ambient home refusal must tell the operator to pass --path: {error}"
+    );
 }
 
 /// The route names the real directory the way the operator spells it: `..`
@@ -4119,11 +4123,12 @@ async fn production_composition_dashboard_persists_project_settings_over_http() 
             (status, payload)
         }
 
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_global(Some(std::time::Duration::from_secs(4)))
-            .build()
-            .into();
+        let agent = tracedecay_application::http_agent::http_agent(
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .timeout_global(Some(std::time::Duration::from_secs(4)))
+                .build(),
+        );
         let settings_url = format!("{base_url}/api/settings");
         let project_settings_url = format!("{settings_url}/project");
 

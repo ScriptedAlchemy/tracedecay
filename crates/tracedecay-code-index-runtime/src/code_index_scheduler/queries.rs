@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphSymbolRefV1,
-    UnresolvedCallerGapsV1,
+    InteractiveCatalogReaderLeaseV1, UnresolvedCallerGapsV1,
 };
 use tracedecay_contracts::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
@@ -71,6 +71,15 @@ use tracedecay_query::retrieval::{
 };
 
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
+/// Inbound kinds `code_callers` and `code_references` share: call sites,
+/// usages, type references, and annotations. Walking `Calls` alone dropped
+/// import/type/`new` rows and then claimed a complete empty page.
+const CALLER_AND_REFERENCE_KINDS: [RelationEdgeKindV1; 4] = [
+    RelationEdgeKindV1::Calls,
+    RelationEdgeKindV1::Uses,
+    RelationEdgeKindV1::TypeOf,
+    RelationEdgeKindV1::Annotates,
+];
 const MAX_GENERATION_RESOLUTION_WAIT: Duration = Duration::from_secs(30);
 /// Leave enough of the carried dispatch budget for timeout projection and the
 /// typed response to cross the enclosing boundary.
@@ -1635,6 +1644,8 @@ struct PreparedGraphCallableQueryV1 {
     latest: LatestCodeTextGenerationV1,
     /// Counts every store read on [`Self::cost`].
     reader: CodeGraphInteractiveReader,
+    /// Holds the catalog across admission, warming, and the complete read.
+    _catalog_retain: Option<Arc<InteractiveCatalogReaderLeaseV1>>,
     cost: CodeGraphReadCostMeter,
     query: PreparedQueryV1,
     /// Absent only when the scope unmounted between resolving `latest` and
@@ -1947,6 +1958,32 @@ impl CodeIndexSchedulerRegistryV1 {
         let store = latest
             .interactive_graph_store()
             .map_err(|_| CallableCodeCursorError::Unavailable)?;
+        // A parked worktree released the engine and catalog beside its
+        // decode; their re-warm runs in the background, so a callable
+        // admitted while they warm would refuse a cold store instead of
+        // waiting. Wait within what the request still admits, as project
+        // graph reads do, then open the reader on the warmed store. A
+        // request that spent its budget mid-warm, was cancelled, or lost
+        // the wait task answers the typed unavailable rather than opening
+        // a reader on a store it never waited out.
+        let mut catalog_retain = None;
+        if let Some(budget) = remaining_generation_resolution_wait(context.request) {
+            let waiting = Arc::clone(&store);
+            match tokio::task::spawn_blocking(move || waiting.await_catalog_and_retain(budget))
+                .await
+            {
+                Ok(Ok(retain)) => catalog_retain = Some(retain),
+                Ok(Err(_pending)) => return Err(CallableCodeCursorError::Unavailable),
+                Err(join_error) => {
+                    tracing::warn!(
+                        event = "code_graph_rewarm_wait_failed",
+                        error = %join_error,
+                        "a callable's graph re-warm wait did not finish"
+                    );
+                    return Err(CallableCodeCursorError::Unavailable);
+                }
+            }
+        }
         let cost = CodeGraphReadCostMeter::start();
         let reader = store
             .interactive_reader_with_cancellation(
@@ -1961,6 +1998,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(PreparedGraphCallableQueryV1 {
             latest,
             reader,
+            _catalog_retain: catalog_retain,
             cost,
             query,
             cursor_retention,
@@ -2401,7 +2439,7 @@ fn graph_relation_keys(
     // A call hierarchy lists a directly recursive seed as its own neighbor.
     // Walks over other relation kinds describe the seed's surroundings, which
     // never include the seed.
-    let mut direct_recursion_pending = kinds == [RelationEdgeKindV1::Calls];
+    let mut direct_recursion_pending = kinds.contains(&RelationEdgeKindV1::Calls);
     'walk: while !frontier.is_empty() && depth < maximum_depth {
         let remaining = cap.saturating_sub(keys.len());
         if remaining == 0 {
@@ -3410,7 +3448,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(found) = graph_relation_keys(
                 &prepared.reader,
                 &start,
-                &[RelationEdgeKindV1::Calls],
+                &CALLER_AND_REFERENCE_KINDS,
                 true,
                 request.maximum_depth,
                 &request.scope,
@@ -3841,12 +3879,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(found) = graph_relation_keys(
                 &prepared.reader,
                 &start,
-                &[
-                    RelationEdgeKindV1::Calls,
-                    RelationEdgeKindV1::Uses,
-                    RelationEdgeKindV1::TypeOf,
-                    RelationEdgeKindV1::Annotates,
-                ],
+                &CALLER_AND_REFERENCE_KINDS,
                 true,
                 1,
                 &request.scope,

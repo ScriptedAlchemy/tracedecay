@@ -961,3 +961,49 @@ async fn edited_middle_record_rescans_only_the_claude_bytes_after_the_edit() {
         .unwrap();
     assert_eq!(cursor.byte_offset(), 40 * line_bytes);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn historical_ingest_commits_every_record_on_one_worker() {
+    const SESSIONS: usize = 8;
+    const RECORDS: usize = 24;
+    let payload = "privacy-scan ".repeat(80);
+    let fixture = Fixture::new("historical-base");
+    for session in 0..SESSIONS {
+        let session_id = format!("historical-session-{session:02}");
+        let path = fixture
+            .home
+            .join(".claude/projects/project-scope")
+            .join(format!("{session_id}.jsonl"));
+        let mut body = String::new();
+        for record in 0..RECORDS {
+            let line = json!({
+                "type": "user",
+                "sessionId": session_id,
+                "uuid": format!("historical-{session:02}-{record:02}"),
+                "timestamp": "2026-07-15T00:00:00Z",
+                "cwd": fixture.temp.path(),
+                "message": {
+                    "role": "user",
+                    "content": format!("{payload} {session} {record}"),
+                }
+            });
+            body.push_str(&line.to_string());
+            body.push('\n');
+        }
+        fs::write(&path, body).expect("write historical transcript");
+    }
+    let source = ClaudeSource::with_home(&fixture.home).for_user_scope(None, Vec::new());
+    let first = fixture
+        .ingest(&source, None, ObservationCancellation::default())
+        .await
+        .unwrap();
+    assert_eq!(first.observations_committed, (SESSIONS * RECORDS) as u64);
+    assert_eq!(fixture.admission.observations().len(), SESSIONS * RECORDS);
+
+    let second = fixture
+        .ingest(&source, None, ObservationCancellation::default())
+        .await
+        .unwrap();
+    assert_eq!(second.observations_committed, 0);
+    assert_eq!(fixture.admission.observations().len(), SESSIONS * RECORDS);
+}

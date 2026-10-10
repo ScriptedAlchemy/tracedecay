@@ -182,16 +182,24 @@ impl ProjectCodeGraphServingAuthorityV1 {
         // exact/lexical readiness as well made a restart that resumed an
         // unfinished ngram index refuse every graph read for the duration of
         // that build, with a recovered verified head already seated.
-        if let Some((text, current)) = retained
-            && text.interactive_graph_store().is_ok()
-        {
-            let freshness = if current {
-                tracedecay_graph_query::CodeGraphReadFreshnessV1::Current
-            } else {
-                self.last_complete_stale(text.metadata().manifest().seal.sealed_at)
-                    .await
-            };
-            return Self::text_projection(text, freshness);
+        if let Some((text, current)) = retained {
+            if text.interactive_graph_store().is_ok() {
+                let freshness = if current {
+                    tracedecay_graph_query::CodeGraphReadFreshnessV1::Current
+                } else {
+                    self.last_complete_stale(text.metadata().manifest().seal.sealed_at)
+                        .await
+                };
+                return Self::text_projection(text, freshness);
+            }
+            // Park may have dropped the decode seat. A refused generation
+            // still answers that typed refusal from the text owner; it must
+            // not collapse to "graph is not ready".
+            if let Some(reason) = text.generation_graph_refusal() {
+                return Err(CodeGraphReadError::Refused {
+                    detail: reason.to_owned(),
+                });
+            }
         }
         let Some(seated) = self
             .schedulers

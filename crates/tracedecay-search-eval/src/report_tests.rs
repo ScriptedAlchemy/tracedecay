@@ -71,16 +71,10 @@ fn assert_baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples(
     assert_eq!(
         failed_queries,
         [
-            "train-015",
             "train-016",
             "train-019",
             "train-020",
-            "train-025",
             "train-026",
-            "train-027",
-            "train-029",
-            "train-031",
-            "train-033",
             "validation-015",
             "validation-017",
             "validation-023",

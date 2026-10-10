@@ -131,17 +131,17 @@ pub(crate) fn chatgpt_staged_plugin_dir(home: &Path) -> PathBuf {
 /// tracedecay binary; `tracedecay-explorer` keeps its `node` launch, the
 /// extension requires a Node runtime the host supplies.
 pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
-    super::plugin_bundle::chatgpt_files()
+    super::plugin_bundle::chatgpt_files()?
         .into_iter()
         .map(|(relative, contents)| {
             let rendered = match relative {
                 CHATGPT_PLUGIN_MANIFEST_RELATIVE => {
-                    super::plugin_bundle::stamp_manifest_version(contents)?
+                    super::plugin_bundle::stamp_manifest_version(&contents)?
                 }
                 CHATGPT_MCP_RELATIVE => {
-                    super::plugin_bundle::set_mcp_command(contents, tracedecay_bin)?
+                    super::plugin_bundle::set_mcp_command(&contents, tracedecay_bin)?
                 }
-                _ => contents.to_string(),
+                _ => contents,
             };
             super::plugin_bundle::reject_unresolved_placeholders(&rendered, relative)?;
             Ok((relative, rendered))
@@ -216,11 +216,19 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         }
     }
 
-    let missing: Vec<&'static str> = super::plugin_bundle::chatgpt_files()
-        .into_iter()
-        .map(|(relative, _)| relative)
-        .filter(|relative| !staged_dir.join(relative).is_file())
-        .collect();
+    let missing: Vec<&'static str> = match super::plugin_bundle::chatgpt_files() {
+        Ok(files) => files
+            .into_iter()
+            .map(|(relative, _)| relative)
+            .filter(|relative| !staged_dir.join(relative).is_file())
+            .collect(),
+        Err(error) => {
+            dc.fail(&format!(
+                "ChatGPT staged bundle inventory could not be decoded ({error})"
+            ));
+            return;
+        }
+    };
     if missing.is_empty() {
         dc.pass("ChatGPT staged bundle contains every rendered file");
     } else {

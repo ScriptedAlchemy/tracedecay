@@ -360,8 +360,17 @@ impl RetainedSurfaceResultV1 {
             Self::MessageSearch(value) => {
                 let mut facts =
                     RetainedSurfaceEvidenceFactsV1::unknown(EvidenceDomain::Temporal, 0)?;
-                facts.apply_status(value.status)?;
-                facts.returned = count(message_search_returned(value)?)?;
+                // Terminal statuses must fail closed before page-shape checks.
+                // An empty Unavailable store is a typed source state, not a
+                // retrieval refusal, so it skips apply_status.
+                if value.status != RetainedOutcomeStatusV1::Unavailable {
+                    facts.apply_status(value.status)?;
+                }
+                let returned = message_search_returned(value)?;
+                if value.status == RetainedOutcomeStatusV1::Unavailable && returned != 0 {
+                    facts.apply_status(value.status)?;
+                }
+                facts.returned = count(returned)?;
                 facts.apply_unattributed_omitted(value.omitted);
                 if let Some(temporal) = &value.temporal {
                     facts.apply_temporal(temporal)?;
@@ -715,6 +724,19 @@ mod tests {
     }
 
     #[test]
+    fn denied_message_search_with_an_empty_page_stays_denied() {
+        let result = RetainedSurfaceResultV1::MessageSearch(message_search_result(
+            RetainedOutcomeStatusV1::Denied,
+            Some(0),
+            Some(Vec::new()),
+        ));
+        assert_eq!(
+            result.evidence_facts(),
+            Err(RetainedSurfaceEvidenceTerminalV1::Denied)
+        );
+    }
+
+    #[test]
     fn cancelled_refresh_receipt_remains_status_evidence() {
         let facts = cancelled_refresh_status(Some(refresh_receipt(
             SessionRefreshTerminalStateResultV1::Cancelled,
@@ -746,6 +768,20 @@ mod tests {
         let facts = RetainedSurfaceResultV1::MessageSearch(result)
             .evidence_facts()
             .expect("empty result vector proves zero returned items");
+        assert_eq!(facts.returned, 0);
+        assert_eq!(facts.unattributed_omitted, None);
+    }
+
+    #[test]
+    fn message_search_accepts_unavailable_as_a_typed_empty_source() {
+        let result = message_search_result(
+            RetainedOutcomeStatusV1::Unavailable,
+            Some(0),
+            Some(Vec::new()),
+        );
+        let facts = RetainedSurfaceResultV1::MessageSearch(result)
+            .evidence_facts()
+            .expect("an empty mounted store is a typed empty, not a terminal refusal");
         assert_eq!(facts.returned, 0);
         assert_eq!(facts.unattributed_omitted, None);
     }

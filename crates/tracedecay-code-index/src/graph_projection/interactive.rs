@@ -47,8 +47,8 @@ mod catalog;
 mod imports;
 mod models;
 
-use self::models::CatalogSymbol;
 pub(super) use self::models::InteractiveCatalog;
+use self::models::{CatalogSymbol, source_key};
 pub use self::models::{
     CodeGraphCensusV1, CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1,
     CodeGraphFileDependenciesV1, CodeGraphFileSymbolCountV1, CodeGraphImpactBatchV1,
@@ -101,7 +101,56 @@ pub(super) struct InteractiveCatalogCache {
     /// [`InteractiveCatalog::retained_bytes`] of the ready catalog, measured
     /// once when it is built.
     ready_bytes: std::sync::atomic::AtomicU64,
+    /// Live readers holding this cache. A memory release answers Busy while
+    /// any reader is assembled: evicting the ready catalog under an admitted
+    /// read turns every later catalog lookup into the typed warming answer
+    /// the reader could not have waited out.
+    readers: std::sync::atomic::AtomicUsize,
     clock: Arc<WarmClock>,
+}
+
+/// One assembled reader's hold on the catalog cache.
+///
+/// Mirrors the engine release, which already stays pinned while a reader is
+/// open: the catalog owner is retained across the complete read, so a park
+/// release cannot evict it between a readiness wait and the reader's next
+/// catalog lookup.
+pub struct InteractiveCatalogReaderLeaseV1 {
+    cache: Arc<InteractiveCatalogCache>,
+}
+
+impl InteractiveCatalogReaderLeaseV1 {
+    pub(super) fn retain(cache: &Arc<InteractiveCatalogCache>) -> Arc<Self> {
+        cache
+            .readers
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Arc::new(Self {
+            cache: Arc::clone(cache),
+        })
+    }
+}
+
+impl Drop for InteractiveCatalogReaderLeaseV1 {
+    fn drop(&mut self) {
+        self.cache
+            .readers
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+impl fmt::Debug for InteractiveCatalogReaderLeaseV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InteractiveCatalogReaderLeaseV1")
+            .field(
+                "readers",
+                &self
+                    .cache
+                    .readers
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish()
+    }
 }
 
 /// What a catalog read would wait on, as [`InteractiveCatalogCache::residency`]
@@ -111,7 +160,10 @@ pub(super) enum CatalogResidency {
     Released,
     /// Warming again after a completed warm.
     Rewarming,
-    /// Cold, failed, or on its first warm: the reader answers that state.
+    /// A warm was marked in background but no build owns it: its runner
+    /// never started or never finished, so a read must restart it.
+    OrphanedWarm,
+    /// Cold, failed, or building on a live owner: the reader answers that state.
     Unreleased,
 }
 
@@ -138,6 +190,7 @@ impl InteractiveCatalogCache {
             build: Mutex::new(()),
             scan_builds: std::sync::atomic::AtomicUsize::new(0),
             ready_bytes: std::sync::atomic::AtomicU64::new(0),
+            readers: std::sync::atomic::AtomicUsize::new(0),
             clock,
         }
     }
@@ -149,6 +202,7 @@ impl InteractiveCatalogCache {
         match &*state {
             InteractiveCatalogState::Ready(_) => CatalogResidency::Resident,
             InteractiveCatalogState::Released => CatalogResidency::Released,
+            InteractiveCatalogState::Warming { owner: None } => CatalogResidency::OrphanedWarm,
             InteractiveCatalogState::Warming { .. }
                 if self.clock.has_warmed(WarmOwner::Catalog) =>
             {
@@ -178,6 +232,9 @@ impl InteractiveCatalogCache {
         let Ok(mut state) = self.state.try_write() else {
             return CodeGraphCatalogReleaseV1::Busy;
         };
+        if self.readers.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            return CodeGraphCatalogReleaseV1::Busy;
+        }
         if !matches!(&*state, InteractiveCatalogState::Ready(_)) {
             return CodeGraphCatalogReleaseV1::NotReady;
         }
@@ -223,6 +280,8 @@ pub struct CodeGraphInteractiveReader {
     projection_node_count: usize,
     cancellation: Arc<dyn GraphCancellation>,
     catalog: Arc<InteractiveCatalogCache>,
+    /// Retains the catalog owner while this reader lives; shared by clones.
+    catalog_lease: Arc<InteractiveCatalogReaderLeaseV1>,
     meter: Option<Arc<GraphReadMeter>>,
 }
 
@@ -232,6 +291,7 @@ impl fmt::Debug for CodeGraphInteractiveReader {
             .debug_struct("CodeGraphInteractiveReader")
             .field("generation", &self.generation)
             .field("projection_node_count", &self.projection_node_count)
+            .field("catalog_lease", &self.catalog_lease)
             .finish_non_exhaustive()
     }
 }
@@ -363,6 +423,16 @@ impl CodeGraphProjectionStore {
             Err(TryLockError::Poisoned(_)) => Err(catalog_lock_poisoned()),
         }
     }
+
+    /// True after the interactive catalog has completed at least one warm.
+    ///
+    /// Stays true when that catalog is later released for memory, so a
+    /// composition wait can hand over while the next graph read re-warms.
+    /// First-time warming is still false.
+    pub fn interactive_catalog_has_completed_a_warm(&self) -> bool {
+        self.warm_clock.has_warmed(WarmOwner::Catalog)
+            || self.interactive_catalog_is_warm().unwrap_or(false)
+    }
 }
 
 impl CodeGraphInteractiveReader {
@@ -380,6 +450,7 @@ impl CodeGraphInteractiveReader {
             snapshot,
             projection_node_count,
             cancellation,
+            catalog_lease: InteractiveCatalogReaderLeaseV1::retain(&catalog),
             catalog,
             meter: None,
         }
@@ -735,10 +806,17 @@ impl CodeGraphInteractiveReader {
         let cancellation = self.read_cancellation(request_cancellation)?;
         require_positive(max_relations, "code graph relation key limit")?;
         let starts = seeds.iter().map(|seed| seed.0.clone()).collect::<Vec<_>>();
-        // A reverse walk admits every kind at the store and filters after,
-        // so its truncation point is the one the unfiltered fan-out defines.
+        // Incoming store kind filters drop Uses/TypeOf rows that a full
+        // inbound fan-out still returns. Match `semantic_neighbors`: read
+        // every inbound kind, then keep the kinds this walk asked for.
+        // Callers must not treat the unrequested kinds as a complete empty
+        // page — the walk names Uses/TypeOf/Annotates as well as Calls.
         let admitted: BTreeSet<RelationEdgeKindV1> = kinds.iter().copied().collect();
-        let edge_kinds = code_relation_kinds(if reverse { &[] } else { kinds })?;
+        let edge_kinds = if reverse {
+            code_relation_kinds(&[])?
+        } else {
+            code_relation_kinds(kinds)?
+        };
         let edge_rows = if reverse {
             self.snapshot.incoming_relations_truncated(
                 &starts,
@@ -767,6 +845,8 @@ impl CodeGraphInteractiveReader {
                 for relation in &relations {
                     let kind = relation_edge_kind(relation)?;
                     if reverse && !admitted.is_empty() && !admitted.contains(&kind) {
+                        // A kind the caller asked not to see is not a result.
+                        // Never treat a dropped admitted row as complete.
                         continue;
                     }
                     keys.push(CodeGraphRelationKeyV1 {
@@ -1263,9 +1343,10 @@ impl CodeGraphInteractiveReader {
     /// `[offset, offset + limit)` window of the symbols `admit` accepts (all
     /// when `None`).
     ///
-    /// ponytail: every query scans every catalog name (~150 ms on a
-    /// 200k-symbol generation); a name n-gram index built with the catalog is
-    /// the upgrade when that bites.
+    /// Walks the catalog's source-order index and stops one match past the
+    /// window, so a first page does not collect or sort the rest of the
+    /// generation. A name n-gram index is the upgrade when a unique or
+    /// missing query still has to prove there is no later containment hit.
     pub fn search_symbols(
         &self,
         query: &str,
@@ -1290,21 +1371,14 @@ impl CodeGraphInteractiveReader {
         };
         // Occurrence ids digest the repository identity, so their order differs
         // between two clones of one checkout; hits are served in source order.
-        let source_position = |occurrence: &SymbolOccurrenceId| {
-            let symbol = catalog.symbols.get(occurrence);
-            (
-                symbol
-                    .and_then(|symbol| symbol.binding.as_ref())
-                    .and_then(|binding| binding.logical_path.as_deref()),
-                symbol
-                    .and_then(|symbol| symbol.metadata.as_ref())
-                    .map(|metadata| metadata.start_line),
-            )
-        };
-        let source_order = |left: &&SymbolOccurrenceId, right: &&SymbolOccurrenceId| {
-            source_position(left)
-                .cmp(&source_position(right))
-                .then_with(|| left.cmp(right))
+        let source_order = |left: &&SymbolOccurrenceId, right: &&SymbolOccurrenceId| match (
+            catalog.symbols.get(*left),
+            catalog.symbols.get(*right),
+        ) {
+            (Some(left_symbol), Some(right_symbol)) => source_key(left_symbol)
+                .cmp(&source_key(right_symbol))
+                .then_with(|| (*left).cmp(*right)),
+            _ => (*left).cmp(*right),
         };
         let exact: BTreeSet<&SymbolOccurrenceId> = catalog
             .by_simple_name
@@ -1320,43 +1394,55 @@ impl CodeGraphInteractiveReader {
             .collect();
         let mut exact_hits: Vec<&SymbolOccurrenceId> = exact.iter().copied().collect();
         exact_hits.sort_by(source_order);
-        // ponytail: every named hit is collected and sorted before the window
-        // is cut, so a broad query costs O(hits log hits) per page; a
-        // source-ordered name index built with the catalog is the upgrade.
-        let mut named_hits = Vec::new();
-        for (index, (occurrence, symbol)) in catalog.symbols.iter().enumerate() {
-            if index.is_multiple_of(CANCELLATION_INTERVAL) && cancellation.is_cancelled() {
-                return Err(CodeGraphProjectionError::Cancelled);
-            }
-            let named = symbol.metadata.as_ref().is_some_and(|metadata| {
-                contains_ignore_ascii_case(&metadata.simple_name, query)
-                    || contains_ignore_ascii_case(&metadata.qualified_name, query)
-            });
-            if named && !exact.contains(occurrence) && admitted(occurrence, symbol) {
-                named_hits.push(occurrence);
-            }
-        }
-        named_hits.sort_by(source_order);
 
         let mut symbols = Vec::new();
         let mut matched = 0_usize;
         let mut has_more = false;
-        let mut accept = |occurrence: &SymbolOccurrenceId| -> bool {
-            if matched >= offset {
-                if symbols.len() == limit {
-                    has_more = true;
-                    return true;
-                }
-                if let Some(summary) = catalog.summary(occurrence) {
-                    symbols.push(summary);
-                }
-            }
-            matched += 1;
-            false
-        };
-        for occurrence in exact_hits.into_iter().chain(named_hits) {
-            if accept(occurrence) {
+        for occurrence in exact_hits {
+            if take_search_hit(
+                occurrence,
+                catalog.as_ref(),
+                offset,
+                limit,
+                &mut symbols,
+                &mut matched,
+            ) {
+                has_more = true;
                 break;
+            }
+        }
+        if has_more && cancellation.is_cancelled() {
+            return Err(CodeGraphProjectionError::Cancelled);
+        }
+        if !has_more {
+            for (index, &symbol_index) in catalog.source_order.iter().enumerate() {
+                if index.is_multiple_of(CANCELLATION_INTERVAL) && cancellation.is_cancelled() {
+                    return Err(CodeGraphProjectionError::Cancelled);
+                }
+                let Some((occurrence, symbol)) = catalog.symbols.get_index(symbol_index) else {
+                    continue;
+                };
+                if exact.contains(occurrence) {
+                    continue;
+                }
+                let named = symbol.metadata.as_ref().is_some_and(|metadata| {
+                    contains_ignore_ascii_case(&metadata.simple_name, query)
+                        || contains_ignore_ascii_case(&metadata.qualified_name, query)
+                });
+                if named
+                    && admitted(occurrence, symbol)
+                    && take_search_hit(
+                        occurrence,
+                        catalog.as_ref(),
+                        offset,
+                        limit,
+                        &mut symbols,
+                        &mut matched,
+                    )
+                {
+                    has_more = true;
+                    break;
+                }
             }
         }
         let total = if query.is_empty() && admit.is_none() {
@@ -1368,6 +1454,7 @@ impl CodeGraphInteractiveReader {
             symbols: self.served_from_catalog(symbols),
             has_more,
             total,
+            indexed_symbols: catalog.symbols.len() as u64,
         })
     }
 
@@ -1594,13 +1681,14 @@ impl CodeGraphInteractiveReader {
                     }
                     return Ok(Arc::clone(catalog));
                 }
-                InteractiveCatalogState::Warming { .. } => {
+                InteractiveCatalogState::Warming { owner: Some(_) } => {
                     return Err(CodeGraphProjectionError::Unavailable(
                         CATALOG_WARMING.to_owned(),
                     ));
                 }
                 InteractiveCatalogState::Failed(error) => return Err(error.clone()),
-                InteractiveCatalogState::Released => {}
+                InteractiveCatalogState::Warming { owner: None }
+                | InteractiveCatalogState::Released => {}
                 InteractiveCatalogState::Cold => {
                     drop(state);
                     return self.build_cold_catalog(cancellation);
@@ -1631,20 +1719,30 @@ impl CodeGraphInteractiveReader {
         }
     }
 
-    /// Start rebuilding a released catalog on a thread of its own and answer
-    /// the typed warming state. The rebuild answers to no request's
+    /// Start rebuilding a released catalog — or a background-marked warm
+    /// whose runner never took the build — on a thread of its own and
+    /// answer the typed warming state. The rebuild answers to no request's
     /// cancellation, so a short read cannot abandon it half-scanned.
     pub(super) fn rewarm_released_catalog(&self) -> CodeGraphProjectionError {
-        let released = CodeGraphProjectionError::Unavailable(CATALOG_RELEASED.to_owned());
-        {
+        let mut was_released = false;
+        let answered = {
             let Ok(mut state) = self.catalog.state.write() else {
                 return catalog_lock_poisoned();
             };
-            if !matches!(&*state, InteractiveCatalogState::Released) {
-                return CodeGraphProjectionError::Unavailable(CATALOG_WARMING.to_owned());
+            match &*state {
+                InteractiveCatalogState::Released => was_released = true,
+                InteractiveCatalogState::Warming { owner: None } => {}
+                _ => {
+                    return CodeGraphProjectionError::Unavailable(CATALOG_WARMING.to_owned());
+                }
             }
             *state = InteractiveCatalogState::Warming { owner: None };
-        }
+            if was_released {
+                CodeGraphProjectionError::Unavailable(CATALOG_RELEASED.to_owned())
+            } else {
+                CodeGraphProjectionError::Unavailable(CATALOG_WARMING.to_owned())
+            }
+        };
         self.catalog.clock.begin(WarmOwner::Catalog);
         let background = Self {
             cancellation: Arc::new(NeverCancelled),
@@ -1658,10 +1756,14 @@ impl CodeGraphInteractiveReader {
                 let _ = background.warm_catalog(None, Arc::new(NeverCancelled));
             });
         match spawned {
-            Ok(_) => released,
+            Ok(_) => answered,
             Err(error) => {
                 if let Ok(mut state) = self.catalog.state.write() {
-                    *state = InteractiveCatalogState::Released;
+                    *state = if was_released {
+                        InteractiveCatalogState::Released
+                    } else {
+                        InteractiveCatalogState::Warming { owner: None }
+                    };
                 }
                 self.catalog.clock.settle(WarmOwner::Catalog, false);
                 CodeGraphProjectionError::Unavailable(format!(
@@ -2023,6 +2125,26 @@ fn code_relation_kinds(
         .iter()
         .map(|kind| GraphRelationKind::new(code_edge_kind(*kind)).map_err(Into::into))
         .collect()
+}
+
+fn take_search_hit(
+    occurrence: &SymbolOccurrenceId,
+    catalog: &InteractiveCatalog,
+    offset: usize,
+    limit: usize,
+    symbols: &mut Vec<CodeGraphSymbolSummaryV1>,
+    matched: &mut usize,
+) -> bool {
+    if *matched >= offset {
+        if symbols.len() == limit {
+            return true;
+        }
+        if let Some(summary) = catalog.summary(occurrence) {
+            symbols.push(summary);
+        }
+    }
+    *matched += 1;
+    false
 }
 
 fn contains_ignore_ascii_case(value: &str, query: &str) -> bool {

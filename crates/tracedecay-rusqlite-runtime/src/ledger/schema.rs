@@ -106,10 +106,10 @@ ON td_runtime_writer_inbox_v1 (target_shard_json, effect_id);
 
 /// Installs the runtime ledger tables.
 ///
-/// Call this once when the writer connection opens. Request-path lookups
-/// must not run it: `CREATE TABLE IF NOT EXISTS` still parses DDL and
-/// enters `sqlite3StartTable`, and a first-time create changes the schema
-/// cookie so cached statements reprepare.
+/// Store creation owns the durable schema. Standalone runtime requests may
+/// install it in their first transaction; writer startup must not mutate the
+/// store before its owning authority validates admission. Cache a successful
+/// install only while its transaction has not rolled back.
 pub(crate) fn initialize_schema(transaction: &impl LedgerTransaction) -> Result<(), LedgerError> {
     transaction
         .execute_batch(RUNTIME_LEDGER_SCHEMA)

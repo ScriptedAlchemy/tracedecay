@@ -1,6 +1,7 @@
 use tracedecay_domain::{
     EvidenceRole, ExactClass, FreshnessCompatibilityV1, FusedCandidate, OccurrenceProvenance,
-    RankingDecision, RankingDecisionKind, RetrievalAnchorId, SourceFreshness, UtcMicros,
+    RankingDecision, RankingDecisionKind, RetrievalAnchorId, RetrievalSourceRoleV1,
+    SourceFreshness, UtcMicros,
 };
 
 use super::{composition_lanes, corpus_lanes, id, mixed_caps, no_caps, profile};
@@ -281,11 +282,31 @@ fn generation_scoped_hit(
             },
         }],
         exact_class: ExactClass::Approximate,
+        source_role: RetrievalSourceRoleV1::default(),
         utility_micros: 4_000_000,
         contributions: Vec::new(),
         freshness: Vec::new(),
         decisions: Vec::new(),
     }
+}
+
+#[test]
+fn fused_order_ranks_production_definitions_ahead_of_stronger_test_hits() {
+    let mut definition = generation_scoped_hit("ensure_daemon", "gen", "prod");
+    let mut test_hit = generation_scoped_hit("ensure_daemon_test", "gen", "test");
+    definition.source_role = tracedecay_domain::RetrievalSourceRoleV1::ProductionDefinition;
+    definition.utility_micros = 100_000;
+    test_hit.source_role = tracedecay_domain::RetrievalSourceRoleV1::TestReference;
+    test_hit.utility_micros = 4_000_000;
+    assert_eq!(
+        compare_fused(&definition, &test_hit),
+        std::cmp::Ordering::Less
+    );
+
+    let mut comment = generation_scoped_hit("ensure_daemon_comment", "gen", "comment");
+    comment.source_role = tracedecay_domain::RetrievalSourceRoleV1::ProductionOther;
+    comment.utility_micros = 100_000;
+    assert_eq!(compare_fused(&test_hit, &comment), std::cmp::Ordering::Less);
 }
 
 #[test]

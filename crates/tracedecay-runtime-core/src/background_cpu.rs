@@ -15,7 +15,6 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -151,9 +150,9 @@ impl ProcessBackgroundCpuV1 {
     /// work behind abandoned demand.
     pub fn acquire_cancellable(
         self: &Arc<Self>,
-        cancellation: &AtomicBool,
+        is_cancelled: impl Fn() -> bool,
     ) -> Option<BackgroundCpuPermitV1> {
-        if !self.admit_units_cancellable(1, cancellation) {
+        if !self.admit_units_cancellable(1, is_cancelled) {
             return None;
         }
         Some(BackgroundCpuPermitV1 {
@@ -260,7 +259,7 @@ impl ProcessBackgroundCpuV1 {
         }
     }
 
-    fn admit_units_cancellable(&self, units: usize, cancellation: &AtomicBool) -> bool {
+    fn admit_units_cancellable(&self, units: usize, is_cancelled: impl Fn() -> bool) -> bool {
         const CANCELLATION_POLL: Duration = Duration::from_millis(5);
 
         let waiter = Arc::new(BackgroundCpuWaiterV1 { units });
@@ -270,7 +269,7 @@ impl ProcessBackgroundCpuV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.waiters.push_back(Arc::clone(&waiter));
         loop {
-            if cancellation.load(Ordering::Acquire) {
+            if is_cancelled() {
                 state.waiters.retain(|queued| !Arc::ptr_eq(queued, &waiter));
                 self.available.notify_all();
                 return false;
@@ -337,7 +336,7 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::sync::{
         Arc, Barrier,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use std::time::Duration;
 
@@ -453,7 +452,11 @@ mod tests {
         let waiter = {
             let authority = Arc::clone(&authority);
             let cancellation = Arc::clone(&cancellation);
-            std::thread::spawn(move || authority.acquire_cancellable(&cancellation).is_none())
+            std::thread::spawn(move || {
+                authority
+                    .acquire_cancellable(|| cancellation.load(Ordering::Acquire))
+                    .is_none()
+            })
         };
         while authority.waiting_work_units() == 0 {
             std::thread::sleep(Duration::from_millis(1));

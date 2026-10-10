@@ -176,6 +176,9 @@ impl Fixture {
     async fn wait_for_seated_generation(
         &self,
     ) -> Option<std::sync::Arc<super::super::CodeIndexPublishedGenerationV1>> {
+        self.registry
+            .request_complete_generation(&self.project)
+            .await;
         let deadline = tokio::time::Instant::now() + CONVERGENCE_DEADLINE;
         loop {
             let seated = self
@@ -537,6 +540,11 @@ async fn a_spent_graph_publication_budget_is_refused_once_and_never_replayed() {
         .expect("freshness is observable");
     assert_eq!(settled.code_graph_serving.as_ref(), Some(&refused));
     assert!(!settled.rebuild_in_flight, "{settled:?}");
+    assert_ne!(
+        settled.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Indexing),
+        "a terminal graph refusal must not stay indexing/warming: {settled:?}"
+    );
     let seated = fixture
         .wait_for_seated_generation()
         .await

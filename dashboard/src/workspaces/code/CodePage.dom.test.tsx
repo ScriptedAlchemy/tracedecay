@@ -128,7 +128,8 @@ describe('a graph this page measured as empty', () => {
     await user.type(screen.getByRole('searchbox', { name: /symbol search/i }), 'missing');
     await user.keyboard('{Enter}');
 
-    expect(await screen.findByText(/no symbol matches missing/i)).toBeTruthy();
+    expect(await screen.findByText(/no symbol matches missing in tracedecay/i)).toBeTruthy();
+    expect(screen.getByText(/searched only its launch project/i)).toBeTruthy();
     expect(screen.queryByText(/unverified/i)).toBeNull();
   });
 
@@ -143,6 +144,46 @@ describe('a graph this page measured as empty', () => {
 
     expect(await screen.findByText(/4,210 symbols indexed/i)).toBeTruthy();
     expect(screen.queryByText(/unverified/i)).toBeNull();
+  });
+});
+
+describe('a search aimed at another project', () => {
+  it('reports wrong_project instead of no matches', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/search')) {
+          const search = wire('/api/plugins/graph/search');
+          return jsonOk({
+            ...search,
+            domain_state: 'unknown',
+            payload: null,
+            coverage: {
+              ...(search.coverage as Record<string, unknown>),
+              omission_reasons: [
+                'wrong_project: this dashboard is bound to proj_federati; it does not search proj_grok. Rebound with `tracedecay dashboard --path <repo>` to serve that project',
+              ],
+            },
+          });
+        }
+        if (url.includes('/overview')) {
+          return jsonOk(wire('/api/plugins/graph/overview'));
+        }
+        if (url.includes('/subgraph')) {
+          return jsonOk(wire('/api/plugins/graph/subgraph'));
+        }
+        return jsonOk(wire('/api/plugins/graph/search'));
+      }),
+    );
+    const user = userEvent.setup();
+    renderCode();
+    await user.type(screen.getByRole('searchbox', { name: /symbol search/i }), 'connectGateway');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByText(/wrong_project/i)).toBeTruthy();
+    expect(screen.getByText(/--path/i)).toBeTruthy();
+    expect(screen.queryByText(/no symbol matches connectGateway/i)).toBeNull();
   });
 });
 

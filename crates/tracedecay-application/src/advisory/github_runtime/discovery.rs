@@ -853,11 +853,12 @@ mod tests {
         head_commit: &str,
         credential: &GitHubReadOnlyCredentialV1,
     ) -> GitHubExactCommitDiscoveryOutcomeV1 {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .https_only(false)
-            .http_status_as_error(false)
-            .build()
-            .into();
+        let agent = http_agent(
+            ureq::Agent::config_builder()
+                .https_only(false)
+                .http_status_as_error(false)
+                .build(),
+        );
         discover_with_agent(
             &agent,
             &DiscoveryRequestV1 {

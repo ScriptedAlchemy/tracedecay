@@ -30,13 +30,20 @@ fn close_client_socket(
     reader: tokio::net::unix::OwnedReadHalf,
     writer: tokio::net::unix::OwnedWriteHalf,
 ) {
-    reader
+    let shutdown = reader
         .reunite(writer)
         .expect("client socket halves")
         .into_std()
         .expect("client socket")
-        .shutdown(std::net::Shutdown::Both)
-        .expect("shut down client socket");
+        .shutdown(std::net::Shutdown::Both);
+    if let Err(error) = shutdown {
+        // Darwin reports an already half-closed socket as disconnected here.
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::NotConnected,
+            "shut down client socket"
+        );
+    }
 }
 
 async fn delivery_settlement_fixture() -> DeliverySettlementFixture {
@@ -640,18 +647,43 @@ async fn rmcp_client_cancellation_settles_dropped_without_stranding_the_attempt(
         .expect("cancellation notification");
     client_writer.flush().await.expect("flush cancellation");
 
-    // Settlement happens while the transport observes the notification,
-    // before the message itself is handed to `rmcp`.
-    let _ = tokio::time::timeout(
+    let notification = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
             &mut transport,
         ),
     )
-    .await;
+    .await
+    .expect("receive cancellation")
+    .expect("cancellation notification");
+    assert!(matches!(
+        notification,
+        rmcp::model::JsonRpcMessage::Notification(_)
+    ));
 
     let mut client_reader = tokio::io::BufReader::new(client_reader);
     let mut line = String::new();
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            client_reader.read_line(&mut line)
+        )
+        .await
+        .is_err(),
+        "cancellation must wait for the handler's owned worker to settle"
+    );
+    let late_response = serde_json::from_value(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {"content": [{"type": "text", "text": "late success"}]}
+    }))
+    .expect("typed late response");
+    <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
+        &mut transport,
+        late_response,
+    )
+    .await
+    .expect("settled cancellation response");
     client_reader
         .read_line(&mut line)
         .await

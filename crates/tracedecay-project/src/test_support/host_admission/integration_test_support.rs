@@ -55,15 +55,17 @@ impl HostAdmissionTestRuntimeV1 {
             })?;
         let database = self.project_database_for_test()?;
         let store = tracedecay_global_db::GlobalDbWorkflowStore::new(database);
-        Ok(
-            tracedecay_sessions::runtime::workflow_ingest::ingest_workflow_runs_with_sink(
-                &store,
-                project_id,
-                project_root,
-                &home.join(".claude").join("projects"),
-            )
-            .await,
+        tracedecay_sessions::runtime::workflow_ingest::ingest_workflow_runs_with_sink(
+            &store,
+            project_id,
+            project_root,
+            &home.join(".claude").join("projects"),
         )
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            operation: "ingest workflow test fixture".to_owned(),
+            message: error.to_string(),
+        })
     }
 
     /// Records one git span through this runtime's retained ProjectSessions authority.

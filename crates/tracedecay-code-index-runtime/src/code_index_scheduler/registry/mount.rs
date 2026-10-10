@@ -718,6 +718,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 serving_generation: Arc::clone(&serving_generation),
                 serving_generation_epoch: Arc::clone(&serving_generation_epoch),
                 serving_generation_changed: Arc::clone(&serving_generation_changed),
+                serving_seats: Arc::clone(&self.serving_seats),
                 complete_generation_requested: Arc::clone(&complete_generation_requested),
                 reconcile_in_progress: Arc::clone(&reconcile_in_progress),
                 publication: residency_publication,
@@ -892,6 +893,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             &worker_phase_signal,
                             super::CodeIndexWorkerPhaseV1::Parked,
                         );
+                        worker_residency.release_decode_when_parked(&worker_resident_owners);
                     }
                     tracing::Instrument::instrument(
                         notified,
@@ -1405,14 +1407,22 @@ impl CodeIndexSchedulerRegistryV1 {
                     .is_some_and(LatestCodeTextGenerationV1::uses_partitioned_manifest);
                 // A revision-7 owner can restore its retained persistent graph
                 // directly from the verified head. Give that recovery exactly
-                // one empty-slot pass before the dirty source capture creates
-                // its successor. Once the retained graph is Ready, this guard
-                // falls through to the ordinary reconciliation path instead of
-                // repeatedly consuming the successor's wake as a Noop.
+                // one empty-slot *mount* pass before the dirty source capture
+                // creates its successor. Once the retained graph is Ready, this
+                // guard falls through to the ordinary reconciliation path
+                // instead of repeatedly consuming the successor's wake as a
+                // Noop.
+                //
+                // Park also empties the decode seat. That is not a remount:
+                // a later HookHint / GitWatcher / QueryAdmission must capture
+                // the dirty source on the arrival that requested it. Stealing
+                // that wake for reserved recovery published the edit on an
+                // unattributable BusyFollowUp and wiped clone-update duration.
                 let retained_partitioned_graph_recovery_pending = graph_activation_enabled
                     && !graph_activation_deferred
                     && serving_empty
                     && !retained_graph_head_recovery_attempted
+                    && trigger == CodeIndexCadenceTriggerV1::Mount
                     && retained_text.as_ref().is_some_and(|text| {
                         text.uses_partitioned_manifest() && text.interactive_graph_store().is_err()
                     });

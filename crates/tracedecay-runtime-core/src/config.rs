@@ -345,6 +345,19 @@ pub fn is_ambient_project_root(home: Option<&Path>, path: &Path) -> bool {
             .is_some_and(|home| home == canonical)
 }
 
+/// Operator-facing sentence for an ambient home or filesystem root.
+///
+/// Dashboard and other project-scoped entry points use this so `$HOME` launch
+/// names `--path` instead of stopping at the internal ambient-root diagnosis.
+#[must_use]
+pub fn ambient_project_root_guidance(path: &Path) -> String {
+    format!(
+        "'{}' is an ambient user/filesystem root, not an active TraceDecay code project; \
+         start the dashboard from an enrolled repo or pass --path <repo>",
+        path.display()
+    )
+}
+
 fn directory_hosts_initialized_project(
     profile_root: &Path,
     dir: &Path,
@@ -622,6 +635,12 @@ mod profile_root_tests {
 
         assert!(profile.is_ambient_project_root(&home));
         assert_eq!(profile.discover_project_root(&nested), None);
+        let guidance = super::ambient_project_root_guidance(&home);
+        assert!(
+            guidance.contains("ambient user/filesystem root"),
+            "{guidance}"
+        );
+        assert!(guidance.contains("--path"), "{guidance}");
     }
 
     #[test]

@@ -404,9 +404,15 @@ impl McpServer {
                 .await,
             ),
             McpMethod::ResourcesList => Some(Self::handle_resources_list(id)),
-            McpMethod::ResourcesRead => {
-                Some(self.handle_resources_read(id, request.resource_uri()).await)
-            }
+            McpMethod::ResourcesRead => Some(
+                self.handle_resources_read(
+                    id,
+                    request.resource_uri(),
+                    connection.memory_request_scope(),
+                    cancellation,
+                )
+                .await,
+            ),
             McpMethod::TrivialAck => Some(JsonRpcResponse::success(id, json!({}))),
             McpMethod::Unknown => Some(JsonRpcResponse::error(
                 id,
@@ -656,6 +662,8 @@ impl McpServer {
         &self,
         id: Value,
         uri: Option<&str>,
+        connection_scope: &str,
+        cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> JsonRpcResponse {
         let Some(uri) = uri else {
             return JsonRpcResponse::error(
@@ -670,7 +678,10 @@ impl McpServer {
 
         match uri {
             "tracedecay://status" => self.read_resource_status(id).await,
-            "tracedecay://files" => self.read_resource_files(id),
+            "tracedecay://files" => {
+                self.read_resource_files(id, connection_scope, cancellation)
+                    .await
+            }
             "tracedecay://overview" => self.read_resource_overview(id).await,
             "tracedecay://branches" => self.read_resource_branches(id).await,
             "tracedecay://schema" => Self::read_resource_schema(id),
@@ -709,22 +720,6 @@ impl McpServer {
             }
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         }
-    }
-
-    /// Returns typed file-inventory availability for the active project.
-    ///
-    /// MCP resources do not carry the application operation, request identity,
-    /// deadline, and cancellation proof required to open the verified code
-    /// graph. Until that resource-specific admission exists, exposing files
-    /// from another store would make an unverified or stale inventory look
-    /// authoritative.
-    pub(crate) fn read_resource_files(&self, id: Value) -> JsonRpcResponse {
-        Self::resource_contents(
-            id,
-            "tracedecay://files",
-            "text/plain",
-            "status: unavailable\nreason: verified_generation_file_inventory_not_admitted",
-        )
     }
 
     /// Returns a high-level project overview as a text resource.
@@ -1673,6 +1668,7 @@ impl McpServer {
         let dispatch_outcome = control
             .run_retained(dispatch_server.dispatch_authority.registry(), worker)
             .await;
+        control.settle_cancelled(&dispatch_outcome).await;
         // Safety: each guard is dropped exactly once, here, after the worker
         // has settled, and neither is used again.
         unsafe {

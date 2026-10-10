@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tracedecay_contracts::CancellationSignal;
@@ -1023,6 +1023,33 @@ fn file_dependencies_are_served_from_the_catalog_without_store_reads() {
 }
 
 #[test]
+fn symbol_search_first_page_stops_before_a_full_catalog_scan() {
+    let reader = reader(&store_for(large_production_manifest(5_000)));
+    reader
+        .search_symbols("warm", None, 0, 1, request())
+        .expect("warm catalog");
+
+    let page = reader
+        .search_symbols(
+            "Needle",
+            None,
+            0,
+            20,
+            Arc::new(CancelAfter {
+                observations: AtomicU64::new(0),
+                allowed: 4,
+            }),
+        )
+        .expect("a first page must finish before the 4096-symbol cancellation checkpoint");
+    assert_eq!(page.symbols.len(), 20);
+    assert_eq!(
+        (page.has_more, page.total),
+        (true, None),
+        "stopping one match past the window does not claim a total"
+    );
+}
+
+#[test]
 fn symbol_search_ranks_exact_names_first_and_pages_without_a_full_scan() {
     let reader = reader(&store_for(production_manifest()));
 
@@ -1038,6 +1065,11 @@ fn symbol_search_ranks_exact_names_first_and_pages_without_a_full_scan() {
         "exact simple-name hits precede containment hits"
     );
     assert_eq!((all.has_more, all.total), (false, Some(3)));
+    assert_eq!(
+        all.indexed_symbols, 4,
+        "the page carries the generation's symbol population so coverage can \
+         name the real denominator on a miss"
+    );
 
     let first = reader
         .search_symbols("run", None, 0, 1, request())
@@ -1087,6 +1119,32 @@ fn symbol_search_ranks_exact_names_first_and_pages_without_a_full_scan() {
         (browse.has_more, browse.total),
         (true, Some(4)),
         "an unfiltered browse knows the census total"
+    );
+}
+
+#[test]
+fn exact_search_page_observes_cancellation_during_admission() {
+    struct AdmissionCancellation(AtomicBool);
+
+    impl GraphCancellation for AdmissionCancellation {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    let reader = reader(&store_for(production_manifest()));
+    reader.census(0, request()).expect("warm catalog");
+    let cancellation = Arc::new(AdmissionCancellation(AtomicBool::new(false)));
+    let admit = |_: &SymbolOccurrenceId,
+                 _: Option<&crate::graph_projection::CodeGraphSymbolBindingV1>,
+                 _: Option<&LineageSymbolRecordV1>| {
+        cancellation.0.store(true, Ordering::Relaxed);
+        true
+    };
+    let request_cancellation: Arc<dyn GraphCancellation> = cancellation.clone();
+    assert_eq!(
+        reader.search_symbols("run", Some(&admit), 0, 1, request_cancellation),
+        Err(CodeGraphProjectionError::Cancelled)
     );
 }
 
@@ -1145,6 +1203,8 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
         "the catalog holds {held} bytes, less than the {served_id_bytes} bytes of ids it serves"
     );
 
+    // A live reader retains the catalog owner; the release waits for it.
+    drop(reader);
     assert_eq!(
         store.release_interactive_catalog(),
         CodeGraphCatalogReleaseV1::Released { bytes: held }
@@ -1165,8 +1225,9 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
 
     // A read whose budget ends after its first look cannot rebuild the
     // catalog itself; it answers warming and the rebuild runs on its own.
+    let reopened = self::reader(&store);
     assert_eq!(
-        reader
+        reopened
             .symbols_page(
                 None,
                 10,
@@ -1193,12 +1254,72 @@ fn a_released_catalog_gives_back_its_bytes_and_rebuilds_in_the_background() {
     assert_eq!(store.interactive_catalog_scan_builds(), 2);
     assert_eq!(store.interactive_catalog_bytes(), Some(held));
     let after = occurrences(
-        &reader
+        &reopened
             .symbols_page(None, 10, request())
             .expect("the rebuilt catalog serves")
             .symbols,
     );
     assert_eq!(after, before);
+}
+
+/// A parked release cannot evict the catalog under an admitted read: the
+/// owner stays retained while a reader lives and frees when the last one
+/// drops. Cloned readers — the path `metered` takes — share one hold.
+///
+/// Fails if the release evicts a ready catalog a live reader is about to
+/// walk, or keeps it after every reader is gone.
+#[test]
+fn a_release_answers_busy_while_a_reader_holds_the_catalog() {
+    let store = store_for(production_manifest());
+    let reader = reader(&store);
+    reader
+        .symbols_page(None, 10, request())
+        .expect("warm catalog");
+    let metered = reader.clone();
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Busy
+    );
+    drop(reader);
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Busy,
+        "a clone holds the same lease"
+    );
+    drop(metered);
+    assert!(matches!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Released { .. }
+    ));
+}
+
+#[test]
+fn catalog_admission_retains_a_catalog_that_warms_after_the_wait() {
+    let store = store_for(production_manifest());
+    let retain = store
+        .await_catalog_and_retain(Duration::from_secs(5))
+        .expect("cold admission has no released warm to wait for");
+    store
+        .warm_interactive_catalog_with_cancellation(None, request())
+        .expect("the concurrent first warm finishes before the reader opens");
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Busy
+    );
+    let admitted = reader(&store);
+    assert!(
+        !admitted
+            .symbols_page(None, 10, request())
+            .unwrap()
+            .symbols
+            .is_empty()
+    );
+    drop(admitted);
+    drop(retain);
+    assert!(matches!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Released { .. }
+    ));
 }
 
 /// Holds the catalog build gate for `hold`, the way a corpus-sized scan
@@ -1238,6 +1359,7 @@ fn a_read_waits_for_a_rewarm_that_finishes_within_its_budget() {
             .expect("warm catalog")
             .symbols,
     );
+    drop(reader);
     assert!(matches!(
         store.release_interactive_catalog(),
         CodeGraphCatalogReleaseV1::Released { .. }
@@ -1256,8 +1378,9 @@ fn a_read_waits_for_a_rewarm_that_finishes_within_its_budget() {
         "the read waited {waited:?} for a 1 s re-warm"
     );
     assert_eq!(store.serving_warmth(), Ok(CodeGraphServingWarmthV1::Warm));
+    let reopened = self::reader(&store);
     let after = occurrences(
-        &reader
+        &reopened
             .symbols_page(None, 10, request())
             .expect("the re-warmed catalog serves the read")
             .symbols,

@@ -95,14 +95,23 @@ Error: project route error (code_index_scheduler_unavailable): project initializ
 
 Confirm the daemon with `tracedecay daemon status` and re-run `init`.
 
-TraceDecay enrolls the repository with the daemon, captures an exact checkout
-snapshot, and publishes a validated code generation. Project facts, sessions,
-and lossless LCM remain project-wide; code generations retain exact repository,
-checkout, worktree, ref, commit/tree, snapshot, and generation provenance.
-Storage is daemon-owned (an explicit local `.tracedecay/` install is only a
-location choice), and clients never open a project database directly.
+`tracedecay init` enrolls the repository with the daemon and requests the
+first code generation. The default command returns a typed not-ready receipt
+(`first generation not ready` / `code_index_reconciliation_requested`) once
+that request is queued; the generation publishes in the background. Pass
+`--wait` to hold until it is ready. Project facts, sessions, and lossless LCM
+remain project-wide; code generations retain exact repository, checkout,
+worktree, ref, commit/tree, snapshot, and generation provenance. Storage is
+daemon-owned (an explicit local `.tracedecay/` install is only a location
+choice), and clients never open a project database directly.
 
-Once it finishes, run `tracedecay status` to see what was indexed:
+`init` returns a typed not-ready receipt when enrollment and the code-index
+request are accepted. The first generation is built in the background. Run
+`tracedecay status --json` to inspect progress, the selected generation, and
+its coverage. A `converging` project or `unavailable` graph is not ready; a
+successful status command only means the diagnostic request completed. Pass
+`tracedecay init --wait` to hold until the first generation is ready. Once
+that generation is current, inspect what was indexed:
 
 ```bash
 tracedecay status
@@ -118,7 +127,7 @@ For machine-readable output, use `--json`.
 
 ### Why `init` is explicit and refresh is daemon-owned
 
-`tracedecay init` is the one-time enrollment and first-generation operation.
+`tracedecay init` enrolls the repository once and requests its first generation.
 After enrollment, hooks, MCP, LSP, and the daemon's bounded freshness ladder
 submit content-free hints. The daemon reconciles native Git state, captures the
 selected worktree snapshot, and publishes a complete generation in the
@@ -592,8 +601,8 @@ multiple clients are serialized by the daemon authority.
 
 The daemon is required, not optional: `tracedecay init` brokers through the
 daemon-owned code-index scheduler, and the read commands connect to the daemon
-rather than starting one. Install the per-user service so it survives terminal
-sessions and logout:
+rather than starting one. Install the per-user service to manage the daemon
+through the host service manager:
 
 ```bash
 tracedecay daemon install-service
@@ -601,6 +610,20 @@ tracedecay daemon status
 ```
 
 On Linux this installs a systemd user service. On macOS this installs a LaunchAgent at `~/Library/LaunchAgents/com.tracedecay.daemon.plist`. On Windows this registers a least-privilege, per-user Task Scheduler task that starts at logon. The task name and ACL are scoped to the current Windows SID, and the daemon endpoint is an authenticated loopback connection discovered from the selected profile.
+
+Headless Linux containers and remote shells may have no systemd user bus
+(`systemctl --user` reports `Failed to connect to bus`). In that environment,
+run the daemon in the foreground:
+
+```bash
+tracedecay daemon run
+```
+
+Keep that terminal running, then run `tracedecay init` and other commands in a
+second terminal under the same user and profile. The foreground daemon owns the
+same authenticated endpoint; it does not require a service manager.
+`tracedecay daemon status` exits 0 only when that endpoint is serving; a
+stopped or unreachable daemon exits non-zero.
 
 The service is memory-bounded, sized from physical RAM when it is installed:
 `MemoryMax` is half of RAM up to 24 GiB, `MemoryHigh` is three quarters of

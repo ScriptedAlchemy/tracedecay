@@ -108,7 +108,10 @@ pub async fn discover_repository_identity(
     if cancellation.is_cancelled() {
         return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::Cancelled);
     }
-    if deadline.is_elapsed_at(Instant::now()) {
+    let expired = deadline.is_elapsed_at(Instant::now());
+    #[cfg(any(test, feature = "test-helpers"))]
+    let expired = expired && !crate::git_repository::repository_discovery_clock_held(directory);
+    if expired {
         return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded);
     }
 
@@ -655,6 +658,36 @@ mod tests {
             .status()
             .expect("git not on PATH, required for identity tests");
         assert!(status.success(), "git {args:?} failed in {}", cwd.display());
+    }
+
+    #[tokio::test]
+    async fn held_discovery_clock_covers_entry_expiry_without_disabling_cancellation() {
+        let root = tempdir().unwrap();
+        run_git(root.path(), &["init", "--quiet"]);
+        crate::git_repository::hold_repository_discovery_clock_for_test(root.path());
+        let expired = MonotonicDeadline::at(Instant::now());
+        let outcome =
+            discover_repository_identity(root.path(), expired, &CancellationToken::new()).await;
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let cancellation = discover_repository_identity(root.path(), expired, &cancelled).await;
+        let other_root = tempdir().unwrap();
+        let unrelated =
+            discover_repository_identity(other_root.path(), expired, &CancellationToken::new())
+                .await;
+        crate::git_repository::reset_repository_discovery_for_test(root.path());
+        assert!(
+            matches!(outcome, GitRepositoryIdentityOutcome::Resolved(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            cancellation,
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::Cancelled)
+        );
+        assert_eq!(
+            unrelated,
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tracedecay_contracts::retained_surfaces::{
     GitScopeV1, HydrationStateResultV1, MessageSearchHitV1, MessageSearchRequestV1,
-    MessageSearchResultV1, RetainedOutcomeStatusV1, RetainedSurfaceOperation,
+    MessageSearchResultV1, RetainedNextActionV1, RetainedOutcomeStatusV1, RetainedSurfaceOperation,
     RetainedSurfaceResultV1, SessionMessageV1, SessionRecordV1, SessionRefreshRequestV1,
     SessionRefreshScopeV1, SessionsForRequestV1, TemporalCoverageOmissionV1, TemporalExplanationV1,
     TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1, TemporalPopulationCountV1,
@@ -46,7 +46,7 @@ use crate::session_retrieval::{
 };
 use tracedecay_contracts::retained_receipts::{evidence_outcome, session_refresh_effect_outcome};
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
 mod refresh;
 
@@ -165,6 +165,13 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
         })?;
         let outcome = retrieve_bounded(context, &retrieval, query).await?;
         let result = input.result(outcome, SessionRetrievalStoreScope::Profile)?;
+        let result = if result.outcome == RetainedOutcomeStatusV1::CompleteZero {
+            let database =
+                super::bounded_execution(context, async { session_database().await }).await?;
+            finish_empty_message_search(result, database.as_ref()).await?
+        } else {
+            result
+        };
         evidence_outcome(
             context,
             RetainedSurfaceOperation::MessageSearch,
@@ -196,6 +203,8 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
         let query = input.query()?;
         let outcome = retrieve_bounded(context, authorities.retrieval.as_ref(), query).await?;
         let result = input.result(outcome, SessionRetrievalStoreScope::Project)?;
+        let result =
+            finish_empty_message_search(result, authorities.session_database.as_ref()).await?;
         evidence_outcome(
             context,
             RetainedSurfaceOperation::MessageSearch,
@@ -645,7 +654,10 @@ impl MessageSearchInput {
             SessionRetrievalServiceOutcome::CompleteZero {
                 temporal,
                 freshness,
-            } => apply_temporal(&mut result, temporal, freshness),
+            } => {
+                result.status = RetainedOutcomeStatusV1::CompleteZero;
+                apply_temporal(&mut result, temporal, freshness);
+            }
             SessionRetrievalServiceOutcome::Stale {
                 temporal,
                 freshness,
@@ -775,6 +787,49 @@ impl MessageSearchInput {
             workflow_run: self.workflow_run.clone(),
             workflow_run_parent_session: None,
         }
+    }
+}
+
+async fn finish_empty_message_search(
+    mut result: MessageSearchResultV1,
+    store: &RegisteredGlobalDb,
+) -> Result<MessageSearchResultV1, RetainedSurfaceExecutionErrorV1> {
+    if result.outcome != RetainedOutcomeStatusV1::CompleteZero {
+        return Ok(result);
+    }
+    let count = store.session_message_count().await.map_err(|error| {
+        RetainedSurfaceExecutionErrorV1::unavailable(format!(
+            "the session store could not be counted: {error}"
+        ))
+    })?;
+    annotate_empty_message_search(&mut result, count == 0);
+    Ok(result)
+}
+
+/// Distinguish an empty mounted store from a real query miss.
+fn annotate_empty_message_search(result: &mut MessageSearchResultV1, store_empty: bool) {
+    if result.outcome != RetainedOutcomeStatusV1::CompleteZero {
+        return;
+    }
+    if store_empty {
+        result.status = RetainedOutcomeStatusV1::Unavailable;
+        result.outcome = RetainedOutcomeStatusV1::Unavailable;
+        result.message = Some(
+            "no ingested session transcripts in the mounted store. \
+             Run `tracedecay sessions import` to ingest host transcripts, then search again."
+                .to_owned(),
+        );
+        result.next_action = Some(RetainedNextActionV1 {
+            kind: "import".to_owned(),
+            tool: "tracedecay sessions import".to_owned(),
+            action: "schedule host transcript ingest".to_owned(),
+            reason: "the mounted session store has no ingested messages".to_owned(),
+        });
+        return;
+    }
+    result.status = RetainedOutcomeStatusV1::CompleteZero;
+    if result.message.is_none() {
+        result.message = Some("no indexed messages matched".to_owned());
     }
 }
 
@@ -1151,5 +1206,69 @@ mod refusal_tests {
             wire["coverage_omissions"][0]["strict_population"],
             serde_json::json!({"kind": "exact", "count": 280})
         );
+    }
+}
+
+#[cfg(test)]
+mod empty_search_annotation_tests {
+    use serde_json::json;
+    use tracedecay_contracts::retained_surfaces::MessageSearchResultV1;
+
+    use super::annotate_empty_message_search;
+
+    fn complete_zero_result() -> MessageSearchResultV1 {
+        serde_json::from_value(json!({
+            "require_fresh": false,
+            "count": 0,
+            "goals": false,
+            "include_subagents": false,
+            "message_type": "any",
+            "outcome": "complete_zero",
+            "provider": "all",
+            "query": "indexLocalPlugins",
+            "refresh_required": false,
+            "results": [],
+            "scope": "all",
+            "status": "complete_zero",
+        }))
+        .expect("complete-zero search result decodes")
+    }
+
+    #[test]
+    fn an_empty_store_is_unavailable_with_import_guidance() {
+        let mut result = complete_zero_result();
+        annotate_empty_message_search(&mut result, true);
+        assert_eq!(
+            result.status,
+            tracedecay_contracts::retained_surfaces::RetainedOutcomeStatusV1::Unavailable
+        );
+        assert_eq!(
+            result.outcome,
+            tracedecay_contracts::retained_surfaces::RetainedOutcomeStatusV1::Unavailable
+        );
+        let message = result.message.expect("empty source names the import");
+        assert!(message.contains("tracedecay sessions import"), "{message}");
+        let next = result.next_action.expect("empty source has a next action");
+        assert_eq!(next.tool, "tracedecay sessions import");
+        assert_eq!(next.kind, "import");
+    }
+
+    #[test]
+    fn a_populated_store_miss_stays_complete_zero() {
+        let mut result = complete_zero_result();
+        annotate_empty_message_search(&mut result, false);
+        assert_eq!(
+            result.status,
+            tracedecay_contracts::retained_surfaces::RetainedOutcomeStatusV1::CompleteZero
+        );
+        assert_eq!(
+            result.outcome,
+            tracedecay_contracts::retained_surfaces::RetainedOutcomeStatusV1::CompleteZero
+        );
+        assert_eq!(
+            result.message.as_deref(),
+            Some("no indexed messages matched")
+        );
+        assert!(result.next_action.is_none());
     }
 }

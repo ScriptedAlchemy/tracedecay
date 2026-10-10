@@ -10,13 +10,14 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 #[test]
 fn codex_plugin_hooks_fills_empty_seed_and_preserves_strict_schema() {
     let raw = codex_embedded_plugin_files()
+        .unwrap()
         .into_iter()
         .find_map(|(relative, contents)| (relative == "hooks/hooks.json").then_some(contents))
         .expect("codex bundle ships hooks/hooks.json");
 
     // The seed template is genuinely empty (it is not dead weight: it is the
     // base the renderer mutates in place).
-    let seed: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let seed: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(seed["hooks"], json!({}));
     assert_eq!(
         seed.as_object().unwrap().keys().collect::<Vec<_>>(),
@@ -24,7 +25,7 @@ fn codex_plugin_hooks_fills_empty_seed_and_preserves_strict_schema() {
         "Codex rejects unknown top-level hook fields"
     );
 
-    let rendered = codex_plugin_hooks(raw, "/usr/local/bin/tracedecay").unwrap();
+    let rendered = codex_plugin_hooks(&raw, "/usr/local/bin/tracedecay").unwrap();
     let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
     let top_level_keys = value.as_object().unwrap().keys().collect::<Vec<_>>();
     assert_eq!(
@@ -50,12 +51,13 @@ fn codex_plugin_hooks_fills_empty_seed_and_preserves_strict_schema() {
 #[test]
 fn codex_plugin_mcp_pins_explorer_binary_and_plugin_relative_adapter() {
     let raw = codex_embedded_plugin_files()
+        .unwrap()
         .into_iter()
         .find_map(|(relative, contents)| (relative == ".mcp.json").then_some(contents))
         .expect("codex bundle ships .mcp.json");
     let bin = "/opt/tracedecay/bin/tracedecay";
     for scope in [InstallScope::Global, InstallScope::ProjectLocal] {
-        let rendered = codex_plugin_mcp(raw, bin, CodexBundlePolicy::for_scope(scope)).unwrap();
+        let rendered = codex_plugin_mcp(&raw, bin, CodexBundlePolicy::for_scope(scope)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let explorer = &value["mcpServers"]["tracedecay-explorer"];
         assert_eq!(explorer["command"], json!("node"));
@@ -214,10 +216,11 @@ fn codex_hook_trust_state_flags_modified_when_hash_drifts() {
     // Simulate a bundle change: bump one hook's timeout so its content hash
     // drifts from what was previously trusted.
     let raw = codex_embedded_plugin_files()
+        .unwrap()
         .into_iter()
         .find_map(|(relative, contents)| (relative == "hooks/hooks.json").then_some(contents))
         .unwrap();
-    let rendered = codex_plugin_hooks(raw, TEST_BIN).unwrap();
+    let rendered = codex_plugin_hooks(&raw, TEST_BIN).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
     value["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = json!(9);
     let changed_entries = codex_hook_trust_entries(&value).unwrap();
@@ -629,12 +632,13 @@ fn codex_hook_trust_followup_clears_only_after_explicit_current_trust() {
     let hooks_dir = codex_plugin_install_dir(home.path()).join("hooks");
     std::fs::create_dir_all(&hooks_dir).unwrap();
     let seed = codex_embedded_plugin_files()
+        .unwrap()
         .into_iter()
         .find_map(|(relative, contents)| (relative == "hooks/hooks.json").then_some(contents))
         .unwrap();
     std::fs::write(
         hooks_dir.join("hooks.json"),
-        codex_plugin_hooks(seed, TEST_BIN).unwrap(),
+        codex_plugin_hooks(&seed, TEST_BIN).unwrap(),
     )
     .unwrap();
 

@@ -17,10 +17,10 @@ use tracedecay_domain::{
     CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate, ContentDigest, EdgeAuthorityV1,
     EvidenceRole, FixedPointScore, FreshnessCompatibilityV1, LanguageDescriptorRevision,
     PolicyRevisionId, PrincipalId, RelationEdgeKindV1, RetrievalBudget, RetrievalFailure,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
-    SingleRootScopeV1, SourceFreshness, SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
-    VectorWatermark,
+    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrievalSourceRoleV1, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision, SensitivityDecision,
+    SensitivityLevelV1, SingleRootScopeV1, SourceFreshness, SourceSpan, SymbolOccurrenceId,
+    TemporalModeV1, UtcMicros, VectorWatermark,
 };
 
 use super::{
@@ -163,6 +163,7 @@ fn graph_pair(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: RetrievalSourceRoleV1::default(),
         retriever: RetrieverKind::Graph,
         retriever_revision: id("retriever.graph.v1"),
         score_domain: id(crate::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1),

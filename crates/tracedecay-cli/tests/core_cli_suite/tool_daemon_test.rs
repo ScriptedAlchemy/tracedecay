@@ -375,8 +375,9 @@ fn daemon_first_init_enrolls_a_clean_profile_from_a_linked_worktree() {
     );
     let init_stderr = String::from_utf8_lossy(&initialized.stderr);
     assert!(
-        init_stderr.contains("daemon code-index reconciliation requested"),
-        "successful init must request the daemon-owned scheduler: {init_stderr}"
+        init_stderr.contains("first generation not ready")
+            && init_stderr.contains("code_index_reconciliation_requested"),
+        "successful init must return a typed not-ready receipt: {init_stderr}"
     );
 
     let linked_arg = linked.to_string_lossy().into_owned();
@@ -3810,6 +3811,37 @@ async fn daemon_reopens_retained_receipts_without_reset() {
     }
 }
 
+#[test]
+fn daemon_status_exits_nonzero_for_a_stopped_daemon_without_starting_it() {
+    let home = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let output = tracedecay_command_with_home(&home_path)
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(stdout.starts_with("state: stopped\n"), "{stdout}");
+    let profile = tracedecay_runtime_core::config::ProfileRoot::new(&home_path);
+    let socket = tracedecay_daemon_control::default_socket_path(profile.data_dir()).unwrap();
+    assert!(!socket.exists(), "status must stay passive");
+}
+
+#[test]
+fn daemon_status_exits_successfully_for_a_ready_foreground_daemon() {
+    let home = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let output = tracedecay_command_with_home(&home_path)
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.starts_with("state: running\n"), "{stdout}");
+    assert!(stdout.contains("protocol: Ready"), "{stdout}");
+}
+
 /// A shell that cannot reach the systemd user manager still reads the serving
 /// daemon's own state as the headline; the manager is a separate line.
 #[cfg(target_os = "linux")]
@@ -3850,6 +3882,45 @@ fn daemon_status_headline_is_the_daemon_when_the_service_manager_is_unreachable(
         "{stdout}"
     );
     assert!(lines.contains(&"protocol: Ready"), "{stdout}");
+}
+
+/// Headless Linux without a user bus names the foreground fallback instead of
+/// `journalctl --user`, and still exits 1 for a stopped daemon.
+#[cfg(target_os = "linux")]
+#[test]
+fn daemon_status_names_foreground_fallback_when_user_manager_is_unreachable() {
+    let home = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let fake_bin = home_path.join("fake-bin");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    write_executable_script(
+        &fake_bin.join("systemctl"),
+        "#!/bin/sh\necho 'Failed to connect to bus: No medium found' >&2\nexit 1\n",
+    )
+    .unwrap();
+
+    let output = tracedecay_command_with_home(&home_path)
+        .args(["daemon", "status"])
+        .env("PATH", hermetic_path(&[&fake_bin]))
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stopped daemon status must exit 1\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.lines().next() == Some("state: stopped"), "{stdout}");
+    assert!(
+        stdout.contains("tracedecay daemon run"),
+        "stopped status must name the foreground fallback, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("journalctl --user"),
+        "unreachable user journal must not be the log hint, got:\n{stdout}"
+    );
 }
 
 /// A JSON request the daemon refuses because no project is in reach still

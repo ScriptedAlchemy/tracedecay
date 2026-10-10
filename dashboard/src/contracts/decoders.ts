@@ -5226,6 +5226,7 @@ export const GraphPathPayloadV1Schema: z.ZodObject<{
 export const GraphSearchPayloadV1Schema: z.ZodObject<{
   count: z.ZodType<number, unknown>;
   has_more: z.ZodType<boolean, unknown>;
+  indexed_symbols: z.ZodType<number, unknown>;
   limit: z.ZodType<number, unknown>;
   offset: z.ZodType<number, unknown>;
   query: z.ZodType<string, unknown>;
@@ -5234,6 +5235,7 @@ export const GraphSearchPayloadV1Schema: z.ZodObject<{
 }> = z.object({
   count: z.number().int().min(0),
   has_more: z.boolean(),
+  indexed_symbols: z.number().int().min(0),
   limit: z.number().int(),
   offset: z.number().int(),
   query: z.string(),

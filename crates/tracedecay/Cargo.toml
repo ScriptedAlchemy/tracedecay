@@ -87,9 +87,9 @@ production = [
 ]
 
 # Exact token counting for the Savings & Cost dashboard (tiktoken BPE).
-# Embeds the o200k_base/cl100k_base vocabularies (~4 MB of binary weight);
-# vocab decoding is lazy (first count pays it, idle servers never do).
-# Disable for a leaner binary, cost estimation falls back to chars/4.
+# Embeds gzip-compressed o200k_base (~1.6 MiB .rodata; inflate is lazy on
+# first count). Disable for a leaner binary; cost estimation falls back to
+# chars/4.
 token-counting = ["tracedecay-agent-hosts/token-counting", "tracedecay-dashboard-api/token-counting"]
 
 # Lite tier (11 languages), always compiled, no feature flag needed:

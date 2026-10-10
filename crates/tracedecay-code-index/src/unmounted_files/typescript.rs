@@ -30,7 +30,7 @@
 //! manifest, not because a glob mentioned it, and a package the globs forgot is
 //! audited anyway.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -135,9 +135,28 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
         .filter_map(|manifest| manifest.parent())
         .map(normalized)
         .collect::<Vec<_>>();
+    let package_indices = package_dirs
+        .iter()
+        .enumerate()
+        .map(|(index, dir)| (dir.as_path(), index))
+        .collect::<HashMap<_, _>>();
+    let owners = source_files
+        .iter()
+        .map(|file| {
+            file.ancestors()
+                .find_map(|dir| package_indices.get(dir).copied())
+        })
+        .collect::<Vec<_>>();
+    let mut package_files = vec![Vec::new(); package_dirs.len()];
+    for (&file, owner) in source_files.iter().zip(&owners) {
+        if let Some(index) = owner {
+            package_files[*index].push(file);
+        }
+    }
     let packages = package_dirs
         .iter()
-        .map(|dir| node_package(project_root, dir, &owned_files, &package_dirs))
+        .zip(&package_files)
+        .map(|(dir, sources)| node_package(project_root, dir, &owned_files, sources))
         .collect::<Result<Vec<_>>>()?;
 
     let mut mounted: HashSet<PathBuf> = HashSet::new();
@@ -150,13 +169,12 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
     let mut scanned_file_count = 0usize;
     let mut unclaimed_file_count = 0usize;
     let mut unmounted = Vec::new();
-    for absolute in &source_files {
-        let Some(package) = deepest_package_dir(&package_dirs, absolute)
-            .and_then(|dir| packages.iter().find(|package| package.dir == dir))
-        else {
+    for (absolute, owner) in source_files.iter().zip(owners) {
+        let Some(index) = owner else {
             unclaimed_file_count += 1;
             continue;
         };
+        let package = &packages[index];
         scanned_file_count += 1;
         if mounted.contains(&normalized(absolute)) {
             continue;
@@ -191,18 +209,6 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
     })
 }
 
-/// The manifest directory that owns `file`: the deepest one above it.
-///
-/// A nested package is a claim boundary exactly as a nested `Cargo.toml` is,
-/// an outer package must never be blamed for, nor credited with, a file that
-/// belongs to an inner one.
-fn deepest_package_dir<'a>(dirs: &'a [PathBuf], file: &Path) -> Option<&'a Path> {
-    dirs.iter()
-        .filter(|dir| file.starts_with(dir))
-        .max_by_key(|dir| dir.as_os_str().len())
-        .map(PathBuf::as_path)
-}
-
 /// Reads one `package.json` (and the tsconfigs and config files beside it) into
 /// the entry points and alias rules the walk needs.
 #[tracing::instrument(
@@ -214,7 +220,7 @@ fn node_package(
     project_root: &Path,
     dir: &Path,
     owned: &HashSet<&Path>,
-    package_dirs: &[PathBuf],
+    sources: &[&Path],
 ) -> Result<NodePackage> {
     let manifest_path = dir.join("package.json");
     let manifest = std::fs::read_to_string(&manifest_path)
@@ -284,10 +290,9 @@ fn node_package(
     // Config files are loaded by tooling, and the paths they name are entry
     // points that appear nowhere else. Reading their string literals finds
     // those without executing anyone's config.
-    for candidate in owned
+    for candidate in sources
         .iter()
         .filter(|file| file.parent() == Some(dir) && is_config_file(file))
-        .filter(|file| deepest_package_dir(package_dirs, file) == Some(dir))
     {
         entries.insert((*candidate).to_path_buf());
         let source = std::fs::read_to_string(candidate).map_err(|error| TraceDecayError::File {
@@ -312,9 +317,8 @@ fn node_package(
 
     // Roots a runner discovers by convention rather than by declaration,
     // only this package's own, never a nested package's.
-    for candidate in owned
+    for candidate in sources
         .iter()
-        .filter(|file| deepest_package_dir(package_dirs, file) == Some(dir))
         .filter(|file| is_conventional_entry(dir, file))
     {
         entries.insert((*candidate).to_path_buf());
@@ -561,11 +565,10 @@ fn walk_imports(package: &NodePackage, mounted: &mut HashSet<PathBuf>) {
 
 /// Every module specifier one file names.
 ///
-/// `import` statements come from the same extractor the code graph is built
-/// from, so the audit and the graph cannot disagree about what a file imports.
-/// The three remaining specifier-bearing forms, `export … from`,
-/// `require(…)`, and dynamic `import(…)`, are read off the same tree-sitter
-/// grammar the extractor uses, because the extractor does not emit them as
+/// `import` statements, `export … from`, and `require(…)` come from the same
+/// extractor the code graph is built from, so the audit and the graph cannot
+/// disagree about those forms. Dynamic `import(…)` is still read off the
+/// tree-sitter grammar because the extractor does not emit that form as
 /// import evidence today.
 fn module_specifiers(file: &Path, source: &str) -> Vec<String> {
     let logical_path = file.to_string_lossy().into_owned();

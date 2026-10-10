@@ -3,12 +3,16 @@
 //!
 //! The decoded generation a worktree serves was held until the daemon exited:
 //! the first read that needed the whole generation set a latch that nothing
-//! cleared. Here that residency is a lease renewed by those reads. Once it
-//! lapses, or under pressure, the inventory releases the decode and the graph
-//! engine, and the worktree returns to the state a restart leaves it in:
-//! exact and lexical reads keep serving from the text artifact, graph reads
-//! answer warming while the engine reopens from the durable graph, and the
-//! next read that needs the whole generation re-decodes it.
+//! cleared. Here that residency is a lease renewed by those reads. The worker
+//! also drops the seated decode, catalog, and engine when it parks after a
+//! publish: exact and lexical serve from the sealed text artifact,
+//! `code_graph_serving` reports `warming` while catalog/engine are absent,
+//! and the next graph read reseats them (#3328). Once the lease lapses, or
+//! under pressure, the inventory
+//! releases the decode and the graph engine, and the worktree returns to the
+//! state a restart leaves it in: exact and lexical reads keep serving from
+//! the text artifact, graph reads reseat the engine from the durable graph,
+//! and the next read that needs the whole generation re-decodes it.
 //!
 //! Reads that only report on the seat (the status census, freshness) do not
 //! renew the lease, and a refresh of the worktree refused for memory takes
@@ -27,6 +31,7 @@ use tracedecay_code_index::production::{
     CodeIndexPublishedGenerationV1, DecodedGenerationContentV1,
 };
 use tracedecay_code_index::retained_parse::{RetainedParsePoolReleaseV1, SharedRetainedParsePool};
+use tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1;
 use tracedecay_runtime_core::resident_memory::{
     ResidentHoldingV1, ResidentOwnerBytesV1, ResidentOwnerKindV1, ResidentOwnerRegistrationV1,
     ResidentOwnerReleaseV1, ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1,
@@ -34,7 +39,8 @@ use tracedecay_runtime_core::resident_memory::{
 };
 
 use super::reconcile::ReconcilePassesV1;
-use super::registry::ServingGenerationSlot;
+use super::registry::{CodeIndexSchedulerRegistryV1, ServingGenerationSlot};
+use super::serving::ParkedGraphReleaseCallback;
 use super::{DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1};
 
 /// Whether a serving read renews its worktree's residency lease.
@@ -50,6 +56,7 @@ pub(super) struct WorktreeResidencyV1 {
     serving_generation: Arc<ServingGenerationSlot>,
     serving_generation_epoch: Arc<AtomicU64>,
     serving_generation_changed: Arc<tokio::sync::watch::Sender<()>>,
+    serving_seats: Arc<tokio::sync::watch::Sender<u64>>,
     complete_generation_requested: Arc<AtomicBool>,
     reconcile_in_progress: Arc<ReconcilePassesV1>,
     publication: DaemonCodeIndexPublicationStoreV1,
@@ -63,6 +70,7 @@ pub(super) struct WorktreeResidencyPartsV1 {
     pub(super) serving_generation: Arc<ServingGenerationSlot>,
     pub(super) serving_generation_epoch: Arc<AtomicU64>,
     pub(super) serving_generation_changed: Arc<tokio::sync::watch::Sender<()>>,
+    pub(super) serving_seats: Arc<tokio::sync::watch::Sender<u64>>,
     pub(super) complete_generation_requested: Arc<AtomicBool>,
     pub(super) reconcile_in_progress: Arc<ReconcilePassesV1>,
     pub(super) publication: DaemonCodeIndexPublicationStoreV1,
@@ -76,6 +84,7 @@ impl WorktreeResidencyV1 {
             serving_generation: parts.serving_generation,
             serving_generation_epoch: parts.serving_generation_epoch,
             serving_generation_changed: parts.serving_generation_changed,
+            serving_seats: parts.serving_seats,
             complete_generation_requested: parts.complete_generation_requested,
             reconcile_in_progress: parts.reconcile_in_progress,
             publication: parts.publication,
@@ -134,6 +143,161 @@ impl WorktreeResidencyV1 {
         if released > 0 {
             owners.note_headroom();
         }
+    }
+
+    /// Drop the seated decode, catalog, and engine once the worker parks.
+    ///
+    /// Exact and lexical serve from the sealed text artifact. Callers reseat
+    /// the catalog/engine on the next graph read. The seated
+    /// [`CodeIndexPublishedGenerationV1`] is a third copy of that
+    /// generation. Keep the decode while a complete read demands the seat, a
+    /// reconcile is still running, or the installed text owner cannot yet
+    /// serve: a text owner whose projection is still warming or that
+    /// latched a failure leaves the seat as the only servable generation,
+    /// and taking it then turns serve-old into `GenerationUnavailable`.
+    /// Catalog and engine still go back after a completed activation:
+    /// `code_graph_serving` reports `warming` while they are absent and the
+    /// next graph read reseats them. Do not clear `complete_generation_requested`: a demand that
+    /// arrives during the take must still wake a successor pass to
+    /// re-decode.
+    pub(super) fn release_decode_when_parked(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
+        if self.busy() {
+            return;
+        }
+        if !self
+            .serving_text()
+            .is_some_and(|text| text.query_owners_are_ready())
+        {
+            return;
+        }
+        let mut released = Vec::new();
+        if !self.complete_generation_requested.load(Ordering::Acquire) {
+            let seated = {
+                let mut slot = self
+                    .serving_generation
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if self.complete_generation_requested.load(Ordering::Acquire) {
+                    None
+                } else {
+                    slot.take()
+                }
+            };
+            if seated.is_some() {
+                self.serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
+                CodeIndexSchedulerRegistryV1::record_serving_seat(&self.serving_seats);
+                self.serving_generation_changed.send_replace(());
+            }
+            let serving = HeldDecodesV1::release(
+                seated
+                    .map(|latest| latest.generation_handle())
+                    .into_iter()
+                    .chain(self.publication.release_decoded_active())
+                    .collect(),
+            );
+            let superseded = HeldDecodesV1::release(self.publication.release_superseded_decodes());
+            released.extend([serving, superseded].into_iter().filter_map(
+                |release| match release {
+                    ResidentOwnerReleaseV1::Released { bytes } => Some(bytes),
+                    ResidentOwnerReleaseV1::Busy | ResidentOwnerReleaseV1::Empty => None,
+                },
+            ));
+            if !released.is_empty() {
+                tracing::info!(
+                    event = "code_index_serving_decode_released_on_park",
+                    bytes = released
+                        .iter()
+                        .map(|bytes| bytes.measured().unwrap_or(0))
+                        .sum::<u64>(),
+                    "a parked worktree gave back its seated decode; text keeps serving"
+                );
+            }
+        }
+        if self.busy() {
+            if self.serving_text().is_some_and(|text| {
+                matches!(
+                    text.code_graph_serving_readiness(),
+                    CodeGraphServingReadinessV1::Warming { .. }
+                )
+            }) {
+                self.arm_park_release_after_first_catalog_warm(owners);
+            }
+            if !released.is_empty() {
+                owners.note_headroom();
+            }
+            return;
+        }
+        // First-time warming still needs the engine the catalog task opens
+        // its reader on. Release only after a completed Ready activation;
+        // later parks see Warming and leave the already-released owners.
+        if !self.serving_text().is_some_and(|text| {
+            text.code_graph_serving_readiness() == CodeGraphServingReadinessV1::Ready
+        }) {
+            self.arm_park_release_after_first_catalog_warm(owners);
+            // The first warm may have settled between the check and the arm.
+            // Re-check before returning so that permit is not the only retry.
+            if !self.serving_text().is_some_and(|text| {
+                text.code_graph_serving_readiness() == CodeGraphServingReadinessV1::Ready
+            }) {
+                if !released.is_empty() {
+                    owners.note_headroom();
+                }
+                return;
+            }
+        }
+        for (kind, release) in [
+            (
+                ResidentOwnerKindV1::GraphCatalog,
+                GraphCatalogOwnerV1(Arc::clone(self)).release(),
+            ),
+            (
+                ResidentOwnerKindV1::GraphEngine,
+                GraphEngineOwnerV1(Arc::clone(self)).release(),
+            ),
+            (
+                ResidentOwnerKindV1::GraphEngine,
+                OutgoingGraphOwnerV1(Arc::clone(self)).release(),
+            ),
+        ] {
+            if let ResidentOwnerReleaseV1::Released { bytes } = release {
+                tracing::info!(
+                    event = "code_index_serving_graph_released_on_park",
+                    kind = kind.as_str(),
+                    bytes = bytes.measured(),
+                    "a parked worktree gave back its catalog or engine; the next graph read reseats it"
+                );
+                released.push(bytes);
+            }
+        }
+        if released.is_empty() {
+            return;
+        }
+        owners.note_headroom();
+    }
+
+    /// The first catalog warm finishes on a blocking task and does not wake
+    /// the parked worker. Arm one waiter that retries this release when that
+    /// warm settles; generation/owner checks stay in [`Self::release_decode_when_parked`].
+    fn arm_park_release_after_first_catalog_warm(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
+        let Some(text) = self.serving_text() else {
+            return;
+        };
+        if !text.arm_park_release_after_catalog_warm() {
+            return;
+        }
+        let residency = Arc::downgrade(self);
+        let owners = Arc::downgrade(owners);
+        let retry: ParkedGraphReleaseCallback = Arc::new(move || {
+            if let (Some(residency), Some(owners)) = (residency.upgrade(), owners.upgrade()) {
+                residency.release_decode_when_parked(&owners);
+            }
+        });
+        text.bind_parked_graph_release(Arc::clone(&retry));
+        let settled = text.catalog_warm_notify();
+        tokio::spawn(async move {
+            settled.notified().await;
+            retry();
+        });
     }
 
     /// Renew the lease: a read needed the whole decoded generation.
@@ -332,6 +496,7 @@ impl ResidentOwnerV1 for ServingDecodeOwnerV1 {
             residency
                 .serving_generation_epoch
                 .fetch_add(1, Ordering::AcqRel);
+            CodeIndexSchedulerRegistryV1::record_serving_seat(&residency.serving_seats);
             residency.serving_generation_changed.send_replace(());
         }
         HeldDecodesV1::release(
@@ -498,15 +663,21 @@ struct OutgoingGraphOwnerV1(Arc<WorktreeResidencyV1>);
 
 impl ResidentOwnerV1 for OutgoingGraphOwnerV1 {
     fn sample(&self) -> Option<ResidentOwnerSampleV1> {
+        // The predecessor hold is resident state on its own: keep sampling
+        // while it is held, even after the store's catalog and engine bytes
+        // have been released, so release() stays reachable and can settle
+        // the hold once the successor's activation finishes.
         let held = self.0.serving_text()?.held_graph_predecessor()?;
-        let store = held.interactive_graph_store().ok()?;
-        let catalog = store.interactive_catalog_bytes();
-        let bytes = match store.serving_engine_bytes() {
-            Ok(None) if catalog.is_none() => return None,
-            Ok(engine) => ResidentOwnerBytesV1::Measured(
-                engine.unwrap_or(0).saturating_add(catalog.unwrap_or(0)),
-            ),
-            Err(_) => ResidentOwnerBytesV1::Unmeasured,
+        let bytes = match held.interactive_graph_store().ok() {
+            Some(store) => match store.serving_engine_bytes() {
+                Ok(engine) => ResidentOwnerBytesV1::Measured(
+                    engine
+                        .unwrap_or(0)
+                        .saturating_add(store.interactive_catalog_bytes().unwrap_or(0)),
+                ),
+                Err(_) => ResidentOwnerBytesV1::Unmeasured,
+            },
+            None => ResidentOwnerBytesV1::Measured(0),
         };
         Some(ResidentOwnerSampleV1 {
             holding: ResidentHoldingV1::Generation(
@@ -523,15 +694,32 @@ impl ResidentOwnerV1 for OutgoingGraphOwnerV1 {
         let Some(text) = self.0.serving_text() else {
             return ResidentOwnerReleaseV1::Empty;
         };
+        // While this generation's own graph is still pending or warming, the
+        // held predecessor is the only servable graph: `graph_predecessor`
+        // answers stale reads from it until activation settles. Once it has
+        // settled — ready, refused, or unavailable — the hold is spare and
+        // settles on every release path, busy or not.
+        let settled = !matches!(
+            text.code_graph_serving_readiness(),
+            CodeGraphServingReadinessV1::Pending | CodeGraphServingReadinessV1::Warming { .. }
+        );
         let Some(store) = text
             .held_graph_predecessor()
             .and_then(|held| held.interactive_graph_store().ok())
         else {
+            if settled {
+                text.release_graph_predecessor();
+            }
             return ResidentOwnerReleaseV1::Empty;
         };
         let catalog = match store.release_interactive_catalog() {
             CodeGraphCatalogReleaseV1::Released { bytes } => bytes,
-            CodeGraphCatalogReleaseV1::Busy => return ResidentOwnerReleaseV1::Busy,
+            CodeGraphCatalogReleaseV1::Busy => {
+                if settled {
+                    text.release_graph_predecessor();
+                }
+                return ResidentOwnerReleaseV1::Busy;
+            }
             CodeGraphCatalogReleaseV1::NotReady => 0,
         };
         let engine = match store.release_serving_engine() {
@@ -545,6 +733,9 @@ impl ResidentOwnerV1 for OutgoingGraphOwnerV1 {
                         "the outgoing graph engine could not be released; it stays resident"
                     );
                 }
+                if settled {
+                    text.release_graph_predecessor();
+                }
                 return if catalog > 0 {
                     ResidentOwnerReleaseV1::Released {
                         bytes: ResidentOwnerBytesV1::Measured(catalog),
@@ -554,7 +745,9 @@ impl ResidentOwnerV1 for OutgoingGraphOwnerV1 {
                 };
             }
         };
-        text.release_graph_predecessor();
+        if settled {
+            text.release_graph_predecessor();
+        }
         ResidentOwnerReleaseV1::Released {
             bytes: engine.map_or(ResidentOwnerBytesV1::Unmeasured, |engine| {
                 ResidentOwnerBytesV1::Measured(engine.saturating_add(catalog))

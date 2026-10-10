@@ -105,6 +105,10 @@ pub struct ExactLaneEvidence {
     /// The validated admission proof minted centrally; the lane attaches it,
     /// it never constructs it.
     pub admission_proof: ExactAdmissionProof,
+    /// Source-role evidence for the same-symbol definition/reference order.
+    /// Absent historical evidence deserializes as a non-definition hit.
+    #[serde(default)]
+    pub source_role: tracedecay_domain::RetrievalSourceRoleV1,
 }
 
 impl LaneBoundEvidence for ExactLaneEvidence {
@@ -713,15 +717,22 @@ where
             }
             admitted.push((candidate.clone(), evidence.clone()));
         }
-        // Canonical deterministic order: admitted matched-literal count
+        // Canonical deterministic order: production definitions ahead of
+        // every other source role, then admitted matched-literal count
         // (descending), then stable occurrence identity, then the evidence
         // anchor. Port emission order can never select a different prefix.
         admitted.sort_by(|left, right| {
-            right
-                .1
-                .matched_literals
-                .len()
-                .cmp(&left.1.matched_literals.len())
+            left.1
+                .source_role
+                .admission_rank()
+                .cmp(&right.1.source_role.admission_rank())
+                .then_with(|| {
+                    right
+                        .1
+                        .matched_literals
+                        .len()
+                        .cmp(&left.1.matched_literals.len())
+                })
                 .then_with(|| {
                     left.0
                         .source_occurrence_id
@@ -754,6 +765,7 @@ where
                 retrieval_checkpoint(request.control)?;
             }
             candidate.ordinal_rank = ordinal as u32;
+            candidate.source_role = evidence.source_role;
             candidate.raw_score = FixedPointScore(
                 (evidence.matched_literals.len() as u64)
                     .saturating_mul(ADMITTED_LITERAL_SCORE_MICROS),

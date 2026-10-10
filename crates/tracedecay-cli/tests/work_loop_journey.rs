@@ -202,11 +202,12 @@ impl ProductionDaemon {
             base_url: format!("http://{endpoint}"),
             origin: format!("http://{endpoint}"),
             authorization: format!("Bearer {token}"),
-            agent: ureq::Agent::config_builder()
-                .http_status_as_error(false)
-                .timeout_global(Some(Duration::from_secs(60)))
-                .build()
-                .into(),
+            agent: tracedecay_application::http_agent::http_agent(
+                ureq::Agent::config_builder()
+                    .http_status_as_error(false)
+                    .timeout_global(Some(Duration::from_secs(60)))
+                    .build(),
+            ),
             retired_project: None,
             _home: home,
         }

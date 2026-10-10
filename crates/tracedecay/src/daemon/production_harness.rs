@@ -1183,19 +1183,22 @@ async fn wait_for_production_composition_code_index(
             // the text owner and leave the decoded seat empty until a reader
             // demands it, so a text owner serving the native graph is ready.
             // Graph serving installs before its interactive catalog finishes
-            // warming in the background; the composition is handed over only
-            // once catalog-dependent reads answer instead of reporting warming.
-            let text_graph_catalog_warm = invocation
+            // warming in the background; the composition is handed over once
+            // that catalog has completed a warm. A later park may release it
+            // for memory (`warming`); that is still a completed publication,
+            // and the next graph read reseats it.
+            let text_graph_catalog_ready = invocation
                 .code_index_schedulers
                 .latest_text_serving_for_scope(scope)
                 .await
                 .and_then(|text| text.interactive_graph_store().ok())
-                .map(|store| store.interactive_catalog_is_warm().unwrap_or(false));
-            // A warming native catalog cannot be made ready by decoding the
-            // same generation. Other mounts can use an already-decoded serving
-            // owner; this publication wait must not create a second owner.
-            let generation_ready = match text_graph_catalog_warm {
-                Some(warm) => warm,
+                .map(|store| store.interactive_catalog_has_completed_a_warm());
+            // A first-time warming catalog cannot be made ready by decoding
+            // the same generation. Other mounts can use an already-decoded
+            // serving owner; this publication wait must not create a second
+            // owner.
+            let generation_ready = match text_graph_catalog_ready {
+                Some(ready) => ready,
                 None => invocation
                     .code_index_schedulers
                     .latest_complete_ready_decoded_for_scope(scope)

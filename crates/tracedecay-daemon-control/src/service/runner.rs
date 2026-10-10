@@ -499,12 +499,24 @@ fn run_systemctl(systemctl: Option<&Path>, args: &[&str]) -> Result<()> {
     if output.status.success() {
         return Ok(());
     }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if systemd_user_bus_unreachable(&stderr) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "systemctl --user {} failed: {}. The systemd user manager is unreachable ({}). {}",
+                args.join(" "),
+                stderr.trim(),
+                ServiceManagerUnreachable::REMEDY,
+                ServiceManagerUnreachable::FOREGROUND_FALLBACK
+            ),
+        });
+    }
     Err(TraceDecayError::Config {
         message: format!(
             "systemctl --user {} failed with status {}\n{}",
             args.join(" "),
             output.status,
-            String::from_utf8_lossy(&output.stderr)
+            stderr
         ),
     })
 }
@@ -611,6 +623,12 @@ pub(super) struct ServiceManagerUnreachable {
 
 impl ServiceManagerUnreachable {
     pub(super) const REMEDY: &'static str = "check XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS";
+    pub(super) const FOREGROUND_FALLBACK: &'static str =
+        "Run `tracedecay daemon run` instead of a systemd user service.";
+}
+
+fn systemd_user_bus_unreachable(stderr: &str) -> bool {
+    stderr.contains("Failed to connect to bus")
 }
 
 impl std::fmt::Display for ServiceManagerUnreachable {
@@ -638,8 +656,9 @@ impl From<ServiceStateError> for TraceDecayError {
         match error {
             ServiceStateError::ManagerUnreachable(unreachable) => TraceDecayError::Config {
                 message: format!(
-                    "{unreachable}; the systemd user manager may be unreachable from this environment ({})",
-                    ServiceManagerUnreachable::REMEDY
+                    "{unreachable}; the systemd user manager may be unreachable from this environment ({}). {}",
+                    ServiceManagerUnreachable::REMEDY,
+                    ServiceManagerUnreachable::FOREGROUND_FALLBACK
                 ),
             },
             ServiceStateError::Failed(error) => error,
@@ -912,13 +931,25 @@ fn launchd_service_target(id: &Path, profile: &ProfileRoot) -> Result<String> {
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaunchdJobActivity {
+    Running,
+    Stopped,
+    Stopping,
+    /// launchd is bringing the job up but the daemon has not exec'd yet:
+    /// `xpcproxy` while launchd execs it, `spawn scheduled` while a respawn
+    /// waits out the throttle interval. launchd will run it without further
+    /// action, so readiness waits keep polling and quiescence must boot it out.
+    Starting,
+}
+
 /// A shared launchd domain must never act on a label loaded from another
 /// profile's plist, even when both profiles retain the default label.
-fn launchd_owned_service_running(
+fn launchd_owned_service_activity(
     launchctl: &Path,
     target: &str,
     profile: &ProfileRoot,
-) -> Result<Option<bool>> {
+) -> Result<Option<LaunchdJobActivity>> {
     let output = launchctl_spawn(launchctl, &["print", target])?;
     if !output.status.success() {
         if launchctl_stderr_is_not_loaded(&String::from_utf8_lossy(&output.stderr))
@@ -956,8 +987,12 @@ fn launchd_owned_service_running(
         let state = states.next();
         if states.next().is_none() {
             match state {
-                Some("running") => return Ok(Some(true)),
-                Some("waiting" | "not running") => return Ok(Some(false)),
+                Some("running") => return Ok(Some(LaunchdJobActivity::Running)),
+                Some("waiting" | "not running") => return Ok(Some(LaunchdJobActivity::Stopped)),
+                Some("SIGTERMed") => return Ok(Some(LaunchdJobActivity::Stopping)),
+                Some("xpcproxy" | "spawn scheduled") => {
+                    return Ok(Some(LaunchdJobActivity::Starting));
+                }
                 _ => {}
             }
         }
@@ -982,17 +1017,22 @@ pub(super) fn launchd_service_state(
     profile: &ProfileRoot,
 ) -> Result<DaemonServiceState> {
     let target = launchd_service_target(id, profile)?;
-    let loaded = launchd_owned_service_running(launchctl, &target, profile)?;
+    let loaded = launchd_owned_service_activity(launchctl, &target, profile)?;
     if loaded.is_none() && !launchd_user_service_path(profile)?.try_exists()? {
         return Ok(DaemonServiceState::Missing);
     }
-    let running = loaded == Some(true);
     let enabled = !launchd_service_is_disabled(launchctl, id, profile)?;
-    Ok(match (running, enabled) {
-        (true, true) => DaemonServiceState::RunningEnabled,
-        (true, false) => DaemonServiceState::RunningDisabled,
-        (false, true) => DaemonServiceState::StoppedEnabled,
-        (false, false) => DaemonServiceState::StoppedDisabled,
+    Ok(match (loaded, enabled) {
+        (Some(LaunchdJobActivity::Running | LaunchdJobActivity::Starting), true) => {
+            DaemonServiceState::RunningEnabled
+        }
+        (Some(LaunchdJobActivity::Running | LaunchdJobActivity::Starting), false) => {
+            DaemonServiceState::RunningDisabled
+        }
+        (Some(LaunchdJobActivity::Stopping), true) => DaemonServiceState::StoppingEnabled,
+        (Some(LaunchdJobActivity::Stopping), false) => DaemonServiceState::StoppingDisabled,
+        (Some(LaunchdJobActivity::Stopped) | None, true) => DaemonServiceState::StoppedEnabled,
+        (Some(LaunchdJobActivity::Stopped) | None, false) => DaemonServiceState::StoppedDisabled,
     })
 }
 
@@ -1044,7 +1084,7 @@ fn launchd_install(
     if !start {
         // launchd bootstraps every plist in ~/Library/LaunchAgents at login,
         // so persist a disabled state to keep --no-start meaning "do not run".
-        launchd_owned_service_running(launchctl, &target, profile)?;
+        launchd_owned_service_activity(launchctl, &target, profile)?;
         run_launchctl(launchctl, &["disable", &target])?;
         return Ok(());
     }
@@ -1096,7 +1136,7 @@ fn launchd_start(
     service_path: &Path,
     socket_path: &Path,
 ) -> Result<()> {
-    launchd_owned_service_running(launchctl, target, profile)?;
+    launchd_owned_service_activity(launchctl, target, profile)?;
     let domain = launchd_domain(id)?;
     run_launchd_commands(
         launchctl,
@@ -1115,7 +1155,7 @@ fn launchd_before_uninstall(
         return Ok(());
     }
     let target = launchd_service_target(id, profile)?;
-    if launchd_owned_service_running(launchctl, &target, profile)?.is_none() {
+    if launchd_owned_service_activity(launchctl, &target, profile)?.is_none() {
         return Ok(());
     }
     run_launchd_commands(launchctl, &launchd_uninstall_command_plan(&target))
@@ -1123,7 +1163,7 @@ fn launchd_before_uninstall(
 
 fn launchd_stop(launchctl: &Path, id: &Path, profile: &ProfileRoot) -> Result<()> {
     let target = launchd_service_target(id, profile)?;
-    if launchd_owned_service_running(launchctl, &target, profile)?.is_none() {
+    if launchd_owned_service_activity(launchctl, &target, profile)?.is_none() {
         return Ok(());
     }
     run_launchctl_allow_not_loaded(launchctl, &["bootout", &target])

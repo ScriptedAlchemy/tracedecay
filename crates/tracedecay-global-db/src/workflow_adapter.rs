@@ -9,6 +9,8 @@ use tracedecay_store::StoreShardScopeV1;
 
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 use tracedecay_runtime_core::db::engine::params;
+#[cfg(any(test, feature = "test-helpers"))]
+use tracedecay_sessions::runtime::source::TranscriptIngestResult;
 use tracedecay_sessions::runtime::workflow_index::{
     INGEST_WATERMARK_KEY, RegisteredWorkflowIndexSnapshot, WorkflowAgent, WorkflowIndexError,
     WorkflowIngestSink, WorkflowIngestWriteTxn, WorkflowRun, read_ingest_watermark, upsert_agent,
@@ -72,7 +74,7 @@ where
         project_id: &ProjectId,
         project_root: &Path,
         projects_dir: &Path,
-    ) -> WorkflowIngestStats {
+    ) -> TranscriptIngestResult<WorkflowIngestStats> {
         ingest_workflow_runs_with_sink(self, project_id, project_root, projects_dir).await
     }
 

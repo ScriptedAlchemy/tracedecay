@@ -137,14 +137,15 @@ fn fetch_release_download(
     }
 
     let url = format!("{}/tags/{tag}", cloud::releases_url(api_base));
-    let release: Release = cloud::get_release_json(&url, authorization, Duration::from_secs(30))
-        .and_then(|release| {
-            release.ok_or(ReleaseLookupError::NoAssetForPlatform {
-                channel: if is_beta { "beta" } else { "stable" },
-                platform: cloud::current_platform(),
+    let release: Release =
+        cloud::get_release_json(&url, authorization, cloud::UPGRADE_RELEASE_LOOKUP_TIMEOUT)
+            .and_then(|release| {
+                release.ok_or(ReleaseLookupError::NoAssetForPlatform {
+                    channel: if is_beta { "beta" } else { "stable" },
+                    platform: cloud::current_platform(),
+                })
             })
-        })
-        .map_err(release_lookup_failed)?;
+            .map_err(release_lookup_failed)?;
 
     let archive = release
         .assets
@@ -818,7 +819,12 @@ fn run_versioned_upgrade(
     is_beta: bool,
 ) -> Result<UpgradeOutcome> {
     eprintln!("Checking GitHub releases...");
-    let latest = cloud::fetch_latest_channel_version(is_beta).map_err(release_lookup_failed)?;
+    let latest = cloud::fetch_latest_channel_version(
+        cloud::GITHUB_API_URL,
+        is_beta,
+        cloud::github_authorization().as_deref(),
+    )
+    .map_err(release_lookup_failed)?;
     let latest = match classify_upgrade(current, &latest) {
         UpgradeStatus::AlreadyCurrent => {
             eprintln!("\x1b[32m✔\x1b[0m Already up to date (v{current}).");
@@ -985,6 +991,7 @@ fn describe_process_failure(error: &GitCommandError) -> String {
             format!("could not be read on {stream}: {source}")
         }
         GitCommandError::Wait(source) => format!("could not be waited for: {source}"),
+        GitCommandError::WriteInput(source) => format!("could not receive its input: {source}"),
     }
 }
 
@@ -1216,8 +1223,12 @@ fn switch_channel_for(
 
     eprintln!("Switching from {current_channel} to {target_channel}...");
 
-    let latest =
-        cloud::fetch_latest_channel_version(target_is_beta).map_err(release_lookup_failed)?;
+    let latest = cloud::fetch_latest_channel_version(
+        cloud::GITHUB_API_URL,
+        target_is_beta,
+        cloud::github_authorization().as_deref(),
+    )
+    .map_err(release_lookup_failed)?;
 
     eprintln!("  Target: v{latest}");
 

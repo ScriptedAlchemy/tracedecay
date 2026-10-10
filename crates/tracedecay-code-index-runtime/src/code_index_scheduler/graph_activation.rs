@@ -8,6 +8,8 @@ use tracedecay_domain::{CodeGenerationId, ProjectId, RepositoryId, WorktreeId, s
 use tracedecay_graph_db::GraphDbError;
 use tracedecay_graph_db::{GraphCancellation, SealedGraphStateDigest};
 
+pub(crate) use tracedecay_contracts::code_index_freshness::GRAPH_PUBLICATION_DEADLINE_REASON;
+
 use super::{
     CodeGraphServingAuthorityV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
     DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
@@ -286,13 +288,6 @@ fn take_injected_activation_gate(
 /// path and the injected test refusal so status and tests name one verdict.
 pub(crate) const RESIDENT_MEMORY_GRAPH_REFUSAL_REASON: &str =
     "code graph activation was refused by the resident-memory policy";
-
-/// The typed reason a generation reports once its native graph publication
-/// ran out its background budget. The build is a pure function of the sealed
-/// generation, so the verdict stands until a new generation seals.
-pub(crate) const GRAPH_PUBLICATION_DEADLINE_REASON: &str = "the sealed code graph publication \
-     exceeded its background budget; this generation serves exact and lexical without a \
-     native graph until the next generation seals";
 
 /// Whether a projection error is the resident-memory budget refusal that
 /// [`CodeIndexSchedulerErrorV1::is_graph_activation_refusal`] recognizes.
@@ -776,6 +771,10 @@ impl PendingInteractiveCatalogWarmV1 {
             self.cancellation,
         );
         self.owner.release_graph_predecessor();
+        // The worker may already be parked. This is not a cadence wake: it
+        // only unblocks the park-release waiter that skipped catalog/engine
+        // while this first warm still needed the engine.
+        self.owner.note_catalog_warm_settled();
         warmed
     }
 }

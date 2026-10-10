@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use tempfile::tempdir;
 use tracedecay_domain::{
     MAX_OBSERVATION_RECORD_BYTES, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
@@ -9,9 +11,11 @@ use super::cursors::*;
 use super::queries::*;
 use super::records::*;
 use super::*;
-use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay_global_db::tests::harness::{
+    HostAdmissionScope, HostAdmissionTestRuntimeV1, open_registered_test_database_fixture,
+};
 use tracedecay_runtime_core::db::{
-    DatabaseEngineReadSnapshot,
+    DatabaseEngineReadSnapshot, TestDatabaseRuntimeScope,
     engine::{Connection, Executor, TestConnection, Value as SqlValue},
 };
 use tracedecay_temporal_query::candidates::CandidateChannel;
@@ -1741,6 +1745,46 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
             .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
         "root time retrieval must use the live root generation-order index: {root_time_plan:?}"
     );
+
+    let root_scope_params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Null,
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(128),
+        SqlValue::Integer(10),
+    ];
+    assert_eq!(
+        read.text_column(ROOT_SCOPE_CANDIDATE_QUERY, root_scope_params.clone(), 0)
+            .await,
+        [
+            "occurrence-plan-inside",
+            "occurrence-plan-inside-old",
+            "occurrence-plan-inside-last"
+        ],
+        "root scope browse must return every in-root occurrence in keyset order \
+         and exclude the populated out-of-root session"
+    );
+    let root_scope_plan = read
+        .explain_query_plan(ROOT_SCOPE_CANDIDATE_QUERY, root_scope_params)
+        .await;
+    assert!(
+        root_scope_plan
+            .iter()
+            .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
+        "root scope browse must use the live root generation-order index: {root_scope_plan:?}"
+    );
+    assert!(
+        root_scope_plan
+            .iter()
+            .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+        "root scope browse must take its leading keyset order from the index: {root_scope_plan:?}"
+    );
     // `ORDER BY knowledge_at DESC, session_id, occurrence_id` mixes directions
     // against an all-ascending index, so SQLite can only walk the leading
     // keyset column from the index and must sort the trailing terms inside each
@@ -1752,6 +1796,260 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
             .iter()
             .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
         "root time retrieval must take its leading keyset order from the index: {root_time_plan:?}"
+    );
+}
+
+const LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY: &str = "
+    SELECT occurrence.occurrence_id, occurrence.retrieval_anchor_id,
+           occurrence.knowledge_at, occurrence.message_id, occurrence.turn_id,
+           occurrence.session_id, occurrence.role, authority_session.provider,
+           frozen.generation
+    FROM session_temporal_generations frozen
+    JOIN session_occurrences occurrence
+      ON occurrence.session_id = frozen.session_id
+     AND +occurrence.generation <= frozen.generation
+    JOIN retrieval_anchors authority_anchor
+      ON authority_anchor.anchor_id = occurrence.retrieval_anchor_id
+    JOIN sessions authority_session
+      ON authority_session.session_id = occurrence.session_id
+     AND authority_session.provider = occurrence.source_provider
+     AND authority_session.project_key = ?1
+    WHERE frozen.state = 'active'
+      AND (?2 IS NULL OR authority_session.provider = ?2)
+      AND (
+          (authority_session.project_key = 'user'
+           AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
+          OR
+          (authority_session.project_key <> 'user'
+           AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
+           AND json_extract(authority_anchor.owner_json, '$.project_id')
+               = authority_session.project_key)
+      )
+      AND (
+          occurrence.knowledge_at < ?3
+          OR (
+              occurrence.knowledge_at = ?3
+              AND (
+                  occurrence.session_id > ?4
+                  OR (
+                      occurrence.session_id = ?4
+                      AND occurrence.occurrence_id > ?5
+                  )
+              )
+          )
+      )
+      AND length(CAST(occurrence.occurrence_id AS BLOB)) <= ?6
+      AND length(CAST(occurrence.retrieval_anchor_id AS BLOB)) <= ?7
+      AND length(CAST(COALESCE(occurrence.message_id, '') AS BLOB)) <= ?8
+      AND length(CAST(COALESCE(occurrence.turn_id, '') AS BLOB)) <= ?8
+      AND length(CAST(occurrence.session_id AS BLOB)) <= ?8
+      AND length(CAST(occurrence.role AS BLOB)) <= ?8
+      AND length(CAST(authority_session.provider AS BLOB)) <= ?8
+      AND length(CAST(occurrence.occurrence_id AS BLOB))
+          + length(CAST(occurrence.retrieval_anchor_id AS BLOB))
+          + length(CAST(COALESCE(occurrence.message_id, '') AS BLOB))
+          + length(CAST(COALESCE(occurrence.turn_id, '') AS BLOB))
+          + length(CAST(occurrence.session_id AS BLOB))
+          + length(CAST(occurrence.role AS BLOB))
+          + length(CAST(authority_session.provider AS BLOB)) <= ?9
+      AND length(CAST(occurrence.occurrence_id AS BLOB))
+          + length(CAST(occurrence.session_id AS BLOB)) + 9 <= ?10
+    ORDER BY occurrence.knowledge_at DESC, occurrence.session_id,
+             occurrence.occurrence_id
+    LIMIT ?11";
+
+#[tokio::test]
+async fn root_scope_browse_pages_from_the_occurrence_index_on_a_large_history() {
+    const OCCURRENCE_COUNT: usize = 50_000;
+    const SESSION_COUNT: usize = 2_703;
+    const PAGE: i64 = 64;
+    const CHUNK: usize = 10_000;
+
+    let directory = tempdir().expect("temporary directory");
+    let database_path = directory.path().join("sessions.db");
+    let (_database, _owner) = open_registered_test_database_fixture(
+        &database_path,
+        TestDatabaseRuntimeScope::ProfileSessions,
+    )
+    .await
+    .expect("registered schema");
+    let connection = TestConnection::open(&database_path);
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = ON;
+             INSERT INTO sanitization_receipts (
+                receipt_id, sanitizer_version, payload_digest, receipt_json
+             ) VALUES ('root-scope-receipt', 'test', 'root-scope-digest', '{}');
+             INSERT INTO observations (
+                observation_id, payload_digest, receipt_id, observation_json,
+                committed_cursor_json
+             ) VALUES (
+                'root-scope-observation',
+                'root-scope-digest',
+                'root-scope-receipt',
+                '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}',
+                '{}'
+             );
+             INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES (
+                'root-scope-anchor', '{}', '{\"kind\":\"profile\"}', 'test'
+             );
+             WITH RECURSIVE sequence(value) AS (
+                VALUES(0)
+                UNION ALL
+                SELECT value + 1 FROM sequence WHERE value < 2702
+             )
+             INSERT INTO sessions (provider, session_id, project_key, project_path)
+             SELECT 'claude', printf('root-scope-%04d', value), 'user', '/root-scope'
+             FROM sequence;
+             INSERT INTO session_temporal_generations (
+                session_id, generation, state, frozen_watermarks_json, created_at
+             )
+             SELECT session_id, 1, 'building', '{}', 0 FROM sessions;
+             UPDATE session_temporal_generations SET state = 'ready', ready_at = 1;
+             UPDATE session_temporal_generations SET state = 'active', activated_at = 2;",
+        )
+        .await
+        .expect("root-scope identity fixture");
+
+    let seed = connection
+        .authorized_long_lease_transaction()
+        .await
+        .expect("long-lease seed");
+    for start in (0..OCCURRENCE_COUNT).step_by(CHUNK) {
+        let end = start + CHUNK - 1;
+        seed.execute_authority_revalidated_batch(&format!(
+            "WITH RECURSIVE sequence(value) AS (
+                VALUES({start})
+                UNION ALL
+                SELECT value + 1 FROM sequence WHERE value < {end}
+             )
+             INSERT INTO session_occurrences (
+                session_id, generation, occurrence_id, source_observation_id,
+                source_sequence, source_provider, projection_output_ordinal,
+                retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+                valid_time_json, evidence_json, sanitized_content_digest,
+                sanitized_content_bytes, index_text
+             )
+             SELECT
+                printf('root-scope-%04d', value % {SESSION_COUNT}),
+                1,
+                printf('root-scope-%06d', value),
+                'root-scope-observation',
+                1,
+                'claude',
+                value,
+                'root-scope-anchor',
+                '[]',
+                'assistant',
+                value,
+                json_object('kind', 'unknown'),
+                '{{}}',
+                '0000000000000000000000000000000000000000000000000000000000000000',
+                15,
+                'root scope occurrence'
+             FROM sequence;"
+        ))
+        .await
+        .expect("root-scope occurrence chunk");
+    }
+    seed.execute_authority_revalidated_batch("ANALYZE;")
+        .await
+        .expect("analyze root-scope fixture");
+    seed.commit().await.expect("commit root-scope fixture");
+
+    let params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Null,
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(128),
+        SqlValue::Integer(PAGE),
+    ];
+    let mut explain_rows = connection
+        .query(
+            &format!("EXPLAIN QUERY PLAN {ROOT_SCOPE_CANDIDATE_QUERY}"),
+            params.clone(),
+        )
+        .await
+        .expect("root scope plan");
+    let mut repaired_plan = Vec::new();
+    while let Some(row) = explain_rows.next().await.expect("plan row") {
+        let detail: String = row.get(3).expect("plan detail");
+        repaired_plan.push(normalize_plan_detail(&detail));
+    }
+    assert!(
+        repaired_plan
+            .iter()
+            .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
+        "large-history root scope must use the occurrence keyset index: {repaired_plan:?}"
+    );
+    assert!(
+        repaired_plan
+            .iter()
+            .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+        "large-history root scope must not materialize the project before LIMIT: {repaired_plan:?}"
+    );
+
+    let mut legacy_explain = connection
+        .query(
+            &format!("EXPLAIN QUERY PLAN {LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY}"),
+            params.clone(),
+        )
+        .await
+        .expect("legacy root scope plan");
+    let mut legacy_plan = Vec::new();
+    while let Some(row) = legacy_explain.next().await.expect("legacy plan row") {
+        let detail: String = row.get(3).expect("legacy plan detail");
+        legacy_plan.push(normalize_plan_detail(&detail));
+    }
+    assert!(
+        legacy_plan
+            .iter()
+            .any(|detail| detail.contains("USE TEMP B-TREE FOR ORDER BY"))
+            || !legacy_plan
+                .iter()
+                .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
+        "the generation-first browse is the measured full-window sort: {legacy_plan:?}"
+    );
+
+    let started = Instant::now();
+    let mut rows = connection
+        .query(LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY, params.clone())
+        .await
+        .expect("legacy root scope page");
+    let mut legacy = Vec::new();
+    while let Some(row) = rows.next().await.expect("legacy row") {
+        legacy.push(row.get::<String>(0).expect("occurrence id"));
+    }
+    let legacy_elapsed = started.elapsed();
+
+    let started = Instant::now();
+    let mut rows = connection
+        .query(ROOT_SCOPE_CANDIDATE_QUERY, params)
+        .await
+        .expect("repaired root scope page");
+    let mut repaired = Vec::new();
+    while let Some(row) = rows.next().await.expect("repaired row") {
+        repaired.push(row.get::<String>(0).expect("occurrence id"));
+    }
+    let repaired_elapsed = started.elapsed();
+    assert_eq!(repaired.len(), PAGE as usize, "{repaired:?}");
+    assert_eq!(
+        repaired.first().map(String::as_str),
+        Some("root-scope-049999"),
+        "newest occurrence must be first: {repaired:?}"
+    );
+    assert_eq!(legacy, repaired, "both shapes must return the same page");
+    assert!(
+        repaired_elapsed.as_millis() < 1_000,
+        "indexed browse must stay on a bounded page, not a full-window sort ({repaired_elapsed:?}; generation-first {legacy_elapsed:?})"
     );
 }
 

@@ -360,7 +360,7 @@ def _workflow_environment_pins(
         named = _workflow_pin_mismatch(
             probe(
                 "tracedecay_workflow_validate_definition",
-                {"definition": {**definition, **pins}, "format": "json"},
+                {"definition": {**definition, **pins}},
                 deadline("tracedecay_workflow_validate_definition"),
             )
         )
@@ -510,7 +510,7 @@ def _start_handoff_run(
     }
     call(
         "tracedecay_workflow_register_definition",
-        {"definition": definition, "format": "json"},
+        {"definition": definition},
         deadline("tracedecay_workflow_register_definition"),
     )
     active = _workflow_disposition(
@@ -520,7 +520,6 @@ def _start_handoff_run(
                 "definition_id": definition_id,
                 "definition_version": 1,
                 "expected_revision": 1,
-                "format": "json",
             },
             deadline("tracedecay_workflow_activate_definition"),
         ),
@@ -538,7 +537,6 @@ def _start_handoff_run(
                 "provider": _workflow_provider(),
                 "fan_out": None,
                 "command_id": f"command.workflow.handoff.start.{suffix}",
-                "format": "json",
             },
             deadline("tracedecay_workflow_start_run"),
         ),
@@ -563,7 +561,6 @@ def _retire_handoff_run(handoff_run: dict[str, Any], call: Call, deadline: Deadl
                 "run_id": handoff_run["run_id"],
                 "expected_sequence": handoff_run["sequence"],
                 "command_id": f"command.workflow.handoff.cancel.{handoff_run['suffix']}",
-                "format": "json",
             },
             deadline("tracedecay_workflow_cancel_run"),
         ),
@@ -577,7 +574,6 @@ def _retire_handoff_run(handoff_run: dict[str, Any], call: Call, deadline: Deadl
                 "definition_id": handoff_run["definition_id"],
                 "definition_version": 1,
                 "expected_revision": handoff_run["revision"],
-                "format": "json",
             },
             deadline("tracedecay_workflow_retire_definition"),
         ),
@@ -635,12 +631,10 @@ def _prepare_workflow_effect_journey(
             "scope": scope,
             "secret": secret,
             "frontier": frontier,
-            "format": "json",
         }
         redeem_arguments = {
             "secret": secret,
             "expected_scope": scope,
-            "format": "json",
         }
         issued: dict[str, Any] | None = None
         if name == "tracedecay_workflow_handoff_redeem":
@@ -726,7 +720,7 @@ def _prepare_workflow_effect_journey(
     }
     call(
         "tracedecay_workflow_register_definition",
-        {"definition": definition, "format": "json"},
+        {"definition": definition},
         deadline("tracedecay_workflow_register_definition"),
     )
     activated = call(
@@ -735,7 +729,6 @@ def _prepare_workflow_effect_journey(
             "definition_id": effect_definition_id,
             "definition_version": 1,
             "expected_revision": 1,
-            "format": "json",
         },
         deadline("tracedecay_workflow_activate_definition"),
     )
@@ -748,7 +741,6 @@ def _prepare_workflow_effect_journey(
         "provider": _workflow_provider(),
         "fan_out": None,
         "command_id": f"command.workflow.effect.start.{suffix}",
-        "format": "json",
     }
     started: dict[str, Any] | None = None
     paused: dict[str, Any] | None = None
@@ -771,7 +763,6 @@ def _prepare_workflow_effect_journey(
                     "run_id": run_id,
                     "expected_sequence": started["sequence"],
                     "command_id": f"command.workflow.effect.pause.{suffix}",
-                    "format": "json",
                 },
                 deadline("tracedecay_workflow_pause_run"),
             ),
@@ -786,7 +777,6 @@ def _prepare_workflow_effect_journey(
             "run_id": run_id,
             "expected_sequence": started["sequence"],
             "command_id": f"command.workflow.effect.pause.{suffix}",
-            "format": "json",
         }
     elif name == "tracedecay_workflow_resume_run":
         assert paused is not None
@@ -794,7 +784,6 @@ def _prepare_workflow_effect_journey(
             "run_id": run_id,
             "expected_sequence": paused["sequence"],
             "command_id": f"command.workflow.effect.resume.{suffix}",
-            "format": "json",
         }
     else:
         assert started is not None
@@ -802,7 +791,6 @@ def _prepare_workflow_effect_journey(
             "run_id": run_id,
             "expected_sequence": started["sequence"],
             "command_id": f"command.workflow.effect.cancel.{suffix}",
-            "format": "json",
         }
 
     def cleanup(response: dict[str, Any]) -> str:
@@ -822,7 +810,6 @@ def _prepare_workflow_effect_journey(
                         "run_id": run_id,
                         "expected_sequence": projection["sequence"],
                         "command_id": f"command.workflow.effect.cleanup.resume.{suffix}",
-                        "format": "json",
                     },
                     deadline("tracedecay_workflow_resume_run"),
                 ),
@@ -837,7 +824,6 @@ def _prepare_workflow_effect_journey(
                         "run_id": run_id,
                         "expected_sequence": projection["sequence"],
                         "command_id": f"command.workflow.effect.cleanup.cancel.{suffix}",
-                        "format": "json",
                     },
                     deadline("tracedecay_workflow_cancel_run"),
                 ),
@@ -846,7 +832,7 @@ def _prepare_workflow_effect_journey(
             )
         observed = call(
             "tracedecay_workflow_get_run",
-            {"run_id": run_id, "format": "json"},
+            {"run_id": run_id},
             deadline("tracedecay_workflow_get_run"),
         )
         _workflow_run(observed, run_id, {"cancelled"})
@@ -856,7 +842,6 @@ def _prepare_workflow_effect_journey(
                 "definition_id": effect_definition_id,
                 "definition_version": 1,
                 "expected_revision": active["revision"],
-                "format": "json",
             },
             deadline("tracedecay_workflow_retire_definition"),
         )
@@ -893,14 +878,14 @@ def prime_workflow_lifecycle(
     }
     validated = call(
         "tracedecay_workflow_validate_definition",
-        {"definition": definition_v1, "format": "json"},
+        {"definition": definition_v1},
         deadline("tracedecay_workflow_validate_definition"),
     )
     _exact_workflow_definition(validated, definition_id, 1)
     for definition in (definition_v1, definition_v2):
         registered = call(
             "tracedecay_workflow_register_definition",
-            {"definition": definition, "format": "json"},
+            {"definition": definition},
             deadline("tracedecay_workflow_register_definition"),
         )
         _exact_workflow_definition(
@@ -908,19 +893,19 @@ def prime_workflow_lifecycle(
         )
     fetched = call(
         "tracedecay_workflow_get_definition",
-        {"definition_id": definition_id, "definition_version": 1, "format": "json"},
+        {"definition_id": definition_id, "definition_version": 1},
         deadline("tracedecay_workflow_get_definition"),
     )
     _exact_workflow_definition(fetched, definition_id, 1)
     listed = call(
         "tracedecay_workflow_list_definitions",
-        {"format": "json"},
+        {},
         deadline("tracedecay_workflow_list_definitions"),
     )
     _exact_workflow_definition(listed, definition_id, 1)
     history = call(
         "tracedecay_workflow_definition_history",
-        {"definition_id": definition_id, "format": "json"},
+        {"definition_id": definition_id},
         deadline("tracedecay_workflow_definition_history"),
     )
     _exact_workflow_definition(history, definition_id, 1)
@@ -931,7 +916,6 @@ def prime_workflow_lifecycle(
             "definition_id": definition_id,
             "from_version": 1,
             "to_version": 2,
-            "format": "json",
         },
         deadline("tracedecay_workflow_diff_definition"),
     )
@@ -949,7 +933,6 @@ def prime_workflow_lifecycle(
             "definition_id": definition_id,
             "definition_version": 1,
             "expected_revision": 1,
-            "format": "json",
         },
         deadline("tracedecay_workflow_activate_definition"),
     )
@@ -965,7 +948,6 @@ def prime_workflow_lifecycle(
         "provider": provider,
         "fan_out": None,
         "command_id": f"command.workflow.start.{suffix}",
-        "format": "json",
     }
     started = call(
         "tracedecay_workflow_start_run",
@@ -975,7 +957,7 @@ def prime_workflow_lifecycle(
     running = _workflow_run(started, run_id, {"running"})
     observed = call(
         "tracedecay_workflow_get_run",
-        {"run_id": run_id, "format": "json"},
+        {"run_id": run_id},
         deadline("tracedecay_workflow_get_run"),
     )
     _workflow_run(observed, run_id, {"running"})
@@ -983,7 +965,6 @@ def prime_workflow_lifecycle(
         "run_id": run_id,
         "expected_sequence": running["sequence"],
         "command_id": f"command.workflow.pause.{suffix}",
-        "format": "json",
     }
     paused = call(
         "tracedecay_workflow_pause_run",
@@ -995,7 +976,6 @@ def prime_workflow_lifecycle(
         "run_id": run_id,
         "expected_sequence": paused_run["sequence"],
         "command_id": f"command.workflow.resume.{suffix}",
-        "format": "json",
     }
     resumed = call(
         "tracedecay_workflow_resume_run",
@@ -1007,7 +987,6 @@ def prime_workflow_lifecycle(
         "run_id": run_id,
         "expected_sequence": resumed_run["sequence"],
         "command_id": f"command.workflow.cancel.{suffix}",
-        "format": "json",
     }
     cancelled = call(
         "tracedecay_workflow_cancel_run",
@@ -1019,7 +998,6 @@ def prime_workflow_lifecycle(
         "definition_id": definition_id,
         "definition_version": 1,
         "expected_revision": active["revision"],
-        "format": "json",
     }
     retired = call(
         "tracedecay_workflow_retire_definition",
@@ -1033,7 +1011,6 @@ def prime_workflow_lifecycle(
             "definition_id": definition_id,
             "definition_version": 2,
             "expected_revision": 1,
-            "format": "json",
         },
         deadline("tracedecay_workflow_reject_definition"),
     )
@@ -1049,44 +1026,37 @@ def prime_workflow_lifecycle(
             "workflow_effect_arguments": {
                 "tracedecay_workflow_register_definition": {
                     "definition": definition_v1,
-                    "format": "json",
                 },
                 "tracedecay_workflow_activate_definition": {
                     "definition_id": definition_id,
                     "definition_version": 1,
                     "expected_revision": 1,
-                    "format": "json",
                 },
                 "tracedecay_workflow_retire_definition": retired_arguments,
                 "tracedecay_workflow_reject_definition": {
                     "definition_id": definition_id,
                     "definition_version": 2,
                     "expected_revision": 1,
-                    "format": "json",
                 },
             },
             "workflow_read_arguments": {
                 "tracedecay_workflow_validate_definition": {
                     "definition": definition_v1,
-                    "format": "json",
                 },
                 "tracedecay_workflow_get_definition": {
                     "definition_id": definition_id,
                     "definition_version": 1,
-                    "format": "json",
                 },
-                "tracedecay_workflow_list_definitions": {"format": "json"},
+                "tracedecay_workflow_list_definitions": {},
                 "tracedecay_workflow_definition_history": {
                     "definition_id": definition_id,
-                    "format": "json",
                 },
                 "tracedecay_workflow_diff_definition": {
                     "definition_id": definition_id,
                     "from_version": 1,
                     "to_version": 2,
-                    "format": "json",
                 },
-                "tracedecay_workflow_get_run": {"run_id": run_id, "format": "json"},
+                "tracedecay_workflow_get_run": {"run_id": run_id},
             },
         }
     )
@@ -1176,7 +1146,6 @@ def prime_work_lifecycle(
             },
         },
         "evidence": [],
-        "format": "json",
     }
     prepared_create = call(
         "tracedecay_work_prepare_graph_mutation",
@@ -1198,7 +1167,6 @@ def prime_work_lifecycle(
         # after the create call has returned so its committed publication is
         # inside the requested temporal window.
         "occurred_at": int(time.time() * 1_000_000),
-        "format": "json",
     }
     generated = call(
         "tracedecay_work_generate_proposal",
@@ -1217,7 +1185,6 @@ def prime_work_lifecycle(
                 "disposition": "accepted",
             },
             "evidence": [],
-            "format": "json",
         },
         deadline("tracedecay_work_prepare_graph_mutation"),
     )
@@ -1238,7 +1205,6 @@ def prime_work_lifecycle(
                 "based_on_version": accepted_version["graph_version"],
             },
             "evidence": [],
-            "format": "json",
         },
         deadline("tracedecay_work_prepare_graph_mutation"),
     )
@@ -1274,7 +1240,6 @@ def prime_work_lifecycle(
             "in_place_acknowledged": False,
         },
         "occurred_at": int(time.time() * 1_000_000),
-        "format": "json",
     }
     call(
         "tracedecay_work_placement_preflight",
@@ -1298,7 +1263,6 @@ def prime_work_lifecycle(
         "instructions": "Inspect the disposable fixture only.",
         "effect_state": "observational",
         "occurred_at": int(time.time() * 1_000_000),
-        "format": "json",
     }
     started = call(
         "tracedecay_work_start_attempt",
@@ -1312,7 +1276,6 @@ def prime_work_lifecycle(
         "task_id": task_id,
         "run_id": run_id,
         "attempt_id": attempt_id,
-        "format": "json",
     }
     status = call(
         "tracedecay_work_attempt_status",
@@ -1389,7 +1352,6 @@ def prime_work_lifecycle(
         "task_id": task_id,
         "run_id": run_id,
         "attempt_id": duplicate_attempt_id,
-        "format": "json",
     }
     duplicate_status = _wait_work_attempt_spawn_boundary(
         call, deadline, duplicate_status_arguments, duplicate_attempt_id
@@ -1409,7 +1371,6 @@ def prime_work_lifecycle(
             "effect_outcome": "not_applicable",
             "coverage": "known",
         },
-        "format": "json",
     }
     call(
         "tracedecay_work_prepare_duplicate_adjudication",
@@ -1436,7 +1397,6 @@ def prime_work_lifecycle(
             "mode": {"mode": "current"},
             "continuation": None,
             "observed_at": int(time.time() * 1_000_000),
-            "format": "json",
         },
         deadline("tracedecay_work_views"),
     )
@@ -1601,7 +1561,6 @@ def _fresh_work_task(
             "task_id": task_id,
             "proposal_id": f"proposal.{suffix}",
             "occurred_at": occurred_at + 1,
-            "format": "json",
         },
         deadline("tracedecay_work_generate_proposal"),
     )
@@ -1619,7 +1578,6 @@ def _fresh_work_task(
                     "disposition": "accepted",
                 },
                 "evidence": [],
-                "format": "json",
             },
             deadline("tracedecay_work_prepare_graph_mutation"),
         ),
@@ -1642,7 +1600,6 @@ def _fresh_work_task(
                     "based_on_version": accepted_version["graph_version"],
                 },
                 "evidence": [],
-                "format": "json",
             },
             deadline("tracedecay_work_prepare_graph_mutation"),
         ),
@@ -1677,7 +1634,6 @@ def _fresh_work_admission_request(
                     "disposition": "accepted",
                 },
                 "evidence": [],
-                "format": "json",
             },
             deadline("tracedecay_work_prepare_graph_mutation"),
         ),
@@ -1700,7 +1656,6 @@ def _fresh_work_admission_request(
                     "based_on_version": accepted_version["graph_version"],
                 },
                 "evidence": [],
-                "format": "json",
             },
             deadline("tracedecay_work_prepare_graph_mutation"),
         ),
@@ -1752,7 +1707,6 @@ def _prepare_work_effect_journey(
                     "mode": {"mode": "current"},
                     "continuation": None,
                     "observed_at": int(time.time() * 1_000_000),
-                    "format": "json",
                 },
                 deadline("tracedecay_work_views"),
             )
@@ -1787,7 +1741,6 @@ def _prepare_work_effect_journey(
                     "mode": {"mode": "current"},
                     "continuation": None,
                     "observed_at": int(time.time() * 1_000_000),
-                    "format": "json",
                 },
                 deadline("tracedecay_work_views"),
             )
@@ -1798,7 +1751,7 @@ def _prepare_work_effect_journey(
         return PreparedJourney(arguments, cleanup, "contained")
 
     if name == "tracedecay_work_resume_attempts":
-        arguments = {"occurred_at": occurred_at, "format": "json"}
+        arguments = {"occurred_at": occurred_at}
 
         def cleanup(response: dict[str, Any]) -> str:
             for field in ("recovery_required", "cancelled"):
@@ -1820,7 +1773,6 @@ def _prepare_work_effect_journey(
             "run_id": fixture["work_run_id"],
             "reason": "operator_request",
             "occurred_at": occurred_at,
-            "format": "json",
         }
         if name == "tracedecay_work_pause_run":
             arguments = pause_arguments
@@ -1861,7 +1813,6 @@ def _prepare_work_effect_journey(
                 {
                     "task_id": fixture["work_task_id"],
                     "run_id": fixture["work_run_id"],
-                    "format": "json",
                 },
                 deadline("tracedecay_work_run_control"),
             )
@@ -1884,7 +1835,6 @@ def _prepare_work_effect_journey(
                 "run_id": fixture["work_run_id"],
                 "expected_authority_version": authority,
                 "occurred_at": occurred_at,
-                "format": "json",
             }
 
         def cleanup(response: dict[str, Any]) -> str:
@@ -1900,7 +1850,6 @@ def _prepare_work_effect_journey(
                         "run_id": fixture["work_run_id"],
                         "expected_authority_version": authority,
                         "occurred_at": occurred_at + 1,
-                        "format": "json",
                     },
                     deadline("tracedecay_work_release_placement"),
                 )
@@ -1912,7 +1861,6 @@ def _prepare_work_effect_journey(
                 {
                     "task_id": fixture["work_task_id"],
                     "run_id": fixture["work_run_id"],
-                    "format": "json",
                 },
                 deadline("tracedecay_work_placement_status"),
             )
@@ -1929,7 +1877,6 @@ def _prepare_work_effect_journey(
             "attempt": started_identity,
             "detection_horizon_micros": 60_000_000,
             "command_id": f"command.leak.tool-sweep.{time.monotonic_ns()}",
-            "format": "json",
         }
 
         def cleanup(response: dict[str, Any]) -> str:
@@ -1974,7 +1921,6 @@ def _prepare_work_effect_journey(
                     "disposition": "rejected",
                 },
                 "evidence": [],
-                "format": "json",
             },
             deadline("tracedecay_work_prepare_graph_mutation"),
         )
@@ -2011,7 +1957,6 @@ def _prepare_work_effect_journey(
             "task_id": fixture["work_task_id"],
             "run_id": fixture["work_run_id"],
             "attempt_id": source_attempt_id,
-            "format": "json",
         }
         source_status = _wait_work_attempt_terminal(
             call, deadline, source_status_arguments, source_attempt_id
@@ -2053,7 +1998,6 @@ def _prepare_work_effect_journey(
             },
             "output_name": "inspection",
             "sources": [source_identity],
-            "format": "json",
         }
 
         def cleanup(response: dict[str, Any]) -> str:
@@ -2081,7 +2025,6 @@ def _prepare_work_effect_journey(
                 "task_id": fixture["work_task_id"],
                 "run_id": fixture["work_run_id"],
                 "attempt_id": arguments["start"]["attempt_id"],
-                "format": "json",
             }
             status = _wait_work_attempt_spawn_boundary(
                 call, deadline, status_arguments, arguments["start"]["attempt_id"]
@@ -2121,7 +2064,6 @@ def _prepare_work_effect_journey(
             "task_id": fixture["work_task_id"],
             "run_id": fixture["work_run_id"],
             "attempt_id": retry_attempt_id,
-            "format": "json",
         }
         status = _wait_work_attempt_terminal(
             call, deadline, status_arguments, retry_attempt_id
@@ -2150,7 +2092,6 @@ def _prepare_work_effect_journey(
                 "evidence_ref": f"runtime-terminal:{evidence_digest}",
             },
             "command_id": f"command.retry.tool-sweep.{time.monotonic_ns()}",
-            "format": "json",
         }
 
         def cleanup(response: dict[str, Any]) -> str:
@@ -2184,7 +2125,6 @@ def _prepare_work_effect_journey(
                     "task_id": fixture["work_task_id"],
                     "run_id": fixture["work_run_id"],
                     "attempt_id": arguments["new_attempt_id"],
-                    "format": "json",
                 },
                 arguments["new_attempt_id"],
             )
@@ -2207,7 +2147,7 @@ def _prepare_work_effect_journey(
         )
         arguments = next(
             (
-                {**value, "format": "json"}
+                {**value}
                 for value in objects(prepared_duplicate)
                 if {
                     value.get("first_attempt", {}).get("attempt_id")

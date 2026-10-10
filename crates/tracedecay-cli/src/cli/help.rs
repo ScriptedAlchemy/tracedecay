@@ -5,7 +5,7 @@
 pub(crate) const TOP_LEVEL_AFTER_HELP: &str = "\
 Quick start:
   tracedecay daemon install-service     Install + start the daemon (required first)
-  tracedecay init                       Index the current repo (once per project)
+  tracedecay init                       Enroll and request indexing (once per project)
   tracedecay sync                       Refresh the index after changes
   tracedecay tool                       List every MCP tool callable from the CLI
   tracedecay tool search \"parse config\" --limit 5
@@ -28,12 +28,19 @@ flags to target another project.
 For more help on a command: tracedecay <command> --help";
 
 pub(crate) const INIT_LONG_ABOUT: &str = "\
-Enrolls the repository and publishes its first code generation. Requires a \
+Enrolls the repository and requests its first code generation. Returns once \
+the daemon accepts the request; the default receipt is typed `not_ready` / \
+`code_index_reconciliation_requested` and indexing continues in the \
+background. Pass `--wait` to hold until that generation is ready. Check \
+`tracedecay status --json` for current generation coverage: converging or \
+unavailable is not ready, and exit 0 alone does not establish readiness. Requires a \
 running daemon: init is brokered through the daemon-owned code-index \
 scheduler, and without one it refuses with \
 `code_index_scheduler_unavailable` before writing anything. Start the daemon \
 with `tracedecay daemon install-service` (or `tracedecay daemon start`) and \
-confirm with `tracedecay daemon status`. Storage is daemon-owned. Run once \
+inspect its transport with `tracedecay daemon status`. On headless Linux \
+without a systemd user bus, keep `tracedecay daemon run` running in another \
+terminal. Storage is daemon-owned. Run once \
 per repository; afterwards `tracedecay sync` keeps the index fresh \
 incrementally. Indexes what Git sees (tracked files and untracked files \
 .gitignore does not ignore) minus the project's `index.exclude.v1` patterns.";
@@ -41,8 +48,9 @@ incrementally. Indexes what Git sees (tracked files and untracked files \
 pub(crate) const INIT_AFTER_HELP: &str = "\
 Examples:
   tracedecay daemon install-service              Start the daemon init brokers through
-  tracedecay init                                Index the current directory
-  tracedecay init /path/to/repo                  Index another repository
+  tracedecay init                                Enroll and request the first index
+  tracedecay init --wait                         Enroll and hold until the first generation is ready
+  tracedecay init /path/to/repo                  Enroll another repository
   tracedecay init /new/path --adopt-project proj_abc123
   tracedecay init /new/path --yes                Adopt the unique moved non-git store
   tracedecay init /new/path --fresh              Mint a new identity, never adopt
@@ -67,9 +75,12 @@ Related: tracedecay init (first index), tracedecay status (freshness check).";
 
 pub(crate) const STATUS_LONG_ABOUT: &str = "\
 Reports node/edge/file counts, database size, index freshness, active branch, \
-and tokens saved for the resolved project. Reach for it first when deciding \
-whether the index is stale or when an agent needs project statistics; \
-`--json` emits the same data machine-readably.";
+and tokens saved for the resolved project. Immediately after `init`, status \
+can still be typed `project_open.state=converging` and \
+`graph_statistics.state=unavailable`; that is a not-ready reading, not a \
+usable index, and it still exits 0 because it is a typed state. Reach for \
+status when deciding whether the index is ready or stale; `--json` emits \
+the same data machine-readably.";
 
 pub(crate) const STATUS_AFTER_HELP: &str = "\
 Examples:
@@ -283,15 +294,19 @@ install / update-plugin (refresh Core feedback routes).";
 pub(crate) const DASHBOARD_LONG_ABOUT: &str = "\
 Starts the local web dashboard: holographic memory curation, LCM session \
 explorer, code-graph browser, analytics, and automation review UI. Binds to \
-127.0.0.1 by default and prints the URL; leave it running while you work. \
-Agents can start the same server via the tracedecay_dashboard MCP tool.";
+one launch project (the current directory, or --path) and to 127.0.0.1 by \
+default, then prints the URL; leave it running while you work. Launching \
+from $HOME or another ambient root refuses and tells you to pass --path. \
+Code search covers only that bound project; asking about another enrolled \
+repo fails closed instead of returning an empty hit list. Agents can start \
+the same server via the tracedecay_dashboard MCP tool.";
 
 pub(crate) const DASHBOARD_AFTER_HELP: &str = "\
 Examples:
-  tracedecay dashboard                           Serve on the default port
+  tracedecay dashboard                           Serve the cwd project
   tracedecay dashboard --open                    Also open it in the browser
   tracedecay dashboard --port 8788               Fixed port (0 picks a free one)
-  tracedecay dashboard --path /path/to/repo      Serve another project
+  tracedecay dashboard --path /path/to/repo      Bind the dashboard to that repo
 
 Related: tracedecay memory (curation without the dashboard),
 tracedecay status --runtime (server resource snapshot).";
@@ -315,7 +330,10 @@ pub(crate) const DAEMON_LONG_ABOUT: &str = "\
 Manages the shared background daemon that MCP clients and `tracedecay tool` \
 connect to over a local authenticated transport, so repeated calls skip per-process startup. \
 Usually installed as a user service; check `daemon status` first when tool \
-calls hang or version-mismatch errors appear.";
+calls hang or version-mismatch errors appear. Without a systemd user bus on \
+headless Linux, keep `daemon run` running in one terminal and use commands \
+in another. Status exits 0 only when the daemon is serving; stopped or \
+unreachable is a non-zero exit.";
 
 pub(crate) const DAEMON_AFTER_HELP: &str = "\
 Examples:
@@ -324,7 +342,7 @@ Examples:
   tracedecay daemon start                        Start the installed service
   tracedecay daemon stop                         Stop the installed service
   tracedecay daemon restart                      Restart after a version mismatch
-  tracedecay daemon run --socket \"$XDG_RUNTIME_DIR/tracedecay/td.sock\"    Foreground run (debugging)
+  tracedecay daemon run                          Foreground daemon (no systemd user session)
   tracedecay daemon run --profile-root <path>    Foreground run for one profile
 
 Related: tracedecay doctor (detects daemon problems), tracedecay serve.";

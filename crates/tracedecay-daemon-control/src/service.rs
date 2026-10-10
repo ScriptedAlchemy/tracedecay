@@ -152,6 +152,8 @@ pub enum DaemonServiceState {
     RunningDisabled,
     StoppedEnabled,
     StoppedDisabled,
+    StoppingEnabled,
+    StoppingDisabled,
     Masked,
 }
 
@@ -478,7 +480,10 @@ impl DaemonServiceState {
     }
 
     fn is_enabled(self) -> bool {
-        matches!(self, Self::RunningEnabled | Self::StoppedEnabled)
+        matches!(
+            self,
+            Self::RunningEnabled | Self::StoppedEnabled | Self::StoppingEnabled
+        )
     }
 
     pub fn lifecycle_operator_advice(self) -> String {
@@ -492,6 +497,8 @@ impl DaemonServiceState {
                 .to_string(),
             Self::StoppedDisabled => "TraceDecay daemon unit is installed but stopped and disabled, and may be intentionally held; passive clients do not start or enable it. Run `tracedecay daemon start` only if you want it running while remaining disabled."
                 .to_string(),
+            Self::StoppingEnabled => "TraceDecay daemon unit is stopping and remains enabled; passive clients leave that transition unchanged.".to_string(),
+            Self::StoppingDisabled => "TraceDecay daemon unit is stopping and disabled; passive clients do not restart or enable it.".to_string(),
             Self::Masked => "TraceDecay daemon unit is masked, which is an intentional hold; passive clients leave it masked. Unmask it and run `tracedecay daemon start` only if you want it running."
                 .to_string(),
             Self::Missing => {
@@ -1476,12 +1483,12 @@ pub fn start_service(profile: &ProfileRoot, expected_version: &str) -> Result<()
     // running unit and never changes enablement, so the pre-start enablement
     // names the state an authenticated daemon must actually reach.
     let expected = match pre_start_state {
-        DaemonServiceState::RunningEnabled | DaemonServiceState::StoppedEnabled => {
-            DaemonServiceState::RunningEnabled
-        }
-        DaemonServiceState::RunningDisabled | DaemonServiceState::StoppedDisabled => {
-            DaemonServiceState::RunningDisabled
-        }
+        DaemonServiceState::RunningEnabled
+        | DaemonServiceState::StoppedEnabled
+        | DaemonServiceState::StoppingEnabled => DaemonServiceState::RunningEnabled,
+        DaemonServiceState::RunningDisabled
+        | DaemonServiceState::StoppedDisabled
+        | DaemonServiceState::StoppingDisabled => DaemonServiceState::RunningDisabled,
         // The unit file exists (checked above), so `service_state` cannot
         // report `Missing`, and both Unix service managers refuse to start a
         // masked unit, so a successful start cannot originate from `Masked`;
@@ -1677,8 +1684,32 @@ fn uninstall_service_under_lease(
     Ok(service_path)
 }
 
+/// Display and readiness share the same authenticated initialize observation.
+#[derive(Debug)]
+pub struct DaemonServiceStatus {
+    process: DaemonProcessProofV1,
+    display: String,
+}
+
+impl DaemonServiceStatus {
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.process.version_matches()
+    }
+}
+
+impl std::fmt::Display for DaemonServiceStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.display)
+    }
+}
+
 #[tracing::instrument(name = "daemon.service.status", level = "trace", skip_all)]
-pub fn service_status(profile: &ProfileRoot, socket_path: &Path, expected_version: &str) -> String {
+pub fn service_status(
+    profile: &ProfileRoot,
+    socket_path: &Path,
+    expected_version: &str,
+) -> DaemonServiceStatus {
     let transport_path = if cfg!(unix) {
         socket_path.to_path_buf()
     } else {
@@ -1689,6 +1720,7 @@ pub fn service_status(profile: &ProfileRoot, socket_path: &Path, expected_versio
     };
     let (socket_state, process) =
         probe::observe_daemon_process(profile, &transport_path, expected_version);
+    let serving = daemon_is_serving(socket_state, &process);
     let service = service_unit_path(profile).map_or_else(
         |e| format!("unavailable: {e}"),
         |path| path.display().to_string(),
@@ -1711,18 +1743,33 @@ pub fn service_status(profile: &ProfileRoot, socket_path: &Path, expected_versio
         .and_then(ServiceRunner::service_detail_hint)
         .map(|hint| format!("service-detail: {hint}\n"))
         .unwrap_or_default();
-    let logs = if matches!(service_observation, Ok(Ok(DaemonServiceState::Missing))) {
-        "no managed service; consult the foreground process output".to_owned()
-    } else {
-        runner.map_or_else(
+    let logs = match &service_observation {
+        Ok(Err(ServiceStateError::ManagerUnreachable(_))) if serving => {
+            "foreground daemon output (systemd user journal is unreachable)".to_owned()
+        }
+        Ok(Err(ServiceStateError::ManagerUnreachable(_))) => {
+            "no systemd user session; run `tracedecay daemon run` and read its output".to_owned()
+        }
+        Ok(Ok(DaemonServiceState::Missing)) => {
+            "no managed service; consult the foreground process output".to_owned()
+        }
+        _ => runner.map_or_else(
             |e| format!("unavailable: {e}"),
             |runner| runner.log_hint(profile),
-        )
+        ),
     };
     let transport_kind = if cfg!(unix) { "socket" } else { "endpoint" };
     let transport = daemon_transport_display(&transport_path);
-    format!(
+    let display = format!(
         "state: {state}\nservice: {service}\nservice manager: {service_manager}\n{transport_kind}: {transport} ({socket_state})\nprotocol: {process:?}\n{detail}logs: {logs}\n",
+    );
+    DaemonServiceStatus { process, display }
+}
+
+fn daemon_is_serving(socket: DaemonSocketState, process: &DaemonProcessProofV1) -> bool {
+    matches!(
+        (socket, process),
+        (DaemonSocketState::Connectable, DaemonProcessProofV1::Ready)
     )
 }
 

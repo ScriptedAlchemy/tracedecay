@@ -139,12 +139,13 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
 
     // A browser opening the launch URL is redirected to the tokenless path
     // with a session cookie, and that cookie alone admits later requests.
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .timeout_global(Some(Duration::from_secs(4)))
-        .build()
-        .into();
+    let agent = tracedecay_application::http_agent::http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .timeout_global(Some(Duration::from_secs(4)))
+            .build(),
+    );
     let launched = agent.get(&launch_url).call().expect("launch URL response");
     assert_eq!(launched.status().as_u16(), 303);
     assert_eq!(launched.headers()["location"], "/");

@@ -606,12 +606,14 @@ fn component_assets(
     if (host, component) == (HostKindV1::CursorDesktop, HostComponentV1::Agent) {
         let prefix = super::cursor::cursor_native_extension_relative_dir();
         let mut rendered = Vec::new();
-        for (path, body) in super::plugin_bundle::cursor_native_extension_files() {
+        for (path, body) in super::plugin_bundle::cursor_native_extension_files()
+            .map_err(|_| HostBundleRegistryError::Incompatible)?
+        {
             let contents = if path == "package.json" {
-                super::plugin_bundle::stamp_manifest_version(body)
+                super::plugin_bundle::stamp_manifest_version(&body)
                     .map_err(|_| HostBundleRegistryError::Incompatible)?
             } else {
-                render_compiled_asset(body, tracedecay_bin)?
+                render_compiled_asset(&body, tracedecay_bin)?
             };
             rendered.push((format!("{prefix}/{path}"), contents.into_bytes()));
         }

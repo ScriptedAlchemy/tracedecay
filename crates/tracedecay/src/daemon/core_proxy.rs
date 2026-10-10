@@ -2,9 +2,7 @@
 //! transport, tracking initialize-route and tool-catalog metadata.
 
 use std::borrow::Cow;
-#[cfg(unix)]
 use std::collections::VecDeque;
-#[cfg(unix)]
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -13,27 +11,22 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant};
 
+use super::binary_version;
+#[cfg(unix)]
+use super::connect_with_restart_grace;
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
     PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, PROJECT_WARMING_RETRY_HINT,
     REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, connect_to_current_daemon_within,
     json_rpc_error_is_project_open_retryable, next_daemon_response_line, write_daemon_preamble,
 };
-#[cfg(unix)]
-use super::{binary_version, connect_with_restart_grace};
-#[cfg(unix)]
 use tracedecay_daemon_protocol::{DAEMON_TOOL_RESPONSE_GRACE, version_skew_action};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::JsonRpcRequest;
-#[cfg(not(unix))]
-use tracedecay_mcp::McpTransport;
 use tracedecay_mcp::server::attach_stateless_request_context;
 use tracedecay_mcp::transport::StdioTransport;
-#[cfg(unix)]
 use tracedecay_mcp::transport::{McpDuplexTransport, McpTransportReader, McpTransportWriter};
-#[cfg(unix)]
 use tracedecay_mcp::{ErrorCode, JsonRpcResponse};
-#[cfg(unix)]
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Decides at `tracedecay serve` startup whether to proxy to the daemon.
@@ -79,7 +72,6 @@ pub async fn should_proxy_serve_to_daemon(
     proxy_required_by_platform(false, socket_path.exists())
 }
 
-#[cfg(unix)]
 #[tracing::instrument(name = "daemon.engine.proxy.stdio", level = "trace", skip_all)]
 pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
@@ -90,24 +82,6 @@ pub async fn proxy_stdio_to_daemon(
     proxy_transport_to_daemon(socket_path, handshake, replay_line, &mut transport).await
 }
 
-#[cfg(not(unix))]
-#[tracing::instrument(name = "daemon.engine.proxy.stdio", level = "trace", skip_all)]
-pub async fn proxy_stdio_to_daemon(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    replay_line: Option<String>,
-) -> Result<()> {
-    let mut transport = StdioTransport::new();
-    if let Some(line) = replay_line {
-        proxy_one_request(socket_path, handshake, &line, &mut transport).await?;
-    }
-    while let Some(line) = transport.read_line().await? {
-        proxy_one_request(socket_path, handshake, &line, &mut transport).await?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
 #[derive(Default)]
 pub(crate) struct ProxyInitializeMetadata {
     daemon_version: Option<String>,
@@ -143,7 +117,6 @@ pub(crate) async fn should_proxy_serve_to_daemon_with(
         .is_ok()
 }
 
-#[cfg(unix)]
 pub async fn proxy_transport_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -156,7 +129,6 @@ pub async fn proxy_transport_to_daemon(
 
 /// `drain_bound` overrides the per-request bound derived by
 /// [`disconnect_drain_bound`]; production passes `None` and always derives it.
-#[cfg(unix)]
 #[tracing::instrument(name = "daemon.engine.proxy.transport", level = "trace", skip_all)]
 pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
     socket_path: &Path,
@@ -245,9 +217,23 @@ impl<'a> DaemonProxyRequest<'a> {
         };
         Self { raw, parsed }
     }
+
+    fn is_matching_cancellation(&self, line: &str) -> bool {
+        let Some(id) = self.parsed.as_ref().and_then(|request| request.id.as_ref()) else {
+            return false;
+        };
+        JsonRpcRequest::decode(line.trim()).is_ok_and(|notification| {
+            notification.id.is_none()
+                && notification.method == "notifications/cancelled"
+                && notification
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("requestId"))
+                    == Some(id)
+        })
+    }
 }
 
-#[cfg(unix)]
 fn disconnect_drain_bound(request: &DaemonProxyRequest<'_>) -> Duration {
     let ceiling = request_tool_name(request.parsed.as_ref())
         .and_then(|tool| {
@@ -258,7 +244,6 @@ fn disconnect_drain_bound(request: &DaemonProxyRequest<'_>) -> Duration {
 }
 
 /// The tool a `tools/call` line names, or `None` for any other method.
-#[cfg(unix)]
 fn request_tool_name(request: Option<&JsonRpcRequest>) -> Option<String> {
     let request = request?;
     if request.method != "tools/call" {
@@ -281,7 +266,6 @@ fn request_tool_name(request: Option<&JsonRpcRequest>) -> Option<String> {
 /// `tracedecay serve` waiting forever on a daemon that never answers, that is
 /// how a disconnected session turns into a long-lived orphan holding its fds
 /// and daemon connection.
-#[cfg(unix)]
 #[tracing::instrument(name = "daemon.engine.proxy.drain", level = "trace", skip_all)]
 async fn drain_daemon_request_after_disconnect(
     daemon_request: impl Future<Output = Result<Vec<String>>>,
@@ -300,7 +284,6 @@ async fn drain_daemon_request_after_disconnect(
         })
 }
 
-#[cfg(unix)]
 #[tracing::instrument(name = "daemon.engine.proxy.host_input", level = "trace", skip_all)]
 async fn proxy_host_input_to_daemon(
     socket_path: &Path,
@@ -361,11 +344,16 @@ async fn proxy_host_input_to_daemon(
             request.parsed.as_ref(),
         );
 
+        let (cancellation_tx, mut cancellation_rx) = tokio::sync::watch::channel(None);
+        for queued in std::mem::take(&mut pending) {
+            route_host_line(&request, queued, &cancellation_tx, &mut pending);
+        }
         let result = {
             let daemon_request = send_daemon_request_with_project_open_retry(
                 socket_path,
                 &routed_handshake,
                 &request,
+                &mut cancellation_rx,
             );
             tokio::pin!(daemon_request);
             // The catalog-backed drain ceiling is only meaningful after the
@@ -376,6 +364,9 @@ async fn proxy_host_input_to_daemon(
                 || drain_bound.unwrap_or_else(|| disconnect_drain_bound(&request));
             loop {
                 if *eof.borrow() {
+                    while let Ok(next) = input.try_recv() {
+                        route_host_line(&request, next, &cancellation_tx, &mut pending);
+                    }
                     break drain_daemon_request_after_disconnect(
                         &mut daemon_request,
                         disconnect_bound(),
@@ -388,11 +379,6 @@ async fn proxy_host_input_to_daemon(
                         changed.map_err(|error| TraceDecayError::Config {
                             message: format!("host EOF monitor closed unexpectedly: {error}"),
                         })?;
-                        if *eof.borrow() {
-                            while let Ok(line) = input.try_recv() {
-                                pending.push_back(line);
-                            }
-                        }
                     }
                     next = input.recv() => {
                         let Some(next) = next else {
@@ -404,7 +390,7 @@ async fn proxy_host_input_to_daemon(
                             )
                             .await;
                         };
-                        pending.push_back(next);
+                        route_host_line(&request, next, &cancellation_tx, &mut pending);
                     }
                 }
             }
@@ -414,7 +400,21 @@ async fn proxy_host_input_to_daemon(
     }
 }
 
-#[cfg(unix)]
+/// A host cancellation of the in-flight request goes to that request's daemon
+/// connection; every other line waits its turn.
+fn route_host_line(
+    request: &DaemonProxyRequest<'_>,
+    line: String,
+    cancellation: &tokio::sync::watch::Sender<Option<String>>,
+    pending: &mut VecDeque<String>,
+) {
+    if request.is_matching_cancellation(&line) {
+        cancellation.send_replace(Some(line));
+    } else {
+        pending.push_back(line);
+    }
+}
+
 pub(crate) fn apply_proxy_initialize_metadata(
     handshake: &mut DaemonHandshake,
     metadata: ProxyInitializeMetadata,
@@ -434,7 +434,6 @@ pub(crate) fn apply_proxy_initialize_metadata(
     }
 }
 
-#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn reset_proxy_handshake_for_initialize(
     base_handshake: &DaemonHandshake,
@@ -449,7 +448,6 @@ pub(crate) fn reset_proxy_handshake_for_initialize(
     );
 }
 
-#[cfg(unix)]
 fn reset_proxy_handshake_for_initialize_request(
     base_handshake: &DaemonHandshake,
     handshake: &mut DaemonHandshake,
@@ -639,7 +637,6 @@ pub(super) fn repository_discovery_deferred(
     }
 }
 
-#[cfg(unix)]
 async fn write_proxy_request_result(
     request: &DaemonProxyRequest<'_>,
     result: Result<Vec<String>>,
@@ -697,12 +694,14 @@ pub(crate) async fn send_daemon_request_line(
     line: &str,
 ) -> Result<Vec<String>> {
     let request = DaemonProxyRequest::new(line);
+    let (_cancellation_tx, mut cancellation_rx) = tokio::sync::watch::channel(None);
     send_daemon_request_with_liveness_poll(
         socket_path,
         handshake,
         &request,
         DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
         None,
+        &mut cancellation_rx,
     )
     .await
 }
@@ -716,25 +715,16 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
             .is_some_and(json_rpc_error_is_project_open_retryable)
 }
 
-#[cfg(not(unix))]
-async fn send_daemon_request_line_with_project_open_retry(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    line: &str,
-) -> Result<Vec<String>> {
-    let request = DaemonProxyRequest::new(line);
-    send_daemon_request_with_project_open_retry(socket_path, handshake, &request).await
-}
-
 #[tracing::instrument(name = "daemon.engine.proxy.request_retry", level = "trace", skip_all)]
 async fn send_daemon_request_with_project_open_retry(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     request: &DaemonProxyRequest<'_>,
+    cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
 ) -> Result<Vec<String>> {
     let deadline = Instant::now() + PROJECT_OPEN_RETRY_GRACE;
-    let mut responses = send_daemon_request(socket_path, handshake, request).await?;
-    while responses_are_project_open_retryable(&responses) {
+    let mut responses = send_daemon_request(socket_path, handshake, request, cancellation).await?;
+    while cancellation.borrow().is_none() && responses_are_project_open_retryable(&responses) {
         let Some(remaining) = deadline
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
@@ -742,7 +732,10 @@ async fn send_daemon_request_with_project_open_retry(
             break;
         };
         tokio::time::sleep(remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
-        responses = send_daemon_request(socket_path, handshake, request).await?;
+        if cancellation.borrow().is_some() {
+            break;
+        }
+        responses = send_daemon_request(socket_path, handshake, request, cancellation).await?;
     }
     Ok(responses)
 }
@@ -756,12 +749,14 @@ pub(crate) async fn send_daemon_request_line_with_liveness_poll(
     client_deadline: Option<DaemonClientDeadline>,
 ) -> Result<Vec<String>> {
     let request = DaemonProxyRequest::new(line);
+    let (_cancellation_tx, mut cancellation_rx) = tokio::sync::watch::channel(None);
     send_daemon_request_with_liveness_poll(
         socket_path,
         handshake,
         &request,
         liveness_poll_interval,
         client_deadline,
+        &mut cancellation_rx,
     )
     .await
 }
@@ -770,6 +765,7 @@ async fn send_daemon_request(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     request: &DaemonProxyRequest<'_>,
+    cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
 ) -> Result<Vec<String>> {
     send_daemon_request_with_liveness_poll(
         socket_path,
@@ -777,6 +773,7 @@ async fn send_daemon_request(
         request,
         DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
         None,
+        cancellation,
     )
     .await
 }
@@ -788,6 +785,7 @@ async fn send_daemon_request_with_liveness_poll(
     request: &DaemonProxyRequest<'_>,
     liveness_poll_interval: Duration,
     client_deadline: Option<DaemonClientDeadline>,
+    cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
 ) -> Result<Vec<String>> {
     let request_id = request
         .parsed
@@ -829,6 +827,7 @@ async fn send_daemon_request_with_liveness_poll(
     let mut reader = tokio::io::BufReader::new(reader);
     let mut responses = Vec::new();
     let mut matched_response = request_id.is_none();
+    let mut cancellation_open = true;
     loop {
         let read = next_daemon_response_line(
             &mut reader,
@@ -836,10 +835,15 @@ async fn send_daemon_request_with_liveness_poll(
             &request_label,
             liveness_poll_interval,
         );
-        let response_line = match client_deadline {
-            Some(deadline) => deadline.run("read", &request_label, read).await?,
-            None => read.await?,
+        let read = async {
+            match client_deadline {
+                Some(deadline) => deadline.run("read", &request_label, read).await,
+                None => read.await,
+            }
         };
+        let response_line =
+            read_forwarding_cancellation(read, cancellation, &mut cancellation_open, &mut writer)
+                .await?;
         let Some(response_line) = response_line else {
             break;
         };
@@ -883,13 +887,45 @@ async fn send_daemon_request_with_liveness_poll(
     Ok(responses)
 }
 
+/// Cancellation belongs to the running request's RMCP connection, so it is
+/// written there while the response read stays alive.
+async fn read_forwarding_cancellation<W>(
+    read: impl Future<Output = Result<Option<String>>>,
+    cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
+    cancellation_open: &mut bool,
+    writer: &mut W,
+) -> Result<Option<String>>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    tokio::pin!(read);
+    loop {
+        tokio::select! {
+            response = &mut read => return response,
+            changed = cancellation.changed(), if *cancellation_open => {
+                if changed.is_err() {
+                    *cancellation_open = false;
+                    continue;
+                }
+                let notification = cancellation.borrow_and_update().clone();
+                if let Some(notification) = notification {
+                    writer.write_all(notification.as_bytes()).await?;
+                    if !notification.ends_with('\n') {
+                        writer.write_all(b"\n").await?;
+                    }
+                    writer.flush().await?;
+                }
+            }
+        }
+    }
+}
+
 /// Extracts the daemon's advertised version from a proxied `initialize`
 /// response (`result.serverInfo.version`, which daemons have always sent).
 ///
 /// This works against daemons older than the handshake version field, so a
 /// freshly-updated client can still detect a stale daemon left running by a
 /// non-systemd setup or a plain `tracedecay upgrade`.
-#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn proxy_initialize_metadata(
     request_line: &str,
@@ -899,7 +935,6 @@ pub(crate) fn proxy_initialize_metadata(
     proxy_initialize_metadata_for_request(request.parsed.as_ref(), responses)
 }
 
-#[cfg(unix)]
 fn proxy_initialize_metadata_for_request(
     request: Option<&JsonRpcRequest>,
     responses: &[String],
@@ -935,7 +970,6 @@ fn proxy_initialize_metadata_for_request(
     metadata
 }
 
-#[cfg(unix)]
 fn daemon_version_skew_warning_for_request(
     request: Option<&JsonRpcRequest>,
     responses: &[String],
@@ -952,7 +986,6 @@ fn daemon_version_skew_warning_for_request(
     ))
 }
 
-#[cfg(unix)]
 fn daemon_proxy_error_response(
     request: Option<&JsonRpcRequest>,
     err: &TraceDecayError,
@@ -965,29 +998,6 @@ fn daemon_proxy_error_response(
             format!("TraceDecay daemon connection failed: {err}"),
         )
     })
-}
-
-#[cfg(not(unix))]
-#[tracing::instrument(name = "daemon.engine.proxy.one_request", level = "trace", skip_all)]
-async fn proxy_one_request(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    line: &str,
-    transport: &mut impl McpTransport,
-) -> Result<()> {
-    if line.trim().is_empty() {
-        return Ok(());
-    }
-    for response in
-        send_daemon_request_line_with_project_open_retry(socket_path, handshake, line).await?
-    {
-        transport.write_line(&response).await?;
-        if !response.ends_with('\n') {
-            transport.write_line("\n").await?;
-        }
-    }
-    transport.flush().await?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1083,7 +1093,6 @@ mod tests {
     /// The post-disconnect drain must never cut short work the daemon is still
     /// entitled to be doing, a batch client closes stdin immediately, so every
     /// one of its requests drains under this bound.
-    #[cfg(unix)]
     #[test]
     fn disconnect_drain_bound_always_outlives_the_daemon_dispatch_ceiling() {
         use super::{DaemonProxyRequest, disconnect_drain_bound, request_tool_name};

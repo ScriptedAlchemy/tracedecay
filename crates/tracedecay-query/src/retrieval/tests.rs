@@ -13,9 +13,9 @@ use tracedecay_domain::{
     CalibrationProfileId, CompactCandidate, DiversityPolicy, EvidenceRole, ExactAdmissionProof,
     ExactAdmissionRuleRevision, ExactFieldV1, FixedPointScore, FreshnessCompatibilityV1,
     FusionProfile, PrincipalId, RetrievalAnchorId, RetrievalBudget, RetrievalRequest,
-    RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, ScoreDomainCalibrationV1, SingleRootScopeV1, SourceFreshness, TemporalModeV1,
-    UtcMicros, VectorWatermark,
+    RetrievalScope, RetrievalSnapshot, RetrievalSourceRoleV1, RetrieverBatch, RetrieverCoverage,
+    RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1, SingleRootScopeV1, SourceFreshness,
+    TemporalModeV1, UtcMicros, VectorWatermark,
 };
 
 use super::fusion::CompositionLaneInput;
@@ -151,6 +151,7 @@ fn candidate(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: RetrievalSourceRoleV1::default(),
         retriever: lane,
         retriever_revision: id(&format!("retriever.{}.v1", lane.as_str())),
         score_domain: id(&format!("score.{}.v1", lane.as_str())),

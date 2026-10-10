@@ -11,9 +11,9 @@ use tracedecay_domain::{
     CompactCandidate, EphemeralSanitizedQueryViewV1, EvidenceRole, ExactAdmissionProof,
     ExactAdmissionRuleRevision, ExactAdmissionValidator, ExactFieldV1, FixedPointScore,
     FreshnessCompatibilityV1, PrincipalId, QueryNormalizationRevision, RetrievalBudget,
-    RetrievalError, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch,
-    RetrieverKind, RetrieverOutcome, SanitizerRevision, SingleRootScopeV1, SourceFreshness,
-    TemporalModeV1, UtcMicros, VectorWatermark,
+    RetrievalError, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrievalSourceRoleV1,
+    RetrieverBatch, RetrieverKind, RetrieverOutcome, SanitizerRevision, SingleRootScopeV1,
+    SourceFreshness, TemporalModeV1, UtcMicros, VectorWatermark,
 };
 
 use super::{
@@ -310,6 +310,7 @@ fn exact_pair(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: RetrievalSourceRoleV1::default(),
         retriever: RetrieverKind::ExactLiteral,
         retriever_revision: id("retriever.exact.v1"),
         score_domain: id(crate::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1),
@@ -334,6 +335,7 @@ fn exact_pair(
         },
         matched_literals: vec![literal],
         admission_proof: proof,
+        source_role: RetrievalSourceRoleV1::default(),
     };
     (candidate, evidence)
 }
@@ -676,6 +678,106 @@ fn exact_lane_satisfies_the_generic_retriever_contract() {
         .retrieve_exact(&invalid)
         .expect_err("invalid budget is rejected");
     assert!(matches!(error, RetrievalPortError::Contract(_)));
+}
+
+#[test]
+fn exact_lane_ranks_production_definitions_ahead_of_stronger_test_references() {
+    let authority = FixtureAuthority::new();
+    let request = exact_request(&authority, "reserve_stock --force", 1);
+    let (production, mut production_evidence) = exact_pair(&authority, &request, "occ.z", 0);
+    production_evidence.source_role = RetrievalSourceRoleV1::ProductionDefinition;
+    let (test_hit, mut test_evidence) = exact_pair(&authority, &request, "occ.a", 0);
+    test_evidence.source_role = RetrievalSourceRoleV1::TestReference;
+    test_evidence.matched_literals = request.literals.clone();
+    let lane = ExactLane::new(
+        FixtureAuthority::new(),
+        FakeExactPort::complete(vec![
+            (test_hit, test_evidence),
+            (production, production_evidence),
+        ]),
+    );
+
+    let result = complete_batch(lane.retrieve_exact(&request).expect("exact retrieval"));
+
+    result_order(&result, &["occ.z"]);
+    assert_eq!(result.candidates[0].raw_score, FixedPointScore(1_000_000));
+    assert_eq!(
+        result.candidates[0].source_role,
+        RetrievalSourceRoleV1::ProductionDefinition
+    );
+    assert_eq!(
+        result.evidence_by_occurrence[&id("occ.z")].source_role,
+        RetrievalSourceRoleV1::ProductionDefinition
+    );
+    assert_eq!(result.coverage.capped, 1);
+}
+
+#[test]
+fn exact_lane_keeps_the_definition_ahead_of_production_body_references() {
+    let authority = FixtureAuthority::new();
+    let request = exact_request(&authority, "reserve_stock --force", 1);
+    let (definition, mut definition_evidence) = exact_pair(&authority, &request, "occ.z", 0);
+    definition_evidence.source_role = RetrievalSourceRoleV1::ProductionDefinition;
+    let (body_ref, mut body_evidence) = exact_pair(&authority, &request, "occ.a", 0);
+    body_evidence.source_role = RetrievalSourceRoleV1::ProductionOther;
+    body_evidence.matched_literals = request.literals.clone();
+    let (test_hit, mut test_evidence) = exact_pair(&authority, &request, "occ.b", 0);
+    test_evidence.source_role = RetrievalSourceRoleV1::TestReference;
+    test_evidence.matched_literals = request.literals.clone();
+    let lane = ExactLane::new(
+        FixtureAuthority::new(),
+        FakeExactPort::complete(vec![
+            (test_hit, test_evidence),
+            (body_ref, body_evidence),
+            (definition, definition_evidence),
+        ]),
+    );
+
+    let result = complete_batch(lane.retrieve_exact(&request).expect("exact retrieval"));
+
+    result_order(&result, &["occ.z"]);
+    assert_eq!(
+        result.candidates[0].source_role,
+        RetrievalSourceRoleV1::ProductionDefinition
+    );
+    assert_eq!(result.coverage.capped, 2);
+}
+
+#[test]
+fn exact_lane_lets_measured_scores_rank_production_other_against_tests() {
+    let authority = FixtureAuthority::new();
+    let request = exact_request(&authority, "reserve_stock --force", 1);
+    let (production, mut production_evidence) = exact_pair(&authority, &request, "occ.z", 0);
+    production_evidence.source_role = RetrievalSourceRoleV1::ProductionOther;
+    let (test_hit, mut test_evidence) = exact_pair(&authority, &request, "occ.a", 0);
+    test_evidence.source_role = RetrievalSourceRoleV1::TestReference;
+    test_evidence.matched_literals = request.literals.clone();
+    let lane = ExactLane::new(
+        FixtureAuthority::new(),
+        FakeExactPort::complete(vec![
+            (test_hit, test_evidence),
+            (production, production_evidence),
+        ]),
+    );
+
+    let result = complete_batch(lane.retrieve_exact(&request).expect("exact retrieval"));
+
+    result_order(&result, &["occ.a"]);
+    assert_eq!(
+        result.evidence_by_occurrence[&id("occ.a")].source_role,
+        RetrievalSourceRoleV1::TestReference
+    );
+}
+
+#[test]
+fn exact_lane_evidence_treats_missing_source_role_as_production_other() {
+    let authority = FixtureAuthority::new();
+    let request = exact_request(&authority, "reserve_stock", 8);
+    let (_, evidence) = exact_pair(&authority, &request, "occ.a", 0);
+    let mut value = serde_json::to_value(&evidence).expect("encode");
+    value.as_object_mut().expect("object").remove("source_role");
+    let decoded: ExactLaneEvidence = serde_json::from_value(value).expect("legacy evidence");
+    assert_eq!(decoded.source_role, RetrievalSourceRoleV1::ProductionOther);
 }
 
 #[test]

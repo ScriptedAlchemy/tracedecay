@@ -12,6 +12,12 @@ inputs:
   cache-key:
     description: Disk-cache name; jobs with the same runner image and flags share it.
     required: true
+  extra-restore-keys:
+    description: >
+      Comma-separated extra disk-cache names restored after this job's own
+      prefix misses. Use when two jobs share rustc flags and runner image so
+      Clippy can reuse Test Linux action outputs.
+    default: ""
   test-tools:
     description: Also install rust-analyzer, node, and ast-grep for `bazel test`.
     default: "false"
@@ -34,6 +40,7 @@ runs:
       shell: bash
       env:
         CACHE_NAME: ${{ inputs.cache-key }}
+        EXTRA_RESTORE_KEYS: ${{ inputs.extra-restore-keys }}
       run: |
         node <<'JS'
         const fs = require('node:fs');
@@ -41,8 +48,16 @@ runs:
         const path = process.platform === 'win32'
           ? 'D:/b-disk'
           : `${os.homedir().replace(/\\/g, '/')}/.cache/bazel-disk`;
-        const prefix = `setup-bazel-1-${process.platform}-${os.arch()}-disk-${process.env.CACHE_NAME}-`;
-        fs.appendFileSync(process.env.GITHUB_OUTPUT, `path=${path}\nprefix=${prefix}\n`);
+        const names = [process.env.CACHE_NAME, ...(process.env.EXTRA_RESTORE_KEYS || '')
+          .split(',')
+          .map((name) => name.trim())
+          .filter(Boolean)];
+        const prefixes = names.map((name) =>
+          `setup-bazel-1-${process.platform}-${os.arch()}-disk-${name}-`);
+        fs.appendFileSync(
+          process.env.GITHUB_OUTPUT,
+          `path=${path}\nprefix=${prefixes[0]}\nrestore-keys<<EOF\n${prefixes.join('\n')}\nEOF\n`,
+        );
         JS
 
     - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
@@ -66,7 +81,7 @@ runs:
       with:
         path: ${{ steps.disk-cache-config.outputs.path }}
         key: ${{ steps.disk-cache-config.outputs.prefix }}run-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
-        restore-keys: ${{ steps.disk-cache-config.outputs.prefix }}
+        restore-keys: ${{ steps.disk-cache-config.outputs.restore-keys }}
 
     # Test dependencies, not conveniences: the LSP negotiation acceptance
     # spawns rust-analyzer through the pinned toolchain, the ast-grep

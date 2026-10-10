@@ -60,10 +60,19 @@ operating model](docs/V2-OPERATING-MODEL.md).
 ```bash
 cd /path/to/your/project
 tracedecay daemon install-service
-tracedecay init
+tracedecay init                     # enroll and request indexing
 tracedecay install
-tracedecay status
+tracedecay status --json            # inspect readiness and coverage
 ```
+
+`tracedecay init` enrolls the project and requests the first code
+generation. It returns a typed not-ready receipt once that request is
+accepted; the index continues in the background. `tracedecay status`
+immediately afterwards can still show `project_open.state=converging` and
+`graph_statistics.state=unavailable` with exit 0 — that is a typed
+not-ready reading, not a usable project. Pass `tracedecay init --wait` to
+block until the first generation is ready, or poll `status` until
+`graph_statistics.state` is available.
 
 The daemon comes first. `tracedecay init` is brokered through the
 daemon-owned code-index scheduler, so without a running daemon it refuses
@@ -73,8 +82,10 @@ before it writes anything:
 Error: project route error (code_index_scheduler_unavailable): project initialization requires the daemon-owned code-index scheduler; start the daemon and retry
 ```
 
-`tracedecay status` likewise reads the daemon and never starts it. See [the
-user guide](docs/USER-GUIDE.md) for the daemon lifecycle commands.
+On headless Linux without a systemd user bus, run `tracedecay daemon run` in
+one terminal and keep it running while using the commands above in another.
+`tracedecay status` reads the daemon and never starts it. See the
+[user guide](docs/USER-GUIDE.md#daemon-service) for lifecycle commands.
 
 `tracedecay install` auto-detects supported agents. To target one host:
 
@@ -104,8 +115,9 @@ the installed cache is loaded.
 ## Common Commands
 
 ```bash
-tracedecay daemon install-service   # install + start the daemon (required before init)
-tracedecay init [path]              # enroll a project and publish its first generation
+tracedecay daemon install-service   # install + start the user service (required before init)
+tracedecay daemon run               # foreground daemon when no systemd user session exists
+tracedecay init [path]              # enroll and request the first index
 tracedecay sync [path]              # explicit administrative refresh
 tracedecay status [path]            # graph stats, freshness, savings, cost
 tracedecay tool                     # list every MCP tool
@@ -114,7 +126,7 @@ tracedecay tool files               # indexed files
 tracedecay tool affected --args -   # impacted tests/files ({"files":[...]})
 tracedecay serve                    # MCP server
 tracedecay doctor                   # read-only installation health check
-tracedecay dashboard [--open]       # local dashboard
+tracedecay dashboard [--path PATH] [--open]  # dashboard for one launch project
 tracedecay monitor                  # live MCP savings/cost TUI
 tracedecay update                   # refresh binary, plugins, daemon
 tracedecay upgrade                  # self-upgrade current channel
@@ -161,12 +173,18 @@ selection, provenance, and recovery behavior.
 ## Dashboard
 
 ```bash
-tracedecay dashboard
-tracedecay dashboard --port 8080
-tracedecay dashboard --port 0 --open
+tracedecay dashboard --path /path/to/enrolled/repo
+tracedecay dashboard --path /path/to/enrolled/repo --port 8080
+tracedecay dashboard --path /path/to/enrolled/repo --port 0 --open
 ```
 
-The dashboard includes graph exploration, project memory, LCM session search, token savings, and cost views. See [docs/dashboard.md](docs/dashboard.md).
+The dashboard binds to one launch project: `--path`, or the current directory.
+Launching from `$HOME` or another ambient root refuses and tells you to pass
+`--path`. Code search covers only that bound project; asking about another
+enrolled repo returns a typed `wrong_project` or `empty_scope` state instead of
+a successful empty hit list. The dashboard includes graph exploration, project
+memory, LCM session search, token savings, and cost views. See
+[docs/dashboard.md](docs/dashboard.md).
 
 ## Privacy
 
@@ -224,8 +242,10 @@ Common fixes:
 - Not initialized: run `tracedecay init` from the project root.
 - `code_index_scheduler_unavailable` from `init`: no daemon is accepting
   connections for this profile. Run `tracedecay daemon install-service` (or
-  `tracedecay daemon start` if it is already installed), confirm with
-  `tracedecay daemon status`, then re-run `init`.
+  `tracedecay daemon start` if it is already installed). On Linux without a
+  systemd user session, run `tracedecay daemon run` instead. Confirm with
+  `tracedecay daemon status` (non-zero when stopped or unreachable), then
+  re-run `init`.
 - Agent does not see tools: run `tracedecay doctor`, then restart the agent.
 - Missing symbols: inspect `tracedecay status --json` for the selected
   generation and typed warming/refresh-required coverage; request an explicit

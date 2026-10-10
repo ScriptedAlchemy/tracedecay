@@ -376,6 +376,8 @@ pub struct LatestCompleteCodeIndexV1 {
     pub(super) record_index: Arc<OnceLock<queries::GenerationRecordIndexV1>>,
 }
 
+pub(super) type ParkedGraphReleaseCallback = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone)]
 pub struct LatestCodeTextGenerationV1 {
     pub(super) metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
@@ -411,6 +413,16 @@ pub struct LatestCodeTextGenerationV1 {
     /// The outgoing owner whose warm graph serves reads, stale, until this
     /// generation's own graph first warms.
     pub(super) graph_predecessor: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
+    /// The first catalog warm finishes on a blocking task that does not
+    /// wake the parked worker. One permit lets that worker retry park-release
+    /// without posting a cadence arrival.
+    pub(super) catalog_warm_settled: Arc<tokio::sync::Notify>,
+    /// Arm the first-warm park-release waiter once per text owner so a park
+    /// loop cannot spawn a waiter per skip.
+    pub(super) park_release_after_catalog_warm_armed: Arc<AtomicBool>,
+    /// Bound by the parked worktree so the first catalog warm can retry
+    /// park-release on this owner without a cadence arrival.
+    pub(super) parked_graph_release: Arc<RwLock<Option<ParkedGraphReleaseCallback>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2207,6 +2219,41 @@ impl LatestCodeTextGenerationV1 {
 }
 
 impl LatestCodeTextGenerationV1 {
+    /// The first catalog warm finished (success or failure). A parked worker
+    /// that skipped catalog/engine release while this owner was warming
+    /// retries that release without a cadence arrival.
+    pub(super) fn note_catalog_warm_settled(&self) {
+        self.catalog_warm_settled.notify_one();
+        let hook = self
+            .parked_graph_release
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    pub(super) fn bind_parked_graph_release(&self, hook: ParkedGraphReleaseCallback) {
+        *self
+            .parked_graph_release
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hook);
+    }
+
+    /// Arm the one-shot waiter that retries park-release after the first
+    /// catalog warm. `true` when this owner has not armed it yet.
+    pub(super) fn arm_park_release_after_catalog_warm(&self) -> bool {
+        self.park_release_after_catalog_warm_armed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Shared settle signal for the first-warm park-release waiter.
+    pub(super) fn catalog_warm_notify(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.catalog_warm_settled)
+    }
+
     /// An activated graph reports what its reads would find: `ready` only
     /// while the engine and catalog they need are resident.
     pub fn code_graph_serving_readiness(&self) -> CodeGraphServingReadinessV1 {
@@ -2254,11 +2301,11 @@ impl LatestCodeTextGenerationV1 {
             return;
         };
         let inherited = outgoing.take_graph_predecessor();
+        // An activated outgoing still serves: a released engine or catalog
+        // reports `warming` but a read re-warms it, while a cold store passes
+        // the hold down to the graph it was itself holding.
         let serves_warm_graph = outgoing.interactive_graph_store().is_ok()
-            && matches!(
-                outgoing.code_graph_serving_readiness(),
-                CodeGraphServingReadinessV1::Ready
-            );
+            && outgoing.code_graph_serving_readiness().is_activated();
         let held = if serves_warm_graph {
             Some(outgoing.clone())
         } else {

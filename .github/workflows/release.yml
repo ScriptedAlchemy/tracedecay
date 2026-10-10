@@ -137,6 +137,10 @@ jobs:
 
   build:
     name: Build ${{ matrix.name }}
+    # Gold crashes in its Cortex-A53 erratum fixup during the ARM CLI link.
+    # The workflow setting also recovers immutable release sources.
+    env:
+      BAZEL_LINKOPTS: ${{ matrix.name == 'aarch64-linux' && '-fuse-ld=bfd' || '' }}
     needs: [validate-release, dashboard-assets]
     if: needs.validate-release.outputs.build_required == 'true'
     runs-on: ${{ matrix.runner }}

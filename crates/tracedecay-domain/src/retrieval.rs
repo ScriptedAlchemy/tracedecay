@@ -613,6 +613,48 @@ pub enum EvidenceRole {
     Context,
 }
 
+/// Source-role evidence used at lane admission and fusion.
+///
+/// A production definition outranks a test-file hit for the same symbol even
+/// when the test has a higher measured score. Non-definition production hits
+/// compete with test hits on measured scores so comments and references do
+/// not crowd out relevant tests.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalSourceRoleV1 {
+    /// Non-test path whose name or signature matched the query.
+    ProductionDefinition,
+    /// Non-test path that is not a name or signature definition match.
+    #[default]
+    ProductionOther,
+    /// Hit under a test path.
+    TestReference,
+}
+
+impl RetrievalSourceRoleV1 {
+    /// Admission and fusion priority. Production definitions occupy their
+    /// own tier; every other role shares the measured-score tier.
+    pub const fn admission_rank(self) -> u8 {
+        match self {
+            Self::ProductionDefinition => 0,
+            Self::ProductionOther | Self::TestReference => 1,
+        }
+    }
+}
+
 /// Proof that a typed field admitted a candidate to the exact tier. Only the
 /// central exact-admission validator can mint this proof; retrievers cannot
 /// assign an exact tier. Construct it only through [`ExactAdmissionValidator`].
@@ -746,6 +788,10 @@ pub struct CompactCandidate {
     pub logical_copy_cluster_id: Option<LogicalCopyClusterId>,
     pub logical_copy_evidence_anchor: Option<RetrievalAnchorId>,
     pub evidence_role: EvidenceRole,
+    /// Source-role evidence for the same-symbol definition/reference order.
+    /// Absent historical candidates deserialize as a non-definition hit.
+    #[serde(default)]
+    pub source_role: RetrievalSourceRoleV1,
     pub retriever: RetrieverKind,
     pub retriever_revision: ComponentRevision,
     pub score_domain: ScoreDomainId,
@@ -943,6 +989,10 @@ pub struct FusedCandidate {
     pub logical_evidence_id: LogicalEvidenceId,
     pub occurrences: Vec<OccurrenceProvenance>,
     pub exact_class: ExactClass,
+    /// Strongest source role across the fused occurrences. Absent historical
+    /// candidates deserialize as a non-definition hit.
+    #[serde(default)]
+    pub source_role: RetrievalSourceRoleV1,
     pub utility_micros: u64,
     pub contributions: Vec<CandidateContribution>,
     pub freshness: Vec<SourceFreshness>,
@@ -1365,6 +1415,7 @@ mod tests {
             logical_copy_cluster_id: None,
             logical_copy_evidence_anchor: None,
             evidence_role: EvidenceRole::Primary,
+            source_role: RetrievalSourceRoleV1::default(),
             retriever,
             retriever_revision: id("retriever.fixture.v1"),
             score_domain: id("score.fixture.v1"),
@@ -1487,6 +1538,7 @@ mod tests {
                 logical_evidence_id: id("evidence.fused"),
                 occurrences: vec![],
                 exact_class: ExactClass::Approximate,
+                source_role: RetrievalSourceRoleV1::default(),
                 utility_micros: 1,
                 contributions: vec![CandidateContribution {
                     retriever: RetrieverKind::Temporal,

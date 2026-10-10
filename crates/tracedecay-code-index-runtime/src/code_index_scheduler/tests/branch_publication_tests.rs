@@ -28,6 +28,7 @@ async fn mounted_registry(fixture: &GitFixture, store: &TempDir) -> CodeIndexSch
         .expect("mount worktree");
     super::wait_for_initial_generation(&registry, fixture.path()).await;
     super::wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let _ = super::wait_for_live_complete_generation(&registry, fixture.path()).await;
     registry
 }
 

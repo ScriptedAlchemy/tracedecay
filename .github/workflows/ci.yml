@@ -22,11 +22,14 @@ permissions:
   contents: read
 
 # Explicit OS/host coverage must not be replaced by a default-coverage push
-# while queued. Within each coverage request, master finishes its current
-# snapshot and retains only the newest pending run.
+# while queued (separate group suffixes). Non-master refs cancel superseded
+# runs for tip-fast feedback. Master finishes the in-progress snapshot so a
+# green/red signal still lands when merges outpace the long pole; GitHub
+# keeps only the newest pending tip. Shorter shards cut how long that tip
+# may wait for first job — shard layout is owned elsewhere.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'workflow_dispatch' && format('os-{0}-hosts-{1}', inputs.run_os, inputs.run_hosts) || 'default' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/master') }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -150,6 +153,9 @@ jobs:
 
       - name: Test Bazel workspace provenance
         run: python3 scripts/test-bazel-workspace-status.py
+
+      - name: Test Bazel default-feature alias collapse
+        run: python3 scripts/test-gen-builds-default-alias.py
 
       - name: Test the real-repository hot-path benchmark harness
         run: python3 scripts/test-bench-hot-paths.py
@@ -290,13 +296,14 @@ jobs:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
-  # Linux compile and test authority: the generated Bazel workspace, split
-  # so the measured serial suites no longer share one runner. Union is
-  # `tests(//...)` by construction: root-b is the rest of
-  # `//crates/tracedecay/...`, workspace is everything outside that package.
-  # Last-green 37707017494: bazel 83m, critical path 34m (`mcp_suite` 10m,
-  # `transcript_ingest_suite` 9m, `dashboard_api_test` 6m) because
-  # `--default_test_resources=cpu=HOST_CPUS` runs one suite at a time.
+  # Root suites and the full-daemon memory journey reserve HOST_CPUS.
+  # Workspace suites reserve one CPU each so they can overlap jobs=4 rustc.
+  # Warm v2 cache (run 38071732620) still left workspace-a at 65m because
+  # cli + code-index share one critical path; split that group into
+  # workspace-a (light a–capture) and workspace-code (cli + code-*). One
+  # shared ci-linux-test-v2 prefix; root-b alone saves (a 6.9 GiB second
+  # family previously evicted the budget). root-b and workspace-c catch
+  # unlisted targets in their groups.
   linux-test:
     name: Test Linux (${{ matrix.shard }})
     needs: [scope-gate, gates]
@@ -310,12 +317,15 @@ jobs:
       matrix:
         include:
           - shard: root-a
+            test_resources: ""
             targets: >-
               //crates/tracedecay:mcp_suite
               //crates/tracedecay:dashboard_api_test
               //crates/tracedecay:daemon_suite
               //crates/tracedecay:storage_suite
+              //crates/tracedecay-cli:refresh_memory_journey
           - shard: root-b
+            test_resources: ""
             targets: >-
               --
               //crates/tracedecay/...
@@ -323,11 +333,87 @@ jobs:
               -//crates/tracedecay:dashboard_api_test
               -//crates/tracedecay:daemon_suite
               -//crates/tracedecay:storage_suite
-          - shard: workspace
+          # Four package groups. New crates land in workspace-c via the
+          # catch-all until listed here for balance.
+          - shard: workspace-a
+            test_resources: --default_test_resources=cpu=1
+            targets: >-
+              //crates/tracedecay-agent-hosts/...
+              //crates/tracedecay-api/...
+              //crates/tracedecay-application/...
+              //crates/tracedecay-automation/...
+              //crates/tracedecay-automation-runtime/...
+              //crates/tracedecay-capture/...
+          - shard: workspace-code
+            test_resources: --default_test_resources=cpu=1
+            targets: >-
+              --
+              //crates/tracedecay-cli/...
+              //crates/tracedecay-code-extraction/...
+              //crates/tracedecay-code-index/...
+              //crates/tracedecay-code-index-retention/...
+              //crates/tracedecay-code-index-runtime/...
+              -//crates/tracedecay-cli:refresh_memory_journey
+          - shard: workspace-b
+            test_resources: --default_test_resources=cpu=1
+            targets: >-
+              //crates/tracedecay-configuration/...
+              //crates/tracedecay-contracts/...
+              //crates/tracedecay-daemon-control/...
+              //crates/tracedecay-daemon-identity/...
+              //crates/tracedecay-daemon-protocol/...
+              //crates/tracedecay-daemon-service/...
+              //crates/tracedecay-dashboard-api/...
+              //crates/tracedecay-domain/...
+              //crates/tracedecay-framing/...
+              //crates/tracedecay-global-db/...
+              //crates/tracedecay-graph-db/...
+              //crates/tracedecay-graph-query/...
+              //crates/tracedecay-hooks/...
+              //crates/tracedecay-host-admission/...
+              //crates/tracedecay-host-integration/...
+              //crates/tracedecay-lcm/...
+              //crates/tracedecay-lsp/...
+              //crates/tracedecay-maintenance/...
+              //crates/tracedecay-mcp/...
+              //crates/tracedecay-mcp-catalog/...
+          - shard: workspace-c
+            test_resources: --default_test_resources=cpu=1
             targets: >-
               --
               //...
               -//crates/tracedecay/...
+              -//crates/tracedecay-agent-hosts/...
+              -//crates/tracedecay-api/...
+              -//crates/tracedecay-application/...
+              -//crates/tracedecay-automation/...
+              -//crates/tracedecay-automation-runtime/...
+              -//crates/tracedecay-capture/...
+              -//crates/tracedecay-cli/...
+              -//crates/tracedecay-code-extraction/...
+              -//crates/tracedecay-code-index/...
+              -//crates/tracedecay-code-index-retention/...
+              -//crates/tracedecay-code-index-runtime/...
+              -//crates/tracedecay-configuration/...
+              -//crates/tracedecay-contracts/...
+              -//crates/tracedecay-daemon-control/...
+              -//crates/tracedecay-daemon-identity/...
+              -//crates/tracedecay-daemon-protocol/...
+              -//crates/tracedecay-daemon-service/...
+              -//crates/tracedecay-dashboard-api/...
+              -//crates/tracedecay-domain/...
+              -//crates/tracedecay-framing/...
+              -//crates/tracedecay-global-db/...
+              -//crates/tracedecay-graph-db/...
+              -//crates/tracedecay-graph-query/...
+              -//crates/tracedecay-hooks/...
+              -//crates/tracedecay-host-admission/...
+              -//crates/tracedecay-host-integration/...
+              -//crates/tracedecay-lcm/...
+              -//crates/tracedecay-lsp/...
+              -//crates/tracedecay-maintenance/...
+              -//crates/tracedecay-mcp/...
+              -//crates/tracedecay-mcp-catalog/...
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -358,13 +444,19 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
-          cache-key: ci-linux-test
+          cache-key: ci-linux-test-v2
+          # Prefer v2; keep legacy prefixes as restore fallbacks if still present.
+          extra-restore-keys: ci-linux-test,ci-linux-workspace-test
           test-tools: "true"
 
-      # `bazel test` builds every target in the pattern, so tests start
-      # while the rest of the workspace still links.
+      # Root suites exercise latency-sensitive daemon journeys. Finish their
+      # compilation before testing so compiler work cannot consume that budget.
+      - name: Build root suite binaries
+        if: ${{ matrix.test_resources == '' }}
+        run: bazel build --config=ci ${{ matrix.targets }}
+
       - name: Build and test this shard
-        run: bazel test --config=ci ${{ matrix.targets }}
+        run: bazel test --config=ci ${{ matrix.test_resources }} ${{ matrix.targets }}
 
       - name: Upload failed test diagnostics
         if: failure()
@@ -376,8 +468,8 @@ jobs:
             bazel-testlogs/**/test.xml
 
       # Matrix shards share github.job, so they would race the same save key.
-      # root-b compiles most //crates/tracedecay test binaries; one write
-      # keeps the 10 GiB Actions cache from holding three copies.
+      # One writer keeps the 10 GiB Actions cache from holding several copies
+      # that would evict this prefix (observed: 6.9 GiB workspace-only save).
       - name: Save compiled Bazel actions
         if: always() && !cancelled() && github.ref == 'refs/heads/master' && matrix.shard == 'root-b' && steps.bazel.outputs.disk-cache-key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -449,7 +541,11 @@ jobs:
     name: Clippy
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-26.04-arm
+    # Same image as Test Linux so rustc action keys can restore that job's
+    # disk cache (proc-macros, build scripts, grammar cc, matching rlibs)
+    # when this job's own prefix misses. ARM isolated Clippy from that
+    # cache and paid a cold 55–61m `//...` on recent PRs.
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -457,7 +553,8 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
-          cache-key: ci-linux-arm64
+          cache-key: ci-linux-clippy
+          extra-restore-keys: ci-linux-test-v2
 
       - name: Run blocking Clippy policy
         run: bazel build --config=ci --config=clippy //...
@@ -640,7 +737,7 @@ jobs:
           git -C "$RUNNER_TEMP/hermes-upstream" fetch --depth 1 origin "$HERMES_UPSTREAM_REF"
           git -C "$RUNNER_TEMP/hermes-upstream" checkout --detach FETCH_HEAD
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: ${{ runner.temp }}/hermes-upstream/uv.lock

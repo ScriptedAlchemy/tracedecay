@@ -14,6 +14,7 @@ pub(crate) use crate::runtime::DashboardTestRuntimeV1;
 pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;
 pub(crate) use tracedecay::dashboard;
+use tracedecay_domain::forward_slash_path;
 pub(crate) use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactEventId, FactId, ProjectId,
 };
@@ -318,6 +319,79 @@ pub(crate) fn write_file(path: &Path, content: &str) {
     }
     if let Err(err) = fs::write(path, content) {
         panic!("failed to write {}: {err}", path.display());
+    }
+}
+
+/// Ground-truth paths for a whole-word search. Matches `rg -l -w` on ASCII
+/// identifiers without requiring a host `rg` in the Bazel sandbox.
+pub(crate) fn rg_word_paths(root: &Path, query: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_whole_word_paths(root, root, query, &mut paths);
+    paths.sort();
+    paths
+}
+
+fn is_ascii_word_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn contains_whole_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    let mut start = 0;
+    while start + needle.len() <= haystack.len() {
+        let Some(rel) = haystack[start..]
+            .windows(needle.len())
+            .position(|window| window == needle)
+        else {
+            break;
+        };
+        let idx = start + rel;
+        let before_ok = idx == 0 || !is_ascii_word_char(haystack[idx - 1]);
+        let after = idx + needle.len();
+        let after_ok = after == haystack.len() || !is_ascii_word_char(haystack[after]);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
+}
+
+fn collect_whole_word_paths(root: &Path, dir: &Path, query: &str, out: &mut Vec<String>) {
+    let entries = fs::read_dir(dir).unwrap_or_else(|error| {
+        panic!("read {}: {error}", dir.display());
+    });
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!("read {} entry: {error}", dir.display());
+        });
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        let file_type = entry.file_type().unwrap_or_else(|error| {
+            panic!("stat {}: {error}", path.display());
+        });
+        if file_type.is_dir() {
+            collect_whole_word_paths(root, &path, query, out);
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if contains_whole_word(&contents, query) {
+            out.push(forward_slash_path(
+                path.strip_prefix(root)
+                    .expect("fixture search file remains under its root"),
+            ));
+        }
     }
 }
 
@@ -751,7 +825,7 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
         // and the session-temporal refresh discovers sessions only from
         // output-producing observation effects.
         runtime
-            .seed_session_message_observation_for_test(
+            .seed_session_message_observations_for_test(&[
                 tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
                     project_id: runtime.project_id().as_str(),
                     provider: &message.provider,
@@ -770,7 +844,7 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
                         )
                     }),
                 },
-            )
+            ])
             .await
             .unwrap_or_else(|error| {
                 panic!(
@@ -1229,4 +1303,18 @@ pub(crate) fn commit_all(project: &Path, message: &str) {
             message,
         ],
     );
+}
+
+#[test]
+fn rg_word_paths_match_identifier_boundaries_and_skip_git() {
+    let tmp = tempdir_or_panic();
+    let root = tmp.path();
+    write_file(&root.join("src/a.rs"), "fn dashboard() {}\n");
+    write_file(&root.join("src/b.rs"), "fn dashboards() {}\n");
+    write_file(&root.join(".git/config"), "dashboard\n");
+    assert_eq!(
+        rg_word_paths(root, "dashboard"),
+        vec!["src/a.rs".to_owned()]
+    );
+    assert!(rg_word_paths(root, "connectGateway").is_empty());
 }

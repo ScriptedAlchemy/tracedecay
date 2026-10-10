@@ -1037,6 +1037,9 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
             preopened_source: Arc::new(Mutex::new(None)),
             publication_binding: None,
             graph_predecessor: Arc::default(),
+            catalog_warm_settled: Arc::new(tokio::sync::Notify::new()),
+            park_release_after_catalog_warm_armed: Arc::new(AtomicBool::new(false)),
+            parked_graph_release: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -2704,6 +2707,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                     state_digest: ManifestDigest::new(pointer.state_digest).ok()?,
                 })),
                 graph_predecessor: Arc::default(),
+                catalog_warm_settled: Arc::new(tokio::sync::Notify::new()),
+                park_release_after_catalog_warm_armed: Arc::new(AtomicBool::new(false)),
+                parked_graph_release: Arc::new(RwLock::new(None)),
             },
         ))
     }
@@ -3680,6 +3686,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                 preopened_source: Arc::new(Mutex::new(None)),
                 publication_binding: None,
                 graph_predecessor: Arc::default(),
+                catalog_warm_settled: Arc::new(tokio::sync::Notify::new()),
+                park_release_after_catalog_warm_armed: Arc::new(AtomicBool::new(false)),
+                parked_graph_release: Arc::new(RwLock::new(None)),
             });
         LatestCompleteCodeIndexV1 {
             generation,

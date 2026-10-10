@@ -59,10 +59,6 @@ impl ObservationCancellation {
         }
         notified.await;
     }
-
-    pub(crate) fn cancellation_flag(&self) -> &AtomicBool {
-        self.cancelled.as_ref()
-    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
