@@ -4,6 +4,7 @@ use tracedecay_domain::{SessionId, SessionProjectionGenerationV1};
 use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
+use tracing::Instrument as _;
 
 use super::query::{generation_i64, now_micros, storage, storage_message};
 use super::relations::{SessionRelationProjection, projection_watermark};
@@ -125,27 +126,17 @@ pub async fn apply_relation_projection(
     cancellation: Arc<dyn GraphCancellation>,
 ) -> SessionStoreResult<GraphWatermark> {
     let applied = write_relation_projection(database, projection, cancellation).await?;
-    let transaction = {
-        use tracing::Instrument as _;
-        {
-            database
-                .begin_write_transaction()
-                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-                .await
-                .map_err(|error| storage(RECEIPT_OPERATION, error))?
-        }
-    };
+    let transaction = database
+        .begin_write_transaction()
+        .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
     acknowledge_relation_receipt(&transaction, projection).await?;
-    {
-        use tracing::Instrument as _;
-        {
-            transaction
-                .commit()
-                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
-                .await
-                .map_err(|error| storage(RECEIPT_OPERATION, error))?
-        }
-    };
+    transaction
+        .commit()
+        .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
     Ok(applied)
 }
 
@@ -156,19 +147,28 @@ pub(crate) async fn write_relation_projection(
     projection: &SessionRelationProjection,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> SessionStoreResult<GraphWatermark> {
-    let (expected, _) = {
-        let snapshot = database
-            .read_snapshot()
-            .await
-            .map_err(|error| storage(RECEIPT_OPERATION, error))?;
-        expected_receipt(
-            &snapshot,
-            &projection.session_id,
-            SessionProjectionGenerationV1::new(projection.generation)
-                .map_err(|error| storage(RECEIPT_OPERATION, error))?,
-        )
-        .await?
-    };
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    write_relation_projection_on_snapshot(database, &snapshot, projection, cancellation).await
+}
+
+/// [`write_relation_projection`] against a caller-owned snapshot so batch
+/// appliers share one read lease for every receipt check.
+pub(crate) async fn write_relation_projection_on_snapshot(
+    database: &impl SessionTemporalRegisteredDb,
+    snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+    projection: &SessionRelationProjection,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<GraphWatermark> {
+    let (expected, _) = expected_receipt(
+        snapshot,
+        &projection.session_id,
+        SessionProjectionGenerationV1::new(projection.generation)
+            .map_err(|error| storage(RECEIPT_OPERATION, error))?,
+    )
+    .await?;
     let actual =
         projection_watermark(projection).map_err(|error| storage(RECEIPT_OPERATION, error))?;
     if actual != expected {
@@ -295,7 +295,7 @@ pub(crate) async fn relation_receipt_applied(
     Ok(state.as_deref() == Some("applied"))
 }
 
-async fn expected_receipt(
+pub(crate) async fn expected_receipt(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
     generation: SessionProjectionGenerationV1,

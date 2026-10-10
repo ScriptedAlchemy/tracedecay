@@ -365,6 +365,137 @@ async fn begin_session_refresh_in_transaction(
     })
 }
 
+enum SessionRefreshSnapshotPlan {
+    Planned(SessionRefreshBeginPlanV1),
+    /// A decision input needs the writer lane (no provisioned cursor key or
+    /// no active generation to mint from); the caller replays the begin
+    /// inside a write transaction instead.
+    NeedsWrite,
+}
+
+/// Read-only equivalent of [`begin_session_refresh_in_transaction`]'s
+/// decision chain for the plan path: every input the outcome derives from
+/// is a deterministic read (active generation and watermarks, reset digest,
+/// joinable/running/candidate guards, the provisioned cursor key, and the
+/// next-generation/attempt counters), so the common case plans from
+/// committed snapshot state without occupying the writer lane for a
+/// transaction that only rolls back. The committing replay re-runs the
+/// decisions authoritatively and rejects a diverged batch.
+async fn plan_session_refresh_on_snapshot(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    request: SessionRefreshBeginOrJoinRequestV1,
+    refresh_key: Option<&SessionRefreshKeyV1>,
+    coverage_request: SessionTemporalCoverageRequestV1,
+    session_id: &SessionId,
+    accepted_at: UtcMicros,
+) -> SessionStoreResult<SessionRefreshSnapshotPlan> {
+    let request = match read_active_generation(conn, session_id).await? {
+        Some((_, active_watermarks)) => {
+            rebase_on_committed_frontier(request, active_watermarks.projection_frontier())?
+        }
+        None => request,
+    };
+    let reset_generation = read_reset_generation(conn, session_id).await?;
+    let request_digest = refresh_binding_digest(&request, reset_generation)?;
+    if read_joinable_operation_by_digest(conn, session_id, &request_digest)
+        .await?
+        .is_some()
+    {
+        return Ok(SessionRefreshSnapshotPlan::Planned(
+            SessionRefreshBeginPlanV1::Joined,
+        ));
+    }
+    if read_running_operation(conn, session_id).await?.is_some() {
+        return Err(SessionStoreError::IdempotencyConflict {
+            context: "session refresh busy",
+        });
+    }
+    require_no_open_candidate(conn, session_id, None, BEGIN_REFRESH).await?;
+    let provisioned_cursor_key =
+        match super::cursor_keys::read_active_session_cursor_key(conn).await? {
+            Some(key) => key,
+            None => return Ok(SessionRefreshSnapshotPlan::NeedsWrite),
+        };
+    let candidate_base = next_generation(conn, session_id).await?;
+    let (active_generation, active_watermarks, minted) =
+        match read_active_generation(conn, session_id).await? {
+            Some(active) => (active.0, active.1, false),
+            None => {
+                // The committing replay mints generation 1 in-transaction
+                // before allocating the candidate, so a session with no
+                // generation rows at all plans the same outcome: the mint
+                // activates generation 1 at the committed frontier and the
+                // candidate becomes generation 2. Any other absent-active
+                // state (rows exist but none active) still needs the
+                // writer lane to decide.
+                if u64::from(candidate_base.value()) != 1 {
+                    return Ok(SessionRefreshSnapshotPlan::NeedsWrite);
+                }
+                let generation = SessionProjectionGenerationV1::new(1)?;
+                let watermarks = SessionFrozenWatermarksV1::new(
+                    generation,
+                    request.target_frontier().committed_through(),
+                    request.target_frontier().committed_through(),
+                    0,
+                );
+                (generation, watermarks, true)
+            }
+        };
+    let candidate_generation = if minted {
+        // The mint raises the durable maximum to 1 before the replay reads
+        // it, so the candidate the commit allocates is one past the
+        // snapshot's empty-table answer.
+        SessionProjectionGenerationV1::new(2)?
+    } else {
+        candidate_base
+    };
+    let mut frozen_watermarks = SessionFrozenWatermarksV1::new(
+        active_generation,
+        request.target_frontier().observed_through(),
+        request.target_frontier().observed_through(),
+        active_watermarks.summary_frontier(),
+    );
+    if let Some(cursor_key) = active_watermarks.cursor_key() {
+        frozen_watermarks = frozen_watermarks.with_cursor_key(cursor_key.clone());
+    } else {
+        frozen_watermarks = frozen_watermarks.with_cursor_key(provisioned_cursor_key);
+    }
+    let attempt = next_operation_attempt(conn, session_id, &request_digest).await?;
+    let operation_id = operation_id_for_digest(&request_digest, attempt)?;
+    let binding = RefreshBinding {
+        generation: candidate_generation,
+        source_frontier: request.target_frontier().committed_through(),
+        target_frontier: request.target_frontier().observed_through(),
+        watermarks: frozen_watermarks,
+        projector_version: PROJECTOR_VERSION.to_owned(),
+        config_digest: config_digest(),
+        binding_digest: request_digest,
+    };
+    let target_frontier = request.target_frontier();
+    let source_targets = match refresh_key {
+        Some(refresh_key) => refresh_key.sources().to_vec(),
+        None => default_refresh_source_targets(conn, session_id, target_frontier).await?,
+    };
+    Ok(SessionRefreshSnapshotPlan::Planned(
+        SessionRefreshBeginPlanV1::Prepared(Box::new(SessionRefreshRecoveryV1 {
+            operation_id,
+            session_id: session_id.clone(),
+            source_targets,
+            coverage_request,
+            source_frontier: binding.source_frontier,
+            target_frontier,
+            candidate_generation: binding.generation,
+            frozen_watermarks: binding.watermarks,
+            projector_version: binding.projector_version,
+            config_digest: binding.config_digest,
+            binding_digest: binding.binding_digest,
+            progress: None,
+            restart_state: SessionRefreshRestartStateV1::BeginProjection,
+            accepted_at,
+        })),
+    ))
+}
+
 /// Resolves the single-source refresh target the recovery decode derives
 /// for a begin request without a refresh key: the session's lowest provider
 /// name, or `all` when none is registered.
@@ -472,6 +603,65 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         let session_id = request.session_id().clone();
         let coverage_request = request.coverage_request().clone();
         let refresh_key = request.refresh_key().cloned();
+        // The begin mints a random cursor key when no active key exists, and
+        // a rolled-back mint leaves the commit replay reading a different key.
+        // Provisioning the shared key first makes both replays deterministic.
+        // An already-active key needs no write, so the common path probes on
+        // a snapshot and only enters the writer lane to mint.
+        let key_snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        let key_active = super::cursor_keys::session_cursor_key_is_active(&key_snapshot).await?;
+        drop(key_snapshot);
+        if !key_active {
+            let transaction = self
+                .begin_write_transaction()
+                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+                .await
+                .map_err(|error| storage(BEGIN_REFRESH, error))?;
+            ensure_active_session_cursor_key_in_transaction(&transaction).await?;
+            transaction
+                .commit()
+                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                .await
+                .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        }
+        // The begin's decision inputs are all deterministic reads (active
+        // generation, reset digest, joinable/running/candidate guards,
+        // provisioned cursor key, next-generation and attempt counters), so
+        // the common path plans on a read snapshot and never occupies the
+        // serialized writer lane for a transaction it would roll back. The
+        // committing replay in `commit_session_refresh_begin_batch_result`
+        // re-runs every decision authoritatively and rejects a diverged
+        // batch, so a plan computed from stale-but-committed state degrades
+        // to the same BeganOnly/Joined outcomes the rolled-back replay
+        // produced. Mint work — a session with no active generation or no
+        // provisioned cursor key — still plans inside the writer lane.
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        // A reset can arrive between the earlier probe and this snapshot;
+        // recheck on the snapshot so a concurrent reset still commits begin
+        // alone through the write path instead of planning against it.
+        if !session_reset_is_pending(&snapshot, &session_id).await? {
+            match plan_session_refresh_on_snapshot(
+                &snapshot,
+                request.clone(),
+                refresh_key.as_ref(),
+                coverage_request.clone(),
+                &session_id,
+                now_micros(BEGIN_REFRESH)?,
+            )
+            .await?
+            {
+                SessionRefreshSnapshotPlan::Planned(plan) => return Ok(plan),
+                SessionRefreshSnapshotPlan::NeedsWrite => drop(snapshot),
+            }
+        } else {
+            drop(snapshot);
+        }
         let transaction = self
             .begin_write_transaction()
             .instrument(tracing::trace_span!("session_temporal.txn.begin"))
@@ -510,22 +700,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 SessionRefreshBeginTxnOutcome::Joined { .. } => SessionRefreshBeginPlanV1::Joined,
             });
         }
-        // The begin mints a random cursor key when no active key exists, and
-        // a rolled-back mint leaves the commit replay reading a different key.
-        // Provisioning the shared key first makes both replays deterministic;
-        // with an active key already committed this transaction writes
-        // nothing and its commit appends no WAL frames.
-        ensure_active_session_cursor_key_in_transaction(&transaction).await?;
-        transaction
-            .commit()
-            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
-            .await
-            .map_err(|error| storage(BEGIN_REFRESH, error))?;
-        let transaction = self
-            .begin_write_transaction()
-            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-            .await
-            .map_err(|error| storage(BEGIN_REFRESH, error))?;
         let outcome =
             begin_session_refresh_in_transaction(&transaction, request, now_micros(BEGIN_REFRESH)?)
                 .await;
@@ -942,30 +1116,24 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             checkpoint_relation_rebuild_control(&execution_control)?;
             return Ok(receipt);
         }
-        drop(snapshot);
-
-        let preflight = self
-            .begin_write_transaction()
-            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-            .await
-            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        // Check the binding on the read snapshot so a stale running
+        // operation fails before any rebuild work runs. The finish
+        // transaction re-validates the same rows before committing, so the
+        // snapshot check buys the same early exit without spending a
+        // serialized writer commit on a read-only preflight.
         let binding = require_running_binding(
-            &preflight,
+            &snapshot,
             request.session_id(),
             request.operation_id(),
             COMPLETE_REFRESH,
         )
         .await?;
+        drop(snapshot);
         if request.frontier().committed_through() != binding.target_frontier {
             return Err(SessionStoreError::InvalidStateTransition {
                 context: "refresh completion target coverage",
             });
         }
-        preflight
-            .commit()
-            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
-            .await
-            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
 
         let relation_projection = rebuild_candidate_session_relations(
             self.inner(),
@@ -975,6 +1143,25 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             COMPLETE_REFRESH,
         )
         .await?;
+
+        // The final-receipt scan only reads, so it rides the reader pool
+        // instead of the serialized writer lane. The write transaction below
+        // re-proves terminal progress and the candidate frontier, which pin
+        // the batches this receipt covers, atomically with the commit.
+        let validation_snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        validate_final_projection_receipt(
+            &validation_snapshot,
+            request.session_id(),
+            binding.generation,
+            &binding.watermarks,
+            &relation_projection,
+            &execution_control,
+        )
+        .await?;
+        drop(validation_snapshot);
 
         let transaction = self
             .begin_write_transaction()
@@ -1000,12 +1187,24 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             COMPLETE_REFRESH,
         )
         .await?;
+        // Terminal progress and the candidate frontier must hold at commit
+        // time, so they are proven inside the transaction that writes the
+        // finish rather than on the snapshot above.
         let progress = require_exact_terminal_progress(
             &transaction,
             request.session_id(),
             request.operation_id(),
             request.frontier(),
             request.coverage(),
+        )
+        .await?;
+        validate_candidate_frontier(
+            &transaction,
+            request.session_id().as_str(),
+            generation_i64(binding.generation, COMPLETE_REFRESH)?,
+            binding.target_frontier,
+            &relation_projection,
+            &execution_control,
         )
         .await?;
         let mut request = request;
@@ -1019,24 +1218,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 context: "refresh completion target coverage",
             });
         }
-        validate_final_projection_receipt(
-            &transaction,
-            request.session_id(),
-            binding.generation,
-            &binding.watermarks,
-            &relation_projection,
-            &execution_control,
-        )
-        .await?;
-        validate_candidate_frontier(
-            &transaction,
-            request.session_id().as_str(),
-            generation_i64(binding.generation, COMPLETE_REFRESH)?,
-            binding.target_frontier,
-            &relation_projection,
-            &execution_control,
-        )
-        .await?;
         acknowledge_relation_receipt(&transaction, &relation_projection).await?;
         let terminal_at = terminal_timestamp(&progress, COMPLETE_REFRESH)?;
         activate_bound_generation(&transaction, request.session_id(), &binding, terminal_at)
@@ -1582,7 +1763,7 @@ async fn read_running_operation(
 }
 
 async fn read_active_generation(
-    conn: &impl crate::handle::SessionTemporalExec,
+    conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
 ) -> SessionStoreResult<Option<(SessionProjectionGenerationV1, SessionFrozenWatermarksV1)>> {
     let mut rows = conn

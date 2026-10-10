@@ -8,6 +8,7 @@ use tracedecay_domain::{
 use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
+use tracing::Instrument as _;
 
 use super::operations::CanonicalPublicationManifest;
 use super::query::{generation_i64, storage, storage_message};
@@ -105,52 +106,14 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 .read_snapshot()
                 .await
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let generation = active_generation(&snapshot, session_id).await?;
-            // Publication freezes the complete retained graph in its effect journal.
-            // Availability can change without removing historical graph members, so
-            // replay that authority rather than deriving membership from live roots.
-            let mut rows = snapshot
-                .query(
-                    "SELECT projection_json FROM session_relation_effect_journal
-                     WHERE session_id = ?1 AND generation = ?2",
-                    params![
-                        session_id.as_str(),
-                        generation_i64(generation, RECONSTRUCT_OPERATION)?
-                    ],
-                )
-                .await
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-            let projection = if let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-            {
-                let encoded: String = row
-                    .get(0)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-                serde_json::from_str::<SessionRelationProjection>(&encoded)
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-            } else {
-                seed_session_relation_projection(
-                    self.inner(),
+            let (generation, projection) = self
+                .load_active_relation_projection(
                     &snapshot,
+                    &scope,
                     session_id,
                     Arc::clone(&cancellation),
                 )
-                .await?
-            };
-            drop(rows);
-            if projection.scope != scope
-                || projection.session_id != *session_id
-                || projection.generation != generation.value()
-            {
-                return Err(SessionStoreError::ReceiptIdentityMismatch {
-                    context: "active relation projection identity",
-                });
-            }
-            enforce_projection_bounds(&projection, DEFAULT_MAX_ENTITIES, DEFAULT_MAX_RELATIONS)?;
-            super::relations::validate_projection(&projection)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+                .await?;
             drop(snapshot);
             let error = match super::relation_receipts::apply_relation_projection(
                 self.inner(),
@@ -187,6 +150,189 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 "active session relation projection kept racing past its retry budget",
             )
         }))
+    }
+
+    /// Reads `session_id`'s active generation and the relation projection
+    /// its publication froze, seeding one when the journal holds none, and
+    /// checks the projection's identity and bounds.
+    async fn load_active_relation_projection(
+        &self,
+        snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+        scope: &SessionRelationScope,
+        session_id: &SessionId,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> SessionStoreResult<(SessionProjectionGenerationV1, SessionRelationProjection)> {
+        let generation = active_generation(snapshot, session_id).await?;
+        // Publication freezes the complete retained graph in its effect journal.
+        // Availability can change without removing historical graph members, so
+        // replay that authority rather than deriving membership from live roots.
+        let mut rows = snapshot
+            .query(
+                "SELECT projection_json FROM session_relation_effect_journal
+                 WHERE session_id = ?1 AND generation = ?2",
+                params![
+                    session_id.as_str(),
+                    generation_i64(generation, RECONSTRUCT_OPERATION)?
+                ],
+            )
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let projection = if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        {
+            let encoded: String = row
+                .get(0)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            serde_json::from_str::<SessionRelationProjection>(&encoded)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        } else {
+            seed_session_relation_projection(self.inner(), snapshot, session_id, cancellation)
+                .await?
+        };
+        drop(rows);
+        if projection.scope != *scope
+            || projection.session_id != *session_id
+            || projection.generation != generation.value()
+        {
+            return Err(SessionStoreError::ReceiptIdentityMismatch {
+                context: "active relation projection identity",
+            });
+        }
+        enforce_projection_bounds(&projection, DEFAULT_MAX_ENTITIES, DEFAULT_MAX_RELATIONS)?;
+        super::relations::validate_projection(&projection)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        Ok((generation, projection))
+    }
+
+    /// Applies every listed session's active relation projection through one
+    /// shared snapshot and acknowledgement transaction, for fixtures that
+    /// materialize a large corpus without concurrent publishers.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn apply_active_session_relation_projections_for_test(
+        &self,
+        session_ids: &[SessionId],
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> SessionStoreResult<()> {
+        let (scope, _) = self
+            .session_relation_store()
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let mut projections = Vec::with_capacity(session_ids.len());
+        for session_id in session_ids {
+            let (_, projection) = self
+                .load_active_relation_projection(
+                    &snapshot,
+                    &scope,
+                    session_id,
+                    Arc::clone(&cancellation),
+                )
+                .await?;
+            projections.push(projection);
+        }
+        drop(snapshot);
+        self.apply_session_relation_projection_items(&projections, cancellation)
+            .await?
+            .into_iter()
+            .collect()
+    }
+
+    /// Applies each pre-validated projection through one shared receipt-check
+    /// snapshot and one acknowledgement transaction, returning every item's
+    /// own outcome so callers keep per-candidate failure semantics. Each
+    /// acknowledgement runs under its own savepoint: a failed write or
+    /// acknowledgement rolls back that item's partial mutation and leaves its
+    /// receipt pending for the next recovery pass exactly as the serial apply
+    /// does, without poisoning the rest of the shared commit.
+    pub(crate) async fn apply_session_relation_projection_items(
+        &self,
+        projections: &[SessionRelationProjection],
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> SessionStoreResult<Vec<SessionStoreResult<()>>> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let mut outcomes = Vec::with_capacity(projections.len());
+        let mut acknowledge = Vec::new();
+        for (index, projection) in projections.iter().enumerate() {
+            let outcome = match require_not_cancelled(&cancellation) {
+                Err(error) => Err(error),
+                Ok(()) => super::relation_receipts::write_relation_projection_on_snapshot(
+                    self.inner(),
+                    &snapshot,
+                    projection,
+                    Arc::clone(&cancellation),
+                )
+                .await
+                .map(|_| ()),
+            };
+            if outcome.is_ok() {
+                acknowledge.push(index);
+            }
+            outcomes.push(outcome);
+        }
+        drop(snapshot);
+        if acknowledge.is_empty() {
+            return Ok(outcomes);
+        }
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        // Each acknowledgement runs inside its own savepoint so a failed
+        // acknowledge rolls back only that item's partial mutation; the
+        // per-session apply used to roll its whole transaction back, and a
+        // shared commit must not turn that rollback into a committed
+        // applied-without-journal receipt. Savepoint control itself is
+        // transaction-critical: when SAVEPOINT or RELEASE/ROLLBACK TO fails,
+        // the whole transaction rolls back rather than letting any partially
+        // mutated acknowledgement reach the shared commit.
+        for index in acknowledge {
+            if let Err(error) = transaction
+                .execute_batch("SAVEPOINT relation_projection_ack")
+                .await
+            {
+                transaction
+                    .rollback()
+                    .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
+                    .await
+                    .map_err(|rollback| storage(RECONSTRUCT_OPERATION, rollback))?;
+                return Err(storage(RECONSTRUCT_OPERATION, error));
+            }
+            let result = super::relation_receipts::acknowledge_relation_receipt(
+                &transaction,
+                &projections[index],
+            )
+            .await;
+            let savepoint = if result.is_ok() {
+                "RELEASE relation_projection_ack"
+            } else {
+                "ROLLBACK TO relation_projection_ack; RELEASE relation_projection_ack"
+            };
+            if let Err(error) = transaction.execute_batch(savepoint).await {
+                transaction
+                    .rollback()
+                    .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
+                    .await
+                    .map_err(|rollback| storage(RECONSTRUCT_OPERATION, rollback))?;
+                return Err(storage(RECONSTRUCT_OPERATION, error));
+            }
+            if let Err(error) = result {
+                outcomes[index] = Err(error);
+            }
+        }
+        transaction
+            .commit()
+            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        Ok(outcomes)
     }
 
     #[tracing::instrument(
@@ -285,6 +431,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         pending.truncate(limit);
         let mut recovered = 0_usize;
         let mut processed = 0_usize;
+        let mut ready: Vec<(usize, SessionRelationProjection)> = Vec::new();
         for candidate in &pending {
             require_not_cancelled(&cancellation)?;
             processed = processed.saturating_add(1);
@@ -340,22 +487,37 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                     .await?;
                 continue;
             }
-            match super::relation_receipts::apply_relation_projection(
-                self.inner(),
-                &projection,
+            ready.push((processed - 1, projection));
+        }
+        // One batched apply writes every candidate's projection under a
+        // shared receipt snapshot and acknowledges them in a single commit,
+        // instead of each candidate paying its own snapshot, replace
+        // transaction, and acknowledgement transaction. Per-candidate results
+        // keep the same settle semantics as the serial apply.
+        let outcomes = self
+            .apply_session_relation_projection_items(
+                &ready
+                    .iter()
+                    .map(|(_, projection)| projection.clone())
+                    .collect::<Vec<_>>(),
                 Arc::clone(&cancellation),
             )
-            .await
-            {
-                Ok(_) => recovered = recovered.saturating_add(1),
+            .await?;
+        for ((candidate_index, _), outcome) in ready.into_iter().zip(outcomes) {
+            match outcome {
+                Ok(()) => recovered = recovered.saturating_add(1),
                 Err(SessionStoreError::Cancelled) => return Err(SessionStoreError::Cancelled),
                 Err(SessionStoreError::DeadlineExceeded) => {
                     return Err(SessionStoreError::DeadlineExceeded);
                 }
                 Err(error) => {
                     let (failure_code, permanent) = relation_apply_failure_disposition(&error);
-                    self.settle_relation_recovery_failure(candidate, failure_code, permanent)
-                        .await?;
+                    self.settle_relation_recovery_failure(
+                        &pending[candidate_index],
+                        failure_code,
+                        permanent,
+                    )
+                    .await?;
                 }
             }
         }
@@ -1750,3 +1912,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod store_regression_tests;

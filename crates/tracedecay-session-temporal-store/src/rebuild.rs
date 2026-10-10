@@ -4,6 +4,7 @@ use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
 use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_temporal_query::execution::TemporalPortError;
+use tracing::Instrument as _;
 
 use super::projection::{base_source_frontier, canonical_parent_message_resolver};
 use super::query::{ACTIVATE_OPERATION, now_micros, storage, storage_message};
@@ -51,27 +52,17 @@ pub(super) async fn rebuild_candidate_session_relations(
     drop(snapshot);
 
     checkpoint_relation_rebuild_control(control)?;
-    let receipt = {
-        use tracing::Instrument as _;
-        {
-            database
-                .begin_write_transaction()
-                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-                .await
-                .map_err(|error| storage(operation, error))?
-        }
-    };
+    let receipt = database
+        .begin_write_transaction()
+        .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+        .await
+        .map_err(|error| storage(operation, error))?;
     record_relation_receipt(&receipt, &reconstructed, now_micros(operation)?.0).await?;
-    {
-        use tracing::Instrument as _;
-        {
-            receipt
-                .commit()
-                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
-                .await
-                .map_err(|error| storage(operation, error))?
-        }
-    };
+    receipt
+        .commit()
+        .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+        .await
+        .map_err(|error| storage(operation, error))?;
     checkpoint_relation_rebuild_control(control)?;
 
     let apply_cancellation = execution_control_graph_cancellation(control);
