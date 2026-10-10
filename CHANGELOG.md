@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* **mcp:** `tracedecay serve` lists a 17-tool core set with full schemas and stubs the rest (name, short description, accept-anything schema); calling a stub hydrates the full schema and announces `notifications/tools/list_changed`, each served list logs a SHA-256 of the sorted tool names, and every tool still answers `tools/call` by name ([#3374](https://github.com/ScriptedAlchemy/tracedecay/issues/3374))
+* **mcp:** `tracedecay serve` can advertise a 17-tool core set plus `tracedecay_tool_search`, or keep every catalog name as a stub that hydrates on call; both remain while host-native tool deferral is measured, each served list logs a SHA-256 of the sorted tool names, and every tool still answers `tools/call` by name ([#3374](https://github.com/ScriptedAlchemy/tracedecay/issues/3374))
 
 ### Bug Fixes
 

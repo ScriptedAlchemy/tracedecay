@@ -73,6 +73,7 @@ pub async fn should_proxy_serve_to_daemon(
     proxy_required_by_platform(false, socket_path.exists())
 }
 
+#[cfg(unix)]
 #[tracing::instrument(name = "daemon.engine.proxy.stdio", level = "trace", skip_all)]
 pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
@@ -90,6 +91,25 @@ pub async fn proxy_stdio_to_daemon(
     .await
 }
 
+#[cfg(not(unix))]
+#[tracing::instrument(name = "daemon.engine.proxy.stdio", level = "trace", skip_all)]
+pub async fn proxy_stdio_to_daemon(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    replay_line: Option<String>,
+) -> Result<()> {
+    let mut transport = StdioTransport::new();
+    let mut surface = ToolSurface::from_env()?;
+    if let Some(line) = replay_line {
+        proxy_one_request(socket_path, handshake, &line, &mut surface, &mut transport).await?;
+    }
+    while let Some(line) = transport.read_line().await? {
+        proxy_one_request(socket_path, handshake, &line, &mut surface, &mut transport).await?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 #[derive(Default)]
 pub(crate) struct ProxyInitializeMetadata {
     daemon_version: Option<String>,
@@ -178,7 +198,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
         &mut eof_rx,
         &mut writer,
         drain_bound,
-        ToolSurface::new(),
+        ToolSurface::from_env()?,
     );
     let result = tokio::try_join!(read_host, proxy);
     drop(eof_tx);
@@ -727,8 +747,9 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
             .is_some_and(json_rpc_error_is_project_open_retryable)
 }
 
-/// Sends one host request through this session's tool surface: a `tools/list`
-/// answer stubs pruned tools, and a stub `tools/call` hydrates the full schema.
+/// Sends one host request through this session's tool surface: search answers
+/// from the daemon catalog, stubs hydrate on call, and `tools/list` follows
+/// the session advertisement.
 async fn send_host_request(
     surface: &mut ToolSurface,
     socket_path: &Path,
@@ -736,6 +757,20 @@ async fn send_host_request(
     request: &DaemonProxyRequest<'_>,
     cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
 ) -> Result<Vec<String>> {
+    if let Some((id, query)) = surface.search_request(request.parsed.as_ref()) {
+        let catalog_line =
+            serde_json::json!({ "jsonrpc": "2.0", "id": "tool-search", "method": "tools/list" })
+                .to_string();
+        let catalog = DaemonProxyRequest::new(&catalog_line);
+        let listing = send_daemon_request_with_project_open_retry(
+            socket_path,
+            handshake,
+            &catalog,
+            cancellation,
+        )
+        .await?;
+        return Ok(surface.answer_search(&id, &query, &listing));
+    }
     let mut responses =
         send_daemon_request_with_project_open_retry(socket_path, handshake, request, cancellation)
             .await?;
@@ -744,6 +779,38 @@ async fn send_host_request(
         responses.push(changed);
     }
     Ok(responses)
+}
+
+#[cfg(not(unix))]
+#[tracing::instrument(name = "daemon.engine.proxy.one_request", level = "trace", skip_all)]
+async fn proxy_one_request(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    line: &str,
+    surface: &mut ToolSurface,
+    transport: &mut impl McpTransport,
+) -> Result<()> {
+    if line.trim().is_empty() {
+        return Ok(());
+    }
+    let request = DaemonProxyRequest::new(line);
+    let (_cancellation_tx, mut cancellation_rx) = tokio::sync::watch::channel(None);
+    for response in send_host_request(
+        surface,
+        socket_path,
+        handshake,
+        &request,
+        &mut cancellation_rx,
+    )
+    .await?
+    {
+        transport.write_line(&response).await?;
+        if !response.ends_with('\n') {
+            transport.write_line("\n").await?;
+        }
+    }
+    transport.flush().await?;
+    Ok(())
 }
 
 #[tracing::instrument(name = "daemon.engine.proxy.request_retry", level = "trace", skip_all)]
