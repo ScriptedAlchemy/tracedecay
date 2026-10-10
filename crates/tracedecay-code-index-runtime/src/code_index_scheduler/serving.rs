@@ -414,10 +414,10 @@ pub struct LatestCodeTextGenerationV1 {
     /// The first catalog warm finishes on a blocking task that does not
     /// wake the parked worker. One permit lets that worker retry park-release
     /// without posting a cadence arrival.
-    catalog_warm_settled: Arc<tokio::sync::Notify>,
+    pub(super) catalog_warm_settled: Arc<tokio::sync::Notify>,
     /// Arm the first-warm park-release waiter once per text owner so a park
     /// loop cannot spawn a waiter per skip.
-    park_release_after_catalog_warm_armed: Arc<AtomicBool>,
+    pub(super) park_release_after_catalog_warm_armed: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
