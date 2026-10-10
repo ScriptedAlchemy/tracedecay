@@ -244,6 +244,9 @@ async fn release_capacity_retired_stores(stores: CapacityRetirementStores) -> Re
     let telemetry_sampling = administration.store_telemetry_sampling();
     telemetry_sampling.release_retained_handle(&project_sessions_path);
     telemetry_sampling.release_retained_handle(&owner.graph_db_path);
+    invocation
+        .settle_store_observability_retirement(&project_sessions_path)
+        .await?;
     runtime_registry
         .retire_project_session_relation_graph(&project_id)
         .await?;

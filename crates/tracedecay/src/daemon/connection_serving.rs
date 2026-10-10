@@ -170,7 +170,7 @@ fn serve_routed_rmcp_connection_inner(
         let transport = transport
             .with_rmcp_selected_project_responses(adapter.selected_project_responses())
             .with_rmcp_work_delivery_settlement(adapter.work_delivery_settlement());
-        let running = match adapter.serve(transport).await {
+        let running = match transport.serve(adapter).await {
             Ok(running) => running,
             // The client left before a request settled the handshake; every
             // frame it sent was already answered or refused on the wire.
@@ -1269,14 +1269,13 @@ fn serve_broker_socket_client_inner(
                 } else {
                     None
                 };
-                let project_open = match handshake.project_path.as_deref() {
+                let (project_open, stalled_failure) = match handshake.project_path.as_deref() {
                     Some(project_path) => {
                         let route = ProjectRouteKey::from_handshake(project_path, &handshake)?;
-                        project_open_tasks(engine.project_open_gates.as_ref())
-                            .await
-                            .status(&route)
+                        let tasks = project_open_tasks(engine.project_open_gates.as_ref()).await;
+                        (tasks.status(&route), tasks.stalled_failure(&route))
                     }
-                    None => None,
+                    None => (None, None),
                 };
                 let Some(setup_activity) = Box::pin(serve_core_doctor_runtime_request(
                     &mut transport,
@@ -1284,6 +1283,7 @@ fn serve_broker_socket_client_inner(
                     &engine.store_administration,
                     CoreDoctorStatusV1 {
                         project_open,
+                        stalled_failure,
                         git_watcher_health,
                     },
                     setup_activity,
@@ -1796,14 +1796,13 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         drop(setup_activity);
         return Ok(());
     }
-    let project_open = match handshake.project_path.as_deref() {
+    let (project_open, stalled_failure) = match handshake.project_path.as_deref() {
         Some(project_path) => {
             let route = ProjectRouteKey::from_handshake(project_path, &handshake)?;
-            project_open_tasks(project_open_gates.as_ref())
-                .await
-                .status(&route)
+            let tasks = project_open_tasks(project_open_gates.as_ref()).await;
+            (tasks.status(&route), tasks.stalled_failure(&route))
         }
-        None => None,
+        None => (None, None),
     };
     let Some(setup_activity) = Box::pin(serve_core_doctor_runtime_request(
         &mut transport,
@@ -1811,6 +1810,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         &store_administration,
         CoreDoctorStatusV1 {
             project_open,
+            stalled_failure,
             git_watcher_health: None,
         },
         setup_activity,

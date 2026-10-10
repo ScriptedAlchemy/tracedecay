@@ -456,6 +456,7 @@ fn tool_message_preserves_authored_message_and_typed_result() {
             invocation_id: None,
             content: Value::String(content),
             success: None,
+            ..
         } if content == "safe fixture content"
     )));
     assert!(envelope.facts().iter().any(|fact| matches!(

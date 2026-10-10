@@ -259,6 +259,7 @@ fn transaction_preview(
         current.scope.repository_id.clone(),
         current.scope.worktree_id.clone(),
         current.evaluated_at,
+        None,
     )
     .unwrap();
     let preview_id = GitIndexPreviewId::new(format!("preview.catalog.{suffix}")).unwrap();

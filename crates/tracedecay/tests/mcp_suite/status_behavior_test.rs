@@ -103,7 +103,7 @@ async fn sealed_json_status(
     harness: &ProductionProjectCompositionHarnessV1,
     project_root: &Path,
 ) -> Value {
-    let payload = parse_status(
+    let waited = parse_status(
         &call_status(
             harness,
             project_root,
@@ -115,11 +115,19 @@ async fn sealed_json_status(
         .await,
     );
     assert_eq!(
-        payload["wait"],
+        waited["wait"],
         json!({ "outcome": "reached" }),
-        "tracedecay_status did not report a ready sealed generation: {payload}"
+        "tracedecay_status did not report a ready sealed generation: {waited}"
     );
-    payload
+    // The worker parks after sealing and releases the idle graph; status only
+    // observes residency. A graph read re-warms it before the owner inventory.
+    tool_text(
+        harness
+            .call_tool(project_root, "tracedecay_files", json!({"format": "json"}))
+            .await
+            .expect("production graph read must reopen the sealed generation"),
+    );
+    parse_status(&call_status(harness, project_root, json!({ "format": "json" })).await)
 }
 
 /// The sealed status once session projection has converged. Readiness covers

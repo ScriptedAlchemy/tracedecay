@@ -89,9 +89,8 @@ pub use retention::{
 /// adopt would let a session compress against one budget and be replayed
 /// against another.
 ///
-/// Named distinctly from the chars/4 `estimate_tokens` helpers in read-mode
-/// and global-db surfaces so those cannot be imported into this budget path
-/// by accident.
+/// Named distinctly from the served-output `o200k_base` count so this budget
+/// path cannot be imported into tool-result accounting by accident.
 pub(crate) fn lcm_budget_tokens(text: &str) -> i64 {
     text.split_whitespace().count().max(1) as i64
 }

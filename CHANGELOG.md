@@ -7,11 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+* **sessions:** measure unused returned tool context from stored history ([#3372](https://github.com/ScriptedAlchemy/tracedecay/issues/3372))
+
 ### Bug Fixes
 
 * **session:** report HistoricalRetry from `lcm_load_session` while a foreign provider cursor is retrying, instead of a bare TemporalStoreUnavailable ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))
-* **session:** skip Claude workflow `journal.jsonl` during historical catch-up so real session transcripts occupy the source window; OpenCode snapshot records reuse the batch generation instead of a per-record hash that CAS-conflicts ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))
+* **session:** skip Claude workflow `journal.jsonl` during historical catch-up so real session transcripts occupy the source window; OpenCode snapshot records carry a content-derived generation and the batch generation folds database write state, so in-place row edits re-project ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))
+* **sessions:** record a real `o200k_base` `token_count` and a `cut` marker on stored `tool_result` facts at ingest; `source_read` no longer writes chars/4 ([#3397](https://github.com/ScriptedAlchemy/tracedecay/issues/3397))
 * **cli:** give explicit upgrade lookups their own GitHub deadline so a 1s advisory budget cannot fail `tracedecay upgrade` ([#3371](https://github.com/ScriptedAlchemy/tracedecay/issues/3371))
+* **git:** settle `git_hunks` within its existing deadline while preserving exact worktree identity and releasing the real index lock on cancellation ([#3360](https://github.com/ScriptedAlchemy/tracedecay/issues/3360))
+* **grep:** admit interactive source scans on their own worker pool so background verification cannot hold the indexing CPU FIFO across the 10s source-search deadline ([#3359](https://github.com/ScriptedAlchemy/tracedecay/issues/3359))
 
 ### Performance Improvements
 

@@ -11,6 +11,7 @@ use tracedecay_domain::git::{
     GitChangeKindV1, GitDegradationV1, GitHeadStateV1, GitObjectFormatV1, GitStatusEntryV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::git::GitCommandBounds;
 use tracedecay_runtime_core::git_repository::{
     GitHistoryBudget, GitHistoryOptions, GitHistoryTermination, GitRepositoryAuthority,
     GitRepositoryError,
@@ -243,6 +244,45 @@ fn authority_observes_dirty_files_without_sync() {
             .commits
             .len(),
         1
+    );
+}
+
+#[test]
+fn bounded_status_answers_its_request_deadline_and_cancellation() {
+    let fixture = Fixture::init("sha1");
+    fixture.write("tracked.txt", "before\n");
+    fixture.commit("initial");
+    fixture.write("tracked.txt", "after\n");
+    let authority = GitRepositoryAuthority::discover(fixture.path()).unwrap();
+
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let error = authority
+        .status_bounded(&GitCommandBounds {
+            cancel: Some(cancelled),
+            ..GitCommandBounds::default()
+        })
+        .expect_err("a cancelled request must not report a status");
+    assert!(
+        matches!(&error, GitRepositoryError::Operation { operation: "status", detail } if detail == "git read cancelled"),
+        "{error:?}"
+    );
+    let error = authority
+        .status_bounded(&GitCommandBounds {
+            deadline: std::time::Instant::now(),
+            ..GitCommandBounds::default()
+        })
+        .expect_err("an expired request must not report a status");
+    assert!(
+        matches!(&error, GitRepositoryError::Operation { operation: "status", detail } if detail == "git read deadline exceeded"),
+        "{error:?}"
+    );
+
+    assert_eq!(
+        authority
+            .status_bounded(&GitCommandBounds::default())
+            .unwrap(),
+        authority.status().unwrap()
     );
 }
 

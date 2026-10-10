@@ -75,6 +75,8 @@ pub enum GitCommandError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to write git stdin: {0}")]
+    WriteInput(#[source] std::io::Error),
     #[error("failed to wait for git: {0}")]
     Wait(#[source] std::io::Error),
 }
@@ -312,6 +314,52 @@ pub fn bounded_command_output(
     })
 }
 
+/// Runs in-process Git work under the bounds that govern Git subprocesses.
+///
+/// `work` must stop once `interrupt` is raised. A watchdog raises it when the
+/// request is cancelled or its deadline passes, and the work's output is then
+/// discarded because an interrupted walk returns whatever it had so far.
+pub(crate) fn run_interruptible<T>(
+    bounds: &GitCommandBounds,
+    interrupt: &std::sync::atomic::AtomicBool,
+    work: impl FnOnce() -> T,
+) -> Result<T, GitCommandError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .map_err(GitCommandError::Wait)?;
+    let cancellation = bounds.cancel.clone();
+    let deadline = tokio::time::Instant::from_std(bounds.deadline);
+    let (finished, settled) = tokio::sync::oneshot::channel::<()>();
+    std::thread::scope(|scope| {
+        let watchdog = scope.spawn(move || {
+            let fired = runtime.block_on(async {
+                tokio::select! {
+                    biased;
+                    () = wait_for_cancellation(cancellation) => Some(GitCommandError::Cancelled),
+                    () = tokio::time::sleep_until(deadline) => {
+                        Some(GitCommandError::DeadlineExceeded)
+                    }
+                    _ = settled => None,
+                }
+            });
+            if fired.is_some() {
+                interrupt.store(true, std::sync::atomic::Ordering::Release);
+            }
+            fired
+        });
+        let output = work();
+        let _ = finished.send(());
+        match watchdog.join() {
+            Ok(None) => Ok(output),
+            Ok(Some(error)) => Err(error),
+            Err(_) => Err(GitCommandError::Wait(std::io::Error::other(
+                "in-process Git watchdog panicked",
+            ))),
+        }
+    })
+}
+
 struct BoundedRead {
     bytes: Vec<u8>,
     exceeded: bool,
@@ -430,9 +478,6 @@ async fn run_bounded_command(
     if process_outcome.is_err() {
         terminate_child(&mut child).await;
     }
-    if let Some(writer) = input_writer {
-        let _ = writer.await;
-    }
     let status = process_outcome?;
     // Draining stays under the same deadline and cancellation as the process:
     // a descendant that inherited the child's stdout keeps the pipe open after
@@ -440,6 +485,14 @@ async fn run_bounded_command(
     // outlive the caller's deadline. The reader tasks are dropped with this
     // runtime, which closes our pipe ends.
     let drained = async {
+        if let Some(writer) = input_writer {
+            let written = writer.await.map_err(|error| {
+                GitCommandError::WriteInput(std::io::Error::other(error.to_string()))
+            })?;
+            if status.success() {
+                written.map_err(GitCommandError::WriteInput)?;
+            }
+        }
         let stdout = join_reader(stdout_reader, "stdout").await?;
         let stderr = join_reader(stderr_reader, "stderr").await?;
         Ok::<_, GitCommandError>((stdout, stderr))

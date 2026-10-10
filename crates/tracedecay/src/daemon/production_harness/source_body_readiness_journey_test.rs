@@ -22,6 +22,16 @@ async fn source_body_serves_while_the_released_catalog_cannot_rewarm() {
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
         .unwrap();
+    let lookup = tool_payload(
+        &harness
+            .call_tool(
+                &project,
+                "tracedecay_find_exact_symbol",
+                serde_json::json!({"name": "source_anchor", "format": "json"}),
+            )
+            .await
+            .unwrap(),
+    );
     let project_id = ProjectId::new(harness.project_id(&project).await.unwrap()).unwrap();
     let scope =
         tracedecay_code_index_runtime::resolved_scope_for_project(&project, &project_id).unwrap();
@@ -38,25 +48,16 @@ async fn source_body_serves_while_the_released_catalog_cannot_rewarm() {
     store
         .warm_interactive_catalog_with_cancellation(None, Arc::new(NeverCancelled))
         .unwrap();
-    let lookup = tool_payload(
-        &harness
-            .call_tool(
-                &project,
-                "tracedecay_find_exact_symbol",
-                serde_json::json!({"name": "source_anchor", "format": "json"}),
-            )
-            .await
-            .unwrap(),
-    );
     let node_id = lookup["matches"][0]["id"].as_str().unwrap();
     let occurrence = SymbolOccurrenceId::new(node_id).unwrap();
-    let reader = store
-        .interactive_reader_with_cancellation(store.generation(), Arc::new(NeverCancelled))
-        .unwrap();
+    // An admitted reader pins the catalog, so release it before retaining the engine.
     assert!(matches!(
         store.release_interactive_catalog(),
         CodeGraphCatalogReleaseV1::Released { .. }
     ));
+    let reader = store
+        .interactive_reader_with_cancellation(store.generation(), Arc::new(NeverCancelled))
+        .unwrap();
     let held_store = Arc::clone(&store);
     let (held_tx, held_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = mpsc::channel::<()>();

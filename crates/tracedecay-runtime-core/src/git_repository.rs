@@ -1120,6 +1120,28 @@ impl GitRepositoryAuthority {
     /// status directly from the current index and working tree.
     #[tracing::instrument(name = "runtime_core.git.status", level = "trace", skip_all)]
     pub fn status(&self) -> Result<GitRepositoryStatus, GitRepositoryError> {
+        self.collect_status(None)
+    }
+
+    /// [`Self::status`] under the deadline and cancellation that bound the
+    /// request's Git subprocesses. The walk stops when either fires, and that
+    /// failure is returned instead of the partial status gix leaves behind.
+    #[tracing::instrument(name = "runtime_core.git.status_bounded", level = "trace", skip_all)]
+    pub fn status_bounded(
+        &self,
+        bounds: &crate::git::GitCommandBounds,
+    ) -> Result<GitRepositoryStatus, GitRepositoryError> {
+        let interrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        crate::git::run_interruptible(bounds, &interrupt, || {
+            self.collect_status(Some(Arc::clone(&interrupt)))
+        })
+        .map_err(|error| operation("status", error))?
+    }
+
+    fn collect_status(
+        &self,
+        interrupt: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<GitRepositoryStatus, GitRepositoryError> {
         use gix::diff::index::ChangeRef;
         use gix::dir::entry::Status as DirectoryStatus;
         use gix::status::Item;
@@ -1138,6 +1160,9 @@ impl GitRepositoryAuthority {
         platform.dirwalk_options_mut(|options| {
             options.set_emit_ignored(Some(gix::dir::walk::EmissionMode::Matching));
         });
+        if let Some(interrupt) = interrupt {
+            platform = platform.should_interrupt_owned(interrupt);
+        }
         let status = platform
             .into_iter(Vec::<gix::bstr::BString>::new())
             .map_err(|error| operation("status", error))?;
