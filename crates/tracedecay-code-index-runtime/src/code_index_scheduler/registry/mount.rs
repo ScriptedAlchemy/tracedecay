@@ -1407,14 +1407,22 @@ impl CodeIndexSchedulerRegistryV1 {
                     .is_some_and(LatestCodeTextGenerationV1::uses_partitioned_manifest);
                 // A revision-7 owner can restore its retained persistent graph
                 // directly from the verified head. Give that recovery exactly
-                // one empty-slot pass before the dirty source capture creates
-                // its successor. Once the retained graph is Ready, this guard
-                // falls through to the ordinary reconciliation path instead of
-                // repeatedly consuming the successor's wake as a Noop.
+                // one empty-slot *mount* pass before the dirty source capture
+                // creates its successor. Once the retained graph is Ready, this
+                // guard falls through to the ordinary reconciliation path
+                // instead of repeatedly consuming the successor's wake as a
+                // Noop.
+                //
+                // Park also empties the decode seat. That is not a remount:
+                // a later HookHint / GitWatcher / QueryAdmission must capture
+                // the dirty source on the arrival that requested it. Stealing
+                // that wake for reserved recovery published the edit on an
+                // unattributable BusyFollowUp and wiped clone-update duration.
                 let retained_partitioned_graph_recovery_pending = graph_activation_enabled
                     && !graph_activation_deferred
                     && serving_empty
                     && !retained_graph_head_recovery_attempted
+                    && trigger == CodeIndexCadenceTriggerV1::Mount
                     && retained_text.as_ref().is_some_and(|text| {
                         text.uses_partitioned_manifest() && text.interactive_graph_store().is_err()
                     });
