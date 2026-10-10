@@ -266,65 +266,54 @@ async fn a_parked_worktree_releases_graph_owners_after_the_first_catalog_warm() 
     drop(seated);
 
     let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
-    loop {
+    let warming = loop {
         let current = registry
             .latest_text_serving_for_root(&root)
             .await
             .expect("serving text");
-        if !matches!(
-            current.code_graph_serving_readiness(),
-            CodeGraphServingReadinessV1::Warming { .. }
-        ) && let Some(latest) = registry
+        if let Some(latest) = registry
             .latest_complete_serving_for_test(fixture.path())
             .await
         {
             install_warming_graph_store_on_text(&current, &latest);
         }
+        wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+        registry
+            .release_decode_when_parked_for_test(fixture.path())
+            .await;
         let current = registry
             .latest_text_serving_for_root(&root)
             .await
             .expect("serving text");
-        let kinds = graph_copy_kinds(&owners.report(Instant::now()));
-        if matches!(
-            current.code_graph_serving_readiness(),
-            CodeGraphServingReadinessV1::Warming { .. }
-        ) && kinds.contains(&ResidentOwnerKindV1::GraphEngine)
+        let first_warm = current.interactive_graph_store().is_ok_and(|store| {
+            !store.interactive_catalog_has_completed_a_warm()
+                && store.serving_engine_bytes().ok().flatten().is_some()
+        });
+        if first_warm
+            && matches!(
+                current.code_graph_serving_readiness(),
+                CodeGraphServingReadinessV1::Warming { .. }
+            )
         {
-            break;
+            break current;
         }
         assert!(
             Instant::now() <= deadline,
-            "first catalog warm must be resident before park: {:?}",
+            "first catalog warm must still be in progress after park: {:?}",
             owners.report(Instant::now())
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    };
 
-    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
-    registry
-        .release_decode_when_parked_for_test(fixture.path())
-        .await;
-    let warming = registry
-        .latest_text_serving_for_root(&root)
-        .await
-        .expect("serving text");
     assert!(
         graph_copy_kinds(&owners.report(Instant::now()))
             .contains(&ResidentOwnerKindV1::GraphEngine),
         "the first catalog warm still needs the engine it opened a reader on"
     );
-    assert!(
-        matches!(
-            warming.code_graph_serving_readiness(),
-            CodeGraphServingReadinessV1::Warming { .. }
-        ),
-        "park during the first warm must not treat the catalog as ready"
-    );
 
-    let graph_store = warming
+    warming
         .interactive_graph_store()
-        .expect("warming graph store");
-    graph_store
+        .expect("warming graph store")
         .warm_interactive_catalog_with_cancellation(
             None,
             Arc::new(tracedecay_graph_db::NeverCancelled),
@@ -332,33 +321,28 @@ async fn a_parked_worktree_releases_graph_owners_after_the_first_catalog_warm() 
         .expect("finish the first catalog warm");
     warming.note_catalog_warm_settled();
 
-    loop {
-        let current = registry
-            .latest_text_serving_for_root(&root)
-            .await
-            .expect("serving text");
-        let parked = owners.report(Instant::now());
-        let catalog_gone = !graph_copy_kinds(&parked).contains(&ResidentOwnerKindV1::GraphCatalog);
-        let engine_gone = !graph_copy_kinds(&parked).contains(&ResidentOwnerKindV1::GraphEngine);
-        let released = current
+    let current = registry
+        .latest_text_serving_for_root(&root)
+        .await
+        .expect("serving text");
+    assert!(
+        current
             .interactive_graph_store()
-            .is_ok_and(|store| store.interactive_catalog_bytes().is_none());
-        if catalog_gone && engine_gone && released {
-            assert!(
-                matches!(
-                    current.code_graph_serving_readiness(),
-                    CodeGraphServingReadinessV1::Warming { .. }
-                ),
-                "after the first warm, park-release reports warming until a read reseats"
-            );
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "the first catalog warm must retry park-release without a cadence wake: {parked:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+            .is_ok_and(|store| store.interactive_catalog_bytes().is_none()),
+        "the first catalog warm must retry park-release without a cadence wake"
+    );
+    assert!(
+        !graph_copy_kinds(&owners.report(Instant::now()))
+            .contains(&ResidentOwnerKindV1::GraphCatalog),
+        "the catalog owner must leave after the first warm settles"
+    );
+    assert!(
+        matches!(
+            current.code_graph_serving_readiness(),
+            CodeGraphServingReadinessV1::Warming { .. }
+        ),
+        "after the first warm, park-release reports warming until a read reseats"
+    );
 
     registry.shutdown().await;
 }
