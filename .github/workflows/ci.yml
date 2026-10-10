@@ -297,13 +297,15 @@ jobs:
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
   # Root suites and the full-daemon memory journey reserve HOST_CPUS.
-  # Workspace suites reserve one CPU each so they can overlap jobs=4 rustc
-  # (run 37978596669: workspace-a 36m / workspace-b 41m with the shared
-  # ci-linux-test disk cache). A separate workspace cache prefix went cold
-  # on first use (run 38024749241: 0 disk-cache hits, ~74m) because
-  # restore-keys stop at the first matching empty prefix. Share the root
-  # family cache; root-b alone saves so matrix jobs do not race the key.
-  # root-b and workspace-b catch unlisted targets in their groups.
+  # Workspace suites reserve one CPU each so they can overlap jobs=4 rustc.
+  # Workspace families keep their own cache-keys: a family saved only by
+  # another shard never persists this shard's own test binaries (root-b
+  # builds //crates/tracedecay only, so member-crate test outputs would
+  # recompile every run). Matrix legs share github.job, so two legs under
+  # one prefix would save the same key; each workspace leg saves its own
+  # prefix. Families are prefix-disjoint so restores never cross-pick;
+  # workspace shards fall back to the root family when their own prefix is
+  # cold. root-b and workspace-b catch unlisted targets in their groups.
   linux-test:
     name: Test Linux (${{ matrix.shard }})
     needs: [scope-gate, gates]
@@ -317,6 +319,9 @@ jobs:
       matrix:
         include:
           - shard: root-a
+            cache_key: ci-linux-test
+            extra_restore_keys: ""
+            save_cache: "false"
             test_resources: ""
             targets: >-
               //crates/tracedecay:mcp_suite
@@ -325,6 +330,9 @@ jobs:
               //crates/tracedecay:storage_suite
               //crates/tracedecay-cli:refresh_memory_journey
           - shard: root-b
+            cache_key: ci-linux-test
+            extra_restore_keys: ""
+            save_cache: "true"
             test_resources: ""
             targets: >-
               --
@@ -336,6 +344,9 @@ jobs:
           # Alphabetical a–g member crates. New crates land in workspace-b
           # via the catch-all until listed here for balance.
           - shard: workspace-a
+            cache_key: ci-linux-workspace-a-test
+            extra_restore_keys: ci-linux-test,ci-linux-workspace-b-test
+            save_cache: "true"
             test_resources: --default_test_resources=cpu=1
             targets: >-
               --
@@ -364,6 +375,9 @@ jobs:
               //crates/tracedecay-graph-query/...
               -//crates/tracedecay-cli:refresh_memory_journey
           - shard: workspace-b
+            cache_key: ci-linux-workspace-b-test
+            extra_restore_keys: ci-linux-test,ci-linux-workspace-a-test
+            save_cache: "true"
             test_resources: --default_test_resources=cpu=1
             targets: >-
               --
@@ -422,7 +436,8 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
-          cache-key: ci-linux-test
+          cache-key: ${{ matrix.cache_key }}
+          extra-restore-keys: ${{ matrix.extra_restore_keys }}
           test-tools: "true"
 
       # Root suites exercise latency-sensitive daemon journeys. Finish their
@@ -443,11 +458,10 @@ jobs:
             bazel-testlogs/**/test.log
             bazel-testlogs/**/test.xml
 
-      # Matrix shards share github.job, so they would race the same save key.
-      # root-b compiles most //crates/tracedecay test binaries; one write
-      # keeps the 10 GiB Actions cache from holding several copies.
+      # Matrix shards share github.job, so two legs under one cache-key
+      # would race one save key; each family saves from a single leg.
       - name: Save compiled Bazel actions
-        if: always() && !cancelled() && github.ref == 'refs/heads/master' && matrix.shard == 'root-b' && steps.bazel.outputs.disk-cache-key != ''
+        if: always() && !cancelled() && github.ref == 'refs/heads/master' && matrix.save_cache == 'true' && steps.bazel.outputs.disk-cache-key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
