@@ -24,10 +24,10 @@ pub mod lexical;
 pub mod observation;
 mod ordering;
 pub mod ports;
-mod source_tier;
 pub mod prepared_query;
 pub mod query_authority;
 pub mod request;
+mod source_tier;
 mod stage_counters;
 pub mod task_session;
 
