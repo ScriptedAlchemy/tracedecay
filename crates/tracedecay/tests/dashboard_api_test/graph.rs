@@ -838,7 +838,9 @@ fn rg_word_paths(root: &Path, query: &str) -> Vec<String> {
         .args(["-l", "-w", "--glob", "!**/.git/**", "--", query])
         .current_dir(root)
         .output()
-        .unwrap_or_else(|error| panic!("rg must be available to ground-truth graph search: {error}"));
+        .unwrap_or_else(|error| {
+            panic!("rg must be available to ground-truth graph search: {error}")
+        });
     assert!(
         output.status.success() || output.status.code() == Some(1),
         "rg -w {query} failed in {}: {}",
