@@ -1,5 +1,5 @@
-//! `tracedecay serve` lists a core tool set plus `tracedecay_tool_search`,
-//! loads other catalog tools on demand, and still reaches every catalog tool.
+//! Default core+search, Claude-plugin full list, and catalog dump costs
+//! on a real `tracedecay serve` handshake.
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
@@ -16,24 +16,25 @@ use crate::serve_harness::{init_project_with_file, json_rpc_response};
 
 const TOOL_SEARCH: &str = "tracedecay_tool_search";
 const LIST_CHANGED: &str = "notifications/tools/list_changed";
-/// Stubs (option A) measured on the same catalog, tokenizer, and real
-/// `tracedecay serve` handshake at 8dcdcecd63: 229 names, 17 full schemas,
-/// 212 stubs, 138_280 compact-JSON bytes, 30_664 o200k tokens.
-const STUB_HANDSHAKE_O200K: u64 = 30_664;
+const ALWAYS_LOAD: &str = "anthropic/alwaysLoad";
+const CLAUDE_FLAG: &str = "--claude-code-tool-search";
 const SERVE_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn run_serve(home: &Path, project: &Path, requests: &[Value]) -> Output {
-    let mut child = TestChildProcess::new(
-        tracedecay_command_with_home(home)
-            .arg("serve")
-            .arg("--path")
-            .arg(project)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("tracedecay serve should start"),
-    );
+    run_serve_with(home, project, &[], requests)
+}
+
+fn run_serve_with(home: &Path, project: &Path, extra_args: &[&str], requests: &[Value]) -> Output {
+    let mut command = tracedecay_command_with_home(home);
+    command
+        .arg("serve")
+        .args(extra_args)
+        .arg("--path")
+        .arg(project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = TestChildProcess::new(command.spawn().expect("tracedecay serve should start"));
     {
         let stdin = child.stdin_mut().expect("stdin should be piped");
         for request in requests {
@@ -117,6 +118,11 @@ struct ToolsListCost {
     tokens: u64,
 }
 
+fn count_o200k(label: &str, text: &str) -> u64 {
+    count_ordinary_tokens(text)
+        .unwrap_or_else(|error| panic!("o200k_base must count {label}: {error}"))
+}
+
 fn tools_list_cost(stdout: &[u8], id: i64) -> ToolsListCost {
     let response = json_rpc_response(stdout, id);
     let result = &response["result"];
@@ -131,8 +137,21 @@ fn tools_list_cost(stdout: &[u8], id: i64) -> ToolsListCost {
     ToolsListCost {
         names,
         bytes: compact.len(),
-        tokens: count_ordinary_tokens(&compact)
-            .unwrap_or_else(|error| panic!("o200k_base must count tools/list {id}: {error}")),
+        tokens: count_o200k(&format!("tools/list {id}"), &compact),
+    }
+}
+
+fn old_full_list_cost() -> ToolsListCost {
+    let definitions =
+        tracedecay_mcp::get_maximal_tool_definitions().expect("the advertised tool catalog");
+    let tools = serde_json::to_value(&definitions).expect("catalog serializes");
+    let result = json!({ "tools": tools });
+    let compact = serde_json::to_string(&result).expect("old full list serializes");
+    let names = definitions.iter().map(|tool| tool.name.clone()).collect();
+    ToolsListCost {
+        names,
+        bytes: compact.len(),
+        tokens: count_o200k("old full catalog tools/list", &compact),
     }
 }
 
@@ -142,6 +161,39 @@ fn list_changed_count(stdout: &[u8]) -> usize {
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|message| message["method"] == LIST_CHANGED)
         .count()
+}
+
+fn plugin_agent_pins() -> BTreeSet<String> {
+    let agents = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin/agents");
+    let mut pins = BTreeSet::new();
+    for entry in std::fs::read_dir(&agents)
+        .unwrap_or_else(|error| panic!("read {}: {error}", agents.display()))
+    {
+        let path = entry.expect("agent entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let tools = raw
+            .lines()
+            .find_map(|line| line.strip_prefix("tools: "))
+            .unwrap_or_else(|| panic!("{} is missing a tools: frontmatter line", path.display()));
+        for entry in tools.split(',') {
+            if let Some(name) = entry
+                .trim()
+                .strip_prefix("mcp__tracedecay__")
+                .or_else(|| entry.trim().strip_prefix("mcp__plugin_tracedecay_graph__"))
+            {
+                pins.insert(name.to_owned());
+            }
+        }
+    }
+    assert!(
+        !pins.is_empty(),
+        "plugin/agents must pin at least one TraceDecay tool"
+    );
+    pins
 }
 
 /// One live `tracedecay serve` session driven as a generic MCP stdio client.
@@ -155,15 +207,15 @@ struct PlainMcpClient {
 
 impl PlainMcpClient {
     fn start(home: &Path, project: &Path) -> Self {
-        let mut child = tracedecay_command_with_home(home)
+        let mut command = tracedecay_command_with_home(home);
+        command
             .arg("serve")
             .arg("--path")
             .arg(project)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("tracedecay serve should start");
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("tracedecay serve should start");
         let stdout = BufReader::new(child.stdout.take().expect("stdout should be piped"));
         Self {
             process: TestChildProcess::new(child),
@@ -252,22 +304,90 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
         handshake.names
     );
     assert!(
-        handshake.tokens * 2 < STUB_HANDSHAKE_O200K,
-        "B/C handshake ({} tools, {} bytes, {} o200k) must beat stub option A ({} o200k)",
+        !tools_of(&first.stdout, 2)
+            .iter()
+            .any(|tool| tool["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("full schema was elided"))),
+        "default serve must not advertise stubs"
+    );
+
+    let claude = run_serve_with(
+        home.path(),
+        project.path(),
+        &[CLAUDE_FLAG],
+        &[initialize(), tools_list(2)],
+    );
+    assert!(claude.status.success(), "{claude:?}");
+    let plugin = tools_list_cost(&claude.stdout, 2);
+    let claude_init = json_rpc_response(&claude.stdout, 1);
+    let claude_instructions = claude_init["result"]["instructions"]
+        .as_str()
+        .unwrap_or_else(|| panic!("plugin-flag initialize must carry instructions: {claude_init}"));
+    assert!(
+        claude_instructions.contains("anthropic/alwaysLoad")
+            && claude_instructions.contains("Impact and blast radius"),
+        "plugin-flag initialize must be the category guide: {claude_instructions}"
+    );
+    assert!(
+        claude_instructions.chars().count() < 2_048,
+        "plugin-flag instructions must stay under 2,048 chars, got {}",
+        claude_instructions.chars().count()
+    );
+    assert!(
+        plugin.names.contains("tracedecay_impact")
+            && plugin.names.contains("tracedecay_runtime")
+            && !plugin.names.contains(TOOL_SEARCH),
+        "plugin-flag serve must list the full catalog without tool search: {:?}",
+        plugin.names
+    );
+    assert!(
+        plugin.names.len() > 100,
+        "plugin-flag serve must keep the full catalog: {}",
+        plugin.names.len()
+    );
+    let claude_tools = tools_of(&claude.stdout, 2);
+    assert_eq!(
+        tool_named(&claude_tools, "tracedecay_grep")["_meta"][ALWAYS_LOAD],
+        json!(true)
+    );
+    assert_eq!(
+        tool_named(&claude_tools, "tracedecay_status")["_meta"][ALWAYS_LOAD],
+        json!(true)
+    );
+    assert_ne!(
+        tool_named(&claude_tools, "tracedecay_impact")
+            .pointer(&format!("/_meta/{ALWAYS_LOAD}"))
+            .and_then(Value::as_bool),
+        Some(true),
+        "non-core tools must stay deferrable for Claude native tool search"
+    );
+
+    let pins = plugin_agent_pins();
+    let missing: Vec<&str> = pins
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !plugin.names.contains(*name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "plugin agent pins must resolve on the plugin-flag list: {missing:?}"
+    );
+
+    let old = old_full_list_cost();
+    eprintln!(
+        "tools/list handshake cost: default core+search {} tools / {} bytes / {} o200k; \
+         plugin-flag full list {} tools / {} bytes / {} o200k; \
+         old full catalog {} tools / {} bytes / {} o200k",
         handshake.names.len(),
         handshake.bytes,
         handshake.tokens,
-        STUB_HANDSHAKE_O200K
-    );
-
-    eprintln!(
-        "tools/list handshake cost: A stubs {} o200k (229 names, 17 full); \
-         B/C core+search {} tools / {} bytes / {} o200k (C handshake equals B; \
-         plugin skills are host context, not tools/list)",
-        STUB_HANDSHAKE_O200K,
-        handshake.names.len(),
-        handshake.bytes,
-        handshake.tokens
+        plugin.names.len(),
+        plugin.bytes,
+        plugin.tokens,
+        old.names.len(),
+        old.bytes,
+        old.tokens
     );
 
     let output = run_serve(
@@ -314,6 +434,11 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
 
     let search = json_rpc_response(&output.stdout, 5);
     assert_eq!(search["result"]["isError"], json!(false), "{search}");
+    let search_text = tool_text(&output.stdout, 5);
+    assert!(
+        search_text.contains(r#""inputSchema""#) && search_text.contains("tracedecay_impact"),
+        "search must return full schemas in result text: {search_text}"
+    );
     let loaded = listed_names(&output.stdout, 6);
     assert!(loaded.contains("tracedecay_impact"), "{loaded:?}");
     assert!(loaded.is_superset(&handshake.names), "{loaded:?}");
@@ -337,8 +462,8 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
 
 /// A generic MCP stdio client that is not Claude Code searches for a
 /// withheld tool, receives `notifications/tools/list_changed`, re-lists the
-/// full schema, and calls it. That is the recovery path hosts other than the
-/// Claude plugin need.
+/// full schema, and calls it. Search result text also carries the schema for
+/// hosts that ignore `list_changed`.
 #[tokio::test]
 async fn plain_mcp_stdio_client_finds_and_calls_a_non_core_tool() {
     let home = TempDir::new().unwrap();
@@ -398,6 +523,13 @@ async fn plain_mcp_stdio_client_finds_and_calls_a_non_core_tool() {
         .find(|frame| frame["id"] == 3)
         .expect("tool search answer");
     assert_eq!(search["result"]["isError"], json!(false), "{search}");
+    let search_text = search["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        search_text.contains(r#""inputSchema""#) && search_text.contains("tracedecay_impact"),
+        "hosts that ignore list_changed still receive the full schema: {search_text}"
+    );
     assert!(
         after_search
             .iter()

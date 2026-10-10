@@ -78,9 +78,18 @@ pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
+    claude_code_tool_search: bool,
 ) -> Result<()> {
     let mut transport = StdioTransport::new();
-    proxy_transport_to_daemon(socket_path, handshake, replay_line, &mut transport).await
+    proxy_transport_to_daemon_with_drain_bound(
+        socket_path,
+        handshake,
+        replay_line,
+        &mut transport,
+        None,
+        claude_code_tool_search,
+    )
+    .await
 }
 
 #[derive(Default)]
@@ -124,8 +133,15 @@ pub async fn proxy_transport_to_daemon(
     replay_line: Option<String>,
     transport: &mut impl McpDuplexTransport,
 ) -> Result<()> {
-    proxy_transport_to_daemon_with_drain_bound(socket_path, handshake, replay_line, transport, None)
-        .await
+    proxy_transport_to_daemon_with_drain_bound(
+        socket_path,
+        handshake,
+        replay_line,
+        transport,
+        None,
+        false,
+    )
+    .await
 }
 
 /// `drain_bound` overrides the per-request bound derived by
@@ -137,6 +153,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
     replay_line: Option<String>,
     transport: &mut impl McpDuplexTransport,
     drain_bound: Option<Duration>,
+    claude_code_tool_search: bool,
 ) -> Result<()> {
     let (mut reader, mut writer) = transport.split();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -171,6 +188,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
         &mut eof_rx,
         &mut writer,
         drain_bound,
+        ToolSurface::from_serve(claude_code_tool_search)?,
     );
     let result = tokio::try_join!(read_host, proxy);
     drop(eof_tx);
@@ -285,6 +303,7 @@ async fn drain_daemon_request_after_disconnect(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(name = "daemon.engine.proxy.host_input", level = "trace", skip_all)]
 async fn proxy_host_input_to_daemon(
     socket_path: &Path,
@@ -294,8 +313,8 @@ async fn proxy_host_input_to_daemon(
     eof: &mut tokio::sync::watch::Receiver<bool>,
     writer: &mut impl McpTransportWriter,
     drain_bound: Option<Duration>,
+    mut surface: ToolSurface,
 ) -> Result<()> {
-    let mut surface = ToolSurface::new();
     let mut routed_handshake = handshake.clone();
     let mut pending = VecDeque::new();
     if let Some(line) = replay_line {
@@ -718,9 +737,8 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
             .is_some_and(json_rpc_error_is_project_open_retryable)
 }
 
-/// Sends one host request through this session's tool surface: a tool search
-/// is answered from the daemon's session catalog, and `tools/list` is narrowed
-/// to the core set plus tools this session already loaded.
+/// Sends one host request through this session's tool surface: search answers
+/// from the daemon catalog, and `tools/list` follows the session advertisement.
 async fn send_host_request(
     surface: &mut ToolSurface,
     socket_path: &Path,
@@ -729,8 +747,11 @@ async fn send_host_request(
     cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
 ) -> Result<Vec<String>> {
     if let Some((id, query)) = surface.search_request(request.parsed.as_ref()) {
+        // The catalog lookup borrows the search's own id so a host
+        // cancellation forwarded verbatim matches this daemon request.
         let catalog_line =
-            serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": "tools/list" }).to_string();
+            serde_json::json!({ "jsonrpc": "2.0", "id": id.clone(), "method": "tools/list" })
+                .to_string();
         let catalog = DaemonProxyRequest::new(&catalog_line);
         let listing = send_daemon_request_with_project_open_retry(
             socket_path,
@@ -739,6 +760,11 @@ async fn send_host_request(
             cancellation,
         )
         .await?;
+        // A cancel that landed during the fetch must not still mutate the
+        // session list or answer the cancelled search id.
+        if cancellation.borrow().is_some() {
+            return Ok(Vec::new());
+        }
         return Ok(surface.answer_search(&id, &query, &listing));
     }
     let mut responses =
