@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphSymbolRefV1,
-    UnresolvedCallerGapsV1,
+    InteractiveCatalogReaderLeaseV1, UnresolvedCallerGapsV1,
 };
 use tracedecay_contracts::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
@@ -1644,6 +1644,8 @@ struct PreparedGraphCallableQueryV1 {
     latest: LatestCodeTextGenerationV1,
     /// Counts every store read on [`Self::cost`].
     reader: CodeGraphInteractiveReader,
+    /// Holds the catalog across admission, warming, and the complete read.
+    _catalog_retain: Option<Arc<InteractiveCatalogReaderLeaseV1>>,
     cost: CodeGraphReadCostMeter,
     query: PreparedQueryV1,
     /// Absent only when the scope unmounted between resolving `latest` and
@@ -1956,6 +1958,32 @@ impl CodeIndexSchedulerRegistryV1 {
         let store = latest
             .interactive_graph_store()
             .map_err(|_| CallableCodeCursorError::Unavailable)?;
+        // A parked worktree released the engine and catalog beside its
+        // decode; their re-warm runs in the background, so a callable
+        // admitted while they warm would refuse a cold store instead of
+        // waiting. Wait within what the request still admits, as project
+        // graph reads do, then open the reader on the warmed store. A
+        // request that spent its budget mid-warm, was cancelled, or lost
+        // the wait task answers the typed unavailable rather than opening
+        // a reader on a store it never waited out.
+        let mut catalog_retain = None;
+        if let Some(budget) = remaining_generation_resolution_wait(context.request) {
+            let waiting = Arc::clone(&store);
+            match tokio::task::spawn_blocking(move || waiting.await_catalog_and_retain(budget))
+                .await
+            {
+                Ok(Ok(retain)) => catalog_retain = Some(retain),
+                Ok(Err(_pending)) => return Err(CallableCodeCursorError::Unavailable),
+                Err(join_error) => {
+                    tracing::warn!(
+                        event = "code_graph_rewarm_wait_failed",
+                        error = %join_error,
+                        "a callable's graph re-warm wait did not finish"
+                    );
+                    return Err(CallableCodeCursorError::Unavailable);
+                }
+            }
+        }
         let cost = CodeGraphReadCostMeter::start();
         let reader = store
             .interactive_reader_with_cancellation(
@@ -1970,6 +1998,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(PreparedGraphCallableQueryV1 {
             latest,
             reader,
+            _catalog_retain: catalog_retain,
             cost,
             query,
             cursor_retention,

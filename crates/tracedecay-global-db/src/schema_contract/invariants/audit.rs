@@ -2141,8 +2141,7 @@ mod tests {
                 ],
             )
             .await
-            .err()
-            .expect("a foreign receipt must not replace retirement authority");
+            .expect_err("a foreign receipt must not replace retirement authority");
         assert!(
             error
                 .to_string()

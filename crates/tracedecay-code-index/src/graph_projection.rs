@@ -49,7 +49,7 @@ pub use self::interactive::{
     CodeGraphReadCostMeter, CodeGraphRelationKeyV1, CodeGraphRelationKeysV1,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
     CodeGraphSymbolPredicate, CodeGraphSymbolRefV1, CodeGraphSymbolSearchPageV1,
-    CodeGraphSymbolSummaryV1, UnresolvedCallerGapsV1,
+    CodeGraphSymbolSummaryV1, InteractiveCatalogReaderLeaseV1, UnresolvedCallerGapsV1,
 };
 pub use self::layered::{
     CodeGraphLayeredBuildV1, CodeGraphLayeredDeclineV1, CodeGraphLayeredReportV1,
@@ -614,6 +614,18 @@ impl CodeGraphProjectionStore {
         self.await_rewarm_for(budget, CodeGraphReadinessRequirement::Catalog)
     }
 
+    /// Retains the catalog before waiting so a concurrent warm cannot publish
+    /// a ready catalog that a parked release evicts before the reader opens.
+    /// Cold or failed stores still answer their typed state through the reader.
+    pub fn await_catalog_and_retain(
+        &self,
+        budget: Duration,
+    ) -> Result<Arc<InteractiveCatalogReaderLeaseV1>, CodeGraphRewarmPendingV1> {
+        let retain = InteractiveCatalogReaderLeaseV1::retain(&self.interactive_catalog);
+        self.await_rewarm_for(budget, CodeGraphReadinessRequirement::Catalog)?;
+        Ok(retain)
+    }
+
     /// Waits only for the resident data required by this read.
     pub fn await_rewarm_for(
         &self,
@@ -662,8 +674,12 @@ impl CodeGraphProjectionStore {
         let catalog = match (self.interactive_catalog.residency(), engine) {
             (CatalogResidency::Resident | CatalogResidency::Unreleased, None) => return None,
             (CatalogResidency::Resident | CatalogResidency::Unreleased, Some(_)) => Duration::ZERO,
-            // The engine re-warm starts a released catalog's once it is back.
-            (CatalogResidency::Released, None) => {
+            // The engine re-warm starts a released catalog's once it is
+            // back, and the same restart covers a background-marked warm
+            // whose runner never took the build (a release took the engine
+            // it opened its reader on): the read waiting here is what
+            // would otherwise find `warming` forever.
+            (CatalogResidency::Released | CatalogResidency::OrphanedWarm, None) => {
                 self.interactive_reader_with_cancellation(
                     &self.generation,
                     Arc::new(NeverCancelled),
@@ -672,9 +688,12 @@ impl CodeGraphProjectionStore {
                 .rewarm_released_catalog();
                 self.warm_clock.remaining(WarmOwner::Catalog)
             }
-            (CatalogResidency::Released | CatalogResidency::Rewarming, _) => {
-                self.warm_clock.remaining(WarmOwner::Catalog)
-            }
+            (
+                CatalogResidency::Released
+                | CatalogResidency::OrphanedWarm
+                | CatalogResidency::Rewarming,
+                _,
+            ) => self.warm_clock.remaining(WarmOwner::Catalog),
         };
         let engine = engine.unwrap_or_default();
         Some(CodeGraphRewarmPendingV1 {

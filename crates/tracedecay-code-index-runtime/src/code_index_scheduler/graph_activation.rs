@@ -771,6 +771,10 @@ impl PendingInteractiveCatalogWarmV1 {
             self.cancellation,
         );
         self.owner.release_graph_predecessor();
+        // The worker may already be parked. This is not a cadence wake: it
+        // only unblocks the park-release waiter that skipped catalog/engine
+        // while this first warm still needed the engine.
+        self.owner.note_catalog_warm_settled();
         warmed
     }
 }

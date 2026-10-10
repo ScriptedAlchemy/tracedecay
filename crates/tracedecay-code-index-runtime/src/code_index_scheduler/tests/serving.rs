@@ -3895,19 +3895,10 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
     // cannot end while the hold is up and the owner is blocked in the step it
     // parked in, so every later rise is a readiness call joining the flight.
     registry.request_complete_generation(fixture.path()).await;
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let parked_owner = loop {
-        let parked = held_decode.waiter_count();
-        if parked > 0 {
-            break parked;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "the owner's settle pass never reached the held decode, so its park \
-             cannot be sequenced ahead of the readiness calls"
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    };
+    // Park may already have finished the mount-era settle pass. The hold
+    // still proves readiness does not join a later decode: a rise from this
+    // floor is a readiness call entering the flight.
+    let parked_owner = held_decode.waiter_count();
 
     let ready = tokio::time::timeout(
         Duration::from_secs(30),
@@ -5106,6 +5097,105 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     );
 
     drop(held_decode);
+    registry.shutdown().await;
+}
+
+/// Issue #3328: a released catalog and engine re-warm in the background.
+/// A `code_callers` admitted before the re-warm finishes must wait for it
+/// inside the request budget instead of refusing the cold store
+/// `Unavailable`, as project graph reads already do.
+#[tokio::test]
+async fn a_callers_request_after_park_waits_for_the_graph_to_rewarm() {
+    let sources = caller_star_sources();
+    let files = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    install_verified_graph_store(&latest);
+    let generation = latest.generation.manifest().generation_id.clone();
+    let repository = latest.generation.snapshot().repository.clone();
+    let worktree = latest
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+    let scope = CodeQueryScope::new(generation.clone(), None).expect("query scope");
+    let hub = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("hub"))
+        .expect("hub symbol");
+    let operation = callable_code_operation(CallableCodeOperationKind::Callers).expect("operation");
+    let context = application_context(&operation, repository, worktree);
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
+    wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
+
+    // The parked release drops the catalog and engine through these same
+    // store calls; release them directly so the request meets a cold store.
+    let graph_store = latest
+        .text_generation_handle()
+        .interactive_graph_store()
+        .expect("interactive graph store");
+    graph_store.release_interactive_catalog();
+    graph_store
+        .release_serving_engine()
+        .expect("release the serving engine");
+    assert!(
+        graph_store
+            .await_rewarm_for(
+                Duration::ZERO,
+                tracedecay_code_index::graph_projection::CodeGraphReadinessRequirement::Catalog
+            )
+            .is_err(),
+        "the store must be released for this test to exercise the re-warm wait"
+    );
+
+    let outcome = registry
+        .callers(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &CodeRelationRequest {
+                node_id: hub.occurrence.as_str().to_owned(),
+                maximum_depth: 1,
+                resolve_trait_dispatch: false,
+                scope,
+                meta: callers_page_meta(CALLER_PAGE, None),
+            },
+        )
+        .await;
+    let page = match outcome {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("callers page"),
+        other => panic!("the first callable after park must wait out the re-warm: {other:?}"),
+    };
+    assert!(
+        !page.items.is_empty(),
+        "callers still answers the hub's callers"
+    );
+
     registry.shutdown().await;
 }
 

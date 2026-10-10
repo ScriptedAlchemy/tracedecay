@@ -1,9 +1,12 @@
 use std::num::NonZeroU64;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
-use tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1;
+use tracedecay_contracts::code_index_freshness::{
+    CodeGraphServingReadinessV1, CodeIndexStalenessStateV1,
+};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::resident_memory::{
@@ -19,14 +22,49 @@ use super::super::{
 };
 
 use super::{
-    CodeIndexSchedulerRegistryV1, GitFixture, SERVING_SEAT_FAILURE_CEILING, core_search_request,
-    git, mounted_core_query_worktree_at, mounted_core_query_worktree_in, test_project_id,
+    ALPHA_LIB_V1, CodeIndexSchedulerRegistryV1, GitFixture, SERVING_SEAT_FAILURE_CEILING,
+    core_search_request, git, install_verified_graph_store_on_text,
+    install_warming_graph_store_on_text, mounted_core_query_worktree_at,
+    mounted_core_query_worktree_in, mounted_text_query_worktree_at, test_project_id,
     wait_for_generation_change, wait_for_live_complete_generation,
     wait_for_queryable_text_generation, wait_for_settled_owner, wait_for_worker_phase,
-    with_untouched_fillers,
+    wait_until_serving_seat, with_untouched_fillers,
 };
 
 const IDLE_WINDOW: Duration = Duration::from_mins(10);
+
+fn decoded_kinds(report: &ResidentOwnersReportV1) -> Vec<ResidentOwnerKindV1> {
+    report
+        .owners
+        .iter()
+        .filter(|row| row.kind == ResidentOwnerKindV1::DecodedGeneration)
+        .map(|row| row.kind)
+        .collect()
+}
+
+fn graph_copy_kinds(report: &ResidentOwnersReportV1) -> Vec<ResidentOwnerKindV1> {
+    report
+        .owners
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.kind,
+                ResidentOwnerKindV1::GraphCatalog | ResidentOwnerKindV1::GraphEngine
+            )
+        })
+        .map(|row| row.kind)
+        .collect()
+}
+
+fn search_anchors(search: &super::super::query_runtime::ExecutedQuerySearchV1) -> Vec<String> {
+    search
+        .authorized
+        .fallback
+        .ordered_candidates
+        .iter()
+        .map(|ranked| ranked.candidate.anchor_id.as_str().to_owned())
+        .collect()
+}
 
 fn rows(report: &ResidentOwnersReportV1) -> Vec<(ResidentOwnerKindV1, String, bool)> {
     report
@@ -38,6 +76,669 @@ fn rows(report: &ResidentOwnersReportV1) -> Vec<(ResidentOwnerKindV1, String, bo
                 .map(|holder| (row.kind, holder.holding.as_str().to_owned(), row.protected))
         })
         .collect()
+}
+
+/// Issue #3328: after the worker parks, the seated decode is a third copy of
+/// the generation the text artifact and catalog already serve. Drop it
+/// without waiting out the idle window; search must keep the same answers
+/// and must not re-pin the decode.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_worktree_releases_its_decode_and_search_still_answers() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn park_release_target() -> u32 { 7 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, scope) = mounted_text_query_worktree_at(
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
+        fixture.path(),
+        store.path().to_path_buf(),
+    )
+    .await;
+
+    let parked = owners.report(Instant::now());
+    assert_eq!(
+        decoded_kinds(&parked),
+        [],
+        "a parked worktree must not keep a seated decode: {parked:?}"
+    );
+
+    let without_decode = registry
+        .execute_query_search(&scope, core_search_request("park_release_target"))
+        .await
+        .expect("search serves from the text seat after the decode is released");
+    assert!(!without_decode.served_stale);
+    let anchors = search_anchors(&without_decode);
+    assert!(
+        !anchors.is_empty(),
+        "search must still rank the parked generation: {anchors:?}"
+    );
+    assert_eq!(
+        decoded_kinds(&owners.report(Instant::now())),
+        [],
+        "search must not re-pin the seated decode"
+    );
+
+    assert!(
+        registry.request_complete_generation(fixture.path()).await,
+        "complete-generation demand reaches the mounted worktree"
+    );
+    let _seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let with_decode = registry
+        .execute_query_search(&scope, core_search_request("park_release_target"))
+        .await
+        .expect("search still answers after a demanded decode");
+    assert_eq!(search_anchors(&with_decode), anchors);
+
+    registry.shutdown().await;
+}
+
+/// Park drops catalog and engine after activation; status reports the typed
+/// warming state until the next graph read reseats the store (#3328).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_worktree_releases_catalog_and_engine_and_reports_warming() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn park_graph_target() -> u32 { 7 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, scope) = mounted_text_query_worktree_at(
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
+        fixture.path(),
+        store.path().to_path_buf(),
+    )
+    .await;
+    let root = canonical_existing_identity(fixture.path()).expect("canonical root");
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    install_verified_graph_store_on_text(&text, &seated);
+    text.interactive_graph_store()
+        .expect("installed graph store")
+        .warm_serving_engine()
+        .expect("pin the serving engine so park has something to release");
+    drop(seated);
+
+    // The worker may still be in the complete-generation pass and replace
+    // this store with one whose catalog is still warming. Wait until both
+    // copies are resident on the serving text, then park.
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        let current = registry
+            .latest_text_serving_for_root(&root)
+            .await
+            .expect("serving text");
+        let catalog_ready = current
+            .interactive_graph_store()
+            .ok()
+            .and_then(|store| store.interactive_catalog_bytes())
+            .is_some();
+        if !catalog_ready
+            && let Some(latest) = registry
+                .latest_complete_serving_for_test(fixture.path())
+                .await
+        {
+            install_verified_graph_store_on_text(&current, &latest);
+            let _ = current
+                .interactive_graph_store()
+                .ok()
+                .and_then(|store| store.warm_serving_engine().ok());
+        }
+        let warm = owners.report(Instant::now());
+        let kinds = graph_copy_kinds(&warm);
+        if kinds.contains(&ResidentOwnerKindV1::GraphCatalog)
+            && kinds.contains(&ResidentOwnerKindV1::GraphEngine)
+            && current.code_graph_serving_readiness() == CodeGraphServingReadinessV1::Ready
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "catalog and engine must become resident before park: {warm:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    loop {
+        registry
+            .release_decode_when_parked_for_test(fixture.path())
+            .await;
+        let parked = owners.report(Instant::now());
+        let current = registry
+            .latest_text_serving_for_root(&root)
+            .await
+            .expect("serving text");
+        let released = current
+            .interactive_graph_store()
+            .is_ok_and(|store| store.interactive_catalog_bytes().is_none());
+        let catalog_gone = !graph_copy_kinds(&parked).contains(&ResidentOwnerKindV1::GraphCatalog);
+        if catalog_gone && released {
+            assert!(
+                matches!(
+                    current.code_graph_serving_readiness(),
+                    CodeGraphServingReadinessV1::Warming { .. }
+                ),
+                "a memory release reports warming until a read reseats the store"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "a parked worktree must not keep the catalog: {parked:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let search = registry
+        .execute_query_search(&scope, core_search_request("park_graph_target"))
+        .await
+        .expect("search serves from text after catalog and engine are released");
+    let anchors = search_anchors(&search);
+    assert_ne!(
+        anchors,
+        Vec::<String>::new(),
+        "search must still rank the parked generation: {anchors:?}"
+    );
+    assert!(
+        !graph_copy_kinds(&owners.report(Instant::now()))
+            .contains(&ResidentOwnerKindV1::GraphCatalog),
+        "search must not re-pin the catalog"
+    );
+
+    registry.shutdown().await;
+}
+
+/// Park during the first catalog warm must not leave catalog/engine resident
+/// after that warm settles. The background scan does not post a cadence
+/// wake, so park-release retries from the settle signal (#3328).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_worktree_releases_graph_owners_after_the_first_catalog_warm() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn park_first_warm_target() -> u32 { 3 }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, _scope) = mounted_text_query_worktree_at(
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
+        fixture.path(),
+        store.path().to_path_buf(),
+    )
+    .await;
+    let root = canonical_existing_identity(fixture.path()).expect("canonical root");
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    install_warming_graph_store_on_text(&text, &seated);
+    drop(seated);
+
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    let warming = loop {
+        let current = registry
+            .latest_text_serving_for_root(&root)
+            .await
+            .expect("serving text");
+        if let Some(latest) = registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+        {
+            install_warming_graph_store_on_text(&current, &latest);
+        }
+        wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+        registry
+            .release_decode_when_parked_for_test(fixture.path())
+            .await;
+        let current = registry
+            .latest_text_serving_for_root(&root)
+            .await
+            .expect("serving text");
+        let first_warm = current.interactive_graph_store().is_ok_and(|store| {
+            !store.interactive_catalog_has_completed_a_warm()
+                && store.serving_engine_bytes().ok().flatten().is_some()
+        });
+        if first_warm
+            && matches!(
+                current.code_graph_serving_readiness(),
+                CodeGraphServingReadinessV1::Warming { .. }
+            )
+        {
+            break current;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "first catalog warm must still be in progress after park: {:?}",
+            owners.report(Instant::now())
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+
+    assert!(
+        graph_copy_kinds(&owners.report(Instant::now()))
+            .contains(&ResidentOwnerKindV1::GraphEngine),
+        "the first catalog warm still needs the engine it opened a reader on"
+    );
+
+    warming
+        .interactive_graph_store()
+        .expect("warming graph store")
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("finish the first catalog warm");
+    warming.note_catalog_warm_settled();
+
+    let current = registry
+        .latest_text_serving_for_root(&root)
+        .await
+        .expect("serving text");
+    assert!(
+        current
+            .interactive_graph_store()
+            .is_ok_and(|store| store.interactive_catalog_bytes().is_none()),
+        "the first catalog warm must retry park-release without a cadence wake"
+    );
+    assert!(
+        !graph_copy_kinds(&owners.report(Instant::now()))
+            .contains(&ResidentOwnerKindV1::GraphCatalog),
+        "the catalog owner must leave after the first warm settles"
+    );
+    assert!(
+        matches!(
+            current.code_graph_serving_readiness(),
+            CodeGraphServingReadinessV1::Warming { .. }
+        ),
+        "after the first warm, park-release reports warming until a read reseats"
+    );
+
+    registry.shutdown().await;
+}
+
+/// The parked release frees the seat only because the text owner serves in
+/// its place. While the installed text owner cannot serve — its lexical
+/// projection is still warming or it latched a failure — the seated decode
+/// is the only servable generation: taking it turns serve-old into
+/// `GenerationUnavailable`. The release must keep the seat, and it must
+/// advance the registry-wide seat counter only when a seat was really
+/// written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_worktree_keeps_its_decode_while_the_text_owner_warms() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn park_gate_target() -> u32 { 7 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, scope) = mounted_text_query_worktree_at(
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
+        fixture.path(),
+        store.path().to_path_buf(),
+    )
+    .await;
+    let root = canonical_existing_identity(fixture.path()).expect("canonical root");
+    let ready_text = registry
+        .latest_text_serving_for_root(&root)
+        .await
+        .expect("mounted text owner is query-ready");
+
+    // Seat a real decode, then let the idle release clear the complete-read
+    // latch so the parked release is the code under test again.
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let generation_id = seated.generation().manifest().generation_id.clone();
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    owners.release_idle(Instant::now() + IDLE_WINDOW);
+
+    let mut seats = registry.subscribe_serving_seats();
+    async fn reseat(
+        registry: &CodeIndexSchedulerRegistryV1,
+        root: &Path,
+        seated: &super::super::LatestCompleteCodeIndexV1,
+    ) {
+        let mounted = registry.mounted.lock().await;
+        *mounted
+            .get(root)
+            .expect("mounted worktree")
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(seated.clone());
+    }
+    async fn install_text(
+        registry: &CodeIndexSchedulerRegistryV1,
+        root: &Path,
+        text: super::super::LatestCodeTextGenerationV1,
+    ) {
+        let mounted = registry.mounted.lock().await;
+        *mounted
+            .get(root)
+            .expect("mounted worktree")
+            .text_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text);
+    }
+    async fn seat_is_occupied(registry: &CodeIndexSchedulerRegistryV1, root: &Path) -> bool {
+        let mounted = registry.mounted.lock().await;
+        mounted
+            .get(root)
+            .expect("mounted worktree")
+            .serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    // A ready text owner lets the take proceed and publishes the seat write
+    // on the registry-wide counter every subscriber watches.
+    reseat(&registry, &root, &seated).await;
+    seats.borrow_and_update();
+    registry
+        .release_decode_when_parked_for_test(fixture.path())
+        .await;
+    assert!(
+        !seat_is_occupied(&registry, &root).await,
+        "a query-ready text owner leaves the decode spare on park"
+    );
+    assert!(
+        seats.has_changed().expect("seats channel open"),
+        "the seat counter must publish the take"
+    );
+
+    // A text owner whose projection is still warming cannot serve yet; the
+    // seat stays and no counter advance claims a write happened.
+    let warming_text = {
+        let mounted = registry.mounted.lock().await;
+        mounted
+            .get(&root)
+            .expect("mounted worktree")
+            .historical_generation_owner
+            .published_text_generation(&generation_id)
+            .expect("read retained generation metadata")
+            .expect("retained text owner")
+    };
+    assert!(!warming_text.query_owners_are_ready());
+    reseat(&registry, &root, &seated).await;
+    install_text(&registry, &root, warming_text).await;
+    seats.borrow_and_update();
+    registry
+        .release_decode_when_parked_for_test(fixture.path())
+        .await;
+    assert!(
+        seat_is_occupied(&registry, &root).await,
+        "the seat is the only servable generation while text warms"
+    );
+    assert!(
+        !seats.has_changed().expect("seats channel open"),
+        "no seat write means no counter advance"
+    );
+    let stale = registry
+        .execute_query_search(&scope, core_search_request("park_gate_target"))
+        .await
+        .expect("the kept seat still answers search");
+    assert!(
+        !search_anchors(&stale).is_empty(),
+        "serve-old must keep ranking the seated generation"
+    );
+
+    // Once the text owner can serve again the same park releases the seat.
+    // The search's complete-generation demand may still be latched; give it
+    // back through the idle release and seat again so the parked take is
+    // the code under test.
+    install_text(&registry, &root, ready_text).await;
+    owners.release_idle(Instant::now() + IDLE_WINDOW);
+    reseat(&registry, &root, &seated).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        registry
+            .release_decode_when_parked_for_test(fixture.path())
+            .await;
+        if !seat_is_occupied(&registry, &root).await {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "a ready text owner frees the seat"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    registry.shutdown().await;
+}
+
+/// Issue #3328: while the successor's own graph activation is still
+/// pending, the held predecessor is the only servable graph
+/// `graph_predecessor` answers stale reads from. A resident-owners release
+/// takes the predecessor's catalog and engine bytes but must keep the
+/// servable hold until the successor's activation settles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resident_release_keeps_the_predecessor_while_its_graph_is_pending() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let registry = CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners));
+    let root = fixture.path();
+    registry
+        .mount_worktree(test_project_id(), root, store.path().to_path_buf())
+        .await
+        .expect("mount worktree");
+    assert!(registry.request_complete_generation(root).await);
+    let first_seat = wait_for_live_complete_generation(&registry, root).await;
+    let first = first_seat
+        .generation
+        .manifest()
+        .generation_id
+        .as_str()
+        .to_owned();
+    let worktree_id = first_seat
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+    let first_text = wait_for_queryable_text_generation(&registry, root).await;
+    install_verified_graph_store_on_text(&first_text, &first_seat);
+    drop(first_seat);
+
+    // The second publication inherits the warm graph as its predecessor;
+    // keep its own activation failing so its readiness stays Pending.
+    super::super::graph_activation::set_injected_activation_failures(&worktree_id, usize::MAX);
+    fixture.edit("src/lib.rs", "pub fn changed_after_the_warm_graph() {}\n");
+    assert!(matches!(
+        registry.notify_path(root, root.join("src/lib.rs")).await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    let first_id = first.clone();
+    let registry_ref = &registry;
+    let second_text =
+        wait_until_serving_seat(registry_ref, root, SERVING_SEAT_FAILURE_CEILING, || {
+            let first_id = first_id.clone();
+            async move {
+                registry_ref
+                    .latest_text_serving_for_root(root)
+                    .await
+                    .filter(|text| text.metadata().manifest().generation_id.as_str() != first_id)
+            }
+        })
+        .await;
+    let held = || {
+        second_text
+            .held_graph_predecessor()
+            .map(|held| held.metadata().manifest().generation_id.as_str().to_owned())
+    };
+    assert_eq!(
+        held(),
+        Some(first.clone()),
+        "the successor holds the warm graph as its predecessor"
+    );
+    assert_eq!(
+        second_text.code_graph_serving_readiness(),
+        CodeGraphServingReadinessV1::Pending,
+        "the injected failure keeps the successor's graph pending"
+    );
+
+    wait_for_queryable_text_generation(&registry, root).await;
+    owners.release_idle(Instant::now() + IDLE_WINDOW);
+    assert_eq!(
+        held(),
+        Some(first.clone()),
+        "the release must keep the only servable graph"
+    );
+    assert!(
+        second_text
+            .graph_predecessor(true)
+            .is_some_and(|served| served.metadata().manifest().generation_id.as_str() == first),
+        "the retained predecessor still serves stale graph reads"
+    );
+
+    // Once activation settles the same release drops the hold: the
+    // successor's own graph serves now and the predecessor is spare.
+    super::super::graph_activation::set_injected_activation_failures(&worktree_id, 0);
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    while second_text.code_graph_serving_readiness() != CodeGraphServingReadinessV1::Ready {
+        assert!(
+            Instant::now() <= deadline,
+            "clearing the failure must let activation reach ready"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    owners.release_idle(Instant::now() + IDLE_WINDOW);
+    assert_eq!(held(), None, "a ready successor frees the predecessor");
+
+    registry.shutdown().await;
+}
+
+/// Issue #3328: a parked release leaves the outgoing graph `warming` while
+/// its catalog and engine are away — a read re-warms them, so the outgoing
+/// is still the graph `hold_outgoing_graph` must keep for the successor,
+/// not pass down to a colder predecessor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_for_memory_predecessor_is_still_the_held_graph() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let registry = CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners));
+    let root = fixture.path();
+    registry
+        .mount_worktree(test_project_id(), root, store.path().to_path_buf())
+        .await
+        .expect("mount worktree");
+    assert!(registry.request_complete_generation(root).await);
+    let first_seat = wait_for_live_complete_generation(&registry, root).await;
+    let first = first_seat
+        .generation
+        .manifest()
+        .generation_id
+        .as_str()
+        .to_owned();
+    let worktree_id = first_seat
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+    let first_text = wait_for_queryable_text_generation(&registry, root).await;
+    install_verified_graph_store_on_text(&first_text, &first_seat);
+    drop(first_seat);
+
+    // The parked release reports the outgoing `warming`: its catalog and
+    // engine are away until a read re-warms them, and it is still the only
+    // servable graph the successor can hold.
+    let graph_store = first_text
+        .interactive_graph_store()
+        .expect("interactive graph store");
+    graph_store.release_interactive_catalog();
+    graph_store
+        .release_serving_engine()
+        .expect("release the serving engine");
+    assert!(matches!(
+        first_text.code_graph_serving_readiness(),
+        CodeGraphServingReadinessV1::Warming { .. }
+    ));
+
+    super::super::graph_activation::set_injected_activation_failures(&worktree_id, usize::MAX);
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn changed_after_the_released_graph() {}\n",
+    );
+    assert!(matches!(
+        registry.notify_path(root, root.join("src/lib.rs")).await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    let first_id = first.clone();
+    let registry_ref = &registry;
+    let second_text =
+        wait_until_serving_seat(registry_ref, root, SERVING_SEAT_FAILURE_CEILING, || {
+            let first_id = first_id.clone();
+            async move {
+                registry_ref
+                    .latest_text_serving_for_root(root)
+                    .await
+                    .filter(|text| text.metadata().manifest().generation_id.as_str() != first_id)
+            }
+        })
+        .await;
+    let held = || {
+        second_text
+            .held_graph_predecessor()
+            .map(|held| held.metadata().manifest().generation_id.as_str().to_owned())
+    };
+    assert_eq!(
+        held(),
+        Some(first.clone()),
+        "a released-for-memory outgoing still serves and must be held"
+    );
+    assert!(
+        second_text
+            .graph_predecessor(true)
+            .is_some_and(|served| served.metadata().manifest().generation_id.as_str() == first),
+        "the retained predecessor still serves stale graph reads"
+    );
+
+    registry.shutdown().await;
+}
+
+/// Eight enrolled worktrees is the daemon project-server cap. After they
+/// park, none of them may keep a whole decoded generation just because
+/// enrollment seated one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eight_parked_worktrees_keep_no_decoded_generations() {
+    let fixtures = (0..8)
+        .map(|ordinal| {
+            let source = format!("pub fn symbol_{ordinal}() -> u32 {{ {ordinal} }}\n");
+            GitFixture::new(&[("src/lib.rs", source.as_str())])
+        })
+        .collect::<Vec<_>>();
+    let stores = (0..8)
+        .map(|_| TempDir::new().expect("store root"))
+        .collect::<Vec<_>>();
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let mut registry =
+        CodeIndexSchedulerRegistryV1::new(8).with_resident_owners(Arc::clone(&owners));
+    let mut scopes = Vec::new();
+    for (fixture, store) in fixtures.iter().zip(&stores) {
+        let (next, scope) =
+            mounted_text_query_worktree_at(registry, fixture.path(), store.path().to_path_buf())
+                .await;
+        registry = next;
+        scopes.push(scope);
+    }
+
+    assert_eq!(
+        decoded_kinds(&owners.report(Instant::now())),
+        [],
+        "eight parked worktrees must not retain eight seated decodes"
+    );
+
+    for (ordinal, (fixture, scope)) in fixtures.iter().zip(&scopes).enumerate() {
+        let found = registry
+            .execute_query_search(scope, core_search_request(&format!("symbol_{ordinal}")))
+            .await
+            .expect("each parked worktree still answers search");
+        assert!(!found.served_stale, "{}", fixture.path().display());
+        assert!(
+            !search_anchors(&found).is_empty(),
+            "symbol_{ordinal} must remain searchable after park"
+        );
+    }
+    assert_eq!(
+        decoded_kinds(&owners.report(Instant::now())),
+        [],
+        "search across the eight worktrees must not re-pin their decodes"
+    );
+
+    registry.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -53,16 +754,25 @@ async fn an_idle_worktree_gives_back_its_decode_and_search_still_answers_fresh()
     .await;
     let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
     assert!(text.query_owners_are_ready());
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+    // Park drops the publish-time seat. A complete read is what renews it.
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    let generation = {
+        let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+        seated
+            .generation()
+            .manifest()
+            .generation_id
+            .as_str()
+            .to_owned()
+    };
     let fresh = registry
         .execute_query_search(&scope, core_search_request("main"))
         .await
         .expect("the seated generation answers");
     assert!(!fresh.served_stale);
-    let generation = fresh.generation.as_str().to_owned();
-    // Attribution can hold the decode while awaiting admission after the
-    // source pass settles. Wait for the worker to release that last handle.
-    wait_for_settled_owner(&registry, fixture.path()).await;
-    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+    assert_eq!(fresh.generation.as_str(), generation);
 
     let used = owners.report(Instant::now());
     assert_eq!(
@@ -244,6 +954,8 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
         .execute_query_search(&primary, core_search_request("transform_3"))
         .await
         .expect("the primary worktree answers");
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    wait_for_live_complete_generation(&registry, fixture.path()).await;
     let alone = owners.report(Instant::now());
 
     let (registry, secondary) =
@@ -252,6 +964,8 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
         .execute_query_search(&secondary, core_search_request("transform_3"))
         .await
         .expect("the linked worktree answers");
+    assert!(registry.request_complete_generation(&linked).await);
+    wait_for_live_complete_generation(&registry, &linked).await;
     let both = owners.report(Instant::now());
 
     let decoded = |report: &ResidentOwnersReportV1| {

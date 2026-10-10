@@ -948,6 +948,10 @@ async fn a_reproducing_reconcile_failure_parks_typed_and_converges_after_the_fix
     // complete generation does, so the wait covers both.
     let deadline = std::time::Instant::now() + SETTLE_DEADLINE;
     let mut signals = OwnerSignals::subscribe(&restarted.registry, &restarted.project).await;
+    restarted
+        .registry
+        .request_complete_generation(&restarted.project)
+        .await;
     let (freshness, serving) = loop {
         let freshness = restarted
             .registry

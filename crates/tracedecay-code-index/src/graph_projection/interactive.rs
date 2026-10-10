@@ -101,7 +101,56 @@ pub(super) struct InteractiveCatalogCache {
     /// [`InteractiveCatalog::retained_bytes`] of the ready catalog, measured
     /// once when it is built.
     ready_bytes: std::sync::atomic::AtomicU64,
+    /// Live readers holding this cache. A memory release answers Busy while
+    /// any reader is assembled: evicting the ready catalog under an admitted
+    /// read turns every later catalog lookup into the typed warming answer
+    /// the reader could not have waited out.
+    readers: std::sync::atomic::AtomicUsize,
     clock: Arc<WarmClock>,
+}
+
+/// One assembled reader's hold on the catalog cache.
+///
+/// Mirrors the engine release, which already stays pinned while a reader is
+/// open: the catalog owner is retained across the complete read, so a park
+/// release cannot evict it between a readiness wait and the reader's next
+/// catalog lookup.
+pub struct InteractiveCatalogReaderLeaseV1 {
+    cache: Arc<InteractiveCatalogCache>,
+}
+
+impl InteractiveCatalogReaderLeaseV1 {
+    pub(super) fn retain(cache: &Arc<InteractiveCatalogCache>) -> Arc<Self> {
+        cache
+            .readers
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Arc::new(Self {
+            cache: Arc::clone(cache),
+        })
+    }
+}
+
+impl Drop for InteractiveCatalogReaderLeaseV1 {
+    fn drop(&mut self) {
+        self.cache
+            .readers
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+impl fmt::Debug for InteractiveCatalogReaderLeaseV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InteractiveCatalogReaderLeaseV1")
+            .field(
+                "readers",
+                &self
+                    .cache
+                    .readers
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish()
+    }
 }
 
 /// What a catalog read would wait on, as [`InteractiveCatalogCache::residency`]
@@ -111,7 +160,10 @@ pub(super) enum CatalogResidency {
     Released,
     /// Warming again after a completed warm.
     Rewarming,
-    /// Cold, failed, or on its first warm: the reader answers that state.
+    /// A warm was marked in background but no build owns it: its runner
+    /// never started or never finished, so a read must restart it.
+    OrphanedWarm,
+    /// Cold, failed, or building on a live owner: the reader answers that state.
     Unreleased,
 }
 
@@ -138,6 +190,7 @@ impl InteractiveCatalogCache {
             build: Mutex::new(()),
             scan_builds: std::sync::atomic::AtomicUsize::new(0),
             ready_bytes: std::sync::atomic::AtomicU64::new(0),
+            readers: std::sync::atomic::AtomicUsize::new(0),
             clock,
         }
     }
@@ -149,6 +202,7 @@ impl InteractiveCatalogCache {
         match &*state {
             InteractiveCatalogState::Ready(_) => CatalogResidency::Resident,
             InteractiveCatalogState::Released => CatalogResidency::Released,
+            InteractiveCatalogState::Warming { owner: None } => CatalogResidency::OrphanedWarm,
             InteractiveCatalogState::Warming { .. }
                 if self.clock.has_warmed(WarmOwner::Catalog) =>
             {
@@ -178,6 +232,9 @@ impl InteractiveCatalogCache {
         let Ok(mut state) = self.state.try_write() else {
             return CodeGraphCatalogReleaseV1::Busy;
         };
+        if self.readers.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            return CodeGraphCatalogReleaseV1::Busy;
+        }
         if !matches!(&*state, InteractiveCatalogState::Ready(_)) {
             return CodeGraphCatalogReleaseV1::NotReady;
         }
@@ -223,6 +280,8 @@ pub struct CodeGraphInteractiveReader {
     projection_node_count: usize,
     cancellation: Arc<dyn GraphCancellation>,
     catalog: Arc<InteractiveCatalogCache>,
+    /// Retains the catalog owner while this reader lives; shared by clones.
+    catalog_lease: Arc<InteractiveCatalogReaderLeaseV1>,
     meter: Option<Arc<GraphReadMeter>>,
 }
 
@@ -232,6 +291,7 @@ impl fmt::Debug for CodeGraphInteractiveReader {
             .debug_struct("CodeGraphInteractiveReader")
             .field("generation", &self.generation)
             .field("projection_node_count", &self.projection_node_count)
+            .field("catalog_lease", &self.catalog_lease)
             .finish_non_exhaustive()
     }
 }
@@ -363,6 +423,16 @@ impl CodeGraphProjectionStore {
             Err(TryLockError::Poisoned(_)) => Err(catalog_lock_poisoned()),
         }
     }
+
+    /// True after the interactive catalog has completed at least one warm.
+    ///
+    /// Stays true when that catalog is later released for memory, so a
+    /// composition wait can hand over while the next graph read re-warms.
+    /// First-time warming is still false.
+    pub fn interactive_catalog_has_completed_a_warm(&self) -> bool {
+        self.warm_clock.has_warmed(WarmOwner::Catalog)
+            || self.interactive_catalog_is_warm().unwrap_or(false)
+    }
 }
 
 impl CodeGraphInteractiveReader {
@@ -380,6 +450,7 @@ impl CodeGraphInteractiveReader {
             snapshot,
             projection_node_count,
             cancellation,
+            catalog_lease: InteractiveCatalogReaderLeaseV1::retain(&catalog),
             catalog,
             meter: None,
         }
@@ -1610,13 +1681,14 @@ impl CodeGraphInteractiveReader {
                     }
                     return Ok(Arc::clone(catalog));
                 }
-                InteractiveCatalogState::Warming { .. } => {
+                InteractiveCatalogState::Warming { owner: Some(_) } => {
                     return Err(CodeGraphProjectionError::Unavailable(
                         CATALOG_WARMING.to_owned(),
                     ));
                 }
                 InteractiveCatalogState::Failed(error) => return Err(error.clone()),
-                InteractiveCatalogState::Released => {}
+                InteractiveCatalogState::Warming { owner: None }
+                | InteractiveCatalogState::Released => {}
                 InteractiveCatalogState::Cold => {
                     drop(state);
                     return self.build_cold_catalog(cancellation);
@@ -1647,20 +1719,30 @@ impl CodeGraphInteractiveReader {
         }
     }
 
-    /// Start rebuilding a released catalog on a thread of its own and answer
-    /// the typed warming state. The rebuild answers to no request's
+    /// Start rebuilding a released catalog — or a background-marked warm
+    /// whose runner never took the build — on a thread of its own and
+    /// answer the typed warming state. The rebuild answers to no request's
     /// cancellation, so a short read cannot abandon it half-scanned.
     pub(super) fn rewarm_released_catalog(&self) -> CodeGraphProjectionError {
-        let released = CodeGraphProjectionError::Unavailable(CATALOG_RELEASED.to_owned());
-        {
+        let mut was_released = false;
+        let answered = {
             let Ok(mut state) = self.catalog.state.write() else {
                 return catalog_lock_poisoned();
             };
-            if !matches!(&*state, InteractiveCatalogState::Released) {
-                return CodeGraphProjectionError::Unavailable(CATALOG_WARMING.to_owned());
+            match &*state {
+                InteractiveCatalogState::Released => was_released = true,
+                InteractiveCatalogState::Warming { owner: None } => {}
+                _ => {
+                    return CodeGraphProjectionError::Unavailable(CATALOG_WARMING.to_owned());
+                }
             }
             *state = InteractiveCatalogState::Warming { owner: None };
-        }
+            if was_released {
+                CodeGraphProjectionError::Unavailable(CATALOG_RELEASED.to_owned())
+            } else {
+                CodeGraphProjectionError::Unavailable(CATALOG_WARMING.to_owned())
+            }
+        };
         self.catalog.clock.begin(WarmOwner::Catalog);
         let background = Self {
             cancellation: Arc::new(NeverCancelled),
@@ -1674,10 +1756,14 @@ impl CodeGraphInteractiveReader {
                 let _ = background.warm_catalog(None, Arc::new(NeverCancelled));
             });
         match spawned {
-            Ok(_) => released,
+            Ok(_) => answered,
             Err(error) => {
                 if let Ok(mut state) = self.catalog.state.write() {
-                    *state = InteractiveCatalogState::Released;
+                    *state = if was_released {
+                        InteractiveCatalogState::Released
+                    } else {
+                        InteractiveCatalogState::Warming { owner: None }
+                    };
                 }
                 self.catalog.clock.settle(WarmOwner::Catalog, false);
                 CodeGraphProjectionError::Unavailable(format!(
