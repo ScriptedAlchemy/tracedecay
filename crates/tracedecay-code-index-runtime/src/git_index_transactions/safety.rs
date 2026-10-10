@@ -2,6 +2,8 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tracedecay_code_index::parallelism;
@@ -44,29 +46,57 @@ impl FixedGitIndexRunner {
         paths.extend(self.other_paths(false)?);
         let read_span = tracing::trace_span!("daemon.git.index_tx.worktree_bytes").entered();
         let paths = paths.into_iter().collect::<Vec<_>>();
+        let admission_micros = AtomicU64::new(0);
+        let physical_read_micros = AtomicU64::new(0);
+        let completed_paths = AtomicU64::new(0);
+        let bytes_read = AtomicU64::new(0);
         let manifest = parallelism::install(|| {
             paths
                 .into_par_iter()
                 .map(|path| {
+                    let admission_started = Instant::now();
                     parallelism::with_background_cpu_permit_cancellable(
                         || self.check_cancelled().is_err(),
                         || {
+                            admission_micros.fetch_add(
+                                admission_started
+                                    .elapsed()
+                                    .as_micros()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                                Ordering::Relaxed,
+                            );
                             self.check_cancelled()?;
                             let path_text = std::str::from_utf8(&path).map_err(|_| {
                                 NativeGitIndexError::MalformedOutput {
                                     operation: "ls-tree",
                                 }
                             })?;
-                            let entry = self
-                                .worktree_manifest_bytes(&self.repository_root.join(path_text))?;
+                            let read_started = Instant::now();
+                            let entry =
+                                self.worktree_manifest_bytes(&self.repository_root.join(path_text));
+                            physical_read_micros.fetch_add(
+                                read_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+                                Ordering::Relaxed,
+                            );
+                            let entry = entry?;
+                            completed_paths.fetch_add(1, Ordering::Relaxed);
+                            bytes_read.fetch_add(entry.1.len() as u64, Ordering::Relaxed);
                             Ok((path_text.to_owned(), entry.0, entry.1))
                         },
                     )
                     .ok_or(NativeGitIndexError::Cancelled)?
                 })
                 .collect::<Result<Vec<_>, NativeGitIndexError>>()
-        })
-        .map_err(|error| NativeGitIndexError::Io(error.to_string()))??;
+        });
+        tracing::trace!(
+            admission_micros = admission_micros.load(Ordering::Relaxed),
+            physical_read_micros = physical_read_micros.load(Ordering::Relaxed),
+            completed_paths = completed_paths.load(Ordering::Relaxed),
+            bytes_read = bytes_read.load(Ordering::Relaxed),
+            "worktree physical-byte capture settled"
+        );
+        let manifest = manifest.map_err(|error| NativeGitIndexError::Io(error.to_string()))??;
         drop(read_span);
         self.check_cancelled()?;
         let digest = canonical_sha256(&manifest)?;
