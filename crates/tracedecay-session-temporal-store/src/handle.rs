@@ -14,7 +14,7 @@ use std::path::Path;
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
-use tracedecay_runtime_core::db::engine::{Error as EngineError, IntoParams, Rows, WriteStatement};
+use tracedecay_runtime_core::db::engine::{Error as EngineError, IntoParams, Rows};
 
 use crate::relations::{SessionRelationGraphStore, SessionRelationScope};
 
@@ -40,26 +40,6 @@ pub trait SessionTemporalExec: SessionTemporalQuery {
         P: IntoParams + Send;
 
     fn execute_batch(&self, sql: &str) -> impl Future<Output = Result<(), EngineError>> + Send;
-
-    /// Executes owned parameterized writes as one fused submission.
-    ///
-    /// Concrete writer handles override this with a single writer dispatch;
-    /// the default preserves exact failed-statement attribution through
-    /// sequential `execute`, keeping narrow adapters correct without an
-    /// override.
-    fn execute_statements(
-        &self,
-        statements: Vec<WriteStatement>,
-    ) -> impl Future<Output = Result<Vec<u64>, EngineError>> + Send {
-        async move {
-            let mut results = Vec::with_capacity(statements.len());
-            for statement in statements {
-                let (sql, params) = statement.into_parts();
-                results.push(self.execute(sql.as_str(), params).await?);
-            }
-            Ok(results)
-        }
-    }
 }
 
 /// Write transaction the session-temporal store can query, mutate, and commit.

@@ -294,71 +294,26 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         // the whole transaction rolls back rather than letting any partially
         // mutated acknowledgement reach the shared commit.
         for index in acknowledge {
-            let projection = &projections[index];
-            // The receipt state is decided inside this transaction by the
-            // paired guards in the group: an applied-state guard runs before
-            // the pending-state guard, so the pair distinguishes a peer that
-            // settled between the shared snapshot and this batch — exactly
-            // what the serial acknowledgement reads inside its transaction —
-            // without a separate query dispatch.
-            let group =
-                match super::relation_receipts::acknowledge_relation_receipt_statements(projection)
-                {
-                    Ok(group) => group,
-                    Err(error) => {
-                        transaction
-                            .rollback()
-                            .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
-                            .await
-                            .map_err(|rollback| storage(RECONSTRUCT_OPERATION, rollback))?;
-                        return Err(error);
-                    }
-                };
-            // [SAVEPOINT, applied-guard UPDATE, pending-guard UPDATE,
-            // guarded journal DELETE]: a failure at the SAVEPOINT edge is
-            // transaction-critical exactly like the serial path; a failing
-            // guarded write or a short-circuit row-count check takes the same
-            // savepoint recovery and lands on the item outcome. RELEASE runs
-            // only after the guards pass so a failed item can still roll its
-            // savepoint back.
-            let item_error = match transaction.execute_statements(group).await {
-                Ok(changed) => {
-                    let already_applied = changed.get(1).copied().unwrap_or(0) == 1;
-                    let was_pending = changed.get(2).copied().unwrap_or(0) == 1;
-                    let delete_removed = changed.get(3).copied().unwrap_or(0);
-                    if !already_applied && !was_pending {
-                        Some(storage_message(
-                            RECONSTRUCT_OPERATION,
-                            "relation receipt changed during native graph acknowledgement",
-                        ))
-                    } else if was_pending && delete_removed != 1 {
-                        Some(storage_message(
-                            RECONSTRUCT_OPERATION,
-                            "relation effect journal changed during native graph acknowledgement",
-                        ))
-                    } else {
-                        None
-                    }
-                }
-                Err(error) => match error {
-                    tracedecay_runtime_core::db::engine::Error::StatementBatch {
-                        index: 1..=3,
-                        source,
-                    } => Some(storage(RECONSTRUCT_OPERATION, *source)),
-                    other => {
-                        transaction
-                            .rollback()
-                            .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
-                            .await
-                            .map_err(|rollback| storage(RECONSTRUCT_OPERATION, rollback))?;
-                        return Err(storage(RECONSTRUCT_OPERATION, other));
-                    }
-                },
-            };
-            let savepoint = if item_error.is_some() {
-                "ROLLBACK TO relation_projection_ack; RELEASE relation_projection_ack"
-            } else {
+            if let Err(error) = transaction
+                .execute_batch("SAVEPOINT relation_projection_ack")
+                .await
+            {
+                transaction
+                    .rollback()
+                    .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
+                    .await
+                    .map_err(|rollback| storage(RECONSTRUCT_OPERATION, rollback))?;
+                return Err(storage(RECONSTRUCT_OPERATION, error));
+            }
+            let result = super::relation_receipts::acknowledge_relation_receipt(
+                &transaction,
+                &projections[index],
+            )
+            .await;
+            let savepoint = if result.is_ok() {
                 "RELEASE relation_projection_ack"
+            } else {
+                "ROLLBACK TO relation_projection_ack; RELEASE relation_projection_ack"
             };
             if let Err(error) = transaction.execute_batch(savepoint).await {
                 transaction
@@ -368,8 +323,8 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                     .map_err(|rollback| storage(RECONSTRUCT_OPERATION, rollback))?;
                 return Err(storage(RECONSTRUCT_OPERATION, error));
             }
-            if let Some(item_error) = item_error {
-                outcomes[index] = Err(item_error);
+            if let Err(error) = result {
+                outcomes[index] = Err(error);
             }
         }
         transaction

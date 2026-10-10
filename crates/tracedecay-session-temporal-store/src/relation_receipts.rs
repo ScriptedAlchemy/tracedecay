@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tracedecay_domain::{SessionId, SessionProjectionGenerationV1};
 use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
-use tracedecay_runtime_core::db::engine::{WriteStatement, params};
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
 use tracing::Instrument as _;
 
@@ -257,69 +257,6 @@ pub(crate) async fn acknowledge_relation_receipt(
         ));
     }
     Ok(())
-}
-
-/// Builds the fused acknowledgement group for one validated projection.
-///
-/// The shared-commit caller issues the group as one writer submission under
-/// its own savepoint: [SAVEPOINT, applied-guard UPDATE, pending-guard UPDATE,
-/// guarded journal DELETE]. The already-applied guard must precede the
-/// pending guard so the pair distinguishes a receipt the peer already
-/// settled (first guard changes) from one this group transitions (second
-/// guard changes) — the same `was_pending` the serial path reads inside its
-/// transaction — without a separate query dispatch. The caller checks every
-/// row count after the group returns, issues RELEASE only on success, and
-/// replays the savepoint recovery on any short-circuit, so a concurrent
-/// receipt settle fails the item identically to the serial path.
-pub(crate) fn acknowledge_relation_receipt_statements(
-    projection: &SessionRelationProjection,
-) -> SessionStoreResult<Vec<WriteStatement>> {
-    let applied =
-        projection_watermark(projection).map_err(|error| storage(RECEIPT_OPERATION, error))?;
-    let generation =
-        i64::try_from(projection.generation).map_err(|error| storage(RECEIPT_OPERATION, error))?;
-    Ok(vec![
-        WriteStatement::new("SAVEPOINT relation_projection_ack", ())
-            .map_err(|error| storage(RECEIPT_OPERATION, error))?,
-        // Already-applied guard first: it must run before the pending guard so
-        // a peer-settled receipt is observed as `applied` rather than freshly
-        // transitioned — the pending guard can never satisfy this clause
-        // because it runs after it in the same statement group.
-        WriteStatement::new(
-            "UPDATE session_relation_receipts
-             SET state = 'applied', graph_watermark = ?3, applied_at = ?4
-             WHERE session_id = ?1 AND generation = ?2
-               AND expected_graph_watermark = ?3
-               AND state = 'applied'",
-            params![
-                projection.session_id.as_str(),
-                generation,
-                applied.as_str(),
-                now_micros(RECEIPT_OPERATION)?.0,
-            ],
-        )
-        .map_err(|error| storage(RECEIPT_OPERATION, error))?,
-        WriteStatement::new(
-            "UPDATE session_relation_receipts
-             SET state = 'applied', graph_watermark = ?3, applied_at = ?4
-             WHERE session_id = ?1 AND generation = ?2
-               AND expected_graph_watermark = ?3
-               AND state = 'pending'",
-            params![
-                projection.session_id.as_str(),
-                generation,
-                applied.as_str(),
-                now_micros(RECEIPT_OPERATION)?.0,
-            ],
-        )
-        .map_err(|error| storage(RECEIPT_OPERATION, error))?,
-        WriteStatement::new(
-            "DELETE FROM session_relation_effect_journal
-             WHERE session_id = ?1 AND generation = ?2",
-            params![projection.session_id.as_str(), generation],
-        )
-        .map_err(|error| storage(RECEIPT_OPERATION, error))?,
-    ])
 }
 
 /// Reports whether a peer applier already settled this generation's receipt.

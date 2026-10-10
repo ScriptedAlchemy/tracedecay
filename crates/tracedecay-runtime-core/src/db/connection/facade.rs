@@ -402,13 +402,6 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.execute_batch(sql).await
     }
 
-    pub async fn execute_statements(
-        &self,
-        statements: Vec<crate::db::engine::WriteStatement>,
-    ) -> crate::db::engine::Result<Vec<u64>> {
-        self.transaction.execute_statements(statements).await
-    }
-
     pub async fn execute_engine<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,

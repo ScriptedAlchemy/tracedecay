@@ -6,7 +6,7 @@ use tracedecay_domain::{
     SessionSourceIdV1, SessionTemporalCoverageRequestV1, SignedCursorKeyRefV1,
     TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
-use tracedecay_runtime_core::db::engine::{Row, WriteStatement, params};
+use tracedecay_runtime_core::db::engine::{Row, params};
 use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionRefreshBeginOrJoinReceiptV1,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancellationRequestV1,
@@ -274,82 +274,79 @@ async fn begin_session_refresh_in_transaction(
     // The running-operation and attempt reads above share this writer transaction, so
     // they already decided one-running ownership and the operation id; a constraint
     // failure here is a storage fault, never a busy refresh.
-    // The running-operation and attempt reads above share this writer
-    // transaction, so they already decided one-running ownership and the
-    // operation id; a constraint failure here is a storage fault, never a busy
-    // refresh. The four inserts are unconditional, so they ride one fused
-    // writer submission and stop paying a dispatch roundtrip each.
     transaction
-        .execute_statements(vec![
-            WriteStatement::new(
-                "INSERT INTO session_refresh_operations (
-                    session_id, operation_id, request_digest, target_frontier_json,
-                    state, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?5)",
-                params![
-                    request.session_id().as_str(),
-                    operation_id.as_str(),
-                    request_digest.as_str(),
-                    encode_refresh_target(&request)?,
-                    accepted_at.0,
-                ],
-            )
-            .map_err(|error| storage(BEGIN_REFRESH, error))?,
-            WriteStatement::new(
-                "INSERT INTO session_temporal_generations (
-                    session_id, generation, state, frozen_watermarks_json, created_at
-                 ) VALUES (?1, ?2, 'building', ?3, ?4)",
-                params![
-                    request.session_id().as_str(),
-                    generation_i64(candidate_generation, BEGIN_REFRESH)?,
-                    frozen_watermarks_json.as_str(),
-                    accepted_at.0,
-                ],
-            )
-            .map_err(|error| storage(BEGIN_REFRESH, error))?,
-            // Summary availability is generation-bound: the candidate inherits
-            // the active generation's rows exactly like the
-            // summary-publication route's generation builder, otherwise
-            // activating this refresh would silently drop every published
-            // summary from generation-bound reads.
-            WriteStatement::new(
-                "INSERT INTO session_summary_availability (
-                    session_id, generation, summary_id, availability,
-                    source_horizon_json, reason, checked_at
-                 )
-                 SELECT session_id, ?2, summary_id, availability,
-                        source_horizon_json, reason, ?3
-                 FROM session_summary_availability
-                 WHERE session_id = ?1 AND generation = ?4",
-                params![
-                    request.session_id().as_str(),
-                    generation_i64(candidate_generation, BEGIN_REFRESH)?,
-                    accepted_at.0,
-                    generation_i64(active_generation, BEGIN_REFRESH)?,
-                ],
-            )
-            .map_err(|error| storage(BEGIN_REFRESH, error))?,
-            WriteStatement::new(
-                "INSERT INTO session_refresh_bindings (
-                    session_id, operation_id, scope_kind, source_frontier, target_frontier,
-                    projector_version, config_digest, generation, frozen_watermarks_json,
-                    binding_digest, created_at
-                 ) VALUES (?1, ?2, 'session_store', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    request.session_id().as_str(),
-                    operation_id.as_str(),
-                    frontier_i64(request.target_frontier().committed_through(), BEGIN_REFRESH,)?,
-                    frontier_i64(request.target_frontier().observed_through(), BEGIN_REFRESH)?,
-                    PROJECTOR_VERSION,
-                    config_digest(),
-                    generation_i64(candidate_generation, BEGIN_REFRESH)?,
-                    frozen_watermarks_json,
-                    request_digest.clone(),
-                    accepted_at.0,
-                ],
-            )
-            .map_err(|error| storage(BEGIN_REFRESH, error))?,
-        ])
+        .execute(
+            "INSERT INTO session_refresh_operations (
+                session_id, operation_id, request_digest, target_frontier_json,
+                state, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?5)",
+            params![
+                request.session_id().as_str(),
+                operation_id.as_str(),
+                request_digest.as_str(),
+                encode_refresh_target(&request)?,
+                accepted_at.0,
+            ],
+        )
+        .await
+        .map_err(|error| storage(BEGIN_REFRESH, error))?;
+    transaction
+        .execute(
+            "INSERT INTO session_temporal_generations (
+                session_id, generation, state, frozen_watermarks_json, created_at
+             ) VALUES (?1, ?2, 'building', ?3, ?4)",
+            params![
+                request.session_id().as_str(),
+                generation_i64(candidate_generation, BEGIN_REFRESH)?,
+                frozen_watermarks_json.as_str(),
+                accepted_at.0,
+            ],
+        )
+        .await
+        .map_err(|error| storage(BEGIN_REFRESH, error))?;
+    // Summary availability is generation-bound: the candidate inherits the
+    // active generation's rows exactly like the summary-publication
+    // route's generation builder, otherwise activating this refresh would
+    // silently drop every published summary from generation-bound reads.
+    transaction
+        .execute(
+            "INSERT INTO session_summary_availability (
+                session_id, generation, summary_id, availability,
+                source_horizon_json, reason, checked_at
+             )
+             SELECT session_id, ?2, summary_id, availability,
+                    source_horizon_json, reason, ?3
+             FROM session_summary_availability
+             WHERE session_id = ?1 AND generation = ?4",
+            params![
+                request.session_id().as_str(),
+                generation_i64(candidate_generation, BEGIN_REFRESH)?,
+                accepted_at.0,
+                generation_i64(active_generation, BEGIN_REFRESH)?,
+            ],
+        )
+        .await
+        .map_err(|error| storage(BEGIN_REFRESH, error))?;
+    transaction
+        .execute(
+            "INSERT INTO session_refresh_bindings (
+                session_id, operation_id, scope_kind, source_frontier, target_frontier,
+                projector_version, config_digest, generation, frozen_watermarks_json,
+                binding_digest, created_at
+             ) VALUES (?1, ?2, 'session_store', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                request.session_id().as_str(),
+                operation_id.as_str(),
+                frontier_i64(request.target_frontier().committed_through(), BEGIN_REFRESH,)?,
+                frontier_i64(request.target_frontier().observed_through(), BEGIN_REFRESH)?,
+                PROJECTOR_VERSION,
+                config_digest(),
+                generation_i64(candidate_generation, BEGIN_REFRESH)?,
+                frozen_watermarks_json,
+                request_digest.clone(),
+                accepted_at.0,
+            ],
+        )
         .await
         .map_err(|error| storage(BEGIN_REFRESH, error))?;
     Ok(SessionRefreshBeginTxnOutcome::Started {
@@ -475,71 +472,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         let session_id = request.session_id().clone();
         let coverage_request = request.coverage_request().clone();
         let refresh_key = request.refresh_key().cloned();
-        // The pending-reset probe only reads: run it on a snapshot so the
-        // common no-reset path never opens a write transaction on the
-        // serialized writer lane.
-        let reset_snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| storage(BEGIN_REFRESH, error))?;
-        let reset_pending = session_reset_is_pending(&reset_snapshot, &session_id).await?;
-        drop(reset_snapshot);
-        if reset_pending {
-            let transaction = self
-                .begin_write_transaction()
-                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-                .await
-                .map_err(|error| storage(BEGIN_REFRESH, error))?;
-            if !session_reset_is_pending(&transaction, &session_id).await? {
-                transaction
-                    .rollback()
-                    .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
-                    .await
-                    .map_err(|error| storage(BEGIN_REFRESH, error))?;
-            } else {
-                // The begin deletes the base rows a folded first batch would
-                // project from, so planning here can only produce a batch the
-                // committing replay refuses. Commit the begin instead; durable
-                // recovery picks the operation up this pass and projects the
-                // post-reset state.
-                let outcome = begin_session_refresh_in_transaction(
-                    &transaction,
-                    request,
-                    now_micros(BEGIN_REFRESH)?,
-                )
-                .await;
-                let outcome = match outcome {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        transaction
-                            .rollback()
-                            .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
-                            .await
-                            .map_err(|rollback| storage(BEGIN_REFRESH, rollback))?;
-                        return Err(error);
-                    }
-                };
-                transaction
-                    .commit()
-                    .instrument(tracing::trace_span!("session_temporal.txn.commit"))
-                    .await
-                    .map_err(|error| storage(BEGIN_REFRESH, error))?;
-                return Ok(match outcome {
-                    SessionRefreshBeginTxnOutcome::Started { .. } => {
-                        SessionRefreshBeginPlanV1::Begun
-                    }
-                    SessionRefreshBeginTxnOutcome::Joined { .. } => {
-                        SessionRefreshBeginPlanV1::Joined
-                    }
-                });
-            }
-        }
         // The begin mints a random cursor key when no active key exists, and
         // a rolled-back mint leaves the commit replay reading a different key.
-        // Provisioning the shared key first makes both replays deterministic;
-        // with an active key already committed this transaction writes
-        // nothing, so the common path probes on a snapshot like the reset
-        // check above and only enters the writer lane to mint.
+        // Provisioning the shared key first makes both replays deterministic.
+        // An already-active key needs no write, so the common path probes on
+        // a snapshot and only enters the writer lane to mint.
         let key_snapshot = self
             .read_snapshot()
             .await
@@ -564,10 +501,12 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .instrument(tracing::trace_span!("session_temporal.txn.begin"))
             .await
             .map_err(|error| storage(BEGIN_REFRESH, error))?;
-        // A reset can arrive between the snapshot probe and this transaction;
-        // recheck inside the write transaction so a concurrent reset still
-        // commits begin alone instead of being rolled back by the plan.
         if session_reset_is_pending(&transaction, &session_id).await? {
+            // The begin deletes the base rows a folded first batch would
+            // project from, so planning here can only produce a batch the
+            // committing replay refuses. Commit the begin instead; durable
+            // recovery picks the operation up this pass and projects the
+            // post-reset state.
             let outcome = begin_session_refresh_in_transaction(
                 &transaction,
                 request,

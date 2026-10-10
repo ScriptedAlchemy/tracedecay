@@ -47,13 +47,6 @@ impl SessionTemporalExec for RegisteredGlobalDbWriteTransaction<'_> {
     fn execute_batch(&self, sql: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
         RegisteredGlobalDbWriteTransaction::execute_batch(self, sql)
     }
-
-    fn execute_statements(
-        &self,
-        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
-    ) -> impl Future<Output = Result<Vec<u64>, EngineError>> + Send {
-        RegisteredGlobalDbWriteTransaction::execute_statements(self, statements)
-    }
 }
 
 impl SessionTemporalWriteTxn for RegisteredGlobalDbWriteTransaction<'_> {
