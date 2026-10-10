@@ -144,23 +144,21 @@ impl WorktreeResidencyV1 {
         }
     }
 
-    /// Drop the seated decode and the warm catalog/engine once the worker parks.
+    /// Drop the seated decode once the worker parks.
     ///
-    /// Exact and lexical reads serve from the sealed text artifact. Callers
-    /// remount the graph from that artifact. The seated
-    /// [`CodeIndexPublishedGenerationV1`], the interactive catalog, and the
-    /// native engine are copies of the same published generation. Keep the
-    /// decode while a complete read demands the seat, a reconcile is still
-    /// running, or the installed text owner cannot yet serve: a text owner
-    /// whose projection is still warming or that latched a failure leaves
-    /// the seat as the only servable generation, and taking it then turns
-    /// serve-old into `GenerationUnavailable`. Do not clear
-    /// `complete_generation_requested`: a demand that arrives during the
-    /// take must still wake a successor pass to re-decode. Catalog and
-    /// engine still go back: they rebuild from the durable graph on the
-    /// next graph read.
+    /// Exact, lexical, and callers already serve from the sealed text
+    /// artifact and the warm catalog/engine. The seated
+    /// [`CodeIndexPublishedGenerationV1`] is a third copy of that
+    /// generation. Keep it while a complete read demands the seat, a
+    /// reconcile is still running, or the installed text owner cannot yet
+    /// serve: a text owner whose projection is still warming or that
+    /// latched a failure leaves the seat as the only servable generation,
+    /// and taking it then turns serve-old into `GenerationUnavailable`.
+    /// Do not clear `complete_generation_requested`: a demand that
+    /// arrives during the take must still wake a successor pass to
+    /// re-decode.
     pub(super) fn release_decode_when_parked(self: &Arc<Self>, owners: &ResidentOwnersV1) {
-        if self.busy() {
+        if self.busy() || self.complete_generation_requested.load(Ordering::Acquire) {
             return;
         }
         if !self
@@ -169,83 +167,48 @@ impl WorktreeResidencyV1 {
         {
             return;
         }
-        let mut released = Vec::new();
-        if !self.complete_generation_requested.load(Ordering::Acquire) {
-            let seated = {
-                let mut slot = self
-                    .serving_generation
-                    .write()
-                    .unwrap_or_else(PoisonError::into_inner);
-                if self.complete_generation_requested.load(Ordering::Acquire) {
-                    None
-                } else {
-                    slot.take()
-                }
-            };
-            if seated.is_some() {
-                self.serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
-                CodeIndexSchedulerRegistryV1::record_serving_seat(&self.serving_seats);
-                self.serving_generation_changed.send_replace(());
+        let seated = {
+            let mut slot = self
+                .serving_generation
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            if self.complete_generation_requested.load(Ordering::Acquire) {
+                return;
             }
-            let serving = HeldDecodesV1::release(
-                seated
-                    .map(|latest| latest.generation_handle())
-                    .into_iter()
-                    .chain(self.publication.release_decoded_active())
-                    .collect(),
-            );
-            let superseded = HeldDecodesV1::release(self.publication.release_superseded_decodes());
-            released.extend([serving, superseded].into_iter().filter_map(
-                |release| match release {
-                    ResidentOwnerReleaseV1::Released { bytes } => Some(bytes),
-                    ResidentOwnerReleaseV1::Busy | ResidentOwnerReleaseV1::Empty => None,
-                },
-            ));
-            if !released.is_empty() {
-                tracing::info!(
-                    event = "code_index_serving_decode_released_on_park",
-                    bytes = released
-                        .iter()
-                        .map(|bytes| bytes.measured().unwrap_or(0))
-                        .sum::<u64>(),
-                    "a parked worktree gave back its seated decode; text keeps serving"
-                );
-            }
+            slot.take()
+        };
+        if seated.is_some() {
+            self.serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
+            CodeIndexSchedulerRegistryV1::record_serving_seat(&self.serving_seats);
+            self.serving_generation_changed.send_replace(());
         }
-        if self.busy() {
-            if !released.is_empty() {
-                owners.note_headroom();
-            }
-            return;
-        }
-        for (kind, release) in [
-            (
-                ResidentOwnerKindV1::GraphCatalog,
-                GraphCatalogOwnerV1(Arc::clone(self)).release(),
-            ),
-            (
-                ResidentOwnerKindV1::GraphEngine,
-                GraphEngineOwnerV1(Arc::clone(self)).release(),
-            ),
-            (
-                ResidentOwnerKindV1::GraphEngine,
-                OutgoingGraphOwnerV1(Arc::clone(self)).release(),
-            ),
-        ] {
-            if let ResidentOwnerReleaseV1::Released { bytes } = release {
-                tracing::info!(
-                    event = "code_index_serving_graph_released_on_park",
-                    kind = kind.as_str(),
-                    bytes = bytes.measured(),
-                    "a parked worktree gave back its catalog or engine; text keeps serving"
-                );
-                released.push(bytes);
-            }
-        }
+        let serving = HeldDecodesV1::release(
+            seated
+                .map(|latest| latest.generation_handle())
+                .into_iter()
+                .chain(self.publication.release_decoded_active())
+                .collect(),
+        );
+        let superseded = HeldDecodesV1::release(self.publication.release_superseded_decodes());
+        let released = [serving, superseded]
+            .into_iter()
+            .filter_map(|release| match release {
+                ResidentOwnerReleaseV1::Released { bytes } => Some(bytes),
+                ResidentOwnerReleaseV1::Busy | ResidentOwnerReleaseV1::Empty => None,
+            })
+            .collect::<Vec<_>>();
         if released.is_empty() {
             return;
         }
         owners.note_headroom();
+        tracing::info!(
+            event = "code_index_serving_decode_released_on_park",
+            bytes = released
+                .iter()
+                .map(|bytes| bytes.measured().unwrap_or(0))
+                .sum::<u64>(),
+            "a parked worktree gave back its seated decode; text and graph keep serving"
+        );
     }
 
     /// Renew the lease: a read needed the whole decoded generation.

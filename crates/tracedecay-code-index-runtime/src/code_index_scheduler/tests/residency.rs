@@ -41,22 +41,6 @@ fn decoded_kinds(report: &ResidentOwnersReportV1) -> Vec<ResidentOwnerKindV1> {
         .collect()
 }
 
-fn index_copy_kinds(report: &ResidentOwnersReportV1) -> Vec<ResidentOwnerKindV1> {
-    report
-        .owners
-        .iter()
-        .filter(|row| {
-            matches!(
-                row.kind,
-                ResidentOwnerKindV1::DecodedGeneration
-                    | ResidentOwnerKindV1::GraphCatalog
-                    | ResidentOwnerKindV1::GraphEngine
-            )
-        })
-        .map(|row| row.kind)
-        .collect()
-}
-
 fn search_anchors(search: &super::super::query_runtime::ExecutedQuerySearchV1) -> Vec<String> {
     search
         .authorized
@@ -97,9 +81,9 @@ async fn a_parked_worktree_releases_its_decode_and_search_still_answers() {
 
     let parked = owners.report(Instant::now());
     assert_eq!(
-        index_copy_kinds(&parked),
+        decoded_kinds(&parked),
         [],
-        "a parked worktree must not keep a seated decode, catalog, or engine: {parked:?}"
+        "a parked worktree must not keep a seated decode: {parked:?}"
     );
 
     let without_decode = registry
@@ -408,9 +392,9 @@ async fn eight_parked_worktrees_keep_no_decoded_generations() {
     }
 
     assert_eq!(
-        index_copy_kinds(&owners.report(Instant::now())),
+        decoded_kinds(&owners.report(Instant::now())),
         [],
-        "eight parked worktrees must not retain decode, catalog, or engine copies"
+        "eight parked worktrees must not retain eight seated decodes"
     );
 
     for (ordinal, (fixture, scope)) in fixtures.iter().zip(&scopes).enumerate() {
