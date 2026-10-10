@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.82](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.81...v1.0.0-beta.82) (2026-10-10)
+
+
+### Bug Fixes
+
+* **ci:** type source_role defaults and pin extractor v21 ([#3363](https://github.com/ScriptedAlchemy/tracedecay/issues/3363)) ([73883d8](https://github.com/ScriptedAlchemy/tracedecay/commit/73883d80b503bd704fbdcba89128a252b24baac8))
+* **graph:** publish digest in-place and stop refused warming ([#3343](https://github.com/ScriptedAlchemy/tracedecay/issues/3343)) ([1a9f61e](https://github.com/ScriptedAlchemy/tracedecay/commit/1a9f61e75c0c906c0081633fdeceb9ec101b8474))
+* **grep:** prune scopes and batch admitted source reads ([#3365](https://github.com/ScriptedAlchemy/tracedecay/issues/3365)) ([1f9758e](https://github.com/ScriptedAlchemy/tracedecay/commit/1f9758e0fdea9221d1c8be483a7f02af77b51e1d))
+* **search:** keep name-whitelisted routes scoring symbols ([#3361](https://github.com/ScriptedAlchemy/tracedecay/issues/3361)) ([72bd91f](https://github.com/ScriptedAlchemy/tracedecay/commit/72bd91fba7f14bbb425aa67f3dd183ffb0ae2922))
+* **search:** recover labeled needs on own-symbol definition ranking ([#3355](https://github.com/ScriptedAlchemy/tracedecay/issues/3355)) ([7245fe6](https://github.com/ScriptedAlchemy/tracedecay/commit/7245fe6e9cb7d41e47f71156dda31010995cfea5))
+* Windows mcp template paths and cancel-before-park ([#3350](https://github.com/ScriptedAlchemy/tracedecay/issues/3350)) ([ea789c6](https://github.com/ScriptedAlchemy/tracedecay/commit/ea789c683640552c05d3c27c814950b3fd1b717e))
+
+
+### Performance Improvements
+
+* **ci:** three-way workspace shards + single disk-cache family ([#3337](https://github.com/ScriptedAlchemy/tracedecay/issues/3337)) ([4b800ff](https://github.com/ScriptedAlchemy/tracedecay/commit/4b800ff6b880e1f7a75869ef9bdd26a203760a54))
+
 ## [Unreleased]
 
 ### Bug Fixes
