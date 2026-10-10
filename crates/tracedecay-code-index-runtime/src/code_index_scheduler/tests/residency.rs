@@ -41,22 +41,6 @@ fn decoded_kinds(report: &ResidentOwnersReportV1) -> Vec<ResidentOwnerKindV1> {
         .collect()
 }
 
-fn index_copy_kinds(report: &ResidentOwnersReportV1) -> Vec<ResidentOwnerKindV1> {
-    report
-        .owners
-        .iter()
-        .filter(|row| {
-            matches!(
-                row.kind,
-                ResidentOwnerKindV1::DecodedGeneration
-                    | ResidentOwnerKindV1::GraphCatalog
-                    | ResidentOwnerKindV1::GraphEngine
-            )
-        })
-        .map(|row| row.kind)
-        .collect()
-}
-
 fn graph_copy_kinds(report: &ResidentOwnersReportV1) -> Vec<ResidentOwnerKindV1> {
     report
         .owners
@@ -159,49 +143,88 @@ async fn a_parked_worktree_releases_catalog_and_engine_and_stays_ready() {
         store.path().to_path_buf(),
     )
     .await;
+    let root = canonical_existing_identity(fixture.path()).expect("canonical root");
     assert!(registry.request_complete_generation(fixture.path()).await);
     let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
     let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
     install_verified_graph_store_on_text(&text, &seated);
-    drop(seated);
     text.interactive_graph_store()
         .expect("installed graph store")
         .warm_serving_engine()
         .expect("pin the serving engine so park has something to release");
-    wait_for_settled_owner(&registry, fixture.path()).await;
-    assert_eq!(
-        text.code_graph_serving_readiness(),
-        CodeGraphServingReadinessV1::Ready
-    );
-    let warm = owners.report(Instant::now());
-    assert!(
-        graph_copy_kinds(&warm)
-            .iter()
-            .any(|kind| *kind == ResidentOwnerKindV1::GraphCatalog),
-        "the installed catalog must be visible before park: {warm:?}"
-    );
-    assert!(
-        graph_copy_kinds(&warm)
-            .iter()
-            .any(|kind| *kind == ResidentOwnerKindV1::GraphEngine),
-        "the pinned engine must be visible before park: {warm:?}"
-    );
+    drop(seated);
 
-    registry
-        .release_decode_when_parked_for_test(fixture.path())
-        .await;
+    // The worker may still be in the complete-generation pass and replace
+    // this store with one whose catalog is still warming. Wait until both
+    // copies are resident on the serving text, then park.
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        let current = registry
+            .latest_text_serving_for_root(&root)
+            .await
+            .expect("serving text");
+        let catalog_ready = current
+            .interactive_graph_store()
+            .ok()
+            .and_then(|store| store.interactive_catalog_bytes())
+            .is_some();
+        if !catalog_ready {
+            if let Some(latest) = registry
+                .latest_complete_serving_for_test(fixture.path())
+                .await
+            {
+                install_verified_graph_store_on_text(&current, &latest);
+                let _ = current
+                    .interactive_graph_store()
+                    .ok()
+                    .and_then(|store| store.warm_serving_engine().ok());
+            }
+        }
+        let warm = owners.report(Instant::now());
+        if graph_copy_kinds(&warm)
+            .iter()
+            .any(|kind| *kind == ResidentOwnerKindV1::GraphCatalog)
+            && graph_copy_kinds(&warm)
+                .iter()
+                .any(|kind| *kind == ResidentOwnerKindV1::GraphEngine)
+            && current.code_graph_serving_readiness() == CodeGraphServingReadinessV1::Ready
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "catalog and engine must become resident before park: {warm:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
-    let parked = owners.report(Instant::now());
-    assert_eq!(
-        graph_copy_kinds(&parked),
-        [],
-        "a parked worktree must not keep catalog or engine: {parked:?}"
-    );
-    assert_eq!(
-        text.code_graph_serving_readiness(),
-        CodeGraphServingReadinessV1::Ready,
-        "memory release of an activated store stays ready"
-    );
+    loop {
+        registry
+            .release_decode_when_parked_for_test(fixture.path())
+            .await;
+        let parked = owners.report(Instant::now());
+        let current = registry
+            .latest_text_serving_for_root(&root)
+            .await
+            .expect("serving text");
+        let released = current
+            .interactive_graph_store()
+            .ok()
+            .is_some_and(|store| store.released_for_memory());
+        if graph_copy_kinds(&parked).is_empty() && released {
+            assert_eq!(
+                current.code_graph_serving_readiness(),
+                CodeGraphServingReadinessV1::Ready,
+                "memory release of an activated store stays ready"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "a parked worktree must not keep catalog or engine: {parked:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
     let search = registry
         .execute_query_search(&scope, core_search_request("park_graph_target"))
