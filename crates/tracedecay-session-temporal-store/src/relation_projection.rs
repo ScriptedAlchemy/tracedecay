@@ -280,12 +280,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         if acknowledge.is_empty() {
             return Ok(outcomes);
         }
-        let transaction = {
-            self.begin_write_transaction()
-                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-                .await
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-        };
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         // Each acknowledgement runs inside its own savepoint so a failed
         // acknowledge rolls back only that item's partial mutation; the
         // per-session apply used to roll its whole transaction back, and a
@@ -373,13 +372,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 outcomes[index] = Err(item_error);
             }
         }
-        {
-            transaction
-                .commit()
-                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
-                .await
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        }
+        transaction
+            .commit()
+            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         Ok(outcomes)
     }
 

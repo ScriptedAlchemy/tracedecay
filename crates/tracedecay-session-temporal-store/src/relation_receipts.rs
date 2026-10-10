@@ -126,15 +126,11 @@ pub async fn apply_relation_projection(
     cancellation: Arc<dyn GraphCancellation>,
 ) -> SessionStoreResult<GraphWatermark> {
     let applied = write_relation_projection(database, projection, cancellation).await?;
-    let transaction = {
-        {
-            database
-                .begin_write_transaction()
-                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-                .await
-                .map_err(|error| storage(RECEIPT_OPERATION, error))?
-        }
-    };
+    let transaction = database
+        .begin_write_transaction()
+        .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
     acknowledge_relation_receipt(&transaction, projection).await?;
     transaction
         .commit()

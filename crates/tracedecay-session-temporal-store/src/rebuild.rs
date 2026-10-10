@@ -52,15 +52,11 @@ pub(super) async fn rebuild_candidate_session_relations(
     drop(snapshot);
 
     checkpoint_relation_rebuild_control(control)?;
-    let receipt = {
-        {
-            database
-                .begin_write_transaction()
-                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-                .await
-                .map_err(|error| storage(operation, error))?
-        }
-    };
+    let receipt = database
+        .begin_write_transaction()
+        .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+        .await
+        .map_err(|error| storage(operation, error))?;
     record_relation_receipt(&receipt, &reconstructed, now_micros(operation)?.0).await?;
     receipt
         .commit()
