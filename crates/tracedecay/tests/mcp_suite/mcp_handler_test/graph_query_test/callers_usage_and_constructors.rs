@@ -155,6 +155,11 @@ async fn callers_return_commonjs_constructor_sites() {
         fs::create_dir_all(project.join("src/webpack")).unwrap();
         fs::create_dir_all(project.join("manual/webpack")).unwrap();
         fs::write(
+            project.join("package.json"),
+            "{\n  \"name\": \"webpack-external-import\",\n  \"files\": [\"webpack\", \"index.js\"]\n}\n",
+        )
+        .unwrap();
+        fs::write(
             project.join("src/webpack/index.js"),
             "class URLImportPlugin {\n  constructor(opts) {\n    this.opts = opts;\n  }\n}\n\
              module.exports = URLImportPlugin;\n",

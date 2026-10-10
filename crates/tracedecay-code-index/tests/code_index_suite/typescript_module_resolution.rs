@@ -416,13 +416,18 @@ fn sealed_replay_recomputes_identical_typescript_edges() {
 }
 
 /// webpack-external-import compiles `src/` to the package root. A factory
-/// that `require`s the published path and `new`s the class must still bind
-/// while only the source tree is indexed.
+/// that `require`s a path listed in `files` and `new`s the class must still
+/// bind while only the source tree is indexed.
 #[test]
 fn published_root_require_binds_src_constructor() {
     let root = tempfile::tempdir().expect("published-root fixture");
     std::fs::create_dir_all(root.path().join("src/webpack")).expect("src/webpack");
     std::fs::create_dir_all(root.path().join("manual/webpack")).expect("manual/webpack");
+    std::fs::write(
+        root.path().join("package.json"),
+        "{\n  \"name\": \"webpack-external-import\",\n  \"files\": [\"webpack\", \"index.js\"]\n}\n",
+    )
+    .expect("package manifest");
     std::fs::write(
         root.path().join("src/webpack/index.js"),
         "class URLImportPlugin {\n  constructor(opts) { this.opts = opts; }\n}\n\
@@ -438,10 +443,8 @@ fn published_root_require_binds_src_constructor() {
     )
     .expect("factory source");
 
-    let generation = crate::cross_file_import_calls::publish_fixture_tree(
-        root.path(),
-        "published-root-require",
-    );
+    let generation =
+        crate::cross_file_import_calls::publish_fixture_tree(root.path(), "published-root-require");
     let target = symbol(&generation, "src/webpack/index.js::URLImportPlugin");
     let callers = resolved_callers(&generation, &target);
     assert!(
@@ -449,6 +452,52 @@ fn published_root_require_binds_src_constructor() {
             .keys()
             .any(|name| name.contains("webpackConfigFactory.js")),
         "new URLImportPlugin after require(\"../../webpack\") must bind: {callers:?}"
+    );
+}
+
+/// An undeclared relative specifier must not invent a `src/` edge. `app.ts`
+/// importing `./foo` next to `src/foo.ts` is a missing module, not a
+/// published-root mapping, even when a root `package.json` exists.
+#[test]
+fn undeclared_missing_relative_stays_unresolved() {
+    let root = tempfile::tempdir().expect("undeclared-relative fixture");
+    std::fs::create_dir_all(root.path().join("src")).expect("src");
+    std::fs::write(
+        root.path().join("package.json"),
+        "{\n  \"name\": \"app\",\n  \"main\": \"index.js\"\n}\n",
+    )
+    .expect("package manifest");
+    std::fs::write(
+        root.path().join("src/foo.ts"),
+        "export function foo() { return 1; }\n",
+    )
+    .expect("src foo");
+    std::fs::write(
+        root.path().join("app.ts"),
+        "import { foo } from './foo';\nfoo();\n",
+    )
+    .expect("app source");
+
+    let generation =
+        crate::cross_file_import_calls::publish_fixture_tree(root.path(), "undeclared-relative");
+    let unresolved = generation
+        .unresolved_import_calls()
+        .into_iter()
+        .map(|reference| reference.reference_name)
+        .collect::<Vec<_>>();
+    assert!(
+        unresolved.iter().any(|name| name == "foo"),
+        "undeclared ./foo must stay unresolved, not bind src/foo.ts: {unresolved:?}"
+    );
+    let foo = symbol(&generation, "src/foo.ts::foo");
+    let inbound = generation
+        .edges()
+        .iter()
+        .filter(|edge| edge.to_occurrence == foo)
+        .count();
+    assert_eq!(
+        inbound, 0,
+        "undeclared ./foo must not invent an edge to src/foo.ts"
     );
 }
 

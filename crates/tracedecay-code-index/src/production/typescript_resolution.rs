@@ -13,7 +13,8 @@
 //! `export … from` chains through barrels, including same-module
 //! `export { a as b }` clauses and `export default <name>` that forward a
 //! declaration or a local import (`export *` never forwards `default`),
-//! CommonJS `require`/`module.exports`, published-root paths whose source
+//! CommonJS `require`/`module.exports`, published-root paths the owning
+//! `package.json` declares (`files`, root `main`/`exports`) whose source
 //! still lives under `src/`, and member calls through module namespaces
 //! (`import * as ns`, `export * as ns`).
 //!
@@ -121,6 +122,8 @@ struct NodePackageV1 {
     entries: Vec<String>,
     /// `exports` subpaths (`./utils`, `./*`) to their target templates.
     subpath_exports: Vec<(String, Vec<String>)>,
+    /// Manifest `files` entries: the paths this package publishes.
+    published_files: Vec<String>,
 }
 
 /// Module facts for one sealed file set.
@@ -198,7 +201,7 @@ impl TypeScriptModuleIndexV1 {
             let published = join_normalized(from_dir, specifier);
             return self
                 .probe(&published)
-                .or_else(|| self.probe_published_from_src(&published))
+                .or_else(|| self.probe_declared_published_from_src(&published))
                 .map_or(ModuleTargetV1::Unresolved, ModuleTargetV1::File);
         }
         let mut names_project_code = false;
@@ -584,15 +587,52 @@ impl TypeScriptModuleIndexV1 {
         }
     }
 
-    /// `babel src -d .` (and similar) publish `src/foo` as `foo`. A relative
-    /// require of the published path must still bind the indexed source, or
-    /// `new URLImportPlugin()` after `require("../../webpack")` never reaches
-    /// `src/webpack`.
-    fn probe_published_from_src(&self, published: &str) -> Option<usize> {
-        if published.is_empty() || published == "src" || published.starts_with("src/") {
+    /// A relative require of a published path binds the indexed `src/`
+    /// source only when the owning `package.json` declares that path:
+    /// `files`, a root-level `main`/`exports` entry, or a known build-output
+    /// directory (`dist/foo` → `src/foo`). An undeclared `./foo` next to
+    /// `src/foo.ts` stays unresolved.
+    fn probe_declared_published_from_src(&self, published: &str) -> Option<usize> {
+        let package = self.owning_package(published)?;
+        let relative = if package.dir.is_empty() {
+            published.to_owned()
+        } else {
+            published
+                .strip_prefix(package.dir.as_str())?
+                .trim_start_matches('/')
+                .to_owned()
+        };
+        if relative.is_empty() || relative == "src" || relative.starts_with("src/") {
             return None;
         }
-        self.probe(&join_normalized("src", published))
+        if let Some((head, rest)) = relative.split_once('/')
+            && OUTPUT_DIRS.contains(&head)
+        {
+            return self.probe(&join_normalized(
+                &join_normalized(&package.dir, "src"),
+                rest,
+            ));
+        }
+        if !declares_published_path(package, &relative) {
+            return None;
+        }
+        self.probe(&join_normalized(
+            &join_normalized(&package.dir, "src"),
+            &relative,
+        ))
+    }
+
+    /// The package whose directory owns `published`, preferring the longest
+    /// prefix so a workspace package beats the repository root.
+    fn owning_package(&self, published: &str) -> Option<&NodePackageV1> {
+        self.packages
+            .iter()
+            .filter(|package| {
+                package.dir.is_empty()
+                    || published == package.dir
+                    || published.starts_with(&format!("{}/", package.dir))
+            })
+            .max_by_key(|package| package.dir.len())
     }
 
     /// Node/TypeScript file probing over the indexed set: the path itself, the
@@ -844,14 +884,55 @@ fn node_package(
             entries.push(entry);
         }
     }
+    let mut published_files = Vec::new();
+    if let Some(value) = pair_value(symbols, "files") {
+        string_leaves(&value, &mut published_files);
+    }
     (
         name,
         NodePackageV1 {
             dir: dir.to_owned(),
             entries,
             subpath_exports,
+            published_files,
         },
     )
+}
+
+/// Whether `relative` is a path this package publishes at its root.
+fn declares_published_path(package: &NodePackageV1, relative: &str) -> bool {
+    package
+        .published_files
+        .iter()
+        .chain(package.entries.iter().filter(|entry| {
+            let head = entry
+                .trim_start_matches("./")
+                .split('/')
+                .next()
+                .unwrap_or("");
+            head != "src" && !OUTPUT_DIRS.contains(&head)
+        }))
+        .any(|declared| published_path_matches(declared, relative))
+}
+
+fn published_path_matches(declared: &str, relative: &str) -> bool {
+    let declared = declared.trim_start_matches("./");
+    if declared.is_empty() {
+        return false;
+    }
+    let declared_stem = strip_js_like_extension(declared);
+    let relative_stem = strip_js_like_extension(relative);
+    relative == declared
+        || relative_stem == declared_stem
+        || relative.starts_with(&format!("{declared}/"))
+        || relative_stem.starts_with(&format!("{declared_stem}/"))
+}
+
+fn strip_js_like_extension(path: &str) -> &str {
+    path.strip_suffix(".js")
+        .or_else(|| path.strip_suffix(".mjs"))
+        .or_else(|| path.strip_suffix(".cjs"))
+        .unwrap_or(path)
 }
 
 fn tsconfig(dir: &str, symbols: &[Arc<LineageSymbolRecordV1>]) -> TsConfigV1 {
@@ -938,7 +1019,7 @@ pub(super) fn unique_local_import<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{AliasRuleV1, join_normalized, split_parent};
+    use super::{AliasRuleV1, join_normalized, published_path_matches, split_parent};
 
     #[test]
     fn join_normalized_folds_dots_and_clamps_at_the_root() {
@@ -974,5 +1055,15 @@ mod tests {
             vec!["apps/web/src/lib/x".to_owned()]
         );
         assert!(rule.expand("@other/x").is_empty());
+    }
+
+    #[test]
+    fn published_path_matches_declared_files_and_extensionless_js() {
+        assert!(published_path_matches("webpack", "webpack"));
+        assert!(published_path_matches("webpack", "webpack/index"));
+        assert!(published_path_matches("index.js", "index"));
+        assert!(published_path_matches("./corsImport.js", "corsImport"));
+        assert!(!published_path_matches("webpack", "foo"));
+        assert!(!published_path_matches("index.js", "foo"));
     }
 }
