@@ -38,7 +38,7 @@ use tracedecay_runtime_core::resident_memory::{
 };
 
 use super::reconcile::ReconcilePassesV1;
-use super::registry::ServingGenerationSlot;
+use super::registry::{CodeIndexSchedulerRegistryV1, ServingGenerationSlot};
 use super::{DaemonCodeIndexPublicationStoreV1, LatestCodeTextGenerationV1};
 
 /// Whether a serving read renews its worktree's residency lease.
@@ -54,6 +54,7 @@ pub(super) struct WorktreeResidencyV1 {
     serving_generation: Arc<ServingGenerationSlot>,
     serving_generation_epoch: Arc<AtomicU64>,
     serving_generation_changed: Arc<tokio::sync::watch::Sender<()>>,
+    serving_seats: Arc<tokio::sync::watch::Sender<u64>>,
     complete_generation_requested: Arc<AtomicBool>,
     reconcile_in_progress: Arc<ReconcilePassesV1>,
     publication: DaemonCodeIndexPublicationStoreV1,
@@ -67,6 +68,7 @@ pub(super) struct WorktreeResidencyPartsV1 {
     pub(super) serving_generation: Arc<ServingGenerationSlot>,
     pub(super) serving_generation_epoch: Arc<AtomicU64>,
     pub(super) serving_generation_changed: Arc<tokio::sync::watch::Sender<()>>,
+    pub(super) serving_seats: Arc<tokio::sync::watch::Sender<u64>>,
     pub(super) complete_generation_requested: Arc<AtomicBool>,
     pub(super) reconcile_in_progress: Arc<ReconcilePassesV1>,
     pub(super) publication: DaemonCodeIndexPublicationStoreV1,
@@ -80,6 +82,7 @@ impl WorktreeResidencyV1 {
             serving_generation: parts.serving_generation,
             serving_generation_epoch: parts.serving_generation_epoch,
             serving_generation_changed: parts.serving_generation_changed,
+            serving_seats: parts.serving_seats,
             complete_generation_requested: parts.complete_generation_requested,
             reconcile_in_progress: parts.reconcile_in_progress,
             publication: parts.publication,
@@ -145,15 +148,22 @@ impl WorktreeResidencyV1 {
     /// Exact, lexical, and callers already serve from the sealed text
     /// artifact and the warm catalog/engine. The seated
     /// [`CodeIndexPublishedGenerationV1`] is a third copy of that
-    /// generation. Keep it only when a complete read has demanded the seat
-    /// or a reconcile is still running. Do not clear
-    /// `complete_generation_requested`: a demand that arrives during the
-    /// take must still wake a successor pass to re-decode.
+    /// generation. Keep it while a complete read demands the seat, a
+    /// reconcile is still running, or the installed text owner cannot yet
+    /// serve: a text owner whose projection is still warming or that
+    /// latched a failure leaves the seat as the only servable generation,
+    /// and taking it then turns serve-old into `GenerationUnavailable`.
+    /// Do not clear `complete_generation_requested`: a demand that
+    /// arrives during the take must still wake a successor pass to
+    /// re-decode.
     pub(super) fn release_decode_when_parked(self: &Arc<Self>, owners: &ResidentOwnersV1) {
         if self.busy() || self.complete_generation_requested.load(Ordering::Acquire) {
             return;
         }
-        if self.serving_text().is_none() {
+        if !self
+            .serving_text()
+            .is_some_and(|text| text.query_owners_are_ready())
+        {
             return;
         }
         let seated = {
@@ -168,6 +178,7 @@ impl WorktreeResidencyV1 {
         };
         if seated.is_some() {
             self.serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
+            CodeIndexSchedulerRegistryV1::record_serving_seat(&self.serving_seats);
             self.serving_generation_changed.send_replace(());
         }
         let serving = HeldDecodesV1::release(
@@ -395,6 +406,7 @@ impl ResidentOwnerV1 for ServingDecodeOwnerV1 {
             residency
                 .serving_generation_epoch
                 .fetch_add(1, Ordering::AcqRel);
+            CodeIndexSchedulerRegistryV1::record_serving_seat(&residency.serving_seats);
             residency.serving_generation_changed.send_replace(());
         }
         HeldDecodesV1::release(

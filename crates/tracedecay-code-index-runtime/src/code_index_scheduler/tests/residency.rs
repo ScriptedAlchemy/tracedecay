@@ -1,4 +1,5 @@
 use std::num::NonZeroU64;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -108,6 +109,141 @@ async fn a_parked_worktree_releases_its_decode_and_search_still_answers() {
         .await
         .expect("search still answers after a demanded decode");
     assert_eq!(search_anchors(&with_decode), anchors);
+
+    registry.shutdown().await;
+}
+
+/// The parked release frees the seat only because the text owner serves in
+/// its place. While the installed text owner cannot serve — its lexical
+/// projection is still warming or it latched a failure — the seated decode
+/// is the only servable generation: taking it turns serve-old into
+/// `GenerationUnavailable`. The release must keep the seat, and it must
+/// advance the registry-wide seat counter only when a seat was really
+/// written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_worktree_keeps_its_decode_while_the_text_owner_warms() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn park_gate_target() -> u32 { 7 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, scope) = mounted_text_query_worktree_at(
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
+        fixture.path(),
+        store.path().to_path_buf(),
+    )
+    .await;
+    let root = canonical_existing_identity(fixture.path()).expect("canonical root");
+    let ready_text = registry
+        .latest_text_serving_for_root(&root)
+        .await
+        .expect("mounted text owner is query-ready");
+
+    // Seat a real decode, then let the idle release clear the complete-read
+    // latch so the parked release is the code under test again.
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let generation_id = seated.generation().manifest().generation_id.clone();
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    owners.release_idle(Instant::now() + IDLE_WINDOW);
+
+    let mut seats = registry.subscribe_serving_seats();
+    async fn reseat(
+        registry: &CodeIndexSchedulerRegistryV1,
+        root: &Path,
+        seated: &super::super::LatestCompleteCodeIndexV1,
+    ) {
+        let mounted = registry.mounted.lock().await;
+        *mounted
+            .get(root)
+            .expect("mounted worktree")
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(seated.clone());
+    }
+    async fn install_text(
+        registry: &CodeIndexSchedulerRegistryV1,
+        root: &Path,
+        text: super::super::LatestCodeTextGenerationV1,
+    ) {
+        let mounted = registry.mounted.lock().await;
+        *mounted
+            .get(root)
+            .expect("mounted worktree")
+            .text_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text);
+    }
+    async fn seat_is_occupied(registry: &CodeIndexSchedulerRegistryV1, root: &Path) -> bool {
+        let mounted = registry.mounted.lock().await;
+        mounted
+            .get(root)
+            .expect("mounted worktree")
+            .serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    // A ready text owner lets the take proceed and publishes the seat write
+    // on the registry-wide counter every subscriber watches.
+    reseat(&registry, &root, &seated).await;
+    seats.borrow_and_update();
+    registry
+        .release_decode_when_parked_for_test(fixture.path())
+        .await;
+    assert!(
+        !seat_is_occupied(&registry, &root).await,
+        "a query-ready text owner leaves the decode spare on park"
+    );
+    assert!(
+        seats.has_changed().expect("seats channel open"),
+        "the seat counter must publish the take"
+    );
+
+    // A text owner whose projection is still warming cannot serve yet; the
+    // seat stays and no counter advance claims a write happened.
+    let warming_text = {
+        let mounted = registry.mounted.lock().await;
+        mounted
+            .get(&root)
+            .expect("mounted worktree")
+            .historical_generation_owner
+            .published_text_generation(&generation_id)
+            .expect("read retained generation metadata")
+            .expect("retained text owner")
+    };
+    assert!(!warming_text.query_owners_are_ready());
+    reseat(&registry, &root, &seated).await;
+    install_text(&registry, &root, warming_text).await;
+    seats.borrow_and_update();
+    registry
+        .release_decode_when_parked_for_test(fixture.path())
+        .await;
+    assert!(
+        seat_is_occupied(&registry, &root).await,
+        "the seat is the only servable generation while text warms"
+    );
+    assert!(
+        !seats.has_changed().expect("seats channel open"),
+        "no seat write means no counter advance"
+    );
+    let stale = registry
+        .execute_query_search(&scope, core_search_request("park_gate_target"))
+        .await
+        .expect("the kept seat still answers search");
+    assert!(
+        !search_anchors(&stale).is_empty(),
+        "serve-old must keep ranking the seated generation"
+    );
+
+    // Once the text owner can serve again the same park releases the seat.
+    install_text(&registry, &root, ready_text).await;
+    registry
+        .release_decode_when_parked_for_test(fixture.path())
+        .await;
+    assert!(
+        !seat_is_occupied(&registry, &root).await,
+        "a ready text owner frees the seat"
+    );
 
     registry.shutdown().await;
 }

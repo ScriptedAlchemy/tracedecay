@@ -3071,7 +3071,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Record that the serving slot was written. Call this only after the slot
     /// holds the new generation, so a woken waiter observes the seated value.
-    fn record_serving_seat(seats: &tokio::sync::watch::Sender<u64>) {
+    pub(super) fn record_serving_seat(seats: &tokio::sync::watch::Sender<u64>) {
         seats.send_modify(|seats| *seats = seats.wrapping_add(1));
     }
 
