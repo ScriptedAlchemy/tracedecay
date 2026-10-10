@@ -254,7 +254,7 @@ pub(super) async fn execute_git_read(
         },
         max_bytes: request.max_bytes,
         deadline: Some(std::time::Instant::now() + Duration::from_micros(remaining_micros)),
-        cancel: Some(request_cancellation),
+        cancel: Some(request_cancellation.clone()),
     };
     let selected_scope = initial.scope.clone();
     let mut read_request = request.request.clone();
