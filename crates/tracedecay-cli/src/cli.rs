@@ -155,7 +155,7 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize a new TraceDecay project (full index)
+    /// Enroll a project and request background indexing
     #[command(long_about = INIT_LONG_ABOUT, after_help = INIT_AFTER_HELP)]
     Init {
         /// Project path (default: current directory)
