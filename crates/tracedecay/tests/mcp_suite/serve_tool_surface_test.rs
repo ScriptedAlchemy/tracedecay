@@ -2,13 +2,14 @@
 //! hydrates a stub on call, and still reaches every catalog tool.
 
 use std::collections::BTreeSet;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Output, Stdio};
-use std::time::Duration;
+use std::process::{ChildStdout, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay_tokenizer::count_ordinary_tokens;
 
 use crate::common::{self, TestChildProcess, tracedecay_command_with_home};
 use crate::serve_harness::{init_project_with_file, json_rpc_response};
@@ -88,12 +89,12 @@ fn tool_named<'a>(tools: &'a [Value], name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing tool {name} in {tools:?}"))
 }
 
-/// Compact-JSON size of one `tools/list` result, with the MCP token budget
-/// estimator (`json_bytes.div_ceil(4)`).
+/// Compact-JSON size of one `tools/list` result, counted with the shipped
+/// `o200k_base` tokenizer (`tracedecay_tokenizer::count_ordinary_tokens`).
 struct ToolsListCost {
     names: BTreeSet<String>,
     bytes: usize,
-    tokens: usize,
+    tokens: u64,
 }
 
 fn tools_list_cost(stdout: &[u8], id: i64) -> ToolsListCost {
@@ -110,7 +111,8 @@ fn tools_list_cost(stdout: &[u8], id: i64) -> ToolsListCost {
     ToolsListCost {
         names,
         bytes: compact.len(),
-        tokens: compact.len().div_ceil(4),
+        tokens: count_ordinary_tokens(&compact)
+            .unwrap_or_else(|error| panic!("o200k_base must count tools/list {id}: {error}")),
     }
 }
 
@@ -120,6 +122,86 @@ fn list_changed_count(stdout: &[u8]) -> usize {
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|message| message["method"] == LIST_CHANGED)
         .count()
+}
+
+/// One live `tracedecay serve` session driven as a generic MCP stdio client.
+///
+/// Writes one JSON-RPC line, then reads lines until the expected response or
+/// notification arrives, the same way a host that is not Claude Code would.
+struct PlainMcpClient {
+    process: TestChildProcess,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl PlainMcpClient {
+    fn start(home: &Path, project: &Path) -> Self {
+        let mut child = tracedecay_command_with_home(home)
+            .arg("serve")
+            .arg("--path")
+            .arg(project)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("tracedecay serve should start");
+        let stdout = BufReader::new(child.stdout.take().expect("stdout should be piped"));
+        Self {
+            process: TestChildProcess::new(child),
+            stdout,
+        }
+    }
+
+    fn send(&mut self, request: &Value) {
+        let stdin = self
+            .process
+            .stdin_mut()
+            .expect("stdin should stay open for the session");
+        writeln!(stdin, "{request}").expect("write MCP request");
+        stdin.flush().expect("flush MCP request");
+    }
+
+    fn read_message(&mut self) -> Value {
+        let deadline = Instant::now() + SERVE_TIMEOUT;
+        loop {
+            let mut line = String::new();
+            match self.stdout.read_line(&mut line) {
+                Ok(0) => panic!("serve closed stdout before answering the next MCP frame"),
+                Ok(_) => {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    return serde_json::from_str(line)
+                        .unwrap_or_else(|error| panic!("invalid MCP frame {line:?}: {error}"));
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::Interrupted
+                        && Instant::now() < deadline =>
+                {
+                    continue;
+                }
+                Err(error) => panic!("failed to read MCP frame: {error}"),
+            }
+        }
+    }
+
+    fn wait_until(&mut self, mut done: impl FnMut(&[Value]) -> bool) -> Vec<Value> {
+        let mut frames = Vec::new();
+        while !done(&frames) {
+            frames.push(self.read_message());
+        }
+        frames
+    }
+
+    fn request(&mut self, request: Value) -> Value {
+        let id = request["id"].clone();
+        self.send(&request);
+        let frames = self.wait_until(|frames| frames.iter().any(|frame| frame["id"] == id));
+        frames
+            .into_iter()
+            .find(|frame| frame["id"] == id)
+            .expect("response id")
+    }
 }
 
 #[tokio::test]
@@ -217,14 +299,14 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
     let before = tools_list_cost(&output.stdout, 6);
     assert!(
         before.tokens > 50_000,
-        "the fully hydrated list must still carry the expensive catalog ({} tools, {} bytes, {} tokens)",
+        "the fully hydrated list must still carry the expensive catalog ({} tools, {} bytes, {} o200k tokens)",
         before.names.len(),
         before.bytes,
         before.tokens
     );
     assert!(
         after.tokens * 2 < before.tokens,
-        "default stubbed tools/list ({after_tools} tools, {after_bytes} bytes, {after_tokens} tokens) must be cheaper than the hydrated catalog ({before_tools} tools, {before_bytes} bytes, {before_tokens} tokens)",
+        "default stubbed tools/list ({after_tools} tools, {after_bytes} bytes, {after_tokens} o200k tokens) must be cheaper than the hydrated catalog ({before_tools} tools, {before_bytes} bytes, {before_tokens} o200k tokens)",
         after_tools = after.names.len(),
         after_bytes = after.bytes,
         after_tokens = after.tokens,
@@ -233,7 +315,7 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
         before_tokens = before.tokens
     );
     eprintln!(
-        "tools/list handshake cost: before (hydrated catalog) {} tools / {} bytes / {} tokens; after (default stubs) {} tools / {} bytes / {} tokens ({} full, {} stubbed)",
+        "tools/list handshake cost: before (hydrated catalog) {} tools / {} bytes / {} o200k tokens; after (default stubs) {} tools / {} bytes / {} o200k tokens ({} full, {} stubbed)",
         before.names.len(),
         before.bytes,
         before.tokens,
@@ -247,5 +329,82 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
     assert!(
         stderr.contains("mcp_tool_list_roster") && stderr.contains("sha256:"),
         "each served list must log a hash of the sorted tool names: {stderr}"
+    );
+}
+
+/// A generic MCP stdio client that is not Claude Code discovers a stub by
+/// name, calls it, receives `notifications/tools/list_changed`, then re-lists
+/// and gets the full schema. That is the recovery path hosts other than the
+/// Claude plugin need.
+#[tokio::test]
+async fn plain_mcp_stdio_client_hydrates_a_stub_after_list_changed() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn plain_mcp_stdio_marker() {}\n").await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+    let mut client = PlainMcpClient::start(home.path(), project.path());
+
+    let initialize = client.request(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": { "tools": { "listChanged": true } },
+            "clientInfo": { "name": "plain-mcp-stdio", "version": "1" }
+        }
+    }));
+    assert!(
+        initialize.get("error").is_none(),
+        "plain MCP initialize must succeed: {initialize}"
+    );
+    client.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+
+    let listed = client.request(tools_list(2));
+    let first_tools = listed["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list must carry a tool array: {listed}"));
+    let impact = tool_named(first_tools, "tracedecay_impact");
+    assert!(
+        is_stub(impact),
+        "a non-Claude host must discover stubbed tools by name: {impact}"
+    );
+    assert!(
+        !is_stub(tool_named(first_tools, "tracedecay_grep")),
+        "core tools stay fully described: {}",
+        tool_named(first_tools, "tracedecay_grep")
+    );
+
+    client.send(&tool_call(3, "tracedecay_impact", &json!({})));
+    let after_call = client.wait_until(|frames| {
+        frames.iter().any(|frame| frame["id"] == 3)
+            && frames.iter().any(|frame| frame["method"] == LIST_CHANGED)
+    });
+    let call = after_call
+        .iter()
+        .find(|frame| frame["id"] == 3)
+        .expect("tools/call answer");
+    assert!(
+        call.get("error").is_none() || call["error"]["code"] != json!(-32601),
+        "the stub name must be callable; method-not-found means the host never registered it: {call}"
+    );
+    assert!(
+        after_call
+            .iter()
+            .any(|frame| frame["method"] == LIST_CHANGED),
+        "the client must receive notifications/tools/list_changed before it re-lists: {after_call:?}"
+    );
+
+    let relisted = client.request(tools_list(4));
+    let second_tools = relisted["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("second tools/list must carry a tool array: {relisted}"));
+    let hydrated = tool_named(second_tools, "tracedecay_impact");
+    assert!(
+        !is_stub(hydrated),
+        "the next tools/list after list_changed must carry the full schema: {hydrated}"
+    );
+    assert!(
+        hydrated["inputSchema"]["properties"].is_object(),
+        "hydrated impact must expose its real input schema: {hydrated}"
     );
 }
