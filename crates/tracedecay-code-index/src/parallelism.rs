@@ -167,13 +167,17 @@ impl From<CodeIndexWorkerPlanErrorV1> for CodeIndexWorkerPlanInstallErrorV1 {
     }
 }
 
-/// The process-resident worker runtime: the Rayon pool and the one background
-/// CPU authority sized to the same effective width. Pool and admission are one
-/// installation so leaf fan-outs on the pool always meter against the width
-/// the pool was built for.
+/// The process-resident worker runtime: the indexing Rayon pool, a separate
+/// interactive source-scan pool of the same width, and the one background
+/// CPU authority sized to that width. Indexing pool and background admission
+/// stay one installation so leaf fan-outs meter against the width the pool
+/// was built for. Interactive scans use the second pool so a verification
+/// sweep that occupies indexing workers and the CPU FIFO cannot starve a
+/// foreground grep of admission.
 struct InstalledCodeIndexWorkerRuntimeV1 {
     plan: CodeIndexWorkerPlanV1,
     pool: rayon::ThreadPool,
+    interactive_pool: rayon::ThreadPool,
     background_cpu: Arc<ProcessBackgroundCpuV1>,
     activity: PoolActivityV1,
 }
@@ -225,6 +229,19 @@ impl InstalledCodeIndexWorkerRuntimeV1 {
             .with_yielded_permits(|| self.pool.install(operation))
     }
 
+    /// Run request-bound source-scan work on the interactive pool.
+    ///
+    /// This is not an indexing-pool boundary and does not take or yield
+    /// background CPU units. Foreground grep must keep progressing while
+    /// verification holds those units on the indexing pool.
+    fn install_interactive<R, F>(&self, operation: F) -> R
+    where
+        F: FnOnce() -> R + Send,
+        R: Send,
+    {
+        self.interactive_pool.install(operation)
+    }
+
     fn collect_worker_heaps_when_idle(&self) {
         self.activity.collect_pending.store(true, Ordering::Release);
     }
@@ -256,8 +273,9 @@ impl InstalledCodeIndexWorkerRuntimeV1 {
 /// Receipt of [`install_worker_plan`]: the configuration status projection
 /// and the process background CPU authority the plan installed. The
 /// composition root injects `background_cpu` into session preparation and
-/// host admission; index, semantic, and lexical fan-outs on the pool reach the
-/// same authority through this module's leaf admission helpers.
+/// host admission; index and semantic fan-outs on the indexing pool reach
+/// the same authority through this module's leaf admission helpers.
+/// Interactive source scans use [`install_interactive`] instead.
 #[derive(Clone, Debug)]
 pub struct InstalledCodeIndexWorkerPlanV1 {
     pub status: CodeIndexWorkerStatusV1,
@@ -319,6 +337,7 @@ impl CodeIndexWorkerRuntimeV1 {
     fn from_plan(plan: CodeIndexWorkerPlanV1) -> Result<Self, CodeIndexWorkerPlanInstallErrorV1> {
         let owner = Arc::new(OnceLock::<Weak<InstalledCodeIndexWorkerRuntimeV1>>::new());
         let pool_owner = Arc::clone(&owner);
+        let interactive_owner = Arc::clone(&owner);
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(plan.effective_workers)
             .thread_name(|index| format!("tracedecay-index-{index}"))
@@ -329,9 +348,20 @@ impl CodeIndexWorkerRuntimeV1 {
             .map_err(|error| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
                 message: error.to_string(),
             })?;
+        let interactive_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(plan.effective_workers)
+            .thread_name(|index| format!("tracedecay-source-scan-{index}"))
+            .start_handler(move |_| {
+                POOL_RUNTIME.with(|slot| *slot.borrow_mut() = Some(Arc::clone(&interactive_owner)));
+            })
+            .build()
+            .map_err(|error| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
+                message: error.to_string(),
+            })?;
         let runtime = Arc::new(InstalledCodeIndexWorkerRuntimeV1 {
             plan,
             pool,
+            interactive_pool,
             background_cpu: Arc::new(ProcessBackgroundCpuV1::new(
                 NonZeroUsize::new(plan.effective_workers).unwrap_or(NonZeroUsize::MIN),
             )),
@@ -747,20 +777,6 @@ pub fn with_background_cpu_permit<R>(operation: impl FnOnce() -> R) -> R {
     with_background_cpu_permits(1, operation)
 }
 
-/// Request-bound leaf work relinquishes its queued demand on cancellation.
-pub fn with_background_cpu_permit_cancellable<R>(
-    is_cancelled: impl Fn() -> bool,
-    operation: impl FnOnce() -> R,
-) -> Option<R> {
-    match current_runtime() {
-        Some(runtime) => runtime
-            .background_cpu
-            .with_permit_cancellable(is_cancelled, operation),
-        None if is_cancelled() => None,
-        None => Some(operation()),
-    }
-}
-
 /// Run `operation` on the configured indexing pool.
 ///
 /// CPU admission happens inside each active parallel work unit through
@@ -788,6 +804,35 @@ where
     }
     if let Some(runtime) = current_runtime() {
         return Ok(runtime.install(operation));
+    }
+    let pool = standalone_pool()?;
+    Ok(pool.install(operation))
+}
+
+/// Run request-bound source-scan work on the owner's interactive pool.
+///
+/// Foreground grep and other live source reads use this instead of
+/// [`install`] so they are not queued behind verification or rebuild work
+/// that already holds the indexing pool and the background CPU FIFO.
+/// Standalone callers without an installed owner share the automatic pool.
+#[tracing::instrument(
+    name = "code_index.workers.install_interactive",
+    level = "trace",
+    skip_all
+)]
+pub fn install_interactive<R, F>(operation: F) -> Result<R, CodeIndexParallelismErrorV1>
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    #[cfg(test)]
+    if FORCE_INSTALL_FAILURE.with(std::cell::Cell::get) {
+        return Err(CodeIndexParallelismErrorV1::PoolBuild {
+            message: "forced code-index worker pool failure for test".to_owned(),
+        });
+    }
+    if let Some(runtime) = current_runtime() {
+        return Ok(runtime.install_interactive(operation));
     }
     let pool = standalone_pool()?;
     Ok(pool.install(operation))
@@ -837,6 +882,41 @@ mod tests {
 
     /// Two owners in one process run concurrently, each under its own plan:
     /// its width, its pool, and the width its pool's leaves report.
+    #[test]
+    fn interactive_install_runs_while_the_indexing_pool_is_held() {
+        let owner = CodeIndexWorkerRuntimeV1::build(
+            CodeIndexWorkerSelectionV1::Exact { workers: 1 },
+            1,
+            64 * 1024 * 1024 * 1024,
+        )
+        .expect("one-worker owner");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let owner = owner.clone();
+            std::thread::spawn(move || {
+                let _entered = owner.enter();
+                install(|| {
+                    started_tx
+                        .send(())
+                        .expect("test waits for the indexing hold");
+                    release_rx.recv().expect("test releases the indexing hold");
+                })
+                .expect("indexing pool");
+            })
+        };
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("indexing hold started");
+        let observed = {
+            let _entered = owner.enter();
+            install_interactive(|| rayon::current_num_threads()).expect("interactive pool")
+        };
+        release_tx.send(()).expect("indexing hold waits");
+        holder.join().expect("indexing hold");
+        assert_eq!(observed, 1);
+    }
+
     #[test]
     fn two_owners_in_one_process_each_run_under_their_own_plan() {
         let available = 64 * 1024 * 1024 * 1024;
