@@ -984,12 +984,19 @@ fn init_wait_holds_until_first_generation_is_ready() {
     );
     let payload: serde_json::Value = serde_json::from_slice(&status_output.stdout)
         .expect("status --json should print one document");
-    assert_ne!(
+    assert_eq!(
         payload
             .pointer("/graph_statistics/state")
             .and_then(serde_json::Value::as_str),
-        Some("unavailable"),
+        Some("observed"),
         "init --wait must leave a usable graph\n{payload}"
+    );
+    assert!(
+        payload
+            .pointer("/graph_statistics/symbol_count")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|count| count > 0),
+        "init --wait must serve the fixture's indexed symbol\n{payload}"
     );
 }
 

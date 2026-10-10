@@ -306,31 +306,43 @@ async fn wait_for_first_generation(
     )
     .await?;
     crate::commands::reject_problem_envelope(&payload, "tracedecay_status")?;
-    if let Some(wait) = payload.get("wait").cloned() {
-        match serde_json::from_value::<CodeIndexReadinessWaitOutcomeV1>(wait)? {
-            CodeIndexReadinessWaitOutcomeV1::Reached => {}
-            CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => {
-                return Err(tracedecay_domain::errors::TraceDecayError::tool_refused(
-                    "tracedecay_status",
-                    Some(CODE_INDEX_READINESS_WAIT_TIMED_OUT.to_owned()),
-                    Some(format!(
-                        "init --wait timed out before the first generation was ready; last \
+    require_first_generation_ready(&payload)?;
+    eprintln!("{}", init_ready_receipt(project_path));
+    Ok(())
+}
+
+fn require_first_generation_ready(
+    payload: &serde_json::Value,
+) -> tracedecay_domain::errors::Result<()> {
+    let wait = payload.get("wait").ok_or_else(|| {
+        tracedecay_domain::errors::TraceDecayError::tool_refused(
+            "tracedecay_status",
+            Some(CODE_INDEX_READINESS_WAIT_UNAVAILABLE.to_owned()),
+            Some("status omitted the requested first-generation readiness proof".to_owned()),
+        )
+    })?;
+    match serde_json::from_value::<CodeIndexReadinessWaitOutcomeV1>(wait.clone())? {
+        CodeIndexReadinessWaitOutcomeV1::Reached => {}
+        CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => {
+            return Err(tracedecay_domain::errors::TraceDecayError::tool_refused(
+                "tracedecay_status",
+                Some(CODE_INDEX_READINESS_WAIT_TIMED_OUT.to_owned()),
+                Some(format!(
+                    "init --wait timed out before the first generation was ready; last \
                          state: {last_state}"
-                    )),
-                ));
-            }
-            CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => {
-                return Err(tracedecay_domain::errors::TraceDecayError::tool_refused(
-                    "tracedecay_status",
-                    Some(CODE_INDEX_READINESS_WAIT_UNAVAILABLE.to_owned()),
-                    Some(format!(
-                        "init --wait cannot reach a ready first generation: {reason}"
-                    )),
-                ));
-            }
+                )),
+            ));
+        }
+        CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => {
+            return Err(tracedecay_domain::errors::TraceDecayError::tool_refused(
+                "tracedecay_status",
+                Some(CODE_INDEX_READINESS_WAIT_UNAVAILABLE.to_owned()),
+                Some(format!(
+                    "init --wait cannot reach a ready first generation: {reason}"
+                )),
+            ));
         }
     }
-    eprintln!("{}", init_ready_receipt(project_path));
     Ok(())
 }
 
@@ -386,6 +398,11 @@ async fn code_index_reconciliation_is_optional(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod daemon_precondition_tests {
     use std::path::Path;
+    use tracedecay_contracts::code_index_freshness::{
+        CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+        CodeIndexReadinessWaitOutcomeV1,
+    };
+    use tracedecay_domain::errors::TraceDecayError;
 
     pub(super) struct SocketEnvGuard {
         previous: Option<std::ffi::OsString>,
@@ -454,6 +471,47 @@ mod daemon_precondition_tests {
             !text.contains("initialized "),
             "receipt must not look like a finished index: {text}"
         );
+    }
+
+    #[test]
+    fn first_generation_ready_requires_positive_wait_proof() {
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"wait": null}),
+            serde_json::json!({"wait": {"outcome": "unknown"}}),
+        ] {
+            assert!(super::require_first_generation_ready(&payload).is_err());
+        }
+        let payload = serde_json::json!({
+            "wait": CodeIndexReadinessWaitOutcomeV1::Reached
+        });
+        assert!(super::require_first_generation_ready(&payload).is_ok());
+    }
+
+    #[test]
+    fn first_generation_wait_preserves_timeout_and_unavailable_refusals() {
+        for (outcome, code) in [
+            (
+                CodeIndexReadinessWaitOutcomeV1::TimedOut {
+                    last_state: "warming".to_owned(),
+                },
+                CODE_INDEX_READINESS_WAIT_TIMED_OUT,
+            ),
+            (
+                CodeIndexReadinessWaitOutcomeV1::Unavailable {
+                    reason: "scheduler unavailable".to_owned(),
+                },
+                CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+            ),
+        ] {
+            let error =
+                super::require_first_generation_ready(&serde_json::json!({"wait": outcome}))
+                    .expect_err("only reached proves readiness");
+            let TraceDecayError::ToolRefused(refusal) = error else {
+                panic!("wait outcome must retain its typed refusal");
+            };
+            assert_eq!(refusal.code.as_deref(), Some(code));
+        }
     }
 }
 
