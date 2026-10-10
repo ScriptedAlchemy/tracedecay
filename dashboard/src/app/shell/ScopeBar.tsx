@@ -40,7 +40,7 @@ export function ScopeBar({
   const scope = useScope((s) => s.scope);
   const selectAllProjects = useScope((s) => s.selectAllProjects);
   const reconcileScope = useScope((s) => s.reconcileScope);
-  const registry = useProjectRegistry();
+  const registry = useProjectRegistry({ enabled: scope.kind === 'all' });
   const listing = projectRegistryPayload(registry.data);
   const bindingCaption = scope.kind === 'all' ? launchBindingCaption(listing) : null;
   // The bounded registry read: one project by id, rather than a search through
