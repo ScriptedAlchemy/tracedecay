@@ -65,8 +65,8 @@ use tracedecay_daemon_protocol::{
     adapt_application_tool_request, parse_application_surface_request,
 };
 use tracedecay_daemon_protocol::{
-    DaemonHandshake, RequestedOutputFormat, TOOL_REQUEST_DEADLINE_ENV, requested_output_format,
-    tool_request_deadline,
+    DaemonHandshake, DaemonInvocationClient, RequestedOutputFormat, TOOL_REQUEST_DEADLINE_ENV,
+    requested_output_format, tool_request_deadline,
 };
 use tracedecay_daemon_service::application_surface::observe_surface_argument_rejection;
 use tracedecay_domain::UtcMicros;
@@ -573,8 +573,7 @@ fn dispatch_cli_application_surface_inner(
             Err(error) => {
                 if let Ok(handshake) =
                     crate::commands::client_handshake(profile, project.as_deref())
-                    && let Ok(client) =
-                        tracedecay::daemon::invocation_client_for_current_client(profile, handshake)
+                    && let Ok(client) = cli_invocation_client(profile, handshake)
                 {
                     observe_surface_argument_rejection(
                         Some(&client),
@@ -595,7 +594,7 @@ fn dispatch_cli_application_surface_inner(
             false,
             false,
         )?;
-        let client = tracedecay::daemon::invocation_client_for_current_client(profile, handshake)?;
+        let client = cli_invocation_client(profile, handshake)?;
         // A cold daemon answers the mounting refusal while the project open
         // still warms in the background. The compatibility tool path rides
         // that state out through its project-open retry loop; the typed
@@ -688,10 +687,7 @@ async fn dispatch_cli_retained(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let client = tracedecay::daemon::invocation_client_for_current_client(
-        profile,
-        dispatch.handshake(profile)?,
-    )?;
+    let client = cli_invocation_client(profile, dispatch.handshake(profile)?)?;
     // The mounting refusal precedes admission; re-send it until the deadline.
     let execution = loop {
         let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
@@ -752,7 +748,7 @@ async fn dispatch_cli_source_edit(
         false,
         false,
     )?;
-    let client = tracedecay::daemon::invocation_client_for_current_client(profile, handshake)?;
+    let client = cli_invocation_client(profile, handshake)?;
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
     // deadline like every other surface.
@@ -897,7 +893,7 @@ async fn invoke_cli_graph_tool(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let client = tracedecay::daemon::invocation_client_for_current_client(profile, handshake)?;
+    let client = cli_invocation_client(profile, handshake)?;
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
     // deadline like every other surface.
@@ -959,10 +955,7 @@ async fn dispatch_cli_profile_registry(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let client = tracedecay::daemon::invocation_client_for_current_client(
-        profile,
-        dispatch.handshake(profile)?,
-    )?;
+    let client = cli_invocation_client(profile, dispatch.handshake(profile)?)?;
     let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
     let outcome = tracedecay::mcp::tools::execute_graph_tool_surface(
         tracedecay_tool_catalog::BindingSurface::Cli,
@@ -987,6 +980,19 @@ async fn dispatch_cli_profile_registry(
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
     print_tool_output(&result, CliToolOutput::for_args(raw_json, &tool_args))?;
     tool_result_process_outcome(&result.value, tool_name)
+}
+
+/// One-shot CLI clients drop the invocation stream after the response so the
+/// daemon is not left in its retained-connection read loop while stdout is
+/// written.
+fn cli_invocation_client(
+    profile: &ProfileRoot,
+    handshake: DaemonHandshake,
+) -> Result<DaemonInvocationClient> {
+    Ok(
+        tracedecay::daemon::invocation_client_for_current_client(profile, handshake)?
+            .without_idle_reuse(),
+    )
 }
 
 /// Enrolled project's handle root, or none when that path has no store.
@@ -1313,8 +1319,17 @@ impl CliToolOutput {
 
 /// Prints one completed tool call; the beside-result blocks go to stderr
 /// unless the document on stdout already carries them.
+///
+/// The write is flushed before this returns so a one-shot process can exit
+/// once the document is on the OS pipe. An unflushed `println!` of a large
+/// `--json` document leaves the tail in userspace while the process waits
+/// on a still-open daemon stream, which is the 65 KiB mid-object cut.
 fn print_tool_output(result: &ToolResult, output: CliToolOutput) -> Result<()> {
-    println!("{}", rendered_tool_output(result, output)?);
+    let rendered = rendered_tool_output(result, output)?;
+    {
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "{rendered}").and_then(|()| stdout.flush())?;
+    }
     if output != CliToolOutput::Document {
         print_beside_result_blocks(&result.value);
     }
@@ -1331,9 +1346,7 @@ fn print_beside_result_blocks(result_value: &Value) {
 /// is decided separately from `isError`.
 fn rendered_tool_output(result: &ToolResult, output: CliToolOutput) -> Result<String> {
     match (output, result.structured_result()) {
-        (CliToolOutput::Document, _) => {
-            Ok(serde_json::to_string_pretty(&json_tool_document(result)?)?)
-        }
+        (CliToolOutput::Document, _) => Ok(serde_json::to_string(&json_tool_document(result)?)?),
         (CliToolOutput::TypedResult, Some(structured)) if !is_error_result(&result.value) => {
             Ok(structured.to_string())
         }

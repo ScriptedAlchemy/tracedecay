@@ -1025,9 +1025,13 @@ fn successful_tool_result_exits_zero() {
         CliToolOutput::Document,
     )
     .unwrap();
-    // Pretty serialization escapes the nested `content[0].text` JSON string.
+    // Compact `--json` escapes the nested `content[0].text` JSON string.
     // Parse the complete document back and compare it structurally instead of
     // searching for an unescaped substring that valid output cannot contain.
+    assert!(
+        !json_stdout.contains('\n'),
+        "--json must be one compact line so a mid-size structuredContent cannot fill a 64KiB pipe mid-object: {json_stdout}"
+    );
     let reparsed: Value = serde_json::from_str(&json_stdout)
         .unwrap_or_else(|error| panic!("JSON stdout must itself be valid JSON: {error}"));
     assert_eq!(
@@ -1038,6 +1042,52 @@ fn successful_tool_result_exits_zero() {
             "structuredContent": typed,
         }),
         "JSON stdout is the tool result with the typed answer: {json_stdout}"
+    );
+}
+
+#[test]
+fn json_document_for_a_mid_size_files_result_fits_a_pipe_as_one_compact_line() {
+    let files = (0..520)
+        .map(|index| {
+            json!({
+                "path": format!("src/pipe_boundary_{index:04}.rs"),
+                "symbols": 1,
+                "bytes": 20
+            })
+        })
+        .collect::<Vec<_>>();
+    let typed = json!({ "count": 520, "layout": "flat", "files": files });
+    let result = ToolResult::new(
+        json!({
+            "content": [{ "type": "text", "text": "## Files\nindexed files: 520" }],
+            "isError": false
+        }),
+        Vec::new(),
+    )
+    .with_structured_result(typed);
+    let compact = rendered_tool_output(&result, CliToolOutput::Document).unwrap();
+    let pretty = serde_json::to_string_pretty(&json_tool_document(&result).unwrap()).unwrap();
+    assert!(
+        !compact.contains('\n'),
+        "--json must stay one line: {compact}"
+    );
+    assert!(
+        pretty.len() > 65_536,
+        "pretty --json must be the form that filled a 64KiB pipe: {}",
+        pretty.len()
+    );
+    assert!(
+        compact.len() < 65_536,
+        "compact --json must fit a wait-then-read parent: {}",
+        compact.len()
+    );
+    let parsed: Value = serde_json::from_str(&compact).unwrap();
+    assert_eq!(
+        parsed["structuredContent"]["files"]
+            .as_array()
+            .unwrap()
+            .len(),
+        520
     );
 }
 

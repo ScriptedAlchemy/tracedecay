@@ -385,6 +385,7 @@ pub struct DaemonInvocationClient {
     handshake: crate::handshake::DaemonHandshake,
     pool: Arc<DaemonInvocationConnectionPool>,
     activity: Arc<DaemonInvocationClientActivity>,
+    reuse_idle_connections: bool,
 }
 
 #[derive(Default)]
@@ -493,6 +494,10 @@ struct InvocationConnectionLease {
     /// without settling (cancellation, timeout, an indeterminate effect, a
     /// mid-request failure) never returns a possibly desynchronized stream.
     disposition: LeaseDisposition,
+    /// One-shot callers (CLI `tool`) must close the stream after the
+    /// response. Returning it to the idle pool keeps the daemon connection
+    /// accepted and can hold the process after stdout has been written.
+    reuse: bool,
 }
 
 impl InvocationConnectionLease {
@@ -507,7 +512,9 @@ impl InvocationConnectionLease {
     }
 
     fn release_to_pool(&mut self) {
-        self.disposition = LeaseDisposition::Return;
+        if self.reuse {
+            self.disposition = LeaseDisposition::Return;
+        }
     }
 
     fn invalidate_pool(&mut self) {
@@ -603,7 +610,20 @@ impl DaemonInvocationClient {
             handshake,
             pool: DaemonInvocationConnectionPool::shared(),
             activity: Arc::new(DaemonInvocationClientActivity::default()),
+            reuse_idle_connections: true,
         }
+    }
+
+    /// Drop the invocation stream after this client's next settled response
+    /// instead of returning it to the idle pool.
+    ///
+    /// One-shot CLI processes issue a single request and then print. Keeping
+    /// the Unix stream pooled leaves the daemon in its retained-connection
+    /// read loop and can keep the Tokio runtime from shutting down after
+    /// the tool document has already been written.
+    pub fn without_idle_reuse(mut self) -> Self {
+        self.reuse_idle_connections = false;
+        self
     }
 
     #[cfg(test)]
@@ -616,6 +636,7 @@ impl DaemonInvocationClient {
             handshake,
             pool: DaemonInvocationConnectionPool::shared(),
             activity: Arc::new(DaemonInvocationClientActivity::default()),
+            reuse_idle_connections: true,
         }
     }
 
@@ -671,6 +692,7 @@ impl DaemonInvocationClient {
                 connection: Some(connection),
                 permit: Some(permit),
                 disposition: LeaseDisposition::DiscardOne,
+                reuse: self.reuse_idle_connections,
             },
             in_flight,
         ))

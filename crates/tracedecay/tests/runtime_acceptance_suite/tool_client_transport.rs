@@ -523,6 +523,150 @@ fn generic_tool_retrieves_oversized_typed_result() {
     );
 }
 
+/// Files listing whose compact `--json` document stays under the Linux pipe
+/// buffer while the pretty-printed form does not. Agents that `wait()` before
+/// reading stdout deadlock on the pretty form and capture ~65KiB of truncated
+/// JSON; compact output plus an explicit flush lets that parent exit.
+fn pipe_boundary_files() -> FilesResultV1 {
+    files_result((0..520).map(|index| format!("src/pipe_boundary_{index:04}.rs")))
+}
+
+fn hold_stream_after_files(
+    mut stream: UnixStream,
+    request: DaemonInvocationRequest,
+    scope: ResolvedScope,
+    files: FilesResultV1,
+) {
+    stream
+        .write_all(&files_response(&request, scope, files))
+        .expect("write files result");
+    stream.flush().expect("flush files result");
+    // The production daemon stays in its retained-connection read loop after
+    // a graph-tool response. Close only when the CLI drops the stream.
+    let mut extra = String::new();
+    let _ = BufReader::new(stream).read_line(&mut extra);
+}
+
+/// `wait()` the child before reading stdout, the classic pipe-deadlock parent.
+fn run_command_wait_then_read(mut command: Command, timeout: Duration) -> ChildResult {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn tracedecay");
+    let mut stdout = child.stdout.take().expect("stdout pipe");
+    let mut stderr = child.stderr.take().expect("stderr pipe");
+    let started = Instant::now();
+    let (status, killed_by_harness) = loop {
+        if let Some(status) = child.try_wait().expect("poll tracedecay") {
+            break (status, false);
+        }
+        if started.elapsed() >= timeout {
+            child.kill().expect("kill hung tracedecay");
+            break (child.wait().expect("reap hung tracedecay"), true);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    stdout.read_to_end(&mut stdout_bytes).expect("read stdout");
+    stderr.read_to_end(&mut stderr_bytes).expect("read stderr");
+    ChildResult {
+        output: Output {
+            status,
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+        },
+        elapsed: started.elapsed(),
+        killed_by_harness,
+    }
+}
+
+fn assert_complete_files_json(result: &ChildResult, expected: usize) {
+    assert!(
+        !result.killed_by_harness,
+        "CLI --json hung after writing files: elapsed={:?} stdout_len={} stderr={}",
+        result.elapsed,
+        result.output.stdout.len(),
+        String::from_utf8_lossy(&result.output.stderr)
+    );
+    assert!(
+        result.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.output.stderr)
+    );
+    let envelope: Value = serde_json::from_slice(&result.output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "--json must be one complete parseable document ({error}); bytes={} head={}",
+            result.output.stdout.len(),
+            String::from_utf8_lossy(&result.output.stdout[..result.output.stdout.len().min(200)])
+        )
+    });
+    assert_eq!(envelope["isError"], false, "{envelope}");
+    let files = envelope["structuredContent"]["files"]
+        .as_array()
+        .unwrap_or_else(|| panic!("structuredContent.files missing: {envelope}"));
+    assert_eq!(
+        files.len(),
+        expected,
+        "structuredContent must retain every file, not a 65KiB prefix"
+    );
+}
+
+#[test]
+fn generic_tool_json_exits_while_daemon_holds_the_stream() {
+    let (_home, _project, _socket_dir, home, project, socket) = fixture();
+    let files = oversized_files();
+    let expected = files.count;
+    let (_requests, server) = spawn_scripted_daemon(
+        socket.clone(),
+        &home,
+        &project,
+        1,
+        move |stream, request, scope| {
+            hold_stream_after_files(stream, request, scope, files.clone());
+        },
+    );
+    let result = run_command_with_timeout(
+        tool_command(&home, &project, &socket, "large"),
+        CHILD_TIMEOUT,
+    );
+    server.join().expect("join scripted daemon");
+    assert!(
+        result.elapsed < Duration::from_secs(3),
+        "held daemon stream must not keep --json alive: {:?}",
+        result.elapsed
+    );
+    assert!(
+        result.output.stdout.len() > 65_536,
+        "oversized files --json must not stop at the 65KiB pipe boundary: {}",
+        result.output.stdout.len()
+    );
+    assert_complete_files_json(&result, expected);
+}
+
+#[test]
+fn generic_tool_json_completes_when_parent_waits_before_reading() {
+    let (_home, _project, _socket_dir, home, project, socket) = fixture();
+    let files = pipe_boundary_files();
+    let expected = files.count;
+    let (_requests, server) = spawn_scripted_daemon(
+        socket.clone(),
+        &home,
+        &project,
+        1,
+        move |stream, request, scope| {
+            hold_stream_after_files(stream, request, scope, files.clone());
+        },
+    );
+    let result = run_command_wait_then_read(
+        tool_command(&home, &project, &socket, "boundary"),
+        CHILD_TIMEOUT,
+    );
+    server.join().expect("join scripted daemon");
+    assert_complete_files_json(&result, expected);
+}
+
 #[test]
 fn generic_read_only_tool_times_out_without_late_success() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
