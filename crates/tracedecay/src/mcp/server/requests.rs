@@ -1668,6 +1668,7 @@ impl McpServer {
         let dispatch_outcome = control
             .run_retained(dispatch_server.dispatch_authority.registry(), worker)
             .await;
+        control.settle_cancelled(&dispatch_outcome).await;
         // Safety: each guard is dropped exactly once, here, after the worker
         // has settled, and neither is used again.
         unsafe {

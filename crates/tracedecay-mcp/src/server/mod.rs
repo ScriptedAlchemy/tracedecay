@@ -30,6 +30,7 @@ pub use read_coalescing::{
     IdenticalReadCoalescer, ReadCoalescingSnapshot, ReadFlight, ReadFlightClaim, ReadFlightLeader,
     tool_allows_identical_read_coalescing,
 };
+pub(crate) use rmcp::serve_guarded_rmcp_connection;
 pub use rmcp::{
     RmcpConnectionAdapter, RmcpInitializeResponseDecorator, RmcpSelectedProjectResponseAuthority,
     RmcpWorkDeliverySettlement, attach_stateless_request_context, await_dispatch_with_cancellation,

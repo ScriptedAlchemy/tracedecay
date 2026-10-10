@@ -991,6 +991,7 @@ fn describe_process_failure(error: &GitCommandError) -> String {
             format!("could not be read on {stream}: {source}")
         }
         GitCommandError::Wait(source) => format!("could not be waited for: {source}"),
+        GitCommandError::WriteInput(source) => format!("could not receive its input: {source}"),
     }
 }
 

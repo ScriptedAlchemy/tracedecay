@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_domain::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay_mcp::ToolResult;
@@ -4458,49 +4457,31 @@ pub fn closure_then_sibling(counter: &Counter) -> u32 {
     close_test_graph(host).await;
 }
 
+/// `ready` counts a graph parked and released for memory as served, so the
+/// analysis read that follows must re-warm it on its own.
 async fn wait_for_current_graph(host: &impl AnalysisToolHost) {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let status = handle_tool_call(
-                host,
-                "tracedecay_status",
-                json!({
-                    "format": "json",
-                    "include_branch_diagnostics": false,
-                    "include_storage_health": false,
-                    "include_session_ingest": false,
-                    "include_staleness": false,
-                }),
-                None,
-            )
-            .await
-            .expect("typed project status while awaiting the current graph");
-            let status: Value = serde_json::from_str(extract_text(&status.value))
-                .expect("typed project status JSON");
-            let freshness = &status["code_index_freshness"];
-            let serving = &freshness["worktree"]["code_graph_serving"];
-            match (
-                freshness["status"].as_str(),
-                serving["state"].as_str(),
-                serving["reason"].as_str(),
-                freshness["worktree"]["staleness_state"].as_str(),
-            ) {
-                (Some("current"), Some("ready"), _, _) => break,
-                (Some("warming"), _, _, _)
-                | (Some("stale"), Some("ready"), _, Some("verifying"))
-                | (_, Some("pending"), _, _)
-                | (_, Some("unavailable"), Some("generation_unavailable"), _) => {
-                    tokio::task::yield_now().await;
-                }
-                (_, Some("refused"), _, _) | (_, _, Some("activation_disabled"), _) => {
-                    panic!("graph readiness was refused: {status}");
-                }
-                actual => panic!("graph readiness became {actual:?}: {status}"),
-            }
-        }
-    })
+    let status = handle_tool_call(
+        host,
+        "tracedecay_status",
+        json!({
+            "format": "json",
+            "include_branch_diagnostics": false,
+            "include_storage_health": false,
+            "include_session_ingest": false,
+            "include_staleness": false,
+            "wait_for": { "state": "ready", "timeout_ms": 20_000 },
+        }),
+        None,
+    )
     .await
-    .expect("graph did not become current within the publication budget");
+    .expect("typed project status while awaiting the current graph");
+    let status: Value =
+        serde_json::from_str(extract_text(&status.value)).expect("typed project status JSON");
+    assert_eq!(
+        status["wait"],
+        json!({ "outcome": "reached" }),
+        "graph did not become current within the publication budget: {status}"
+    );
 }
 
 async fn find_node_id(host: &impl AnalysisToolHost, name: &str) -> String {

@@ -616,12 +616,32 @@ impl NativeGitIntelligence {
     /// state plus explicit coverage.
     #[tracing::instrument(name = "usecases.git_intelligence.status", level = "trace", skip_all)]
     pub fn status(&self) -> Result<GitStatusV1, GitIntelligenceError> {
+        self.typed_status(None)
+    }
+
+    /// [`Self::status`] stopped by the caller's request deadline and
+    /// cancellation, the bounds its Git subprocesses already obey.
+    pub fn status_within(
+        &self,
+        bounds: &tracedecay_runtime_core::git::GitCommandBounds,
+    ) -> Result<GitStatusV1, GitIntelligenceError> {
+        self.typed_status(Some(bounds))
+    }
+
+    fn typed_status(
+        &self,
+        bounds: Option<&tracedecay_runtime_core::git::GitCommandBounds>,
+    ) -> Result<GitStatusV1, GitIntelligenceError> {
         let authority = tracedecay_runtime_core::git_repository::GitRepositoryAuthority::discover(
             &self.repo_root,
         )
         .map_err(map_repository_error)?;
         let _object_format = authority.object_format().map_err(map_repository_error)?;
-        let snapshot = authority.status().map_err(map_repository_error)?;
+        let snapshot = match bounds {
+            Some(bounds) => authority.status_bounded(bounds),
+            None => authority.status(),
+        }
+        .map_err(map_repository_error)?;
 
         let status = GitStatusV1 {
             repository: self.repository.clone(),

@@ -1,14 +1,17 @@
 //! Exact native Git safety evidence and executable-policy classification.
 
 use std::collections::BTreeSet;
-use std::process::Stdio;
+use std::path::Path;
+
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use tracedecay_code_index::parallelism;
 
 use tracedecay_domain::{GitFileModeV1, GitHeadStateV1, ManifestDigest, canonical_sha256};
 use tracedecay_runtime_core::git_discovery::{
     GitRepositoryIdentityOutcome, discover_repository_identity_bounded,
 };
 
-use super::process::{read_optional_file, run_command_with_stdin, worktree_mode};
+use super::process::{read_optional_file, worktree_mode};
 use super::{FixedGitIndexRunner, NativeGitIndexError};
 
 impl FixedGitIndexRunner {
@@ -17,7 +20,10 @@ impl FixedGitIndexRunner {
         level = "trace",
         skip_all
     )]
+    /// Bind physical bytes, modes and names independently of Git's dirty set,
+    /// which may hide edits through stat settings, flags or text normalization.
     pub fn tracked_worktree_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
+        self.check_cancelled()?;
         let head_paths = match self.head_state()? {
             GitHeadStateV1::Unborn { .. } => Vec::new(),
             GitHeadStateV1::Attached { .. } | GitHeadStateV1::Detached { .. } => {
@@ -32,50 +38,40 @@ impl FixedGitIndexRunner {
             .split(|byte| *byte == 0)
             .filter(|entry| !entry.is_empty())
         {
-            let path = index_entry_path(entry)?;
-            paths.insert(path.to_vec());
+            paths.insert(index_entry_path(entry)?.to_vec());
         }
-        // An untracked path may become an index entry during the intended
-        // publication. Including it in the same manifest before and after
-        // staging binds its bytes without making the digest index-relative.
+        // A path keeps its byte identity when staging moves it into the index.
         paths.extend(self.other_paths(false)?);
-
-        let mut manifest = Vec::new();
-        for path in paths {
-            let path =
-                std::str::from_utf8(&path).map_err(|_| NativeGitIndexError::MalformedOutput {
-                    operation: "ls-tree",
-                })?;
-            let absolute = self.repository_root.join(path);
-            let entry = match std::fs::symlink_metadata(&absolute) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    let target = std::fs::read_link(&absolute)
-                        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-                    (
-                        "symlink",
-                        target.to_string_lossy().into_owned().into_bytes(),
+        let read_span = tracing::trace_span!("daemon.git.index_tx.worktree_bytes").entered();
+        let paths = paths.into_iter().collect::<Vec<_>>();
+        let manifest = parallelism::install(|| {
+            paths
+                .into_par_iter()
+                .map(|path| {
+                    parallelism::with_background_cpu_permit_cancellable(
+                        || self.check_cancelled().is_err(),
+                        || {
+                            self.check_cancelled()?;
+                            let path_text = std::str::from_utf8(&path).map_err(|_| {
+                                NativeGitIndexError::MalformedOutput {
+                                    operation: "ls-tree",
+                                }
+                            })?;
+                            let entry = self
+                                .worktree_manifest_bytes(&self.repository_root.join(path_text))?;
+                            Ok((path_text.to_owned(), entry.0, entry.1))
+                        },
                     )
-                }
-                Ok(metadata) if metadata.is_file() => (
-                    if worktree_mode(&absolute)
-                        .is_some_and(|mode| mode.as_str() == GitFileModeV1::EXECUTABLE)
-                    {
-                        "executable"
-                    } else {
-                        "file"
-                    },
-                    std::fs::read(&absolute)
-                        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?,
-                ),
-                Ok(_) => ("unsupported", Vec::new()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    ("absent", Vec::new())
-                }
-                Err(error) => return Err(NativeGitIndexError::Io(error.to_string())),
-            };
-            manifest.push((path.to_owned(), entry.0, entry.1));
-        }
-        canonical_sha256(&manifest).map_err(Into::into)
+                    .ok_or(NativeGitIndexError::Cancelled)?
+                })
+                .collect::<Result<Vec<_>, NativeGitIndexError>>()
+        })
+        .map_err(|error| NativeGitIndexError::Io(error.to_string()))??;
+        drop(read_span);
+        self.check_cancelled()?;
+        let digest = canonical_sha256(&manifest)?;
+        self.check_cancelled()?;
+        Ok(digest)
     }
 
     pub fn untracked_name_digest(&self) -> Result<Option<ManifestDigest>, NativeGitIndexError> {
@@ -133,13 +129,9 @@ impl FixedGitIndexRunner {
 
     pub fn attributes_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         let paths = self.run_git("ls-files", &["ls-files", "-z"])?;
-        let mut command = self.command();
-        command
-            .args(["check-attr", "-z", "-a", "--stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let attributes = run_command_with_stdin(command, "check-attr", &paths.stdout)?;
+        let mut command = self.command()?;
+        command.args(["check-attr", "-z", "-a", "--stdin"]);
+        let attributes = self.run_bounded_git_stdin(command, "check-attr", &paths.stdout)?;
         canonical_sha256(&attributes.stdout).map_err(Into::into)
     }
 
@@ -231,13 +223,9 @@ impl FixedGitIndexRunner {
             stdin.extend_from_slice(path);
             stdin.push(0);
         }
-        let mut command = self.command();
-        command
-            .args(["check-attr", "-z", "--stdin", "diff", "merge", "filter"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let output = run_command_with_stdin(command, "check-attr", &stdin)?;
+        let mut command = self.command()?;
+        command.args(["check-attr", "-z", "--stdin", "diff", "merge", "filter"]);
+        let output = self.run_bounded_git_stdin(command, "check-attr", &stdin)?;
         // `-z` emits `path NUL attribute NUL value NUL` triples.
         let fields = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
         let mut bound = BTreeSet::new();
@@ -317,6 +305,72 @@ impl FixedGitIndexRunner {
                     && identity.git_dir == self.git_dir
                     && identity.common_dir == self.common_dir
         )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WorktreeKind {
+    File,
+    Executable,
+    Symlink,
+    Unsupported,
+    Absent,
+}
+
+impl WorktreeKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Executable => "executable",
+            Self::Symlink => "symlink",
+            Self::Unsupported => "unsupported",
+            Self::Absent => "absent",
+        }
+    }
+}
+
+fn classify_worktree_path(absolute: &Path) -> Result<WorktreeKind, NativeGitIndexError> {
+    match std::fs::symlink_metadata(absolute) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Ok(WorktreeKind::Symlink),
+        Ok(metadata) if metadata.is_file() => Ok(
+            if worktree_mode(absolute)
+                .is_some_and(|mode| mode.as_str() == GitFileModeV1::EXECUTABLE)
+            {
+                WorktreeKind::Executable
+            } else {
+                WorktreeKind::File
+            },
+        ),
+        Ok(_) => Ok(WorktreeKind::Unsupported),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(WorktreeKind::Absent),
+        Err(error) => Err(NativeGitIndexError::Io(error.to_string())),
+    }
+}
+
+impl FixedGitIndexRunner {
+    fn worktree_manifest_bytes(
+        &self,
+        absolute: &Path,
+    ) -> Result<(&'static str, Vec<u8>), NativeGitIndexError> {
+        match classify_worktree_path(absolute)? {
+            WorktreeKind::Symlink => {
+                let target = std::fs::read_link(absolute)
+                    .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+                Ok((
+                    "symlink",
+                    target.to_string_lossy().into_owned().into_bytes(),
+                ))
+            }
+            kind @ (WorktreeKind::File | WorktreeKind::Executable) => Ok((
+                kind.as_str(),
+                self.read_file_chunks(
+                    std::fs::File::open(absolute)
+                        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?,
+                )?,
+            )),
+            WorktreeKind::Unsupported => Ok(("unsupported", Vec::new())),
+            WorktreeKind::Absent => Ok(("absent", Vec::new())),
+        }
     }
 }
 

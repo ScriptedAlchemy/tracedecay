@@ -377,6 +377,7 @@ impl BranchPublicationContextV1 {
             scope.repository_id.clone(),
             scope.worktree_id.clone(),
             tracedecay_contracts::now_micros(),
+            None,
         )
         .map_err(|error| {
             TraceDecayError::project_route(
