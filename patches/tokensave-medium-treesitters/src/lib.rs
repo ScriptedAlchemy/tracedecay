@@ -13,8 +13,8 @@ pub use tree_sitter;
 pub mod languages {
     pub use tokensave_lite_treesitters::languages::*;
     pub use tree_sitter_bash;
-    pub use tree_sitter_c_sharp;
     pub use tree_sitter_cpp;
+    pub use tree_sitter_c_sharp;
     pub use tree_sitter_dart_orchard;
     pub use tree_sitter_lua;
     pub use tree_sitter_php;
