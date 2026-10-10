@@ -982,7 +982,13 @@ fn launchd_owned_service_activity(
         let state = states.next();
         if states.next().is_none() {
             match state {
-                Some("running") => return Ok(Some(LaunchdJobActivity::Running)),
+                // launchd reports `xpcproxy` while it execs the job and
+                // `spawn scheduled` while a spawn is queued. Both are startup
+                // of the owned job: quiescence must stop it, and readiness
+                // waits keep polling the socket until it serves.
+                Some("running" | "xpcproxy" | "spawn scheduled") => {
+                    return Ok(Some(LaunchdJobActivity::Running));
+                }
                 Some("waiting" | "not running") => return Ok(Some(LaunchdJobActivity::Stopped)),
                 Some("SIGTERMed") => return Ok(Some(LaunchdJobActivity::Stopping)),
                 _ => {}
