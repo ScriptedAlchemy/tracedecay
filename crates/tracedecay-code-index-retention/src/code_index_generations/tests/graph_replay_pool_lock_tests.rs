@@ -29,19 +29,6 @@ fn isolated_pool() -> (tempfile::TempDir, std::path::PathBuf) {
     (root, pool)
 }
 
-/// Wall-clock bound for a cancelled execute that must not consume the
-/// 50ms acquire budget. Linux stays at 20ms. Windows `park_timeout`
-/// rounds a 5ms poll up to the default ~15.6ms timer quantum, and
-/// execute still does lock-file setup before the winning cancel check,
-/// so the bound is one quantum above 20ms and still strictly below 50ms.
-fn cancelled_execute_wall_bound() -> Duration {
-    if cfg!(windows) {
-        Duration::from_millis(40)
-    } else {
-        Duration::from_millis(20)
-    }
-}
-
 /// The remaining TOCTOU after the outer non-blocking probe: the probe
 /// succeeds, the publisher takes the pool, and execute must defer with a
 /// typed busy result instead of a deadline-free flock. Nothing is exposed.
@@ -282,7 +269,6 @@ fn execute_cancels_held_pool_acquire_before_any_exposure() {
         .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let checks = AtomicUsize::new(0);
-    reset_graph_replay_pool_acquire_observation();
     let started = Instant::now();
     let error = execute_code_generation_retention_cancellable(
         store.path(),
@@ -294,15 +280,10 @@ fn execute_cancels_held_pool_acquire_before_any_exposure() {
     )
     .expect_err("cancellation during pool wait must abort execute");
     let elapsed = started.elapsed();
-    let (tries, waits) = graph_replay_pool_acquire_observation();
 
     assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
     assert!(
-        waits <= 1,
-        "cancelled execute must not poll out the acquire budget, waits={waits} tries={tries}"
-    );
-    assert!(
-        elapsed < cancelled_execute_wall_bound(),
+        elapsed < Duration::from_millis(20),
         "cancelled execute must not wait out the acquire budget, took {elapsed:?}"
     );
     assert!(

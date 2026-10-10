@@ -224,6 +224,9 @@ impl GraphReplayPoolLockV1 {
         deadline: Instant,
         is_cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, CodeGenerationRetentionErrorV1> {
+        if is_cancelled() {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+        }
         ensure_private_graph_replay_pool_root(pool_root)?;
         // Honor a sooner caller deadline, but never wait longer than the
         // executor budget. A 30s graph-operation deadline would still pin
@@ -251,19 +254,29 @@ impl GraphReplayPoolLockV1 {
                 None if Instant::now() >= deadline => {
                     return Err(CodeGenerationRetentionErrorV1::GraphReplayPoolBusy);
                 }
-                None => Self::wait_for_exclusive(deadline),
+                None => Self::wait_for_exclusive(deadline, is_cancelled)?,
             }
         }
     }
 
-    fn wait_for_exclusive(deadline: Instant) {
+    fn wait_for_exclusive(
+        deadline: Instant,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), CodeGenerationRetentionErrorV1> {
+        // Observe cancellation before the park slice. Windows
+        // `park_timeout(5ms)` rounds up to the default ~15.6ms timer
+        // quantum; a cancel that is already true must not wait that out.
+        if is_cancelled() {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
+        }
         #[cfg(test)]
         GRAPH_REPLAY_POOL_ACQUIRE_WAITS.with(|waits| waits.set(waits.get() + 1));
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return;
+            return Ok(());
         }
         std::thread::park_timeout(remaining.min(GRAPH_REPLAY_POOL_ACQUIRE_POLL));
+        Ok(())
     }
 
     fn release_exclusive(&mut self) {
