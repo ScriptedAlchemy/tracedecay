@@ -8,17 +8,35 @@ use tracedecay_tokenizer::count_ordinary_tokens;
 ///
 /// Counts the output the host recorded, which is what entered the agent's
 /// context, footers and notices included, with `o200k_base`. Hosts do not
-/// persist MCP `_meta`, so a serve-time stamp could not reach this fact. The
-/// tool-body `token_count` field is ignored so source_read's payload cannot
-/// replace the served-output count.
+/// persist MCP `_meta`, so ingest is the only authority. The tool-body
+/// `token_count` field is ignored so source_read's payload cannot replace
+/// the served-output count.
 pub fn accounted_tool_result(
     invocation_id: Option<ObservationId>,
     content: Value,
     success: Option<bool>,
 ) -> CanonicalObservationFactV1 {
-    let token_count =
-        tool_result_visible_text(&content).and_then(|text| count_ordinary_tokens(&text).ok());
-    let cut = (!content.is_null()).then(|| tool_result_output_was_cut(&content));
+    accounted_tool_result_with_recorded_output(invocation_id, content, success, None)
+}
+
+/// Same as [`accounted_tool_result`], counting `recorded_output` when stored
+/// `content` is `Null`. Codex and Composer keep Null canonical content; the
+/// unused-context meter still scores the text the host recorded.
+pub fn accounted_tool_result_with_recorded_output(
+    invocation_id: Option<ObservationId>,
+    content: Value,
+    success: Option<bool>,
+    recorded_output: Option<&Value>,
+) -> CanonicalObservationFactV1 {
+    let visible = tool_result_visible_text(&content)
+        .or_else(|| recorded_output.and_then(tool_result_visible_text));
+    let token_count = visible
+        .as_deref()
+        .and_then(|text| count_ordinary_tokens(text).ok());
+    let cut = visible.as_ref().map(|_| {
+        tool_result_output_was_cut(&content)
+            || recorded_output.is_some_and(tool_result_output_was_cut)
+    });
     CanonicalObservationFactV1::tool_result(invocation_id, content, success, token_count, cut)
 }
 
@@ -28,7 +46,7 @@ mod tests {
     use tracedecay_domain::{CanonicalObservationFactV1, tool_result_visible_text};
     use tracedecay_tokenizer::count_ordinary_tokens;
 
-    use super::accounted_tool_result;
+    use super::{accounted_tool_result, accounted_tool_result_with_recorded_output};
 
     fn result_fields(
         fact: &CanonicalObservationFactV1,
@@ -96,6 +114,40 @@ mod tests {
         let (token_count, cut, _) = result_fields(&fact);
         assert_eq!(token_count, None);
         assert_eq!(cut, None);
+    }
+
+    #[test]
+    fn counts_codex_output_when_canonical_content_is_null() {
+        let fact = accounted_tool_result_with_recorded_output(
+            None,
+            json!(null),
+            Some(true),
+            Some(&json!("test result: ok")),
+        );
+        let (token_count, cut, content) = result_fields(&fact);
+        assert_eq!(content, &json!(null));
+        assert_eq!(
+            token_count,
+            Some(count_ordinary_tokens("test result: ok").unwrap())
+        );
+        assert_eq!(cut, Some(false));
+    }
+
+    #[test]
+    fn counts_composer_result_when_canonical_content_is_null() {
+        let fact = accounted_tool_result_with_recorded_output(
+            None,
+            json!(null),
+            Some(true),
+            Some(&json!("{\"ok\":true}")),
+        );
+        let (token_count, cut, content) = result_fields(&fact);
+        assert_eq!(content, &json!(null));
+        assert_eq!(
+            token_count,
+            Some(count_ordinary_tokens("{\"ok\":true}").unwrap())
+        );
+        assert_eq!(cut, Some(false));
     }
 
     #[test]

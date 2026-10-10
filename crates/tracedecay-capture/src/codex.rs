@@ -887,13 +887,14 @@ fn append_codex_response_item_facts(
             }
         }
         "function_call_output" | "custom_tool_call_output" => {
-            facts.push(crate::accounted_tool_result(
+            facts.push(crate::accounted_tool_result_with_recorded_output(
                 canonical_native_observation_id(payload.get("call_id").and_then(Value::as_str)),
                 Value::Null,
                 payload
                     .get("status")
                     .and_then(Value::as_str)
                     .map(|status| matches!(status, "completed" | "success" | "succeeded")),
+                payload.get("output"),
             ));
         }
         "reasoning" => {
