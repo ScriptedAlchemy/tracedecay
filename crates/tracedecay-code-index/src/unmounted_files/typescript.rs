@@ -561,11 +561,10 @@ fn walk_imports(package: &NodePackage, mounted: &mut HashSet<PathBuf>) {
 
 /// Every module specifier one file names.
 ///
-/// `import` statements come from the same extractor the code graph is built
-/// from, so the audit and the graph cannot disagree about what a file imports.
-/// The three remaining specifier-bearing forms, `export … from`,
-/// `require(…)`, and dynamic `import(…)`, are read off the same tree-sitter
-/// grammar the extractor uses, because the extractor does not emit them as
+/// `import` statements, `export … from`, and `require(…)` come from the same
+/// extractor the code graph is built from, so the audit and the graph cannot
+/// disagree about those forms. Dynamic `import(…)` is still read off the
+/// tree-sitter grammar because the extractor does not emit that form as
 /// import evidence today.
 fn module_specifiers(file: &Path, source: &str) -> Vec<String> {
     let logical_path = file.to_string_lossy().into_owned();

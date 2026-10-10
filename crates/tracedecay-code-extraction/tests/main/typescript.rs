@@ -1302,3 +1302,55 @@ class Circle {\n\
         ]
     );
 }
+
+/// `new Foo()` is a call site of `Foo`. Missing it is why callers of a class
+/// stayed empty while the disk still had constructor invocations.
+#[test]
+fn test_ts_new_expression_is_a_calls_site() {
+    let source = r#"
+export class URLImportPlugin {}
+
+export function build() {
+    return new URLImportPlugin();
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("factory.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        calls_from(&result, "build"),
+        ["URLImportPlugin"],
+        "constructor sites must be Calls refs, got {:?}",
+        result.unresolved_refs
+    );
+}
+
+/// CommonJS factory files construct plugins at module scope, not inside a
+/// named function. The module-scope owner must still keep the `new`.
+#[test]
+fn test_js_module_scope_new_expression_is_a_calls_site() {
+    let source = r#"
+const URLImportPlugin = require("../../webpack");
+module.exports = (siteId) => {
+  return new URLImportPlugin({ manifestName: `website-${siteId}` });
+};
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("manual/webpack/webpackConfigFactory.js", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let news = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| {
+            reference.reference_kind == EdgeKind::Calls
+                && reference.reference_name == "URLImportPlugin"
+        })
+        .count();
+    assert_eq!(
+        news, 1,
+        "module-scope new URLImportPlugin must be a Calls ref: {:?}",
+        result.unresolved_refs
+    );
+}

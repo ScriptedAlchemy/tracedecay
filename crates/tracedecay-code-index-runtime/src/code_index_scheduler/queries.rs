@@ -71,6 +71,15 @@ use tracedecay_query::retrieval::{
 };
 
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
+/// Inbound kinds `code_callers` and `code_references` share: call sites,
+/// usages, type references, and annotations. Walking `Calls` alone dropped
+/// import/type/`new` rows and then claimed a complete empty page.
+const CALLER_AND_REFERENCE_KINDS: [RelationEdgeKindV1; 4] = [
+    RelationEdgeKindV1::Calls,
+    RelationEdgeKindV1::Uses,
+    RelationEdgeKindV1::TypeOf,
+    RelationEdgeKindV1::Annotates,
+];
 const MAX_GENERATION_RESOLUTION_WAIT: Duration = Duration::from_secs(30);
 /// Leave enough of the carried dispatch budget for timeout projection and the
 /// typed response to cross the enclosing boundary.
@@ -2401,7 +2410,7 @@ fn graph_relation_keys(
     // A call hierarchy lists a directly recursive seed as its own neighbor.
     // Walks over other relation kinds describe the seed's surroundings, which
     // never include the seed.
-    let mut direct_recursion_pending = kinds == [RelationEdgeKindV1::Calls];
+    let mut direct_recursion_pending = kinds.contains(&RelationEdgeKindV1::Calls);
     'walk: while !frontier.is_empty() && depth < maximum_depth {
         let remaining = cap.saturating_sub(keys.len());
         if remaining == 0 {
@@ -3410,7 +3419,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(found) = graph_relation_keys(
                 &prepared.reader,
                 &start,
-                &[RelationEdgeKindV1::Calls],
+                &CALLER_AND_REFERENCE_KINDS,
                 true,
                 request.maximum_depth,
                 &request.scope,
@@ -3841,12 +3850,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(found) = graph_relation_keys(
                 &prepared.reader,
                 &start,
-                &[
-                    RelationEdgeKindV1::Calls,
-                    RelationEdgeKindV1::Uses,
-                    RelationEdgeKindV1::TypeOf,
-                    RelationEdgeKindV1::Annotates,
-                ],
+                &CALLER_AND_REFERENCE_KINDS,
                 true,
                 1,
                 &request.scope,

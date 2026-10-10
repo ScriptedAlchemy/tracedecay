@@ -488,6 +488,186 @@ fn unquote(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// `const X = require("./m")` and `const { A: B } = require("./m")` are
+/// CommonJS import rows. Without them, a later `new X()` cannot bind.
+pub(super) fn visit_require_declarator(state: &mut ExtractionState<'_>, declarator: TsNode<'_>) {
+    let Some(value) = declarator.child_by_field_name("value") else {
+        return;
+    };
+    if value.kind() != "call_expression" {
+        return;
+    }
+    let Some(callee) = value
+        .child_by_field_name("function")
+        .or_else(|| value.named_child(0))
+    else {
+        return;
+    };
+    if state.node_text(callee) != "require" {
+        return;
+    }
+    let Some(module_specifier) = value
+        .child_by_field_name("arguments")
+        .or_else(|| find_direct_child_by_kind(value, "arguments"))
+        .and_then(|arguments| arguments.named_child(0))
+        .and_then(|argument| unquote(state.node_text(argument)))
+    else {
+        return;
+    };
+    let Some(module_kind) = import_module_kind("typescript", &module_specifier) else {
+        return;
+    };
+    let Some(name) = declarator.child_by_field_name("name") else {
+        return;
+    };
+    match name.kind() {
+        "identifier" => {
+            let local_name = state.node_text(name).to_string();
+            push_evidence(
+                state,
+                &module_specifier,
+                (Some("default".to_owned()), Some(local_name)),
+                BindingShape::IMPORT,
+                ImportNamespaceV1::Value,
+                module_kind,
+                name,
+            );
+        }
+        "object_pattern" => {
+            visit_require_object_pattern(state, name, &module_specifier, module_kind)
+        }
+        _ => {}
+    }
+}
+
+fn visit_require_object_pattern(
+    state: &mut ExtractionState<'_>,
+    pattern: TsNode<'_>,
+    module_specifier: &str,
+    module_kind: ImportModuleKindV1,
+) {
+    let mut cursor = pattern.walk();
+    if !cursor.goto_first_child() {
+        return;
+    }
+    loop {
+        let child = cursor.node();
+        match child.kind() {
+            "shorthand_property_identifier_pattern" | "shorthand_property_identifier" => {
+                let name = state.node_text(child).to_string();
+                push_evidence(
+                    state,
+                    module_specifier,
+                    (Some(name.clone()), Some(name)),
+                    BindingShape::IMPORT,
+                    ImportNamespaceV1::Value,
+                    module_kind,
+                    child,
+                );
+            }
+            "pair_pattern" | "pair" => {
+                if let Some(key) = child
+                    .child_by_field_name("key")
+                    .or_else(|| child.named_child(0))
+                {
+                    let imported_name = binding_name(state, key);
+                    let local_name = child
+                        .child_by_field_name("value")
+                        .or_else(|| child.named_child(1))
+                        .map(|value| binding_name(state, value))
+                        .unwrap_or_else(|| imported_name.clone());
+                    push_evidence(
+                        state,
+                        module_specifier,
+                        (Some(imported_name), Some(local_name)),
+                        BindingShape::IMPORT,
+                        ImportNamespaceV1::Value,
+                        module_kind,
+                        child,
+                    );
+                }
+            }
+            _ => {}
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+}
+
+/// `module.exports = Name` is the CommonJS default export. `require()` of
+/// this file binds `Name` through the same `default` row ESM uses.
+pub(super) fn visit_commonjs_export(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
+    let assignment = match node.kind() {
+        "assignment_expression" => node,
+        "expression_statement" => {
+            let Some(assignment) = find_direct_child_by_kind(node, "assignment_expression") else {
+                return;
+            };
+            assignment
+        }
+        _ => return,
+    };
+    let Some(left) = assignment.child_by_field_name("left") else {
+        return;
+    };
+    if !is_module_exports(state, left) {
+        return;
+    }
+    let Some(right) = assignment.child_by_field_name("right") else {
+        return;
+    };
+    let exported = match right.kind() {
+        "identifier" => Some(state.node_text(right).to_string()),
+        "function_declaration"
+        | "generator_function_declaration"
+        | "class_declaration"
+        | "abstract_class_declaration" => right
+            .child_by_field_name("name")
+            .map(|name| state.node_text(name).to_string()),
+        _ => None,
+    };
+    let Some(exported) = exported else {
+        return;
+    };
+    let file_name = state.file_path.rsplit('/').next().unwrap_or_default();
+    if file_name.is_empty() {
+        return;
+    }
+    let module_specifier = format!("./{file_name}");
+    let Some(module_kind) = import_module_kind("typescript", &module_specifier) else {
+        return;
+    };
+    push_evidence(
+        state,
+        &module_specifier,
+        (Some(exported), Some("default".to_owned())),
+        BindingShape::REEXPORT,
+        ImportNamespaceV1::Value,
+        module_kind,
+        right,
+    );
+}
+
+fn is_module_exports(state: &ExtractionState<'_>, node: TsNode<'_>) -> bool {
+    if node.kind() != "member_expression" {
+        return false;
+    }
+    let Some(object) = node
+        .child_by_field_name("object")
+        .or_else(|| node.named_child(0))
+    else {
+        return false;
+    };
+    let Some(property) = node
+        .child_by_field_name("property")
+        .or_else(|| node.named_child(1))
+    else {
+        return false;
+    };
+    state.node_text(object) == "module" && state.node_text(property) == "exports"
+}
+
 fn has_unnamed_child_kind(node: TsNode<'_>, kind: &str) -> bool {
     let mut cursor = node.walk();
     if !cursor.goto_first_child() {

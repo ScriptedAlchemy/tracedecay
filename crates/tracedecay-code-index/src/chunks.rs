@@ -2668,6 +2668,13 @@ pub(crate) fn relation_target_kind_is_compatible(
                 | NodeKind::ArrowFunction
                 | NodeKind::Procedure
                 | NodeKind::Macro
+                // `new Foo()` names the class. Without this, constructor
+                // sites never became Calls edges and callers stayed empty.
+                | NodeKind::Class
+                | NodeKind::InnerClass
+                | NodeKind::SealedClass
+                | NodeKind::CaseClass
+                | NodeKind::DataClass
         ),
         RelationEdgeKindV1::TypeOf => matches!(
             target_kind,

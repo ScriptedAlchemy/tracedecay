@@ -630,3 +630,111 @@ fn local_and_default_exports_forward_through_the_module_itself() {
         assert_eq!(rows, expected, "{source}");
     }
 }
+
+/// `const X = require("./m")` is the CommonJS default import. Without this
+/// row, `new X()` cannot bind across files.
+#[test]
+fn require_assignment_is_a_default_import_row() {
+    let source = "const URLImportPlugin = require(\"../../webpack\");\n";
+    let artifact =
+        TypeScriptExtractor.extract_artifact("manual/webpack/webpackConfigFactory.js", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+    let rows = artifact
+        .imports
+        .iter()
+        .map(|row| {
+            (
+                row.module_specifier.as_str(),
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.namespace,
+                row.module_kind,
+                row.is_public,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [(
+            "../../webpack",
+            Some("default"),
+            Some("URLImportPlugin"),
+            ImportNamespaceV1::Value,
+            ImportModuleKindV1::ProjectRelative,
+            false,
+        )],
+        "{:?}",
+        artifact.imports
+    );
+}
+
+/// `const { Foo } = require("./m")` binds the named export, matching ESM
+/// `import { Foo } from "./m"`.
+#[test]
+fn require_destructure_is_a_named_import_row() {
+    let source = "const { URLImportPlugin: Plugin } = require(\"./webpack\");\n";
+    let artifact = TypeScriptExtractor.extract_artifact("factory.js", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+    let rows = artifact
+        .imports
+        .iter()
+        .map(|row| {
+            (
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.module_specifier.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [(Some("URLImportPlugin"), Some("Plugin"), "./webpack")],
+        "{:?}",
+        artifact.imports
+    );
+}
+
+/// `module.exports = Name` is the CommonJS default export. Callers of
+/// `Name` through `require()` need this forwarding row.
+#[test]
+fn module_exports_assignment_is_a_default_export_row() {
+    let source = "class URLImportPlugin {}\nmodule.exports = URLImportPlugin;\n";
+    let artifact = TypeScriptExtractor.extract_artifact("src/webpack/index.js", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+    let rows = artifact
+        .imports
+        .iter()
+        .filter(|row| row.is_public)
+        .map(|row| {
+            (
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.module_specifier.as_str(),
+                row.namespace,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [(
+            Some("URLImportPlugin"),
+            Some("default"),
+            "./index.js",
+            ImportNamespaceV1::Value,
+        )],
+        "{:?}",
+        artifact.imports
+    );
+}

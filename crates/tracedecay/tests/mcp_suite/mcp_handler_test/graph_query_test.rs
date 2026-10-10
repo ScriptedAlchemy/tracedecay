@@ -1,6 +1,7 @@
 #![cfg(feature = "test-transport")]
 
 mod callers_coverage;
+mod callers_usage_and_constructors;
 mod go_interface_satisfaction;
 mod relation_page_cost;
 mod restart_seat;
