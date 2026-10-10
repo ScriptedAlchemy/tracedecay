@@ -1122,7 +1122,10 @@ fn application_error_tool_result_exits_nonzero() {
         stdout_json.contains("old_str not found in README.md"),
         "{stdout_json}"
     );
-    assert!(stdout_json.contains("\"isError\": true"), "{stdout_json}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout_json).expect("tool output is valid JSON"),
+        failed.value
+    );
     assert_eq!(
         stdout_text,
         "{\"success\":false,\"message\":\"old_str not found in README.md\"}"

@@ -9,7 +9,7 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexOmittedSourcesV1, CodeIndexSourceOmissionReasonV1, CodeIndexStalenessStateV1,
     CodeIndexWorktreeFreshnessV1,
 };
-use tracedecay_domain::ExactClass;
+use tracedecay_domain::{ExactClass, RetrievalSourceRoleV1};
 use tracedecay_mcp::ToolResult;
 use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
 
@@ -34,7 +34,7 @@ fn completed_sparse_search_for_generation(
             .expect("sparse lexical candidate logical evidence"),
             occurrences: Vec::new(),
             exact_class: ExactClass::Approximate,
-            source_role: Default::default(),
+            source_role: RetrievalSourceRoleV1::default(),
             utility_micros: 1,
             contributions: Vec::new(),
             freshness: Vec::new(),
