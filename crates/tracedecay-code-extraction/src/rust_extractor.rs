@@ -198,29 +198,29 @@ fn is_rust_item_kind(kind: &str) -> bool {
 /// is removed: `Factory::<u32>::Widget` names `Factory::Widget`, and no
 /// symbol is ever called `Factory::<u32>`.
 fn strip_turbofish(path: &str) -> String {
-    let bytes = path.as_bytes();
     let mut out = String::with_capacity(path.len());
     let mut depth = 0usize;
     let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            _ if depth == 0 && bytes[index..].starts_with(b"::<") => {
-                depth = 1;
-                index += 3;
-            }
-            _ if depth > 0 => {
-                match bytes[index] {
-                    b'<' => depth += 1,
-                    b'>' => depth -= 1,
-                    _ => {}
-                }
-                index += 1;
-            }
-            byte => {
-                out.push(byte as char);
-                index += 1;
-            }
+    while index < path.len() {
+        if depth == 0 && path[index..].starts_with("::<") {
+            depth = 1;
+            index += 3;
+            continue;
         }
+        if depth > 0 {
+            match path.as_bytes()[index] {
+                b'<' => depth += 1,
+                b'>' => depth -= 1,
+                _ => {}
+            }
+            index += 1;
+            continue;
+        }
+        let Some(ch) = path[index..].chars().next() else {
+            break;
+        };
+        out.push(ch);
+        index += ch.len_utf8();
     }
     out
 }

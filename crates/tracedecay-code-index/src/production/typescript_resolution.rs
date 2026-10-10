@@ -1067,6 +1067,9 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
     let mut index = index + 1;
     while index < tokens.len() {
         match tokens[index] {
+            // `babel … --help` / `--version` print instead of compiling; no
+            // output is produced and no mapping is declared.
+            "--help" | "-h" | "--version" | "-V" => return None,
             "-d" | "--out-dir" => {
                 index += 1;
                 output = tokens.get(index).copied();

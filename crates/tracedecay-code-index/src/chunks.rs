@@ -2127,11 +2127,61 @@ fn reference_name_suffix_start(candidate: &str, reference_name: &str) -> Option<
     (prefix.is_empty() || prefix.ends_with('.') || prefix.ends_with("::")).then_some(prefix.len())
 }
 
-/// Whether the source at a Rust call site plainly invokes a value
-/// (`foo(`, `foo!`, `foo .`) rather than a path (`Foo::member`,
-/// `Factory::<u32>::new`). `::<` is ambiguous text — a generic function
-/// call and a tuple-struct constructor spell it the same — so it reports
-/// false and keeps both candidates.
+/// The path a call names once every `::<...>` turbofish argument list is
+/// removed; mirrors `strip_turbofish` in the Rust extractor, which emits
+/// reference names this comparison must agree with.
+fn strip_turbofish(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut depth = 0usize;
+    let mut index = 0;
+    while index < path.len() {
+        if depth == 0 && path[index..].starts_with("::<") {
+            depth = 1;
+            index += 3;
+            continue;
+        }
+        if depth > 0 {
+            match path.as_bytes()[index] {
+                b'<' => depth += 1,
+                b'>' => depth -= 1,
+                _ => {}
+            }
+            index += 1;
+            continue;
+        }
+        let Some(ch) = path[index..].chars().next() else {
+            break;
+        };
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+/// Whether a Rust `struct` symbol declares a tuple body — `Name(...)`, the
+/// only struct shape a call expression can construct. The first `{`, `(`,
+/// or `;` after the name inside the symbol's own span decides; generics
+/// and where clauses carry none of the three bytes.
+fn rust_tuple_struct(source: &str, symbol: &SymbolRow) -> bool {
+    let Some(after_name) = symbol_name_span(source, symbol)
+        .and_then(|name| usize::try_from(name.end_byte).ok())
+        .zip(usize::try_from(symbol.span.end_byte).ok())
+        .and_then(|(start, end)| source.get(start..end))
+    else {
+        return false;
+    };
+    matches!(
+        after_name
+            .bytes()
+            .find(|byte| matches!(byte, b'{' | b'(' | b';')),
+        Some(b'(')
+    )
+}
+
+/// Whether the source at a Rust call site invokes a value call
+/// (`foo(`, `foo!`, `foo::<T>(`) rather than a type path (`Foo::member`):
+/// `::` opens a path only when a name follows; `::<` is a turbofish
+/// argument list on a call.
 fn rust_callsite_names_value(source: &str, offsets: &[u64], reference: &UnresolvedRef) -> bool {
     let Some(rest) = offsets
         .get(reference.line as usize)
@@ -2143,7 +2193,12 @@ fn rust_callsite_names_value(source: &str, offsets: &[u64], reference: &Unresolv
     else {
         return false;
     };
-    !rest.trim_start().starts_with("::")
+    let rest = rest.trim_start();
+    rest.strip_prefix("::").is_none_or(|tail| {
+        !tail
+            .trim_start()
+            .starts_with(|ch: char| ch.is_alphanumeric() || ch == '_')
+    })
 }
 
 fn reference_evidence_span(
@@ -2154,12 +2209,21 @@ fn reference_evidence_span(
 ) -> Option<SourceSpan> {
     let line_start = offsets.get(reference.line as usize).copied()?;
     let site_start = usize::try_from(line_start.checked_add(u64::from(reference.column))?).ok()?;
-    let source_at_site = source.get(site_start..)?;
+    let raw_source_at_site = source.get(site_start..)?;
     // Typed receiver references name `Type::method`, while the source spells
     // `receiver.method`. Both forms must identify the parser-observed method
     // token so a sealed edge can discharge the same site's limitation.
     let rust_call =
         reference.reference_kind == EdgeKind::Calls && reference.file_path.ends_with(".rs");
+    // Reference names carry no turbofish arguments; compare on the
+    // same-normalized site so `Factory::<u32>::new` evidences `Factory::new`.
+    let normalized_site;
+    let source_at_site = if rust_call {
+        normalized_site = strip_turbofish(raw_source_at_site);
+        normalized_site.as_str()
+    } else {
+        raw_source_at_site
+    };
     let reference_name = if rust_call
         && (reference.reference_name.contains('.')
             || !source_at_site.starts_with(&reference.reference_name))
@@ -2169,9 +2233,17 @@ fn reference_evidence_span(
         &reference.reference_name
     };
     if rust_call && source_at_site.starts_with(reference_name) {
+        // The site token may be longer than the normalized name
+        // (`Factory::<u32>::new`); evidence covers the whole callee token
+        // through its argument list opener.
+        let end = raw_source_at_site
+            .bytes()
+            .position(|byte| matches!(byte, b'(' | b'!' | b'['))
+            .unwrap_or(reference_name.len())
+            .max(reference_name.len());
         return Some(SourceSpan {
             start_byte: u64::try_from(site_start).ok()?,
-            end_byte: u64::try_from(site_start.checked_add(reference_name.len())?).ok()?,
+            end_byte: u64::try_from(site_start.checked_add(end)?).ok()?,
         });
     }
     references_by_site
@@ -2392,15 +2464,19 @@ fn resolve_file_references(
         // `foo()` names a value and `Foo::member` names a type; Rust keeps
         // the two in different namespaces, so a same-named struct and
         // function are both kind-compatible. A value-call site drops the
-        // struct candidate; a path site (`::` or `::<`) stays an honest
-        // ambiguity rather than guessing the namespace.
+        // struct candidates a call cannot construct (named-field and unit
+        // structs); a tuple struct ctor spells `Name(` or `Name::<T>(` like
+        // a function call and stays an honest ambiguity, as does every
+        // `::` path form.
         if language == "rust"
             && reference.reference_kind == EdgeKind::Calls
             && !reference.reference_name.contains("::")
             && compatible.len() > 1
             && rust_callsite_names_value(source, offsets, reference)
         {
-            compatible.retain(|target| target.kind != NodeKind::Struct.as_str());
+            compatible.retain(|target| {
+                target.kind != NodeKind::Struct.as_str() || rust_tuple_struct(source, target)
+            });
         }
         match compatible.as_slice() {
             // Rust admits one definition per name and scope, so same-named

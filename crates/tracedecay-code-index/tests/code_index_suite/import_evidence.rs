@@ -1472,6 +1472,56 @@ fn rust_value_call_binds_the_function_not_the_same_named_struct() {
 }
 
 #[test]
+fn rust_generic_call_binds_the_function_past_a_named_field_struct() {
+    let generation = published_rust_workspace(&[(
+        "file.generic.lib",
+        "crates/app/src/lib.rs",
+        "pub struct helper { pub value: u8 }\n\nfn helper<T>() {}\n\nfn caller() { helper::<u32>(); }\n",
+    )]);
+    let function = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.qualified_name == "crates/app/src/lib.rs::helper" && symbol.kind == "function"
+        })
+        .expect("missing fn helper")
+        .occurrence
+        .clone();
+    assert_eq!(
+        resolved_callers(&generation, &function),
+        ["crates/app/src/lib.rs::caller"],
+        "a named-field struct cannot be constructed by a call, so \
+         `helper::<u32>()` names the generic function"
+    );
+}
+
+#[test]
+fn rust_tuple_struct_constructor_keeps_the_generic_call_ambiguous() {
+    let generation = published_rust_workspace(&[(
+        "file.tuple.lib",
+        "crates/app/src/lib.rs",
+        "pub struct helper<T>(pub T);\n\nfn helper<T>() {}\n\nfn caller() { helper::<u8>(0); }\n",
+    )]);
+    let function = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.qualified_name == "crates/app/src/lib.rs::helper" && symbol.kind == "function"
+        })
+        .expect("missing fn helper")
+        .occurrence
+        .clone();
+    assert_eq!(
+        resolved_callers(&generation, &function),
+        Vec::<&str>::new(),
+        "`helper::<u8>(0)` spells tuple-struct construction and generic \
+         invocation identically; it must stay ambiguous, never guess"
+    );
+}
+
+#[test]
 fn rust_calls_bind_through_a_use_declared_in_the_calling_block() {
     let generation = published_rust_workspace(&[
         (
