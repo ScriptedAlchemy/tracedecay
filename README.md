@@ -115,7 +115,8 @@ the installed cache is loaded.
 ## Common Commands
 
 ```bash
-tracedecay daemon install-service   # install + start the daemon (required before init)
+tracedecay daemon install-service   # install + start the user service (required before init)
+tracedecay daemon run               # foreground daemon when no systemd user session exists
 tracedecay init [path]              # enroll and request the first index
 tracedecay sync [path]              # explicit administrative refresh
 tracedecay status [path]            # graph stats, freshness, savings, cost
@@ -125,7 +126,7 @@ tracedecay tool files               # indexed files
 tracedecay tool affected --args -   # impacted tests/files ({"files":[...]})
 tracedecay serve                    # MCP server
 tracedecay doctor                   # read-only installation health check
-tracedecay dashboard [--path PATH] [--open]  # dashboard for one project
+tracedecay dashboard [--path PATH] [--open]  # dashboard for one launch project
 tracedecay monitor                  # live MCP savings/cost TUI
 tracedecay update                   # refresh binary, plugins, daemon
 tracedecay upgrade                  # self-upgrade current channel
@@ -177,13 +178,13 @@ tracedecay dashboard --path /path/to/enrolled/repo --port 8080
 tracedecay dashboard --path /path/to/enrolled/repo --port 0 --open
 ```
 
-The dashboard serves the project selected by `--path`, or the current project
-when that flag is omitted. Pass `--path` when launching from your home directory.
-Its project graph API reports that bound scope; a search query does not select
-a different enrolled repository. Start a dashboard for that repository to query
-its graph.
-
-The dashboard includes graph exploration, project memory, LCM session search, token savings, and cost views. See [docs/dashboard.md](docs/dashboard.md).
+The dashboard binds to one launch project: `--path`, or the current directory.
+Launching from `$HOME` or another ambient root refuses and tells you to pass
+`--path`. Code search covers only that bound project; asking about another
+enrolled repo returns a typed `wrong_project` or `empty_scope` state instead of
+a successful empty hit list. The dashboard includes graph exploration, project
+memory, LCM session search, token savings, and cost views. See
+[docs/dashboard.md](docs/dashboard.md).
 
 ## Privacy
 
@@ -241,8 +242,10 @@ Common fixes:
 - Not initialized: run `tracedecay init` from the project root.
 - `code_index_scheduler_unavailable` from `init`: no daemon is accepting
   connections for this profile. Run `tracedecay daemon install-service` (or
-  `tracedecay daemon start` if it is already installed), confirm with
-  `tracedecay daemon status`, then re-run `init`.
+  `tracedecay daemon start` if it is already installed). On Linux without a
+  systemd user session, run `tracedecay daemon run` instead. Confirm with
+  `tracedecay daemon status` (non-zero when stopped or unreachable), then
+  re-run `init`.
 - Agent does not see tools: run `tracedecay doctor`, then restart the agent.
 - Missing symbols: inspect `tracedecay status --json` for the selected
   generation and typed warming/refresh-required coverage; request an explicit

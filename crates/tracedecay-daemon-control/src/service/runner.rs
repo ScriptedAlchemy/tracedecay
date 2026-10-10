@@ -499,12 +499,24 @@ fn run_systemctl(systemctl: Option<&Path>, args: &[&str]) -> Result<()> {
     if output.status.success() {
         return Ok(());
     }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if systemd_user_bus_unreachable(&stderr) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "systemctl --user {} failed: {}. The systemd user manager is unreachable ({}). {}",
+                args.join(" "),
+                stderr.trim(),
+                ServiceManagerUnreachable::REMEDY,
+                ServiceManagerUnreachable::FOREGROUND_FALLBACK
+            ),
+        });
+    }
     Err(TraceDecayError::Config {
         message: format!(
             "systemctl --user {} failed with status {}\n{}",
             args.join(" "),
             output.status,
-            String::from_utf8_lossy(&output.stderr)
+            stderr
         ),
     })
 }
@@ -611,6 +623,12 @@ pub(super) struct ServiceManagerUnreachable {
 
 impl ServiceManagerUnreachable {
     pub(super) const REMEDY: &'static str = "check XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS";
+    pub(super) const FOREGROUND_FALLBACK: &'static str =
+        "Run `tracedecay daemon run` instead of a systemd user service.";
+}
+
+fn systemd_user_bus_unreachable(stderr: &str) -> bool {
+    stderr.contains("Failed to connect to bus")
 }
 
 impl std::fmt::Display for ServiceManagerUnreachable {
@@ -638,8 +656,9 @@ impl From<ServiceStateError> for TraceDecayError {
         match error {
             ServiceStateError::ManagerUnreachable(unreachable) => TraceDecayError::Config {
                 message: format!(
-                    "{unreachable}; the systemd user manager may be unreachable from this environment ({})",
-                    ServiceManagerUnreachable::REMEDY
+                    "{unreachable}; the systemd user manager may be unreachable from this environment ({}). {}",
+                    ServiceManagerUnreachable::REMEDY,
+                    ServiceManagerUnreachable::FOREGROUND_FALLBACK
                 ),
             },
             ServiceStateError::Failed(error) => error,

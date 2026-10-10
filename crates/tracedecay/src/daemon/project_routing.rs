@@ -107,9 +107,8 @@ pub(super) fn project_route_for_handshake(
     if tracedecay_runtime_core::config::is_ambient_project_root(owner_home, &canonical_project_path)
     {
         return Err(TraceDecayError::Config {
-            message: format!(
-                "'{}' is an ambient user/filesystem root, not an active TraceDecay code project",
-                canonical_project_path.display()
+            message: tracedecay_runtime_core::config::ambient_project_root_guidance(
+                &canonical_project_path,
             ),
         });
     }

@@ -294,17 +294,19 @@ install / update-plugin (refresh Core feedback routes).";
 pub(crate) const DASHBOARD_LONG_ABOUT: &str = "\
 Starts the local web dashboard: holographic memory curation, LCM session \
 explorer, code-graph browser, analytics, and automation review UI. Binds to \
-127.0.0.1 by default and prints the URL; leave it running while you work. \
-The graph is scoped to --path or the current project; pass --path outside a \
-project directory. Query text does not switch to another repository. Agents \
-can start the same server via the tracedecay_dashboard MCP tool.";
+one launch project (the current directory, or --path) and to 127.0.0.1 by \
+default, then prints the URL; leave it running while you work. Launching \
+from $HOME or another ambient root refuses and tells you to pass --path. \
+Code search covers only that bound project; asking about another enrolled \
+repo fails closed instead of returning an empty hit list. Agents can start \
+the same server via the tracedecay_dashboard MCP tool.";
 
 pub(crate) const DASHBOARD_AFTER_HELP: &str = "\
 Examples:
-  tracedecay dashboard                           Serve on the default port
+  tracedecay dashboard                           Serve the cwd project
   tracedecay dashboard --open                    Also open it in the browser
   tracedecay dashboard --port 8788               Fixed port (0 picks a free one)
-  tracedecay dashboard --path /path/to/repo      Serve another project
+  tracedecay dashboard --path /path/to/repo      Bind the dashboard to that repo
 
 Related: tracedecay memory (curation without the dashboard),
 tracedecay status --runtime (server resource snapshot).";
@@ -330,8 +332,8 @@ connect to over a local authenticated transport, so repeated calls skip per-proc
 Usually installed as a user service; check `daemon status` first when tool \
 calls hang or version-mismatch errors appear. Without a systemd user bus on \
 headless Linux, keep `daemon run` running in one terminal and use commands \
-in another. Status reports diagnostic state; exit 0 does not mean the daemon \
-is accepting connections.";
+in another. Status exits 0 only when the daemon is serving; stopped or \
+unreachable is a non-zero exit.";
 
 pub(crate) const DAEMON_AFTER_HELP: &str = "\
 Examples:
@@ -340,7 +342,7 @@ Examples:
   tracedecay daemon start                        Start the installed service
   tracedecay daemon stop                         Stop the installed service
   tracedecay daemon restart                      Restart after a version mismatch
-  tracedecay daemon run --socket \"$XDG_RUNTIME_DIR/tracedecay/td.sock\"    Foreground run (debugging)
+  tracedecay daemon run                          Foreground daemon (no systemd user session)
   tracedecay daemon run --profile-root <path>    Foreground run for one profile
 
 Related: tracedecay doctor (detects daemon problems), tracedecay serve.";

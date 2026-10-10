@@ -842,7 +842,7 @@ pub enum LspAction {
 
 #[derive(Subcommand)]
 pub enum DaemonAction {
-    /// Run the foreground daemon process
+    /// Run the foreground daemon process (the no-systemd path)
     Run {
         /// Unix socket path for MCP clients
         #[arg(long)]

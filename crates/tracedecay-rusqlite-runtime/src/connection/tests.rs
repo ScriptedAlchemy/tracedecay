@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, ErrorCode, config::DbConfig, limits::Limit};
 use tempfile::NamedTempFile;
@@ -533,6 +533,177 @@ fn windows_discard_created_removes_the_complete_sqlite_family() {
 
     assert!(!path.exists());
     assert!(sidecars.iter().all(|sidecar| !sidecar.exists()));
+}
+
+/// `sqlite_host_path` shortens a verbatim *disk* path so SQLite's win32 VFS
+/// uses per-handle byte locking instead of the UNC shared-handle emulation;
+/// it must keep the prefix for genuine UNC and over-long paths, which need
+/// the extended-length spelling to open at all.
+#[cfg(windows)]
+#[test]
+fn sqlite_host_path_shortens_verbatim_disk_paths_only() {
+    use super::sqlite_host_path;
+
+    let verbatim = Path::new(r"\\?\C:\data\store.db");
+    assert_eq!(sqlite_host_path(verbatim), Path::new(r"C:\data\store.db"));
+
+    let unc = Path::new(r"\\?\UNC\server\share\store.db");
+    assert_eq!(sqlite_host_path(unc), unc);
+
+    let long = PathBuf::from(format!(r"\\?\C:\{}", "d".repeat(300)));
+    assert_eq!(sqlite_host_path(&long), long);
+
+    // 255 plain chars strip (sidecars still fit); 256 keep the prefix
+    // because `-wal`/`-shm` would push past the classic 259-char limit.
+    let fits_with_sidecars = PathBuf::from(format!(r"\\?\C:\{}", "d".repeat(252)));
+    assert_eq!(
+        sqlite_host_path(&fits_with_sidecars),
+        PathBuf::from(format!(r"C:\{}", "d".repeat(252)))
+    );
+    let sidecars_too_long = PathBuf::from(format!(r"\\?\C:\{}", "d".repeat(253)));
+    assert_eq!(sqlite_host_path(&sidecars_too_long), sidecars_too_long);
+
+    // An empty `\\` component collapses to a plain separator either way,
+    // so dunce accepts the conversion; the literal spelling is preserved.
+    let empty_component = Path::new(r"\\?\C:\data\\store.db");
+    assert_eq!(
+        sqlite_host_path(empty_component),
+        Path::new(r"C:\data\\store.db")
+    );
+
+    // The classic limit is measured in UTF-16 code units, not UTF-8 bytes:
+    // 150 multibyte chars are 300 bytes but 150 units, so they may strip.
+    let wide_fits = PathBuf::from(format!("\\\\?\\C:\\{}", "é".repeat(150)));
+    assert_eq!(
+        sqlite_host_path(&wide_fits),
+        PathBuf::from(format!("C:\\{}", "é".repeat(150)))
+    );
+
+    // Components whose identity would change under Win32 name parsing keep
+    // the prefix: trailing dots/spaces are stripped, dot components resolve,
+    // `/` is a separator, and reserved DOS-device stems get special
+    // treatment. `dunce::simplified` refuses all of these and the refusal
+    // is honored — refused verbatim paths stay verbatim. (An empty `\\`
+    // component collapses to a plain separator either way, so dunce accepts
+    // that one — covered above.)
+    for raw in [
+        r"\\?\C:\data\store.",
+        r"\\?\C:\data\store ",
+        r"\\?\C:\data\.\store.db",
+        r"\\?\C:\data\..\store.db",
+        r"\\?\C:\data/store.db",
+        r"\\?\C:\data\CON.db",
+        r"\\?\C:\data\con.db",
+        r"\\?\C:\data\NUL",
+        r"\\?\C:\data\com1.db",
+        r"\\?\C:\data\lpt9.log",
+        "\\\\?\\C:\\data\\COM\u{b9}.db",
+        "\\\\?\\C:\\data\\lpt\u{b3}",
+    ] {
+        let path = Path::new(raw);
+        assert_eq!(sqlite_host_path(path), path, "{raw}");
+    }
+
+    let plain = Path::new(r"C:\data\store.db");
+    assert_eq!(sqlite_host_path(plain), plain);
+
+    let relative = Path::new("data\\store.db");
+    assert_eq!(sqlite_host_path(relative), relative);
+}
+
+/// On non-Windows hosts the `\\?\` byte sequence is an ordinary relative
+/// filename — a database path spelled that way must reach SQLite unchanged.
+#[cfg(not(windows))]
+#[test]
+fn sqlite_host_path_keeps_literal_windows_prefix_names() {
+    use super::sqlite_host_path;
+
+    let name = PathBuf::from(r"\\?\C:\data\store.db");
+    assert_eq!(sqlite_host_path(&name), name);
+}
+
+/// Two real directories can coexist whose names differ only by a trailing
+/// dot, and stripping `\\?\` from the dotted spelling would change which
+/// name the OS sees — so `dunce::simplified` refuses and the verbatim
+/// path is passed through untouched. SQLite itself still canonicalizes
+/// the name and aliases `store.` to `store`: a separate SQLite
+/// limitation, not a reason to normalize further here. What the
+/// production boundary must guarantee is that a refused verbatim
+/// spelling keeps its prefix and still opens.
+#[cfg(windows)]
+#[test]
+fn dot_suffixed_directory_retains_verbatim_and_opens() {
+    use super::sqlite_host_path;
+
+    let temp = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(temp.path()).unwrap();
+    assert!(
+        canonical.to_str().unwrap().starts_with(r"\\?\"),
+        "test requires a verbatim tempdir path"
+    );
+
+    // Both creations must go through verbatim spelling: a plain `store.`
+    // would collapse onto `store`.
+    let dotted = canonical.join("store.");
+    let plain = canonical.join("store");
+    std::fs::create_dir(&dotted).unwrap();
+    std::fs::create_dir(&plain).unwrap();
+    assert!(dotted.is_dir() && plain.is_dir());
+
+    // The refused verbatim spelling is passed through untouched.
+    let dotted_db = dotted.join("db.sqlite");
+    assert_eq!(sqlite_host_path(&dotted_db), dotted_db);
+
+    // Seed the `store` database (production open is READ_WRITE-only).
+    let db = Connection::open(plain.join("db.sqlite")).expect("create database");
+    db.execute_batch(
+        "CREATE TABLE sentinel(v TEXT); INSERT INTO sentinel VALUES('canonical-store');",
+    )
+    .unwrap();
+    drop(db);
+
+    // The verbatim open succeeds through the production boundary. SQLite
+    // resolves the name to `store`'s database (its own canonicalization
+    // aliases the dotted directory — a SQLite limitation, not this
+    // conversion's identity claim) — proven by the sentinel row; a
+    // separate `store.` database is unreachable through SQLite either way.
+    let reader = open(&dotted_db, ConnectionMode::Writer).expect("open via dotted verbatim path");
+    let value: String = reader
+        .query_row("SELECT v FROM sentinel", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(value, "canonical-store");
+}
+
+/// A database opened through a verbatim `\\?\` path is the same file, the
+/// same WAL journal, and the same lock domain as its plain spelling — the
+/// normalization only changes the pathname the VFS sees.
+#[cfg(windows)]
+#[test]
+fn verbatim_disk_path_opens_the_same_wal_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("verbatim.db");
+    std::fs::write(&path, b"").unwrap();
+    // `canonicalize` yields the `\\?\` extended-length spelling that store
+    // paths carry into the engine on Windows.
+    let verbatim = path.canonicalize().unwrap();
+    assert!(verbatim.to_str().unwrap().starts_with(r"\\?\"));
+
+    let writer = open(&verbatim, ConnectionMode::Writer).expect("verbatim writer open");
+    writer
+        .execute_batch("CREATE TABLE items(value INTEGER); INSERT INTO items VALUES (1);")
+        .unwrap();
+    let journal_mode: String = writer
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .expect("read pragma");
+    assert_eq!(journal_mode, "wal");
+
+    let reader = open(&path, ConnectionMode::Reader).expect("plain reader open");
+    assert_eq!(
+        reader.query_row("SELECT value FROM items", [], |row| row.get::<_, i64>(0)),
+        Ok(1)
+    );
+    drop(reader);
+    drop(writer);
 }
 
 #[test]

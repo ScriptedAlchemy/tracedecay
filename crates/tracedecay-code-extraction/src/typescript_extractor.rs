@@ -256,6 +256,14 @@ impl TypeScriptExtractor {
                     if test_calls::is_test_framework_call(state, call) {
                         test_calls::visit_test_call(state, call);
                     }
+                } else if let Some((assignment, name)) =
+                    Self::commonjs_export_assignment(state, node)
+                {
+                    // `module.exports = { … }` and `exports.foo = …` are the
+                    // CommonJS public surface. Without a symbol grain they
+                    // stay off the indexed-file census even though `.js`
+                    // admission already captured them.
+                    Self::visit_commonjs_export(state, assignment, name);
                 }
             }
             _ => {
@@ -276,6 +284,7 @@ impl TypeScriptExtractor {
                 find_direct_child_by_kind(statement, "internal_module").is_none()
                     && !find_direct_child_by_kind(statement, "call_expression")
                         .is_some_and(|call| test_calls::is_test_framework_call(state, call))
+                    && Self::commonjs_export_assignment(state, statement).is_none()
             }
             "export_statement" => statement.child_by_field_name("declaration").is_none(),
             "import_statement" | "comment" | "internal_module" | "module" => false,
@@ -305,6 +314,129 @@ impl TypeScriptExtractor {
             state.nodes.push(owner);
             state.edges.push(contains);
         }
+    }
+
+    /// `module.exports = …`, `exports.foo = …`, or `module.exports.foo = …`.
+    fn commonjs_export_assignment<'a>(
+        state: &ExtractionState<'_>,
+        statement: TsNode<'a>,
+    ) -> Option<(TsNode<'a>, String)> {
+        let assignment = find_direct_child_by_kind(statement, "assignment_expression")?;
+        let left = assignment.child_by_field_name("left")?;
+        let name = Self::commonjs_export_name(state, left)?;
+        Some((assignment, name))
+    }
+
+    fn commonjs_export_name(state: &ExtractionState<'_>, left: TsNode<'_>) -> Option<String> {
+        if left.kind() != "member_expression" {
+            return None;
+        }
+        if Self::member_is(state, left, "module", "exports") {
+            return Some("module.exports".to_owned());
+        }
+        if let Some(object) = left.child_by_field_name("object") {
+            if Self::identifier_is(state, object, "exports") {
+                return Self::member_property_name(state, left)
+                    .map(|property| format!("exports.{property}"));
+            }
+            if object.kind() == "member_expression"
+                && Self::member_is(state, object, "module", "exports")
+            {
+                return Self::member_property_name(state, left)
+                    .map(|property| format!("module.exports.{property}"));
+            }
+        }
+        None
+    }
+
+    fn member_is(
+        state: &ExtractionState<'_>,
+        node: TsNode<'_>,
+        object: &str,
+        property: &str,
+    ) -> bool {
+        node.kind() == "member_expression"
+            && node
+                .child_by_field_name("object")
+                .is_some_and(|object_node| Self::identifier_is(state, object_node, object))
+            && node
+                .child_by_field_name("property")
+                .is_some_and(|property_node| Self::property_is(state, property_node, property))
+    }
+
+    fn identifier_is(state: &ExtractionState<'_>, node: TsNode<'_>, name: &str) -> bool {
+        node.kind() == "identifier" && state.node_text(node) == name
+    }
+
+    fn property_is(state: &ExtractionState<'_>, node: TsNode<'_>, name: &str) -> bool {
+        matches!(node.kind(), "property_identifier" | "identifier") && state.node_text(node) == name
+    }
+
+    fn member_property_name<'s>(
+        state: &ExtractionState<'s>,
+        member: TsNode<'_>,
+    ) -> Option<&'s str> {
+        let property = member.child_by_field_name("property")?;
+        if !matches!(property.kind(), "property_identifier" | "identifier") {
+            return None;
+        }
+        let name = state.node_text(property);
+        (!name.is_empty() && name != "<invalid utf8>").then_some(name)
+    }
+
+    fn visit_commonjs_export(
+        state: &mut ExtractionState<'_>,
+        assignment: TsNode<'_>,
+        name: String,
+    ) {
+        let text = state.node_text(assignment);
+        let start_line = assignment.start_position().row as u32;
+        let end_line = assignment.end_position().row as u32;
+        let start_column = assignment.start_position().column as u32;
+        let end_column = assignment.end_position().column as u32;
+        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Const,
+            &name,
+            assignment,
+        );
+        state.nodes.push(Node {
+            id: id.clone(),
+            kind: NodeKind::Const,
+            name,
+            qualified_name,
+            file_path: state.file_path.clone(),
+            start_line,
+            attrs_start_line: start_line,
+            end_line,
+            start_column,
+            end_column,
+            signature: Some(text.trim().to_string()),
+            docstring: None,
+            visibility: Visibility::Pub,
+            is_async: false,
+            branches: 0,
+            loops: 0,
+            returns: 0,
+            max_nesting: 0,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
+            updated_at: state.timestamp,
+            parent_id: None,
+        });
+        if let Some(parent_id) = state.parent_node_id() {
+            state.edges.push(Edge {
+                source: parent_id.to_string(),
+                target: id.clone(),
+                kind: EdgeKind::Contains,
+                line: Some(start_line),
+            });
+        }
+        Self::extract_owned_call_sites(state, assignment, &id);
     }
 
     /// Visit an `export_statement`. Sets `in_export` flag and recurses into the

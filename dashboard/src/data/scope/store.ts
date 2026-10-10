@@ -37,6 +37,30 @@ export type DashboardScope =
       activation: ProjectActivation;
     };
 
+/** The registry facts graph search binding is allowed to read. */
+export type LaunchBindingListing = {
+  status: string;
+  active_project_id: string | null;
+  active_project_root: string;
+  projects: Array<{ project_id: string; label: string }> | null;
+};
+
+/**
+ * The sentence the scope bar uses when the page is in the all-projects
+ * aggregate: graph search still covers only the launch project, and that
+ * exclusive bind has to be visible or a miss looks like a real empty index.
+ */
+export function launchBindingCaption(listing: LaunchBindingListing | undefined): string | null {
+  if (!listing || listing.status !== 'ok') return null;
+  if (!listing.active_project_id) {
+    return 'No launch project bound · pass --path';
+  }
+  const label =
+    listing.projects?.find((project) => project.project_id === listing.active_project_id)?.label ??
+    listing.active_project_root;
+  return `Bound to ${label} · code search covers this project only`;
+}
+
 /**
  * What the registry established about the *selected* project.
  *

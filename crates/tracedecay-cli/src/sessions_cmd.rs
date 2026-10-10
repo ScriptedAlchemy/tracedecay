@@ -195,12 +195,21 @@ impl SessionsSearchReport {
         if hits.is_empty() && result.error.is_none() {
             let status = Self::status_label(result.status);
             let query = result.query.as_deref().unwrap_or("");
-            let _ = writeln!(
-                report,
-                "no messages matched query {query:?} \
-                 (status: {status}, scope: {}, provider: {})",
-                result.scope, result.provider
-            );
+            if Self::missing_source(result.status) {
+                let _ = writeln!(
+                    report,
+                    "no ingested session transcripts \
+                     (status: {status}, scope: {}, provider: {})",
+                    result.scope, result.provider
+                );
+            } else {
+                let _ = writeln!(
+                    report,
+                    "no messages matched query {query:?} \
+                     (status: {status}, scope: {}, provider: {})",
+                    result.scope, result.provider
+                );
+            }
             if let Some(message) = &result.message {
                 let _ = writeln!(report, "{message}");
             }
@@ -221,6 +230,13 @@ impl SessionsSearchReport {
             Ok(Value::String(label)) => label,
             _ => format!("{status:?}"),
         }
+    }
+
+    const fn missing_source(status: RetainedOutcomeStatusV1) -> bool {
+        matches!(
+            status,
+            RetainedOutcomeStatusV1::Unavailable | RetainedOutcomeStatusV1::NotFound
+        )
     }
 }
 
@@ -361,6 +377,36 @@ mod search_report_tests {
             !report.contains("no messages matched"),
             "a refusal is not an empty page: {report}"
         );
+    }
+
+    /// A missing or empty mounted store is not a successful miss. The report
+    /// must name the typed source state and the import that fills it.
+    #[test]
+    fn a_missing_session_source_is_not_reported_as_a_query_miss() {
+        let mut value = base_result();
+        value["status"] = json!("unavailable");
+        value["outcome"] = json!("unavailable");
+        value["message"] = json!(
+            "no ingested session transcripts in the mounted store. \
+             Run `tracedecay sessions import` to ingest host transcripts, then search again."
+        );
+        value["next_action"] = json!({
+            "kind": "import",
+            "tool": "tracedecay sessions import",
+            "action": "schedule host transcript ingest",
+            "reason": "the mounted session store has no ingested messages",
+        });
+        let report = SessionsSearchReport::render(&search_result(value));
+        assert!(
+            !report.contains("no messages matched"),
+            "an empty source is not a query miss: {report}"
+        );
+        assert!(report.contains("status: unavailable"), "{report}");
+        assert!(
+            report.contains("no ingested session transcripts"),
+            "{report}"
+        );
+        assert!(report.contains("tracedecay sessions import"), "{report}");
     }
 }
 
