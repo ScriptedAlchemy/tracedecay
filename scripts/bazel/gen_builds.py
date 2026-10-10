@@ -165,7 +165,11 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def run(cmd, cwd=REPO):
-    out = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    # Cargo emits UTF-8; the Windows console default (cp1252) cannot decode it.
+    out = subprocess.run(
+        cmd, cwd=cwd, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+    )
     if out.returncode != 0:
         sys.exit(f"{' '.join(cmd)} failed:\n{out.stderr}")
     # CARGO_TERM_COLOR=always CI shells would otherwise bake color escapes
@@ -225,7 +229,8 @@ def feature_map(pkg_name, edges, features=()):
         m = _TREE_LINE.match(line.strip())
         if not m or not m.group("path"):
             continue
-        if "/crates/" not in m.group("path"):
+        # cargo tree renders host-native separators; labels below assume /
+        if "/crates/" not in m.group("path").replace("\\", "/"):
             continue
         # cargo tree marks repeated subtrees by appending ' (*)' inside the
         # feature field; strip the marker before splitting.
@@ -277,7 +282,7 @@ def target_feature_annotations(locked):
         dep_labels = sorted(lib_label(m.group("name"), m.group("ver")) for m in deps)
         if has_build:
             dep_labels.append(f"@{repo}//:build_script_build")
-        crate_root = Path(lib["src_path"]).relative_to(Path(package["manifest_path"]).parent)
+        crate_root = Path(lib["src_path"]).relative_to(Path(package["manifest_path"]).parent).as_posix()
         target = f"{lib['name'].replace('-', '_')}_target"
         blocks.append(
             "crate.annotation(\n"
@@ -498,10 +503,10 @@ def main():
     opt_default, opt_levels = perf_opt_levels()
     members = {p["name"]: p for p in meta["packages"]}
     dir_of = {
-        p["name"]: str(Path(p["manifest_path"]).parent.relative_to(REPO))
+        p["name"]: Path(p["manifest_path"]).parent.relative_to(REPO).as_posix()
         for p in meta["packages"]
     }
-    rel_src = lambda p, t: str(Path(t["src_path"]).relative_to(Path(p["manifest_path"]).parent))
+    rel_src = lambda p, t: Path(t["src_path"]).relative_to(Path(p["manifest_path"]).parent).as_posix()
     member_deps_of = {}
     for p in meta["packages"]:
         by_kind = {"normal": [], "dev": [], "build": []}
@@ -662,14 +667,14 @@ def main():
         members own their subtree. Other top-level dirs own theirs."""
         parts = repo_rel.parts
         if parts[0] == "crates":
-            return str(Path(*parts[:2])), str(Path(*parts[2:-1]))
-        return parts[0], str(Path(*parts[1:-1]))
+            return "/".join(parts[:2]), "/".join(parts[2:-1])
+        return parts[0], "/".join(parts[1:-1])
 
     def group_label(repo_rel, *, sources=False):
         """filegroup label + pkg-relative file label for an out-of-package
         file, registering the group for emission in the owning package."""
         pkg_dir, group_rel = owner_pkg(repo_rel)
-        pkg_rel = str(Path(*repo_rel.parts[len(Path(pkg_dir).parts):]))
+        pkg_rel = "/".join(repo_rel.parts[len(pkg_dir.split("/")):])
         gname = group_rel.replace("/", "_") or pkg_dir
         if (pkg_dir, gname) == ("tests", "fixtures"):
             gname = "shared_fixtures"
@@ -696,7 +701,7 @@ def main():
         # Package-root fixtures are data, including deliberately invalid or
         # vendored Rust. Nested support/fixtures modules remain source inputs.
         exclude = ', exclude = ["tests/fixtures/**"]' if d == Path("tests") else ""
-        return (f'glob(["{d}/**/*.rs"]{exclude})', f'"{rel}"')
+        return (f'glob(["{d.as_posix()}/**/*.rs"]{exclude})', f'"{rel}"')
 
     def extra_mod_srcs(p, t, covered=()):
         """(pkg_relative_srcs, filegroup_labels) for `#[path = "..."]` modules
@@ -729,7 +734,7 @@ def main():
                             # The pulled-in file can declare its own `mod`
                             # children, which resolve beside it. Glob its dir.
                             local.add(
-                                str(resolved.parent.relative_to(crate_dir))
+                                resolved.parent.relative_to(crate_dir).as_posix()
                                 + "/**/*.rs"
                             )
                         continue
@@ -768,7 +773,7 @@ def main():
                 if crate_dir in resolved.parents or resolved.parent == crate_dir:
                     if not any(d in resolved.parents for d in covered):
                         local.add(
-                            str(resolved.parent.relative_to(crate_dir))
+                            resolved.parent.relative_to(crate_dir).as_posix()
                             + "/**"
                         )
                     continue
@@ -1136,7 +1141,7 @@ def main():
                 srcs += " + [" + q(mod_labels) + "]"
             format_sources(srcs, t["edition"])
             runtime_globs = dedup([
-                f"{Path(rel_src(p, t)).parent}/**",
+                f"{Path(rel_src(p, t)).parent.as_posix()}/**",
                 *[f"{directory}/**" for directory in RESOURCE_DIRS if directory != "src"],
             ])
             # Source groups keep separate full resource groups for runfiles.
@@ -1477,7 +1482,9 @@ def main():
         return
 
     for path, content in outputs.items():
-        path.write_text(content)
+        # Generated files are LF on every host; the OS-default newline
+        # would emit CRLF here on Windows.
+        path.write_text(content, newline="\n")
     for path in obsolete:
         # Generator-owned files render to nothing once their last Cargo
         # reference is gone; remove them so --check stops flagging the same
