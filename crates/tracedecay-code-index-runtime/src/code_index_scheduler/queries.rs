@@ -13,8 +13,8 @@ use std::time::Duration;
 use serde::Serialize;
 
 use tracedecay_code_index::graph_projection::{
-    CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphSymbolRefV1,
-    UnresolvedCallerGapsV1,
+    CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphReadinessRequirement,
+    CodeGraphSymbolRefV1, UnresolvedCallerGapsV1,
 };
 use tracedecay_contracts::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
@@ -1956,6 +1956,18 @@ impl CodeIndexSchedulerRegistryV1 {
         let store = latest
             .interactive_graph_store()
             .map_err(|_| CallableCodeCursorError::Unavailable)?;
+        // A parked worktree released the engine and catalog beside its
+        // decode; their re-warm runs in the background, so a callable
+        // admitted while they warm would refuse a cold store instead of
+        // waiting. Wait within what the request still admits, as project
+        // graph reads do, then open the reader on the warmed store.
+        if let Some(budget) = remaining_generation_resolution_wait(context.request) {
+            let waiting = Arc::clone(&store);
+            let _ = tokio::task::spawn_blocking(move || {
+                waiting.await_rewarm_for(budget, CodeGraphReadinessRequirement::Catalog)
+            })
+            .await;
+        }
         let cost = CodeGraphReadCostMeter::start();
         let reader = store
             .interactive_reader_with_cancellation(

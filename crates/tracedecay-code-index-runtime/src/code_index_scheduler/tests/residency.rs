@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
-use tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1;
+use tracedecay_contracts::code_index_freshness::{
+    CodeGraphServingReadinessV1, CodeIndexStalenessStateV1,
+};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::resident_memory::{
@@ -20,11 +22,12 @@ use super::super::{
 };
 
 use super::{
-    CodeIndexSchedulerRegistryV1, GitFixture, SERVING_SEAT_FAILURE_CEILING, core_search_request,
-    git, mounted_core_query_worktree_at, mounted_core_query_worktree_in,
-    mounted_text_query_worktree_at, test_project_id, wait_for_generation_change,
-    wait_for_live_complete_generation, wait_for_queryable_text_generation, wait_for_settled_owner,
-    wait_for_worker_phase, with_untouched_fillers,
+    ALPHA_LIB_V1, CodeIndexSchedulerRegistryV1, GitFixture, SERVING_SEAT_FAILURE_CEILING,
+    core_search_request, git, install_verified_graph_store_on_text, mounted_core_query_worktree_at,
+    mounted_core_query_worktree_in, mounted_text_query_worktree_at, test_project_id,
+    wait_for_generation_change, wait_for_live_complete_generation,
+    wait_for_queryable_text_generation, wait_for_settled_owner, wait_for_worker_phase,
+    wait_until_serving_seat, with_untouched_fillers,
 };
 
 const IDLE_WINDOW: Duration = Duration::from_mins(10);
@@ -252,14 +255,128 @@ async fn a_parked_worktree_keeps_its_decode_while_the_text_owner_warms() {
     );
 
     // Once the text owner can serve again the same park releases the seat.
+    // The search's complete-generation demand may still be latched; give it
+    // back through the idle release and seat again so the parked take is
+    // the code under test.
     install_text(&registry, &root, ready_text).await;
+    owners.release_idle(Instant::now() + IDLE_WINDOW);
+    reseat(&registry, &root, &seated).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        registry
+            .release_decode_when_parked_for_test(fixture.path())
+            .await;
+        if !seat_is_occupied(&registry, &root).await {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "a ready text owner frees the seat"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    registry.shutdown().await;
+}
+
+/// Issue #3328: while the successor's own graph activation is still
+/// pending, the held predecessor is the only servable graph
+/// `graph_predecessor` answers stale reads from. A resident-owners release
+/// takes the predecessor's catalog and engine bytes but must keep the
+/// servable hold until the successor's activation settles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resident_release_keeps_the_predecessor_while_its_graph_is_pending() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let registry = CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners));
+    let root = fixture.path();
     registry
-        .release_decode_when_parked_for_test(fixture.path())
+        .mount_worktree(test_project_id(), root, store.path().to_path_buf())
+        .await
+        .expect("mount worktree");
+    assert!(registry.request_complete_generation(root).await);
+    let first_seat = wait_for_live_complete_generation(&registry, root).await;
+    let first = first_seat
+        .generation
+        .manifest()
+        .generation_id
+        .as_str()
+        .to_owned();
+    let worktree_id = first_seat
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+    let first_text = wait_for_queryable_text_generation(&registry, root).await;
+    install_verified_graph_store_on_text(&first_text, &first_seat);
+    drop(first_seat);
+
+    // The second publication inherits the warm graph as its predecessor;
+    // keep its own activation failing so its readiness stays Pending.
+    super::super::graph_activation::set_injected_activation_failures(&worktree_id, usize::MAX);
+    fixture.edit("src/lib.rs", "pub fn changed_after_the_warm_graph() {}\n");
+    assert!(matches!(
+        registry.notify_path(root, root.join("src/lib.rs")).await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    let first_id = first.clone();
+    let registry_ref = &registry;
+    let second_text =
+        wait_until_serving_seat(registry_ref, root, SERVING_SEAT_FAILURE_CEILING, || {
+            let first_id = first_id.clone();
+            async move {
+                registry_ref
+                    .latest_text_serving_for_root(root)
+                    .await
+                    .filter(|text| text.metadata().manifest().generation_id.as_str() != first_id)
+            }
+        })
         .await;
-    assert!(
-        !seat_is_occupied(&registry, &root).await,
-        "a ready text owner frees the seat"
+    let held = || {
+        second_text
+            .held_graph_predecessor()
+            .map(|held| held.metadata().manifest().generation_id.as_str().to_owned())
+    };
+    assert_eq!(
+        held(),
+        Some(first.clone()),
+        "the successor holds the warm graph as its predecessor"
     );
+    assert_eq!(
+        second_text.code_graph_serving_readiness(),
+        CodeGraphServingReadinessV1::Pending,
+        "the injected failure keeps the successor's graph pending"
+    );
+
+    wait_for_queryable_text_generation(&registry, root).await;
+    owners.release_idle(Instant::now() + IDLE_WINDOW);
+    assert_eq!(
+        held(),
+        Some(first.clone()),
+        "the release must keep the only servable graph"
+    );
+    assert!(
+        second_text
+            .graph_predecessor(true)
+            .is_some_and(|served| served.metadata().manifest().generation_id.as_str() == first),
+        "the retained predecessor still serves stale graph reads"
+    );
+
+    // Once activation settles the same release drops the hold: the
+    // successor's own graph serves now and the predecessor is spare.
+    super::super::graph_activation::set_injected_activation_failures(&worktree_id, 0);
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    while second_text.code_graph_serving_readiness() != CodeGraphServingReadinessV1::Ready {
+        assert!(
+            Instant::now() <= deadline,
+            "clearing the failure must let activation reach ready"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    owners.release_idle(Instant::now() + IDLE_WINDOW);
+    assert_eq!(held(), None, "a ready successor frees the predecessor");
 
     registry.shutdown().await;
 }

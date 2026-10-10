@@ -31,6 +31,7 @@ use tracedecay_code_index::production::{
     CodeIndexPublishedGenerationV1, DecodedGenerationContentV1,
 };
 use tracedecay_code_index::retained_parse::{RetainedParsePoolReleaseV1, SharedRetainedParsePool};
+use tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1;
 use tracedecay_runtime_core::resident_memory::{
     ResidentHoldingV1, ResidentOwnerBytesV1, ResidentOwnerKindV1, ResidentOwnerRegistrationV1,
     ResidentOwnerReleaseV1, ResidentOwnerSampleV1, ResidentOwnerScopeV1, ResidentOwnerV1,
@@ -639,6 +640,13 @@ impl ResidentOwnerV1 for OutgoingGraphOwnerV1 {
             .held_graph_predecessor()
             .and_then(|held| held.interactive_graph_store().ok())
         else {
+            // No resident bytes left; the hold itself still settles below.
+            if !matches!(
+                text.code_graph_serving_readiness(),
+                CodeGraphServingReadinessV1::Pending | CodeGraphServingReadinessV1::Warming { .. }
+            ) {
+                text.release_graph_predecessor();
+            }
             return ResidentOwnerReleaseV1::Empty;
         };
         let catalog = match store.release_interactive_catalog() {
@@ -666,7 +674,16 @@ impl ResidentOwnerV1 for OutgoingGraphOwnerV1 {
                 };
             }
         };
-        text.release_graph_predecessor();
+        // While this generation's own graph is still pending or warming, the
+        // held predecessor is the only servable graph: `graph_predecessor`
+        // answers stale reads from it until activation settles. Its store
+        // bytes were reclaimed above; only the servable hold stays.
+        if !matches!(
+            text.code_graph_serving_readiness(),
+            CodeGraphServingReadinessV1::Pending | CodeGraphServingReadinessV1::Warming { .. }
+        ) {
+            text.release_graph_predecessor();
+        }
         ResidentOwnerReleaseV1::Released {
             bytes: engine.map_or(ResidentOwnerBytesV1::Unmeasured, |engine| {
                 ResidentOwnerBytesV1::Measured(engine.saturating_add(catalog))
