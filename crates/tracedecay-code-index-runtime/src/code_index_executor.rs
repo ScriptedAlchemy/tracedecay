@@ -389,7 +389,27 @@ pub fn code_index_search_display_binding(
             .iter()
             .find(|symbol| symbol.occurrence.as_str() == occurrence)
             .ok_or(HydrationUnavailableV1::Invalid)?;
-        (code_index_symbol_display(symbol, display_paths)?, None)
+        let mut display = code_index_symbol_display(symbol, display_paths)?;
+        // The symbol's first attributed chunk is the byte interval
+        // extraction admitted for it — the same window the chunk lane
+        // verifies. None when the manifest holds no chunk for the
+        // occurrence: the location stands, code reports unavailable.
+        if let Some(code_search::CodeIndexSearchSiteV1::SymbolLines { code_window, .. }) =
+            display.site.as_mut()
+        {
+            *code_window = generation
+                .chunks()
+                .chunks()
+                .iter()
+                .find(|chunk| {
+                    chunk.anchor.symbol_occurrence_id.as_ref() == Some(&symbol.occurrence)
+                })
+                .map(|chunk| code_search::CodeIndexSearchWindowV1 {
+                    source_span: chunk.anchor.source_span,
+                    sanitized_text: chunk.sanitized_text.clone(),
+                });
+        }
+        (display, None)
     } else if let Some(chunk_id) = anchor.strip_prefix("code-chunk:") {
         let chunk_id = tracedecay_domain::CodeSearchChunkId::new(chunk_id.to_owned())
             .map_err(|_| HydrationUnavailableV1::Invalid)?;
