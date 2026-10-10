@@ -67,6 +67,7 @@ mod project_open_access;
 mod requests;
 mod rmcp;
 mod routing;
+mod files_resource;
 mod status_resource;
 
 pub(crate) use connection::ProductionMcpConnectionContext;

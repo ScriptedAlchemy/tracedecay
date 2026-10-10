@@ -223,9 +223,9 @@ class ProblemCodeTests(unittest.TestCase):
         runner = load_runner()
         for text, expected_verdict, expected_code in [
             (
-                "status: unavailable\nreason: verified_generation_file_inventory_not_admitted",
+                "status: unavailable\nreason: authority_unavailable",
                 "FAIL",
-                "verified_generation_file_inventory_not_admitted",
+                "authority_unavailable",
             ),
             ("status: unavailable", "FAIL", "tool_sweep.problem_code_missing"),
             ("Project: /isolated/project\nGraph statistics: unavailable", "PASS", None),

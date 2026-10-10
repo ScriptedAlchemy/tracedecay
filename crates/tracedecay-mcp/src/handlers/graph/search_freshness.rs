@@ -261,7 +261,7 @@ pub fn graph_read_freshness(
 
 /// The opening lines of a rendered response: the verdict, plus the indexing
 /// state when the verdict is `possibly_stale`.
-pub(crate) fn freshness_lines(freshness: &PrimitiveSearchFreshnessV1) -> String {
+pub fn freshness_lines(freshness: &PrimitiveSearchFreshnessV1) -> String {
     let mut lines = format!("freshness: {}\n", freshness.state.as_str());
     if let Some(indexing) = &freshness.indexing {
         let _ = writeln!(lines, "indexing: {}", indexing.summary);

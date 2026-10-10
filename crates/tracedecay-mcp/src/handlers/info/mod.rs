@@ -14,8 +14,7 @@ mod todos;
 mod verified;
 
 pub use config::compute_config;
-pub use files::compute_files;
-pub(crate) use files::render_files_md;
+pub use files::{compute_files, render_files_md};
 pub use port_order::compute_port_order;
 pub use port_status::compute_port_status;
 pub use registry::compute_registry_read;

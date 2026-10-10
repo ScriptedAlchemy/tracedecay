@@ -10,6 +10,7 @@ mod analytics_test;
 mod automation_run_artifact_view_test;
 mod automation_run_view_test;
 mod branch_list_test;
+mod files_resource_test;
 mod hooks_branch_test;
 mod multi_root_scope_set_read_test;
 mod protocol_test;
