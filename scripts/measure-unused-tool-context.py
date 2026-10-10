@@ -45,6 +45,9 @@ docs/development/unused-tool-context.md):
   Mixed used/unused lines leave used/unused tokens null. MCP
   `tracedecay_metrics` trailers are ignored.
 * Error results (`isError`) are counted separately and excluded from bytes.
+* Token coverage: when any scored call lacks a stored `token_count`, token
+  columns stay null and the coverage object reports
+  `token_count_coverage` (share of non-error calls that had a real count).
 
 Columns: `bytes` are UTF-8 bytes of the result text (MCP envelope
 removed), `tokens` are stored real counts or null, `unused %` is unused /
@@ -555,25 +558,64 @@ def aggregate(reports: list[CallReport]) -> list[dict]:
     return out
 
 
-def print_sanitized_examples(reports: list[CallReport], limit: int) -> None:
-    """Print unused then used spot-checks. Path/symbol keys only; no source quotes."""
+def sanitized_examples(reports: list[CallReport], limit: int) -> list[dict]:
+    """Unused then used spot-checks. Path/symbol keys only; no source quotes."""
     by_tool: dict[str, list[CallReport]] = defaultdict(list)
     for report in reports:
         by_tool[report.tool].append(report)
+    examples: list[dict] = []
     for tool in sorted(by_tool):
         unused = [row for row in by_tool[tool] if row.used_lines == 0 and not row.is_error][:limit]
         used = [row for row in by_tool[tool] if row.used_lines > 0][:limit]
         for state, rows in (("ignored", unused), ("used", used)):
             for report in rows:
-                print(
-                    f"[{state}] {report.tool} session={report.session} "
-                    f"used_lines={report.used_lines}/{report.lines} "
-                    f"bytes={report.used_bytes}/{report.total_bytes} "
-                    f"rerequests={report.rerequest_calls} "
-                    f"after_cut={cell(report.rerequest_after_cut)} "
-                    f"tokens={cell(report.total_tokens)} matches={report.matches[:8]}",
-                    file=sys.stderr,
+                examples.append(
+                    {
+                        "state": state,
+                        "tool": report.tool,
+                        "session": report.session,
+                        "used_lines": report.used_lines,
+                        "lines": report.lines,
+                        "used_bytes": report.used_bytes,
+                        "bytes": report.total_bytes,
+                        "rerequests": report.rerequest_calls,
+                        "after_cut": report.rerequest_after_cut,
+                        "tokens": report.total_tokens,
+                        "matches": [list(match) for match in report.matches[:8]],
+                    }
                 )
+    return examples
+
+
+def print_sanitized_examples(reports: list[CallReport], limit: int) -> None:
+    """Print unused then used spot-checks. Path/symbol keys only; no source quotes."""
+    for example in sanitized_examples(reports, limit):
+        print(
+            f"[{example['state']}] {example['tool']} session={example['session']} "
+            f"used_lines={example['used_lines']}/{example['lines']} "
+            f"bytes={example['used_bytes']}/{example['bytes']} "
+            f"rerequests={example['rerequests']} "
+            f"after_cut={cell(example['after_cut'])} "
+            f"tokens={cell(example['tokens'])} matches={example['matches']}",
+            file=sys.stderr,
+        )
+
+
+def token_count_coverage(rows: list[dict]) -> dict:
+    """Share of non-error scored calls that carried a stored token_count."""
+    scored = 0
+    missing = 0
+    for row in rows:
+        non_error = row.get("calls", 0) - row.get("error_calls", 0)
+        scored += non_error
+        missing += row.get("calls_without_tokens", 0)
+    measured = scored - missing
+    return {
+        "scored_non_error_calls": scored,
+        "calls_with_token_count": measured,
+        "calls_without_token_count": missing,
+        "token_count_coverage": None if scored == 0 else measured / scored,
+    }
 
 
 def percent(part: int | None, whole: int | None) -> str:
@@ -692,10 +734,15 @@ def main() -> int:
     rows = aggregate(reports)
     coverage["sessions_with_calls"] = len({report.session for report in reports})
     coverage["scored_calls"] = len(reports)
+    coverage.update(token_count_coverage(rows))
     summary = {"providers": {name: dict(stats) for name, stats in sorted(by_provider.items())}, **coverage}
     print(render(rows, summary))
+    examples = sanitized_examples(reports, args.examples) if args.examples else []
     if args.json:
-        args.json.write_text(json.dumps({"rows": rows, "coverage": summary}, indent=2, sort_keys=True) + "\n")
+        payload = {"rows": rows, "coverage": summary}
+        if args.examples:
+            payload["examples"] = examples
+        args.json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     if args.examples:
         print_sanitized_examples(reports, args.examples)
     return 0

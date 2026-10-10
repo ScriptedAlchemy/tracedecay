@@ -221,6 +221,30 @@ class MatchingRules(unittest.TestCase):
         self.assertIn("| null | null | null | null |", table)
         self.assertNotIn("total_chars", json.dumps(row))
         self.assertNotIn("chars / 4", table)
+        coverage = measure.token_count_coverage([row])
+        self.assertEqual(coverage["scored_non_error_calls"], 2)
+        self.assertEqual(coverage["calls_with_token_count"], 1)
+        self.assertEqual(coverage["calls_without_token_count"], 1)
+        self.assertEqual(coverage["token_count_coverage"], 0.5)
+
+    def test_token_coverage_is_null_when_no_scored_calls(self) -> None:
+        self.assertEqual(
+            measure.token_count_coverage([]),
+            {
+                "scored_non_error_calls": 0,
+                "calls_with_token_count": 0,
+                "calls_without_token_count": 0,
+                "token_count_coverage": None,
+            },
+        )
+
+    def test_sanitized_examples_keep_path_keys_only(self) -> None:
+        used = score(Call("r1", "Read", measure.argument_values({"file_path": "/repo/crates/config/src/loader.rs"})))
+        ignored = score(Text("nothing to do"))
+        examples = measure.sanitized_examples([ignored, used], 3)
+        self.assertEqual([row["state"] for row in examples], ["ignored", "used"])
+        self.assertEqual(examples[1]["matches"], [["path", "config/src/loader.rs"]])
+        self.assertTrue(all("quote:" not in json.dumps(row["matches"]) for row in examples))
 
     def test_non_tracedecay_calls_and_unpaired_calls(self) -> None:
         events = [Call("b1", "Bash", "{}"), Result("b1", "src/a.rs"), Call("c9", SEARCH, "{}")]
