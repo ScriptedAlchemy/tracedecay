@@ -696,15 +696,16 @@ fn cli_tool_listing(fixture: &MountFixture) -> BTreeSet<String> {
     names
 }
 
-/// The tool names the real MCP server publishes to a client.
+/// The tool names a real MCP client can still reach after the pruned handshake.
 ///
 /// `tracedecay serve` is the stdio MCP transport hosts connect to; it proxies
-/// to the same live daemon, and its `tools/list` answer is the catalog-filtered
-/// discovery result. Driving it end to end is the only way to prove an MCP
-/// binding is discoverable rather than merely declared.
+/// to the same live daemon. The default `tools/list` is the always-loaded core
+/// plus `tracedecay_tool_search`; an empty search names every remaining
+/// callable catalog tool. Driving both end to end is the only way to prove an
+/// MCP binding is discoverable rather than merely declared.
 fn mcp_tool_listing(fixture: &MountFixture) -> BTreeSet<String> {
     let mut child = isolated_command(&fixture.home)
-        .arg("serve")
+        .args(["serve"])
         .current_dir(&fixture.project)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -726,6 +727,15 @@ fn mcp_tool_listing(fixture: &MountFixture) -> BTreeSet<String> {
             }),
             serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
             serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_tool_search",
+                    "arguments": { "query": "" }
+                }
+            }),
         ] {
             writeln!(stdin, "{line}").expect("write MCP request");
         }
@@ -735,7 +745,7 @@ fn mcp_tool_listing(fixture: &MountFixture) -> BTreeSet<String> {
     let mut process = common::TestChildProcess::new(child);
     let output = process
         .wait_with_output(Duration::from_secs(180))
-        .expect("tracedecay serve should answer tools/list and exit");
+        .expect("tracedecay serve should answer tools/list and tool search and exit");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -746,17 +756,46 @@ fn mcp_tool_listing(fixture: &MountFixture) -> BTreeSet<String> {
         .unwrap_or_else(|| {
             panic!("the MCP server never answered tools/list\nstdout:\n{stdout}\nstderr:\n{stderr}")
         });
-    let tools = listing["result"]["tools"].as_array().unwrap_or_else(|| {
+    let handshake_tools = listing["result"]["tools"].as_array().unwrap_or_else(|| {
         panic!("MCP tools/list did not carry a tool array: {listing}\nstderr:\n{stderr}")
     });
-    let names = tools
+    assert!(
+        handshake_tools
+            .iter()
+            .any(|tool| tool["name"] == "tracedecay_tool_search"),
+        "default handshake must advertise tool search: {listing}\nstderr:\n{stderr}"
+    );
+
+    let search = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|message| message["id"] == 3)
+        .unwrap_or_else(|| {
+            panic!(
+                "the MCP server never answered tracedecay_tool_search\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            )
+        });
+    let search_text = search["result"]["content"]
+        .as_array()
+        .and_then(|content| content.first())
+        .and_then(|block| block["text"].as_str())
+        .unwrap_or_else(|| {
+            panic!("tool search did not return text content: {search}\nstderr:\n{stderr}")
+        });
+    let mut names = handshake_tools
         .iter()
         .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
         .collect::<BTreeSet<_>>();
+    names.extend(
+        search_text
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|token| token.starts_with("tracedecay_") && *token != "tracedecay_tool_search")
+            .map(str::to_owned),
+    );
     assert!(
         names.len() > 20,
-        "the MCP server published only {} tool(s), so grading catalog bindings \
-         against it would be near-vacuous: {listing}",
+        "tool search reached only {} tool(s), so grading catalog bindings \
+         against it would be near-vacuous: {search_text}",
         names.len()
     );
     names
@@ -912,7 +951,7 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
                 ),
                 BindingSurface::Mcp => format!(
                     "{note}: tracedecay_{operation} is absent from the live MCP \
-                     server's tools/list answer"
+                     server's tools/list and tool search"
                 ),
                 BindingSurface::Cli => {
                     format!("{note}: absent from the `tracedecay tool` command listing")
@@ -1010,7 +1049,7 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
             failures.push(format!(
                 "{mcp_subject}: WorkOperation::ALL names it a mounted operation \
                  but {mcp_tool} is absent from the live MCP server's tools/list \
-                 answer"
+                 and tool search"
             ));
         }
     }
@@ -1042,7 +1081,7 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
             failures.push(format!(
                 "{mcp_subject}: declared by WorkflowOperation::ALL but \
                  {mcp_tool} is absent from the live MCP server's tools/list \
-                 answer"
+                 and tool search"
             ));
         }
     }

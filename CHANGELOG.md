@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+* **mcp:** default `tracedecay serve` lists a 17-tool core set plus `tracedecay_tool_search` (no stubs); search ranks exact names first, loads matches with `list_changed`, and returns full schemas in the result text. `--claude-code-tool-search` (or `TRACEDECAY_MCP_CLAUDE_CODE_TOOL_SEARCH`) serves the full catalog with `_meta["anthropic/alwaysLoad"]` on the core tools for Claude Code native tool search. Drop that flag under `ANTHROPIC_BASE_URL` proxies, Foundry, or `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` ([#3374](https://github.com/ScriptedAlchemy/tracedecay/issues/3374), [#3383](https://github.com/ScriptedAlchemy/tracedecay/issues/3383))
+
 ### Bug Fixes
 
 * **cli:** give explicit upgrade lookups their own GitHub deadline so a 1s advisory budget cannot fail `tracedecay upgrade` ([#3371](https://github.com/ScriptedAlchemy/tracedecay/issues/3371))

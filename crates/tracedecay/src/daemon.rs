@@ -430,6 +430,7 @@ pub(crate) mod session_runtime_tests;
 #[cfg(test)]
 pub(crate) mod store_runtime_tests;
 
+mod tool_surface;
 mod wire_io;
 #[cfg(test)]
 mod work_evidence_retrieval_tests;
