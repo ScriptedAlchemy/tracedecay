@@ -278,9 +278,9 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
             json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
             tools_list(2),
             tool_call(3, "tracedecay_runtime", &json!({ "format": "json" })),
-            tool_call(4, TOOL_SEARCH, &json!({ "query": "blast radius impact" })),
-            tools_list(5),
-            tool_call(6, TOOL_SEARCH, &json!({ "query": "" })),
+            tool_call(4, TOOL_SEARCH, &json!({ "query": "" })),
+            tool_call(5, TOOL_SEARCH, &json!({ "query": "blast radius impact" })),
+            tools_list(6),
             tool_call(7, TOOL_SEARCH, &json!({ "query": "tracedecay_runtime" })),
             tools_list(8),
         ],
@@ -301,14 +301,7 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
         "an unlisted tool must answer tools/call by name: {runtime}"
     );
 
-    let search = json_rpc_response(&output.stdout, 4);
-    assert_eq!(search["result"]["isError"], json!(false), "{search}");
-    let loaded = listed_names(&output.stdout, 5);
-    assert!(loaded.contains("tracedecay_impact"), "{loaded:?}");
-    assert!(loaded.is_superset(&handshake.names), "{loaded:?}");
-    assert!(loaded.len() <= handshake.names.len() + 8, "{loaded:?}");
-
-    let catalog = catalog_names_from_search_text(&tool_text(&output.stdout, 6));
+    let catalog = catalog_names_from_search_text(&tool_text(&output.stdout, 4));
     assert!(
         catalog.contains("tracedecay_impact") && catalog.contains("tracedecay_runtime"),
         "empty tool search must name every remaining catalog tool: {catalog:?}"
@@ -318,6 +311,13 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
         "empty search must reach the rest of the catalog, not a handful: {}",
         catalog.len()
     );
+
+    let search = json_rpc_response(&output.stdout, 5);
+    assert_eq!(search["result"]["isError"], json!(false), "{search}");
+    let loaded = listed_names(&output.stdout, 6);
+    assert!(loaded.contains("tracedecay_impact"), "{loaded:?}");
+    assert!(loaded.is_superset(&handshake.names), "{loaded:?}");
+    assert!(loaded.len() <= handshake.names.len() + 8, "{loaded:?}");
 
     let reached = listed_names(&output.stdout, 8);
     assert!(
