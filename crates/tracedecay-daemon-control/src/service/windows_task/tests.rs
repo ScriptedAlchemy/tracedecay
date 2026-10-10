@@ -251,6 +251,9 @@ impl FakeTaskScheduler {
             DaemonServiceState::StoppedEnabled => (false, true),
             DaemonServiceState::StoppedDisabled | DaemonServiceState::Masked => (false, false),
             DaemonServiceState::Missing => return Self::default(),
+            DaemonServiceState::StoppingEnabled | DaemonServiceState::StoppingDisabled => {
+                panic!("Windows task snapshots cannot report a launchd stopping observation")
+            }
         };
         Self {
             task: Some(TaskSnapshot { running, enabled }),
