@@ -1313,6 +1313,9 @@ fn rg_word_paths_match_identifier_boundaries_and_skip_git() {
     write_file(&root.join("src/a.rs"), "fn dashboard() {}\n");
     write_file(&root.join("src/b.rs"), "fn dashboards() {}\n");
     write_file(&root.join(".git/config"), "dashboard\n");
-    assert_eq!(rg_word_paths(root, "dashboard"), vec!["src/a.rs".to_owned()]);
+    assert_eq!(
+        rg_word_paths(root, "dashboard"),
+        vec!["src/a.rs".to_owned()]
+    );
     assert!(rg_word_paths(root, "connectGateway").is_empty());
 }
