@@ -102,6 +102,14 @@ mod tests {
     }
 
     #[test]
+    fn counts_served_json_text_as_served_not_reserialized() {
+        let served = "{\n  \"results\": [\n    {\n      \"name\": \"read_source\",\n      \"line\": 144\n    }\n  ]\n}";
+        let fact = accounted_tool_result(None, json!(served), Some(true));
+        let (token_count, _, _) = result_fields(&fact);
+        assert_eq!(token_count, Some(count_ordinary_tokens(served).unwrap()));
+    }
+
+    #[test]
     fn records_cut_when_the_json_envelope_was_truncated() {
         let content = json!({
             "truncated": true,

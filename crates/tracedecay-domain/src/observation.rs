@@ -2210,53 +2210,41 @@ impl CanonicalObservationFactV1 {
 
 /// Visible text the unused-context meter scores for one stored tool result.
 ///
-/// `Null` means the host stored no output. JSON MCP envelopes unwrap to their
-/// text blocks so the count matches the bytes the agent actually read.
+/// `Null` means the host stored no output. Provider and MCP envelopes unwrap
+/// to their text blocks; any other text, JSON included, counts exactly as
+/// served, because re-serializing it would change what the agent read.
 pub fn tool_result_visible_text(content: &Value) -> Option<String> {
-    if matches!(content, Value::Null) {
-        return None;
+    match content {
+        Value::Null => None,
+        Value::String(text) => Some(
+            serde_json::from_str::<Value>(text)
+                .ok()
+                .as_ref()
+                .and_then(envelope_text)
+                .unwrap_or_else(|| text.clone()),
+        ),
+        other => Some(envelope_text(other).unwrap_or_else(|| other.to_string())),
     }
-    Some(unwrap_tool_result_text(content))
 }
 
-fn unwrap_tool_result_text(content: &Value) -> String {
-    match content {
-        Value::String(text) => {
-            if let Ok(parsed) = serde_json::from_str::<Value>(text)
-                && (parsed.is_object() || parsed.is_array())
-            {
-                return unwrap_tool_result_text(&parsed);
-            }
-            text.clone()
-        }
+/// Text of an `output`/`content`/`text` envelope field or a list of text blocks.
+fn envelope_text(value: &Value) -> Option<String> {
+    let inner = match value {
+        Value::Object(map) => ["output", "content", "text"]
+            .into_iter()
+            .find_map(|key| map.get(key))?,
+        other => other,
+    };
+    match inner {
+        Value::String(text) => Some(text.clone()),
         Value::Array(items) => {
             let texts: Vec<&str> = items
                 .iter()
-                .filter_map(|item| {
-                    if item.get("type").and_then(Value::as_str) == Some("text")
-                        || item.get("text").is_some()
-                    {
-                        item.get("text").and_then(Value::as_str)
-                    } else {
-                        item.as_str()
-                    }
-                })
+                .filter_map(|item| item.get("text").and_then(Value::as_str))
                 .collect();
-            if texts.is_empty() {
-                content.to_string()
-            } else {
-                texts.join("\n")
-            }
+            (!texts.is_empty()).then(|| texts.join("\n"))
         }
-        Value::Object(map) => {
-            for key in ["output", "content", "text"] {
-                if let Some(inner) = map.get(key) {
-                    return unwrap_tool_result_text(inner);
-                }
-            }
-            content.to_string()
-        }
-        other => other.to_string(),
+        _ => None,
     }
 }
 
