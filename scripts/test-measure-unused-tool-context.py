@@ -47,7 +47,7 @@ class MatchingRules(unittest.TestCase):
         report = score(Text("Done; nothing relevant turned up."), Call("b1", "Bash", '{"command":"cargo build"}'))
         self.assertEqual(report.used_lines, 0)
         self.assertEqual(report.used_bytes, 0)
-        self.assertEqual(report.total_bytes, len(RESULT.encode()) + 1)
+        self.assertEqual(report.total_bytes, len(RESULT.encode()))
 
     def test_citing_a_symbol_in_agent_text_counts(self) -> None:
         report = score(Text("The bug is in `parse_config_file`."))
@@ -250,6 +250,39 @@ class MatchingRules(unittest.TestCase):
         events = [Call("b1", "Bash", "{}"), Result("b1", "src/a.rs"), Call("c9", SEARCH, "{}")]
         reports, unpaired = measure.analyze(events)
         self.assertEqual((reports, unpaired), ([], 1))
+
+
+class ExactByteAccounting(unittest.TestCase):
+    def test_empty_result_is_zero_bytes(self) -> None:
+        report = score(result="")
+        self.assertEqual((report.lines, report.total_bytes, report.used_bytes), (0, 0, 0))
+
+    def test_unterminated_ascii_is_exact(self) -> None:
+        text = "pub fn unique_anchor() {}"
+        self.assertEqual(len(text.encode()), 25)
+        report = score(result=text)
+        self.assertEqual((report.lines, report.total_bytes), (1, 25))
+
+    def test_newline_terminated_does_not_invent_an_empty_line(self) -> None:
+        text = "pub fn unique_anchor() {}\n"
+        report = score(result=text)
+        self.assertEqual((report.lines, report.total_bytes), (1, 26))
+
+    def test_crlf_and_multibyte_keep_actual_bytes(self) -> None:
+        text = "café\r\nnaïve"
+        report = score(result=text)
+        self.assertEqual(report.total_bytes, len(text.encode()))
+        self.assertEqual(report.lines, 2)
+
+    def test_used_terminated_line_is_not_partly_unused(self) -> None:
+        text = "fn parse_config_file (crates/config/src/loader.rs:42)\n"
+        report = score(
+            Call("r1", "Read", measure.argument_values({"file_path": "crates/config/src/loader.rs"})),
+            result=text,
+        )
+        self.assertEqual((report.lines, report.used_lines), (1, 1))
+        self.assertEqual(report.used_bytes, report.total_bytes)
+        self.assertEqual(report.total_bytes, len(text.encode()))
 
 
 class TranscriptNormalization(unittest.TestCase):
