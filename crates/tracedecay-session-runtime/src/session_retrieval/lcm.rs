@@ -192,7 +192,7 @@ impl DaemonSessionRetrievalService {
         }
     }
 
-    fn converging_projection_unavailable(
+    pub(super) fn converging_projection_unavailable(
         &self,
         unavailable: &SessionRetrievalUnavailable,
     ) -> Option<SessionRetrievalUnavailable> {

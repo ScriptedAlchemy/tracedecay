@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+* **session:** report HistoricalRetry from `lcm_load_session` while a foreign provider cursor is retrying, instead of a bare TemporalStoreUnavailable ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))
 * **cli:** give explicit upgrade lookups their own GitHub deadline so a 1s advisory budget cannot fail `tracedecay upgrade` ([#3371](https://github.com/ScriptedAlchemy/tracedecay/issues/3371))
 
 ### Performance Improvements
