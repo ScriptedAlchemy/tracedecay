@@ -477,6 +477,28 @@ impl RustExtractor {
         .ok()
     }
 
+    fn record_tuple_struct_arity(state: &mut ExtractionState<'_>, node: TsNode<'_>, node_id: &str) {
+        let Some(body) = node
+            .child_by_field_name("body")
+            .filter(|body| body.kind() == "ordered_field_declaration_list" && !body.has_error())
+        else {
+            return;
+        };
+        let mut cursor = body.walk();
+        let Ok(parameters) =
+            u32::try_from(body.children_by_field_name("type", &mut cursor).count())
+        else {
+            return;
+        };
+        state.callable_arities.push(ExtractedCallableArityV1 {
+            node_id: node_id.to_owned(),
+            arity: CallableArityV1 {
+                parameters,
+                variadic: false,
+            },
+        });
+    }
+
     /// Extract a struct node and its fields.
     fn visit_struct(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
@@ -522,6 +544,7 @@ impl RustExtractor {
             updated_at: state.timestamp,
             parent_id: None,
         };
+        Self::record_tuple_struct_arity(state, node, &id);
         state.nodes.push(graph_node);
 
         if let Some(parent_id) = state.parent_node_id() {
@@ -1921,6 +1944,7 @@ impl RustExtractor {
                             // Receiver spelling is not target authority. The field
                             // node owns the member identity and exact token site,
                             // independently of comments or whitespace after `.`.
+                            let named_callee = Self::callee_path(state, callee);
                             let (callee_name, position) = match receiver {
                                 Some((value, field)) => (
                                     format!(
@@ -1930,15 +1954,16 @@ impl RustExtractor {
                                     ),
                                     field.start_position(),
                                 ),
-                                None => (
-                                    Self::self_path_callee(state, member_callee)
-                                        .unwrap_or_else(|| state.node_text(callee).to_owned()),
-                                    child.start_position(),
-                                ),
+                                None => match named_callee {
+                                    Some((name, token)) => (name, token.start_position()),
+                                    None => {
+                                        (state.node_text(callee).to_owned(), child.start_position())
+                                    }
+                                },
                             };
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
+                                reference_name: callee_name.clone(),
                                 reference_kind: EdgeKind::Calls,
                                 line: position.row as u32,
                                 column: position.column as u32,
@@ -1946,6 +1971,22 @@ impl RustExtractor {
                                 unmodeled_import: None,
                                 argument_count: Self::argument_count(child),
                             });
+                            if let Some((owner, token)) = member_callee
+                                .child_by_field_name("path")
+                                .and_then(|path| Self::callee_path(state, path))
+                            {
+                                let position = token.start_position();
+                                state.unresolved_refs.push(UnresolvedRef {
+                                    from_node_id: fn_node_id.to_string(),
+                                    reference_name: owner,
+                                    reference_kind: EdgeKind::TypeOf,
+                                    line: position.row as u32,
+                                    column: position.column as u32,
+                                    file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
+                                    argument_count: None,
+                                });
+                            }
                             // The simple name of a dotted call is not itself a call.
                             // `items.push()` must not bind a same-file `fn push`.
                             // Only a stated receiver type names the method
@@ -2010,22 +2051,31 @@ impl RustExtractor {
         }
     }
 
-    /// `Type::function` for a `Self::function(..)` callee inside an impl or
-    /// trait, the only spelling of that path the resolver can bind.
-    fn self_path_callee(state: &ExtractionState<'_>, callee: TsNode<'_>) -> Option<String> {
-        if callee.kind() != "scoped_identifier" {
-            return None;
+    /// The named path and terminal token observed by Rust syntax, without
+    /// treating operators inside generic arguments as path delimiters.
+    fn callee_path<'tree>(
+        state: &ExtractionState<'_>,
+        callee: TsNode<'tree>,
+    ) -> Option<(String, TsNode<'tree>)> {
+        match callee.kind() {
+            "generic_function" => Self::callee_path(state, callee.child_by_field_name("function")?),
+            "generic_type" => Self::callee_path(state, callee.child_by_field_name("type")?),
+            "scoped_identifier" | "scoped_type_identifier" => {
+                let (path, _) = Self::callee_path(state, callee.child_by_field_name("path")?)?;
+                let (name, token) = Self::callee_path(state, callee.child_by_field_name("name")?)?;
+                Some((format!("{path}::{name}"), token))
+            }
+            "identifier" | "type_identifier" | "self" | "super" | "crate" => {
+                let name = state.node_text(callee);
+                let path = if name == "Self" {
+                    Self::enclosing_receiver_type(state)?
+                } else {
+                    name.to_owned()
+                };
+                Some((path, callee))
+            }
+            _ => None,
         }
-        let path = callee.child_by_field_name("path")?;
-        let name = callee.child_by_field_name("name")?;
-        if state.node_text(path) != "Self" {
-            return None;
-        }
-        Some(format!(
-            "{}::{}",
-            Self::enclosing_receiver_type(state)?,
-            state.node_text(name)
-        ))
     }
 
     /// `Type::method` for a `binding.method(..)` callee whose binding has one

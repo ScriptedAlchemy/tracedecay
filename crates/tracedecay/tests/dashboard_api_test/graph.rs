@@ -888,7 +888,7 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
             rg_dashboard
                 .iter()
                 .any(|path| path == "src/dashboard/mod.rs"),
-            "rg must see dashboard in the launch fixture: {rg_dashboard:?}"
+            "whole-word walk must see dashboard in the launch fixture: {rg_dashboard:?}"
         );
         assert!(
             search["payload"]["results"].as_array().is_some_and(|rows| {
@@ -896,7 +896,7 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
                     row["id"] == "n-dashboard" && row["file_path"] == "src/dashboard/mod.rs"
                 })
             }),
-            "search should include the exact dashboard symbol at the rg path: {search}"
+            "search should include the exact dashboard symbol at the whole-word path: {search}"
         );
 
         let (status, route_search) = get_json(
@@ -911,7 +911,7 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
         let rg_route = rg_word_paths(&fixture.project_root, "route_graph");
         assert!(
             rg_route.iter().any(|path| path == "src/dashboard/mod.rs"),
-            "rg must see route_graph in the launch fixture: {rg_route:?}"
+            "whole-word walk must see route_graph in the launch fixture: {rg_route:?}"
         );
         assert!(
             route_search["payload"]["results"]
@@ -921,7 +921,7 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
                         row["id"] == "n-route" && row["file_path"] == "src/dashboard/mod.rs"
                     })
                 }),
-            "search should include route_graph at the rg path: {route_search}"
+            "search should include route_graph at the whole-word path: {route_search}"
         );
 
         let bound_project = search["scope"]["project_id"]
@@ -931,7 +931,7 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
 
         assert!(
             rg_word_paths(&fixture.project_root, "connectGateway").is_empty(),
-            "rg must not see connectGateway in the launch fixture"
+            "whole-word walk must not see connectGateway in the launch fixture"
         );
         let (status, empty) = get_json(
             &agent,

@@ -670,7 +670,7 @@ impl McpServer {
 
         match uri {
             "tracedecay://status" => self.read_resource_status(id).await,
-            "tracedecay://files" => self.read_resource_files(id),
+            "tracedecay://files" => self.read_resource_files(id).await,
             "tracedecay://overview" => self.read_resource_overview(id).await,
             "tracedecay://branches" => self.read_resource_branches(id).await,
             "tracedecay://schema" => Self::read_resource_schema(id),
@@ -709,22 +709,6 @@ impl McpServer {
             }
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         }
-    }
-
-    /// Returns typed file-inventory availability for the active project.
-    ///
-    /// MCP resources do not carry the application operation, request identity,
-    /// deadline, and cancellation proof required to open the verified code
-    /// graph. Until that resource-specific admission exists, exposing files
-    /// from another store would make an unverified or stale inventory look
-    /// authoritative.
-    pub(crate) fn read_resource_files(&self, id: Value) -> JsonRpcResponse {
-        Self::resource_contents(
-            id,
-            "tracedecay://files",
-            "text/plain",
-            "status: unavailable\nreason: verified_generation_file_inventory_not_admitted",
-        )
     }
 
     /// Returns a high-level project overview as a text resource.

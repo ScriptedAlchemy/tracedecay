@@ -2057,6 +2057,34 @@ fn rust_path_head_is_declared(reference_name: &str, root_modules: &HashSet<&str>
     })
 }
 
+pub(crate) fn rust_ufcs_impl_type_name(owner: &str) -> Option<&str> {
+    let body = owner.strip_prefix('<')?.strip_suffix('>')?;
+    let mut depth = 0_i32;
+    for (index, character) in body.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ if depth == 0 && body[index..].starts_with(" as ") => {
+                let type_name = body[..index].trim();
+                return (!type_name.is_empty()).then_some(type_name);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+pub(crate) fn nominal_rust_impl_owner(owner: &str) -> Option<&str> {
+    if rust_ufcs_impl_type_name(owner).is_some() {
+        return None;
+    }
+    match owner.find('<') {
+        Some(generic_start) if owner.ends_with('>') => Some(&owner[..generic_start]),
+        Some(_) => None,
+        None => Some(owner),
+    }
+}
+
 /// Map a Rust UFCS trait-impl method path `<Type as Trait>::method` to the
 /// type-path form `Type::method` that call sites write (`WalkEventIter::from`,
 /// `Builder::default`). Keeps the intentional `<Type as Trait>` definition
@@ -2127,6 +2155,32 @@ fn reference_name_suffix_start(candidate: &str, reference_name: &str) -> Option<
     (prefix.is_empty() || prefix.ends_with('.') || prefix.ends_with("::")).then_some(prefix.len())
 }
 
+/// Whether the source at a Rust call site invokes a value call
+/// (`foo(`, `foo!`, `foo::<T>(`) rather than a type path (`Foo::member`):
+/// `::` opens a path only when a name follows; `::<` is a turbofish
+/// argument list on a call.
+fn rust_callsite_names_value(source: &str, offsets: &[u64], reference: &UnresolvedRef) -> bool {
+    if reference.argument_count.is_none() {
+        return false;
+    }
+    let Some(rest) = offsets
+        .get(reference.line as usize)
+        .copied()
+        .and_then(|line_start| {
+            usize::try_from(line_start.checked_add(u64::from(reference.column))?).ok()
+        })
+        .and_then(|start| source.get(start + reference.reference_name.len()..))
+    else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    rest.strip_prefix("::").is_none_or(|tail| {
+        !tail
+            .trim_start()
+            .starts_with(|ch: char| ch.is_alphanumeric() || ch == '_')
+    })
+}
+
 fn reference_evidence_span(
     source: &str,
     offsets: &[u64],
@@ -2135,25 +2189,30 @@ fn reference_evidence_span(
 ) -> Option<SourceSpan> {
     let line_start = offsets.get(reference.line as usize).copied()?;
     let site_start = usize::try_from(line_start.checked_add(u64::from(reference.column))?).ok()?;
-    let source_at_site = source.get(site_start..)?;
+    let raw_source_at_site = source.get(site_start..)?;
     // Typed receiver references name `Type::method`, while the source spells
     // `receiver.method`. Both forms must identify the parser-observed method
     // token so a sealed edge can discharge the same site's limitation.
-    let rust_call =
-        reference.reference_kind == EdgeKind::Calls && reference.file_path.ends_with(".rs");
-    let reference_name = if rust_call
-        && (reference.reference_name.contains('.')
-            || !source_at_site.starts_with(&reference.reference_name))
-    {
-        reference.reference_name.rsplit(['.', ':']).next()?
-    } else {
-        &reference.reference_name
-    };
-    if rust_call && source_at_site.starts_with(reference_name) {
-        return Some(SourceSpan {
-            start_byte: u64::try_from(site_start).ok()?,
-            end_byte: u64::try_from(site_start.checked_add(reference_name.len())?).ok()?,
-        });
+    let rust_call = matches!(reference.reference_kind, EdgeKind::Calls | EdgeKind::TypeOf)
+        && reference.file_path.ends_with(".rs");
+    let source_at_site = raw_source_at_site;
+    if rust_call {
+        let token = if source_at_site.starts_with(&reference.reference_name) {
+            reference.reference_name.as_str()
+        } else if source_at_site
+            .strip_prefix("Self")
+            .is_some_and(|tail| tail.starts_with([':', '<', '(', ' ', '\t', '\r', '\n', '/']))
+        {
+            "Self"
+        } else {
+            reference.reference_name.rsplit(['.', ':']).next()?
+        };
+        if source_at_site.starts_with(token) {
+            return Some(SourceSpan {
+                start_byte: u64::try_from(site_start).ok()?,
+                end_byte: u64::try_from(site_start.checked_add(token.len())?).ok()?,
+            });
+        }
     }
     references_by_site
         .get(&(
@@ -2228,6 +2287,19 @@ fn resolve_file_references(
             .entry(relative_name.to_owned())
             .or_default()
             .push(symbol);
+        // Generic impl declarations retain their written type parameters;
+        // invocation paths name the nominal owner instead.
+        if language == "rust"
+            && symbol.kind == NodeKind::Method.as_str()
+            && let Some((owner, method)) = relative_name.rsplit_once("::")
+            && let Some(nominal) = nominal_rust_impl_owner(owner)
+            && nominal != owner
+        {
+            by_file_relative_name
+                .entry(format!("{nominal}::{method}"))
+                .or_default()
+                .push(symbol);
+        }
         // Dual-index `<Type as Trait>::method` under `Type::method` so
         // type-path calls bind without renaming the definition. Collected
         // first so an inherent `Type::method` already in the map keeps the
@@ -2344,7 +2416,7 @@ fn resolve_file_references(
             .copied()
             .flatten()
             .map(|from| from.span);
-        let compatible = candidates
+        let mut compatible = candidates
             .map(|candidates| {
                 candidates
                     .iter()
@@ -2370,6 +2442,23 @@ fn resolve_file_references(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        // `foo()` names a value and `Foo::member` names a type; Rust keeps
+        // the two in different namespaces, so a same-named struct and
+        // function are both kind-compatible. A value-call site drops the
+        // struct candidates a call cannot construct (named-field and unit
+        // structs); a tuple struct ctor spells `Name(` or `Name::<T>(` like
+        // a function call and stays an honest ambiguity, as does every
+        // `::` path form.
+        if language == "rust"
+            && reference.reference_kind == EdgeKind::Calls
+            && !reference.reference_name.contains("::")
+            && compatible.len() > 1
+            && rust_callsite_names_value(source, offsets, reference)
+        {
+            compatible.retain(|target| {
+                target.kind != NodeKind::Struct.as_str() || target.arity.is_some()
+            });
+        }
         match compatible.as_slice() {
             // Rust admits one definition per name and scope, so same-named
             // same-kind definitions are `#[cfg]` variants of one identity; the
@@ -2668,6 +2757,16 @@ pub(crate) fn relation_target_kind_is_compatible(
                 | NodeKind::ArrowFunction
                 | NodeKind::Procedure
                 | NodeKind::Macro
+                // `new Foo()` names the class. Without this, constructor
+                // sites never became Calls edges and callers stayed empty.
+                | NodeKind::Class
+                | NodeKind::InnerClass
+                | NodeKind::SealedClass
+                | NodeKind::CaseClass
+                | NodeKind::DataClass
+                // `Type::open` / `Type::new` names the struct the same way
+                // `new Foo()` names the class.
+                | NodeKind::Struct
         ),
         RelationEdgeKindV1::TypeOf => matches!(
             target_kind,

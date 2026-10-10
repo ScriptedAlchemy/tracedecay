@@ -360,11 +360,14 @@ impl RetainedSurfaceResultV1 {
             Self::MessageSearch(value) => {
                 let mut facts =
                     RetainedSurfaceEvidenceFactsV1::unknown(EvidenceDomain::Temporal, 0)?;
+                // Terminal statuses must fail closed before page-shape checks.
+                // An empty Unavailable store is a typed source state, not a
+                // retrieval refusal, so it skips apply_status.
+                if value.status != RetainedOutcomeStatusV1::Unavailable {
+                    facts.apply_status(value.status)?;
+                }
                 let returned = message_search_returned(value)?;
-                if value.status == RetainedOutcomeStatusV1::Unavailable && returned == 0 {
-                    // An empty mounted store is a typed source state, not a
-                    // terminal retrieval refusal.
-                } else {
+                if value.status == RetainedOutcomeStatusV1::Unavailable && returned != 0 {
                     facts.apply_status(value.status)?;
                 }
                 facts.returned = count(returned)?;
@@ -713,6 +716,19 @@ mod tests {
             RetainedOutcomeStatusV1::Denied,
             None,
             None,
+        ));
+        assert_eq!(
+            result.evidence_facts(),
+            Err(RetainedSurfaceEvidenceTerminalV1::Denied)
+        );
+    }
+
+    #[test]
+    fn denied_message_search_with_an_empty_page_stays_denied() {
+        let result = RetainedSurfaceResultV1::MessageSearch(message_search_result(
+            RetainedOutcomeStatusV1::Denied,
+            Some(0),
+            Some(Vec::new()),
         ));
         assert_eq!(
             result.evidence_facts(),

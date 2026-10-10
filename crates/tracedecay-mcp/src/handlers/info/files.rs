@@ -62,7 +62,7 @@ pub async fn compute_files(
     ))
 }
 
-pub(crate) fn render_files_md(result: &FilesResultV1) -> String {
+pub fn render_files_md(result: &FilesResultV1) -> String {
     let layout = match result.layout {
         FilesLayoutV1::Flat => "flat",
         FilesLayoutV1::Grouped => "grouped",

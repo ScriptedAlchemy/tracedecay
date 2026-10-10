@@ -255,6 +255,8 @@ impl TypeScriptExtractor {
                     // graph. Attribute those callbacks so tests map to sources.
                     if test_calls::is_test_framework_call(state, call) {
                         test_calls::visit_test_call(state, call);
+                    } else {
+                        imports::visit_commonjs_export(state, node);
                     }
                 } else if let Some((assignment, name)) =
                     Self::commonjs_export_assignment(state, node)
@@ -264,6 +266,10 @@ impl TypeScriptExtractor {
                     // stay off the indexed-file census even though `.js`
                     // admission already captured them.
                     Self::visit_commonjs_export(state, assignment, name);
+                    // `module.exports = Name` is also the CommonJS default
+                    // export; collect that binding so `require()` can resolve
+                    // the exported identifier.
+                    imports::visit_commonjs_export(state, node);
                 }
             }
             _ => {
@@ -620,6 +626,7 @@ impl TypeScriptExtractor {
                 continue;
             }
             let binding = Self::visit_variable(state, declarator, variable_kind.clone());
+            imports::visit_require_declarator(state, declarator);
             match initializer_owner {
                 Some(owner) => Self::extract_call_sites(state, declarator, owner),
                 None => Self::extract_owned_call_sites(state, declarator, &binding),
@@ -1626,6 +1633,13 @@ impl TypeScriptExtractor {
                 let child = cursor.node();
                 let callee = match child.kind() {
                     "call_expression" => child.named_child(0).map(|callee| (callee, child)),
+                    // `new Foo()` is a constructor call site of `Foo`. Omitting
+                    // it left callers of a class empty while the disk still
+                    // had `new` invocations.
+                    "new_expression" => child
+                        .child_by_field_name("constructor")
+                        .or_else(|| child.named_child(0))
+                        .map(|callee| (callee, child)),
                     "jsx_opening_element" | "jsx_self_closing_element" => child
                         .child_by_field_name("name")
                         .filter(|name| Self::is_jsx_component_name(state, *name))
