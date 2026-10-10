@@ -503,11 +503,12 @@ pub fn http_agent() -> ureq::Agent {
 }
 
 pub fn http_agent_with_timeout(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(timeout))
-        .build()
-        .into()
+    tracedecay_application::http_agent::http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(timeout))
+            .build(),
+    )
 }
 
 /// Reaps a spawned test child on every exit path.

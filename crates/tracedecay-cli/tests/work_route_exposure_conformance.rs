@@ -706,11 +706,12 @@ fn assert_typed_problem(label: &str, status: u16, body: &Value, expected: (u16, 
 fn the_work_surface_answers_real_requests_on_both_published_mounts() {
     let fixture = ProductionDaemon::start();
     let dashboard = DashboardProcess::start(&fixture);
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into();
+    let agent = tracedecay_application::http_agent::http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(30)))
+            .build(),
+    );
 
     let list_request = serde_json::json!({ "page_size": 25, "cursor": null });
     let daemon_list = fixture.external_url("/application/work/list-attempts");
@@ -978,11 +979,12 @@ fn work_topology_metrics_preserves_typed_absence_and_denial_across_restart() {
         "horizon": { "since_micros": 1, "until_micros": 2 },
         "max_events": 10_000,
     });
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into();
+    let agent = tracedecay_application::http_agent::http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(30)))
+            .build(),
+    );
     let route = fixture.external_url(route_path);
     let expected_metric_names = EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1
         .iter()
@@ -1308,11 +1310,12 @@ fn the_dashboard_work_surface_answers_who_worked_on_a_task_on_both_published_mou
     // request may legitimately queue behind a rebinding project runtime. The
     // budget is generous on purpose: a client timeout here would read as a
     // surface failure it is not.
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(120)))
-        .build()
-        .into();
+    let agent = tracedecay_application::http_agent::http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(120)))
+            .build(),
+    );
 
     work_task_session::assert_provider_qualified_task_session_evidence(&agent, &mut fixture);
 }
@@ -1320,11 +1323,12 @@ fn the_dashboard_work_surface_answers_who_worked_on_a_task_on_both_published_mou
 #[test]
 fn public_executable_routes_are_served_by_the_production_daemon() {
     let fixture = ProductionDaemon::start();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into();
+    let agent = tracedecay_application::http_agent::http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(30)))
+            .build(),
+    );
 
     assert_external_surface_is_authenticated_and_resolving(&agent, &fixture);
 

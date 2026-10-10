@@ -97,12 +97,13 @@ impl GitHubProviderPermissionVerifierV1 {
     #[cfg(test)]
     fn local(base_uri: String) -> Self {
         Self {
-            agent: ureq::Agent::config_builder()
-                .https_only(false)
-                .max_redirects(0)
-                .http_status_as_error(false)
-                .build()
-                .into(),
+            agent: http_agent(
+                ureq::Agent::config_builder()
+                    .https_only(false)
+                    .max_redirects(0)
+                    .http_status_as_error(false)
+                    .build(),
+            ),
             base_uri,
         }
     }
