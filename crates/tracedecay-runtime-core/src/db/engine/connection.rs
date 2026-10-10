@@ -265,7 +265,7 @@ impl Connection {
                     .begin_deferred_async()
                     .await
                     .map_err(Error::from)
-                    .map(|transaction| Transaction::from_runtime(transaction))
+                    .map(Transaction::from_runtime)
             }
             TransactionBehavior::Immediate => {
                 let runtime = Arc::clone(&self.runtime);
@@ -273,7 +273,7 @@ impl Connection {
                     .begin_immediate_async()
                     .await
                     .map_err(Error::from)
-                    .map(|transaction| Transaction::from_runtime(transaction))
+                    .map(Transaction::from_runtime)
             }
         }
     }
@@ -294,7 +294,7 @@ impl Connection {
             .begin_authorized_long_lease_immediate_async()
             .await
             .map_err(Error::from)
-            .map(|transaction| Transaction::from_runtime(transaction))
+            .map(Transaction::from_runtime)
     }
 }
 
