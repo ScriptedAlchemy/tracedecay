@@ -516,8 +516,7 @@ async fn search_ranks_the_production_definition_ahead_of_the_test_reference() {
         "production definition must outrank the test reference and production body reference: {page}"
     );
     assert_eq!(
-        page["results"][0]["display"]["name"],
-        "ensure_daemon_running",
+        page["results"][0]["display"]["name"], "ensure_daemon_running",
         "first hit must be the definition, not a caller: {page}"
     );
     assert!(

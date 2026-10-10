@@ -33,9 +33,8 @@ use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexIn
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
     CompactCandidate, ExactFieldV1, ExactTechnicalTermKindV1, LanguageDescriptorRevision,
-    ManifestDigest, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SourceOccurrenceId, SourceSpan,
-    SymbolOccurrenceId, canonical_sha256,
+    ManifestDigest, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_private_fs::{RewriteWitness, open_private_file};
 
