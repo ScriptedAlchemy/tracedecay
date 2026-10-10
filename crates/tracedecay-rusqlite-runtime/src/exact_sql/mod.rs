@@ -1126,10 +1126,15 @@ fn execute_request(
                 let mut results = Vec::with_capacity(statements.len());
                 let mut item_result = Ok(SqlResult::ExecutedMany(Vec::new()));
                 for (index, statement) in statements.into_iter().enumerate() {
-                    let before_rowid = connection.last_insert_rowid();
+                    // The update hook is the authority on whether the member
+                    // actually inserted — comparing physical rowids would miss
+                    // an explicit insert that reuses the connection's
+                    // existing last-insert id.
+                    let before_inserts = insert_tracker.insert_count.load(Ordering::Acquire);
                     match execute_statement(connection, statement) {
                         Ok(mut result) => {
-                            if connection.last_insert_rowid() == before_rowid {
+                            if insert_tracker.insert_count.load(Ordering::Acquire) == before_inserts
+                            {
                                 // Non-inserting member: sequential dispatch
                                 // would publish the calling handle's logical
                                 // rowid, which only the caller of
