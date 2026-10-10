@@ -129,31 +129,12 @@ test-ci = "nextest run --workspace --profile ci --features tracedecay/test-helpe
 # default nextest policy (no retries).
 test-all = "nextest run --workspace --all-features --no-fail-fast --cargo-profile perf"
 
-# `pnpm install` generates the block below from Cargo.lock and creates the
-# directories it names (see `cargo` in pnpm-workspace.yaml). Do not edit it by
-# hand; rerun `pnpm install` when Cargo.lock changes.
+# `pnpm install` writes the block below and generates the included file from
+# Cargo.lock: the source replacement for the sources it vendors under
+# `.pnpm/crates` (see `cargo` in pnpm-workspace.yaml). Do not edit it by hand;
+# rerun `pnpm install` when Cargo.lock changes.
 # >>> pnpm-managed cargo sources >>>
-[source.crates-io]
-replace-with = "pnpm-crates-io"
-
-[source.pnpm-crates-io]
-directory = ".pnpm/crates/crates-io"
-
-[source.pnpm-git]
-directory = ".pnpm/crates/git"
-
-[source."git+https://github.com/ScriptedAlchemy/grafeo.git?rev=be4713a5c2ee9df7e4639671c1e1244b7680f103"]
-git = "https://github.com/ScriptedAlchemy/grafeo.git"
-rev = "be4713a5c2ee9df7e4639671c1e1244b7680f103"
-replace-with = "pnpm-git"
-
-[source."git+https://github.com/ScriptedAlchemy/tokensave-large-treesitters?rev=102d0103b6fd093c1e5989cceede1ed9f08fe6a9"]
-git = "https://github.com/ScriptedAlchemy/tokensave-large-treesitters"
-rev = "102d0103b6fd093c1e5989cceede1ed9f08fe6a9"
-replace-with = "pnpm-git"
-
-[source."git+https://github.com/vanessa-rodrigues/tree-sitter-rust?rev=877df9f82f320243ab23929589a940208faa9d15"]
-git = "https://github.com/vanessa-rodrigues/tree-sitter-rust"
-rev = "877df9f82f320243ab23929589a940208faa9d15"
-replace-with = "pnpm-git"
+[[include]]
+path = "../.pnpm/crates/config.toml"
+optional = true
 # <<< pnpm-managed cargo sources <<<
