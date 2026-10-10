@@ -1057,13 +1057,16 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
     // Unknown options cannot consume a positional directory by guesswork.
     let mut source = None;
     let mut output = None;
+    let mut watch = false;
+    let mut skip_initial_build = false;
+    let mut verbose = false;
+    let mut quiet = false;
     let mut index = index + 1;
     while index < tokens.len() {
         match tokens[index] {
             // `babel … --help` / `--version` print instead of compiling; no
             // output is produced and no mapping is declared.
-            // `--no-code` emits nothing; like `--help` no mapping exists.
-            "--help" | "-h" | "--version" | "-V" | "--no-code" => return None,
+            "--help" | "-h" | "--version" | "-V" => return None,
             "-d" | "--out-dir" => {
                 if output.is_some() {
                     return None;
@@ -1071,21 +1074,27 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
                 index += 1;
                 output = tokens.get(index).copied();
             }
-            // `--source-maps` and `--compact` take an *optional* value from
-            // a fixed set; anything else is a positional, not the mode.
-            "--source-maps" => {
-                if tokens
+            // Commander consumes the next non-option word even when its
+            // value is invalid; it cannot then serve as the source path.
+            "--source-maps" | "-s" => {
+                if let Some(value) = tokens
                     .get(index + 1)
-                    .is_some_and(|value| matches!(*value, "true" | "false" | "inline" | "both"))
+                    .filter(|value| !value.starts_with('-'))
                 {
+                    if !matches!(*value, "true" | "false" | "1" | "0" | "inline" | "both") {
+                        return None;
+                    }
                     index += 1;
                 }
             }
             "--compact" => {
-                if tokens
+                if let Some(value) = tokens
                     .get(index + 1)
-                    .is_some_and(|value| matches!(*value, "auto" | "true" | "false"))
+                    .filter(|value| !value.starts_with('-'))
                 {
+                    if !matches!(*value, "auto" | "true" | "false" | "1" | "0") {
+                        return None;
+                    }
                     index += 1;
                 }
             }
@@ -1101,7 +1110,6 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
             | "--source-map-target"
             | "--source-file-name"
             | "--source-root"
-            | "--root"
             | "--filename" => {
                 index += 1;
                 if !tokens
@@ -1113,22 +1121,24 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
             }
             // `--out-file`/`-o` writes one file and `--out-file-extension`
             // renames emitted paths; neither fits the directory mapping.
+            "--watch" | "-w" => watch = true,
+            "--skip-initial-build" => skip_initial_build = true,
+            "--verbose" => verbose = true,
+            "--quiet" => quiet = true,
             "--copy-files"
-            | "--copy-ignored"
+            | "-D"
             | "--no-copy-ignored"
             | "--no-babelrc"
-            | "--verbose"
-            | "--quiet"
-            | "--watch"
             | "--delete-dir-on-start"
-            | "--skip-initial-build"
-            | "--minified"
-            | "--no-compact" => {}
+            | "--minified" => {}
             flag if flag.starts_with('-') => return None,
             token if source.is_none() => source = Some(token),
             _ => return None,
         }
         index += 1;
+    }
+    if (skip_initial_build && !watch) || (verbose && quiet) {
+        return None;
     }
     match (source, output) {
         (Some(source), Some(output)) if !output.is_empty() && !output.starts_with('-') => {
@@ -1377,6 +1387,20 @@ mod tests {
             babel_src_to_out("babel src --source-maps inline -d dist"),
             Some(("src".to_owned(), "dist".to_owned()))
         );
+        for script in [
+            "babel --source-maps inline src -d dist",
+            "babel -s 1 src -d dist",
+            "babel --compact auto src -d dist",
+            "babel src -d dist --compact --minified",
+            "babel src -d dist --watch --skip-initial-build",
+            "babel src -d dist --skip-initial-build -w",
+        ] {
+            assert_eq!(
+                babel_src_to_out(script),
+                Some(("src".to_owned(), "dist".to_owned())),
+                "script: {script}"
+            );
+        }
     }
 
     #[test]
@@ -1397,6 +1421,16 @@ mod tests {
             "babel src -d dist --out-file-extension .mjs",
             "babel src -o bundle.js",
             "babel --compact auto -d dist",
+            "babel --source-maps src -d dist",
+            "babel --source-maps invalid src -d dist",
+            "babel --compact src -d dist",
+            "babel src -d dist --source-maps invalid",
+            "babel src -d dist --compact invalid",
+            "babel src -d dist --root .",
+            "babel src -d dist --copy-ignored",
+            "babel src -d dist --no-compact",
+            "babel src -d dist --skip-initial-build",
+            "babel src -d dist --verbose --quiet",
         ] {
             assert_eq!(babel_src_to_out(script), None, "script: {script}");
         }
