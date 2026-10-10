@@ -109,9 +109,9 @@ class MatchingRules(unittest.TestCase):
         self.assertEqual(report.used_lines, 0)
 
     def test_error_results_are_counted_without_bytes(self) -> None:
-        text, is_error = measure.unwrap_result('{"isError":true,"output":"Tool was not run"}')
-        self.assertTrue(is_error)
-        events = [Call("c1", SEARCH, "{}"), Result("c1", text, is_error)]
+        content = '{"isError":true,"output":"Tool was not run"}'
+        self.assertTrue(measure.reports_error(content))
+        events = [Call("c1", SEARCH, "{}"), Result("c1", measure.visible_text(content), True)]
         (report,), _ = measure.analyze(events)
         self.assertTrue(report.is_error)
         self.assertEqual(report.total_bytes, 0)
@@ -176,7 +176,7 @@ class MatchingRules(unittest.TestCase):
             "message_id": "m",
             "content_range": {"truncated": False},
             "metadata_json": json.dumps(
-                {"facts": [{"kind": "tool_result", "invocation_id": "c1", "name": "tracedecay_search"}]}
+                {"facts": [{"kind": "tool_result", "invocation_id": "c1", "content": json.dumps({"token_count": 99, "results": []})}]}
             ),
         }
         results = [event for event in measure.events_from_messages([row]) if isinstance(event, Result)]
@@ -299,7 +299,7 @@ class TranscriptNormalization(unittest.TestCase):
 
         rows = [
             row(5, 30, "assistant", "Edit crates/config/src/loader.rs now.", [{"kind": "message"}]),
-            row(5, 20, "tool", json.dumps({"output": RESULT}), [{"kind": "tool_result", "invocation_id": "c1"}]),
+            row(5, 20, "tool", json.dumps({"output": RESULT}), [{"kind": "tool_result", "invocation_id": "c1", "content": json.dumps({"output": RESULT})}]),
             row(5, 10, "assistant", '{"query":"config"}', [{"kind": "tool_invocation", "name": SEARCH, "invocation_id": "c1"}]),
             row(5, 25, "assistant", "secret plan", [{"kind": "reasoning"}]),
         ]
@@ -337,8 +337,9 @@ class TranscriptNormalization(unittest.TestCase):
                         {
                             "kind": "tool_result",
                             "invocation_id": "c1",
+                            "content": RESULT,
                             "token_count": 18,
-                            "cut": {"applied": True},
+                            "cut": True,
                         }
                     ]
                 }
@@ -348,8 +349,95 @@ class TranscriptNormalization(unittest.TestCase):
         self.assertEqual([(event.tokens, event.cut) for event in results], [(18, True)])
 
     def test_unwrap_mcp_text_envelope(self) -> None:
-        text, is_error = measure.unwrap_result(json.dumps([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]))
-        self.assertEqual((text, is_error), ("a\nb", False))
+        self.assertEqual(measure.visible_text([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]), "a\nb")
+
+    def test_served_json_without_an_envelope_is_scored_as_served(self) -> None:
+        served = '{\n  "results": [\n    {"name": "read_source", "line": 144}\n  ]\n}'
+        self.assertEqual(measure.visible_text(served), served)
+        self.assertEqual(measure.visible_text({"results": [1, "é"]}), '{"results":[1,"é"]}')
+
+
+def lcm_row(index: int, role: str, content: str, facts: list[dict]) -> dict:
+    """One `lcm_load_session` message as the canonical projection serves it."""
+    return {
+        "timestamp": index,
+        "role": role,
+        "content": content,
+        "message_id": f"m{index}",
+        "content_range": {"truncated": False},
+        "metadata_json": json.dumps({"evidence": {"range": {"start": index}}, "facts": facts}),
+    }
+
+
+class HostResultShapes(unittest.TestCase):
+    """Stored shapes of tracedecay MCP results from Claude Code and Codex rollouts.
+
+    Claude Code records an MCP result as a `tool_result` block whose content
+    is the text blocks the server returned (the metrics trailer is its own
+    block), and its row renders that block list as JSON. Codex stores its
+    `function_call_output` with Null content: the host output is redacted, so
+    the row renders `null`.
+    """
+
+    CLAUDE_BLOCKS = [
+        {"type": "text", "text": "## search\n- fn parse_config_file (crates/config/src/loader.rs:42)"},
+        {"type": "text", "text": "tracedecay_metrics: before=40 after=18"},
+    ]
+
+    def claude_events(self, tokens: int | None) -> list:
+        result_fact = {"kind": "tool_result", "invocation_id": "toolu_01", "content": self.CLAUDE_BLOCKS}
+        if tokens is not None:
+            result_fact |= {"token_count": tokens, "cut": False}
+        rows = [
+            lcm_row(1, "assistant", '{"query":"config"}', [
+                {"kind": "tool_invocation", "invocation_id": "toolu_01", "name": SEARCH, "arguments": {"query": "config"}}
+            ]),
+            lcm_row(2, "tool", json.dumps(self.CLAUDE_BLOCKS), [result_fact]),
+            lcm_row(3, "assistant", "", [
+                {"kind": "tool_invocation", "invocation_id": "toolu_02", "name": "Read", "arguments": {"file_path": "/r/crates/config/src/loader.rs"}}
+            ]),
+        ]
+        return measure.events_from_messages(rows)
+
+    def test_claude_result_scores_the_served_text_blocks(self) -> None:
+        (report,), unpaired = measure.analyze(self.claude_events(tokens=None), "claude")
+        served = "\n".join(block["text"] for block in self.CLAUDE_BLOCKS)
+        self.assertEqual(unpaired, 0)
+        self.assertEqual((report.lines, report.used_lines), (3, 1))
+        self.assertEqual(report.total_bytes, len(served.encode()))
+        self.assertIsNone(report.total_tokens)
+
+    def test_claude_ingest_token_count_describes_the_scored_text(self) -> None:
+        (report,), _ = measure.analyze(self.claude_events(tokens=27), "claude")
+        self.assertEqual(report.total_tokens, 27)
+        self.assertEqual(report.rerequest_after_cut, 0)
+
+    def test_scored_text_is_the_fact_content_not_the_row_rendering(self) -> None:
+        fact = {"kind": "tool_result", "invocation_id": "c1", "content": "pub fn unique_anchor() {}"}
+        rows = [
+            lcm_row(1, "assistant", "{}", [{"kind": "tool_invocation", "invocation_id": "c1", "name": SEARCH}]),
+            lcm_row(2, "tool", "pub fn unique_anchor() {} [row rendering differs]", [fact]),
+        ]
+        (report,), _ = measure.analyze(measure.events_from_messages(rows))
+        self.assertEqual(report.total_bytes, 25)
+
+    def test_codex_result_with_redacted_output_is_not_scored_as_text(self) -> None:
+        rows = [
+            lcm_row(1, "assistant", '{"query":"config"}', [
+                {"kind": "tool_invocation", "invocation_id": "call_1", "name": "tracedecay__tracedecay_search", "arguments": '{"query":"config"}'}
+            ]),
+            lcm_row(2, "tool", "null", [
+                {"kind": "tool_result", "invocation_id": "call_1", "content": None, "success": True, "token_count": 412, "cut": False}
+            ]),
+        ]
+        (report,), unpaired = measure.analyze(measure.events_from_messages(rows), "codex")
+        self.assertEqual(unpaired, 0)
+        self.assertFalse(report.text_stored)
+        self.assertEqual((report.lines, report.total_bytes), (0, 0))
+        self.assertIsNone(report.total_tokens)
+        row = measure.aggregate([report])[0]
+        self.assertEqual((row["calls"], row["calls_without_text"], row.get("calls_zero_used", 0)), (1, 1, 0))
+        self.assertEqual(measure.token_count_coverage([row])["scored_non_error_calls"], 0)
 
     def test_tool_names_from_every_host_spelling(self) -> None:
         for name in (SEARCH, "mcp__tracedecay__tracedecay_search", "tracedecay_search"):

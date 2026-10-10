@@ -15,6 +15,10 @@ estimate. Never reads `.tracedecay` databases or native transcript files.
 Matching rules (deliberately conservative; see
 docs/development/unused-tool-context.md):
 
+* A result's text is its tool_result fact's content, unwrapped by the rule
+  ingest counts `token_count` over, so bytes and tokens describe one
+  string. Null content (Codex and Cursor Composer redact host output) is
+  `no text`: counted, never scored as bytes or tokens.
 * A result is walked as physical lines, keeping each line's actual
   separator bytes (`\\n`, `\\r\\n`, or none). Empty text is 0 bytes and
   0 lines. A line is USED when one of its anchors occurs in
@@ -40,12 +44,12 @@ docs/development/unused-tool-context.md):
   the query back never counts as use.
 * Re-request: a later call of the *same* `tracedecay_*` tool whose arguments
   share a novelty-filtered anchor is counted separately and is not use.
-* Re-request after a cut: counted only when the original result records an
-  explicit cut. If cut state is unknown, the count is null, never 0.
+* Re-request after a cut: counted only when the original result's fact
+  records `cut`. If cut state is unknown, the count is null, never 0.
 * Tokens: only a stored non-negative `token_count` on the tool_result fact.
-  Tool-body `token_count` is ignored (source_read writes chars/4 there).
-  Mixed used/unused lines leave used/unused tokens null. MCP
-  `tracedecay_metrics` trailers are ignored.
+  Tool-body `token_count` and MCP `tracedecay_metrics` trailer numbers are
+  never token sources. Mixed used/unused lines leave used/unused tokens
+  null.
 * Error results (`isError`) are counted separately and excluded from bytes.
 * Token coverage: when any scored call lacks a stored `token_count`, token
   columns stay null and the coverage object reports
@@ -75,7 +79,6 @@ SYMBOL = re.compile(r"(?<![\w:])[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]
 MIN_SYMBOL = 6
 MIN_QUOTE = 24
 PAGE_SIZES = (25, 10, 4, 1)
-MAX_RESULT_CHARS = 400_000
 
 
 # ---------------------------------------------------------------- matching --
@@ -106,30 +109,10 @@ def stored_token_count(fact: object) -> int | None:
     return value
 
 
-def stored_cut(*sources: object) -> bool | None:
-    """True/false when a cut was recorded; None when cut state is unknown."""
-    for source in sources:
-        if not isinstance(source, dict) or "cut" not in source:
-            continue
-        value = source["cut"]
-        if value is None:
-            return None
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, dict):
-            applied = value.get("applied")
-            if isinstance(applied, bool):
-                return applied
-            return True
-    return None
-
-
-def parse_object(text: str) -> dict:
-    try:
-        value = json.loads(text)
-    except ValueError:
-        return {}
-    return value if isinstance(value, dict) else {}
+def stored_cut(fact: dict) -> bool | None:
+    """The tool_result fact's recorded cut marker; None when cut state is unknown."""
+    value = fact.get("cut")
+    return value if isinstance(value, bool) else None
 
 
 def attribute_tokens(total: int | None, used_lines: int, lines: int) -> tuple[int | None, int | None]:
@@ -182,26 +165,50 @@ def argument_values(arguments: object) -> str:
     return "" if arguments is None else str(arguments)
 
 
-def unwrap_result(content: str) -> tuple[str, bool]:
-    """Return (result text, is_error) with provider/MCP envelopes removed."""
-    try:
-        value = json.loads(content)
-    except ValueError:
-        return content, False
-    is_error = False
+def visible_text(content: object) -> str | None:
+    """The served text of a stored tool_result fact's content.
+
+    Same rule as `tool_result_visible_text` in tracedecay-domain, the text
+    the ingest `token_count` is counted over, so a result's bytes and tokens
+    describe one string. Null means the host stored no output (Codex and
+    Cursor Composer redact it); that is unknown text, never the word `null`.
+    """
+    if content is None:
+        return None
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+        except ValueError:
+            return content
+        text = envelope_text(parsed)
+        return content if text is None else text
+    text = envelope_text(content)
+    if text is None:
+        return json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+    return text
+
+
+def envelope_text(value: object) -> str | None:
+    """Text of an `output`/`content`/`text` envelope field or a list of text blocks."""
+    inner = value
     if isinstance(value, dict):
-        is_error = bool(value.get("isError") or value.get("is_error"))
-        for key in ("output", "content", "text"):
-            if key in value:
-                value = value[key]
-                break
-    if isinstance(value, list):
-        texts = [item.get("text") for item in value if isinstance(item, dict) and isinstance(item.get("text"), str)]
-        if texts:
-            value = "\n".join(texts)
-    if isinstance(value, str):
-        return value, is_error
-    return content, is_error
+        inner = next((value[key] for key in ("output", "content", "text") if key in value), None)
+    if isinstance(inner, str):
+        return inner
+    if isinstance(inner, list):
+        texts = [item["text"] for item in inner if isinstance(item, dict) and isinstance(item.get("text"), str)]
+        return "\n".join(texts) if texts else None
+    return None
+
+
+def reports_error(content: object) -> bool:
+    """Whether an MCP result body marks itself as an error (`isError`)."""
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except ValueError:
+            return False
+    return isinstance(content, dict) and bool(content.get("isError") or content.get("is_error"))
 
 
 # Normalized transcript events, in session order.
@@ -215,7 +222,7 @@ class Call:
 @dataclass
 class Result:
     id: str
-    text: str
+    text: str | None
     is_error: bool = False
     tokens: int | None = None
     cut: bool | None = None
@@ -238,6 +245,7 @@ class CallReport:
     lines: int = 0
     used_lines: int = 0
     is_error: bool = False
+    text_stored: bool = True
     rerequest_calls: int = 0
     rerequest_after_cut: int | None = None
     total_tokens: int | None = None
@@ -269,8 +277,10 @@ def analyze(events: list[Event], session: str = "") -> tuple[list[CallReport], i
             continue
         split = result_index[call_id]
         before, later_use, later_rerequest = split_evidence(events, split, tool)
-        report = CallReport(tool=tool, session=session, is_error=result.is_error)
-        if not result.is_error:
+        report = CallReport(
+            tool=tool, session=session, is_error=result.is_error, text_stored=result.text is not None
+        )
+        if report.text_stored and not result.is_error:
             score_lines(report, result.text, before, later_use)
             report.rerequest_calls = count_rerequests(result.text, before, later_rerequest)
             report.rerequest_after_cut = (
@@ -423,33 +433,6 @@ def load_messages(client: TraceDecay, provider: str, session: str, scope: str) -
     raise last
 
 
-def full_content(client: TraceDecay, provider: str, session: str, scope: str, message: dict) -> str:
-    """Fetch the slices of a result that one load page truncated."""
-    content = message["content"]
-    span = message["content_range"]
-    while span["truncated"] and len(content) < min(span["total_chars"], MAX_RESULT_CHARS):
-        payload = client.call(
-            "tracedecay_lcm_load_session",
-            {
-                "session_id": session,
-                "provider": provider,
-                "storage_scope": scope,
-                "start_time": message["timestamp"],
-                "end_time": message["timestamp"],
-                "roles": [message["role"]],
-                "limit": 100,
-                "content_offset": len(content),
-                "content_limit": 20000,
-            },
-        )
-        same = [row for row in payload["messages"] if row["message_id"] == message["message_id"]]
-        if not same or not same[0]["content"]:
-            break
-        content += same[0]["content"]
-        span = same[0]["content_range"]
-    return content
-
-
 def message_order(indexed: tuple[int, dict]) -> tuple:
     index, message = indexed
     metadata = json.loads(message.get("metadata_json") or "{}")
@@ -457,10 +440,9 @@ def message_order(indexed: tuple[int, dict]) -> tuple:
     return (message["timestamp"], start, index)
 
 
-def events_from_messages(messages: list[dict], fetch=None) -> list[Event]:
+def events_from_messages(messages: list[dict]) -> list[Event]:
     """Normalize LCM rows into ordered calls, results, and visible agent text."""
     events: list[Event] = []
-    tracedecay_ids: set[str] = set()
     for _, message in sorted(enumerate(messages), key=message_order):
         metadata = json.loads(message.get("metadata_json") or "{}")
         facts = metadata.get("facts") or []
@@ -471,30 +453,19 @@ def events_from_messages(messages: list[dict], fetch=None) -> list[Event]:
             arguments = fact.get("arguments")
             if arguments is None and len(invocations) == 1:
                 arguments = message["content"]
-            if tool_name(fact.get("name")):
-                tracedecay_ids.add(call_id)
             events.append(Call(call_id, fact.get("name") or "", argument_values(arguments)))
+        # Each result is scored from its own fact, never the row rendering:
+        # a row renders only its first result, and its content is sliced.
         for fact in outputs:
             call_id = fact.get("invocation_id") or fact.get("tool_use_id") or ""
-            if len(outputs) == 1:
-                content = message["content"]
-                if fetch and call_id in tracedecay_ids and message["content_range"].get("truncated"):
-                    content = fetch(message)
-            else:
-                # A row renders only its first non-empty result, so parallel
-                # results are scored from their own facts.
-                content = fact.get("content")
-                if not isinstance(content, str):
-                    content = json.dumps(content)
-            text, is_error = unwrap_result(content)
-            payload = parse_object(content)
+            content = fact.get("content")
             events.append(
                 Result(
                     call_id,
-                    text,
-                    is_error or fact.get("success") is False,
+                    visible_text(content),
+                    fact.get("success") is False or reports_error(content),
                     stored_token_count(fact),
-                    stored_cut(fact, payload),
+                    stored_cut(fact),
                 )
             )
         if (
@@ -534,6 +505,9 @@ def aggregate(reports: list[CallReport]) -> list[dict]:
         if report.is_error:
             row["error_calls"] += 1
             continue
+        if not report.text_stored:
+            row["calls_without_text"] += 1
+            continue
         row["calls_zero_used"] += report.used_lines == 0
         row["rerequest_calls"] += report.rerequest_calls
         row["calls_without_tokens"] += report.total_tokens is None
@@ -569,7 +543,7 @@ def sanitized_examples(reports: list[CallReport], limit: int) -> list[dict]:
         by_tool[report.tool].append(report)
     examples: list[dict] = []
     for tool in sorted(by_tool):
-        unused = [row for row in by_tool[tool] if row.used_lines == 0 and not row.is_error][:limit]
+        unused = [row for row in by_tool[tool] if row.used_lines == 0 and row.text_stored and not row.is_error][:limit]
         used = [row for row in by_tool[tool] if row.used_lines > 0][:limit]
         for state, rows in (("ignored", unused), ("used", used)):
             for report in rows:
@@ -610,7 +584,7 @@ def token_count_coverage(rows: list[dict]) -> dict:
     scored = 0
     missing = 0
     for row in rows:
-        non_error = row.get("calls", 0) - row.get("error_calls", 0)
+        non_error = row.get("calls", 0) - row.get("error_calls", 0) - row.get("calls_without_text", 0)
         scored += non_error
         missing += row.get("calls_without_tokens", 0)
     measured = scored - missing
@@ -642,15 +616,15 @@ def unused_tokens_ratio(row: dict) -> str:
 
 def render(rows: list[dict], coverage: dict) -> str:
     lines = [
-        "| tool | sessions | calls | errors | calls 0 used | rerequests | after cut | bytes | used bytes | unused bytes | unused % | tokens | used tokens | unused tokens | unused tokens % |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| tool | sessions | calls | errors | no text | calls 0 used | rerequests | after cut | bytes | used bytes | unused bytes | unused % | tokens | used tokens | unused tokens | unused tokens % |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     totaled = sum_rows(rows, coverage["sessions_with_calls"]) if rows else None
     for row in rows + ([totaled] if totaled else []):
         unused = row.get("total_bytes", 0) - row.get("used_bytes", 0)
         lines.append(
             f"| {row['tool']} | {row['sessions']} | {row.get('calls', 0)} | {row.get('error_calls', 0)} "
-            f"| {row.get('calls_zero_used', 0)} | {row.get('rerequest_calls', 0)} | {cell(row.get('rerequest_after_cut'))} "
+            f"| {row.get('calls_without_text', 0)} | {row.get('calls_zero_used', 0)} | {row.get('rerequest_calls', 0)} | {cell(row.get('rerequest_after_cut'))} "
             f"| {row.get('total_bytes', 0)} | {row.get('used_bytes', 0)} | {unused} "
             f"| {percent(unused, row.get('total_bytes', 0))} | {cell(row.get('total_tokens'))} "
             f"| {cell(row.get('used_tokens'))} | {cell(row.get('unused_tokens'))} | {unused_tokens_ratio(row)} |"
@@ -725,10 +699,7 @@ def main() -> int:
             continue
         stats["loaded"] += 1
 
-        def fetch(message: dict, provider: str = provider, session: str = session) -> str:
-            return full_content(client, provider, session, args.storage_scope, message)
-
-        found, unpaired = analyze(events_from_messages(messages, fetch), session)
+        found, unpaired = analyze(events_from_messages(messages), session)
         coverage["calls_without_result"] += unpaired
         if found:
             stats["with_tracedecay_calls"] += 1
