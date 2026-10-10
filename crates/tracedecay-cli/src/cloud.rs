@@ -25,8 +25,21 @@ const GITHUB_REPOSITORY: &str = "tracedecay";
 /// Timeout for flush (upload) requests.
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Timeout for fetching the worldwide total.
+/// Timeout for opportunistic advisory reads (worldwide counter and the
+/// background / `doctor` version probe). Keep this short so a stalled
+/// GitHub or worker never blocks those paths.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Deadline for an operator-initiated channel/version lookup
+/// (`tracedecay upgrade` / channel switch). Advisory worldwide-counter and
+/// status probes keep [`FETCH_TIMEOUT`].
+///
+/// Five seconds is a hard bound above measured GitHub release-lookup
+/// totals on this VM (HTTP/1.1 no-keepalive `GET /releases?per_page=10`:
+/// 0.03s–0.29s; `gh api` of the same URL: 0.39s–0.65s) and the reporter's
+/// ~1.06s unauthenticated quota refusal, plus the 1.5s delayed-server
+/// proof that the previous one-second budget could not wait for.
+const RELEASE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Response from the worker's POST /increment and GET /total endpoints.
 #[derive(serde::Deserialize)]
@@ -66,14 +79,12 @@ pub fn flush_pending(amount: u64) -> Option<u64> {
 /// Returns None on timeout, network error, or parse failure.
 #[tracing::instrument(name = "cloud.fetch_worldwide_total", level = "trace", skip_all)]
 pub fn fetch_worldwide_total() -> Option<u64> {
+    fetch_worldwide_total_from(&format!("{WORKER_URL}/total"))
+}
+
+fn fetch_worldwide_total_from(url: &str) -> Option<u64> {
     let agent = agent_with_timeout(FETCH_TIMEOUT);
-    let parsed: WorkerResponse = agent
-        .get(&format!("{WORKER_URL}/total"))
-        .call()
-        .ok()?
-        .body_mut()
-        .read_json()
-        .ok()?;
+    let parsed: WorkerResponse = agent.get(url).call().ok()?.body_mut().read_json().ok()?;
     Some(parsed.total)
 }
 
@@ -278,13 +289,30 @@ fn transport_failure(error: ureq::Error) -> ReleaseLookupError {
 /// beta build sees only prereleases, a stable build only stable releases.
 /// Releases whose CI hasn't yet uploaded the current-platform binary are
 /// skipped, see `release_has_current_platform_asset`.
+///
+/// This is the opportunistic advisory probe (`doctor`, post-start version
+/// notice). It keeps [`FETCH_TIMEOUT`]. Operator-initiated install/upgrade
+/// uses [`fetch_latest_channel_version`].
 pub fn fetch_latest_version() -> Result<String, ReleaseLookupError> {
-    fetch_latest_channel_version(is_beta())
+    latest_release_version(
+        GITHUB_API_URL,
+        is_beta(),
+        github_authorization().as_deref(),
+        FETCH_TIMEOUT,
+    )
 }
 
 /// Fetches the latest installable version of one channel from GitHub.
+///
+/// This is the explicit upgrade/channel-switch lookup and uses
+/// [`RELEASE_LOOKUP_TIMEOUT`], not the one-second advisory budget.
 pub fn fetch_latest_channel_version(is_beta: bool) -> Result<String, ReleaseLookupError> {
-    latest_release_version(GITHUB_API_URL, is_beta, github_authorization().as_deref())
+    latest_release_version(
+        GITHUB_API_URL,
+        is_beta,
+        github_authorization().as_deref(),
+        RELEASE_LOOKUP_TIMEOUT,
+    )
 }
 
 #[tracing::instrument(name = "cloud.latest_release_version", level = "trace", skip_all)]
@@ -292,23 +320,16 @@ fn latest_release_version(
     api_base: &str,
     is_beta: bool,
     authorization: Option<&str>,
+    timeout: Duration,
 ) -> Result<String, ReleaseLookupError> {
     let releases = releases_url(api_base);
     let candidates: Vec<GitHubRelease> = if is_beta {
-        get_release_json(
-            &format!("{releases}?per_page=10"),
-            authorization,
-            FETCH_TIMEOUT,
-        )?
-        .unwrap_or_default()
+        get_release_json(&format!("{releases}?per_page=10"), authorization, timeout)?
+            .unwrap_or_default()
     } else {
-        get_release_json::<GitHubRelease>(
-            &format!("{releases}/latest"),
-            authorization,
-            FETCH_TIMEOUT,
-        )?
-        .into_iter()
-        .collect()
+        get_release_json::<GitHubRelease>(&format!("{releases}/latest"), authorization, timeout)?
+            .into_iter()
+            .collect()
     };
     // GitHub lists releases newest-first, so the first installable match is
     // the latest. Releases whose CI is still in progress are skipped, they
@@ -384,8 +405,19 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
+    use std::time::Instant;
     use tracedecay_application::http_agent::{InterruptFirstReadConnector, http_agent_over};
     use ureq::unversioned::transport::DefaultConnector;
+
+    /// Existing lookup tests keep the one-second advisory budget so an
+    /// unanswered stub still fails in about a second.
+    fn latest_release_version(
+        api_base: &str,
+        is_beta: bool,
+        authorization: Option<&str>,
+    ) -> Result<String, ReleaseLookupError> {
+        super::latest_release_version(api_base, is_beta, authorization, FETCH_TIMEOUT)
+    }
 
     fn release(tag: &str, prerelease: bool, asset_names: &[&str]) -> GitHubRelease {
         GitHubRelease {
@@ -460,6 +492,16 @@ mod tests {
     /// HTTP/1.1 response), or holds it unanswered when `None`, and forwards
     /// each request head it read.
     fn stub(response: Option<&'static str>) -> (String, mpsc::Receiver<String>) {
+        stub_after(Duration::ZERO, response)
+    }
+
+    /// Like [`stub`], but waits `delay` after reading the request before
+    /// writing the response. A 1.5s delay is past [`FETCH_TIMEOUT`] and
+    /// inside [`RELEASE_LOOKUP_TIMEOUT`].
+    fn stub_after(
+        delay: Duration,
+        response: Option<&'static str>,
+    ) -> (String, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let (heads, received) = mpsc::channel();
@@ -469,6 +511,9 @@ mod tests {
                 let mut request = [0u8; 4096];
                 let read = stream.read(&mut request).unwrap_or(0);
                 let _ = heads.send(String::from_utf8_lossy(&request[..read]).into_owned());
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
                 match response {
                     Some(response) => {
                         let _ = stream.write_all(response.as_bytes());
@@ -478,6 +523,90 @@ mod tests {
             }
         });
         (base, received)
+    }
+
+    fn installable_beta_listing() -> &'static str {
+        let asset = asset_name("0.9.9-beta.1", true);
+        respond(
+            "200 OK",
+            "Content-Type: application/json\r\n",
+            &format!(
+                r#"[{{"tag_name":"v0.9.9-beta.1","prerelease":true,"assets":[{{"name":"{asset}"}}]}}]"#
+            ),
+        )
+    }
+
+    /// A 1.5s delayed release answer is past the one-second advisory budget
+    /// that `fetch_latest_channel_version` used on master, and inside the
+    /// explicit upgrade deadline.
+    #[test]
+    fn explicit_upgrade_lookup_succeeds_when_github_answers_after_one_second() {
+        let delay = Duration::from_millis(1500);
+        let (base, _heads) = stub_after(delay, Some(installable_beta_listing()));
+        let started = Instant::now();
+
+        let version = super::latest_release_version(&base, true, None, RELEASE_LOOKUP_TIMEOUT)
+            .expect("explicit upgrade lookup must wait past the one-second advisory budget");
+
+        assert_eq!(version, "0.9.9-beta.1");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= delay,
+            "lookup returned before the delayed answer: {elapsed:?}"
+        );
+        assert!(
+            elapsed < RELEASE_LOOKUP_TIMEOUT,
+            "lookup exceeded the explicit upgrade deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn advisory_release_lookup_still_times_out_at_the_one_second_budget() {
+        let (base, _heads) = stub_after(
+            Duration::from_millis(1500),
+            Some(installable_beta_listing()),
+        );
+        let started = Instant::now();
+
+        let error = latest_release_version(&base, true, None).unwrap_err();
+
+        assert_eq!(error, ReleaseLookupError::TimedOut);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= FETCH_TIMEOUT,
+            "advisory lookup returned before its one-second budget: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "advisory lookup waited for the delayed answer: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn advisory_worldwide_total_still_times_out_at_the_one_second_budget() {
+        let (base, _heads) = stub_after(
+            Duration::from_millis(1500),
+            Some(respond(
+                "200 OK",
+                "Content-Type: application/json\r\n",
+                r#"{"total":42}"#,
+            )),
+        );
+        let started = Instant::now();
+
+        assert!(
+            fetch_worldwide_total_from(&format!("{base}/total")).is_none(),
+            "advisory worldwide-total must keep the one-second budget"
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= FETCH_TIMEOUT,
+            "advisory worldwide-total returned before its one-second budget: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "advisory worldwide-total waited for the delayed answer: {elapsed:?}"
+        );
     }
 
     fn respond(status: &str, headers: &str, body: &str) -> &'static str {
