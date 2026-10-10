@@ -1065,6 +1065,11 @@ fn symbol_search_ranks_exact_names_first_and_pages_without_a_full_scan() {
         "exact simple-name hits precede containment hits"
     );
     assert_eq!((all.has_more, all.total), (false, Some(3)));
+    assert_eq!(
+        all.indexed_symbols, 4,
+        "the page carries the generation's symbol population so coverage can \
+         name the real denominator on a miss"
+    );
 
     let first = reader
         .search_symbols("run", None, 0, 1, request())

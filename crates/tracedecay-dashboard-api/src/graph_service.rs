@@ -122,6 +122,10 @@ pub(super) struct GraphSearchPayloadV1 {
     offset: i64,
     /// Exact match count, or `None` when the search stopped past this page.
     pub(super) total: Option<u64>,
+    /// Symbols in the served generation — the population a completed scan
+    /// examined, so an empty hit list can report its real denominator
+    /// instead of claiming the index was empty.
+    pub(super) indexed_symbols: u64,
     pub(super) has_more: bool,
     count: usize,
     pub(super) results: Vec<GraphNodeV1>,
@@ -399,6 +403,7 @@ pub async fn search_payload(
             limit,
             offset,
             total: page.total,
+            indexed_symbols: page.indexed_symbols,
             has_more: page.has_more,
             count: results.len(),
             results,

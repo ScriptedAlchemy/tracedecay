@@ -163,12 +163,16 @@ pub struct CodeGraphFileDependenciesV1 {
 
 /// One window of a symbol name search. `total` is the exact match count
 /// when the scan reached the end of the generation, and `None` when it
-/// stopped one match past the window (`has_more`).
+/// stopped one match past the window (`has_more`). `indexed_symbols` is
+/// the generation's whole symbol population — before any `admit` filter —
+/// so a completed scan can report what it examined instead of claiming
+/// the index was empty.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodeGraphSymbolSearchPageV1 {
     pub symbols: Vec<CodeGraphSymbolSummaryV1>,
     pub has_more: bool,
     pub total: Option<u64>,
+    pub indexed_symbols: u64,
 }
 
 /// One symbol reached by a reverse-reachability (impact) expansion.
