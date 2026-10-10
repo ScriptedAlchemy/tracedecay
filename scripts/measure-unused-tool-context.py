@@ -35,6 +35,10 @@ docs/development/unused-tool-context.md):
 * Novelty: an anchor that already occurs in agent-authored content before the
   result arrived (including the call's own arguments) is dropped, so echoing
   the query back never counts as use.
+* Re-request: a later call of the *same* `tracedecay_*` tool whose arguments
+  share a novelty-filtered anchor is counted separately and is not use. A
+  re-request after a cut (#3373) is not scored here; that count is null until
+  cuts exist.
 * Error results (`isError`) are counted separately and excluded from bytes.
 
 Columns: `bytes` are UTF-8 bytes of the result text (MCP envelope
@@ -180,28 +184,21 @@ class CallReport:
     lines: int = 0
     used_lines: int = 0
     is_error: bool = False
+    rerequest_calls: int = 0
     matches: list[tuple[str, str]] = field(default_factory=list)
 
 
 def analyze(events: list[Event], session: str = "") -> tuple[list[CallReport], int]:
     """Score every tracedecay call; returns (reports, calls without a result)."""
-    corpus: list[str] = []
-    result_offsets: dict[str, int] = {}
     calls: dict[str, Call] = {}
     results: dict[str, Result] = {}
-    offset = 0
-    for event in events:
-        if isinstance(event, Result):
-            if event.id in calls and event.id not in results:
-                results[event.id] = event
-                result_offsets[event.id] = offset
-            continue
-        text = event.evidence if isinstance(event, Call) else event.text
+    result_index: dict[str, int] = {}
+    for index, event in enumerate(events):
         if isinstance(event, Call) and tool_name(event.name):
             calls.setdefault(event.id, event)
-        corpus.append(text)
-        offset += len(text) + 1
-    evidence = "\n".join(corpus)
+        elif isinstance(event, Result) and event.id in calls and event.id not in results:
+            results[event.id] = event
+            result_index[event.id] = index
     reports: list[CallReport] = []
     unpaired = 0
     for call_id, call in calls.items():
@@ -212,15 +209,36 @@ def analyze(events: list[Event], session: str = "") -> tuple[list[CallReport], i
         if result is None:
             unpaired += 1
             continue
-        split = result_offsets[call_id]
+        split = result_index[call_id]
+        before, later_use, later_rerequest = split_evidence(events, split, tool)
         report = CallReport(tool=tool, session=session, is_error=result.is_error)
         if not result.is_error:
-            score_lines(report, result.text, evidence, split)
+            score_lines(report, result.text, before, later_use)
+            report.rerequest_calls = count_rerequests(result.text, before, later_rerequest)
         reports.append(report)
     return reports, unpaired
 
 
-def score_lines(report: CallReport, text: str, evidence: str, split: int) -> None:
+def split_evidence(events: list[Event], result_index: int, tool: str) -> tuple[str, str, str]:
+    """Before-result text, later use evidence, later same-tool rerequest text."""
+    before: list[str] = []
+    later_use: list[str] = []
+    later_rerequest: list[str] = []
+    for index, event in enumerate(events):
+        if isinstance(event, Result):
+            continue
+        text = event.evidence if isinstance(event, Call) else event.text
+        if index < result_index:
+            before.append(text)
+            continue
+        if isinstance(event, Call) and tool_name(event.name) == tool:
+            later_rerequest.append(text)
+        else:
+            later_use.append(text)
+    return "\n".join(before), "\n".join(later_use), "\n".join(later_rerequest)
+
+
+def score_lines(report: CallReport, text: str, before: str, later: str) -> None:
     for line in text.split("\n"):
         size = len(line.encode()) + 1
         chars = len(line) + 1
@@ -228,15 +246,34 @@ def score_lines(report: CallReport, text: str, evidence: str, split: int) -> Non
         report.total_bytes += size
         report.total_chars += chars
         for kind, pattern in anchors(line):
-            if pattern.search(evidence, 0, split):
+            if pattern.search(before):
                 continue
-            hit = pattern.search(evidence, split)
+            hit = pattern.search(later)
             if hit:
                 report.used_lines += 1
                 report.used_bytes += size
                 report.used_chars += chars
-                report.matches.append((kind, hit.group(0)))
+                report.matches.append((kind, sanitize_match(kind, hit.group(0))))
                 break
+
+
+def count_rerequests(text: str, before: str, later_rerequest: str) -> int:
+    if not later_rerequest:
+        return 0
+    for line in text.split("\n"):
+        for _kind, pattern in anchors(line):
+            if pattern.search(before):
+                continue
+            if pattern.search(later_rerequest):
+                return 1
+    return 0
+
+
+def sanitize_match(kind: str, matched: str) -> str:
+    """Keep path/symbol keys; never keep quoted source lines."""
+    if kind == "quote":
+        return f"quote:{len(matched)}c"
+    return matched
 
 
 # ------------------------------------------------------- tracedecay access --
@@ -412,6 +449,7 @@ def aggregate(reports: list[CallReport]) -> list[dict]:
             row["error_calls"] += 1
             continue
         row["calls_zero_used"] += report.used_lines == 0
+        row["rerequest_calls"] += report.rerequest_calls
         for key in ("total_bytes", "used_bytes", "total_chars", "used_chars", "lines", "used_lines"):
             row[key] += getattr(report, key)
     out = []
@@ -425,14 +463,33 @@ def aggregate(reports: list[CallReport]) -> list[dict]:
     return out
 
 
+def print_sanitized_examples(reports: list[CallReport], limit: int) -> None:
+    """Print unused then used spot-checks. Path/symbol keys only; no source quotes."""
+    by_tool: dict[str, list[CallReport]] = defaultdict(list)
+    for report in reports:
+        by_tool[report.tool].append(report)
+    for tool in sorted(by_tool):
+        unused = [row for row in by_tool[tool] if row.used_lines == 0 and not row.is_error][:limit]
+        used = [row for row in by_tool[tool] if row.used_lines > 0][:limit]
+        for state, rows in (("ignored", unused), ("used", used)):
+            for report in rows:
+                print(
+                    f"[{state}] {report.tool} session={report.session} "
+                    f"used_lines={report.used_lines}/{report.lines} "
+                    f"bytes={report.used_bytes}/{report.total_bytes} "
+                    f"rerequests={report.rerequest_calls} matches={report.matches[:8]}",
+                    file=sys.stderr,
+                )
+
+
 def percent(part: int, whole: int) -> str:
     return f"{100 * part / whole:.1f}" if whole else "-"
 
 
 def render(rows: list[dict], coverage: dict) -> str:
     lines = [
-        "| tool | sessions | calls | errors | calls 0 used | bytes | used bytes | unused bytes | unused % | tokens | used tokens | unused tokens % |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| tool | sessions | calls | errors | calls 0 used | rerequests | bytes | used bytes | unused bytes | unused % | tokens | used tokens | unused tokens % |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     total = Counter()
     for row in rows:
@@ -441,7 +498,7 @@ def render(rows: list[dict], coverage: dict) -> str:
         unused = row.get("total_bytes", 0) - row.get("used_bytes", 0)
         lines.append(
             f"| {row['tool']} | {row['sessions']} | {row.get('calls', 0)} | {row.get('error_calls', 0)} "
-            f"| {row.get('calls_zero_used', 0)} | {row.get('total_bytes', 0)} | {row.get('used_bytes', 0)} | {unused} "
+            f"| {row.get('calls_zero_used', 0)} | {row.get('rerequest_calls', 0)} | {row.get('total_bytes', 0)} | {row.get('used_bytes', 0)} | {unused} "
             f"| {percent(unused, row.get('total_bytes', 0))} | {row.get('total_tokens', 0)} | {row.get('used_tokens', 0)} "
             f"| {percent(row.get('total_tokens', 0) - row.get('used_tokens', 0), row.get('total_tokens', 0))} |"
         )
@@ -463,7 +520,7 @@ def main() -> int:
     parser.add_argument("--storage-scope", default="project", choices=("project", "user"))
     parser.add_argument("--max-sessions", type=int, default=0, help="0 = no limit")
     parser.add_argument("--json", type=Path, help="write aggregate rows and coverage as JSON")
-    parser.add_argument("--examples", type=int, default=0, help="print N scored calls per tool to stderr (local spot checks; contains transcript excerpts)")
+    parser.add_argument("--examples", type=int, default=0, help="print N sanitized scored calls per tool (path/symbol keys only; no source quotes)")
     args = parser.parse_args()
 
     client = TraceDecay(args.binary, args.project)
@@ -517,15 +574,7 @@ def main() -> int:
     if args.json:
         args.json.write_text(json.dumps({"rows": rows, "coverage": summary}, indent=2, sort_keys=True) + "\n")
     if args.examples:
-        shown: Counter = Counter()
-        for report in reports:
-            if shown[report.tool] < args.examples:
-                shown[report.tool] += 1
-                print(
-                    f"{report.tool} session={report.session} lines={report.used_lines}/{report.lines} "
-                    f"bytes={report.used_bytes}/{report.total_bytes} error={report.is_error} matches={report.matches[:8]}",
-                    file=sys.stderr,
-                )
+        print_sanitized_examples(reports, args.examples)
     return 0
 
 

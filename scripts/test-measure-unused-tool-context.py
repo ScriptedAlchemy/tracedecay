@@ -87,6 +87,19 @@ class MatchingRules(unittest.TestCase):
         report = score(Call("e1", "Edit", json.dumps({"old_string": "    let total = compute_total(items);", "new_string": "x"})), result=result)
         self.assertEqual(report.used_lines, 1)
 
+    def test_same_tool_rerequest_is_not_use(self) -> None:
+        events = [
+            Call("c1", SEARCH, measure.argument_values({"query": "config loader"})),
+            Result("c1", RESULT),
+            Call("c2", SEARCH, measure.argument_values({"query": "crates/config/src/loader.rs"})),
+            Result("c2", "no later hit"),
+        ]
+        reports, unpaired = measure.analyze(events, "s")
+        self.assertEqual(unpaired, 0)
+        first, second = reports
+        self.assertEqual((first.used_lines, first.rerequest_calls), (0, 1))
+        self.assertEqual(second.rerequest_calls, 0)
+
     def test_qualified_symbol_matches_on_its_final_segment(self) -> None:
         report = score(Text("Rename load_settings."), result="store::config::load_settings")
         self.assertEqual(report.matches, [("symbol", "load_settings")])

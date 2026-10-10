@@ -23,9 +23,9 @@ scripts/measure-unused-tool-context.py --branch master --providers claude,kimi -
 scripts/measure-unused-tool-context.py --session kimi:SESSION_ID --examples 3
 ```
 
-The table goes to stdout and progress to stderr. `--examples` prints matched
-anchors from the transcript to stderr. Use it for local spot checks only. Do
-not paste its output into issues or pull requests.
+The table goes to stdout and progress to stderr. `--examples N` prints up to N
+ignored and N used calls per tool with path/symbol keys only (quoted source
+lines are reduced to `quote:<chars>c`). Those sanitized rows are safe to cite.
 
 ## Columns
 
@@ -35,6 +35,7 @@ not paste its output into issues or pull requests.
 | `calls` | Calls paired with a stored result, including error results |
 | `errors` | Calls whose result is an error (`isError`); they add no bytes |
 | `calls 0 used` | Non-error calls where no result line was used |
+| `rerequests` | Later same-tool calls that asked for an already-returned path/symbol/quote. Not counted as use. Re-request-after-cut is null until #3373 lands. |
 | `bytes` | UTF-8 bytes of the result text after removing the MCP envelope |
 | `used bytes` / `unused bytes` | Bytes of used lines / all other lines |
 | `unused %` | `unused bytes / bytes` |
@@ -72,6 +73,9 @@ The rules are conservative: a line counts as used only on direct evidence.
 4. Novelty: an anchor that already occurs in agent-authored content before the
    result arrived, including the call's own arguments, is dropped. Echoing the
    query back never counts as use.
+5. Re-request: a later call of the same `tracedecay_*` tool whose arguments
+   share a novelty-filtered anchor is a `rerequest`, not use. Re-request after
+   a cut is not scored until #3373 exists; treat that count as null.
 
 These rules undercount use. An agent that acts on a fact without naming a
 path, symbol, or line (for example "no callers, so it is safe") is scored as
@@ -95,6 +99,7 @@ python3 scripts/test-measure-unused-tool-context.py
 
 The tests score synthetic transcripts and pin each rule: a read of a returned
 path is used, an unreferenced result is unused, query echoes and earlier
-mentions are not use, later tool output is not use, JSON keys and partial
-words do not match, parallel results in one row keep their own content, and
-error results add no bytes.
+mentions are not use, later tool output is not use, a later same-tool call
+that repeats a returned path is a rerequest rather than use, JSON keys and
+partial words do not match, parallel results in one row keep their own
+content, and error results add no bytes.
