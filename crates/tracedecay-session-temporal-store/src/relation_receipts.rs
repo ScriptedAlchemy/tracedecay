@@ -4,6 +4,7 @@ use tracedecay_domain::{SessionId, SessionProjectionGenerationV1};
 use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
+use tracing::Instrument as _;
 
 use super::query::{generation_i64, now_micros, storage, storage_message};
 use super::relations::{SessionRelationProjection, projection_watermark};
@@ -126,7 +127,6 @@ pub async fn apply_relation_projection(
 ) -> SessionStoreResult<GraphWatermark> {
     let applied = write_relation_projection(database, projection, cancellation).await?;
     let transaction = {
-        use tracing::Instrument as _;
         {
             database
                 .begin_write_transaction()
@@ -137,7 +137,6 @@ pub async fn apply_relation_projection(
     };
     acknowledge_relation_receipt(&transaction, projection).await?;
     {
-        use tracing::Instrument as _;
         {
             transaction
                 .commit()

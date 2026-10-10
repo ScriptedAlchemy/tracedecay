@@ -4,6 +4,7 @@ use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
 use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_temporal_query::execution::TemporalPortError;
+use tracing::Instrument as _;
 
 use super::projection::{base_source_frontier, canonical_parent_message_resolver};
 use super::query::{ACTIVATE_OPERATION, now_micros, storage, storage_message};
@@ -52,7 +53,6 @@ pub(super) async fn rebuild_candidate_session_relations(
 
     checkpoint_relation_rebuild_control(control)?;
     let receipt = {
-        use tracing::Instrument as _;
         {
             database
                 .begin_write_transaction()
@@ -63,7 +63,6 @@ pub(super) async fn rebuild_candidate_session_relations(
     };
     record_relation_receipt(&receipt, &reconstructed, now_micros(operation)?.0).await?;
     {
-        use tracing::Instrument as _;
         {
             receipt
                 .commit()

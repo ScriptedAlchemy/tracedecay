@@ -8,6 +8,7 @@ use tracedecay_domain::{
 use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
+use tracing::Instrument as _;
 
 use super::operations::CanonicalPublicationManifest;
 use super::query::{generation_i64, storage, storage_message};
@@ -312,7 +313,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             return Ok(outcomes);
         }
         let transaction = {
-            use tracing::Instrument as _;
             self.begin_write_transaction()
                 .instrument(tracing::trace_span!("session_temporal.txn.begin"))
                 .await
@@ -326,7 +326,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         // transaction-critical: when SAVEPOINT or RELEASE/ROLLBACK TO fails,
         // the whole transaction rolls back rather than letting any partially
         // mutated acknowledgement reach the shared commit.
-        use tracing::Instrument as _;
         for index in acknowledge {
             if let Err(error) = transaction
                 .execute_batch("SAVEPOINT relation_projection_ack")
@@ -362,7 +361,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             }
         }
         {
-            use tracing::Instrument as _;
             transaction
                 .commit()
                 .instrument(tracing::trace_span!("session_temporal.txn.commit"))

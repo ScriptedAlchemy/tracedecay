@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
+use futures_util::{StreamExt as _, TryStreamExt as _};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_temporal_query::execution::ExecutionControl;
 
@@ -186,7 +187,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> SessionTemporalStore<'a, D> {
             // number of them concurrently so the caller-side statement
             // dispatch of one session overlaps the writer-lane work of
             // another. The lane itself still serializes every transaction.
-            use futures_util::{StreamExt as _, TryStreamExt as _};
+
             futures_util::stream::iter(matched)
                 .map(Ok::<_, SessionStoreError>)
                 .try_for_each_concurrent(8, |request| async move {
