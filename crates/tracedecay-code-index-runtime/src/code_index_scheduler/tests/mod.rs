@@ -1105,6 +1105,45 @@ async fn mounted_core_query_worktree_at(
     (registry, scope)
 }
 
+/// Mount a worktree and the core query authority from the text seat only.
+///
+/// Exact/lexical search and callers bind the sealed text artifact and the
+/// warm graph, not the seated decode. Tests that pin the decode-free
+/// serving set must not wait on [`wait_for_live_complete_generation`]: that
+/// wait is a complete-generation demand and would re-pin the third copy.
+async fn mounted_text_query_worktree_at(
+    registry: CodeIndexSchedulerRegistryV1,
+    root: &Path,
+    store_root: PathBuf,
+) -> (CodeIndexSchedulerRegistryV1, ResolvedScope) {
+    registry
+        .mount_worktree(test_project_id(), root, store_root)
+        .await
+        .expect("mount daemon-owned scheduler");
+    let text = wait_for_queryable_text_generation(&registry, root).await;
+    wait_for_settled_owner(&registry, root).await;
+    wait_for_worker_phase(
+        &registry,
+        root,
+        crate::code_index_scheduler::CodeIndexWorkerPhaseV1::Parked,
+    )
+    .await;
+    let snapshot = text.metadata().snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree id"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    let authority = query_authority(text.metadata().manifest().privacy_domain.clone());
+    registry
+        .mount_query_authority(root, &scope, authority)
+        .await
+        .expect("mount core query authority from the text seat");
+    (registry, scope)
+}
+
 /// Mount the core query authority for one exact scope against an
 /// already-mounted worktree. The authority slot is keyed by the scope digest,
 /// so remounting under a different reference is exactly what a daemon does when
@@ -1732,6 +1771,10 @@ async fn wait_for_live_complete_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
 ) -> super::LatestCompleteCodeIndexV1 {
+    // A parked worker may have already given the seat back. Demand it
+    // without opening git so this wait cannot starve on an empty slot,
+    // and so park will not drop the seat while the test still holds it.
+    registry.request_complete_generation(path).await;
     wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || {
         registry.latest_complete_serving_for_test(path)
     })

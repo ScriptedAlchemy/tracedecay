@@ -892,6 +892,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             &worker_phase_signal,
                             super::CodeIndexWorkerPhaseV1::Parked,
                         );
+                        worker_residency.release_decode_when_parked(&worker_resident_owners);
                     }
                     tracing::Instrument::instrument(
                         notified,

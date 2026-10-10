@@ -3,12 +3,16 @@
 //!
 //! The decoded generation a worktree serves was held until the daemon exited:
 //! the first read that needed the whole generation set a latch that nothing
-//! cleared. Here that residency is a lease renewed by those reads. Once it
-//! lapses, or under pressure, the inventory releases the decode and the graph
-//! engine, and the worktree returns to the state a restart leaves it in:
-//! exact and lexical reads keep serving from the text artifact, graph reads
-//! answer warming while the engine reopens from the durable graph, and the
-//! next read that needs the whole generation re-decodes it.
+//! cleared. Here that residency is a lease renewed by those reads. The worker
+//! also drops the seated decode when it parks after a publish: exact, lexical,
+//! and callers already serve from the sealed text artifact and the warm
+//! catalog/engine, so keeping the whole generation was a third copy of the
+//! same index (#3328). Once the lease lapses, or under pressure, the inventory
+//! releases the decode and the graph engine, and the worktree returns to the
+//! state a restart leaves it in: exact and lexical reads keep serving from
+//! the text artifact, graph reads answer warming while the engine reopens
+//! from the durable graph, and the next read that needs the whole generation
+//! re-decodes it.
 //!
 //! Reads that only report on the seat (the status census, freshness) do not
 //! renew the lease, and a refresh of the worktree refused for memory takes
@@ -134,6 +138,65 @@ impl WorktreeResidencyV1 {
         if released > 0 {
             owners.note_headroom();
         }
+    }
+
+    /// Drop the seated decode once the worker parks.
+    ///
+    /// Exact, lexical, and callers already serve from the sealed text
+    /// artifact and the warm catalog/engine. The seated
+    /// [`CodeIndexPublishedGenerationV1`] is a third copy of that
+    /// generation. Keep it only when a complete read has demanded the seat
+    /// or a reconcile is still running. Do not clear
+    /// `complete_generation_requested`: a demand that arrives during the
+    /// take must still wake a successor pass to re-decode.
+    pub(super) fn release_decode_when_parked(self: &Arc<Self>, owners: &ResidentOwnersV1) {
+        if self.busy() || self.complete_generation_requested.load(Ordering::Acquire) {
+            return;
+        }
+        if self.serving_text().is_none() {
+            return;
+        }
+        let seated = {
+            let mut slot = self
+                .serving_generation
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            if self.complete_generation_requested.load(Ordering::Acquire) {
+                return;
+            }
+            slot.take()
+        };
+        if seated.is_some() {
+            self.serving_generation_epoch.fetch_add(1, Ordering::AcqRel);
+            self.serving_generation_changed.send_replace(());
+        }
+        let serving = HeldDecodesV1::release(
+            seated
+                .map(|latest| latest.generation_handle())
+                .into_iter()
+                .chain(self.publication.release_decoded_active())
+                .collect(),
+        );
+        let superseded = HeldDecodesV1::release(self.publication.release_superseded_decodes());
+        let released = [serving, superseded]
+            .into_iter()
+            .filter_map(|release| match release {
+                ResidentOwnerReleaseV1::Released { bytes } => Some(bytes),
+                ResidentOwnerReleaseV1::Busy | ResidentOwnerReleaseV1::Empty => None,
+            })
+            .collect::<Vec<_>>();
+        if released.is_empty() {
+            return;
+        }
+        owners.note_headroom();
+        tracing::info!(
+            event = "code_index_serving_decode_released_on_park",
+            bytes = released
+                .iter()
+                .map(|bytes| bytes.measured().unwrap_or(0))
+                .sum::<u64>(),
+            "a parked worktree gave back its seated decode; text and graph keep serving"
+        );
     }
 
     /// Renew the lease: a read needed the whole decoded generation.

@@ -20,13 +20,32 @@ use super::super::{
 
 use super::{
     CodeIndexSchedulerRegistryV1, GitFixture, SERVING_SEAT_FAILURE_CEILING, core_search_request,
-    git, mounted_core_query_worktree_at, mounted_core_query_worktree_in, test_project_id,
-    wait_for_generation_change, wait_for_live_complete_generation,
-    wait_for_queryable_text_generation, wait_for_settled_owner, wait_for_worker_phase,
-    with_untouched_fillers,
+    git, mounted_core_query_worktree_at, mounted_core_query_worktree_in,
+    mounted_text_query_worktree_at, test_project_id, wait_for_generation_change,
+    wait_for_live_complete_generation, wait_for_queryable_text_generation, wait_for_settled_owner,
+    wait_for_worker_phase, with_untouched_fillers,
 };
 
 const IDLE_WINDOW: Duration = Duration::from_mins(10);
+
+fn decoded_kinds(report: &ResidentOwnersReportV1) -> Vec<ResidentOwnerKindV1> {
+    report
+        .owners
+        .iter()
+        .filter(|row| row.kind == ResidentOwnerKindV1::DecodedGeneration)
+        .map(|row| row.kind)
+        .collect()
+}
+
+fn search_anchors(search: &super::super::query_runtime::ExecutedQuerySearchV1) -> Vec<String> {
+    search
+        .authorized
+        .fallback
+        .ordered_candidates
+        .iter()
+        .map(|ranked| ranked.candidate.anchor_id.as_str().to_owned())
+        .collect()
+}
 
 fn rows(report: &ResidentOwnersReportV1) -> Vec<(ResidentOwnerKindV1, String, bool)> {
     report
@@ -38,6 +57,111 @@ fn rows(report: &ResidentOwnersReportV1) -> Vec<(ResidentOwnerKindV1, String, bo
                 .map(|holder| (row.kind, holder.holding.as_str().to_owned(), row.protected))
         })
         .collect()
+}
+
+/// Issue #3328: after the worker parks, the seated decode is a third copy of
+/// the generation the text artifact and catalog already serve. Drop it
+/// without waiting out the idle window; search must keep the same answers
+/// and must not re-pin the decode.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_worktree_releases_its_decode_and_search_still_answers() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn park_release_target() -> u32 { 7 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, scope) = mounted_text_query_worktree_at(
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
+        fixture.path(),
+        store.path().to_path_buf(),
+    )
+    .await;
+
+    let parked = owners.report(Instant::now());
+    assert_eq!(
+        decoded_kinds(&parked),
+        [],
+        "a parked worktree must not keep a seated decode: {parked:?}"
+    );
+
+    let without_decode = registry
+        .execute_query_search(&scope, core_search_request("park_release_target"))
+        .await
+        .expect("search serves from the text seat after the decode is released");
+    assert!(!without_decode.served_stale);
+    let anchors = search_anchors(&without_decode);
+    assert!(
+        !anchors.is_empty(),
+        "search must still rank the parked generation: {without_decode:?}"
+    );
+    assert_eq!(
+        decoded_kinds(&owners.report(Instant::now())),
+        [],
+        "search must not re-pin the seated decode"
+    );
+
+    assert!(
+        registry.request_complete_generation(fixture.path()).await,
+        "complete-generation demand reaches the mounted worktree"
+    );
+    let _seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let with_decode = registry
+        .execute_query_search(&scope, core_search_request("park_release_target"))
+        .await
+        .expect("search still answers after a demanded decode");
+    assert_eq!(search_anchors(&with_decode), anchors);
+
+    registry.shutdown().await;
+}
+
+/// Eight enrolled worktrees is the daemon project-server cap. After they
+/// park, none of them may keep a whole decoded generation just because
+/// enrollment seated one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eight_parked_worktrees_keep_no_decoded_generations() {
+    let fixtures = (0..8)
+        .map(|ordinal| {
+            let source = format!("pub fn symbol_{ordinal}() -> u32 {{ {ordinal} }}\n");
+            GitFixture::new(&[("src/lib.rs", source.as_str())])
+        })
+        .collect::<Vec<_>>();
+    let stores = (0..8)
+        .map(|_| TempDir::new().expect("store root"))
+        .collect::<Vec<_>>();
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let mut registry =
+        CodeIndexSchedulerRegistryV1::new(8).with_resident_owners(Arc::clone(&owners));
+    let mut scopes = Vec::new();
+    for (fixture, store) in fixtures.iter().zip(&stores) {
+        let (next, scope) =
+            mounted_text_query_worktree_at(registry, fixture.path(), store.path().to_path_buf())
+                .await;
+        registry = next;
+        scopes.push(scope);
+    }
+
+    assert_eq!(
+        decoded_kinds(&owners.report(Instant::now())),
+        [],
+        "eight parked worktrees must not retain eight seated decodes"
+    );
+
+    for (ordinal, (fixture, scope)) in fixtures.iter().zip(&scopes).enumerate() {
+        let found = registry
+            .execute_query_search(scope, core_search_request(&format!("symbol_{ordinal}")))
+            .await
+            .expect("each parked worktree still answers search");
+        assert!(!found.served_stale, "{}", fixture.path().display());
+        assert!(
+            !search_anchors(&found).is_empty(),
+            "symbol_{ordinal} must remain searchable after park"
+        );
+    }
+    assert_eq!(
+        decoded_kinds(&owners.report(Instant::now())),
+        [],
+        "search across the eight worktrees must not re-pin their decodes"
+    );
+
+    registry.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -53,16 +177,23 @@ async fn an_idle_worktree_gives_back_its_decode_and_search_still_answers_fresh()
     .await;
     let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
     assert!(text.query_owners_are_ready());
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+    // Park drops the publish-time seat. A complete read is what renews it.
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let generation = seated
+        .generation()
+        .manifest()
+        .generation_id
+        .as_str()
+        .to_owned();
     let fresh = registry
         .execute_query_search(&scope, core_search_request("main"))
         .await
         .expect("the seated generation answers");
     assert!(!fresh.served_stale);
-    let generation = fresh.generation.as_str().to_owned();
-    // Attribution can hold the decode while awaiting admission after the
-    // source pass settles. Wait for the worker to release that last handle.
-    wait_for_settled_owner(&registry, fixture.path()).await;
-    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+    assert_eq!(fresh.generation.as_str(), generation);
 
     let used = owners.report(Instant::now());
     assert_eq!(
@@ -244,6 +375,8 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
         .execute_query_search(&primary, core_search_request("transform_3"))
         .await
         .expect("the primary worktree answers");
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    wait_for_live_complete_generation(&registry, fixture.path()).await;
     let alone = owners.report(Instant::now());
 
     let (registry, secondary) =
@@ -252,6 +385,8 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
         .execute_query_search(&secondary, core_search_request("transform_3"))
         .await
         .expect("the linked worktree answers");
+    assert!(registry.request_complete_generation(&linked).await);
+    wait_for_live_complete_generation(&registry, &linked).await;
     let both = owners.report(Instant::now());
 
     let decoded = |report: &ResidentOwnersReportV1| {
