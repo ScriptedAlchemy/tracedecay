@@ -66,16 +66,12 @@ fn inspect_database(
             Ok(metadata) if metadata.is_file() => {
                 let modified = metadata
                     .modified()
-                    .map_err(|error| scan_error("stat OpenCode database", &member, error))?
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|error| {
-                        scan_error(
-                            "stat OpenCode database",
-                            &member,
-                            std::io::Error::other(error),
-                        )
-                    })?;
-                member_state.push((modified.as_nanos() as u64, metadata.len()));
+                    .map_err(|error| scan_error("stat OpenCode database", &member, error))?;
+                let nanos = match modified.duration_since(std::time::UNIX_EPOCH) {
+                    Ok(since) => since.as_nanos() as i64,
+                    Err(earlier) => -(earlier.duration().as_nanos() as i64),
+                };
+                member_state.push((nanos, metadata.len()));
             }
             Ok(_) if index == 0 => {
                 return Ok((

@@ -1244,6 +1244,30 @@ async fn retained_read_snapshot_keeps_reference_scope_and_payload_together() {
 }
 
 #[tokio::test]
+async fn pre_epoch_modified_times_do_not_block_snapshot_open() {
+    use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
+    use crate::runtime::hosts::opencode_snapshot::{OpenedOpenCodeDatabase, open_database};
+    let (_temp, _project, database) = fixture();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&database)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH - std::time::Duration::from_secs(42))
+        .unwrap();
+    let budget = HostScanBudget::new(
+        1024 * 1024,
+        100,
+        std::time::Instant::now() + HOST_SCAN_WINDOW,
+        ObservationCancellation::default(),
+    );
+    let (opened, _budget) = open_database(database, budget).await.unwrap();
+    assert!(
+        matches!(opened, OpenedOpenCodeDatabase::Ready(_)),
+        "a member timestamped before the Unix epoch must still open"
+    );
+}
+
+#[tokio::test]
 async fn page_snapshot_refuses_a_replaced_database_identity() {
     use super::{
         OpenCodePageCursor, OpenCodeScanKind, OpenCodeScanSource, OpenCodeSourceScope,
