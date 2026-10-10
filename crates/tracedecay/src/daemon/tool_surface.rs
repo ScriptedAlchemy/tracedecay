@@ -109,10 +109,6 @@ pub(super) struct ToolSurface {
 }
 
 impl ToolSurface {
-    pub(super) fn new() -> Self {
-        Self::with_advertisement(ToolAdvertisement::Search)
-    }
-
     pub(super) fn with_advertisement(advertisement: ToolAdvertisement) -> Self {
         Self {
             advertisement,
@@ -506,7 +502,7 @@ mod tests {
     #[test]
     fn search_loads_matches_into_the_session_list_and_announces_once() {
         let list = request(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
-        let mut surface = ToolSurface::new();
+        let mut surface = ToolSurface::with_advertisement(ToolAdvertisement::Search);
         let mut responses = listing();
         surface.rewrite(Some(&list), &mut responses);
         assert_eq!(listed(&responses), ["tracedecay_grep", TOOL_SEARCH_NAME]);
@@ -540,7 +536,7 @@ mod tests {
             "method": "tools/call",
             "params": {"name": TOOL_SEARCH_NAME, "arguments": {"query": "impact"}}
         }));
-        let surface = ToolSurface::new();
+        let surface = ToolSurface::with_advertisement(ToolAdvertisement::Search);
         assert_eq!(
             surface.search_request(Some(&call)),
             Some((json!(3), "impact".to_owned()))
@@ -553,7 +549,7 @@ mod tests {
 
     #[test]
     fn empty_query_lists_unloaded_tools_without_loading_them() {
-        let mut surface = ToolSurface::new();
+        let mut surface = ToolSurface::with_advertisement(ToolAdvertisement::Search);
         let answer = surface.answer_search(&json!(3), "", &listing());
         assert_eq!(answer.len(), 1, "{answer:?}");
         assert!(answer[0].contains("tracedecay_git_diff"), "{answer:?}");
@@ -563,7 +559,7 @@ mod tests {
 
     #[test]
     fn a_failed_catalog_read_is_a_tool_error() {
-        let mut surface = ToolSurface::new();
+        let mut surface = ToolSurface::with_advertisement(ToolAdvertisement::Search);
         let failure = format!(
             "{}\n",
             json!({"jsonrpc": "2.0", "id": 2, "error": {"code": -32603, "message": "boom"}})
