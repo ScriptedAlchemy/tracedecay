@@ -346,12 +346,11 @@ fn digest_rows_parallel(
                 let Some(receiver) = pending.pop_front() else {
                     return Ok(());
                 };
-                let encoded = recv_while_working(&receiver, check)?
-                    .unwrap_or_else(|_| {
-                        Err(GraphDbError::unavailable(
-                            "recovered generation verification worker panicked",
-                        ))
-                    })?;
+                let encoded = recv_while_working(&receiver, check)?.unwrap_or_else(|_| {
+                    Err(GraphDbError::unavailable(
+                        "recovered generation verification worker panicked",
+                    ))
+                })?;
                 let mut start = 0usize;
                 for &end in &encoded.frame_ends {
                     check()?;
