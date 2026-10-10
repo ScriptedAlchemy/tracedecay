@@ -35,7 +35,6 @@ pub struct SessionTemporalStore<'a, D: SessionTemporalRegisteredDb> {
     db: &'a D,
 }
 
-
 #[derive(Clone, Debug)]
 struct ExecutionControlGraphCancellation(ExecutionControl);
 

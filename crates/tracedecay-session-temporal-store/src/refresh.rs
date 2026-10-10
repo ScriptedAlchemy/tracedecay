@@ -494,11 +494,68 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                     .await
                     .map_err(|error| storage(BEGIN_REFRESH, error))?;
             } else {
-            // The begin deletes the base rows a folded first batch would
-            // project from, so planning here can only produce a batch the
-            // committing replay refuses. Commit the begin instead; durable
-            // recovery picks the operation up this pass and projects the
-            // post-reset state.
+                // The begin deletes the base rows a folded first batch would
+                // project from, so planning here can only produce a batch the
+                // committing replay refuses. Commit the begin instead; durable
+                // recovery picks the operation up this pass and projects the
+                // post-reset state.
+                let outcome = begin_session_refresh_in_transaction(
+                    &transaction,
+                    request,
+                    now_micros(BEGIN_REFRESH)?,
+                )
+                .await;
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        transaction
+                            .rollback()
+                            .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
+                            .await
+                            .map_err(|rollback| storage(BEGIN_REFRESH, rollback))?;
+                        return Err(error);
+                    }
+                };
+                transaction
+                    .commit()
+                    .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                    .await
+                    .map_err(|error| storage(BEGIN_REFRESH, error))?;
+                return Ok(match outcome {
+                    SessionRefreshBeginTxnOutcome::Started { .. } => {
+                        SessionRefreshBeginPlanV1::Begun
+                    }
+                    SessionRefreshBeginTxnOutcome::Joined { .. } => {
+                        SessionRefreshBeginPlanV1::Joined
+                    }
+                });
+            }
+        }
+        // The begin mints a random cursor key when no active key exists, and
+        // a rolled-back mint leaves the commit replay reading a different key.
+        // Provisioning the shared key first makes both replays deterministic;
+        // with an active key already committed this transaction writes
+        // nothing and its commit appends no WAL frames.
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        ensure_active_session_cursor_key_in_transaction(&transaction).await?;
+        transaction
+            .commit()
+            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+            .await
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        // A reset can arrive between the snapshot probe and this transaction;
+        // recheck inside the write transaction so a concurrent reset still
+        // commits begin alone instead of being rolled back by the plan.
+        if session_reset_is_pending(&transaction, &session_id).await? {
             let outcome = begin_session_refresh_in_transaction(
                 &transaction,
                 request,
@@ -525,29 +582,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 SessionRefreshBeginTxnOutcome::Started { .. } => SessionRefreshBeginPlanV1::Begun,
                 SessionRefreshBeginTxnOutcome::Joined { .. } => SessionRefreshBeginPlanV1::Joined,
             });
-            }
         }
-        // The begin mints a random cursor key when no active key exists, and
-        // a rolled-back mint leaves the commit replay reading a different key.
-        // Provisioning the shared key first makes both replays deterministic;
-        // with an active key already committed this transaction writes
-        // nothing and its commit appends no WAL frames.
-        let transaction = self
-            .begin_write_transaction()
-            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-            .await
-            .map_err(|error| storage(BEGIN_REFRESH, error))?;
-        ensure_active_session_cursor_key_in_transaction(&transaction).await?;
-        transaction
-            .commit()
-            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
-            .await
-            .map_err(|error| storage(BEGIN_REFRESH, error))?;
-        let transaction = self
-            .begin_write_transaction()
-            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-            .await
-            .map_err(|error| storage(BEGIN_REFRESH, error))?;
         let outcome =
             begin_session_refresh_in_transaction(&transaction, request, now_micros(BEGIN_REFRESH)?)
                 .await;

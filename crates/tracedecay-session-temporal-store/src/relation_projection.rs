@@ -274,10 +274,12 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
     /// Applies each pre-validated projection through one shared receipt-check
     /// snapshot and one acknowledgement transaction, returning every item's
-    /// own outcome so callers keep per-candidate failure semantics. A failed
-    /// write or acknowledgement leaves that receipt pending for the next
-    /// recovery pass exactly as the serial apply does.
-    async fn apply_session_relation_projection_items(
+    /// own outcome so callers keep per-candidate failure semantics. Each
+    /// acknowledgement runs under its own savepoint: a failed write or
+    /// acknowledgement rolls back that item's partial mutation and leaves its
+    /// receipt pending for the next recovery pass exactly as the serial apply
+    /// does, without poisoning the rest of the shared commit.
+    pub async fn apply_session_relation_projection_items(
         &self,
         projections: &[SessionRelationProjection],
         cancellation: Arc<dyn GraphCancellation>,
@@ -316,14 +318,35 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 .await
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
         };
+        // Each acknowledgement runs inside its own savepoint so a failed
+        // acknowledge rolls back only that item's partial mutation; the
+        // per-session apply used to roll its whole transaction back, and a
+        // shared commit must not turn that rollback into a committed
+        // applied-without-journal receipt.
         for index in acknowledge {
-            if let Err(error) =
-                super::relation_receipts::acknowledge_relation_receipt(
+            let outcome = async {
+                transaction
+                    .execute_batch("SAVEPOINT relation_projection_ack")
+                    .await
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+                let result = super::relation_receipts::acknowledge_relation_receipt(
                     &transaction,
                     &projections[index],
                 )
-                .await
-            {
+                .await;
+                let savepoint = if result.is_ok() {
+                    "RELEASE relation_projection_ack"
+                } else {
+                    "ROLLBACK TO relation_projection_ack; RELEASE relation_projection_ack"
+                };
+                transaction
+                    .execute_batch(savepoint)
+                    .await
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+                result
+            }
+            .await;
+            if let Err(error) = outcome {
                 outcomes[index] = Err(error);
             }
         }
@@ -1915,3 +1938,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod store_regression_tests;
