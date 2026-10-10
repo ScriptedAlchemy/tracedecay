@@ -1303,6 +1303,37 @@ class Circle {\n\
     );
 }
 
+/// A class method's typed parameter is a Uses site of that type. Missing it
+/// is why callers of a type-imported class stayed empty.
+#[test]
+fn test_ts_typed_parameter_is_a_uses_site() {
+    let source = r#"
+import type { Compiler } from './Compiler';
+export default class JsonpTemplatePlugin {
+    apply(compiler: Compiler) {
+        compiler.run();
+    }
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("JsonpTemplatePlugin.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let uses: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| {
+            reference.reference_kind == EdgeKind::Uses && reference.reference_name == "Compiler"
+        })
+        .collect();
+    assert_eq!(
+        uses.len(),
+        1,
+        "apply(compiler: Compiler) must be a Uses ref: {:?}",
+        result.unresolved_refs
+    );
+}
+
 /// `new Foo()` is a call site of `Foo`. Missing it is why callers of a class
 /// stayed empty while the disk still had constructor invocations.
 #[test]

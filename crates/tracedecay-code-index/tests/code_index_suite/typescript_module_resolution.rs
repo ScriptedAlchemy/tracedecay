@@ -451,3 +451,66 @@ fn published_root_require_binds_src_constructor() {
         "new URLImportPlugin after require(\"../../webpack\") must bind: {callers:?}"
     );
 }
+
+/// Type-only imports still produce Uses from the methods that name the
+/// class. Callers of that class must list those methods.
+#[test]
+fn type_imported_class_has_usage_callers() {
+    let root = tempfile::tempdir().expect("type-import fixture");
+    std::fs::create_dir_all(root.path().join("src")).expect("src");
+    std::fs::write(
+        root.path().join("src/Compiler.ts"),
+        "export class Compiler {\n  run() {}\n}\n",
+    )
+    .expect("compiler source");
+    std::fs::write(
+        root.path().join("src/JsonpTemplatePlugin.ts"),
+        "import type { Compiler } from './Compiler';\n\
+         export default class JsonpTemplatePlugin {\n\
+           apply(compiler: Compiler) {\n\
+             compiler.run();\n\
+           }\n\
+         }\n",
+    )
+    .expect("plugin source");
+
+    let generation =
+        crate::cross_file_import_calls::publish_fixture_tree(root.path(), "type-import-compiler");
+    let target = symbol(&generation, "src/Compiler.ts::Compiler");
+    let inbound = generation
+        .edges()
+        .iter()
+        .filter(|edge| edge.to_occurrence == target)
+        .map(|edge| format!("{:?} {:?}", edge.kind, edge.authority))
+        .collect::<Vec<_>>();
+    let names = generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.occurrence.clone(), symbol.qualified_name.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let graph = reader(&generation);
+    let walked = graph
+        .callers(
+            std::slice::from_ref(&target),
+            &[
+                RelationEdgeKindV1::Calls,
+                RelationEdgeKindV1::Uses,
+                RelationEdgeKindV1::TypeOf,
+                RelationEdgeKindV1::Annotates,
+            ],
+            10_000,
+            Arc::new(NeverCancelled),
+        )
+        .expect("incoming caller kinds")
+        .into_iter()
+        .flatten()
+        .filter_map(|edge| names.get(&edge.edge.from_occurrence).cloned())
+        .collect::<Vec<_>>();
+    assert!(
+        walked
+            .iter()
+            .any(|name| name.contains("JsonpTemplatePlugin") || name.contains("apply")),
+        "type-imported Compiler must walk apply through Uses: walked={walked:?} inbound={inbound:?}"
+    );
+}
