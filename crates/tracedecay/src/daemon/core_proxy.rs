@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant};
 
-use super::tool_surface::{ToolListScope, ToolSurface};
+use super::tool_surface::ToolSurface;
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
     PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, PROJECT_WARMING_RETRY_HINT,
@@ -86,7 +86,6 @@ pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
-    scope: ToolListScope,
 ) -> Result<()> {
     let mut transport = StdioTransport::new();
     proxy_transport_to_daemon_with_drain_bound(
@@ -95,7 +94,6 @@ pub async fn proxy_stdio_to_daemon(
         replay_line,
         &mut transport,
         None,
-        scope,
     )
     .await
 }
@@ -106,10 +104,9 @@ pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
-    scope: ToolListScope,
 ) -> Result<()> {
     let mut transport = StdioTransport::new();
-    let mut surface = ToolSurface::new(scope);
+    let mut surface = ToolSurface::new();
     if let Some(line) = replay_line {
         proxy_one_request(socket_path, handshake, &line, &mut surface, &mut transport).await?;
     }
@@ -162,15 +159,8 @@ pub async fn proxy_transport_to_daemon(
     replay_line: Option<String>,
     transport: &mut impl McpDuplexTransport,
 ) -> Result<()> {
-    proxy_transport_to_daemon_with_drain_bound(
-        socket_path,
-        handshake,
-        replay_line,
-        transport,
-        None,
-        ToolListScope::Core,
-    )
-    .await
+    proxy_transport_to_daemon_with_drain_bound(socket_path, handshake, replay_line, transport, None)
+        .await
 }
 
 /// `drain_bound` overrides the per-request bound derived by
@@ -183,7 +173,6 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
     replay_line: Option<String>,
     transport: &mut impl McpDuplexTransport,
     drain_bound: Option<Duration>,
-    scope: ToolListScope,
 ) -> Result<()> {
     let (mut reader, mut writer) = transport.split();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -218,7 +207,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
         &mut eof_rx,
         &mut writer,
         drain_bound,
-        ToolSurface::new(scope),
+        ToolSurface::new(),
     );
     let result = tokio::try_join!(read_host, proxy);
     drop(eof_tx);
@@ -736,24 +725,14 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
             .is_some_and(json_rpc_error_is_project_open_retryable)
 }
 
-/// Sends one host request through this session's tool surface: a tool search
-/// is answered here from the daemon's session catalog, a `tools/list` answer
-/// stubs pruned tools, and a stub `tools/call` hydrates the full schema.
+/// Sends one host request through this session's tool surface: a `tools/list`
+/// answer stubs pruned tools, and a stub `tools/call` hydrates the full schema.
 async fn send_host_request(
     surface: &mut ToolSurface,
     socket_path: &Path,
     handshake: &DaemonHandshake,
     request: &DaemonProxyRequest<'_>,
 ) -> Result<Vec<String>> {
-    if let Some((id, query)) = surface.search_request(request.parsed.as_ref()) {
-        let catalog_line =
-            serde_json::json!({ "jsonrpc": "2.0", "id": "tool-search", "method": "tools/list" })
-                .to_string();
-        let catalog = DaemonProxyRequest::new(&catalog_line);
-        let listing =
-            send_daemon_request_with_project_open_retry(socket_path, handshake, &catalog).await?;
-        return Ok(surface.answer_search(&id, &query, &listing));
-    }
     let mut responses =
         send_daemon_request_with_project_open_retry(socket_path, handshake, request).await?;
     surface.rewrite(request.parsed.as_ref(), &mut responses);

@@ -701,11 +701,11 @@ fn cli_tool_listing(fixture: &MountFixture) -> BTreeSet<String> {
 /// `tracedecay serve` is the stdio MCP transport hosts connect to; it proxies
 /// to the same live daemon, and its `tools/list` answer is the catalog-filtered
 /// discovery result. Driving it end to end is the only way to prove an MCP
-/// binding is discoverable rather than merely declared. `--all-tools` lists
-/// the full session catalog rather than the core set.
+/// binding is discoverable rather than merely declared. Stubs keep every
+/// catalog name on the list, so discoverability is the default handshake.
 fn mcp_tool_listing(fixture: &MountFixture) -> BTreeSet<String> {
     let mut child = isolated_command(&fixture.home)
-        .args(["serve", "--all-tools"])
+        .args(["serve"])
         .current_dir(&fixture.project)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -70,7 +70,6 @@ pub async fn run_serve(
     profile: &ProfileRoot,
     path_arg: Option<String>,
     timings: bool,
-    tool_list: tracedecay::daemon::ToolListScope,
 ) -> Result<()> {
     let original_cwd = std::env::current_dir().ok();
     let socket_path = tracedecay_daemon_control::default_socket_path(profile.data_dir())?;
@@ -81,7 +80,7 @@ pub async fn run_serve(
         ));
     }
     let handshake = proxy_serve_handshake(profile, path_arg, original_cwd.as_deref(), timings)?;
-    tracedecay::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, None, tool_list)
+    tracedecay::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, None)
         .await
         .map_err(|error| {
             tracedecay_daemon_control::with_unavailable_daemon_advice(profile, &socket_path, error)

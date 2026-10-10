@@ -6,9 +6,9 @@ description: Find the supported TraceDecay operation for a code-intelligence, me
 # Discovering TraceDecay
 
 Use live tool descriptions and `tracedecay tool <name> --help` for available
-operations and arguments. When the MCP tool list holds only a core set, call
-`tracedecay_tool_search` with keywords or a tool name to load the tool you
-need. This is capability discovery, not a prerequisite for ordinary reads,
+operations and arguments. Tools outside the core set are listed as stubs;
+call one by name to use it and receive its full schema on the next tools/list.
+This is capability discovery, not a prerequisite for ordinary reads,
 local edits, or clarification.
 
 Choose by the missing evidence: exploration locates code; tracing follows call

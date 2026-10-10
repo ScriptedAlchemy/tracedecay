@@ -476,11 +476,6 @@ pub enum Commands {
         /// Useful for profiling index work vs. JSON-RPC / stdio overhead.
         #[arg(long)]
         timings: bool,
-        /// List every tool in `tools/list` instead of the core set plus
-        /// `tracedecay_tool_search`. For hosts that defer tool schemas
-        /// themselves or pin agents to named tools.
-        #[arg(long)]
-        all_tools: bool,
     },
     /// Manage the long-running TraceDecay daemon used by MCP clients
     #[command(long_about = DAEMON_LONG_ABOUT, after_help = DAEMON_AFTER_HELP)]

@@ -431,7 +431,6 @@ pub(crate) mod session_runtime_tests;
 pub(crate) mod store_runtime_tests;
 
 mod tool_surface;
-pub use tool_surface::ToolListScope;
 mod wire_io;
 #[cfg(test)]
 mod work_evidence_retrieval_tests;

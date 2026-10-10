@@ -6,13 +6,12 @@
 //! uncallable from the model until the host re-lists. Following Parsec's
 //! prune (daseinlabs/parsec `stub_tool` / reactive unfreeze), the serve proxy
 //! keeps every catalog name on the list: [`CORE_TOOL_NAMES`] plus tools this
-//! session already called or searched keep their full schemas; the rest are
-//! stubs (name, first ~200 characters of the description, an accept-anything
-//! schema, and a note to call by name). Calling a stub hydrates its full
-//! schema and announces `notifications/tools/list_changed`. `tools/call` is
-//! never filtered. Each served list logs a SHA-256 of the sorted tool names
-//! so the session records which roster it saw. `serve --all-tools` skips
-//! stubbing.
+//! session already called keep their full schemas; the rest are stubs (name,
+//! first ~200 characters of the description, an accept-anything schema, and
+//! a note to call by name). Calling a stub hydrates its full schema and
+//! announces `notifications/tools/list_changed`. `tools/call` is never
+//! filtered. Each served list logs a SHA-256 of the sorted tool names so the
+//! session records which roster it saw.
 
 use std::collections::BTreeSet;
 
@@ -21,18 +20,7 @@ use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_mcp::JsonRpcRequest;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
-/// Which tools a serve session lists with full schemas.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ToolListScope {
-    /// [`CORE_TOOL_NAMES`] and hydrated tools keep full schemas; the rest
-    /// are stubs plus the tool search.
-    Core,
-    /// The daemon's full session catalog, for hosts that defer tool schemas
-    /// themselves or pin agents to named tools.
-    All,
-}
-
-/// The tools a `Core` session lists with full schemas before any call or search.
+/// The tools a session lists with full schemas before any call.
 ///
 /// Every `anthropic/alwaysLoad` tool plus every tool with at least 100
 /// recorded calls across local Claude Code and Codex transcripts (October
@@ -58,10 +46,6 @@ pub(super) const CORE_TOOL_NAMES: &[&str] = &[
     "tracedecay_test_map",
 ];
 
-/// The proxy-served tool that finds and hydrates tools outside the core set.
-pub(super) const TOOL_SEARCH_NAME: &str = "tracedecay_tool_search";
-/// Matches hydrated per search, so one broad query cannot re-inflate every schema.
-const MAX_LOADED_PER_SEARCH: usize = 8;
 const TOOL_LIST_CHANGED: &str = "notifications/tools/list_changed";
 /// Chars of the original description carried into a stub (char-safe cap).
 const STUB_DESC_CHARS: usize = 200;
@@ -72,56 +56,29 @@ pub(super) const STUB_NOTE: &str = "[This tool is available but its full schema 
      be provided from the next turn onward.]";
 const INSTRUCTIONS_NOTE: &str = "\n\nThis session lists a core tool set with full schemas. Other \
      catalog tools are stubs (name, a short description, and an accept-anything schema). Call a \
-     stub by name to use it; its complete schema is sent on the next tools/list. Call \
-     `tracedecay_tool_search` with keywords or a tool name to hydrate matching tools.";
+     stub by name to use it; its complete schema is sent on the next tools/list.";
 
 /// One host session's advertised tool set.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(super) struct ToolSurface {
-    scope: ToolListScope,
     loaded: BTreeSet<String>,
     catalog: BTreeSet<String>,
     last_roster_sha256: Option<String>,
 }
 
 impl ToolSurface {
-    pub(super) fn new(scope: ToolListScope) -> Self {
-        Self {
-            scope,
-            loaded: BTreeSet::new(),
-            catalog: BTreeSet::new(),
-            last_roster_sha256: None,
-        }
+    pub(super) fn new() -> Self {
+        Self::default()
     }
 
     fn advertises_full(&self, name: &str) -> bool {
         CORE_TOOL_NAMES.contains(&name) || self.loaded.contains(name)
     }
 
-    /// The id and query of a tool search this proxy answers itself.
-    pub(super) fn search_request(
-        &self,
-        request: Option<&JsonRpcRequest>,
-    ) -> Option<(Value, String)> {
-        let request = request.filter(|request| {
-            self.scope == ToolListScope::Core && request.method == "tools/call"
-        })?;
-        let params = request.params.as_ref()?;
-        if params.get("name").and_then(Value::as_str) != Some(TOOL_SEARCH_NAME) {
-            return None;
-        }
-        let query = params
-            .pointer("/arguments/query")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        Some((request.id.clone().unwrap_or(Value::Null), query))
-    }
-
-    /// Stub pruned tools on `tools/list`, and note the tool search in the
+    /// Stub pruned tools on `tools/list`, and note how to hydrate them in the
     /// `initialize` instructions.
     pub(super) fn rewrite(&mut self, request: Option<&JsonRpcRequest>, responses: &mut [String]) {
-        let Some(request) = request.filter(|_| self.scope == ToolListScope::Core) else {
+        let Some(request) = request else {
             return;
         };
         if request.id.is_none() || !matches!(request.method.as_str(), "tools/list" | "initialize") {
@@ -153,8 +110,6 @@ impl ToolSurface {
                         stubbed += 1;
                     }
                 }
-                tools.push(tool_search_definition());
-                full += 1;
                 let roster = roster_sha256(tools);
                 if self.last_roster_sha256.as_deref() != Some(&roster) {
                     log_daemon_event(
@@ -182,15 +137,13 @@ impl ToolSurface {
     /// Hydrates a stub the host just called so the next `tools/list` carries
     /// its full schema, and announces the change.
     pub(super) fn unfreeze_call(&mut self, request: Option<&JsonRpcRequest>) -> Option<String> {
-        let request = request.filter(|request| {
-            self.scope == ToolListScope::Core && request.method == "tools/call"
-        })?;
+        let request = request.filter(|request| request.method == "tools/call")?;
         let name = request
             .params
             .as_ref()
             .and_then(|params| params.get("name"))
             .and_then(Value::as_str)?;
-        if name == TOOL_SEARCH_NAME || self.advertises_full(name) {
+        if self.advertises_full(name) {
             return None;
         }
         if !self.catalog.is_empty() && !self.catalog.contains(name) {
@@ -199,103 +152,6 @@ impl ToolSurface {
         self.loaded
             .insert(name.to_owned())
             .then(|| list_changed_line())
-    }
-
-    /// Answers a tool search from the daemon's `tools/list` answer for this
-    /// session, hydrating the best matches into full schemas.
-    ///
-    /// Searching the session's own listing keeps the answer to tools this
-    /// session can call: a projectless session never hydrates project-bound tools.
-    pub(super) fn answer_search(
-        &mut self,
-        id: &Value,
-        query: &str,
-        listing: &[String],
-    ) -> Vec<String> {
-        let Some(tools) = listing
-            .iter()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .find_map(|message| {
-                message
-                    .pointer("/result/tools")
-                    .and_then(Value::as_array)
-                    .cloned()
-            })
-        else {
-            return vec![tool_result(
-                id,
-                &format!(
-                    "The TraceDecay tool catalog is unavailable: {}",
-                    listing.concat().trim()
-                ),
-                true,
-            )];
-        };
-        self.catalog = tools
-            .iter()
-            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
-            .collect();
-        let catalog = tools
-            .iter()
-            .filter_map(|tool| Some((tool["name"].as_str()?, tool["description"].as_str()?)))
-            .collect::<Vec<_>>();
-
-        let terms = query
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .filter(|term| term.len() >= 2)
-            .map(str::to_lowercase)
-            .collect::<Vec<_>>();
-        if terms.is_empty() {
-            let unlisted = catalog
-                .iter()
-                .map(|(name, _)| *name)
-                .filter(|name| !self.advertises_full(name))
-                .collect::<Vec<_>>();
-            let text = format!(
-                "{} more TraceDecay tools are stubs. Call {TOOL_SEARCH_NAME} with keywords \
-                 or an exact name to hydrate some:\n{}",
-                unlisted.len(),
-                unlisted.join(", ")
-            );
-            return vec![tool_result(id, &text, false)];
-        }
-
-        let mut matches = catalog
-            .iter()
-            .filter_map(|(name, description)| {
-                let score = search_score(name, description, &terms);
-                (score > 0).then_some((score, *name, *description))
-            })
-            .collect::<Vec<_>>();
-        matches.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(right.1)));
-        matches.truncate(MAX_LOADED_PER_SEARCH);
-        if matches.is_empty() {
-            let text = format!(
-                "No TraceDecay tool matches {query:?}. Call {TOOL_SEARCH_NAME} without a query \
-                 to list every stub."
-            );
-            return vec![tool_result(id, &text, false)];
-        }
-
-        let mut newly_loaded = false;
-        for (_, name, _) in &matches {
-            newly_loaded |= !self.advertises_full(name) && self.loaded.insert((*name).to_owned());
-        }
-        let listed = matches
-            .iter()
-            .map(|(_, name, description)| format!("- {name}: {}", summary(description)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let text = format!(
-            "Matching TraceDecay tools (now in tools/list with full schemas):\n{listed}\n\nIf \
-             your host does not refresh its tool list, call the tool by name or run \
-             `tracedecay tool <name> --help` from a shell."
-        );
-        let mut lines = vec![tool_result(id, &text, false)];
-        if newly_loaded {
-            lines.push(list_changed_line());
-        }
-        lines
     }
 }
 
@@ -309,72 +165,11 @@ pub(super) fn roster_sha256(tools: &[Value]) -> String {
     format!("sha256:{}", sha256_hex(names.join("\n").as_bytes()))
 }
 
-/// An exact name wins; otherwise a term in the name outweighs one in the prose.
-fn search_score(name: &str, description: &str, terms: &[String]) -> usize {
-    let short = name.strip_prefix("tracedecay_").unwrap_or(name);
-    if terms.len() == 1 && (terms[0] == name || terms[0] == short) {
-        return 1_000;
-    }
-    let description = description.to_lowercase();
-    terms
-        .iter()
-        .map(|term| {
-            let term = term.strip_prefix("tracedecay_").unwrap_or(term);
-            3 * usize::from(short.contains(term)) + usize::from(description.contains(term))
-        })
-        .sum()
-}
-
-/// The first sentence of a description, bounded for the search answer.
-fn summary(description: &str) -> String {
-    let sentence = description.split(". ").next().unwrap_or(description);
-    let mut summary = sentence.chars().take(200).collect::<String>();
-    if summary.len() < sentence.len() {
-        summary.push('…');
-    }
-    summary
-}
-
-fn tool_result(id: &Value, text: &str, is_error: bool) -> String {
-    let response = json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": {
-            "content": [{ "type": "text", "text": text }],
-            "isError": is_error,
-        },
-    });
-    format!("{response}\n")
-}
-
 fn list_changed_line() -> String {
     format!(
         "{}\n",
         json!({ "jsonrpc": "2.0", "method": TOOL_LIST_CHANGED })
     )
-}
-
-fn tool_search_definition() -> Value {
-    json!({
-        "name": TOOL_SEARCH_NAME,
-        "description": "Find and hydrate TraceDecay tools that are still stubs. The \
-            list starts with a core set (grep, search, context, source reads, callers, diff \
-            context, test mapping, files, session and fact recall); the rest are listed as \
-            stubs until called or searched. Pass keywords or an exact tool name as `query`: \
-            the best matches get their full schemas and are announced with \
-            notifications/tools/list_changed. Without a query, lists every stub.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Keywords (e.g. \"impact blast radius\") or an exact tool name."
-                }
-            },
-            "additionalProperties": false
-        },
-        "annotations": { "readOnlyHint": true, "title": "Find TraceDecay Tools" },
-    })
 }
 
 /// Name + truncated description + accept-anything schema, so the model can
@@ -421,10 +216,7 @@ mod tests {
     }
 
     fn listed(responses: &[String]) -> Vec<String> {
-        let message: Value = serde_json::from_str(&responses[0]).expect("json");
-        message["result"]["tools"]
-            .as_array()
-            .expect("tools")
+        tools_of(responses)
             .iter()
             .map(|tool| tool["name"].as_str().expect("name").to_owned())
             .collect()
@@ -459,7 +251,6 @@ mod tests {
             "core tools missing from the catalog: {:?}",
             core.difference(&catalog).collect::<Vec<_>>()
         );
-        assert!(!catalog.contains(TOOL_SEARCH_NAME));
         for definition in &definitions {
             let always_load = definition
                 .meta
@@ -478,7 +269,7 @@ mod tests {
     #[test]
     fn rewrite_stubs_pruned_tools_and_keeps_every_name() {
         let list = request(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
-        let mut surface = ToolSurface::new(ToolListScope::Core);
+        let mut surface = ToolSurface::new();
         let mut responses = listing();
         surface.rewrite(Some(&list), &mut responses);
         assert_eq!(
@@ -487,7 +278,6 @@ mod tests {
                 "tracedecay_grep",
                 "tracedecay_impact",
                 "tracedecay_git_diff",
-                TOOL_SEARCH_NAME
             ]
         );
         let tools = tools_of(&responses);
@@ -548,7 +338,7 @@ mod tests {
             "method": "tools/call",
             "params": {"name": "tracedecay_impact", "arguments": {"node_id": "n1"}}
         }));
-        let mut surface = ToolSurface::new(ToolListScope::Core);
+        let mut surface = ToolSurface::new();
         let mut responses = listing();
         surface.rewrite(Some(&list), &mut responses);
         assert!(is_stub(&tools_of(&responses)[1]));
@@ -565,64 +355,5 @@ mod tests {
             tools[1]["inputSchema"]["properties"]["node_id"]["type"],
             "string"
         );
-    }
-
-    #[test]
-    fn search_loads_matches_into_the_session_list_and_announces_once() {
-        let list = request(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
-        let mut surface = ToolSurface::new(ToolListScope::Core);
-        let mut responses = listing();
-        surface.rewrite(Some(&list), &mut responses);
-        assert!(is_stub(&tools_of(&responses)[1]));
-
-        let answer = surface.answer_search(&json!(3), "blast radius", &listing());
-        assert!(answer[0].contains("tracedecay_impact"), "{answer:?}");
-        assert!(!answer[0].contains("tracedecay_git_diff"), "{answer:?}");
-        assert_eq!(answer.len(), 2, "{answer:?}");
-        assert!(answer[1].contains(TOOL_LIST_CHANGED), "{answer:?}");
-        let mut responses = listing();
-        surface.rewrite(Some(&list), &mut responses);
-        let tools = tools_of(&responses);
-        assert!(!is_stub(&tools[1]), "{tools:?}");
-        assert!(is_stub(&tools[2]), "{tools:?}");
-
-        let again = surface.answer_search(&json!(4), "tracedecay_impact", &listing());
-        assert_eq!(again.len(), 1, "a repeat load must not announce a change");
-    }
-
-    #[test]
-    fn all_scope_passes_the_catalog_through_and_answers_no_search() {
-        let list = request(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
-        let mut surface = ToolSurface::new(ToolListScope::All);
-        let mut responses = listing();
-        surface.rewrite(Some(&list), &mut responses);
-        assert_eq!(responses, listing());
-        let call = request(&json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-            "params": {"name": TOOL_SEARCH_NAME, "arguments": {}}}));
-        assert!(surface.search_request(Some(&call)).is_none());
-        assert!(surface.unfreeze_call(Some(&call)).is_none());
-    }
-
-    #[test]
-    fn empty_query_lists_unloaded_tools_without_loading_them() {
-        let mut surface = ToolSurface::new(ToolListScope::Core);
-        let answer = surface.answer_search(&json!(3), "", &listing());
-        assert_eq!(answer.len(), 1, "{answer:?}");
-        assert!(answer[0].contains("tracedecay_git_diff"), "{answer:?}");
-        assert!(!answer[0].contains("tracedecay_grep,"), "{answer:?}");
-        assert!(surface.loaded.is_empty());
-    }
-
-    #[test]
-    fn a_failed_catalog_read_is_a_tool_error() {
-        let mut surface = ToolSurface::new(ToolListScope::Core);
-        let failure = format!(
-            "{}\n",
-            json!({"jsonrpc": "2.0", "id": 2, "error": {"code": -32603, "message": "boom"}})
-        );
-        let answer = surface.answer_search(&json!(3), "impact", &[failure]);
-        let response: Value = serde_json::from_str(&answer[0]).expect("json");
-        assert_eq!(response["result"]["isError"], json!(true), "{response}");
-        assert!(surface.loaded.is_empty());
     }
 }

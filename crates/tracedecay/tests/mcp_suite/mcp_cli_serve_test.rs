@@ -1005,9 +1005,9 @@ fn configuration_get_request(id: i64, key: &str) -> Value {
 }
 
 /// A session served without any project still reads and writes the profile's
-/// user settings over MCP: the tool search loads the configuration tools that
-/// can name a user key, `configuration_get` answers from the profile store, and
-/// a project-scoped key is the typed `project_required` refusal.
+/// user settings over MCP: `tools/list` keeps every catalog name (configuration
+/// tools as stubs), `configuration_get` answers from the profile store, and a
+/// project-scoped key is the typed `project_required` refusal.
 #[cfg(unix)]
 #[tokio::test]
 async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
@@ -1032,16 +1032,6 @@ async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
             configuration_get_request(2, "user.upload_enabled.v1"),
             json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
             configuration_get_request(4, "index.max_file_size.v1"),
-            json!({
-                "jsonrpc": "2.0",
-                "id": 5,
-                "method": "tools/call",
-                "params": {
-                    "name": "tracedecay_tool_search",
-                    "arguments": { "query": "configuration get set unset batch runtime" }
-                }
-            }),
-            json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list" }),
         ],
     );
     assert!(output.status.success(), "{output:?}");
@@ -1059,14 +1049,11 @@ async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
         "{setting}"
     );
 
-    assert!(
-        json_rpc_response(&output.stdout, 3)["result"]["tools"].is_array(),
-        "projectless tools/list must answer with a tool array"
-    );
-    // Configuration tools sit outside the core set; they appear as stubs and
-    // the search hydrates them. A project-bound tool may keep its name as a
-    // stub, but calling a project-scoped key is still the typed refusal below.
-    let tools = json_rpc_response(&output.stdout, 6);
+    // Configuration tools sit outside the core set and appear as stubs; the
+    // names stay on the list so a host can call them. A project-bound tool
+    // may keep its name as a stub, but calling a project-scoped key is still
+    // the typed refusal below.
+    let tools = json_rpc_response(&output.stdout, 3);
     let listed = tools["result"]["tools"]
         .as_array()
         .unwrap_or_else(|| panic!("tools/list must carry a tool array: {tools}"));

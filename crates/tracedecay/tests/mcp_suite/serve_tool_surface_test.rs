@@ -1,5 +1,5 @@
 //! `tracedecay serve` lists a core tool set with full schemas, stubs the rest,
-//! hydrates a stub on call or search, and still reaches every catalog tool.
+//! hydrates a stub on call, and still reaches every catalog tool.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -13,18 +13,16 @@ use tempfile::TempDir;
 use crate::common::{self, TestChildProcess, tracedecay_command_with_home};
 use crate::serve_harness::{init_project_with_file, json_rpc_response};
 
-const TOOL_SEARCH: &str = "tracedecay_tool_search";
 const LIST_CHANGED: &str = "notifications/tools/list_changed";
-/// One tool search per catalog tool, each re-reading the daemon's catalog.
+/// One tools/call per stub, each forwarded to the daemon.
 const SERVE_TIMEOUT: Duration = Duration::from_secs(120);
 
-fn run_serve(home: &Path, project: &Path, extra_args: &[&str], requests: &[Value]) -> Output {
+fn run_serve(home: &Path, project: &Path, requests: &[Value]) -> Output {
     let mut child = TestChildProcess::new(
         tracedecay_command_with_home(home)
             .arg("serve")
             .arg("--path")
             .arg(project)
-            .args(extra_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -124,74 +122,21 @@ fn list_changed_count(stdout: &[u8]) -> usize {
         .count()
 }
 
-/// The session catalog `serve --all-tools` lists for `project`.
-fn full_catalog_cost(home: &Path, project: &Path) -> ToolsListCost {
-    let output = run_serve(
-        home,
-        project,
-        &["--all-tools"],
-        &[initialize(), tools_list(2)],
-    );
-    assert!(output.status.success(), "{output:?}");
-    let cost = tools_list_cost(&output.stdout, 2);
-    assert!(!cost.names.contains(TOOL_SEARCH), "{:?}", cost.names);
-    cost
-}
-
 #[tokio::test]
 async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
     let home = TempDir::new().unwrap();
     let project = init_project_with_file(home.path(), "pub fn tool_surface_marker() {}\n").await;
     let _daemon = common::spawn_tracedecay_daemon(home.path());
-    let before = full_catalog_cost(home.path(), project.path());
-    let catalog = before.names.clone();
+
+    let first = run_serve(home.path(), project.path(), &[initialize(), tools_list(2)]);
+    assert!(first.status.success(), "{first:?}");
+    let after = tools_list_cost(&first.stdout, 2);
+    let catalog = after.names.clone();
     assert!(
         catalog.contains("tracedecay_impact") && catalog.contains("tracedecay_runtime"),
-        "--all-tools must list the full session catalog: {catalog:?}"
+        "default serve must keep every catalog name: {catalog:?}"
     );
-
-    let mut requests = vec![
-        initialize(),
-        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
-        tools_list(2),
-        // A stub still answers by exact name and hydrates its full schema.
-        tool_call(3, "tracedecay_runtime", &json!({ "format": "json" })),
-        tool_call(4, TOOL_SEARCH, &json!({ "query": "blast radius impact" })),
-        tools_list(5),
-    ];
-    let load_base = 1_000;
-    for (offset, name) in (0_i64..).zip(&catalog) {
-        requests.push(tool_call(
-            load_base + offset,
-            TOOL_SEARCH,
-            &json!({ "query": name }),
-        ));
-    }
-    requests.push(tools_list(6));
-    let output = run_serve(home.path(), project.path(), &[], &requests);
-    assert!(output.status.success(), "{output:?}");
-
-    let initialize = json_rpc_response(&output.stdout, 1);
-    assert!(
-        initialize["result"]["instructions"]
-            .as_str()
-            .is_some_and(|instructions| instructions.contains(TOOL_SEARCH)),
-        "initialize must tell the host how to load more tools: {initialize}"
-    );
-
-    let after = tools_list_cost(&output.stdout, 2);
-    let listed = after.names.clone();
-    assert!(listed.contains(TOOL_SEARCH), "{listed:?}");
-    assert!(
-        listed.contains("tracedecay_grep") && listed.contains("tracedecay_source_body"),
-        "{listed:?}"
-    );
-    assert!(
-        catalog.is_subset(&listed),
-        "stubs must keep every catalog name: missing {:?}",
-        catalog.difference(&listed).collect::<Vec<_>>()
-    );
-    let first_tools = tools_of(&output.stdout, 2);
+    let first_tools = tools_of(&first.stdout, 2);
     assert!(
         is_stub(tool_named(&first_tools, "tracedecay_impact")),
         "pruned tools must be stubs: {}",
@@ -202,45 +147,40 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
         "core tools must keep their full schema: {}",
         tool_named(&first_tools, "tracedecay_grep")
     );
-    let stubbed = first_tools.iter().filter(|tool| is_stub(tool)).count();
+    let stubbed_names = first_tools
+        .iter()
+        .filter(|tool| is_stub(tool))
+        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let stubbed = stubbed_names.len();
     let full = first_tools.len() - stubbed;
     assert!(
         stubbed > 100 && full * 8 < first_tools.len(),
         "most listed tools must be stubs ({full} full, {stubbed} stubbed, {} total)",
         first_tools.len()
     );
+
+    let mut requests = vec![
+        initialize(),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        tools_list(2),
+        tool_call(3, "tracedecay_runtime", &json!({ "format": "json" })),
+        tools_list(5),
+    ];
+    let load_base = 1_000;
+    for (offset, name) in (0_i64..).zip(&stubbed_names) {
+        requests.push(tool_call(load_base + offset, name, &json!({})));
+    }
+    requests.push(tools_list(6));
+    let output = run_serve(home.path(), project.path(), &requests);
+    assert!(output.status.success(), "{output:?}");
+
+    let initialize = json_rpc_response(&output.stdout, 1);
     assert!(
-        before.tokens > 50_000,
-        "the unpruned --all-tools handshake must still carry the expensive catalog ({} tools, {} bytes, {} tokens)",
-        before.names.len(),
-        before.bytes,
-        before.tokens
-    );
-    assert!(
-        after.tokens * 2 < before.tokens,
-        "default stubbed tools/list ({after_tools} tools, {after_bytes} bytes, {after_tokens} tokens) must be cheaper than --all-tools ({before_tools} tools, {before_bytes} bytes, {before_tokens} tokens)",
-        after_tools = after.names.len(),
-        after_bytes = after.bytes,
-        after_tokens = after.tokens,
-        before_tools = before.names.len(),
-        before_bytes = before.bytes,
-        before_tokens = before.tokens
-    );
-    eprintln!(
-        "tools/list handshake cost: before (--all-tools) {} tools / {} bytes / {} tokens; after (default stubs) {} tools / {} bytes / {} tokens ({} full, {} stubbed)",
-        before.names.len(),
-        before.bytes,
-        before.tokens,
-        after.names.len(),
-        after.bytes,
-        after.tokens,
-        full,
-        stubbed
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("mcp_tool_list_roster") && stderr.contains("sha256:"),
-        "each served list must log a hash of the sorted tool names: {stderr}"
+        initialize["result"]["instructions"]
+            .as_str()
+            .is_some_and(|instructions| instructions.contains("Call a stub by name")),
+        "initialize must tell the host how to hydrate stubs: {initialize}"
     );
 
     let runtime = json_rpc_response(&output.stdout, 3);
@@ -248,24 +188,16 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
         runtime.get("error").is_none() && runtime["result"]["isError"] != json!(true),
         "a stub must answer tools/call by name: {runtime}"
     );
-
-    let search = json_rpc_response(&output.stdout, 4);
-    assert_eq!(search["result"]["isError"], json!(false), "{search}");
     let hydrated = tools_of(&output.stdout, 5);
-    assert!(
-        !is_stub(tool_named(&hydrated, "tracedecay_impact")),
-        "a keyword search must hydrate tracedecay_impact: {}",
-        tool_named(&hydrated, "tracedecay_impact")
-    );
     assert!(
         !is_stub(tool_named(&hydrated, "tracedecay_runtime")),
         "calling a stub must hydrate its full schema: {}",
         tool_named(&hydrated, "tracedecay_runtime")
     );
-    let hydrated_full = hydrated.iter().filter(|tool| !is_stub(tool)).count();
     assert!(
-        hydrated_full <= full + 8 + 1,
-        "one search hydrates at most 8 stubs; plus the called stub: {hydrated_full} full after {full} initial"
+        is_stub(tool_named(&hydrated, "tracedecay_impact")),
+        "uncalled stubs must stay stubs: {}",
+        tool_named(&hydrated, "tracedecay_impact")
     );
 
     let reached = tools_of(&output.stdout, 6);
@@ -275,10 +207,45 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
         .collect::<Vec<_>>();
     assert!(
         still_stubbed.is_empty(),
-        "an exact-name tool search must hydrate every catalog tool; still stubbed {still_stubbed:?}"
+        "calling every stub must hydrate every catalog tool; still stubbed {still_stubbed:?}"
     );
     assert!(
         list_changed_count(&output.stdout) > 1,
         "each hydrate must announce notifications/tools/list_changed"
+    );
+
+    let before = tools_list_cost(&output.stdout, 6);
+    assert!(
+        before.tokens > 50_000,
+        "the fully hydrated list must still carry the expensive catalog ({} tools, {} bytes, {} tokens)",
+        before.names.len(),
+        before.bytes,
+        before.tokens
+    );
+    assert!(
+        after.tokens * 2 < before.tokens,
+        "default stubbed tools/list ({after_tools} tools, {after_bytes} bytes, {after_tokens} tokens) must be cheaper than the hydrated catalog ({before_tools} tools, {before_bytes} bytes, {before_tokens} tokens)",
+        after_tools = after.names.len(),
+        after_bytes = after.bytes,
+        after_tokens = after.tokens,
+        before_tools = before.names.len(),
+        before_bytes = before.bytes,
+        before_tokens = before.tokens
+    );
+    eprintln!(
+        "tools/list handshake cost: before (hydrated catalog) {} tools / {} bytes / {} tokens; after (default stubs) {} tools / {} bytes / {} tokens ({} full, {} stubbed)",
+        before.names.len(),
+        before.bytes,
+        before.tokens,
+        after.names.len(),
+        after.bytes,
+        after.tokens,
+        full,
+        stubbed
+    );
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(
+        stderr.contains("mcp_tool_list_roster") && stderr.contains("sha256:"),
+        "each served list must log a hash of the sorted tool names: {stderr}"
     );
 }

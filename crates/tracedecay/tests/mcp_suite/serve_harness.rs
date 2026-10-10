@@ -204,13 +204,10 @@ pub fn assert_unenrolled_cwd_serve_session(output: &Output, cwd: &Path) {
 
     let tools = json_rpc_response(&output.stdout, 3);
     assert!(
-        tools["result"]["tools"].as_array().is_some_and(|tools| {
-            tools
-                .iter()
-                .any(|tool| tool["name"] == "tracedecay_tool_search")
-        }),
-        "tools/list must advertise the default core, including tool search, \
-         before a project exists: {tools}"
+        tools["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| { tools.iter().any(|tool| tool["name"] == "tracedecay_status") }),
+        "tools/list must advertise the default core before a project exists: {tools}"
     );
 
     let refusal = json_rpc_response(&output.stdout, 2);
