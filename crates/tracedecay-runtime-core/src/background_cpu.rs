@@ -168,24 +168,6 @@ impl ProcessBackgroundCpuV1 {
         self.with_permits(1, operation)
     }
 
-    /// Reuse a parent CPU unit or wait in FIFO order while this operation is live.
-    pub fn with_permit_cancellable<R>(
-        self: &Arc<Self>,
-        is_cancelled: impl Fn() -> bool,
-        operation: impl FnOnce() -> R,
-    ) -> Option<R> {
-        if is_cancelled() {
-            return None;
-        }
-        if BACKGROUND_CPU_UNITS.with(Cell::get) > 0 {
-            return Some(operation());
-        }
-        let _permit = self.acquire_cancellable(is_cancelled)?;
-        let _scope = BackgroundCpuScopeV1::enter();
-        BACKGROUND_CPU_UNITS.with(|active| active.set(1));
-        Some(operation())
-    }
-
     /// Run a weighted work unit, clamped to the entire process width. Semantic
     /// inference uses its native intra-op thread count as the weight; ordinary
     /// index/session preparation uses one.
@@ -483,25 +465,6 @@ mod tests {
         assert!(waiter.join().expect("cancelled waiter"));
         assert_eq!(authority.waiting_work_units(), 0);
         drop(held);
-        assert!(authority.try_acquire().is_some());
-    }
-
-    #[test]
-    fn cancellable_scope_reuses_parent_and_releases_capacity_on_unwind() {
-        let authority = Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::MIN));
-        authority.with_permit(|| {
-            assert_eq!(
-                authority.with_permit_cancellable(|| false, || authority.active_units()),
-                Some(1)
-            );
-            assert_eq!(authority.with_permit_cancellable(|| true, || 2), None);
-        });
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            authority
-                .with_permit_cancellable(|| false, || panic!("injected cancellation scope panic"));
-        }));
-        assert!(panic.is_err());
-        assert_eq!(authority.active_units(), 0);
         assert!(authority.try_acquire().is_some());
     }
 }
