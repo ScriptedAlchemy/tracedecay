@@ -27,6 +27,7 @@ use crate::retrieval::ports::RetrievalExecutionControl;
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, LexicalPostingReadPort, RetrievalPortError,
 };
+use crate::retrieval::source_tier::PRODUCTION_DEFINITION_TIER_MICROS;
 
 /// A request authority that never cancels: the lane must not observe it.
 struct ActiveControl;
@@ -346,6 +347,7 @@ fn lexical_pair(
         spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
+        test_reference: false,
     };
     (candidate, evidence)
 }
@@ -468,9 +470,18 @@ fn lexical_lane_scores_candidates_with_checked_fixed_point_sums() {
     // occ.a = 1_000_000, occ.b = 800_000, occ.c = 300_000. No float ever
     // crosses the candidate identity.
     result_order(&result, &["occ.a", "occ.b", "occ.c"]);
-    assert_eq!(result.candidates[0].raw_score, FixedPointScore(1_000_000));
-    assert_eq!(result.candidates[1].raw_score, FixedPointScore(800_000));
-    assert_eq!(result.candidates[2].raw_score, FixedPointScore(300_000));
+    assert_eq!(
+        result.candidates[0].raw_score,
+        FixedPointScore(PRODUCTION_DEFINITION_TIER_MICROS + 1_000_000)
+    );
+    assert_eq!(
+        result.candidates[1].raw_score,
+        FixedPointScore(PRODUCTION_DEFINITION_TIER_MICROS + 800_000)
+    );
+    assert_eq!(
+        result.candidates[2].raw_score,
+        FixedPointScore(PRODUCTION_DEFINITION_TIER_MICROS + 300_000)
+    );
     for (ordinal, candidate) in result.candidates.iter().enumerate() {
         assert_eq!(candidate.ordinal_rank, ordinal as u32);
         assert_eq!(candidate.retriever, RetrieverKind::Lexical);
@@ -501,7 +512,10 @@ fn lexical_lane_applies_include_field_filters() {
     // (900_000, not 1_000_000) and the other candidates are excluded with
     // typed coverage, never silently.
     result_order(&result, &["occ.a"]);
-    assert_eq!(result.candidates[0].raw_score, FixedPointScore(900_000));
+    assert_eq!(
+        result.candidates[0].raw_score,
+        FixedPointScore(PRODUCTION_DEFINITION_TIER_MICROS + 900_000)
+    );
     assert_eq!(result.coverage.examined, 3);
     assert_eq!(result.coverage.eligible, 1);
     assert_eq!(result.coverage.excluded, 2);
@@ -553,8 +567,46 @@ fn lexical_lane_applies_exclude_field_filters() {
     // occ.a keeps only its SymbolName micros; every candidate survives
     // because each retains at least one admitted field.
     result_order(&result, &["occ.a", "occ.b", "occ.c"]);
-    assert_eq!(result.candidates[0].raw_score, FixedPointScore(900_000));
+    assert_eq!(
+        result.candidates[0].raw_score,
+        FixedPointScore(PRODUCTION_DEFINITION_TIER_MICROS + 900_000)
+    );
     assert_eq!(result.coverage.excluded, 0);
+}
+
+#[test]
+fn lexical_lane_ranks_production_definitions_ahead_of_test_references() {
+    let request = lexical_request(8);
+    let production = lexical_pair(
+        &request,
+        "occ.z",
+        &[(LexicalFieldV1::SymbolName, 900_000)],
+        &["reserve"],
+        &[],
+    );
+    let (test_hit, mut test_evidence) = lexical_pair(
+        &request,
+        "occ.a",
+        &[(LexicalFieldV1::SymbolName, 900_000)],
+        &["reserve"],
+        &[],
+    );
+    test_evidence.test_reference = true;
+    let lane = LexicalLane::new(FakeLexicalPort::complete(vec![
+        (test_hit, test_evidence),
+        production,
+    ]));
+
+    let result = complete_batch(lane.retrieve_lexical(&request).expect("lexical retrieval"));
+
+    result_order(&result, &["occ.z", "occ.a"]);
+    assert_eq!(
+        result.candidates[0].raw_score,
+        FixedPointScore(PRODUCTION_DEFINITION_TIER_MICROS + 900_000)
+    );
+    assert_eq!(result.candidates[1].raw_score, FixedPointScore(900_000));
+    assert!(!result.evidence_by_occurrence[&id("occ.z")].test_reference);
+    assert!(result.evidence_by_occurrence[&id("occ.a")].test_reference);
 }
 
 #[test]

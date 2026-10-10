@@ -413,6 +413,7 @@ fn pair(
         spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
+        test_reference: false,
     };
     (candidate, evidence)
 }

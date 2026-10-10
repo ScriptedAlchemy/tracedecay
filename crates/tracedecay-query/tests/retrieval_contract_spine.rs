@@ -137,6 +137,7 @@ fn exact_evidence_matches_the_frozen_generation_and_literal() {
         },
         matched_literals: vec![literal],
         admission_proof: proof,
+        test_reference: false,
     };
     evidence
         .validate(&request)

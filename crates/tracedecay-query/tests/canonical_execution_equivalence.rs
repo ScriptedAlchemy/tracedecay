@@ -158,6 +158,7 @@ fn exact_evidence() -> ExactLaneEvidence {
             canonical_bytes: b"run_query".to_vec(),
         }],
         admission_proof: exact_proof(),
+        test_reference: false,
     }
 }
 
@@ -172,6 +173,7 @@ fn lexical_evidence() -> LexicalLaneEvidence {
         spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
+        test_reference: false,
     }
 }
 

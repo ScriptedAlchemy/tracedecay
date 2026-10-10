@@ -29,6 +29,7 @@ use tracedecay_code_index::clones::{
     CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneExactKeyV1, CloneSelectedBlockV1,
     CodeIndexCloneBodyV1,
 };
+use tracedecay_code_index::is_test_file;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
@@ -2157,6 +2158,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 spelling_variants: score.spelling_variants,
                 typo_recovery_applied: score.typo_recovery_applied,
                 echo_penalty_applied: score.echo_penalty_applied,
+                test_reference: is_test_file(&row.logical_path),
             };
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
@@ -2204,6 +2206,7 @@ impl<'a> ArtifactQueryV1<'a> {
                     document,
                     row.id.as_str().to_owned(),
                     row.anchor.file_occurrence_id,
+                    is_test_file(&row.logical_path),
                     matches,
                 ));
             }
@@ -2213,7 +2216,9 @@ impl<'a> ArtifactQueryV1<'a> {
         let mut eligible = 0u64;
         let mut ranked = BinaryHeap::new();
         let mut proofs = LiteralProofCacheV1::new(request.literals.len());
-        for (visited, (document, row_id, file, matches)) in matched_rows.into_iter().enumerate() {
+        for (visited, (document, row_id, file, test_reference, matches)) in
+            matched_rows.into_iter().enumerate()
+        {
             if visited.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
                 retrieval_checkpoint(request.control)?;
             }
@@ -2232,7 +2237,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 &mut ranked,
                 cap,
                 Keyed {
-                    key: (Reverse(matched_literals.len()), row_id, document),
+                    key: (Reverse(matched_literals.len()), test_reference, row_id, document),
                     value: (admitted_ordinal, matched_literals, matched_kinds),
                 },
             );
@@ -2241,7 +2246,7 @@ impl<'a> ArtifactQueryV1<'a> {
         let selected = ranked.into_sorted_vec();
         let truncated = eligible - selected.len() as u64;
         // Winners re-read in document order so each row block inflates once.
-        let mut winner_documents = selected.iter().map(|entry| entry.key.2).collect::<Vec<_>>();
+        let mut winner_documents = selected.iter().map(|entry| entry.key.3).collect::<Vec<_>>();
         winner_documents.sort_unstable();
         let mut winner_rows = BTreeMap::new();
         for document in winner_documents {
@@ -2254,7 +2259,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 retrieval_checkpoint(request.control)?;
             }
             let Keyed {
-                key: (_, _, document),
+                key: (_, test_reference, _, document),
                 value: (admitted_ordinal, matched_literals, matched_kinds),
             } = entry;
             let proof = proofs.admitted_proof(admitted_ordinal)?;
@@ -2279,6 +2284,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 binding: lexical_lane_binding(&row, &candidate, matched_kinds),
                 matched_literals,
                 admission_proof: proof,
+                test_reference,
             };
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);

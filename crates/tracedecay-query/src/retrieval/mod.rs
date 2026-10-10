@@ -24,6 +24,7 @@ pub mod lexical;
 pub mod observation;
 mod ordering;
 pub mod ports;
+mod source_tier;
 pub mod prepared_query;
 pub mod query_authority;
 pub mod request;

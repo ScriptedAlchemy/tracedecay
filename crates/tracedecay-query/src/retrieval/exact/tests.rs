@@ -24,6 +24,7 @@ use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort,
     RetrievalExecutionControl, RetrievalPortError,
 };
+use crate::retrieval::source_tier::PRODUCTION_DEFINITION_TIER_MICROS;
 
 struct ActiveControl;
 
@@ -334,6 +335,7 @@ fn exact_pair(
         },
         matched_literals: vec![literal],
         admission_proof: proof,
+        test_reference: false,
     };
     (candidate, evidence)
 }
@@ -566,7 +568,10 @@ fn exact_lane_enforces_budget_cutoff_with_typed_coverage_and_deterministic_conti
     // occ.b matched both literals (2.0 fixed-point) and outranks the
     // single-literal occurrences; ties break on stable occurrence identity.
     result_order(&first, &["occ.b", "occ.a"]);
-    assert_eq!(first.candidates[0].raw_score, FixedPointScore(2_000_000));
+    assert_eq!(
+        first.candidates[0].raw_score,
+        FixedPointScore(PRODUCTION_DEFINITION_TIER_MICROS + 2_000_000)
+    );
     let continuation = first.continuation.expect("checkpoint emitted");
     assert!(!continuation.exhausted);
 
@@ -676,6 +681,47 @@ fn exact_lane_satisfies_the_generic_retriever_contract() {
         .retrieve_exact(&invalid)
         .expect_err("invalid budget is rejected");
     assert!(matches!(error, RetrievalPortError::Contract(_)));
+}
+
+#[test]
+fn exact_lane_ranks_production_definitions_ahead_of_test_references() {
+    let authority = FixtureAuthority::new();
+    let request = exact_request(&authority, "reserve_stock", 8);
+    let (production, production_evidence) = exact_pair(&authority, &request, "occ.z", 0);
+    let (test_hit, mut test_evidence) = exact_pair(&authority, &request, "occ.a", 0);
+    test_evidence.test_reference = true;
+    let lane = ExactLane::new(
+        FixtureAuthority::new(),
+        FakeExactPort::complete(vec![
+            (test_hit, test_evidence),
+            (production, production_evidence),
+        ]),
+    );
+
+    let result = complete_batch(lane.retrieve_exact(&request).expect("exact retrieval"));
+
+    result_order(&result, &["occ.z", "occ.a"]);
+    assert_eq!(
+        result.candidates[0].raw_score,
+        FixedPointScore(PRODUCTION_DEFINITION_TIER_MICROS + 1_000_000)
+    );
+    assert_eq!(result.candidates[1].raw_score, FixedPointScore(1_000_000));
+    assert!(!result.evidence_by_occurrence[&id("occ.z")].test_reference);
+    assert!(result.evidence_by_occurrence[&id("occ.a")].test_reference);
+}
+
+#[test]
+fn exact_lane_evidence_treats_missing_test_reference_as_production() {
+    let authority = FixtureAuthority::new();
+    let request = exact_request(&authority, "reserve_stock", 8);
+    let (_, evidence) = exact_pair(&authority, &request, "occ.a", 0);
+    let mut value = serde_json::to_value(&evidence).expect("encode");
+    value
+        .as_object_mut()
+        .expect("object")
+        .remove("test_reference");
+    let decoded: ExactLaneEvidence = serde_json::from_value(value).expect("legacy evidence");
+    assert!(!decoded.test_reference);
 }
 
 #[test]
