@@ -185,6 +185,93 @@ fn launchd_owned_job_requires_a_recognized_activity_state() {
     );
 }
 
+/// Native `launchctl print gui/<uid>/<label>` shape: one-tab job fields and
+/// nested coalitions that carry their own `state =` at two tabs.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn launchctl_print_job(plist: &std::path::Path, state: &str) -> String {
+    format!(
+        "gui/501/com.tracedecay.daemon = {{
+	active count = 1
+	path = {plist}
+	type = LaunchAgent
+	state = {state}
+
+	program = /usr/local/bin/tracedecay
+	arguments = {{
+		0 = /usr/local/bin/tracedecay
+		1 = daemon
+		2 = run
+	}}
+
+	pid = 4242
+	immediate reason = speculative
+	last exit code = (never exited)
+
+	resource coalition = {{
+		ID = 1234
+		type = resource
+		state = active
+	}}
+
+	jetsam coalition = {{
+		ID = 5678
+		type = jetsam
+		state = active
+	}}
+}}
+",
+        plist = plist.display()
+    )
+}
+
+/// launchd is bringing the owned job up but has not exec'd the daemon yet.
+/// Observation reports it running so readiness waits keep polling, and the
+/// startup state never bypasses exact plist ownership.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn launchd_starting_job_is_pending_owned_activity() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let launchctl = fake_service_program(&bin, "launchctl", "#!/bin/sh\nexit 0\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    let write_print = |loaded: &std::path::Path, state: &str, disabled: bool| {
+        write_executable_script(
+            &launchctl,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = print ]; then\ncat <<'JOB'\n{}JOB\nelif [ \"$1\" = print-disabled ]; then\n  echo '\"com.tracedecay.daemon\" => {disabled}'\nfi\n",
+                launchctl_print_job(loaded, state)
+            ),
+        )
+        .unwrap();
+    };
+
+    for state in ["xpcproxy", "spawn scheduled"] {
+        for (disabled, expected) in [
+            (false, DaemonServiceState::RunningEnabled),
+            (true, DaemonServiceState::RunningDisabled),
+        ] {
+            write_print(&plist, state, disabled);
+            assert_eq!(
+                runner.service_state().unwrap(),
+                expected,
+                "owned job state {state:?}, disabled {disabled}"
+            );
+        }
+        write_print(std::path::Path::new("/foreign/daemon.plist"), state, false);
+        assert!(
+            matches!(
+                runner.service_state(),
+                Err(tracedecay_domain::errors::TraceDecayError::ServiceUnitNotOwned { .. })
+            ),
+            "{state:?} must not bypass exact plist ownership"
+        );
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn launchd_stop_refuses_a_foreign_loaded_plist_before_mutating_it() {
@@ -3079,45 +3166,8 @@ fn launchd_termination_is_not_quiescence_while_the_socket_serves() {
     );
 }
 
-/// launchd reports `xpcproxy` while it execs the job and `spawn scheduled`
-/// while a spawn is queued; both are startup of the owned job, not an
-/// unrecognized state (#3370).
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn launchd_spawning_job_is_pending_startup_of_the_owned_job() {
-    let root = TempDir::new().unwrap();
-    let profile = ProfileRoot::under_home(root.path().join("home"));
-    let bin = root.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
-    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
-    let launchctl = fake_service_program(&bin, "launchctl", "#!/bin/sh\nexit 0\n");
-    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
-    for state in ["xpcproxy", "spawn scheduled"] {
-        for (disabled, expected) in [
-            (false, DaemonServiceState::RunningEnabled),
-            (true, DaemonServiceState::RunningDisabled),
-        ] {
-            write_executable_script(&launchctl, format!(
-                "#!/bin/sh\nif [ \"$1\" = print ]; then\n  printf 'path = %s\\nstate = {state}\\n' '{}'\nelif [ \"$1\" = print-disabled ]; then\n  echo '\"com.tracedecay.daemon\" => {disabled}'\nfi\n",
-                plist.display()
-            )).unwrap();
-            assert_eq!(runner.service_state().unwrap(), expected, "{state}");
-        }
-        write_executable_script(
-            &launchctl,
-            format!("#!/bin/sh\necho 'path = /foreign/daemon.plist'\necho 'state = {state}'\n"),
-        )
-        .unwrap();
-        assert!(matches!(
-            runner.service_state(),
-            Err(tracedecay_domain::errors::TraceDecayError::ServiceUnitNotOwned { .. })
-        ));
-    }
-}
-
 /// Post-update restores wait on authenticated readiness; a job launchd is
-/// still spawning must keep that wait pending instead of failing it (#3370).
+/// still spawning must keep that wait pending instead of failing it.
 #[cfg(target_os = "linux")]
 #[test]
 fn readiness_wait_rides_through_launchd_xpcproxy_startup() {
@@ -3166,45 +3216,6 @@ fn readiness_wait_rides_through_launchd_xpcproxy_startup() {
     )
     .expect("an xpcproxy startup must await readiness, not fail it");
     assert!(spawned.exists(), "the wait must have observed xpcproxy");
-}
-
-/// Native `launchctl print gui/<uid>/<label>` shape: one-tab job fields and
-/// nested coalitions that carry their own `state =` at two tabs.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn launchctl_print_job(plist: &std::path::Path, state: &str) -> String {
-    format!(
-        "gui/501/com.tracedecay.daemon = {{
-	active count = 1
-	path = {plist}
-	type = LaunchAgent
-	state = {state}
-
-	program = /usr/local/bin/tracedecay
-	arguments = {{
-		0 = /usr/local/bin/tracedecay
-		1 = daemon
-		2 = run
-	}}
-
-	pid = 4242
-	immediate reason = speculative
-	last exit code = (never exited)
-
-	resource coalition = {{
-		ID = 1234
-		type = resource
-		state = active
-	}}
-
-	jetsam coalition = {{
-		ID = 5678
-		type = jetsam
-		state = active
-	}}
-}}
-",
-        plist = plist.display()
-    )
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
