@@ -171,7 +171,7 @@ impl MountFixture {
         let profile = home.join(".tracedecay");
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile)
             .expect("isolated profile root");
-        let project = home.join("project");
+        let project = home.join("project #mount");
         fs::create_dir_all(project.join("src")).expect("isolated project root");
         fs::write(
             project.join("Cargo.toml"),
@@ -436,11 +436,14 @@ impl LspBridgeProbe {
             responses: rx,
             next_id: 0,
         };
+        let root_uri = url::Url::from_file_path(&fixture.project)
+            .expect("fixture project has an absolute file URI")
+            .to_string();
         let initialize = probe.request(
             "initialize",
             serde_json::json!({
                 "processId": Value::Null,
-                "rootUri": format!("file://{}", fixture.project.display()),
+                "rootUri": root_uri,
                 "capabilities": {
                     "general": { "positionEncodings": ["utf-16"] },
                     "textDocument": {
@@ -462,7 +465,7 @@ impl LspBridgeProbe {
                     },
                 },
                 "workspaceFolders": [{
-                    "uri": format!("file://{}", fixture.project.display()),
+                    "uri": root_uri,
                     "name": "surface-mount-fixture",
                 }],
             }),
