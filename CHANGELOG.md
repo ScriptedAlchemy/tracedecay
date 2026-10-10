@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+* **http:** preserve the original timeout when resuming interrupted socket waits
 * **callers:** require tuple-constructor evidence before treating a Rust struct as a callee, including imported and qualified calls
 * **search:** rank production symbol definitions above stronger test-file hits ([#3332](https://github.com/ScriptedAlchemy/tracedecay/issues/3332))
 * **mcp:** carry request cancellation into the verified files resource ([#3339](https://github.com/ScriptedAlchemy/tracedecay/issues/3339))
