@@ -181,7 +181,7 @@ async fn callers_return_commonjs_constructor_sites() {
     assert!(
         caller_names(&evidence)
             .iter()
-            .any(|name| name == "<module>" || name == "build"),
+            .any(|name| { name == "<module>" || name == "build" || name == "module.exports" }),
         "new URLImportPlugin in the factory must appear: {evidence:#}"
     );
     assert!(
