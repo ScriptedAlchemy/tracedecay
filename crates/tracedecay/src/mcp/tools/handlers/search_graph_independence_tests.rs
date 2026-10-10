@@ -66,35 +66,101 @@ fn lexical_candidate() -> RankedCandidate {
     }
 }
 
+fn lexical_file_candidate() -> RankedCandidate {
+    RankedCandidate {
+        candidate: FusedCandidate {
+            anchor_id: RetrievalAnchorId::new("code-chunk:chunk.lexical-file.v1")
+                .expect("lexical file candidate anchor"),
+            logical_evidence_id: LogicalEvidenceId::new("logical.lexical-file")
+                .expect("lexical file candidate logical evidence"),
+            occurrences: Vec::new(),
+            exact_class: ExactClass::Approximate,
+            source_role: RetrievalSourceRoleV1::default(),
+            utility_micros: 1,
+            contributions: Vec::new(),
+            freshness: Vec::new(),
+            decisions: Vec::new(),
+        },
+        final_ordinal: 1,
+    }
+}
+
 fn completed_lexical_search() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
-    let candidate = lexical_candidate();
+    completed_lexical_search_with(
+        "src/lib.rs",
+        Some(lexical_symbol_window(0, 0, "pub fn LexicalWidget() {}")),
+    )
+}
+
+/// A lineage site whose chunk admitted `attested` at byte 0 — the file
+/// head, as the fixtures write their declaration first.
+fn lexical_symbol_window(
+    start_line: u32,
+    end_line: u32,
+    attested: &str,
+) -> tracedecay_query::code_search::CodeIndexSearchSiteV1 {
+    tracedecay_query::code_search::CodeIndexSearchSiteV1::SymbolLines {
+        start_line,
+        end_line,
+        code_window: Some(tracedecay_query::code_search::CodeIndexSearchWindowV1 {
+            source_span: tracedecay_domain::SourceSpan {
+                start_byte: 0,
+                end_byte: attested.len() as u64,
+            },
+            sanitized_text: tracedecay_domain::BoundedSanitizedText::new(attested)
+                .expect("bounded window text"),
+        }),
+    }
+}
+
+fn completed_lexical_search_with(
+    path: &str,
+    site: Option<tracedecay_query::code_search::CodeIndexSearchSiteV1>,
+) -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
+    completed_lexical_search_for(vec![(
+        lexical_candidate(),
+        tracedecay_query::code_search::CodeIndexSearchDisplayV1 {
+            name: "LexicalWidget".to_owned(),
+            qualified_name: "crate::LexicalWidget".to_owned(),
+            kind: "function".to_owned(),
+            path: path.to_owned(),
+            site,
+        },
+    )])
+}
+
+fn completed_lexical_search_for(
+    entries: Vec<(
+        RankedCandidate,
+        tracedecay_query::code_search::CodeIndexSearchDisplayV1,
+    )>,
+) -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
+    let candidates = entries
+        .iter()
+        .map(|(candidate, _)| candidate.clone())
+        .collect::<Vec<_>>();
     let fallback_coverage = RetrieverKind::QUERY_FALLBACK_LANES
         .into_iter()
         .map(|lane| (lane, PublicRetrieverStatus::Complete))
         .collect::<BTreeMap<_, _>>();
     let query_fallback = QueryFallbackSubpayload::new(
         FusionProfileId::new("profile.search-graph-independence").expect("search profile identity"),
-        vec![candidate.clone()],
+        candidates.clone(),
         fallback_coverage,
         Vec::new(),
         None,
     )
     .expect("canonical lexical fallback payload");
-    let anchor = candidate.candidate.anchor_id.clone();
+    let display_by_anchor = entries
+        .into_iter()
+        .map(|(candidate, display)| (candidate.candidate.anchor_id.clone(), display))
+        .collect();
     tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(
         tracedecay_query::code_search::CodeIndexSearchCompletedV1 {
             code_generation: "generation.search-degradation.1".to_owned(),
-            ordered_candidates: vec![candidate],
+            ordered_candidates: candidates,
             query_fallback: Arc::new(query_fallback),
-            display_by_anchor: HashMap::from([(
-                anchor,
-                tracedecay_query::code_search::CodeIndexSearchDisplayV1 {
-                    name: "LexicalWidget".to_owned(),
-                    qualified_name: "crate::LexicalWidget".to_owned(),
-                    kind: "function".to_owned(),
-                    path: "src/lib.rs".to_owned(),
-                },
-            )]),
+            display_by_anchor,
             display_unavailable_by_anchor: HashMap::new(),
             coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::warm(),
             next_cursor: None,
@@ -383,7 +449,13 @@ async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
     assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(1));
     assert_eq!(payload["search_matches"][0]["name"], "LexicalWidget");
     assert_eq!(payload["search_matches"][0]["file"], "src/lib.rs");
-    assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(0));
+    assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"][0]["name"], "LexicalWidget");
+    assert_eq!(payload["symbols"][0]["file"], "src/lib.rs");
+    assert_eq!(payload["symbols"][0]["kind"], "function");
+    assert_eq!(payload["symbols"][0]["start_line"], 1);
+    assert_eq!(payload["symbols"][0]["end_line"], 1);
+    assert_eq!(payload["code"].as_array().map(Vec::len), Some(0));
     assert_eq!(payload["coverage"]["exact"], "complete");
     assert_eq!(payload["coverage"]["lexical"], "complete");
     assert_eq!(
@@ -453,10 +525,391 @@ async fn tracedecay_context_waits_for_requested_code_graph_admission() {
     .expect("context JSON payload");
 
     assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"][0]["name"], "LexicalWidget");
+    assert_eq!(payload["symbols"][0]["file"], "src/lib.rs");
+    assert_eq!(payload["code"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["code"][0]["file"], "src/lib.rs");
+    assert_eq!(payload["code"][0]["code"], "pub fn LexicalWidget() {}");
     assert_eq!(
         payload["verified_graph_evidence"]["detail"],
         "the exact project code graph is unavailable: ready graph admission result"
     );
+    cg.close();
+}
+
+#[tokio::test]
+async fn tracedecay_context_hydrates_search_matches_when_catalog_is_warming() {
+    let dir = TempDir::new().expect("warming catalog isolation");
+    let profile = SelectorProfile::new(dir.path());
+    let project = dir.path().join("context-warming-catalog");
+    fs::create_dir_all(project.join("src")).expect("create fixture sources");
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn LexicalWidget() {\n    let ready = true;\n    let _ = ready;\n}\n",
+    )
+    .expect("write warming catalog fixture");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.context-warming-catalog",
+    )
+    .await
+    .expect("registered warming catalog fixture");
+
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(|_| {
+        Box::pin(async {
+            completed_lexical_search_with(
+                "src/lib.rs",
+                Some(lexical_symbol_window(
+                    0,
+                    3,
+                    "pub fn LexicalWidget() {\n    let ready = true;\n    let _ = ready;\n}",
+                )),
+            )
+        })
+    });
+    let mut options = lexical_search_options(&cg);
+    options.code_index_search_executor = Some(executor);
+    options.verified_graph_query_port = None;
+    let result = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "explain LexicalWidget",
+            "include_code": true,
+            "include_memory": false,
+            "format": "json",
+        }),
+        options,
+    )
+    .await
+    .expect("warming catalog must hydrate from search matches");
+    let payload: Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("warming catalog JSON text"),
+    )
+    .expect("warming catalog JSON payload");
+
+    assert_eq!(payload["freshness"], json!({"state": "fresh"}));
+    assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"][0]["name"], "LexicalWidget");
+    assert_eq!(
+        payload["symbols"][0]["qualified_name"],
+        "crate::LexicalWidget"
+    );
+    assert_eq!(payload["symbols"][0]["file"], "src/lib.rs");
+    assert_eq!(payload["symbols"][0]["start_line"], 1);
+    assert_eq!(payload["symbols"][0]["end_line"], 4);
+    assert_eq!(payload["code"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        payload["code"][0]["code"],
+        "pub fn LexicalWidget() {\n    let ready = true;\n    let _ = ready;\n}"
+    );
+    assert_eq!(payload["retrieval"]["code"]["state"], "ran");
+    assert_eq!(
+        payload["verified_graph_evidence"]["reason_code"],
+        "verified-code-graph-read-unavailable"
+    );
+    cg.close();
+}
+
+#[tokio::test]
+async fn tracedecay_context_hydrates_attested_window_past_preceding_noise() {
+    let dir = TempDir::new().expect("attested window isolation");
+    let profile = SelectorProfile::new(dir.path());
+    let project = dir.path().join("context-attested-window");
+    fs::create_dir_all(project.join("src")).expect("create fixture sources");
+    // A comment, an import, and a call site all precede the compact
+    // declaration and name it first; only the lane's artifact-attested
+    // window may supply the location and code.
+    let source = "// LexicalWidget call site\nuse crate::LexicalWidget;\nfn caller() { LexicalWidget(); }\npub fn LexicalWidget() -> u32 { 42 }\n";
+    fs::write(project.join("src/lib.rs"), source).expect("write attested window fixture");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.context-attested-window",
+    )
+    .await
+    .expect("registered attested window fixture");
+
+    let declared = "pub fn LexicalWidget() -> u32 { 42 }";
+    let start = u64::try_from(source.find(declared).expect("declaration offset"))
+        .expect("declaration offset bytes");
+    let site = tracedecay_query::code_search::CodeIndexSearchSiteV1::ArtifactWindow {
+        source_span: tracedecay_domain::SourceSpan {
+            start_byte: start,
+            end_byte: start + declared.len() as u64,
+        },
+        sanitized_text: tracedecay_domain::BoundedSanitizedText::new(declared)
+            .expect("bounded window text"),
+    };
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(move |_| {
+        let site = site.clone();
+        Box::pin(async move { completed_lexical_search_with("src/lib.rs", Some(site)) })
+    });
+    let mut options = lexical_search_options(&cg);
+    options.code_index_search_executor = Some(executor);
+    options.verified_graph_query_port = None;
+    let result = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "explain LexicalWidget",
+            "include_code": true,
+            "include_memory": false,
+            "format": "json",
+        }),
+        options,
+    )
+    .await
+    .expect("attested window must hydrate from the lane's site");
+    let payload: Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("attested window JSON text"),
+    )
+    .expect("attested window JSON payload");
+
+    assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"][0]["start_line"], 4);
+    assert_eq!(payload["symbols"][0]["end_line"], 4);
+    assert_eq!(payload["code"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["code"][0]["start_line"], 4);
+    assert_eq!(payload["code"][0]["end_line"], 4);
+    assert_eq!(payload["code"][0]["code"], declared);
+    assert_eq!(payload["retrieval"]["code"]["state"], "ran");
+    cg.close();
+}
+
+#[tokio::test]
+async fn tracedecay_context_reports_code_unavailable_when_attested_source_is_missing() {
+    let dir = TempDir::new().expect("missing source isolation");
+    let profile = SelectorProfile::new(dir.path());
+    let project = dir.path().join("context-missing-source");
+    fs::create_dir_all(project.join("src")).expect("create fixture sources");
+    // The display names a file the project does not have: the attested
+    // site cannot resolve, so location fields go unavailable and the code
+    // stage reports a typed failure instead of an empty success.
+    fs::write(project.join("src/other.rs"), "fn other() {}\n")
+        .expect("write unrelated fixture source");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.context-missing-source",
+    )
+    .await
+    .expect("registered missing source fixture");
+
+    let site = tracedecay_query::code_search::CodeIndexSearchSiteV1::ArtifactWindow {
+        source_span: tracedecay_domain::SourceSpan {
+            start_byte: 0,
+            end_byte: 10,
+        },
+        sanitized_text: tracedecay_domain::BoundedSanitizedText::new("fn missing")
+            .expect("bounded window text"),
+    };
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(move |_| {
+        let site = site.clone();
+        Box::pin(async move { completed_lexical_search_with("src/missing.rs", Some(site)) })
+    });
+    let mut options = lexical_search_options(&cg);
+    options.code_index_search_executor = Some(executor);
+    options.verified_graph_query_port = None;
+    let result = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "explain LexicalWidget",
+            "include_code": true,
+            "include_memory": false,
+            "format": "json",
+        }),
+        options,
+    )
+    .await
+    .expect("missing source must report typed unavailability");
+    let payload: Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("missing source JSON text"),
+    )
+    .expect("missing source JSON payload");
+
+    assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"][0]["start_line"], 0);
+    assert_eq!(payload["symbols"][0]["end_line"], 0);
+    let unavailable = payload["symbols"][0]["unavailable_fields"]
+        .as_array()
+        .expect("unavailable fields list");
+    for field in ["start_line", "end_line"] {
+        assert!(
+            unavailable
+                .iter()
+                .any(|value| value.as_str() == Some(field)),
+            "unavailable_fields must name {field}: {unavailable:?}"
+        );
+    }
+    assert_eq!(payload["code"].as_array().map(Vec::len), Some(0));
+    assert_eq!(payload["retrieval"]["code"]["state"], "unavailable");
+    cg.close();
+}
+
+#[tokio::test]
+async fn tracedecay_context_marks_code_unavailable_when_symbol_lines_drift() {
+    let dir = TempDir::new().expect("drifted source isolation");
+    let profile = SelectorProfile::new(dir.path());
+    let project = dir.path().join("context-drifted-source");
+    fs::create_dir_all(project.join("src")).expect("create fixture sources");
+    // The file drifted since the published extraction: a comment now
+    // occupies the attested line. The lineage extent still stands as the
+    // symbol's location, but the live window no longer mints the
+    // extraction digest, so the code stage reports typed unavailability
+    // instead of serving the comment as the declaration.
+    fs::write(
+        project.join("src/lib.rs"),
+        "// inserted before the declaration\npub fn LexicalWidget() {}\n",
+    )
+    .expect("write drifted fixture");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.context-drifted-source",
+    )
+    .await
+    .expect("registered drifted source fixture");
+
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(|_| {
+        Box::pin(async {
+            completed_lexical_search_with(
+                "src/lib.rs",
+                Some(lexical_symbol_window(0, 0, "pub fn LexicalWidget() {}")),
+            )
+        })
+    });
+    let mut options = lexical_search_options(&cg);
+    options.code_index_search_executor = Some(executor);
+    options.verified_graph_query_port = None;
+    let result = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "explain LexicalWidget",
+            "include_code": true,
+            "include_memory": false,
+            "format": "json",
+        }),
+        options,
+    )
+    .await
+    .expect("drifted source must report typed unavailability");
+    let payload: Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("drifted source JSON text"),
+    )
+    .expect("drifted source JSON payload");
+
+    assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"][0]["start_line"], 1);
+    assert_eq!(payload["symbols"][0]["end_line"], 1);
+    assert_eq!(payload["code"].as_array().map(Vec::len), Some(0));
+    assert_eq!(payload["retrieval"]["code"]["state"], "unavailable");
+    cg.close();
+}
+
+#[tokio::test]
+async fn tracedecay_context_excludes_file_hits_from_symbols_but_serves_their_window() {
+    let dir = TempDir::new().expect("file hit isolation");
+    let profile = SelectorProfile::new(dir.path());
+    let project = dir.path().join("context-file-hit");
+    fs::create_dir_all(project.join("src")).expect("create fixture sources");
+    let source = "fn caller() { LexicalWidget(); }\n";
+    fs::write(project.join("src/lib.rs"), source).expect("write file hit fixture");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.context-file-hit",
+    )
+    .await
+    .expect("registered file hit fixture");
+
+    // A symbol hit and a file hit answer together. The file hit has no
+    // symbol location to attest, so it earns no symbols[] row; its own
+    // artifact window is still a bounded site and serves as code.
+    let file_text = source.trim_end();
+    let file_site = tracedecay_query::code_search::CodeIndexSearchSiteV1::ArtifactWindow {
+        source_span: tracedecay_domain::SourceSpan {
+            start_byte: 0,
+            end_byte: file_text.len() as u64,
+        },
+        sanitized_text: tracedecay_domain::BoundedSanitizedText::new(file_text)
+            .expect("bounded file window"),
+    };
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(move |_| {
+        let file_site = file_site.clone();
+        Box::pin(async move {
+            completed_lexical_search_for(vec![
+                (
+                    lexical_candidate(),
+                    tracedecay_query::code_search::CodeIndexSearchDisplayV1 {
+                        name: "LexicalWidget".to_owned(),
+                        qualified_name: "crate::LexicalWidget".to_owned(),
+                        kind: "function".to_owned(),
+                        path: "src/lib.rs".to_owned(),
+                        site: Some(lexical_symbol_window(
+                            0,
+                            0,
+                            "fn caller() { LexicalWidget(); }",
+                        )),
+                    },
+                ),
+                (
+                    lexical_file_candidate(),
+                    tracedecay_query::code_search::CodeIndexSearchDisplayV1 {
+                        name: "lib.rs".to_owned(),
+                        qualified_name: "src/lib.rs".to_owned(),
+                        kind: "file".to_owned(),
+                        path: "src/lib.rs".to_owned(),
+                        site: Some(file_site),
+                    },
+                ),
+            ])
+        })
+    });
+    let mut options = lexical_search_options(&cg);
+    options.code_index_search_executor = Some(executor);
+    options.verified_graph_query_port = None;
+    let result = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "explain LexicalWidget",
+            "include_code": true,
+            "include_memory": false,
+            "format": "json",
+        }),
+        options,
+    )
+    .await
+    .expect("file hit must not invent a symbol location");
+    let payload: Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("file hit JSON text"),
+    )
+    .expect("file hit JSON payload");
+
+    assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(2));
+    assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"][0]["name"], "LexicalWidget");
+    let code = payload["code"].as_array().expect("code blocks");
+    assert_eq!(code.len(), 2);
+    assert_eq!(code[1]["node_id"], "code-chunk:chunk.lexical-file.v1");
+    assert_eq!(code[1]["code"], source.trim_end());
+    assert_eq!(payload["retrieval"]["code"]["state"], "ran");
     cg.close();
 }
 
