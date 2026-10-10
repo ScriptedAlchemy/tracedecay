@@ -1,6 +1,8 @@
 use std::fmt;
+use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
+use tokio::sync::Notify;
 use tokio_util::task::TaskTracker;
 use tracedecay_application::observability::{
     BoundedDeliverySettlementRecorderV1, BoundedObservabilityProducerV1,
@@ -125,6 +127,13 @@ enum StoreObservabilityCompletionV1 {
     Failed,
 }
 
+enum StoreObservabilitySettleV1 {
+    Absent,
+    Active,
+    Failed,
+    Waiting,
+}
+
 enum StoreObservabilityStateV1 {
     Active {
         core: Arc<StoreObservabilityCoreV1>,
@@ -228,6 +237,8 @@ pub struct StoreObservabilityRegistryV1 {
     /// Each holds its store's lease until the drain settles, so shutdown
     /// joins them before the stores close.
     retirement_drains: TaskTracker,
+    /// Wakes capacity retirement after a store entry leaves `Stopping`.
+    settled: Arc<Notify>,
 }
 
 impl StoreObservabilityRegistryV1 {
@@ -490,7 +501,86 @@ impl StoreObservabilityRegistryV1 {
                 entries[index].state = StoreObservabilityStateV1::Failed;
             }
         }
+        self.settled.notify_waiters();
         Ok(())
+    }
+
+    /// Finishes a capacity-retired store's observability drain, including the
+    /// writer fence `shutdown` can leave as `AwaitingWriter`.
+    ///
+    /// Daemon shutdown joins every background drain by closing the tracker.
+    /// A single-project capacity reuse cannot close that tracker: other
+    /// projects still publish. This waits for the exact store path to leave
+    /// the registry so its counted ProjectSessions lease is dropped before
+    /// Store retirement.
+    #[tracing::instrument(
+        name = "daemon.service.project_runtime.observability_settle_store",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn settle_registered_store_retirement(
+        &self,
+        database_path: &Path,
+    ) -> Result<(), String> {
+        let deadline =
+            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
+        loop {
+            match self.drive_registered_store_retirement(database_path)? {
+                StoreObservabilitySettleV1::Absent => return Ok(()),
+                StoreObservabilitySettleV1::Active => {
+                    return Err(format!(
+                        "observability aliases still hold {}",
+                        database_path.display()
+                    ));
+                }
+                StoreObservabilitySettleV1::Failed => {
+                    return Err(format!(
+                        "observability shutdown failed for {}",
+                        database_path.display()
+                    ));
+                }
+                StoreObservabilitySettleV1::Waiting => {
+                    let notified = self.settled.notified();
+                    if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                        return Err(format!(
+                            "observability retirement for {} exceeded the drain deadline",
+                            database_path.display()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    fn drive_registered_store_retirement(
+        &self,
+        database_path: &Path,
+    ) -> Result<StoreObservabilitySettleV1, String> {
+        let mut entries = self
+            .lock_entries()
+            .map_err(str::to_owned)?;
+        let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| entry.database.db_path() == database_path)
+        else {
+            return Ok(StoreObservabilitySettleV1::Absent);
+        };
+        match &mut entry.state {
+            StoreObservabilityStateV1::Active { .. } => Ok(StoreObservabilitySettleV1::Active),
+            StoreObservabilityStateV1::Failed => Ok(StoreObservabilitySettleV1::Failed),
+            StoreObservabilityStateV1::Stopping { core, drain } => {
+                if matches!(
+                    *drain,
+                    StoreObservabilityDrainV1::Deferred | StoreObservabilityDrainV1::AwaitingWriter
+                ) && let Ok(runtime) = tokio::runtime::Handle::try_current()
+                {
+                    let writer_only = matches!(*drain, StoreObservabilityDrainV1::AwaitingWriter);
+                    *drain = StoreObservabilityDrainV1::InFlight;
+                    self.spawn_retirement_drain(&runtime, Arc::clone(core), writer_only);
+                }
+                Ok(StoreObservabilitySettleV1::Waiting)
+            }
+        }
     }
 }
 

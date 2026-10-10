@@ -795,6 +795,12 @@ fn classify_daemon_status_error(
         report_project_not_enrolled(dc, project_path);
         return DoctorDaemonFindingsV1::unread("project_not_enrolled");
     }
+    if let Some((reason, _, detail)) = error.project_route_context()
+        && reason == crate::daemon::PROJECT_SERVER_CAPACITY_REASON_CODE
+    {
+        dc.fail(&format!("Project open stalled: {detail}"));
+        return DoctorDaemonFindingsV1::unread("project_server_capacity_reached");
+    }
     report_daemon_diagnostics_unavailable(
         dc,
         fallback_database_path(profile_root, project_path).as_deref(),

@@ -152,6 +152,65 @@ fn schema_convergence_line(finding: &SchemaConvergenceFindingV1) -> String {
     )
 }
 
+fn stalled_project_open_error(status: &ProjectOpenStatusV1) -> tracedecay_domain::errors::TraceDecayError {
+    let detail = status
+        .detail
+        .clone()
+        .unwrap_or_else(|| "project open stalled".to_owned());
+    match status.reason {
+        ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery => {
+            tracedecay_domain::errors::TraceDecayError::project_route(
+                tracedecay::daemon::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+                true,
+                detail,
+            )
+        }
+        ProjectOpenStatusReasonV1::RetryBackoff => {
+            tracedecay_domain::errors::TraceDecayError::project_route(
+                tracedecay::daemon::PROJECT_SERVER_CAPACITY_REASON_CODE,
+                true,
+                detail,
+            )
+        }
+        ProjectOpenStatusReasonV1::UnrepairableVerdict => {
+            tracedecay_domain::errors::TraceDecayError::project_open(
+                tracedecay_domain::errors::ProjectOpenFailureKind::AuthorityVerdict {
+                    migration_pending: false,
+                },
+                detail,
+            )
+        }
+        ProjectOpenStatusReasonV1::Unavailable
+        | ProjectOpenStatusReasonV1::Converging
+        | ProjectOpenStatusReasonV1::Ready => {
+            tracedecay_domain::errors::TraceDecayError::project_open(
+                tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff {
+                    retry_after_ms: status.retry_after_ms.unwrap_or(0),
+                },
+                detail,
+            )
+        }
+    }
+}
+
+fn reject_stalled_project_open(
+    daemon_status: &Value,
+) -> tracedecay_domain::errors::Result<()> {
+    let Some(project_open) = daemon_status
+        .get("project_open")
+        .cloned()
+        .filter(|value| !value.is_null())
+        .map(serde_json::from_value::<ProjectOpenStatusV1>)
+        .transpose()?
+    else {
+        return Ok(());
+    };
+    if project_open.state != ProjectOpenStatusStateV1::Stalled {
+        return Ok(());
+    }
+    Err(stalled_project_open_error(&project_open))
+}
+
 fn project_open_line(status: &ProjectOpenStatusV1) -> String {
     let reason = match status.reason {
         ProjectOpenStatusReasonV1::Converging => "converging",
@@ -335,10 +394,13 @@ async fn handle_status_command_within(
     .await?;
     reject_truncation_envelope(&daemon_status, "tracedecay_status")?;
     if json {
+        reject_problem_envelope(&daemon_status, "tracedecay_status")?;
+        reject_stalled_project_open(&daemon_status)?;
         println!("{}", serde_json::to_string_pretty(&daemon_status)?);
-        return reject_problem_envelope(&daemon_status, "tracedecay_status");
+        return Ok(());
     }
     reject_problem_envelope(&daemon_status, "tracedecay_status")?;
+    reject_stalled_project_open(&daemon_status)?;
     if let Some(project_open) = daemon_status
         .get("project_open")
         .cloned()
@@ -516,9 +578,9 @@ fn status_branch_info(
 #[cfg(test)]
 mod tests {
     use super::{
-        await_daemon_tool_result, project_open_line, reject_truncation_envelope,
-        schema_convergence_line, status_branch_info, status_command_deadline_from,
-        status_server_request_budget,
+        await_daemon_tool_result, project_open_line, reject_stalled_project_open,
+        reject_truncation_envelope, schema_convergence_line, status_branch_info,
+        status_command_deadline_from, status_server_request_budget,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -606,6 +668,26 @@ mod tests {
             ),
             Ok(())
         ));
+    }
+
+    #[test]
+    fn stalled_project_open_snapshot_is_a_typed_capacity_error() {
+        let stalled = json!({
+            "project_open": {
+                "state": "stalled",
+                "reason": "retry_backoff",
+                "retry_after_ms": 1000,
+                "detail": "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases / ProjectSessions",
+            }
+        });
+        let error = reject_stalled_project_open(&stalled).expect_err("stalled must fail");
+        assert_eq!(
+            error
+                .project_route_context()
+                .map(|(reason, retryable, _)| (reason, retryable)),
+            Some(("project_server_capacity_reached", true))
+        );
+        assert!(reject_stalled_project_open(&json!({ "node_count": 1 })).is_ok());
     }
 
     #[test]

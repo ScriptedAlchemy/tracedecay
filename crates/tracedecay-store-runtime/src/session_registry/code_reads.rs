@@ -264,6 +264,17 @@ impl DaemonSessionRuntimeRegistryV1 {
         replacement.restore_old_ready()
     }
 
+    fn project_session_graph_open_task_key(&self, project_id: &ProjectId) -> Option<String> {
+        self.project_owners.session_graph_open_task_key(project_id)
+    }
+
+    fn error_is_unattached_session_graph(error: &TraceDecayError) -> bool {
+        matches!(
+            error.project_route_context(),
+            Some(("project_session_graph_warming", _, _))
+        )
+    }
+
     #[tracing::instrument(
         name = "daemon.session_registry.retire_relation_graph",
         level = "trace",
@@ -273,10 +284,38 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
         project_id: &ProjectId,
     ) -> Result<()> {
-        let Some(mut replacement) = self.reserve_project_session_replacement(project_id).await?
-        else {
+        if let Some(graph_open_task_key) = self.project_session_graph_open_task_key(project_id) {
+            self.retained_hook_tasks
+                .retire("session-relation-graph-open", &graph_open_task_key)
+                .await
+                .map_err(|error| {
+                    session_registry_error("retire session relation graph open task", error)
+                })?;
+        }
+        let replacement = match self.reserve_project_session_replacement(project_id).await {
+            Ok(replacement) => replacement,
+            Err(error) if Self::error_is_unattached_session_graph(&error) => {
+                return self
+                    .retire_unattached_project_session_store(project_id)
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(mut replacement) = replacement else {
             return Ok(());
         };
+        if let Some(graph_open_task_key) = replacement
+            .sessions
+            .as_ref()
+            .map(|sessions| sessions.graph_open_task_key.clone())
+        {
+            self.retained_hook_tasks
+                .retire("session-relation-graph-open", &graph_open_task_key)
+                .await
+                .map_err(|error| {
+                    session_registry_error("retire session relation graph open task", error)
+                })?;
+        }
 
         // Replay and sync may issue counted database clients. Fence both before
         // the database reservation so their in-flight work appears as a real
@@ -439,6 +478,101 @@ impl DaemonSessionRuntimeRegistryV1 {
         };
         let vacancy = native.into_vacancy(graph, store)?;
         vacancy.commit_without_sessions()
+    }
+
+    async fn retire_unattached_project_session_store(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<()> {
+        let Some(mut retirement) = self.project_owners.take_unattached_session_owner(project_id)?
+        else {
+            return Ok(());
+        };
+        let old_lease = retirement.database()?.issue_lease().map_err(|error| {
+            session_registry_error(
+                "issue unattached project session lease",
+                format!("{error:?}"),
+            )
+        })?;
+        let path = old_lease.db_path().to_path_buf();
+        let replay_issuer = retirement.database()?.weak_lease_issuer();
+        let replay_binding = retirement.database()?.registered_binding().clone();
+        let replay_locator = retirement.database()?.registered_verified_locator().clone();
+        drop(old_lease);
+        let restore_replay = |retirement: &mut super::UnattachedSessionRetirementV1| -> Result<()> {
+            self.remote_replay_transaction
+                .register_target(
+                    project_id.clone(),
+                    replay_issuer.clone(),
+                    replay_binding.clone(),
+                    replay_locator.clone(),
+                    path.clone(),
+                )
+                .map_err(|error| session_registry_error("restore project replay target", error))?;
+            retirement.restore_ready()
+        };
+        self.remote_replay_transaction
+            .unregister_target(project_id, &replay_binding)
+            .map_err(|error| session_registry_error("quiesce project replay target", error))?;
+        if let Err(error) = self.retire_project_session_sync(project_id).await {
+            restore_replay(&mut retirement)?;
+            return Err(error);
+        }
+        let target = retirement
+            .database()?
+            .reserve_retirement()
+            .map_err(|error| {
+                session_registry_error(
+                    "reserve unattached project session Store retirement",
+                    format!("{error:?}"),
+                )
+            })?
+            .into_store_retirement_target()
+            .map_err(|error| {
+                session_registry_error(
+                    "compose unattached project session Store retirement",
+                    format!("{error:?}"),
+                )
+            })?;
+        let mut store_reservation = match self.registry.reserve_retirement_batch(vec![target]) {
+            tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(
+                reservation,
+            ) => reservation,
+            tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(
+                refusal,
+            ) => {
+                restore_replay(&mut retirement)?;
+                return Err(session_registry_error(
+                    "reserve unattached project session Store retirement",
+                    format!("{:?}", refusal.blockers()),
+                ));
+            }
+        };
+        let store = match store_reservation.commit() {
+            Ok(commit) => commit,
+            Err(error) => {
+                restore_replay(&mut retirement)?;
+                return Err(session_registry_error(
+                    "commit unattached project session Store retirement",
+                    format!("{error:?}"),
+                ));
+            }
+        };
+        let store_closed = store.outcomes().iter().all(|outcome| {
+            matches!(
+                outcome,
+                tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementOutcome::Closed { .. }
+            )
+        });
+        retirement.commit_without_sessions()?;
+        if store_closed {
+            Ok(())
+        } else {
+            Err(session_registry_error(
+                "retire unattached project session store",
+                "project session Store retirement reached a terminal failure".to_owned(),
+            ))
+        }
     }
 
     #[tracing::instrument(

@@ -6,9 +6,11 @@ use std::path::{Path, PathBuf};
 use tokio::time::{Duration, timeout};
 
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
-use tracedecay_contracts::project_open::{ProjectOpenStatusStateV1, ProjectOpenStatusV1};
+use tracedecay_contracts::project_open::{
+    ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
+};
 use tracedecay_daemon_service::shutdown::DaemonActivity;
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
 use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
@@ -30,6 +32,9 @@ pub(crate) struct DoctorRuntimeRequest {
 
 pub(super) struct CoreDoctorStatusV1 {
     pub project_open: Option<ProjectOpenStatusV1>,
+    /// Exact open failure when `project_open` is stalled. Status and Doctor
+    /// must answer this as a typed JSON-RPC error, not a successful snapshot.
+    pub stalled_failure: Option<super::ProjectOpenFailure>,
     pub git_watcher_health: Option<serde_json::Value>,
 }
 
@@ -99,6 +104,45 @@ fn core_status_request_id(request: Option<&JsonRpcRequest>) -> Option<serde_json
             .get("wait_for")
             .is_none_or(serde_json::Value::is_null))
     .then(|| request.id.clone().unwrap_or(serde_json::Value::Null))
+}
+
+fn stalled_project_open_error(
+    project_open: &ProjectOpenStatusV1,
+    stalled_failure: Option<&super::ProjectOpenFailure>,
+) -> TraceDecayError {
+    if let Some(failure) = stalled_failure {
+        return failure.to_error();
+    }
+    let detail = project_open
+        .detail
+        .clone()
+        .unwrap_or_else(|| "project open stalled".to_owned());
+    match project_open.reason {
+        ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery => TraceDecayError::project_route(
+            super::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+            true,
+            detail,
+        ),
+        ProjectOpenStatusReasonV1::RetryBackoff => TraceDecayError::project_route(
+            super::PROJECT_SERVER_CAPACITY_REASON_CODE,
+            true,
+            detail,
+        ),
+        ProjectOpenStatusReasonV1::UnrepairableVerdict => TraceDecayError::project_open(
+            ProjectOpenFailureKind::AuthorityVerdict {
+                migration_pending: false,
+            },
+            detail,
+        ),
+        ProjectOpenStatusReasonV1::Unavailable
+        | ProjectOpenStatusReasonV1::Converging
+        | ProjectOpenStatusReasonV1::Ready => TraceDecayError::project_open(
+            ProjectOpenFailureKind::BackedOff {
+                retry_after_ms: project_open.retry_after_ms.unwrap_or(0),
+            },
+            detail,
+        ),
+    }
 }
 
 fn project_open_status_value(
@@ -625,6 +669,15 @@ where
         && project_open.state != ProjectOpenStatusStateV1::Completed
     {
         drop(setup_activity);
+        if project_open.state == ProjectOpenStatusStateV1::Stalled {
+            let error = stalled_project_open_error(project_open, status.stalled_failure.as_ref());
+            Box::pin(write_json_rpc_response(
+                transport,
+                &super::project_open_handshake::project_open_error_response(id, &error),
+            ))
+            .await?;
+            return Ok(None);
+        }
         let reset_required_stores = Box::pin(store_administration.session_runtime_registry())
             .await?
             .reset_required_stores();
@@ -643,10 +696,23 @@ where
     let Some(request) = doctor_runtime_request(first_request.parsed()) else {
         return Ok(Some(setup_activity));
     };
+    if request.doctor_report_requested()
+        && let Some(project_open) = status.project_open.as_ref()
+        && project_open.state == ProjectOpenStatusStateV1::Stalled
+    {
+        drop(setup_activity);
+        let error = stalled_project_open_error(project_open, status.stalled_failure.as_ref());
+        Box::pin(write_json_rpc_response(
+            transport,
+            &super::project_open_handshake::project_open_error_response(request.id.clone(), &error),
+        ))
+        .await?;
+        return Ok(None);
+    }
     let report_ready = if request.doctor_report_requested() {
         match Box::pin(doctor_report_ready()).await {
             Ok(ready) => ready,
-            // Enrollment, warming, a blocked repository walk, and a
+            // Enrollment, warming, a blocked repository walk, capacity, and a
             // reset-required store are client or operator states. Dropping
             // the socket before any frame made Doctor report a closed
             // connection and then print store-recovery guidance.
@@ -654,6 +720,7 @@ where
                 if super::error_is_project_not_enrolled(&error)
                     || super::error_is_project_warming(&error)
                     || super::error_is_repository_discovery_deferred(&error)
+                    || super::error_is_project_open_retryable(&error)
                     || tracedecay_mcp::reset_required_context(&error).is_some() =>
             {
                 drop(setup_activity);
@@ -1026,6 +1093,7 @@ mod doctor_runtime_route_tests {
             &store_administration,
             CoreDoctorStatusV1 {
                 project_open: Some(project_open),
+                stalled_failure: None,
                 git_watcher_health: None,
             },
             setup_activity,
@@ -1045,6 +1113,153 @@ mod doctor_runtime_route_tests {
         assert!(
             transport.output.contains(r#""reset_required_stores":[]"#),
             "{}",
+            transport.output
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_project_open_status_returns_typed_error_not_success() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let handshake = handshake(
+            root.path().join("project"),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        let mut transport = DoctorRouteTransport {
+            lifecycle,
+            output: String::new(),
+            idle_before_write: false,
+        };
+        std::fs::create_dir_all(&profile).expect("fixture profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700))
+                .expect("secure fixture profile root");
+        }
+        let store_administration = StoreAdministration::default().with_profile_identity(
+            tracedecay_daemon_identity::profile_identity::load_or_create(&profile)
+                .expect("load fixture profile identity"),
+        );
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile,
+            REGISTERED_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed),
+            "core-doctor-status-stalled-project-open",
+        )
+        .expect("enter daemon database scope");
+        let first_request = AuthenticatedFirstRequest::new(status_request_line());
+        let detail = "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases { count: 1 } / ProjectSessions";
+        let project_open = ProjectOpenStatusV1 {
+            state: ProjectOpenStatusStateV1::Stalled,
+            reason: ProjectOpenStatusReasonV1::RetryBackoff,
+            retry_after_ms: Some(1_000),
+            detail: Some(detail.to_owned()),
+        };
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            CoreDoctorStatusV1 {
+                project_open: Some(project_open),
+                stalled_failure: None,
+                git_watcher_health: None,
+            },
+            setup_activity,
+            &first_request,
+            || async { panic!("stalled status must not probe the project owner") },
+        )
+        .await
+        .expect("serve stalled status as a typed error");
+
+        assert!(outcome.is_none());
+        assert!(
+            transport
+                .output
+                .contains(r#""reason_code":"project_server_capacity_reached""#),
+            "stalled status must be a typed capacity error: {}",
+            transport.output
+        );
+        assert!(
+            transport.output.contains(r#""error""#),
+            "stalled status must be a JSON-RPC error, not a success snapshot: {}",
+            transport.output
+        );
+        assert!(
+            !transport.output.contains(r#""state":"stalled""#),
+            "stalled status must not exit as a successful project_open snapshot: {}",
+            transport.output
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_project_open_doctor_report_returns_typed_error_not_closed_connection() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let handshake = handshake(
+            root.path().join("project"),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        let mut transport = DoctorRouteTransport {
+            lifecycle,
+            output: String::new(),
+            idle_before_write: false,
+        };
+        std::fs::create_dir_all(&profile).expect("fixture profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700))
+                .expect("secure fixture profile root");
+        }
+        let store_administration = StoreAdministration::default().with_profile_identity(
+            tracedecay_daemon_identity::profile_identity::load_or_create(&profile)
+                .expect("load fixture profile identity"),
+        );
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile,
+            REGISTERED_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed),
+            "core-doctor-report-stalled-project-open",
+        )
+        .expect("enter daemon database scope");
+        let first_request = AuthenticatedFirstRequest::new(doctor_report_request_line());
+        let project_open = ProjectOpenStatusV1 {
+            state: ProjectOpenStatusStateV1::Stalled,
+            reason: ProjectOpenStatusReasonV1::RetryBackoff,
+            retry_after_ms: Some(1_000),
+            detail: Some(
+                "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases { count: 1 } / ProjectSessions".to_owned(),
+            ),
+        };
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            CoreDoctorStatusV1 {
+                project_open: Some(project_open),
+                stalled_failure: None,
+                git_watcher_health: None,
+            },
+            setup_activity,
+            &first_request,
+            || async { panic!("stalled doctor must not open the project owner") },
+        )
+        .await
+        .expect("stalled doctor must answer with a frame");
+
+        assert!(outcome.is_none());
+        assert!(
+            transport
+                .output
+                .contains(r#""reason_code":"project_server_capacity_reached""#),
+            "stalled doctor must be a typed capacity error, not a closed connection: {}",
             transport.output
         );
     }
@@ -1076,6 +1291,7 @@ mod doctor_runtime_route_tests {
             &store_administration,
             CoreDoctorStatusV1 {
                 project_open: None,
+                stalled_failure: None,
                 git_watcher_health: Some(serde_json::json!({
                     "status": "degraded",
                     "coverage": "degraded_poll",
@@ -1131,6 +1347,7 @@ mod doctor_runtime_route_tests {
             &store_administration,
             CoreDoctorStatusV1 {
                 project_open: None,
+                stalled_failure: None,
                 git_watcher_health: None,
             },
             setup_activity,
@@ -1195,6 +1412,7 @@ mod doctor_runtime_route_tests {
             &store_administration,
             CoreDoctorStatusV1 {
                 project_open: None,
+                stalled_failure: None,
                 git_watcher_health: None,
             },
             setup_activity,
@@ -1258,6 +1476,7 @@ mod doctor_runtime_route_tests {
             &store_administration,
             CoreDoctorStatusV1 {
                 project_open: None,
+                stalled_failure: None,
                 git_watcher_health: None,
             },
             setup_activity,
@@ -1305,6 +1524,7 @@ mod doctor_runtime_route_tests {
             &store_administration,
             CoreDoctorStatusV1 {
                 project_open: None,
+                stalled_failure: None,
                 git_watcher_health: None,
             },
             setup_activity,

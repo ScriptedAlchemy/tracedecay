@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+* **daemon:** settle observability drains and session-graph open tasks so idle projects retire under capacity=8; stalled `status --json` and Doctor return a typed `project_server_capacity_reached` error instead of exit 0 ([#3386](https://github.com/ScriptedAlchemy/tracedecay/issues/3386))
+
 ### Performance Improvements
 
 * **daemon:** release the seated decode, interactive catalog, and graph engine when a worktree parks; a first catalog warm that finishes after park retries that graph release without a cadence wake; `code_graph_serving` reports `warming` while the released owners are absent and the next graph read reseats them ([#3328](https://github.com/ScriptedAlchemy/tracedecay/issues/3328))

@@ -789,6 +789,27 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
 }
 
 #[tokio::test]
+async fn retiring_a_dropped_session_store_joins_the_open_task() {
+    let fixture = ContractFixture::new("session-open-task-join").await;
+    let project_id = project_id("session-open-task-join");
+    let (_project_database, sessions) = fixture.mount_project(&project_id).await;
+    drop(sessions);
+    fixture
+        .registry
+        .retire_project_session_relation_graph(&project_id)
+        .await
+        .expect("idle session store retires after its open task is joined");
+    assert!(
+        fixture
+            .registry
+            .mounted_project_sessions(&project_id)
+            .await
+            .is_none(),
+        "joined retirement removes the ProjectSessions route"
+    );
+}
+
+#[tokio::test]
 async fn project_and_profile_memory_verified_heads_survive_registry_restart() {
     let temporary = TempDir::new().expect("restart fixture root");
     let profile_root = temporary.path().join("profile");

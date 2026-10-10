@@ -465,6 +465,30 @@ fn doctor_reports_a_discovery_blocked_daemon_without_recovery_guidance() {
 }
 
 #[test]
+fn stalled_capacity_status_is_a_typed_doctor_failure_not_a_closed_connection() {
+    let path = std::path::Path::new("/tmp/project.capacity");
+    let capacity = tracedecay_domain::errors::TraceDecayError::project_route(
+        crate::daemon::PROJECT_SERVER_CAPACITY_REASON_CODE,
+        true,
+        "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases { count: 1 } / ProjectSessions",
+    );
+    let mut counters = DoctorCounters::new();
+    let findings = super::classify_daemon_status_error(
+        &mut counters,
+        std::path::Path::new("/tmp/profile"),
+        path,
+        &capacity,
+    );
+    let super::DoctorDaemonFindingsV1::Unread { reason } = findings else {
+        panic!("a stalled capacity refusal must stay an unread report: {findings:?}");
+    };
+    assert_eq!(
+        (reason, counters.issues, counters.warnings),
+        ("project_server_capacity_reached", 1, 0)
+    );
+}
+
+#[test]
 fn unavailable_canonical_report_is_an_issue_that_fails_the_doctor_exit() {
     let mut counters = DoctorCounters::new();
     super::report_daemon_diagnostics_unavailable(

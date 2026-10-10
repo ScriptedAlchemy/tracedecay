@@ -680,6 +680,23 @@ impl ProjectOpenTasks {
         }
     }
 
+    pub(super) fn stalled_failure(&self, route: &ProjectRouteKey) -> Option<ProjectOpenFailure> {
+        let now = Instant::now();
+        let mut registry = self.lock_registry();
+        registry.prune(now);
+        match registry
+            .routes
+            .get(route)
+            .or_else(|| registry.retiring.get(route))?
+            .state
+            .borrow()
+            .clone()
+        {
+            ProjectOpenTaskState::Failed(failure) => Some(failure),
+            ProjectOpenTaskState::Opening | ProjectOpenTaskState::Ready => None,
+        }
+    }
+
     pub(super) fn status(&self, route: &ProjectRouteKey) -> Option<ProjectOpenStatusV1> {
         let now = Instant::now();
         let mut registry = self.lock_registry();

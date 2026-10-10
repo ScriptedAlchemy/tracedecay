@@ -182,6 +182,15 @@ impl DaemonInvocationState {
             .map(drop)
     }
 
+    pub(super) async fn settle_store_observability_retirement(
+        &self,
+        database_path: &std::path::Path,
+    ) -> Result<()> {
+        self.service
+            .settle_store_observability_retirement(database_path)
+            .await
+    }
+
     pub(super) async fn quiesce_project_runtime_owners(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
