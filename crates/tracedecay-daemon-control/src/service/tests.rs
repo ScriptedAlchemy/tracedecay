@@ -3167,3 +3167,138 @@ fn readiness_wait_rides_through_launchd_xpcproxy_startup() {
     .expect("an xpcproxy startup must await readiness, not fail it");
     assert!(spawned.exists(), "the wait must have observed xpcproxy");
 }
+
+/// Native `launchctl print gui/<uid>/<label>` shape: one-tab job fields and
+/// nested coalitions that carry their own `state =` at two tabs.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn launchctl_print_job(plist: &std::path::Path, state: &str) -> String {
+    format!(
+        "gui/501/com.tracedecay.daemon = {{
+	active count = 1
+	path = {plist}
+	type = LaunchAgent
+	state = {state}
+
+	program = /usr/local/bin/tracedecay
+	arguments = {{
+		0 = /usr/local/bin/tracedecay
+		1 = daemon
+		2 = run
+	}}
+
+	pid = 4242
+	immediate reason = speculative
+	last exit code = (never exited)
+
+	resource coalition = {{
+		ID = 1234
+		type = resource
+		state = active
+	}}
+
+	jetsam coalition = {{
+		ID = 5678
+		type = jetsam
+		state = active
+	}}
+}}
+",
+        plist = plist.display()
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn write_launchctl_print(launchctl: &std::path::Path, job: &str) {
+    write_executable_script(
+        launchctl,
+        format!("#!/bin/sh\nif [ \"$1\" = print ]; then\ncat <<'JOB'\n{job}JOB\nfi\n"),
+    )
+    .unwrap();
+}
+
+/// The two-line `path`/`state` fixture is already covered. This feeds the
+/// real `launchctl print` dump, including nested coalition `state =` fields.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn launchd_native_print_dump_keeps_startup_and_typed_states() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let launchctl = fake_service_program(&bin, "launchctl", "#!/bin/sh\nexit 0\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+
+    for (state, expected) in [
+        ("running", DaemonServiceState::RunningEnabled),
+        ("waiting", DaemonServiceState::StoppedEnabled),
+        ("not running", DaemonServiceState::StoppedEnabled),
+        ("SIGTERMed", DaemonServiceState::StoppingEnabled),
+        ("xpcproxy", DaemonServiceState::RunningEnabled),
+        ("spawn scheduled", DaemonServiceState::RunningEnabled),
+    ] {
+        write_launchctl_print(&launchctl, &launchctl_print_job(&plist, state));
+        assert_eq!(
+            runner.service_state().unwrap(),
+            expected,
+            "native print dump for {state:?}"
+        );
+    }
+
+    write_launchctl_print(&launchctl, &launchctl_print_job(&plist, "unfamiliar"));
+    let error = runner
+        .service_state()
+        .expect_err("unknown native print state must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("missing, ambiguous, or unrecognized service state"),
+        "unknown state must stay a typed failure, got {error}"
+    );
+    assert!(
+        error.to_string().contains("Some(\"unfamiliar\")"),
+        "failure must name the unknown state, got {error}"
+    );
+
+    write_launchctl_print(
+        &launchctl,
+        &launchctl_print_job(std::path::Path::new("/foreign/daemon.plist"), "xpcproxy"),
+    );
+    assert!(
+        matches!(
+            runner.service_state(),
+            Err(tracedecay_domain::errors::TraceDecayError::ServiceUnitNotOwned { .. })
+        ),
+        "a native xpcproxy dump must not bypass exact plist ownership"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn launchd_start_replaces_an_owned_xpcproxy_job() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let log = root.path().join("commands");
+    let launchctl = fake_service_program(
+        &bin,
+        "launchctl",
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = print ]; then\ncat <<'JOB'\n{}JOB\nelse\n  printf '%s\\n' \"$*\" >> '{}'\nfi\n",
+            launchctl_print_job(&plist, "xpcproxy"),
+            log.display()
+        ),
+    );
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    let socket = root.path().join("daemon.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    runner.start(&plist, &socket, TEST_BUILD_VERSION).unwrap();
+    let commands = std::fs::read_to_string(log).unwrap();
+    assert!(commands.contains("bootout gui/501/com.tracedecay.daemon"));
+    assert!(commands.contains("bootstrap gui/501"));
+    assert!(commands.contains("kickstart -k gui/501/com.tracedecay.daemon"));
+}
