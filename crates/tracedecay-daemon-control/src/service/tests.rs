@@ -224,30 +224,12 @@ fn launchctl_print_job(plist: &std::path::Path, state: &str) -> String {
     )
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn write_launchctl_print(launchctl: &std::path::Path, job: &str) {
-    write_executable_script(
-        launchctl,
-        format!("#!/bin/sh\nif [ \"$1\" = print ]; then\ncat <<'JOB'\n{job}JOB\nfi\n"),
-    )
-    .unwrap();
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn unrecognized_service_state(error: &tracedecay_domain::errors::TraceDecayError) -> bool {
-    matches!(
-        error,
-        tracedecay_domain::errors::TraceDecayError::Config { message }
-            if message.contains("missing, ambiguous, or unrecognized service state")
-    )
-}
-
-/// `xpcproxy` is launchd's native spawn window. Observation must keep exact
-/// ownership and treat that state as pending so restore can wait for
-/// authenticated readiness instead of failing the refresh.
+/// launchd is bringing the owned job up but has not exec'd the daemon yet.
+/// Observation reports it running so readiness waits keep polling, and the
+/// startup state never bypasses exact plist ownership.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn launchd_xpcproxy_startup_is_pending_owned_activity() {
+fn launchd_starting_job_is_pending_owned_activity() {
     let root = TempDir::new().unwrap();
     let profile = ProfileRoot::under_home(root.path().join("home"));
     let bin = root.path().join("bin");
@@ -256,97 +238,38 @@ fn launchd_xpcproxy_startup_is_pending_owned_activity() {
     let launchctl = fake_service_program(&bin, "launchctl", "#!/bin/sh\nexit 0\n");
     let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
     let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    let write_print = |loaded: &std::path::Path, state: &str, disabled: bool| {
+        write_executable_script(
+            &launchctl,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = print ]; then\ncat <<'JOB'\n{}JOB\nelif [ \"$1\" = print-disabled ]; then\n  echo '\"com.tracedecay.daemon\" => {disabled}'\nfi\n",
+                launchctl_print_job(loaded, state)
+            ),
+        )
+        .unwrap();
+    };
 
-    write_launchctl_print(&launchctl, &launchctl_print_job(&plist, "xpcproxy"));
-    let observed = runner.service_state().unwrap_or_else(|error| {
-        panic!("xpcproxy is pending startup, not an unrecognized state; got {error}")
-    });
-    assert_eq!(observed, DaemonServiceState::RunningEnabled);
-    assert!(
-        observed.is_running(),
-        "pending startup must enter the existing readiness wait, not report stopped"
-    );
-
-    write_executable_script(
-        &launchctl,
-        format!(
-            "#!/bin/sh\nif [ \"$1\" = print ]; then\ncat <<'JOB'\n{}JOB\nelif [ \"$1\" = print-disabled ]; then\n  echo '\"com.tracedecay.daemon\" => true'\nfi\n",
-            launchctl_print_job(&plist, "xpcproxy")
-        ),
-    )
-    .unwrap();
-    let disabled = runner.service_state().unwrap();
-    assert_eq!(disabled, DaemonServiceState::RunningDisabled);
-    assert!(disabled.is_running());
-    assert!(!disabled.is_enabled());
-
-    write_launchctl_print(
-        &launchctl,
-        &launchctl_print_job(std::path::Path::new("/foreign/daemon.plist"), "xpcproxy"),
-    );
-    assert!(
-        matches!(
-            runner.service_state(),
-            Err(tracedecay_domain::errors::TraceDecayError::ServiceUnitNotOwned { .. })
-        ),
-        "xpcproxy must not bypass exact plist ownership"
-    );
-}
-
-/// Running, stopped, and `SIGTERMed` stay the same; unknown and ambiguous
-/// states stay typed failures. `xpcproxy` is the only new recognized state.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn launchd_owned_job_activity_states_stay_typed() {
-    let root = TempDir::new().unwrap();
-    let profile = ProfileRoot::under_home(root.path().join("home"));
-    let bin = root.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
-    let launchctl = fake_service_program(&bin, "launchctl", "#!/bin/sh\nexit 0\n");
-    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
-    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
-
-    for (state, expected) in [
-        ("running", DaemonServiceState::RunningEnabled),
-        ("waiting", DaemonServiceState::StoppedEnabled),
-        ("not running", DaemonServiceState::StoppedEnabled),
-        ("SIGTERMed", DaemonServiceState::StoppingEnabled),
-        ("xpcproxy", DaemonServiceState::RunningEnabled),
-    ] {
-        write_launchctl_print(&launchctl, &launchctl_print_job(&plist, state));
-        assert_eq!(
-            runner.service_state().unwrap(),
-            expected,
-            "owned job state {state:?}"
+    for state in ["xpcproxy", "spawn scheduled"] {
+        for (disabled, expected) in [
+            (false, DaemonServiceState::RunningEnabled),
+            (true, DaemonServiceState::RunningDisabled),
+        ] {
+            write_print(&plist, state, disabled);
+            assert_eq!(
+                runner.service_state().unwrap(),
+                expected,
+                "owned job state {state:?}, disabled {disabled}"
+            );
+        }
+        write_print(std::path::Path::new("/foreign/daemon.plist"), state, false);
+        assert!(
+            matches!(
+                runner.service_state(),
+                Err(tracedecay_domain::errors::TraceDecayError::ServiceUnitNotOwned { .. })
+            ),
+            "{state:?} must not bypass exact plist ownership"
         );
     }
-
-    write_launchctl_print(&launchctl, &launchctl_print_job(&plist, "unfamiliar"));
-    let error = runner.service_state().expect_err("unknown state must fail");
-    assert!(
-        unrecognized_service_state(&error),
-        "unknown state must stay a typed failure, got {error}"
-    );
-    assert!(
-        error.to_string().contains("Some(\"unfamiliar\")"),
-        "failure must name the unknown state, got {error}"
-    );
-
-    write_launchctl_print(
-        &launchctl,
-        &format!(
-            "gui/501/com.tracedecay.daemon = {{\n\tpath = {}\n\tstate = running\n\tstate = waiting\n}}\n",
-            plist.display()
-        ),
-    );
-    let ambiguous = runner
-        .service_state()
-        .expect_err("two job-level states must fail");
-    assert!(
-        unrecognized_service_state(&ambiguous),
-        "ambiguous state must stay a typed failure, got {ambiguous}"
-    );
 }
 
 #[cfg(windows)]
@@ -3202,35 +3125,6 @@ fn launchd_start_replaces_an_owned_terminating_job() {
     assert!(commands.contains("kickstart -k gui/501/com.tracedecay.daemon"));
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn launchd_start_replaces_an_owned_xpcproxy_job() {
-    let root = TempDir::new().unwrap();
-    let profile = ProfileRoot::under_home(root.path().join("home"));
-    let bin = root.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
-    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
-    let log = root.path().join("commands");
-    let launchctl = fake_service_program(
-        &bin,
-        "launchctl",
-        &format!(
-            "#!/bin/sh\nif [ \"$1\" = print ]; then\ncat <<'JOB'\n{}JOB\nelse\n  printf '%s\\n' \"$*\" >> '{}'\nfi\n",
-            launchctl_print_job(&plist, "xpcproxy"),
-            log.display()
-        ),
-    );
-    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
-    let socket = root.path().join("daemon.sock");
-    let _listener = UnixListener::bind(&socket).unwrap();
-    runner.start(&plist, &socket, TEST_BUILD_VERSION).unwrap();
-    let commands = std::fs::read_to_string(log).unwrap();
-    assert!(commands.contains("bootout gui/501/com.tracedecay.daemon"));
-    assert!(commands.contains("bootstrap gui/501"));
-    assert!(commands.contains("kickstart -k gui/501/com.tracedecay.daemon"));
-}
-
 #[cfg(target_os = "macos")]
 #[test]
 fn launchd_termination_is_not_quiescence_while_the_socket_serves() {
@@ -3272,45 +3166,8 @@ fn launchd_termination_is_not_quiescence_while_the_socket_serves() {
     );
 }
 
-/// launchd reports `xpcproxy` while it execs the job and `spawn scheduled`
-/// while a spawn is queued; both are startup of the owned job, not an
-/// unrecognized state (#3370).
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn launchd_spawning_job_is_pending_startup_of_the_owned_job() {
-    let root = TempDir::new().unwrap();
-    let profile = ProfileRoot::under_home(root.path().join("home"));
-    let bin = root.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
-    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
-    let launchctl = fake_service_program(&bin, "launchctl", "#!/bin/sh\nexit 0\n");
-    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
-    for state in ["xpcproxy", "spawn scheduled"] {
-        for (disabled, expected) in [
-            (false, DaemonServiceState::RunningEnabled),
-            (true, DaemonServiceState::RunningDisabled),
-        ] {
-            write_executable_script(&launchctl, format!(
-                "#!/bin/sh\nif [ \"$1\" = print ]; then\n  printf 'path = %s\\nstate = {state}\\n' '{}'\nelif [ \"$1\" = print-disabled ]; then\n  echo '\"com.tracedecay.daemon\" => {disabled}'\nfi\n",
-                plist.display()
-            )).unwrap();
-            assert_eq!(runner.service_state().unwrap(), expected, "{state}");
-        }
-        write_executable_script(
-            &launchctl,
-            format!("#!/bin/sh\necho 'path = /foreign/daemon.plist'\necho 'state = {state}'\n"),
-        )
-        .unwrap();
-        assert!(matches!(
-            runner.service_state(),
-            Err(tracedecay_domain::errors::TraceDecayError::ServiceUnitNotOwned { .. })
-        ));
-    }
-}
-
 /// Post-update restores wait on authenticated readiness; a job launchd is
-/// still spawning must keep that wait pending instead of failing it (#3370).
+/// still spawning must keep that wait pending instead of failing it.
 #[cfg(target_os = "linux")]
 #[test]
 fn readiness_wait_rides_through_launchd_xpcproxy_startup() {
