@@ -242,14 +242,30 @@ mod tests {
     }
 
     #[test]
-    fn does_not_mark_truncation_words_in_served_text() {
-        let fact = accounted_tool_result(
+    fn marks_native_truncation_warning_after_a_wrapper_header_as_cut() {
+        let recorded = json!(
+            "Wall time: 2.5000 seconds\nProcess exited with code 0\nOutput:\nWarning: truncated output (original token count: 6923)\nfirst page"
+        );
+        let fact = accounted_tool_result_with_recorded_output(
             None,
-            json!("// handle truncated output here\nfn parse() {}"),
+            json!(null),
             Some(true),
+            Some(&recorded),
         );
         let (_, cut, _) = result_fields(&fact);
-        assert_eq!(cut, None);
+        assert_eq!(cut, Some(true));
+    }
+
+    #[test]
+    fn does_not_mark_truncation_words_in_served_text() {
+        for content in [
+            json!("// handle truncated output here\nfn parse() {}"),
+            json!("// Warning: truncated names are rejected\nfn parse() {}"),
+        ] {
+            let fact = accounted_tool_result(None, content, Some(true));
+            let (_, cut, _) = result_fields(&fact);
+            assert_eq!(cut, None);
+        }
     }
 
     #[test]
