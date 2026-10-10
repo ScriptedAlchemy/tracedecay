@@ -617,10 +617,9 @@ tracedecay daemon run
 
 Keep that terminal running, then run `tracedecay init` and other commands in a
 second terminal under the same user and profile. The foreground daemon owns the
-same authenticated endpoint; it does not require a service manager. Check the
-reported transport state, rather than treating the exit status of
-`tracedecay daemon status` as a readiness assertion. A stopped daemon with a
-missing socket cannot serve requests.
+same authenticated endpoint; it does not require a service manager.
+`tracedecay daemon status` exits 0 only when that endpoint is serving; a
+stopped or unreachable daemon exits non-zero.
 
 The service is memory-bounded, sized from physical RAM when it is installed:
 `MemoryMax` is half of RAM up to 24 GiB, `MemoryHigh` is three quarters of
