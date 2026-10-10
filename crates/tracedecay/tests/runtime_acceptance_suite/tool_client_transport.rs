@@ -582,7 +582,7 @@ fn run_command_wait_then_read(mut command: Command, timeout: Duration) -> ChildR
     }
 }
 
-fn assert_complete_files_json(result: &ChildResult, expected: usize) {
+fn assert_complete_json_document(result: &ChildResult) -> Value {
     assert!(
         !result.killed_by_harness,
         "CLI --json hung after writing files: elapsed={:?} stdout_len={} stderr={}",
@@ -595,22 +595,18 @@ fn assert_complete_files_json(result: &ChildResult, expected: usize) {
         "{}",
         String::from_utf8_lossy(&result.output.stderr)
     );
-    let envelope: Value = serde_json::from_slice(&result.output.stdout).unwrap_or_else(|error| {
+    assert!(
+        result.output.stdout.len() <= 65_536,
+        "--json must fit a wait-then-read pipe: {}",
+        result.output.stdout.len()
+    );
+    serde_json::from_slice(&result.output.stdout).unwrap_or_else(|error| {
         panic!(
             "--json must be one complete parseable document ({error}); bytes={} head={}",
             result.output.stdout.len(),
             String::from_utf8_lossy(&result.output.stdout[..result.output.stdout.len().min(200)])
         )
-    });
-    assert_eq!(envelope["isError"], false, "{envelope}");
-    let files = envelope["structuredContent"]["files"]
-        .as_array()
-        .unwrap_or_else(|| panic!("structuredContent.files missing: {envelope}"));
-    assert_eq!(
-        files.len(),
-        expected,
-        "structuredContent must retain every file, not a 65KiB prefix"
-    );
+    })
 }
 
 #[test]
@@ -637,12 +633,20 @@ fn generic_tool_json_exits_while_daemon_holds_the_stream() {
         "held daemon stream must not keep --json alive: {:?}",
         result.elapsed
     );
-    assert!(
-        result.output.stdout.len() > 65_536,
-        "oversized files --json must not stop at the 65KiB pipe boundary: {}",
-        result.output.stdout.len()
+    let envelope = assert_complete_json_document(&result);
+    assert_eq!(envelope["isError"], false, "{envelope}");
+    assert_eq!(envelope["structuredContent"]["count"], expected);
+    assert_eq!(envelope["structuredContent"]["truncated"], true);
+    assert_eq!(
+        envelope["structuredContent"]["reason"],
+        "cli_json_stdout_budget"
     );
-    assert_complete_files_json(&result, expected);
+    assert!(
+        envelope["structuredContent"]["handle"]
+            .as_str()
+            .is_some_and(|handle| handle.starts_with("rh_")),
+        "oversized --json must keep the retrieve handle: {envelope}"
+    );
 }
 
 #[test]
@@ -664,7 +668,36 @@ fn generic_tool_json_completes_when_parent_waits_before_reading() {
         CHILD_TIMEOUT,
     );
     server.join().expect("join scripted daemon");
-    assert_complete_files_json(&result, expected);
+    let envelope = assert_complete_json_document(&result);
+    assert_eq!(envelope["isError"], false, "{envelope}");
+    let files = envelope["structuredContent"]["files"]
+        .as_array()
+        .unwrap_or_else(|| panic!("pipe-boundary --json must keep inline files: {envelope}"));
+    assert_eq!(files.len(), expected);
+}
+
+#[test]
+fn generic_tool_json_exits_when_parent_waits_on_oversized_files() {
+    let (_home, _project, _socket_dir, home, project, socket) = fixture();
+    let files = oversized_files();
+    let expected = files.count;
+    let (_requests, server) = spawn_scripted_daemon(
+        socket.clone(),
+        &home,
+        &project,
+        1,
+        move |stream, request, scope| {
+            hold_stream_after_files(stream, request, scope, files.clone());
+        },
+    );
+    let result = run_command_wait_then_read(
+        tool_command(&home, &project, &socket, "large"),
+        CHILD_TIMEOUT,
+    );
+    server.join().expect("join scripted daemon");
+    let envelope = assert_complete_json_document(&result);
+    assert_eq!(envelope["structuredContent"]["count"], expected);
+    assert_eq!(envelope["structuredContent"]["truncated"], true);
 }
 
 #[test]

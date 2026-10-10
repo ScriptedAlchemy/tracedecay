@@ -1091,6 +1091,50 @@ fn json_document_for_a_mid_size_files_result_fits_a_pipe_as_one_compact_line() {
     );
 }
 
+#[test]
+fn json_document_over_the_pipe_budget_keeps_a_complete_handle_envelope() {
+    let files = (0..2000)
+        .map(|index| {
+            json!({
+                "path": format!("src/pipe_overflow_{index:04}.rs"),
+                "symbols": 1,
+                "bytes": 20
+            })
+        })
+        .collect::<Vec<_>>();
+    let typed = json!({ "count": 2000, "layout": "flat", "files": files });
+    let result = ToolResult::new(
+        json!({
+            "content": [{
+                "type": "text",
+                "text": "# Truncated Response\ncall tracedecay_retrieve using handle `rh_pipebudget0123456789abcdef` before 1"
+            }],
+            "isError": false
+        }),
+        Vec::new(),
+    )
+    .with_structured_result(typed);
+    let compact = rendered_tool_output(&result, CliToolOutput::Document).unwrap();
+    assert!(
+        compact.len() < 65_536,
+        "pipe-safe --json must stay under 64KiB: {}",
+        compact.len()
+    );
+    let parsed: Value = serde_json::from_str(&compact).unwrap();
+    assert_eq!(parsed["isError"], false);
+    assert_eq!(parsed["structuredContent"]["truncated"], true);
+    assert_eq!(
+        parsed["structuredContent"]["reason"],
+        "cli_json_stdout_budget"
+    );
+    assert_eq!(parsed["structuredContent"]["count"], 2000);
+    assert_eq!(
+        parsed["structuredContent"]["handle"],
+        "rh_pipebudget0123456789abcdef"
+    );
+    assert!(parsed["structuredContent"].get("files").is_none());
+}
+
 /// An answer rendered without its typed result cannot print the `--json`
 /// document, rather than printing one with no `structuredContent`.
 #[test]
