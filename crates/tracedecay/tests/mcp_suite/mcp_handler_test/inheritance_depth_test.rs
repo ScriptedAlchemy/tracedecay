@@ -129,6 +129,18 @@ async fn wait_for_graph(project: &OpenedProject) {
                 freshness["worktree"]["staleness_state"].as_str(),
             ) {
                 (Some("current"), Some("ready"), _, _) => break,
+                (Some("current"), Some("warming"), _, _) => {
+                    let read =
+                        call_tool(project, "tracedecay_files", json!({"format": "json"})).await;
+                    assert_ne!(
+                        read.result.as_ref().expect("file inventory response")["isError"],
+                        true,
+                        "{read:?}"
+                    );
+                    if json_body(&read)["freshness"]["state"] == "fresh" {
+                        break;
+                    }
+                }
                 (Some("warming"), _, _, _)
                 | (Some("stale"), Some("ready"), _, Some("verifying"))
                 | (_, Some("pending"), _, _)
