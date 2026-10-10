@@ -213,6 +213,14 @@ impl WorktreeResidencyV1 {
             }
         }
         if self.busy() {
+            if self.serving_text().is_some_and(|text| {
+                matches!(
+                    text.code_graph_serving_readiness(),
+                    CodeGraphServingReadinessV1::Warming { .. }
+                )
+            }) {
+                self.arm_park_release_after_first_catalog_warm(owners);
+            }
             if !released.is_empty() {
                 owners.note_headroom();
             }
@@ -276,14 +284,18 @@ impl WorktreeResidencyV1 {
         if !text.arm_park_release_after_catalog_warm() {
             return;
         }
-        let residency = Arc::clone(self);
+        let residency = Arc::downgrade(self);
         let owners = Arc::downgrade(owners);
+        let retry: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let (Some(residency), Some(owners)) = (residency.upgrade(), owners.upgrade()) {
+                residency.release_decode_when_parked(&owners);
+            }
+        });
+        text.bind_parked_graph_release(Arc::clone(&retry));
         let settled = text.catalog_warm_notify();
         tokio::spawn(async move {
             settled.notified().await;
-            if let Some(owners) = owners.upgrade() {
-                residency.release_decode_when_parked(&owners);
-            }
+            retry();
         });
     }
 

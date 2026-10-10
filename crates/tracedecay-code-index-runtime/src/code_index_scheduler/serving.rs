@@ -418,6 +418,9 @@ pub struct LatestCodeTextGenerationV1 {
     /// Arm the first-warm park-release waiter once per text owner so a park
     /// loop cannot spawn a waiter per skip.
     pub(super) park_release_after_catalog_warm_armed: Arc<AtomicBool>,
+    /// Bound by the parked worktree so the first catalog warm can retry
+    /// park-release on this owner without a cadence arrival.
+    pub(super) parked_graph_release: Arc<RwLock<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2219,6 +2222,21 @@ impl LatestCodeTextGenerationV1 {
     /// retries that release without a cadence arrival.
     pub(super) fn note_catalog_warm_settled(&self) {
         self.catalog_warm_settled.notify_one();
+        let hook = self
+            .parked_graph_release
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    pub(super) fn bind_parked_graph_release(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .parked_graph_release
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hook);
     }
 
     /// Arm the one-shot waiter that retries park-release after the first
