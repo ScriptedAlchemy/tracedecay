@@ -1,7 +1,10 @@
 //! Exact native Git safety evidence and executable-policy classification.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
+
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use tracedecay_code_index::parallelism;
 
 use tracedecay_domain::{GitFileModeV1, GitHeadStateV1, ManifestDigest, canonical_sha256};
 use tracedecay_runtime_core::git_discovery::{
@@ -17,130 +20,58 @@ impl FixedGitIndexRunner {
         level = "trace",
         skip_all
     )]
-    /// Bind worktree identity without reading every clean HEAD blob.
-    ///
-    /// The path domain is still HEAD ∪ index ∪ non-ignored untracked names, so
-    /// staging an already-bound path does not change the digest. Content may
-    /// reuse a HEAD tree object id only when Git still compares that path and
-    /// the worktree is still a regular file. Mode, type, and absence always
-    /// come from the worktree: `core.filemode=false` makes `git diff HEAD`
-    /// omit chmod-only edits, so the dirty set is not mode evidence.
-    /// Assume-unchanged / skip-worktree paths are read as worktree bytes.
-    /// Request cancel and deadline are checked between Git children and paths
-    /// so a hunks deadline can drop the real index lock.
+    /// Bind physical bytes, modes and names independently of Git's dirty set,
+    /// which may hide edits through stat settings, flags or text normalization.
     pub fn tracked_worktree_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         self.check_cancelled()?;
-        let (has_head, head_entries) = self.head_tree_entries()?;
-        self.check_cancelled()?;
-        let mut paths = head_entries.keys().cloned().collect::<BTreeSet<_>>();
+        let head_paths = match self.head_state()? {
+            GitHeadStateV1::Unborn { .. } => Vec::new(),
+            GitHeadStateV1::Attached { .. } | GitHeadStateV1::Detached { .. } => {
+                self.run_git("ls-tree", &["ls-tree", "-r", "-z", "--name-only", "HEAD"])?
+                    .stdout
+            }
+        };
+        let mut paths = nul_paths(&head_paths);
         let index = self.run_git("ls-files", &["ls-files", "--stage", "-z"])?;
         for entry in index
             .stdout
             .split(|byte| *byte == 0)
             .filter(|entry| !entry.is_empty())
         {
-            let path = index_entry_path(entry)?;
-            paths.insert(path.to_vec());
+            paths.insert(index_entry_path(entry)?.to_vec());
         }
-        // An untracked path may become an index entry during the intended
-        // publication. Including it in the same manifest before and after
-        // staging binds its bytes without making the digest index-relative.
+        // A path keeps its byte identity when staging moves it into the index.
         paths.extend(self.other_paths(false)?);
+        let read_span = tracing::trace_span!("daemon.git.index_tx.worktree_bytes").entered();
+        let paths = paths.into_iter().collect::<Vec<_>>();
+        let manifest = parallelism::install(|| {
+            paths
+                .into_par_iter()
+                .map(|path| {
+                    parallelism::with_background_cpu_permit_cancellable(
+                        || self.check_cancelled().is_err(),
+                        || {
+                            self.check_cancelled()?;
+                            let path_text = std::str::from_utf8(&path).map_err(|_| {
+                                NativeGitIndexError::MalformedOutput {
+                                    operation: "ls-tree",
+                                }
+                            })?;
+                            let entry = self
+                                .worktree_manifest_bytes(&self.repository_root.join(path_text))?;
+                            Ok((path_text.to_owned(), entry.0, entry.1))
+                        },
+                    )
+                    .ok_or(NativeGitIndexError::Cancelled)?
+                })
+                .collect::<Result<Vec<_>, NativeGitIndexError>>()
+        })
+        .map_err(|error| NativeGitIndexError::Io(error.to_string()))??;
+        drop(read_span);
         self.check_cancelled()?;
-        let mut read_worktree = self.dirty_worktree_paths(has_head)?;
-        read_worktree.extend(self.worktree_check_suppressed_paths()?);
-
-        let mut manifest = Vec::new();
-        for path in paths {
-            self.check_cancelled()?;
-            let path_text =
-                std::str::from_utf8(&path).map_err(|_| NativeGitIndexError::MalformedOutput {
-                    operation: "ls-tree",
-                })?;
-            let absolute = self.repository_root.join(path_text);
-            let kind = classify_worktree_path(&absolute)?;
-            let entry = if !read_worktree.contains(&path)
-                && let Some(head) = head_entries.get(&path)
-                && kind.is_regular_file()
-                && matches!(head.kind, "file" | "executable")
-            {
-                (kind.as_str(), head.oid.clone())
-            } else {
-                self.worktree_manifest_bytes(&absolute)?
-            };
-            manifest.push((path_text.to_owned(), entry.0, entry.1));
-        }
-        canonical_sha256(&manifest).map_err(Into::into)
-    }
-
-    fn head_tree_entries(
-        &self,
-    ) -> Result<(bool, BTreeMap<Vec<u8>, HeadTreeEntry>), NativeGitIndexError> {
-        match self.head_state()? {
-            GitHeadStateV1::Unborn { .. } => Ok((false, BTreeMap::new())),
-            GitHeadStateV1::Attached { .. } | GitHeadStateV1::Detached { .. } => {
-                let output = self.run_git("ls-tree", &["ls-tree", "-r", "-z", "HEAD"])?;
-                let mut entries = BTreeMap::new();
-                for raw in output
-                    .stdout
-                    .split(|byte| *byte == 0)
-                    .filter(|entry| !entry.is_empty())
-                {
-                    let (path, entry) = parse_ls_tree_entry(raw)?;
-                    entries.insert(path, entry);
-                }
-                Ok((true, entries))
-            }
-        }
-    }
-
-    fn dirty_worktree_paths(
-        &self,
-        has_head: bool,
-    ) -> Result<BTreeSet<Vec<u8>>, NativeGitIndexError> {
-        if !has_head {
-            return Ok(BTreeSet::new());
-        }
-        Ok(nul_paths(
-            &self
-                .run_git(
-                    "diff",
-                    &[
-                        "-c",
-                        "core.fsmonitor=",
-                        "-c",
-                        "core.ignoreStat=false",
-                        "diff",
-                        "-z",
-                        "--name-only",
-                        "--no-renames",
-                        "--no-ext-diff",
-                        "--no-textconv",
-                        "--no-color",
-                        "HEAD",
-                    ],
-                )?
-                .stdout,
-        ))
-    }
-
-    /// Paths whose worktree bytes Git will not compare (`assume-unchanged`,
-    /// `skip-worktree`). Those flags are not byte evidence for an exact
-    /// snapshot; the digest must read the worktree itself.
-    fn worktree_check_suppressed_paths(&self) -> Result<BTreeSet<Vec<u8>>, NativeGitIndexError> {
-        let output = self.run_git("ls-files", &["ls-files", "-v", "-z"])?;
-        let mut suppressed = BTreeSet::new();
-        for entry in output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|entry| !entry.is_empty())
-        {
-            let (tag, path) = parse_ls_files_tag_path(entry)?;
-            if git_tag_suppresses_worktree_check(tag) {
-                suppressed.insert(path);
-            }
-        }
-        Ok(suppressed)
+        let digest = canonical_sha256(&manifest)?;
+        self.check_cancelled()?;
+        Ok(digest)
     }
 
     pub fn untracked_name_digest(&self) -> Result<Option<ManifestDigest>, NativeGitIndexError> {
@@ -377,11 +308,6 @@ impl FixedGitIndexRunner {
     }
 }
 
-struct HeadTreeEntry {
-    kind: &'static str,
-    oid: Vec<u8>,
-}
-
 #[derive(Clone, Copy)]
 enum WorktreeKind {
     File,
@@ -400,10 +326,6 @@ impl WorktreeKind {
             Self::Unsupported => "unsupported",
             Self::Absent => "absent",
         }
-    }
-
-    const fn is_regular_file(self) -> bool {
-        matches!(self, Self::File | Self::Executable)
     }
 }
 
@@ -452,41 +374,6 @@ impl FixedGitIndexRunner {
     }
 }
 
-fn parse_ls_tree_entry(entry: &[u8]) -> Result<(Vec<u8>, HeadTreeEntry), NativeGitIndexError> {
-    let delimiter = entry.iter().position(|byte| *byte == b'\t').ok_or(
-        NativeGitIndexError::MalformedOutput {
-            operation: "ls-tree",
-        },
-    )?;
-    let (metadata, path_with_delimiter) = entry.split_at(delimiter);
-    let Some(path) = path_with_delimiter.get(1..).filter(|path| !path.is_empty()) else {
-        return Err(NativeGitIndexError::MalformedOutput {
-            operation: "ls-tree",
-        });
-    };
-    let mut fields = metadata.split(|byte| *byte == b' ');
-    let mode = fields.next().unwrap_or_default();
-    let _object_type = fields.next();
-    let Some(oid) = fields.next().filter(|oid| !oid.is_empty()) else {
-        return Err(NativeGitIndexError::MalformedOutput {
-            operation: "ls-tree",
-        });
-    };
-    let kind = match mode {
-        b"100644" => "file",
-        b"100755" => "executable",
-        b"120000" => "symlink",
-        _ => "unsupported",
-    };
-    Ok((
-        path.to_vec(),
-        HeadTreeEntry {
-            kind,
-            oid: oid.to_vec(),
-        },
-    ))
-}
-
 /// The subsection of a named-driver configuration key, or `None` when the key
 /// names no driver. Git subsection names may themselves contain `.`, so the
 /// name is whatever the fixed prefix and suffix leave behind.
@@ -508,24 +395,6 @@ fn driver_subsection_name(key: &str) -> Option<&str> {
         }
     }
     None
-}
-
-fn parse_ls_files_tag_path(entry: &[u8]) -> Result<(u8, Vec<u8>), NativeGitIndexError> {
-    let (tag, rest) = entry
-        .split_first()
-        .ok_or(NativeGitIndexError::MalformedOutput {
-            operation: "ls-files",
-        })?;
-    let Some(path) = rest.strip_prefix(b" ").filter(|path| !path.is_empty()) else {
-        return Err(NativeGitIndexError::MalformedOutput {
-            operation: "ls-files",
-        });
-    };
-    Ok((*tag, path.to_vec()))
-}
-
-fn git_tag_suppresses_worktree_check(tag: u8) -> bool {
-    tag.is_ascii_lowercase() || tag == b'S'
 }
 
 fn nul_paths(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
@@ -558,26 +427,7 @@ fn index_entry_path(entry: &[u8]) -> Result<&[u8], NativeGitIndexError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        NativeGitIndexError, git_tag_suppresses_worktree_check, index_entry_path,
-        parse_ls_files_tag_path, parse_ls_tree_entry,
-    };
-
-    #[test]
-    fn ls_tree_entry_binds_mode_oid_and_path() {
-        let (path, entry) =
-            parse_ls_tree_entry(b"100644 blob deadbeefcafebabe\tcrates/app.rs").expect("entry");
-        assert_eq!(path, b"crates/app.rs");
-        assert_eq!(entry.kind, "file");
-        assert_eq!(entry.oid, b"deadbeefcafebabe");
-        let (path, entry) = parse_ls_tree_entry(b"100755 blob abc\tbin/tool").expect("executable");
-        assert_eq!(path, b"bin/tool");
-        assert_eq!(entry.kind, "executable");
-        let (path, entry) = parse_ls_tree_entry(b"160000 commit def\tvendor/lib").expect("gitlink");
-        assert_eq!(path, b"vendor/lib");
-        assert_eq!(entry.kind, "unsupported");
-        assert!(parse_ls_tree_entry(b"100644 blob deadbeef").is_err());
-    }
+    use super::{NativeGitIndexError, index_entry_path};
 
     #[test]
     fn index_entry_path_rejects_missing_or_empty_path_bytes() {
@@ -597,22 +447,5 @@ mod tests {
             index_entry_path(b"100644 deadbeef 0\tpath\twith-tab.txt").expect("valid entry"),
             b"path\twith-tab.txt"
         );
-    }
-
-    #[test]
-    fn ls_files_status_tag_marks_assume_unchanged_and_skip_worktree() {
-        let (tag, path) = parse_ls_files_tag_path(b"H source.rs").expect("cached");
-        assert_eq!(tag, b'H');
-        assert_eq!(path, b"source.rs");
-        assert!(!git_tag_suppresses_worktree_check(tag));
-        let (tag, path) = parse_ls_files_tag_path(b"h source.rs").expect("assume-unchanged");
-        assert_eq!(path, b"source.rs");
-        assert!(git_tag_suppresses_worktree_check(tag));
-        let (tag, _) = parse_ls_files_tag_path(b"S source.rs").expect("skip-worktree");
-        assert!(git_tag_suppresses_worktree_check(tag));
-        let (tag, _) = parse_ls_files_tag_path(b"s source.rs").expect("both flags");
-        assert!(git_tag_suppresses_worktree_check(tag));
-        assert!(parse_ls_files_tag_path(b"H").is_err());
-        assert!(parse_ls_files_tag_path(b"Hsource.rs").is_err());
     }
 }

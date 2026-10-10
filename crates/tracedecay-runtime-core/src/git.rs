@@ -75,6 +75,8 @@ pub enum GitCommandError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to write git stdin: {0}")]
+    WriteInput(#[source] std::io::Error),
     #[error("failed to wait for git: {0}")]
     Wait(#[source] std::io::Error),
 }
@@ -430,9 +432,6 @@ async fn run_bounded_command(
     if process_outcome.is_err() {
         terminate_child(&mut child).await;
     }
-    if let Some(writer) = input_writer {
-        let _ = writer.await;
-    }
     let status = process_outcome?;
     // Draining stays under the same deadline and cancellation as the process:
     // a descendant that inherited the child's stdout keeps the pipe open after
@@ -440,6 +439,14 @@ async fn run_bounded_command(
     // outlive the caller's deadline. The reader tasks are dropped with this
     // runtime, which closes our pipe ends.
     let drained = async {
+        if let Some(writer) = input_writer {
+            let written = writer.await.map_err(|error| {
+                GitCommandError::WriteInput(std::io::Error::other(error.to_string()))
+            })?;
+            if status.success() {
+                written.map_err(GitCommandError::WriteInput)?;
+            }
+        }
         let stdout = join_reader(stdout_reader, "stdout").await?;
         let stderr = join_reader(stderr_reader, "stderr").await?;
         Ok::<_, GitCommandError>((stdout, stderr))

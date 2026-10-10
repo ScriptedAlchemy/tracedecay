@@ -1,12 +1,8 @@
 use std::env;
 use std::fs::File;
 use std::io::Read;
-#[cfg(test)]
-use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-#[cfg(test)]
-use std::process::{Child, Output};
 
 use tracedecay_domain::{GitFileModeV1, GitOidV1, GitOperationStateV1};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
@@ -46,108 +42,6 @@ pub fn git_command(repository_root: &Path) -> Result<Command, NativeGitIndexErro
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0");
     Ok(command)
-}
-
-#[cfg(test)]
-pub fn run_command_with_stdin(
-    mut command: Command,
-    operation: &'static str,
-    input: &[u8],
-) -> Result<Output, NativeGitIndexError> {
-    let mut child = command
-        .spawn()
-        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-    let Some(mut stdin) = child.stdin.take() else {
-        return Err(missing_child_pipe(&mut child, "stdin"));
-    };
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    // Commands such as `git check-attr --stdin` emit output as they consume
-    // paths. Feeding the complete input before draining stdout can fill both
-    // pipes and deadlock the parent and child. Keep the writer scoped so every
-    // return path joins it, while sibling readers drain stdout and stderr.
-    let (status, write_result, stdout_result, stderr_result) = std::thread::scope(|scope| {
-        let writer = scope.spawn(move || stdin.write_all(input));
-        let stdout_reader = stdout.map(|mut stdout| {
-            scope.spawn(move || {
-                let mut bytes = Vec::new();
-                stdout.read_to_end(&mut bytes).map(|_| bytes)
-            })
-        });
-        let stderr_reader = stderr.map(|mut stderr| {
-            scope.spawn(move || {
-                let mut bytes = Vec::new();
-                stderr.read_to_end(&mut bytes).map(|_| bytes)
-            })
-        });
-        let status = child.wait().map_err(|error| {
-            let cleanup = terminate_and_reap(&mut child);
-            NativeGitIndexError::Io(format!(
-                "native Git wait failed: {error}; cleanup: {cleanup}"
-            ))
-        });
-        let write_result = writer
-            .join()
-            .map_err(|_| NativeGitIndexError::Io("native Git stdin writer panicked".to_owned()));
-        let stdout_result = stdout_reader.map_or_else(
-            || Ok(Ok(Vec::new())),
-            |reader| {
-                reader.join().map_err(|_| {
-                    NativeGitIndexError::Io("native Git stdout reader panicked".to_owned())
-                })
-            },
-        );
-        let stderr_result = stderr_reader.map_or_else(
-            || Ok(Ok(Vec::new())),
-            |reader| {
-                reader.join().map_err(|_| {
-                    NativeGitIndexError::Io("native Git stderr reader panicked".to_owned())
-                })
-            },
-        );
-        (status, write_result, stdout_result, stderr_result)
-    });
-    let status = status?;
-    write_result
-        .and_then(|result| result.map_err(|error| NativeGitIndexError::Io(error.to_string())))?;
-    let stdout = stdout_result
-        .and_then(|result| result.map_err(|error| NativeGitIndexError::Io(error.to_string())))?;
-    let stderr = stderr_result
-        .and_then(|result| result.map_err(|error| NativeGitIndexError::Io(error.to_string())))?;
-    let output = Output {
-        status,
-        stdout,
-        stderr,
-    };
-    if output.status.success() {
-        Ok(output)
-    } else {
-        Err(NativeGitIndexError::GitFailed {
-            operation,
-            status: output.status.to_string(),
-        })
-    }
-}
-
-#[cfg(test)]
-fn missing_child_pipe(child: &mut Child, pipe: &str) -> NativeGitIndexError {
-    let cleanup = terminate_and_reap(child);
-    NativeGitIndexError::Io(format!(
-        "native Git {pipe} was not available; cleanup: {cleanup}"
-    ))
-}
-
-#[cfg(test)]
-fn terminate_and_reap(child: &mut Child) -> String {
-    let kill = child.kill().map_or_else(
-        |error| format!("termination failed: {error}"),
-        |()| "terminated".to_owned(),
-    );
-    let reap = child.wait().map_or_else(
-        |error| format!("reap failed: {error}"),
-        |status| format!("reaped with {status}"),
-    );
-    format!("{kill}, {reap}")
 }
 
 pub fn read_optional_file(path: &Path) -> Result<Vec<u8>, NativeGitIndexError> {

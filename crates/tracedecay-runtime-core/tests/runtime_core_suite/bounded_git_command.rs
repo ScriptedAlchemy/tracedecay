@@ -56,6 +56,21 @@ fn draining_after_exit_is_bounded_when_a_descendant_holds_stdout() {
 
 #[cfg(unix)]
 #[test]
+fn stdin_drain_after_exit_is_bounded_when_a_descendant_holds_input() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "sleep 2 <&0 >/dev/null 2>&1 & exit 0"]);
+    let bounds = GitCommandBounds {
+        deadline: Instant::now() + Duration::from_millis(300),
+        ..GitCommandBounds::default()
+    };
+    let started = Instant::now();
+    let result = bounded_command_output(command, Some(&vec![0xa5; 4 * 1024 * 1024]), &bounds);
+    assert!(matches!(result, Err(GitCommandError::DeadlineExceeded)));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[cfg(unix)]
+#[test]
 fn generic_command_is_interrupted_by_live_cancellation() {
     let cancellation = CancellationToken::new();
     let trigger = cancellation.clone();

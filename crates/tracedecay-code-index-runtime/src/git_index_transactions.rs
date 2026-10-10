@@ -449,12 +449,16 @@ impl FixedGitIndexRunner {
         }
     }
 
-    /// Reads a file to bytes while checking the request cancel token and
-    /// deadline between chunks, so a large index or worktree blob cannot
-    /// outlive the caller's bounds inside one `read`.
+    /// Checks request cancellation and deadline between bounded read chunks.
+    /// Small files allocate only their current size, rather than a full chunk.
     fn read_file_chunks(&self, mut file: File) -> Result<Vec<u8>, NativeGitIndexError> {
         let mut bytes = Vec::new();
-        let mut chunk = vec![0u8; SNAPSHOT_READ_CHUNK_BYTES];
+        let chunk_size = file
+            .metadata()
+            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?
+            .len()
+            .clamp(1, SNAPSHOT_READ_CHUNK_BYTES as u64) as usize;
+        let mut chunk = vec![0u8; chunk_size];
         loop {
             self.check_cancelled()?;
             let read = file
@@ -864,5 +868,6 @@ fn map_bounded_git_error(error: GitCommandError) -> NativeGitIndexError {
             NativeGitIndexError::Io(format!("git {stream}: {source}"))
         }
         GitCommandError::Wait(error) => NativeGitIndexError::Io(error.to_string()),
+        GitCommandError::WriteInput(error) => NativeGitIndexError::Io(error.to_string()),
     }
 }

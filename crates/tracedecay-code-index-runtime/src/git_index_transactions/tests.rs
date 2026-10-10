@@ -3,7 +3,6 @@ use std::io::{Read, Write};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use super::process::run_command_with_stdin;
 use super::{FixedGitIndexRunner, NativeGitIndexError};
 use tempfile::tempdir;
 use tracedecay_runtime_core::cancellation::CancellationToken;
@@ -42,6 +41,7 @@ fn pipe_echo_helper() {
 
 #[test]
 fn command_with_large_bidirectional_pipes_drains_output_while_writing_input() {
+    let (_directory, runner) = committed_file("fixture.txt", b"fixture\n");
     let input = vec![0xa5; 4 * 1024 * 1024];
     let mut command = Command::new(std::env::current_exe().expect("current test executable"));
     command
@@ -55,7 +55,8 @@ fn command_with_large_bidirectional_pipes_drains_output_while_writing_input() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
 
-    let output = run_command_with_stdin(command, "pipe-echo", &input)
+    let output = runner
+        .run_bounded_git_stdin(command, "pipe-echo", &input)
         .expect("large bidirectional subprocess completes");
     assert_eq!(
         output
@@ -71,6 +72,7 @@ fn command_with_large_bidirectional_pipes_drains_output_while_writing_input() {
 
 #[test]
 fn command_child_failure_remains_typed_after_pipe_drain() {
+    let (_directory, runner) = committed_file("fixture.txt", b"fixture\n");
     let input = vec![0xa5; 4 * 1024 * 1024];
     let mut command = Command::new(std::env::current_exe().expect("current test executable"));
     command
@@ -86,7 +88,7 @@ fn command_child_failure_remains_typed_after_pipe_drain() {
         .stderr(std::process::Stdio::piped());
 
     assert!(matches!(
-        run_command_with_stdin(command, "pipe-child-failure", &input),
+        runner.run_bounded_git_stdin(command, "pipe-child-failure", &input),
         Err(NativeGitIndexError::GitFailed {
             operation: "pipe-child-failure",
             ..
@@ -96,6 +98,7 @@ fn command_child_failure_remains_typed_after_pipe_drain() {
 
 #[test]
 fn command_that_closes_stdin_early_returns_a_typed_io_failure() {
+    let (_directory, runner) = committed_file("fixture.txt", b"fixture\n");
     let input = vec![0xa5; 4 * 1024 * 1024];
     let mut command = Command::new(std::env::current_exe().expect("current test executable"));
     command
@@ -110,7 +113,7 @@ fn command_that_closes_stdin_early_returns_a_typed_io_failure() {
         .stderr(std::process::Stdio::piped());
 
     assert!(matches!(
-        run_command_with_stdin(command, "pipe-early-exit", &input),
+        runner.run_bounded_git_stdin(command, "pipe-early-exit", &input),
         Err(NativeGitIndexError::Io(_))
     ));
 }
@@ -772,6 +775,82 @@ fn tracked_worktree_digest_changes_when_skip_worktree_bytes_change() {
     assert_ne!(
         before, after,
         "skip-worktree is not byte evidence; the digest must bind worktree bytes"
+    );
+}
+
+#[test]
+fn tracked_worktree_digest_hidden_content_with_untrusted_ctime() {
+    let (directory, runner) = committed_file("source.rs", b"original\n");
+    let path = directory.path().join("source.rs");
+    let mtime = std::time::SystemTime::now() - Duration::from_secs(30);
+    fs::File::open(&path)
+        .expect("source file")
+        .set_modified(mtime)
+        .expect("historical mtime");
+    for args in [
+        vec!["config", "--local", "core.trustctime", "false"],
+        vec!["add", "--", "source.rs"],
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(directory.path())
+                .args(args)
+                .status()
+                .expect("Git stat setup")
+                .success()
+        );
+    }
+    let before = runner.tracked_worktree_digest().expect("original identity");
+    assert_eq!(
+        before,
+        tracedecay_domain::canonical_sha256(&[("source.rs", "file", b"original\n".to_vec())],)
+            .expect("canonical raw-byte manifest")
+    );
+    fs::write(&path, b"modified\n").expect("same-size edit");
+    fs::File::open(&path)
+        .expect("edited file")
+        .set_modified(mtime)
+        .expect("restored mtime");
+    assert_git_diff_head_hides(directory.path(), "source.rs");
+    assert_ne!(
+        before,
+        runner.tracked_worktree_digest().expect("edited identity")
+    );
+}
+
+#[test]
+fn tracked_worktree_digest_hidden_content_with_text_normalization() {
+    let (directory, runner) = committed_file("source.rs", b"original\n");
+    fs::write(directory.path().join(".gitattributes"), b"*.rs text\n")
+        .expect("text normalization attribute");
+    for args in [
+        vec!["add", "--", ".gitattributes"],
+        vec![
+            "-c",
+            "user.name=TraceDecay",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "text normalization",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .current_dir(directory.path())
+                .args(args)
+                .status()
+                .expect("Git attribute setup")
+                .success()
+        );
+    }
+    let before = runner.tracked_worktree_digest().expect("LF identity");
+    fs::write(directory.path().join("source.rs"), b"original\r\n").expect("CRLF edit");
+    assert_git_diff_head_hides(directory.path(), "source.rs");
+    assert_ne!(
+        before,
+        runner.tracked_worktree_digest().expect("CRLF identity")
     );
 }
 
