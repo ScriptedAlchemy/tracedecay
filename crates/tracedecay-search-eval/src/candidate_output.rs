@@ -1677,6 +1677,7 @@ pub(crate) mod tests {
                 logical_evidence_id: id("code-symbol:symbol.stable").expect("evidence"),
                 occurrences: vec![occurrence],
                 exact_class: ExactClass::Approximate,
+                source_role: Default::default(),
                 utility_micros: 1,
                 contributions: Vec::new(),
                 freshness: Vec::new(),

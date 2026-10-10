@@ -56,6 +56,7 @@ fn lexical_candidate() -> RankedCandidate {
                 .expect("lexical candidate logical evidence"),
             occurrences: Vec::new(),
             exact_class: ExactClass::Approximate,
+            source_role: Default::default(),
             utility_micros: 1,
             contributions: Vec::new(),
             freshness: Vec::new(),

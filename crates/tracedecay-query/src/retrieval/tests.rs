@@ -151,6 +151,7 @@ fn candidate(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: Default::default(),
         retriever: lane,
         retriever_revision: id(&format!("retriever.{}.v1", lane.as_str())),
         score_domain: id(&format!("score.{}.v1", lane.as_str())),

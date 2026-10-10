@@ -46,6 +46,11 @@ impl OrderedFusedCandidates {
 pub(super) fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Ordering {
     exact_class_rank(left.exact_class)
         .cmp(&exact_class_rank(right.exact_class))
+        .then_with(|| {
+            left.source_role
+                .admission_rank()
+                .cmp(&right.source_role.admission_rank())
+        })
         .then_with(|| right.utility_micros.cmp(&left.utility_micros))
         .then_with(|| source_validity_rank(right).cmp(&source_validity_rank(left)))
         .then_with(|| ordered_domain_scores(left).cmp(&ordered_domain_scores(right)))

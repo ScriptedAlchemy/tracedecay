@@ -380,6 +380,7 @@ fn pair(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: Default::default(),
         retriever: RetrieverKind::Lexical,
         retriever_revision: id("retriever.lexical.v1"),
         score_domain: id(crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1),
@@ -413,7 +414,7 @@ fn pair(
         spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
-        test_reference: false,
+        source_role: Default::default(),
     };
     (candidate, evidence)
 }

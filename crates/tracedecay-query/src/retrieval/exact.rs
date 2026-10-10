@@ -26,7 +26,6 @@ use super::ports::{
     candidate_checkpoint_prefix, checkpoint_digest, contract_error, lane_bound_evidence,
     lane_candidate_cap, retrieval_checkpoint,
 };
-use super::source_tier::source_tiered_score;
 
 /// Wording the exact lane uses when a port-emitted batch fails the shared
 /// candidate/evidence binding checks.
@@ -106,10 +105,10 @@ pub struct ExactLaneEvidence {
     /// The validated admission proof minted centrally; the lane attaches it,
     /// it never constructs it.
     pub admission_proof: ExactAdmissionProof,
-    /// True when the hit lives under a test path. Absent historical evidence
-    /// deserializes as a production hit.
+    /// Source-role evidence for the same-symbol definition/reference order.
+    /// Absent historical evidence deserializes as a non-definition hit.
     #[serde(default)]
-    pub test_reference: bool,
+    pub source_role: tracedecay_domain::RetrievalSourceRoleV1,
 }
 
 impl LaneBoundEvidence for ExactLaneEvidence {
@@ -718,17 +717,22 @@ where
             }
             admitted.push((candidate.clone(), evidence.clone()));
         }
-        // Canonical deterministic order: admitted matched-literal count
-        // (descending), then production definitions ahead of test-file
-        // references, then stable occurrence identity, then the evidence
+        // Canonical deterministic order: production definitions ahead of
+        // every other source role, then admitted matched-literal count
+        // (descending), then stable occurrence identity, then the evidence
         // anchor. Port emission order can never select a different prefix.
         admitted.sort_by(|left, right| {
-            right
-                .1
-                .matched_literals
-                .len()
-                .cmp(&left.1.matched_literals.len())
-                .then_with(|| left.1.test_reference.cmp(&right.1.test_reference))
+            left.1
+                .source_role
+                .admission_rank()
+                .cmp(&right.1.source_role.admission_rank())
+                .then_with(|| {
+                    right
+                        .1
+                        .matched_literals
+                        .len()
+                        .cmp(&left.1.matched_literals.len())
+                })
                 .then_with(|| {
                     left.0
                         .source_occurrence_id
@@ -761,11 +765,11 @@ where
                 retrieval_checkpoint(request.control)?;
             }
             candidate.ordinal_rank = ordinal as u32;
-            candidate.raw_score = FixedPointScore(source_tiered_score(
+            candidate.source_role = evidence.source_role;
+            candidate.raw_score = FixedPointScore(
                 (evidence.matched_literals.len() as u64)
                     .saturating_mul(ADMITTED_LITERAL_SCORE_MICROS),
-                evidence.test_reference,
-            ));
+            );
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }

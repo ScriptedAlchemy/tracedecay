@@ -508,6 +508,7 @@ pub struct FusionComparatorRecordV1 {
     /// (`LexicalRouteReceiptV1::anchor_tiers`); the leading key.
     pub anchor_tier: u32,
     pub exact_class: ExactClass,
+    pub source_role_rank: u8,
     pub utility_micros: u64,
     pub source_validity_rank: u8,
     /// Identity for matching survivors after deduplication, not a sorting key.
@@ -961,12 +962,16 @@ impl DeterministicFixedPointFusion {
                 logical_evidence_id: candidate.logical_evidence_id.clone(),
                 occurrences: Vec::new(),
                 exact_class,
+                source_role: candidate.source_role,
                 utility_micros: 0,
                 contributions: Vec::new(),
                 freshness: Vec::new(),
                 decisions: Vec::new(),
             });
             entry.exact_class = strongest_exact_class(entry.exact_class, exact_class);
+            if candidate.source_role.admission_rank() < entry.source_role.admission_rank() {
+                entry.source_role = candidate.source_role;
+            }
             entry.occurrences.push(occurrence);
             entry.contributions.push(contribution);
             entry.freshness.push(candidate.freshness.clone());
@@ -1024,9 +1029,10 @@ impl DeterministicFixedPointFusion {
                         .first()
                         .map(|occurrence| occurrence.retriever_evidence_anchor.clone()),
                     detail: format!(
-                        "anchor_tier={};exact={:?};utility={};source_validity={};domain_scores=[{}];evidence_anchors=[{}];occurrences=[{}];revision={}",
+                        "anchor_tier={};exact={:?};source_role={};utility={};source_validity={};domain_scores=[{}];evidence_anchors=[{}];occurrences=[{}];revision={}",
                         record.anchor_tier,
                         record.exact_class,
+                        record.source_role_rank,
                         record.utility_micros,
                         record.source_validity_rank,
                         record.domain_scores.iter()
@@ -1059,6 +1065,7 @@ impl DeterministicFixedPointFusion {
         FusionComparatorRecordV1 {
             anchor_tier,
             exact_class: candidate.exact_class,
+            source_role_rank: candidate.source_role.admission_rank(),
             utility_micros: candidate.utility_micros,
             source_validity_rank: source_validity_rank(candidate),
             anchor_id: candidate.anchor_id.clone(),
@@ -1451,6 +1458,7 @@ mod attach_same_source_decisions_tests {
             logical_evidence_id: id::<LogicalEvidenceId>("logical.fixture"),
             occurrences,
             exact_class: ExactClass::Approximate,
+            source_role: Default::default(),
             utility_micros: 0,
             contributions: Vec::new(),
             freshness: Vec::new(),

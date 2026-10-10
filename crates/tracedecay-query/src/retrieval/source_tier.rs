@@ -1,37 +1,71 @@
 //! Source-role ranking: production definitions outrank test-file references.
 
-/// Added to a production hit's raw score so fusion keeps the source tier
-/// after calibration saturates. `compare_fused` falls back to raw score
-/// when calibrated utility ties.
-pub(crate) const PRODUCTION_DEFINITION_TIER_MICROS: u64 = 1_000_000_000;
+use tracedecay_code_index::is_test_file;
+use tracedecay_domain::{CodeSearchChunkGrainV1, RetrievalSourceRoleV1};
 
-/// Lift a measured lane score into the production tier, or leave a test
-/// reference on the measured scale.
-pub(crate) fn source_tiered_score(base_micros: u64, test_reference: bool) -> u64 {
-    if test_reference {
-        base_micros
+use super::lexical::LexicalFieldV1;
+
+/// Classify a hit from the existing test-path authority plus whether the
+/// matched evidence is a name or signature definition.
+pub(crate) fn classify_source_role(path: &str, definition_match: bool) -> RetrievalSourceRoleV1 {
+    if is_test_file(path) {
+        RetrievalSourceRoleV1::TestReference
+    } else if definition_match {
+        RetrievalSourceRoleV1::ProductionDefinition
     } else {
-        base_micros.saturating_add(PRODUCTION_DEFINITION_TIER_MICROS)
+        RetrievalSourceRoleV1::ProductionOther
     }
+}
+
+pub(crate) fn is_definition_field(field: LexicalFieldV1) -> bool {
+    matches!(
+        field,
+        LexicalFieldV1::SymbolName | LexicalFieldV1::QualifiedName | LexicalFieldV1::Signature
+    )
+}
+
+pub(crate) fn exact_definition_grain(grain: CodeSearchChunkGrainV1) -> bool {
+    matches!(
+        grain,
+        CodeSearchChunkGrainV1::SymbolSignature
+            | CodeSearchChunkGrainV1::SymbolBody
+            | CodeSearchChunkGrainV1::SymbolMember
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PRODUCTION_DEFINITION_TIER_MICROS, source_tiered_score};
+    use tracedecay_domain::RetrievalSourceRoleV1;
+
+    use super::{classify_source_role, exact_definition_grain, is_definition_field};
+    use crate::retrieval::lexical::LexicalFieldV1;
+    use tracedecay_domain::CodeSearchChunkGrainV1;
 
     #[test]
-    fn production_hits_keep_a_fusion_visible_tier_above_equal_test_hits() {
-        assert_eq!(source_tiered_score(1_000_000, false), 1_001_000_000);
-        assert_eq!(source_tiered_score(1_000_000, true), 1_000_000);
-        assert!(
-            source_tiered_score(1_000_000, false) > source_tiered_score(2_000_000, true),
-            "the production tier outranks a stronger test-file match"
+    fn production_definitions_are_not_every_non_test_path() {
+        assert_eq!(
+            classify_source_role("src/internal/client/ensure-daemon.ts", true),
+            RetrievalSourceRoleV1::ProductionDefinition
         );
         assert_eq!(
-            source_tiered_score(u64::MAX, false),
-            u64::MAX,
-            "the production lift saturates instead of overflowing"
+            classify_source_role("src/internal/client/ensure-daemon.ts", false),
+            RetrievalSourceRoleV1::ProductionOther
         );
-        assert_eq!(PRODUCTION_DEFINITION_TIER_MICROS, 1_000_000_000);
+        assert_eq!(
+            classify_source_role("src/internal/client/ensure-daemon.test.ts", true),
+            RetrievalSourceRoleV1::TestReference
+        );
+        assert_eq!(
+            RetrievalSourceRoleV1::ProductionDefinition.admission_rank(),
+            0
+        );
+        assert_eq!(RetrievalSourceRoleV1::ProductionOther.admission_rank(), 1);
+        assert_eq!(RetrievalSourceRoleV1::TestReference.admission_rank(), 1);
+        assert!(is_definition_field(LexicalFieldV1::SymbolName));
+        assert!(!is_definition_field(LexicalFieldV1::BodyText));
+        assert!(exact_definition_grain(
+            CodeSearchChunkGrainV1::SymbolSignature
+        ));
+        assert!(!exact_definition_grain(CodeSearchChunkGrainV1::FileWindow));
     }
 }

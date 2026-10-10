@@ -110,6 +110,7 @@ fn candidate(kind: RetrieverKind, raw_score: u64) -> CompactCandidate {
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: Default::default(),
         retriever: kind,
         retriever_revision: id(&format!(
             "retriever.{}.canonical-equivalence.v1",
@@ -158,7 +159,7 @@ fn exact_evidence() -> ExactLaneEvidence {
             canonical_bytes: b"run_query".to_vec(),
         }],
         admission_proof: exact_proof(),
-        test_reference: false,
+        source_role: Default::default(),
     }
 }
 
@@ -173,7 +174,7 @@ fn lexical_evidence() -> LexicalLaneEvidence {
         spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
-        test_reference: false,
+        source_role: Default::default(),
     }
 }
 

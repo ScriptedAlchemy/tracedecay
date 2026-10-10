@@ -24,7 +24,6 @@ use super::ports::{
     candidate_checkpoint_prefix, checkpoint_digest, contract_error, lane_bound_evidence,
     lane_candidate_cap, retrieval_checkpoint,
 };
-use super::source_tier::source_tiered_score;
 
 mod projection;
 mod routes;
@@ -343,10 +342,10 @@ pub struct LexicalLaneEvidence {
     pub spelling_variants: Vec<LexicalSpellingVariantV1>,
     pub typo_recovery_applied: bool,
     pub echo_penalty_applied: bool,
-    /// True when the hit lives under a test path. Absent historical evidence
-    /// deserializes as a production hit.
+    /// Source-role evidence for the same-symbol definition/reference order.
+    /// Absent historical evidence deserializes as a non-definition hit.
     #[serde(default)]
-    pub test_reference: bool,
+    pub source_role: tracedecay_domain::RetrievalSourceRoleV1,
 }
 
 impl LaneBoundEvidence for LexicalLaneEvidence {
@@ -598,15 +597,16 @@ where
             }
             admitted.push((candidate.clone(), filtered, raw_score));
         }
-        // Canonical deterministic order: recomputed fixed-point score
-        // (descending), then production definitions ahead of test-file
-        // references, then stable occurrence identity, then the evidence
+        // Canonical deterministic order: production definitions ahead of
+        // every other source role, then recomputed fixed-point score
+        // (descending), then stable occurrence identity, then the evidence
         // anchor. Port emission order can never select a different prefix.
         admitted.sort_by(|left, right| {
-            right
-                .2
-                .cmp(&left.2)
-                .then_with(|| left.1.test_reference.cmp(&right.1.test_reference))
+            left.1
+                .source_role
+                .admission_rank()
+                .cmp(&right.1.source_role.admission_rank())
+                .then_with(|| right.2.cmp(&left.2))
                 .then_with(|| {
                     left.0
                         .source_occurrence_id
@@ -629,10 +629,8 @@ where
                 retrieval_checkpoint(request.control)?;
             }
             candidate.ordinal_rank = ordinal as u32;
-            candidate.raw_score = FixedPointScore(source_tiered_score(
-                raw_score.micros(),
-                evidence.test_reference,
-            ));
+            candidate.source_role = evidence.source_role;
+            candidate.raw_score = raw_score;
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }

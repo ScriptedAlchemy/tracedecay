@@ -29,7 +29,6 @@ use tracedecay_code_index::clones::{
     CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneExactKeyV1, CloneSelectedBlockV1,
     CodeIndexCloneBodyV1,
 };
-use tracedecay_code_index::is_test_file;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
@@ -89,6 +88,9 @@ use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
     MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1, admit_candidate_sources,
     candidate_admission_outcome, field_admitted,
+};
+use crate::retrieval::source_tier::{
+    classify_source_role, exact_definition_grain, is_definition_field,
 };
 
 impl LexicalFieldTextV1 for ArtifactRowV1 {
@@ -2148,6 +2150,10 @@ impl<'a> ArtifactQueryV1<'a> {
                 None,
             )?;
             candidate.ordinal_rank = ordinal as u32;
+            let definition_match = score
+                .field_scores
+                .iter()
+                .any(|(field, micros)| *micros > 0 && is_definition_field(*field));
             let evidence = LexicalLaneEvidence {
                 binding: lexical_lane_binding(&row, &candidate, score.matched_kinds),
                 field_scores_micros: score.field_scores,
@@ -2158,7 +2164,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 spelling_variants: score.spelling_variants,
                 typo_recovery_applied: score.typo_recovery_applied,
                 echo_penalty_applied: score.echo_penalty_applied,
-                test_reference: is_test_file(&row.logical_path),
+                source_role: classify_source_role(&row.logical_path, definition_match),
             };
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
@@ -2185,8 +2191,9 @@ impl<'a> ArtifactQueryV1<'a> {
         retrieval_checkpoint(request.control)?;
         let documents = self.exact_documents(request)?;
         // Same bounded selection as the lexical lane: keys mirror the exact
-        // lane's canonical order (admitted literal count, then occurrence),
-        // and only the selected winners are rehydrated into evidence.
+        // lane's canonical order (production-definition rank, then admitted
+        // literal count, then occurrence), and only the selected winners are
+        // rehydrated into evidence.
         // Central admission runs BEFORE heap eligibility: a document whose
         // matched literals are all denied is excluded, never selected, so a
         // denied best match can never displace an admitted candidate or
@@ -2206,7 +2213,11 @@ impl<'a> ArtifactQueryV1<'a> {
                     document,
                     row.id.as_str().to_owned(),
                     row.anchor.file_occurrence_id,
-                    is_test_file(&row.logical_path),
+                    classify_source_role(
+                        &row.logical_path,
+                        exact_definition_grain(row.anchor.grain)
+                            && row.symbol_simple_name.is_some(),
+                    ),
                     matches,
                 ));
             }
@@ -2216,7 +2227,7 @@ impl<'a> ArtifactQueryV1<'a> {
         let mut eligible = 0u64;
         let mut ranked = BinaryHeap::new();
         let mut proofs = LiteralProofCacheV1::new(request.literals.len());
-        for (visited, (document, row_id, file, test_reference, matches)) in
+        for (visited, (document, row_id, file, source_role, matches)) in
             matched_rows.into_iter().enumerate()
         {
             if visited.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
@@ -2238,12 +2249,17 @@ impl<'a> ArtifactQueryV1<'a> {
                 cap,
                 Keyed {
                     key: (
+                        source_role.admission_rank(),
                         Reverse(matched_literals.len()),
-                        test_reference,
                         row_id,
                         document,
                     ),
-                    value: (admitted_ordinal, matched_literals, matched_kinds),
+                    value: (
+                        admitted_ordinal,
+                        matched_literals,
+                        matched_kinds,
+                        source_role,
+                    ),
                 },
             );
         }
@@ -2264,8 +2280,8 @@ impl<'a> ArtifactQueryV1<'a> {
                 retrieval_checkpoint(request.control)?;
             }
             let Keyed {
-                key: (_, test_reference, _, document),
-                value: (admitted_ordinal, matched_literals, matched_kinds),
+                key: (_, _, _, document),
+                value: (admitted_ordinal, matched_literals, matched_kinds, source_role),
             } = entry;
             let proof = proofs.admitted_proof(admitted_ordinal)?;
             let matched_literals = matched_literals
@@ -2289,7 +2305,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 binding: lexical_lane_binding(&row, &candidate, matched_kinds),
                 matched_literals,
                 admission_proof: proof,
-                test_reference,
+                source_role,
             };
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
@@ -2453,7 +2469,12 @@ impl<'a> ArtifactQueryV1<'a> {
                     }
                     // Echo only lowers the score. A candidate whose upper bound
                     // loses to the current worst winner never needs text hydration.
-                    let best_key = (Reverse(upper), draft.chunk_id.clone(), document);
+                    // Name/signature matches may be production definitions; those
+                    // outrank every test hit, so their path is read before the
+                    // bound can reject them. Other hits share one measured-score
+                    // tier and do not inflate just to classify a test path.
+                    let role_rank = lexical_admission_rank(self, document, &draft)?;
+                    let best_key = (role_rank, Reverse(upper), draft.chunk_id.clone(), document);
                     if ranked.len() == cap
                         && ranked.peek().is_some_and(|worst| best_key >= worst.key)
                     {
@@ -2485,7 +2506,7 @@ impl<'a> ArtifactQueryV1<'a> {
                         &mut ranked,
                         cap,
                         Keyed {
-                            key: (Reverse(rank), draft.chunk_id.clone(), document),
+                            key: (role_rank, Reverse(rank), draft.chunk_id.clone(), document),
                             value: SelectedLexicalV1 {
                                 draft,
                                 document,
@@ -3118,7 +3139,34 @@ struct SelectedLexicalV1 {
     rank: u64,
 }
 
-type LexicalWinnerHeap = BinaryHeap<Keyed<(Reverse<u64>, String, u32), SelectedLexicalV1>>;
+type LexicalWinnerHeap = BinaryHeap<Keyed<(u8, Reverse<u64>, String, u32), SelectedLexicalV1>>;
+
+fn draft_definition_match(draft: &LexicalDraftV1) -> bool {
+    draft
+        .frequencies
+        .0
+        .iter()
+        .any(|(field, _, frequency)| *frequency > 0 && is_definition_field(*field))
+        || draft
+            .phrase_tfs
+            .iter()
+            .any(|(field, _, count)| *count > 0 && is_definition_field(*field))
+        || draft
+            .proximity_tfs
+            .iter()
+            .any(|(field, _, count)| *count > 0 && is_definition_field(*field))
+}
+
+fn lexical_admission_rank(
+    query: &ArtifactQueryV1<'_>,
+    document: u32,
+    draft: &LexicalDraftV1,
+) -> Result<u8, RetrievalPortError> {
+    if !draft_definition_match(draft) {
+        return Ok(tracedecay_domain::RetrievalSourceRoleV1::ProductionOther.admission_rank());
+    }
+    Ok(classify_source_role(&query.row(document)?.logical_path, true).admission_rank())
+}
 
 /// Heap entry ordered by `key` alone. Payload is excluded from equality so a
 /// worst-first `BinaryHeap` ranks capped winners without comparing row
