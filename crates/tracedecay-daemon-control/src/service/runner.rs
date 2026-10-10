@@ -503,7 +503,7 @@ fn run_systemctl(systemctl: Option<&Path>, args: &[&str]) -> Result<()> {
     if systemd_user_bus_unreachable(&stderr) {
         return Err(TraceDecayError::Config {
             message: format!(
-                "systemctl --user {} failed: {}. The systemd user manager is unreachable ({}). {}.",
+                "systemctl --user {} failed: {}. The systemd user manager is unreachable ({}). {}",
                 args.join(" "),
                 stderr.trim(),
                 ServiceManagerUnreachable::REMEDY,
@@ -624,7 +624,7 @@ pub(super) struct ServiceManagerUnreachable {
 impl ServiceManagerUnreachable {
     pub(super) const REMEDY: &'static str = "check XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS";
     pub(super) const FOREGROUND_FALLBACK: &'static str =
-        "run `tracedecay daemon run` instead of a systemd user service";
+        "Run `tracedecay daemon run` instead of a systemd user service.";
 }
 
 fn systemd_user_bus_unreachable(stderr: &str) -> bool {
