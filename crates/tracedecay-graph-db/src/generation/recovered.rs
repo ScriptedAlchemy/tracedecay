@@ -2,12 +2,13 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvError, RecvTimeoutError, TryRecvError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
 use std::time::Duration;
 
 use grafeo_common::types::{ArcStr, NodeId};
 use grafeo_core::graph::GraphStore;
 use grafeo_engine::GrafeoDB;
+use rayon::Yield;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_store::runtime::MAX_GRAPH_REPLAY_SOURCE_BYTES_V1;
@@ -288,11 +289,11 @@ impl EncodedProofChunk {
 /// chunks are still encoding; the shared abort flag then stops in-flight
 /// encodes between rows instead of letting them finish stale work.
 ///
-/// The drain never parks the calling thread on a channel receive: a caller
-/// that is itself a Rayon worker — the publication lane almost always is —
-/// runs queued tasks (including these encodes) between polls, so a pool
-/// with no free workers still makes progress instead of deadlocking on
-/// tasks queued behind its own blocked receive.
+/// The drain runs queued local work between polls so a Rayon-worker caller
+/// — the publication lane almost always is — still makes progress on a
+/// one-worker or saturated pool. When `yield_local` reports `Idle` or the
+/// caller is not a pool worker, it parks on a bounded receive instead of
+/// spinning, and `check` still runs while the oldest encode is outstanding.
 #[tracing::instrument(
     name = "graph_db.generation.recover.digest_parallel",
     level = "trace",
@@ -345,14 +346,12 @@ fn digest_rows_parallel(
                 let Some(receiver) = pending.pop_front() else {
                     return Ok(());
                 };
-                let encoded = recv_while_working(&receiver)
-                    .ok()
-                    .and_then(Result::ok)
-                    .ok_or_else(|| {
-                        GraphDbError::unavailable(
+                let encoded = recv_while_working(&receiver, check)?
+                    .unwrap_or_else(|_| {
+                        Err(GraphDbError::unavailable(
                             "recovered generation verification worker panicked",
-                        )
-                    })??;
+                        ))
+                    })?;
                 let mut start = 0usize;
                 for &end in &encoded.frame_ends {
                     check()?;
@@ -380,26 +379,52 @@ const WORKER_RECV_PARK: Duration = Duration::from_millis(1);
 /// polls it runs local work, which is what lets a one-worker pool (or a
 /// pool whose workers are all digest callers) complete a proof instead of
 /// deadlocking on a receive that its own queued tasks would have to answer.
-/// Once `rayon::yield_local` reports no local work — the caller is not a
-/// Rayon worker, or its tasks are already running elsewhere — the thread
-/// parks on the channel as usual.
-fn recv_while_working<T>(receiver: &Receiver<T>) -> Result<T, RecvError> {
+///
+/// In rayon-core 1.13.0 a pool worker with an empty local deque returns
+/// `Some(Yield::Idle)`; only a non-worker returns `None`. Both mean there
+/// is no local encode to run, so the caller takes the bounded receive
+/// instead of spinning. `Some(Yield::Executed)` stays on the immediate
+/// poll path so the caller keeps participating in its own queued work.
+///
+/// `check` runs on every empty poll, including while the oldest encode is
+/// still outstanding, so a spent deadline or cancellation exits through
+/// the scope path that raises the shared abort flag.
+fn recv_while_working<T>(
+    receiver: &Receiver<T>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<T, GraphDbError> {
     loop {
         match receiver.try_recv() {
             Ok(value) => return Ok(value),
-            Err(TryRecvError::Disconnected) => return Err(RecvError),
+            Err(TryRecvError::Disconnected) => {
+                return Err(GraphDbError::unavailable(
+                    "recovered generation verification worker panicked",
+                ));
+            }
             Err(TryRecvError::Empty) => {
-                if rayon::yield_local().is_none() {
-                    match receiver.recv_timeout(WORKER_RECV_PARK) {
+                check()?;
+                match rayon::yield_local() {
+                    Some(Yield::Executed) => {}
+                    Some(Yield::Idle) | None => match receiver.recv_timeout(WORKER_RECV_PARK) {
                         Ok(value) => return Ok(value),
-                        Err(RecvTimeoutError::Disconnected) => return Err(RecvError),
+                        Err(RecvTimeoutError::Disconnected) => {
+                            return Err(GraphDbError::unavailable(
+                                "recovered generation verification worker panicked",
+                            ));
+                        }
                         Err(RecvTimeoutError::Timeout) => {}
-                    }
+                    },
                 }
             }
         }
     }
 }
+
+#[cfg(test)]
+static STALL_ENCODE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static ENCODE_IS_STALLED: AtomicBool = AtomicBool::new(false);
 
 fn encode_proof_chunk(
     store: &dyn GraphStore,
@@ -414,6 +439,15 @@ fn encode_proof_chunk(
             Ok(())
         }
     };
+    #[cfg(test)]
+    {
+        while STALL_ENCODE.load(Ordering::Acquire) {
+            ENCODE_IS_STALLED.store(true, Ordering::Release);
+            worker_check()?;
+            std::thread::sleep(WORKER_RECV_PARK);
+        }
+        ENCODE_IS_STALLED.store(false, Ordering::Release);
+    }
     let mut canonical = CheckedVecWriter::new(&worker_check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
     match chunk {
         ProofChunk::Entities(rows) => {
@@ -526,6 +560,9 @@ mod tests {
     use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc::sync_channel;
+    use std::time::{Duration, Instant};
 
     use super::{recovered_generation_digest_chunked, recovered_generation_digest_from_database};
     use crate::{
@@ -824,8 +861,6 @@ mod tests {
     /// encode tasks queued behind a blocking channel receive.
     #[test]
     fn parallel_digest_cancels_on_a_one_worker_pool() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
         let (_owner, database, manifest) = staged_database();
         let identity = manifest.identity();
         let guard = database.read_guard().unwrap();
@@ -868,6 +903,149 @@ mod tests {
             polls.load(Ordering::Relaxed) < total,
             "cancellation must stop the joined encode early: {} polls of {total}",
             polls.load(Ordering::Relaxed)
+        );
+    }
+
+    struct StallEncodeGuard;
+
+    impl Drop for StallEncodeGuard {
+        fn drop(&mut self) {
+            super::STALL_ENCODE.store(false, Ordering::Release);
+            super::ENCODE_IS_STALLED.store(false, Ordering::Release);
+        }
+    }
+
+    fn stall_encodes() -> StallEncodeGuard {
+        super::ENCODE_IS_STALLED.store(false, Ordering::Release);
+        super::STALL_ENCODE.store(true, Ordering::Release);
+        StallEncodeGuard
+    }
+
+    /// A one-worker caller must run its own queued send (no deadlock). A
+    /// two-worker caller whose local deque is empty while the other worker
+    /// owns the send must park on the bounded receive, not spin: rayon-core
+    /// 1.13.0 reports that state as `Yield::Idle`, not `None`.
+    #[test]
+    fn recv_while_working_joins_local_work_and_parks_when_idle() {
+        let one_worker_polls = AtomicUsize::new(0);
+        let one_worker = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("one-worker rayon pool")
+            .install(|| {
+                let (sender, receiver) = sync_channel(1);
+                rayon::spawn(move || {
+                    sender
+                        .send(11_u32)
+                        .expect("one-worker send reaches the waiter");
+                });
+                super::recv_while_working(&receiver, &|| {
+                    one_worker_polls.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                })
+            })
+            .expect("one-worker drain");
+        assert_eq!(one_worker, 11);
+
+        let started = Arc::new(AtomicBool::new(false));
+        let drain_polls = Arc::new(AtomicUsize::new(0));
+        let (sender, receiver) = sync_channel(1);
+        let receiver = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let stolen = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("two-worker rayon pool")
+            .broadcast({
+                let started = Arc::clone(&started);
+                let drain_polls = Arc::clone(&drain_polls);
+                let receiver = Arc::clone(&receiver);
+                move |ctx| {
+                    if ctx.index() == 0 {
+                        let receiver = receiver
+                            .lock()
+                            .expect("receiver lock")
+                            .take()
+                            .expect("single waiter");
+                        while !started.load(Ordering::Acquire) {
+                            std::thread::yield_now();
+                        }
+                        Some(
+                            super::recv_while_working(&receiver, &|| {
+                                drain_polls.fetch_add(1, Ordering::Relaxed);
+                                Ok(())
+                            })
+                            .expect("stolen encode arrives"),
+                        )
+                    } else {
+                        started.store(true, Ordering::Release);
+                        std::thread::sleep(Duration::from_millis(40));
+                        sender
+                            .send(23_u32)
+                            .expect("stolen encode send reaches the waiter");
+                        None
+                    }
+                }
+            });
+        let stolen_value = stolen
+            .into_iter()
+            .find_map(|value| value)
+            .expect("worker 0 received the stolen encode");
+        assert_eq!(stolen_value, 23);
+        let polls = drain_polls.load(Ordering::Relaxed);
+        // A 1 ms park over ~40 ms is tens of polls. A busy Idle spin is
+        // orders of magnitude more; a single blocking recv without
+        // re-checking would stay at 1.
+        assert!(
+            (8..=200).contains(&polls),
+            "stolen-encode drain must park, not spin or block: {polls} polls"
+        );
+    }
+
+    /// `check` must fire while the oldest encode has not produced a result,
+    /// so a spent deadline can raise abort without waiting for that chunk.
+    #[test]
+    fn parallel_digest_cancels_while_oldest_encode_is_outstanding() {
+        let (_owner, database, manifest) = staged_database();
+        let identity = manifest.identity();
+        let guard = database.read_guard().unwrap();
+        let native = guard.as_ref().unwrap();
+        let _stall = stall_encodes();
+        let drain_polls = AtomicUsize::new(0);
+        let first_stall = std::sync::Mutex::new(None::<Instant>);
+
+        let cancelled = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("two-worker rayon pool")
+            .install(|| {
+                recovered_generation_digest_chunked(
+                    native,
+                    &identity,
+                    &|| {
+                        if !super::ENCODE_IS_STALLED.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
+                        let mut first = first_stall.lock().expect("stall window");
+                        let started = *first.get_or_insert_with(Instant::now);
+                        drain_polls.fetch_add(1, Ordering::Relaxed);
+                        if started.elapsed() >= Duration::from_millis(32) {
+                            Err(GraphDbError::Cancelled)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    16,
+                )
+            });
+
+        assert!(
+            matches!(cancelled, Err(GraphDbError::Cancelled)),
+            "{cancelled:?}"
+        );
+        let polls = drain_polls.load(Ordering::Relaxed);
+        assert!(
+            (8..=200).contains(&polls),
+            "empty-channel drain must poll check on a bounded park: {polls}"
         );
     }
 }
