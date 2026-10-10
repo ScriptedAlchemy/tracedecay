@@ -1,5 +1,6 @@
+use std::collections::BTreeSet;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 use tokio::sync::Notify;
@@ -237,6 +238,11 @@ pub struct StoreObservabilityRegistryV1 {
     /// Each holds its store's lease until the drain settles, so shutdown
     /// joins them before the stores close.
     retirement_drains: TaskTracker,
+    /// Exact store paths whose drain task still holds a counted client.
+    /// `finish_retirement(Settled)` removes the registry entry before that
+    /// task drops `core`; capacity reuse must not treat the path as absent
+    /// until this set releases it.
+    draining_paths: Arc<StdMutex<BTreeSet<PathBuf>>>,
     /// Wakes capacity retirement after a store entry leaves `Stopping`.
     settled: Arc<Notify>,
 }
@@ -426,6 +432,10 @@ impl StoreObservabilityRegistryV1 {
         core: Arc<StoreObservabilityCoreV1>,
         writer_only: bool,
     ) {
+        let path = core.database.db_path().to_path_buf();
+        if let Ok(mut paths) = self.draining_paths.lock() {
+            paths.insert(path.clone());
+        }
         let registry = self.clone();
         self.retirement_drains.spawn_on(
             async move {
@@ -446,6 +456,14 @@ impl StoreObservabilityRegistryV1 {
                 if let Err(error) = registry.finish_retirement(&core, settled) {
                     tracing::warn!(%error, "background observability retirement was incomplete");
                 }
+                // The registry entry can leave before this Arc drops. Capacity
+                // reuse waits on `draining_paths` so the counted store client
+                // is gone before session Store retirement.
+                drop(core);
+                if let Ok(mut paths) = registry.draining_paths.lock() {
+                    paths.remove(&path);
+                }
+                registry.settled.notify_waiters();
             },
             runtime,
         );
@@ -501,8 +519,14 @@ impl StoreObservabilityRegistryV1 {
                 entries[index].state = StoreObservabilityStateV1::Failed;
             }
         }
-        self.settled.notify_waiters();
         Ok(())
+    }
+
+    fn drain_holds(&self, database_path: &Path) -> bool {
+        self.draining_paths
+            .lock()
+            .map(|paths| paths.contains(database_path))
+            .unwrap_or(true)
     }
 
     /// Finishes a capacity-retired store's observability drain, including the
@@ -526,7 +550,9 @@ impl StoreObservabilityRegistryV1 {
             tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
         loop {
             match self.drive_registered_store_retirement(database_path)? {
-                StoreObservabilitySettleV1::Absent => return Ok(()),
+                StoreObservabilitySettleV1::Absent if !self.drain_holds(database_path) => {
+                    return Ok(());
+                }
                 StoreObservabilitySettleV1::Active => {
                     return Err(format!(
                         "observability aliases still hold {}",
@@ -539,7 +565,7 @@ impl StoreObservabilityRegistryV1 {
                         database_path.display()
                     ));
                 }
-                StoreObservabilitySettleV1::Waiting => {
+                StoreObservabilitySettleV1::Waiting | StoreObservabilitySettleV1::Absent => {
                     let notified = self.settled.notified();
                     if tokio::time::timeout_at(deadline, notified).await.is_err() {
                         return Err(format!(
