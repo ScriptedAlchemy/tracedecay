@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use tracedecay_store::{OperationPriorityV1, StoreRuntimeBindingV1};
 
 use tracedecay_rusqlite_runtime::exact_sql::{
-    ExactSqlError, ExactSqlHandle, ExactSqlStatement, MemoryReleaseOutcome,
+    ExactSqlHandle, ExactSqlStatement, MemoryReleaseOutcome,
 };
 pub use tracedecay_rusqlite_runtime::reader::{ReaderPoolSnapshot, ReaderPoolState};
 
@@ -136,25 +136,18 @@ impl Connection {
             .collect::<Vec<_>>();
         let runtime = Arc::clone(&self.runtime);
         // Once admitted, a batch continues through its first error even if its
-        // caller stops waiting. One writer submission still serializes on the
-        // single writer lane, so interleaving fairness is unchanged while each
-        // statement stops paying a separate dispatch roundtrip; the writer
-        // reports the exact failing index through ExactSqlError::StatementBatch.
+        // caller stops waiting. Separate dispatches preserve writer interleaving.
         tokio::spawn(async move {
-            let results =
-                runtime
-                    .execute_many_async(statements)
+            let mut results = Vec::with_capacity(statements.len());
+            for (index, statement) in statements.into_iter().enumerate() {
+                let result = runtime
+                    .execute_async(statement)
                     .await
-                    .map_err(|error| match error {
-                        ExactSqlError::StatementBatch { index, source } => {
-                            Error::statement_batch(index, Error::from(*source))
-                        }
-                        other => Error::from(other),
-                    })?;
-            Ok(results
-                .into_iter()
-                .map(|result| result.changed_rows as u64)
-                .collect())
+                    .map_err(Error::from)
+                    .map_err(|error| Error::statement_batch(index, error))?;
+                results.push(result.changed_rows as u64);
+            }
+            Ok(results)
         })
         .await
         .map_err(join_error)?

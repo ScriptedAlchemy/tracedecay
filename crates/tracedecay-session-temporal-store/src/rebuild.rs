@@ -62,15 +62,11 @@ pub(super) async fn rebuild_candidate_session_relations(
         }
     };
     record_relation_receipt(&receipt, &reconstructed, now_micros(operation)?.0).await?;
-    {
-        {
-            receipt
-                .commit()
-                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
-                .await
-                .map_err(|error| storage(operation, error))?
-        }
-    };
+    receipt
+        .commit()
+        .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+        .await
+        .map_err(|error| storage(operation, error))?;
     checkpoint_relation_rebuild_control(control)?;
 
     let apply_cancellation = execution_control_graph_cancellation(control);

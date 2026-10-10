@@ -9,7 +9,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::Instant,
 };
@@ -28,7 +28,6 @@ use super::{
 pub(super) struct InsertTracker {
     authorized_tables: Mutex<BTreeSet<String>>,
     pub(super) applied: AtomicBool,
-    pub(super) insert_count: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -97,7 +96,6 @@ where
                         .contains(table)
                 {
                     hook_tracker.applied.store(true, Ordering::Release);
-                    hook_tracker.insert_count.fetch_add(1, Ordering::Release);
                 }
             },
         )) {

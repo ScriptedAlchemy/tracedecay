@@ -136,15 +136,11 @@ pub async fn apply_relation_projection(
         }
     };
     acknowledge_relation_receipt(&transaction, projection).await?;
-    {
-        {
-            transaction
-                .commit()
-                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
-                .await
-                .map_err(|error| storage(RECEIPT_OPERATION, error))?
-        }
-    };
+    transaction
+        .commit()
+        .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
     Ok(applied)
 }
 

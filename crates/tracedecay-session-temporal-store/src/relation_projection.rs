@@ -375,7 +375,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 }
                 Err(error) => match error {
                     tracedecay_runtime_core::db::engine::Error::StatementBatch {
-                        index: 1 | 2 | 3,
+                        index: 1..=3,
                         source,
                     } => Some(storage(RECONSTRUCT_OPERATION, *source)),
                     other => {

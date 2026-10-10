@@ -336,40 +336,6 @@ impl ExactSqlHandle {
         }
     }
 
-    /// Executes owned parameterized statements as one writer submission.
-    ///
-    /// One authority verification and one dispatch roundtrip serve the whole
-    /// group; a statement failure aborts the group and reports the failing
-    /// index via [`ExactSqlError::StatementBatch`].
-    pub fn execute_many(
-        &self,
-        statements: Vec<ExactSqlStatement>,
-    ) -> Result<Vec<ExactSqlExecuteResult>, ExactSqlError> {
-        if statements.is_empty() {
-            return Err(ExactSqlError::InvalidStatement);
-        }
-        match self.dispatch_writer(SqlRequest::ExecuteMany(statements))? {
-            SqlResult::ExecutedMany(results) => Ok(results),
-            _ => Err(ExactSqlError::WriterUnavailable),
-        }
-    }
-
-    pub async fn execute_many_async(
-        &self,
-        statements: Vec<ExactSqlStatement>,
-    ) -> Result<Vec<ExactSqlExecuteResult>, ExactSqlError> {
-        if statements.is_empty() {
-            return Err(ExactSqlError::InvalidStatement);
-        }
-        match self
-            .dispatch_writer_async(SqlRequest::ExecuteMany(statements))
-            .await?
-        {
-            SqlResult::ExecutedMany(results) => Ok(results),
-            _ => Err(ExactSqlError::WriterUnavailable),
-        }
-    }
-
     pub async fn execute_async(
         &self,
         statement: ExactSqlStatement,
@@ -876,41 +842,6 @@ impl ExactSqlTransaction {
         }
     }
 
-    /// Executes owned parameterized statements in one writer turn.
-    ///
-    /// The group shares one authority verification and one dispatch roundtrip;
-    /// a statement failure aborts the group and reports the failing index via
-    /// [`ExactSqlError::StatementBatch`], matching sequential execution where
-    /// the caller stops at the first error.
-    pub fn execute_many(
-        &self,
-        statements: Vec<ExactSqlStatement>,
-    ) -> Result<Vec<ExactSqlExecuteResult>, ExactSqlError> {
-        if statements.is_empty() {
-            return Err(ExactSqlError::InvalidStatement);
-        }
-        match self.dispatch(SqlRequest::ExecuteMany(statements))? {
-            SqlResult::ExecutedMany(results) => Ok(results),
-            _ => Err(ExactSqlError::TransactionClosed),
-        }
-    }
-
-    pub async fn execute_many_async(
-        &self,
-        statements: Vec<ExactSqlStatement>,
-    ) -> Result<Vec<ExactSqlExecuteResult>, ExactSqlError> {
-        if statements.is_empty() {
-            return Err(ExactSqlError::InvalidStatement);
-        }
-        match self
-            .dispatch_async(SqlRequest::ExecuteMany(statements))
-            .await?
-        {
-            SqlResult::ExecutedMany(results) => Ok(results),
-            _ => Err(ExactSqlError::TransactionClosed),
-        }
-    }
-
     /// Executes one batch with continuous authority revalidation.
     ///
     /// This is not a generic unbounded mode; it is accepted only by an
@@ -1122,43 +1053,6 @@ fn execute_request(
             SqlRequest::ExecuteBatch(sql) => {
                 execute_batch(connection, &sql).map(SqlResult::BatchExecuted)
             }
-            SqlRequest::ExecuteMany(statements) => {
-                let mut results = Vec::with_capacity(statements.len());
-                let mut item_result = Ok(SqlResult::ExecutedMany(Vec::new()));
-                for (index, statement) in statements.into_iter().enumerate() {
-                    // The update hook is the authority on whether the member
-                    // actually inserted — comparing physical rowids would miss
-                    // an explicit insert that reuses the connection's
-                    // existing last-insert id.
-                    let before_inserts = insert_tracker.insert_count.load(Ordering::Acquire);
-                    match execute_statement(connection, statement) {
-                        Ok(mut result) => {
-                            if insert_tracker.insert_count.load(Ordering::Acquire) == before_inserts
-                            {
-                                // Non-inserting member: sequential dispatch
-                                // would publish the calling handle's logical
-                                // rowid, which only the caller of
-                                // execute_request knows. Mark the slot so
-                                // publish_last_insert_rowid normalizes it in
-                                // order against the handle's real value.
-                                result.last_insert_rowid = ROWID_FROM_HANDLE;
-                            }
-                            results.push(result);
-                        }
-                        Err(error) => {
-                            item_result = Err(ExactSqlError::StatementBatch {
-                                index,
-                                source: Box::new(error),
-                            });
-                            break;
-                        }
-                    }
-                }
-                if item_result.is_ok() {
-                    item_result = Ok(SqlResult::ExecutedMany(results));
-                }
-                item_result
-            }
         },
     );
     (result, insert_tracker.applied.load(Ordering::Acquire))
@@ -1174,19 +1068,12 @@ fn verify_write_authority(
     }
 }
 
-/// Marker placed on non-inserting members of an [`SqlRequest::ExecuteMany`]
-/// group: sequential dispatch reports the calling handle's logical rowid for
-/// these, which `execute_request` cannot see, so
-/// [`publish_last_insert_rowid`] resolves it against the handle's real value.
-const ROWID_FROM_HANDLE: i64 = i64::MIN;
-
 fn publish_last_insert_rowid(
     result: &mut Result<SqlResult, ExactSqlError>,
     inserted: bool,
     connection_rowid: i64,
     logical_rowid: &AtomicI64,
 ) {
-    let before_group_rowid = logical_rowid.load(Ordering::Acquire);
     if inserted {
         logical_rowid.store(connection_rowid, Ordering::Release);
     }
@@ -1194,20 +1081,6 @@ fn publish_last_insert_rowid(
     match result.as_mut() {
         Ok(SqlResult::Executed(result)) => result.last_insert_rowid = rowid,
         Ok(SqlResult::BatchExecuted(result)) => result.last_insert_rowid = rowid,
-        Ok(SqlResult::ExecutedMany(results)) => {
-            // Walk the group in order: an inserting member advances the
-            // handle's logical rowid to its own insert id, while a
-            // non-inserting member reports whatever the handle's rowid was at
-            // that position — identical to publishing after each dispatch.
-            let mut current = before_group_rowid;
-            for item in results.iter_mut() {
-                if item.last_insert_rowid == ROWID_FROM_HANDLE {
-                    item.last_insert_rowid = current;
-                } else {
-                    current = item.last_insert_rowid;
-                }
-            }
-        }
         Ok(SqlResult::Validated | SqlResult::Queried(_)) | Err(_) => {}
     }
 }
@@ -1218,15 +1091,6 @@ fn validate_request(request: &SqlRequest) -> Result<(), ExactSqlError> {
         | SqlRequest::Execute(statement)
         | SqlRequest::Query(statement) => statement.validate(),
         SqlRequest::ExecuteBatch(sql) => validate_batch(sql),
-        SqlRequest::ExecuteMany(statements) => {
-            if statements.is_empty() {
-                return Err(ExactSqlError::InvalidStatement);
-            }
-            for statement in statements {
-                statement.validate()?;
-            }
-            Ok(())
-        }
     }
 }
 
