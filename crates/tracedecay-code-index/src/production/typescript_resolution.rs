@@ -946,50 +946,41 @@ fn project_join(dir: &str, declared: &str) -> String {
 /// `babel src -d .` / `babel src --out-dir dist` as a shell command, not as
 /// another command's arguments (`echo babel src -d dist`).
 fn babel_src_to_out(script: &str) -> Option<(String, String)> {
-    // Quoted spans cannot hide a separator or a command, so blank them
-    // instead of dropping the script: `babel src -d dist && echo "done"`
-    // still maps while `echo 'x; babel src -d dist'` does not. Escapes,
-    // substitutions, and comments are not interpreted — reject them.
-    let script = blank_quoted_spans(script);
+    // Escapes, substitutions, and comments require shell interpretation;
+    // only literal compiler commands declare a mapping here.
     if script
         .bytes()
         .any(|byte| matches!(byte, b'`' | b'\\' | b'$' | b'#'))
     {
         return None;
     }
-    shell_simple_commands(&script)
+    shell_simple_commands(script)?
         .into_iter()
         .find_map(babel_command_src_to_out)
 }
 
-/// `script` with every `'…'` and `"…"` span replaced by spaces, so shell
-/// separators and command words inside quotes never reach the scanner.
-fn blank_quoted_spans(script: &str) -> String {
-    let mut out = String::with_capacity(script.len());
-    let mut quote = None;
-    for byte in script.bytes() {
-        match quote {
-            Some(delimiter) if byte == delimiter => quote = None,
-            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
-            _ => {
-                out.push(byte as char);
-                continue;
-            }
-        }
-        out.push(' ');
-    }
-    out
-}
-
-/// Simple commands after `;`, `&&`, `||`, `|`, and `&`. Quotes are not
-/// interpreted: package scripts that declare a babel mapping write the
-/// compiler as a literal command word.
-fn shell_simple_commands(script: &str) -> Vec<&str> {
+/// Separators inside quotes remain arguments to their original command.
+/// Keep each command byte-exact so quoted or concatenated compiler words
+/// can fail closed without hiding an unrelated literal compiler command.
+fn shell_simple_commands(script: &str) -> Option<Vec<&str>> {
     let bytes = script.as_bytes();
     let mut commands = Vec::new();
     let mut start = 0;
     let mut index = 0;
+    let mut quote = None;
     while index < bytes.len() {
+        if let Some(delimiter) = quote {
+            if bytes[index] == delimiter {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(bytes[index], b'\'' | b'"') {
+            quote = Some(bytes[index]);
+            index += 1;
+            continue;
+        }
         let separator = match bytes[index] {
             b';' => 1,
             b'&' if bytes.get(index + 1) == Some(&b'&') => 2,
@@ -1006,9 +997,12 @@ fn shell_simple_commands(script: &str) -> Vec<&str> {
         index += separator;
         start = index;
     }
+    if quote.is_some() {
+        return None;
+    }
     commands.push(script[start..].trim());
     commands.retain(|command| !command.is_empty());
-    commands
+    Some(commands)
 }
 
 fn is_env_assignment(token: &str) -> bool {
@@ -1035,20 +1029,21 @@ fn is_runner_word(token: &str) -> bool {
 }
 
 fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
+    if command.contains(['\'', '"', '<', '>', '(', ')']) {
+        return None;
+    }
     let tokens: Vec<&str> = command.split_whitespace().collect();
     let mut index = 0;
     while index < tokens.len() && is_env_assignment(tokens[index]) {
         index += 1;
     }
-    if tokens.get(index).is_some_and(|token| is_runner_word(token)) {
+    if let Some(runner) = tokens.get(index).filter(|token| is_runner_word(token)) {
         index += 1;
         while let Some(flag) = tokens.get(index).copied() {
             if !flag.starts_with('-') {
                 break;
             }
-            // `npx --help` / `--version` print the runner's own text; no
-            // compiler runs and no mapping is declared.
-            if matches!(flag, "--help" | "-h" | "--version" | "-V") {
+            if *runner != "npx" || !matches!(flag, "-y" | "--yes" | "--no-install") {
                 return None;
             }
             index += 1;
@@ -1058,10 +1053,8 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
     if !is_babel_command_word(command_word) {
         return None;
     }
-    // `babel <src> -d|--out-dir <out> [--flags]`: every flag consumes the
-    // following token as its value only when it does not start with `-`;
-    // exactly one positional (the source) may appear. A flag that would
-    // swallow the source fails closed instead of inventing a mapping.
+    // Only options with known arity may precede or follow the source.
+    // Unknown options cannot consume a positional directory by guesswork.
     let mut source = None;
     let mut output = None;
     let mut index = index + 1;
@@ -1071,18 +1064,25 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
             // output is produced and no mapping is declared.
             "--help" | "-h" | "--version" | "-V" => return None,
             "-d" | "--out-dir" => {
+                if output.is_some() {
+                    return None;
+                }
                 index += 1;
                 output = tokens.get(index).copied();
             }
-            flag if flag.starts_with('-') => {
+            "--presets" | "--plugins" | "--extensions" | "-x" | "--ignore" | "--only"
+            | "--config-file" | "--env-name" | "--root-mode" => {
                 index += 1;
-                if tokens
+                if !tokens
                     .get(index)
                     .is_some_and(|value| !value.starts_with('-'))
                 {
-                    index += 1;
+                    return None;
                 }
             }
+            "--copy-files" | "--copy-ignored" | "--no-copy-ignored" | "--no-babelrc"
+            | "--verbose" | "--quiet" => {}
+            flag if flag.starts_with('-') => return None,
             token if source.is_none() => source = Some(token),
             _ => return None,
         }
@@ -1315,6 +1315,36 @@ mod tests {
             Some(("src".to_owned(), "dist".to_owned()))
         );
         assert_eq!(babel_src_to_out("echo npx babel src -d dist"), None);
+    }
+
+    #[test]
+    fn babel_mapping_preserves_literal_unicode_paths_and_option_values() {
+        assert_eq!(
+            babel_src_to_out("babel --copy-files --presets env café -d généré && echo \"done\""),
+            Some(("café".to_owned(), "généré".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("echo 'ignored; babel fake -d wrong' && babel src -d dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+    }
+
+    #[test]
+    fn babel_mapping_refuses_ambiguous_shell_words_and_option_arity() {
+        for script in [
+            "\"ignored\"babel src -d dist",
+            "babel 'other' src -d dist",
+            "babel src -d dist && echo 'unfinished",
+            "babel src -d dist > output.log",
+            "npx --call babel src -d dist",
+            "npx --version babel src -d dist",
+            "babel --unknown env src -d dist",
+            "babel --presets --copy-files src -d dist",
+            "babel src -d first -d second",
+            "babel src -d --copy-files",
+        ] {
+            assert_eq!(babel_src_to_out(script), None, "script: {script}");
+        }
     }
 
     #[test]
