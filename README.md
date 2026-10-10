@@ -112,7 +112,8 @@ the installed cache is loaded.
 ## Common Commands
 
 ```bash
-tracedecay daemon install-service   # install + start the daemon (required before init)
+tracedecay daemon install-service   # install + start the user service (required before init)
+tracedecay daemon run               # foreground daemon when no systemd user session exists
 tracedecay init [path]              # enroll and request the first index
 tracedecay sync [path]              # explicit administrative refresh
 tracedecay status [path]            # graph stats, freshness, savings, cost
@@ -238,8 +239,10 @@ Common fixes:
 - Not initialized: run `tracedecay init` from the project root.
 - `code_index_scheduler_unavailable` from `init`: no daemon is accepting
   connections for this profile. Run `tracedecay daemon install-service` (or
-  `tracedecay daemon start` if it is already installed), confirm with
-  `tracedecay daemon status`, then re-run `init`.
+  `tracedecay daemon start` if it is already installed). On Linux without a
+  systemd user session, run `tracedecay daemon run` instead. Confirm with
+  `tracedecay daemon status` (non-zero when stopped or unreachable), then
+  re-run `init`.
 - Agent does not see tools: run `tracedecay doctor`, then restart the agent.
 - Missing symbols: inspect `tracedecay status --json` for the selected
   generation and typed warming/refresh-required coverage; request an explicit
