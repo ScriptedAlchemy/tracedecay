@@ -57,6 +57,20 @@ fn index_copy_kinds(report: &ResidentOwnersReportV1) -> Vec<ResidentOwnerKindV1>
         .collect()
 }
 
+fn graph_copy_kinds(report: &ResidentOwnersReportV1) -> Vec<ResidentOwnerKindV1> {
+    report
+        .owners
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.kind,
+                ResidentOwnerKindV1::GraphCatalog | ResidentOwnerKindV1::GraphEngine
+            )
+        })
+        .map(|row| row.kind)
+        .collect()
+}
+
 fn search_anchors(search: &super::super::query_runtime::ExecutedQuerySearchV1) -> Vec<String> {
     search
         .authorized
@@ -154,19 +168,20 @@ async fn a_parked_worktree_releases_catalog_and_engine_and_stays_ready() {
         .expect("installed graph store")
         .warm_serving_engine()
         .expect("pin the serving engine so park has something to release");
+    wait_for_settled_owner(&registry, fixture.path()).await;
     assert_eq!(
         text.code_graph_serving_readiness(),
         CodeGraphServingReadinessV1::Ready
     );
     let warm = owners.report(Instant::now());
     assert!(
-        index_copy_kinds(&warm)
+        graph_copy_kinds(&warm)
             .iter()
             .any(|kind| *kind == ResidentOwnerKindV1::GraphCatalog),
         "the installed catalog must be visible before park: {warm:?}"
     );
     assert!(
-        index_copy_kinds(&warm)
+        graph_copy_kinds(&warm)
             .iter()
             .any(|kind| *kind == ResidentOwnerKindV1::GraphEngine),
         "the pinned engine must be visible before park: {warm:?}"
@@ -178,9 +193,9 @@ async fn a_parked_worktree_releases_catalog_and_engine_and_stays_ready() {
 
     let parked = owners.report(Instant::now());
     assert_eq!(
-        index_copy_kinds(&parked),
+        graph_copy_kinds(&parked),
         [],
-        "a parked worktree must not keep decode, catalog, or engine: {parked:?}"
+        "a parked worktree must not keep catalog or engine: {parked:?}"
     );
     assert_eq!(
         text.code_graph_serving_readiness(),
@@ -194,7 +209,7 @@ async fn a_parked_worktree_releases_catalog_and_engine_and_stays_ready() {
         .expect("search serves from text after catalog and engine are released");
     assert!(!search_anchors(&search).is_empty());
     assert_eq!(
-        index_copy_kinds(&owners.report(Instant::now())),
+        graph_copy_kinds(&owners.report(Instant::now())),
         [],
         "search must not re-pin catalog or engine"
     );

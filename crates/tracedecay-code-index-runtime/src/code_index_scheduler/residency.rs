@@ -159,7 +159,7 @@ impl WorktreeResidencyV1 {
     /// arrives during the take must still wake a successor pass to
     /// re-decode.
     pub(super) fn release_decode_when_parked(self: &Arc<Self>, owners: &ResidentOwnersV1) {
-        if self.busy() || self.complete_generation_requested.load(Ordering::Acquire) {
+        if self.busy() {
             return;
         }
         if !self
