@@ -24,9 +24,15 @@ impl DatabaseWriterConnection<'_> {
         self.conn.execute(sql, params).await
     }
 
-    #[must_use]
-    pub fn last_insert_rowid(&self) -> i64 {
-        self.conn.last_insert_rowid()
+    pub async fn execute_returning<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.conn.execute_returning(sql, params).await
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
@@ -87,6 +93,10 @@ impl DatabaseEngineWriteConnection {
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseEngineWriteConnection {
+    fn backend_kind(&self) -> crate::db::engine::BackendKind {
+        self.conn.backend_kind()
+    }
+
     async fn query<P>(
         &self,
         sql: &str,
@@ -153,6 +163,10 @@ impl DatabaseEngineReadConnection {
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseEngineReadConnection {
+    fn backend_kind(&self) -> crate::db::engine::BackendKind {
+        self.conn.backend_kind()
+    }
+
     async fn query<P>(
         &self,
         sql: &str,
@@ -197,6 +211,10 @@ impl DatabaseEngineReadSnapshot {
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseEngineReadSnapshot {
+    fn backend_kind(&self) -> crate::db::engine::BackendKind {
+        self.snapshot.backend_kind()
+    }
+
     async fn query<P>(
         &self,
         sql: &str,
@@ -229,6 +247,10 @@ impl DatabaseEngineLongLeaseTransaction {
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseEngineLongLeaseTransaction {
+    fn backend_kind(&self) -> crate::db::engine::BackendKind {
+        self.transaction.backend_kind()
+    }
+
     async fn query<P>(
         &self,
         sql: &str,
@@ -330,6 +352,13 @@ impl<'a> DatabaseMemoryTransaction<'a> {
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseMemoryTransaction<'_> {
+    fn backend_kind(&self) -> crate::db::engine::BackendKind {
+        match self {
+            Self::Read(snapshot) => crate::db::engine::QueryExecutor::backend_kind(snapshot),
+            Self::Write(transaction) => crate::db::engine::QueryExecutor::backend_kind(transaction),
+        }
+    }
+
     async fn query<P>(
         &self,
         sql: &str,
@@ -528,6 +557,10 @@ impl DatabaseWriteTransaction<'_> {
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseWriteTransaction<'_> {
+    fn backend_kind(&self) -> crate::db::engine::BackendKind {
+        self.transaction.backend_kind()
+    }
+
     async fn query<P>(
         &self,
         sql: &str,

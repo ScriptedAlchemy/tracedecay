@@ -1755,6 +1755,10 @@ mod tests {
     }
 
     impl QueryExecutor for CountingQuery<'_> {
+        fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+            self.inner.backend_kind()
+        }
+
         async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
         where
             P: IntoParams,
@@ -2311,6 +2315,10 @@ mod tests {
     }
 
     impl<T: QueryExecutor> QueryExecutor for CountingSnapshot<'_, T> {
+        fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+            self.inner.backend_kind()
+        }
+
         async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
         where
             P: IntoParams,

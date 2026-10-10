@@ -33,8 +33,8 @@ use super::{
 mod support;
 use support::{
     begin, begin_read, commit, ensure_owner, ensure_shard_owner, execute,
-    has_active_inbound_dependencies, insert_verified_dependencies, optional_text, read_by_sequence,
-    read_conflicts, read_exact, read_exact_metadata, read_exact_tombstone,
+    has_active_inbound_dependencies, insert_verified_dependencies, integer_at, optional_text,
+    query, read_by_sequence, read_conflicts, read_exact, read_exact_metadata, read_exact_tombstone,
     read_first_conflict_sequence, read_head, read_pending, read_pending_sequence,
     read_projection_page, read_replays_by_sequences, read_tombstone_conflicts,
     read_tombstones_by_sequences, replay_metadata_page, retired_cleanup_metadata_page, rollback,
@@ -490,7 +490,7 @@ fn append_replay_in_transaction(
     if let Some(pending) = read_pending(transaction, &encoded, actual.as_ref())? {
         return Ok(GraphReplayAppendOutcomeV1::PendingReplayConflict { pending });
     }
-    let inserted = execute(
+    let inserted = query(
         transaction,
         "INSERT INTO graph_publication_replay_v1 (
             shard_id, namespace, projection, generation, idempotency_key,
@@ -498,7 +498,9 @@ fn append_replay_in_transaction(
             direct_dependency_bytes, expected_prior_head,
             expected_recovered_digest, canonical_replay_source_digest,
             canonical_replay_source
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         RETURNING sequence"
+            .to_owned(),
         vec![
             text(encoded.shard_id),
             text(encoded.namespace),
@@ -524,8 +526,13 @@ fn append_replay_in_transaction(
             ExactSqlValue::Blob(publication.canonical_replay_source.clone()),
         ],
     )?;
+    let [row] = inserted.as_slice() else {
+        return Err(GraphPublicationStoreErrorV1::Corrupt(
+            "graph replay insert did not return exactly one sequence".to_owned(),
+        ));
+    };
     let record = GraphPublicationReplayRecordV1::new(
-        sequence_from_i64(inserted.last_insert_rowid)?,
+        sequence_from_i64(integer_at(row, 0)?)?,
         publication.clone(),
     )?;
     insert_verified_dependencies(transaction, &record)?;

@@ -1727,6 +1727,10 @@ struct CountingExecutor<'a, E: ?Sized> {
 }
 
 impl<E: QueryExecutor + ?Sized> QueryExecutor for CountingExecutor<'_, E> {
+    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        self.inner.backend_kind()
+    }
+
     async fn query<P>(
         &self,
         sql: &str,

@@ -1,0 +1,70 @@
+{
+  "\" \"": {
+    "plan": [
+      [
+        1,
+        0,
+        0,
+        "QUERY INDEX METHOD fts"
+      ],
+      [
+        15,
+        0,
+        0,
+        "USE SORTER FOR ORDER BY"
+      ]
+    ],
+    "rows": []
+  },
+  "\"!!!\"": {
+    "plan": [
+      [
+        1,
+        0,
+        0,
+        "QUERY INDEX METHOD fts"
+      ],
+      [
+        15,
+        0,
+        0,
+        "USE SORTER FOR ORDER BY"
+      ]
+    ],
+    "rows": []
+  },
+  "\"\ud83d\udea8 :: --\"": {
+    "plan": [
+      [
+        1,
+        0,
+        0,
+        "QUERY INDEX METHOD fts"
+      ],
+      [
+        15,
+        0,
+        0,
+        "USE SORTER FOR ORDER BY"
+      ]
+    ],
+    "rows": []
+  },
+  "\"\"": {
+    "plan": [
+      [
+        1,
+        0,
+        0,
+        "QUERY INDEX METHOD fts"
+      ],
+      [
+        15,
+        0,
+        0,
+        "USE SORTER FOR ORDER BY"
+      ]
+    ],
+    "rows": []
+  }
+}

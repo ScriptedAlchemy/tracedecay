@@ -92,7 +92,7 @@ pub(super) async fn refresh_sessions(
         )
         .map_err(|error| format!("root refresh target: {error}"))?;
         let (context, binding) = request(session_id)?;
-        let handle = match refresh.begin_or_join(&context, &binding, target).await {
+        let handle = match Box::pin(refresh.begin_or_join(&context, &binding, target)).await {
             SessionRefreshOutcome::Started(handle) | SessionRefreshOutcome::Joined(handle) => {
                 handle
             }

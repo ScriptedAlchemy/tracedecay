@@ -2,6 +2,8 @@
 
 use tracedecay_domain::errors::Result;
 
+use crate::db::{engine::BackendKind, native_search::SearchIndex};
+
 use super::super::{MemoryV2Executor, db_error};
 use super::automatic_facts::{
     install_automatic_fact_receipt_integrity_triggers, install_current_projection_indexes,
@@ -69,22 +71,6 @@ pub(super) const BASELINE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_v2_f
                 REFERENCES memory_v2_assertions(assertion_id, fact_id, owner_kind, project_id)
         );
 
-        CREATE VIRTUAL TABLE IF NOT EXISTS memory_v2_assertion_payloads_fts USING fts5(
-            content,
-            content='memory_v2_assertion_payloads',
-            content_rowid='rowid'
-        );
-        CREATE TRIGGER IF NOT EXISTS memory_v2_payloads_fts_insert
-        AFTER INSERT ON memory_v2_assertion_payloads BEGIN
-            INSERT INTO memory_v2_assertion_payloads_fts(rowid, content)
-            VALUES(NEW.rowid, NEW.content);
-        END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_payloads_fts_delete
-        AFTER DELETE ON memory_v2_assertion_payloads BEGIN
-            INSERT INTO memory_v2_assertion_payloads_fts(
-                memory_v2_assertion_payloads_fts, rowid, content
-            ) VALUES('delete', OLD.rowid, OLD.content);
-        END;
         CREATE TRIGGER IF NOT EXISTS memory_v2_payloads_no_update
         BEFORE UPDATE ON memory_v2_assertion_payloads BEGIN
             SELECT RAISE(ABORT, 'memory_v2 assertion payloads are immutable');
@@ -299,16 +285,68 @@ pub(super) const BASELINE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_v2_f
             SELECT RAISE(ABORT, 'memory_v2 automatic fact receipts are immutable');
         END;";
 
+pub(super) const SQLITE_SEARCH_SCHEMA: &str =
+    "CREATE VIRTUAL TABLE IF NOT EXISTS memory_v2_assertion_payloads_fts USING fts5(
+            content,
+            content='memory_v2_assertion_payloads',
+            content_rowid='rowid'
+        );
+        CREATE TRIGGER IF NOT EXISTS memory_v2_payloads_fts_insert
+        AFTER INSERT ON memory_v2_assertion_payloads BEGIN
+            INSERT INTO memory_v2_assertion_payloads_fts(rowid, content)
+            VALUES(NEW.rowid, NEW.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS memory_v2_payloads_fts_delete
+        AFTER DELETE ON memory_v2_assertion_payloads BEGIN
+            INSERT INTO memory_v2_assertion_payloads_fts(
+                memory_v2_assertion_payloads_fts, rowid, content
+            ) VALUES('delete', OLD.rowid, OLD.content);
+        END;
+";
+
 /// Installs the only accepted project-memory persisted shape.
 pub(in crate::db) async fn create_schema(
     conn: &impl MemoryV2Executor,
     operation: &str,
 ) -> Result<()> {
-    conn.execute_batch("PRAGMA secure_delete = ON")
-        .await
-        .map_err(|error| db_error(operation, error))?;
+    if conn.backend_kind() == BackendKind::Sqlite {
+        conn.execute_batch("PRAGMA secure_delete = ON")
+            .await
+            .map_err(|error| db_error(operation, error))?;
+        // Unknown pragmas can succeed without changing any engine behavior. The
+        // persisted memory payload purge contract requires enabled secure delete.
+        let mut secure_delete = conn
+            .query("PRAGMA secure_delete", ())
+            .await
+            .map_err(|error| db_error(operation, error))?;
+        let enabled = match secure_delete
+            .next()
+            .await
+            .map_err(|error| db_error(operation, error))?
+        {
+            Some(row) => {
+                row.get::<i64>(0)
+                    .map_err(|error| db_error(operation, error))?
+                    == 1
+            }
+            None => false,
+        };
+        if !enabled {
+            return Err(db_error(
+                operation,
+                "attached engine cannot confirm enabled secure_delete for memory payload purges",
+            ));
+        }
+    }
     crate::db::retrieval_anchor_schema::install_retrieval_anchor_schema(conn, operation).await?;
     conn.execute_batch(BASELINE_SCHEMA)
+        .await
+        .map_err(|error| db_error(operation, error))?;
+    let search_schema = match conn.backend_kind() {
+        BackendKind::Sqlite => SQLITE_SEARCH_SCHEMA,
+        BackendKind::NativeTurso => SearchIndex::MemoryPayload.create_sql(),
+    };
+    conn.execute_batch(search_schema)
         .await
         .map_err(|error| db_error(operation, error))?;
     super::payload_digests::install_payload_digests(conn, operation).await?;

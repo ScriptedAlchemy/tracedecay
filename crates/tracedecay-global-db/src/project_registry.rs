@@ -463,6 +463,10 @@ impl<'db> ProjectRegistryDatabase<'db> {
 }
 
 impl QueryExecutor for ProjectRegistryReadSnapshot {
+    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        QueryExecutor::backend_kind(&self.0)
+    }
+
     async fn query<P>(
         &self,
         sql: &str,

@@ -1,3 +1,10 @@
+use tracedecay_runtime_core::db::engine::BackendKind;
+
+// Native FTS must drive its own materialized hit scan. A joined/PK-driven
+// plan can otherwise use scalar fts_match fallback with different boolean
+// semantics. Generation, authority, keyset and byte filters still run before
+// the final limit; materialized hits have no candidate truncation.
+
 // Candidate queries read the provider from `session_occurrences.source_provider`,
 // the NOT NULL, CHECK-validated column the projection batch writes from the same
 // canonical observation (and byte-verifies via `require_exact_occurrence`), so no
@@ -467,25 +474,52 @@ pub(super) const ROOT_ANCHOR_CANDIDATE_QUERY: &str = concat!(
     LIMIT ?7"
 );
 
-pub(super) const OCCURRENCE_FTS_QUERY: &str = concat!(
-    "
+macro_rules! occurrence_fts_query_sql {
+    ($prefix:literal, $source:literal, $predicate:literal) => {
+        concat!(
+            $prefix,
+            "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
            o.source_provider
-    FROM session_occurrences_fts
-    JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
+    ",
+            $source,
+            "
     WHERE o.session_id = ?1 AND +o.generation <= ?2
       AND (?3 IS NULL OR o.source_provider = ?3)
-      AND session_occurrences_fts MATCH ?4
+      AND ",
+            $predicate,
+            "
       ",
-    occurrence_keyset!("?5", "?6"),
-    "
+            occurrence_keyset!("?5", "?6"),
+            "
       ",
-    occurrence_row_length_bounds!("?7", "?8", "?9", "?10"),
-    "
+            occurrence_row_length_bounds!("?7", "?8", "?9", "?10"),
+            "
     ORDER BY o.knowledge_at DESC, o.occurrence_id
     LIMIT ?11"
+        )
+    };
+}
+
+pub(super) const OCCURRENCE_FTS_QUERY: &str = occurrence_fts_query_sql!(
+    "",
+    "FROM session_occurrences_fts
+    JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid",
+    "session_occurrences_fts MATCH ?4"
 );
+const NATIVE_OCCURRENCE_FTS_QUERY: &str = occurrence_fts_query_sql!(
+    "WITH indexed_hits AS MATERIALIZED (SELECT rowid AS hit_rowid FROM session_occurrences WHERE fts_match(index_text, ?4)) ",
+    "FROM indexed_hits AS search_hits JOIN session_occurrences AS o ON o.rowid = search_hits.hit_rowid",
+    "1 = 1"
+);
+
+pub(super) fn occurrence_fts_query(backend: BackendKind) -> &'static str {
+    match backend {
+        BackendKind::Sqlite => OCCURRENCE_FTS_QUERY,
+        BackendKind::NativeTurso => NATIVE_OCCURRENCE_FTS_QUERY,
+    }
+}
 
 pub(super) const TIME_CANDIDATE_QUERY: &str = concat!(
     "
@@ -506,42 +540,73 @@ pub(super) const TIME_CANDIDATE_QUERY: &str = concat!(
     LIMIT ?12"
 );
 
-pub(super) const SUMMARY_CANDIDATE_QUERY: &str = concat!(
-    "
+macro_rules! summary_candidate_query_sql {
+    ($prefix:literal, $source:literal, $predicate:literal) => {
+        concat!(
+            $prefix,
+            "
     SELECT n.summary_id, n.summary_anchor_id, n.created_at,
            NULL, NULL, n.session_id, 'summary',
            ",
-    summary_publication_provider!(),
-    "
-    FROM session_summary_nodes_fts
-    JOIN session_summary_nodes AS n ON n.rowid = session_summary_nodes_fts.rowid
+            summary_publication_provider!(),
+            "
+    ",
+            $source,
+            "
     JOIN session_summary_availability AS a
       ON a.summary_id = n.summary_id
      AND a.session_id = ?1
      AND a.generation = ?2
     WHERE n.session_id = ?1
-      AND session_summary_nodes_fts MATCH ?3
+      AND ",
+            $predicate,
+            "
       AND a.availability <> 'unavailable'
       AND (?11 <> 'current' OR NOT ",
-    partial_summary_invalidation_exists!(summary_publication_provider!(), "n.session_id"),
-    ")
+            partial_summary_invalidation_exists!(summary_publication_provider!(), "n.session_id"),
+            ")
       ",
-    summary_keyset!("?4", "?5"),
-    "
+            summary_keyset!("?4", "?5"),
+            "
       ",
-    summary_row_length_bounds!("?6", "?7", "?8", "?9"),
-    "
+            summary_row_length_bounds!("?6", "?7", "?8", "?9"),
+            "
     ORDER BY n.created_at DESC, n.summary_id
     LIMIT ?10"
+        )
+    };
+}
+
+pub(super) const SUMMARY_CANDIDATE_QUERY: &str = summary_candidate_query_sql!(
+    "",
+    "FROM session_summary_nodes_fts
+    JOIN session_summary_nodes AS n ON n.rowid = session_summary_nodes_fts.rowid",
+    "session_summary_nodes_fts MATCH ?3"
+);
+const NATIVE_SUMMARY_CANDIDATE_QUERY: &str = summary_candidate_query_sql!(
+    "WITH indexed_hits AS MATERIALIZED (SELECT rowid AS hit_rowid FROM session_summary_nodes WHERE fts_match(summary_text, ?3)) ",
+    "FROM indexed_hits AS search_hits JOIN session_summary_nodes AS n ON n.rowid = search_hits.hit_rowid",
+    "1 = 1"
 );
 
-pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
-    "
+pub(super) fn summary_candidate_query(backend: BackendKind) -> &'static str {
+    match backend {
+        BackendKind::Sqlite => SUMMARY_CANDIDATE_QUERY,
+        BackendKind::NativeTurso => NATIVE_SUMMARY_CANDIDATE_QUERY,
+    }
+}
+
+macro_rules! root_exact_candidate_query_sql {
+    ($prefix:literal, $source:literal, $predicate:literal) => {
+        concat!(
+            $prefix,
+            "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
            authority_session.provider, o.snippet_text, ?3, frozen.generation
-    FROM session_occurrences_fts
-    JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
+    ",
+            $source,
+            "
     JOIN session_temporal_generations AS frozen
       ON frozen.session_id = o.session_id
      AND +o.generation <= frozen.generation
@@ -553,32 +618,59 @@ pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = concat!(
      AND authority_session.provider = o.source_provider
      AND authority_session.project_key = ?1
     WHERE ",
-    anchor_owner_authority_predicate!(),
-    "
+            anchor_owner_authority_predicate!(),
+            "
       AND (?2 IS NULL OR o.source_provider = ?2)
-      AND session_occurrences_fts MATCH ?4
+      AND ",
+            $predicate,
+            "
       AND instr(o.snippet_text, ?3) > 0
       ",
-    occurrence_root_keyset!("?5", "?6", "?7"),
-    "
+            occurrence_root_keyset!("?5", "?6", "?7"),
+            "
       ",
-    occurrence_row_length_bounds!("?8", "?9", "?10", "?11", "authority_session.provider"),
-    "
+            occurrence_row_length_bounds!("?8", "?9", "?10", "?11", "authority_session.provider"),
+            "
       AND length(CAST(o.snippet_text AS BLOB)) <= ?13
       ",
-    root_occurrence_cursor_bound!("?12"),
-    "
+            root_occurrence_cursor_bound!("?12"),
+            "
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?14"
+        )
+    };
+}
+
+pub(super) const ROOT_EXACT_CANDIDATE_QUERY: &str = root_exact_candidate_query_sql!(
+    "",
+    "FROM session_occurrences_fts
+    JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid",
+    "session_occurrences_fts MATCH ?4"
+);
+const NATIVE_ROOT_EXACT_CANDIDATE_QUERY: &str = root_exact_candidate_query_sql!(
+    "WITH indexed_hits AS MATERIALIZED (SELECT rowid AS hit_rowid FROM session_occurrences WHERE fts_match(index_text, ?4)) ",
+    "FROM indexed_hits AS search_hits JOIN session_occurrences AS o ON o.rowid = search_hits.hit_rowid",
+    "1 = 1"
 );
 
-pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
-    "
+pub(super) fn root_exact_candidate_query(backend: BackendKind) -> &'static str {
+    match backend {
+        BackendKind::Sqlite => ROOT_EXACT_CANDIDATE_QUERY,
+        BackendKind::NativeTurso => NATIVE_ROOT_EXACT_CANDIDATE_QUERY,
+    }
+}
+
+macro_rules! root_occurrence_fts_query_sql {
+    ($prefix:literal, $source:literal, $predicate:literal) => {
+        concat!(
+            $prefix,
+            "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
            authority_session.provider, frozen.generation
-    FROM session_occurrences_fts
-    JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
+    ",
+            $source,
+            "
     JOIN session_temporal_generations AS frozen
       ON frozen.session_id = o.session_id
      AND +o.generation <= frozen.generation
@@ -590,30 +682,57 @@ pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = concat!(
      AND authority_session.provider = o.source_provider
      AND authority_session.project_key = ?1
     WHERE ",
-    anchor_owner_authority_predicate!(),
-    "
+            anchor_owner_authority_predicate!(),
+            "
       AND (?2 IS NULL OR o.source_provider = ?2)
-      AND session_occurrences_fts MATCH ?3
+      AND ",
+            $predicate,
+            "
       ",
-    occurrence_root_keyset!("?4", "?5", "?6"),
-    "
+            occurrence_root_keyset!("?4", "?5", "?6"),
+            "
       ",
-    occurrence_row_length_bounds!("?7", "?8", "?9", "?10", "authority_session.provider"),
-    "
+            occurrence_row_length_bounds!("?7", "?8", "?9", "?10", "authority_session.provider"),
+            "
       ",
-    root_occurrence_cursor_bound!("?11"),
-    "
+            root_occurrence_cursor_bound!("?11"),
+            "
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?12"
+        )
+    };
+}
+
+pub(super) const ROOT_OCCURRENCE_FTS_QUERY: &str = root_occurrence_fts_query_sql!(
+    "",
+    "FROM session_occurrences_fts
+    JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid",
+    "session_occurrences_fts MATCH ?3"
+);
+const NATIVE_ROOT_OCCURRENCE_FTS_QUERY: &str = root_occurrence_fts_query_sql!(
+    "WITH indexed_hits AS MATERIALIZED (SELECT rowid AS hit_rowid FROM session_occurrences WHERE fts_match(index_text, ?3)) ",
+    "FROM indexed_hits AS search_hits JOIN session_occurrences AS o ON o.rowid = search_hits.hit_rowid",
+    "1 = 1"
 );
 
-pub(super) const ROOT_OCCURRENCE_FTS_COUNT_QUERY: &str = concat!(
-    "
+pub(super) fn root_occurrence_fts_query(backend: BackendKind) -> &'static str {
+    match backend {
+        BackendKind::Sqlite => ROOT_OCCURRENCE_FTS_QUERY,
+        BackendKind::NativeTurso => NATIVE_ROOT_OCCURRENCE_FTS_QUERY,
+    }
+}
+
+macro_rules! root_occurrence_fts_count_query_sql {
+    ($prefix:literal, $source:literal, $predicate:literal) => {
+        concat!(
+            $prefix,
+            "
     SELECT COUNT(*)
     FROM (
         SELECT DISTINCT o.retrieval_anchor_id
-        FROM session_occurrences_fts
-        JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
+        ",
+            $source,
+            "
         JOIN session_temporal_generations AS frozen
           ON frozen.session_id = o.session_id
          AND +o.generation <= frozen.generation
@@ -625,19 +744,42 @@ pub(super) const ROOT_OCCURRENCE_FTS_COUNT_QUERY: &str = concat!(
          AND authority_session.provider = o.source_provider
          AND authority_session.project_key = ?1
         WHERE ",
-    anchor_owner_authority_predicate!(),
-    "
+            anchor_owner_authority_predicate!(),
+            "
           AND (?2 IS NULL OR o.source_provider = ?2)
-          AND session_occurrences_fts MATCH ?3
+          AND ",
+            $predicate,
+            "
           ",
-    occurrence_row_length_bounds!("?4", "?5", "?6", "?7", "authority_session.provider"),
-    "
+            occurrence_row_length_bounds!("?4", "?5", "?6", "?7", "authority_session.provider"),
+            "
           ",
-    root_occurrence_cursor_bound!("?8"),
-    "
+            root_occurrence_cursor_bound!("?8"),
+            "
         LIMIT ?9
     )"
+        )
+    };
+}
+
+pub(super) const ROOT_OCCURRENCE_FTS_COUNT_QUERY: &str = root_occurrence_fts_count_query_sql!(
+    "",
+    "FROM session_occurrences_fts
+        JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid",
+    "session_occurrences_fts MATCH ?3"
 );
+const NATIVE_ROOT_OCCURRENCE_FTS_COUNT_QUERY: &str = root_occurrence_fts_count_query_sql!(
+    "WITH indexed_hits AS MATERIALIZED (SELECT rowid AS hit_rowid FROM session_occurrences WHERE fts_match(index_text, ?3)) ",
+    "FROM indexed_hits AS search_hits JOIN session_occurrences AS o ON o.rowid = search_hits.hit_rowid",
+    "1 = 1"
+);
+
+pub(super) fn root_occurrence_fts_count_query(backend: BackendKind) -> &'static str {
+    match backend {
+        BackendKind::Sqlite => ROOT_OCCURRENCE_FTS_COUNT_QUERY,
+        BackendKind::NativeTurso => NATIVE_ROOT_OCCURRENCE_FTS_COUNT_QUERY,
+    }
+}
 
 pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
     "
@@ -674,13 +816,17 @@ pub(super) const ROOT_TIME_CANDIDATE_QUERY: &str = concat!(
     LIMIT ?13"
 );
 
-pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = concat!(
+macro_rules! root_summary_candidate_query_sql {
+    ($prefix:literal, $source:literal, $predicate:literal) => {
+        concat!(
+            $prefix,
     "
     SELECT n.summary_id, n.summary_anchor_id, n.created_at,
            NULL, NULL, n.session_id, 'summary',
            authority_session.provider, frozen.generation
-    FROM session_summary_nodes_fts
-    JOIN session_summary_nodes AS n ON n.rowid = session_summary_nodes_fts.rowid
+    ",
+    $source,
+    "
     JOIN session_summary_availability AS a
       ON a.summary_id = n.summary_id
      AND a.session_id = n.session_id
@@ -699,7 +845,9 @@ pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = concat!(
     WHERE ",
     anchor_owner_authority_predicate!(),
     "
-      AND session_summary_nodes_fts MATCH ?2
+      AND ",
+    $predicate,
+    "
       AND a.availability <> 'unavailable'
       AND (?12 <> 'current' OR NOT ",
     partial_summary_invalidation_exists!("authority_session.provider", "n.session_id"),
@@ -712,7 +860,29 @@ pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = concat!(
     "
     ORDER BY n.created_at DESC, n.session_id, n.summary_id
     LIMIT ?11"
+
+        )
+    };
+}
+
+pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = root_summary_candidate_query_sql!(
+    "",
+    "FROM session_summary_nodes_fts
+    JOIN session_summary_nodes AS n ON n.rowid = session_summary_nodes_fts.rowid",
+    "session_summary_nodes_fts MATCH ?2"
 );
+const NATIVE_ROOT_SUMMARY_CANDIDATE_QUERY: &str = root_summary_candidate_query_sql!(
+    "WITH indexed_hits AS MATERIALIZED (SELECT rowid AS hit_rowid FROM session_summary_nodes WHERE fts_match(summary_text, ?2)) ",
+    "FROM indexed_hits AS search_hits JOIN session_summary_nodes AS n ON n.rowid = search_hits.hit_rowid",
+    "1 = 1"
+);
+
+pub(super) fn root_summary_candidate_query(backend: BackendKind) -> &'static str {
+    match backend {
+        BackendKind::Sqlite => ROOT_SUMMARY_CANDIDATE_QUERY,
+        BackendKind::NativeTurso => NATIVE_ROOT_SUMMARY_CANDIDATE_QUERY,
+    }
+}
 
 // The root browse's summary listing across every participant with an active
 // generation, carried on the Summary channel behind the anchor-owner
@@ -758,8 +928,11 @@ pub(super) const ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY: &str = concat!(
     LIMIT ?11"
 );
 
-pub(super) const DERIVED_CANDIDATE_QUERY: &str = concat!(
-    "
+macro_rules! derived_candidate_query_sql {
+    ($prefix:literal, $source:literal, $predicate:literal) => {
+        concat!(
+            $prefix,
+            "
     SELECT evidence.evidence_id, evidence.retrieval_anchor_id,
            first_occurrence.knowledge_at,
            CASE WHEN evidence.member_count = 1
@@ -781,20 +954,44 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = concat!(
             ON member_occurrence.session_id = member.session_id
            AND +member_occurrence.generation <= ?2
            AND member_occurrence.occurrence_id = member.occurrence_id
-          JOIN session_occurrences_fts
-            ON session_occurrences_fts.rowid = member_occurrence.rowid
+          ",
+            $source,
+            "
           WHERE member.session_id = evidence.session_id
             AND +member.generation <= ?2
             AND member.evidence_kind = evidence.evidence_kind
             AND member.first_occurrence_id = evidence.first_occurrence_id
-            AND session_occurrences_fts MATCH ?5
+            AND ",
+            $predicate,
+            "
       )
       ",
-    derived_keyset!("?6", "?7"),
-    "
+            derived_keyset!("?6", "?7"),
+            "
     ORDER BY first_occurrence.knowledge_at DESC, evidence.evidence_id
     LIMIT ?8"
+        )
+    };
+}
+
+pub(super) const DERIVED_CANDIDATE_QUERY: &str = derived_candidate_query_sql!(
+    "",
+    "JOIN session_occurrences_fts
+            ON session_occurrences_fts.rowid = member_occurrence.rowid",
+    "session_occurrences_fts MATCH ?5"
 );
+const NATIVE_DERIVED_CANDIDATE_QUERY: &str = derived_candidate_query_sql!(
+    "WITH indexed_hits AS MATERIALIZED (SELECT rowid AS hit_rowid FROM session_occurrences WHERE fts_match(index_text, ?5)) ",
+    "JOIN indexed_hits AS search_hits ON search_hits.hit_rowid = member_occurrence.rowid",
+    "1 = 1"
+);
+
+pub(super) fn derived_candidate_query(backend: BackendKind) -> &'static str {
+    match backend {
+        BackendKind::Sqlite => DERIVED_CANDIDATE_QUERY,
+        BackendKind::NativeTurso => NATIVE_DERIVED_CANDIDATE_QUERY,
+    }
+}
 
 // The FTS match is the selective end of this join, so it drives. Probing the
 // root's evidence rows and testing each one for a matching member instead ran
@@ -802,17 +999,20 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = concat!(
 // keyset ORDER BY needs a temp b-tree, so LIMIT could not stop that scan early.
 // Fresh stores have no planner statistics, so CROSS JOIN pins the match as the
 // outer loop; GROUP BY collapses an evidence row several matching members reach.
-pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = concat!(
-    "
+macro_rules! root_derived_candidate_query_sql {
+    ($prefix:literal, $source:literal, $predicate:literal) => {
+        concat!(
+            $prefix,
+            "
     SELECT evidence.evidence_id, evidence.retrieval_anchor_id,
            first_occurrence.knowledge_at,
            CASE WHEN evidence.member_count = 1
                 THEN first_occurrence.message_id ELSE NULL END,
            NULL, evidence.session_id, evidence.evidence_kind,
            authority_session.provider, frozen.generation
-    FROM session_occurrences_fts
-    CROSS JOIN session_occurrences AS member_occurrence
-      ON member_occurrence.rowid = session_occurrences_fts.rowid
+    ",
+            $source,
+            "
     CROSS JOIN session_derived_evidence_members AS member
       ON member.session_id = member_occurrence.session_id
      AND member.occurrence_id = member_occurrence.occurrence_id
@@ -837,16 +1037,40 @@ pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = concat!(
       ON authority_session.session_id = evidence.session_id
      AND authority_session.provider = first_occurrence.source_provider
      AND authority_session.project_key = ?1
-    WHERE session_occurrences_fts MATCH ?4
+    WHERE ",
+            $predicate,
+            "
       AND (?3 IS NULL OR authority_session.provider = ?3)
       AND ",
-    anchor_owner_authority_predicate!(),
-    "
+            anchor_owner_authority_predicate!(),
+            "
       ",
-    derived_root_keyset!("?5", "?6", "?7"),
-    "
+            derived_root_keyset!("?5", "?6", "?7"),
+            "
     GROUP BY evidence.session_id, frozen.generation,
              evidence.evidence_kind, evidence.evidence_id
     ORDER BY first_occurrence.knowledge_at DESC, evidence.session_id, evidence.evidence_id
     LIMIT ?8"
+        )
+    };
+}
+
+pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = root_derived_candidate_query_sql!(
+    "",
+    "FROM session_occurrences_fts
+    CROSS JOIN session_occurrences AS member_occurrence
+      ON member_occurrence.rowid = session_occurrences_fts.rowid",
+    "session_occurrences_fts MATCH ?4"
 );
+const NATIVE_ROOT_DERIVED_CANDIDATE_QUERY: &str = root_derived_candidate_query_sql!(
+    "WITH indexed_hits AS MATERIALIZED (SELECT rowid AS hit_rowid FROM session_occurrences WHERE fts_match(index_text, ?4)) ",
+    "FROM indexed_hits AS search_hits CROSS JOIN session_occurrences AS member_occurrence ON member_occurrence.rowid = search_hits.hit_rowid",
+    "1 = 1"
+);
+
+pub(super) fn root_derived_candidate_query(backend: BackendKind) -> &'static str {
+    match backend {
+        BackendKind::Sqlite => ROOT_DERIVED_CANDIDATE_QUERY,
+        BackendKind::NativeTurso => NATIVE_ROOT_DERIVED_CANDIDATE_QUERY,
+    }
+}

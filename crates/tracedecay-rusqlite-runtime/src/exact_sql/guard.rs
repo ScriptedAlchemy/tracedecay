@@ -5,7 +5,6 @@
 //! inherits the relaxed exact SQL authority.
 
 use std::{
-    collections::BTreeSet,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     sync::{
         Arc, Mutex,
@@ -16,19 +15,13 @@ use std::{
 
 use rusqlite::{
     Connection,
-    hooks::{Action, AuthAction, Authorization},
+    hooks::{AuthAction, Authorization},
 };
 
 use super::{
     EXACT_SQL_EXECUTION_LIMIT, EXACT_SQL_PROGRESS_INTERVAL_OPS, ExactSqlError,
     ExactSqlWriteAuthority, ExactSqlWriteIntent, sqlite_error,
 };
-
-#[derive(Default)]
-pub(super) struct InsertTracker {
-    authorized_tables: Mutex<BTreeSet<String>>,
-    pub(super) applied: AtomicBool,
-}
 
 #[derive(Clone)]
 pub(super) enum AuthorizedDatabaseOperation {
@@ -48,7 +41,6 @@ pub(super) fn with_exact_sql_guard<T, F>(
     canonical_authorizer: for<'a> fn(rusqlite::hooks::AuthContext<'a>) -> Authorization,
     exact_sql_writer: bool,
     database_operation: Option<AuthorizedDatabaseOperation>,
-    insert_tracker: Option<Arc<InsertTracker>>,
     operation: F,
 ) -> Result<T, ExactSqlError>
 where
@@ -56,22 +48,9 @@ where
 {
     let denied = Arc::new(AtomicBool::new(false));
     let hook_denied = Arc::clone(&denied);
-    let authorizer_tracker = insert_tracker.clone();
     let authorized_database_operation = database_operation.clone();
     connection
         .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
-            if context.accessor.is_none()
-                && let AuthAction::Insert { table_name } = context.action
-                && !table_name.eq_ignore_ascii_case("sqlite_master")
-                && !table_name.eq_ignore_ascii_case("sqlite_schema")
-                && let Some(tracker) = &authorizer_tracker
-            {
-                tracker
-                    .authorized_tables
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(table_name.to_owned());
-            }
             if (!allow_transactions && matches!(context.action, AuthAction::Transaction { .. }))
                 || (!allow_savepoints && matches!(context.action, AuthAction::Savepoint { .. }))
             {
@@ -84,25 +63,6 @@ where
             }
         }))
         .map_err(|error| sqlite_error("install transaction-control guard", error))?;
-    if let Some(tracker) = &insert_tracker {
-        let hook_tracker = Arc::clone(tracker);
-        if let Err(error) = connection.update_hook(Some(
-            move |action: Action, _database: &str, table: &str, _rowid: i64| {
-                if action == Action::SQLITE_INSERT
-                    && hook_tracker
-                        .authorized_tables
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .contains(table)
-                {
-                    hook_tracker.applied.store(true, Ordering::Release);
-                }
-            },
-        )) {
-            let _ = connection.authorizer(Some(canonical_authorizer));
-            return Err(sqlite_error("install insert tracker", error));
-        }
-    }
     let deadline = if enforce_statement_limit {
         let operation_deadline = Instant::now() + EXACT_SQL_EXECUTION_LIMIT;
         Some(
@@ -136,7 +96,6 @@ where
             false
         }),
     ) {
-        let _ = connection.update_hook(None::<fn(Action, &str, &str, i64)>);
         let _ = connection.authorizer(Some(canonical_authorizer));
         return Err(sqlite_error("install execution guard", error));
     }
@@ -144,13 +103,9 @@ where
     let result = catch_unwind(AssertUnwindSafe(operation));
     let clear_progress =
         connection.progress_handler(EXACT_SQL_PROGRESS_INTERVAL_OPS, None::<fn() -> bool>);
-    let clear_update_hook = connection.update_hook(None::<fn(Action, &str, &str, i64)>);
     let restore_authorizer = connection.authorizer(Some(canonical_authorizer));
     let cleanup = clear_progress
         .map_err(|error| sqlite_error("clear execution guard", error))
-        .and_then(|()| {
-            clear_update_hook.map_err(|error| sqlite_error("clear insert tracker", error))
-        })
         .and_then(|()| {
             restore_authorizer.map_err(|error| sqlite_error("restore connection authorizer", error))
         });

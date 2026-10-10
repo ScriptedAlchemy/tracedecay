@@ -1,10 +1,9 @@
-//! Bounded canonical `SQLite` candidate discovery for project-memory retrieval.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::memory::entities::normalize_entity;
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
-use tracedecay_runtime_core::db::engine::Value;
+use tracedecay_runtime_core::db::engine::{BackendKind, QueryExecutor, Value};
+use tracedecay_runtime_core::db::native_search;
 
 use tracedecay_domain::{Confidence, FactCategoryV1, FactId, FactOwnerV1};
 use tracedecay_store::{
@@ -19,7 +18,7 @@ use super::primitives::{
     project_memory_category_label, row_f64, row_string, storage_error, storage_message,
 };
 use super::projection::load_project_memory_projections_controlled_tx;
-use super::scoring::{project_memory_normalize_fts5_ranks, project_memory_tokens};
+use super::scoring::{project_memory_normalize_fts_ranks, project_memory_tokens};
 
 const SEARCH_CANDIDATE_ARM_LIMIT: i64 = 1_000;
 
@@ -49,13 +48,13 @@ pub(super) async fn project_memory_available_facts_tx(
         .collect())
 }
 
-fn project_memory_fts_query(tokens: &[String]) -> Option<String> {
+fn project_memory_fts_query(tokens: &[String], backend: BackendKind) -> Option<String> {
     (!tokens.is_empty()).then(|| {
         tokens
             .iter()
             .map(|token| {
-                let quoted = format!("\"{}\"", token.replace('"', "\"\""));
-                if token.chars().count() >= 4 {
+                let quoted = native_search::quote_term(backend, token);
+                if backend == BackendKind::Sqlite && token.chars().count() >= 4 {
                     format!("{quoted}*")
                 } else {
                     quoted
@@ -112,7 +111,8 @@ async fn project_memory_fts_candidates_tx(
     let text = query
         .query()
         .ok_or_else(|| storage_message(PROJECT_MEMORY_READ_OPERATION, "search query is missing"))?;
-    let Some(fts_query) = project_memory_fts_query(&project_memory_tokens(text)) else {
+    let backend = transaction.backend_kind();
+    let Some(fts_query) = project_memory_fts_query(&project_memory_tokens(text), backend) else {
         return Ok(Vec::new());
     };
     let mut values = project_memory_candidate_values(query, min_trust)?;
@@ -121,11 +121,46 @@ async fn project_memory_fts_candidates_tx(
     let category_filter = project_memory_category_filter(query, &mut values);
     let limit_index = values.len() + 1;
     values.push(Value::Integer(SEARCH_CANDIDATE_ARM_LIMIT));
-    let sql = format!(
-        "SELECT current_facts.fact_id, bm25(memory_v2_assertion_payloads_fts) AS rank
-         FROM memory_v2_assertion_payloads_fts
+    let source = match backend {
+        BackendKind::Sqlite => {
+            "memory_v2_assertion_payloads_fts
          JOIN memory_v2_assertion_payloads AS payloads
-           ON payloads.rowid = memory_v2_assertion_payloads_fts.rowid
+           ON payloads.rowid = memory_v2_assertion_payloads_fts.rowid"
+        }
+        BackendKind::NativeTurso => {
+            "hits JOIN memory_v2_assertion_payloads AS payloads ON payloads.rowid = hits.payload_rowid"
+        }
+    };
+    let parameter = format!("?{fts_index}");
+    let predicate = native_search::predicate(
+        backend,
+        "memory_v2_assertion_payloads_fts",
+        &["payloads.content"],
+        &parameter,
+    );
+    let rank = native_search::score(
+        backend,
+        "bm25(memory_v2_assertion_payloads_fts)",
+        &["payloads.content"],
+        &parameter,
+    );
+    let native_hits = format!(
+        "SELECT rowid AS payload_rowid, fts_score(content, {parameter}) AS rank
+         FROM memory_v2_assertion_payloads WHERE fts_match(content, {parameter})"
+    );
+    let predicate = if backend == BackendKind::NativeTurso {
+        "1 = 1".to_owned()
+    } else {
+        predicate
+    };
+    let rank = if backend == BackendKind::NativeTurso {
+        "hits.rank".to_owned()
+    } else {
+        rank
+    };
+    let candidates = format!(
+        "SELECT current_facts.fact_id, {rank} AS rank, current_facts.updated_at
+         FROM {source}
          JOIN memory_v2_current_facts AS current_facts
            ON current_facts.active_assertion_id = payloads.assertion_id
           AND current_facts.fact_id = payloads.fact_id
@@ -141,11 +176,23 @@ async fn project_memory_fts_candidates_tx(
            AND current_facts.payload_access = 'eligible'
            AND current_facts.active_assertion_id IS NOT NULL
            AND current_facts.trust_score >= ?4
-           AND memory_v2_assertion_payloads_fts MATCH ?{fts_index}
-           {category_filter}
+           AND {predicate}
+           {category_filter}"
+    );
+    let sql = match backend {
+        BackendKind::Sqlite => format!(
+            "{candidates}
          ORDER BY rank ASC, current_facts.updated_at DESC, current_facts.fact_id ASC
          LIMIT ?{limit_index}"
-    );
+        ),
+        // Turso 0.8's direct FTS score-order pushdown does not sort its exposed
+        // scores. Materialize the authorized hits before applying rank/limit.
+        BackendKind::NativeTurso => format!(
+            "WITH hits AS MATERIALIZED ({native_hits}), authorized AS MATERIALIZED ({candidates})
+         SELECT fact_id, rank FROM authorized
+         ORDER BY rank DESC, updated_at DESC, fact_id ASC LIMIT ?{limit_index}"
+        ),
+    };
     let mut rows = transaction
         .query(&sql, values)
         .await
@@ -402,7 +449,7 @@ pub(super) async fn project_memory_search_candidates_tx(
 ) -> FactStoreResult<SearchCandidates> {
     let fts_ranked =
         project_memory_fts_candidates_tx(transaction, query, min_trust, read_control).await?;
-    let fts_scores = project_memory_normalize_fts5_ranks(fts_ranked);
+    let fts_scores = project_memory_normalize_fts_ranks(fts_ranked, transaction.backend_kind());
     let entity_ids =
         project_memory_entity_candidates_tx(transaction, query, min_trust, read_control).await?;
     let newest_ids =

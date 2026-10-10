@@ -1,0 +1,20 @@
+Task-owned build artifacts only; APFS confirmed via diskutil info /dev/disk3s5. Existing standalone ScriptedAlchemy cargo-apfs-compress CLI; no installation or Cargo build.
+Command: compress_and_measure.py --path <task>/.bazel-cache/f6612118940a8eafc4697883525f5e0c/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin --compression lzfse --cargo /Users/zackjackson/.cargo/bin/cargo-apfs-compress
+Observed exit 0; apply run, not preview.
+Apply mode: Total progress shows bytes queued for this run; already-compressed and skipped files are excluded.
+Compressed /Users/zackjackson/Documents/Codex/2026-10-09/task/.bazel-cache/f6612118940a8eafc4697883525f5e0c/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin [custom]
+  files processed: 8051
+  already compressed: 0
+  files compressed this run: 2122
+  incompressible/skipped: 935
+  logical bytes scanned: 21.52 GiB
+  physical before: 21.54 GiB
+  physical after: 12.02 GiB
+  compression this round: 9.52 GiB (44.20%)
+  total compression after run: 9.50 GiB (44.16%)
+Before (physical du -sh): 22G	/Users/zackjackson/Documents/Codex/2026-10-09/task/.bazel-cache/f6612118940a8eafc4697883525f5e0c/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin
+Before (logical du -shA): 22G	/Users/zackjackson/Documents/Codex/2026-10-09/task/.bazel-cache/f6612118940a8eafc4697883525f5e0c/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin
+After (physical du -sh): 12G	/Users/zackjackson/Documents/Codex/2026-10-09/task/.bazel-cache/f6612118940a8eafc4697883525f5e0c/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin
+After (logical du -shA): 22G	/Users/zackjackson/Documents/Codex/2026-10-09/task/.bazel-cache/f6612118940a8eafc4697883525f5e0c/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin
+
+Available volume space initially fell while the operation ran; subsequent df reported16GiB. No backup or snapshot settings were changed.

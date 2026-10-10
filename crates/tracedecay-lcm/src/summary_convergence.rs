@@ -330,7 +330,7 @@ pub async fn ensure_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmErr
             .flatten();
         drop(rows);
         if existing.is_some_and(|sql| !sql.contains(required_fragment)) {
-            conn.execute_batch(&format!("DROP TRIGGER {trigger}"))
+            conn.execute_batch(&format!("DROP TRIGGER main.{trigger}"))
                 .await?;
         }
     }

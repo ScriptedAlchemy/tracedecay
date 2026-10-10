@@ -617,7 +617,7 @@ pub async fn validate_authority_schema_contract(
 ) -> tracedecay_domain::errors::Result<()> {
     validate_tables_and_indexes(conn, TABLES).await?;
     for invariant in super::invariants::INVARIANTS {
-        for trigger in invariant.triggers {
+        for trigger in invariant.triggers_for(conn.backend_kind()) {
             validate_trigger(conn, trigger).await?;
         }
     }
@@ -656,6 +656,10 @@ mod tests {
     }
 
     impl<T: QueryExecutor> QueryExecutor for CountingQueryExecutor<'_, T> {
+        fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+            self.inner.backend_kind()
+        }
+
         async fn query<P>(
             &self,
             sql: &str,

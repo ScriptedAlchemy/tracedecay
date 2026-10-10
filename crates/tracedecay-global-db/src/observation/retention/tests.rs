@@ -42,6 +42,10 @@ impl RetentionTestStore {
 }
 
 impl QueryExecutor for RetentionTestStore {
+    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        self.database().read_connection().backend_kind()
+    }
+
     async fn query<P>(
         &self,
         sql: &str,

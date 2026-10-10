@@ -904,6 +904,15 @@ const FTS_SOURCES: &[CoverageSource] = &[CoverageSource {
     encoding: "json_array(row.occurrence_id, fts.index_text)",
 }];
 
+// Native FTS stores postings as transactional index segments rather than an
+// external-content virtual table. The receipt covers the identical canonical
+// indexed inputs; it does not claim to validate every posting in either engine.
+const NATIVE_FTS_SOURCES: &[CoverageSource] = &[CoverageSource {
+    table: "session_occurrences",
+    from: "session_occurrences AS row",
+    encoding: "json_array(row.occurrence_id, row.index_text)",
+}];
+
 /// One exact-SQL page of coverage rows; `snippet_text` and `index_text` are
 /// the row bulk, so pages are row-count-small and keyed by rowid.
 const COVERAGE_DIGEST_PAGE_ROWS: i64 = 32;
@@ -1037,14 +1046,19 @@ async fn fold_coverage_rows(
     Ok(())
 }
 
-fn coverage_components() -> [&'static [CoverageSource]; 6] {
+fn coverage_components(
+    backend: tracedecay_runtime_core::db::engine::BackendKind,
+) -> [&'static [CoverageSource]; 6] {
     [
         OCCURRENCE_SOURCES,
         DIMENSION_SOURCES,
         ASSERTION_SOURCES,
         SUPERSESSION_SOURCES,
         CURRENT_SOURCES,
-        FTS_SOURCES,
+        match backend {
+            tracedecay_runtime_core::db::engine::BackendKind::Sqlite => FTS_SOURCES,
+            tracedecay_runtime_core::db::engine::BackendKind::NativeTurso => NATIVE_FTS_SOURCES,
+        },
     ]
 }
 
@@ -1090,7 +1104,10 @@ pub(crate) async fn candidate_projection_coverage(
     };
     let generation_value = generation_i64(generation, PERSIST_OPERATION)?;
     let mut coverage = base_projection_coverage(conn, session_id, generation_value).await?;
-    for (index, sources) in coverage_components().into_iter().enumerate() {
+    for (index, sources) in coverage_components(conn.backend_kind())
+        .into_iter()
+        .enumerate()
+    {
         let digest = coverage_component_mut(&mut coverage, index);
         for rows in [CoverageRows::Introduced, CoverageRows::Superseded] {
             fold_coverage_rows(
@@ -1127,7 +1144,10 @@ pub(crate) async fn full_projection_coverage(
 ) -> SessionStoreResult<ProjectionCoverage> {
     let generation_value = generation_i64(generation, PERSIST_OPERATION)?;
     let mut coverage = empty_projection_coverage();
-    for (index, sources) in coverage_components().into_iter().enumerate() {
+    for (index, sources) in coverage_components(conn.backend_kind())
+        .into_iter()
+        .enumerate()
+    {
         fold_coverage_rows(
             conn,
             session_id.as_str(),

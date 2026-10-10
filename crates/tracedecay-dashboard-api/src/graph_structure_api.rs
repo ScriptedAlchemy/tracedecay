@@ -32,7 +32,7 @@ use tracedecay_code_index::graph_projection::{
 use tracedecay_contracts::CallableCodeOperationKind;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{BackendKind, QueryExecutor, params};
 use tracedecay_session_memory::memory::entities::normalize_entity;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -572,8 +572,9 @@ async fn node_facts(
             let normalized_name = normalize_entity(&node.name).to_ascii_lowercase();
             let row_limit = i64::try_from(FACT_MATCH_LIMIT + 1).unwrap_or(i64::MAX);
             let connection = state.mem_db.read_connection();
-            let fts_query = format!("\"{}\"", node.name.replace('"', "\"\""));
-            let fts_sql = "
+            let backend = connection.backend_kind();
+            let fts_query = tracedecay_runtime_core::db::native_search::quote_term(backend, &node.name);
+            let fts_sqlite_sql = "
         SELECT current.fact_id, payload.content, current.trust_score,
                current.updated_at, payload.payload_json
         FROM memory_v2_assertion_payloads_fts fts
@@ -587,6 +588,20 @@ async fn node_facts(
           AND current.payload_access = 'eligible'
         ORDER BY bm25(memory_v2_assertion_payloads_fts), current.updated_at DESC
         LIMIT ?2";
+            // Native scoring must happen before canonical joins, and all
+            // eligibility predicates precede the final bounded rank selection.
+            let fts_native_sql = "WITH hits AS MATERIALIZED (
+                SELECT rowid AS payload_rowid, fts_score(content, ?1) AS rank
+                FROM memory_v2_assertion_payloads WHERE fts_match(content, ?1))
+                SELECT current.fact_id, payload.content, current.trust_score,
+                       current.updated_at, payload.payload_json
+                FROM hits JOIN memory_v2_assertion_payloads payload ON payload.rowid = hits.payload_rowid
+                JOIN memory_v2_current_facts current
+                  ON current.fact_id = payload.fact_id AND current.owner_kind = payload.owner_kind
+                 AND current.project_id = payload.project_id AND current.active_assertion_id = payload.assertion_id
+                WHERE current.payload_access = 'eligible'
+                ORDER BY hits.rank DESC, current.updated_at DESC, current.fact_id ASC LIMIT ?2";
+            let fts_sql = match backend { BackendKind::Sqlite => fts_sqlite_sql, BackendKind::NativeTurso => fts_native_sql };
             let mut fts_rows =
                 match query_rows(&connection, fts_sql, params![fts_query, row_limit]).await {
                     Ok(rows) => rows,

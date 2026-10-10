@@ -1,12 +1,14 @@
 use std::path::Path;
 
 use super::{
-    Connection, Error, IntoParams, ReadConnection, ReadSnapshot, Result, Rows, Transaction,
-    WriteStatement,
+    BackendKind, Connection, Error, IntoParams, ReadConnection, ReadSnapshot, Result, Rows,
+    Transaction, WriteStatement,
 };
 
 #[allow(async_fn_in_trait)]
 pub trait QueryExecutor {
+    fn backend_kind(&self) -> BackendKind;
+
     async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams;
@@ -35,6 +37,10 @@ impl WalCheckpointExecutor for Connection {
 }
 
 impl QueryExecutor for Connection {
+    fn backend_kind(&self) -> BackendKind {
+        Connection::backend_kind(self)
+    }
+
     async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
@@ -44,6 +50,10 @@ impl QueryExecutor for Connection {
 }
 
 impl QueryExecutor for ReadConnection {
+    fn backend_kind(&self) -> BackendKind {
+        ReadConnection::backend_kind(self)
+    }
+
     async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
@@ -53,6 +63,10 @@ impl QueryExecutor for ReadConnection {
 }
 
 impl QueryExecutor for Transaction {
+    fn backend_kind(&self) -> BackendKind {
+        Transaction::backend_kind(self)
+    }
+
     async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
@@ -62,6 +76,10 @@ impl QueryExecutor for Transaction {
 }
 
 impl QueryExecutor for ReadSnapshot {
+    fn backend_kind(&self) -> BackendKind {
+        ReadSnapshot::backend_kind(self)
+    }
+
     async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,

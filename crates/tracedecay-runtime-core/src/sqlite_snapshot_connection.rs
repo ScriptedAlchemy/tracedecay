@@ -44,6 +44,10 @@ impl SnapshotConnection {
 }
 
 impl QueryExecutor for SnapshotConnection {
+    fn backend_kind(&self) -> crate::db::engine::BackendKind {
+        crate::db::engine::BackendKind::Sqlite
+    }
+
     async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
     where
         P: IntoParams,

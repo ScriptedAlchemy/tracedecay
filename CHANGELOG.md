@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- An explicit native Turso storage experiment with guarded execution, real-file
+  concurrency tests, and native search caller support. Registered production
+  stores continue to use SQLite while native attachment and operation coverage
+  remain unfinished.
+
+### Fixed
+
+- Foreground reader capacity remains available during concurrent background opens.
+- One-shot `INSERT ... RETURNING` rolls back when returned rows exceed client
+  budgets or commit fails.
+
+### Changed
+
+- Internal inserted-ID callers use statement-owned `RETURNING` rows. The ambient
+  insert-ID API and tracker have been removed.
+- The native experiment uses approved logical deletion without SQLite deleted-page
+  scrubbing. SQLite retains its existing setting.
+
 ## [1.0.0-beta.76](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.75...v1.0.0-beta.76) (2026-10-08)
 
 

@@ -2,8 +2,18 @@
 
 Audited 2026-10-09 at TraceDecay baseline `5fe50528b3`. Target: native Turso
 **0.8.0**, source commit `2829ee1662bd01d79f60c2c170af684a2b50af86`.
-This is an implementation plan, not an installed backend or a completed data
-migration. The default SQLite store remains authoritative.
+This historical plan predates the native Rust implementation. The current
+implementation and blockers are in [NATIVE-RUST.md](turso-prototype/NATIVE-RUST.md).
+SQLite remains the registered production store.
+
+The user subsequently selected **fresh native databases** and made the existing
+TraceDecay contents disposable. Data conversion and preservation of those old
+contents are outside the current work. The exact existing files and reset roots
+remain in the local delivery inventory outside Git. Published aggregate counts
+are in [DATABASE-RESET-INVENTORY.md](turso-prototype/DATABASE-RESET-INVENTORY.md).
+Actual deletion requires action-time human confirmation. No operator data has
+been reset. Future privacy, ordering, identity, and recovery guarantees remain
+required. The historical compatibility findings below still inform that work.
 
 ## Executed evidence and immediate blocker
 
@@ -125,7 +135,7 @@ these callers attached to SQLite.
 | Runtime ledgers and closed domain operations | `crates/tracedecay-rusqlite-runtime/src/ledger/schema.rs:3`, `persistence.rs:67`, `repository/mod.rs`, `work/schema.rs`, `workflow/schema.rs`, `remote/schema.rs` | Preserve rows and receipts, all constraints/indexes, cursor and lifecycle CAS, work/run/effect journals, handoff/admission/recovery state, and remote replay semantics. |
 | External source authority/projection | `crates/tracedecay-rusqlite-runtime/src/repository/external_source.rs:74` | Convert all four WITHOUT ROWID tables, not only the runtime ledger. Retain receipts/frontiers/mutation digests, secondary indexes, pruning and owner-bound replay checks. |
 | Registered profile, project, session, memory, code and remote mounts | `crates/tracedecay-runtime-core/src/shard_runtime/registry/attachment.rs`, `crates/tracedecay-store-runtime/src/session_registry/mounts.rs:585`, `session_registry/maintenance.rs:658`, `remote_replay_transaction.rs:397` | Migrate each registered store under its exact profile/project/shard identity; cut over lifecycle, reset/admission, discovery, recovery and shutdown callers together. |
-| Global authority schemas and transactions | `crates/tracedecay-global-db/src/schema_stages.rs`, `schema_contract/invariants/triggers.rs:40`, `observation/schema.rs:182`, `git_index_transactions/schema.rs:123`, `native_integration/schema.rs:119` | Port final-shape admission and exact SQL schema fingerprints, observation/cursor/retrieval authority, integration journals, immutable receipts and audit invalidation triggers. No resetting populated authority as a migration shortcut. |
+| Global authority schemas and transactions | `crates/tracedecay-global-db/src/schema_stages.rs`, `schema_contract/invariants/triggers.rs:40`, `observation/schema.rs:182`, `git_index_transactions/schema.rs:123`, `native_integration/schema.rs:119` | Port final-shape admission and exact SQL schema fingerprints, observation/cursor/retrieval authority, integration journals, immutable receipts and audit invalidation triggers. Initialize fresh authority after the confirmed reset; do not preserve old authority contents. |
 | Memory and retrieval | `crates/tracedecay-runtime-core/src/db/memory_v2/schema/baseline.rs:72`, `crates/tracedecay-session-memory/src/fact_store/candidates.rs:125`, `crates/tracedecay-session-temporal-store/src/retrieval/queries.rs:471`, `crates/tracedecay-lcm/src/schema.rs:101`, `crates/tracedecay-sessions/src/runtime/store_access/sessions.rs:694`, `crates/tracedecay-dashboard-api/src/graph_structure_api.rs:586` | Migrate canonical rows and all dependent FTS/search/admission/render paths as described below. Include redaction/purge, temporal publication and derived rebuild behavior. |
 | Graph, code index, lexical artifacts | `crates/tracedecay-graph-db/src`, `crates/tracedecay-code-index/src`, `crates/tracedecay-code-index-runtime/src`, `crates/tracedecay-query/src/retrieval/lexical/projection/artifact.rs:228` | Audit shared engine calls plus independent artifact connections. Grafeo GQL MATCH is a different engine and must not be rewritten as SQL FTS. Lexical artifact BM25 is implemented in Rust, not SQLite FTS5. Preserve content-addressed publication, mmap/read budgets and resumable staging. |
 | Direct opens, immutable snapshots, backup/folding and diagnostics | `crates/tracedecay-runtime-core/src/sqlite_read_snapshot.rs:211`, `sqlite_snapshot_materialize.rs:38`, `sqlite_snapshot_connection.rs:18`, `crates/tracedecay-query/src/retrieval/lexical/projection/artifact/reader.rs:460`, `crates/tracedecay-rusqlite-runtime/src/content_digest.rs:56`, `remote/identity.rs:96`, `crates/tracedecay-cli/src/commands/profile_storage.rs:198` | These bypass ordinary registered dispatch. Route owned Turso stores through the migrated engine. Replace SQLite backup/WAL folding/SHM assumptions with a verified snapshot/export/recovery path. Preserve logical digest byte/type encoding and reset refusal behavior. |
@@ -204,18 +214,12 @@ separate stricter transaction-control and database-lifecycle policy at
 triggers/views are denied, ATTACH/DETACH require the actor's fixed lifecycle
 capability, and pragmas are allowlisted.
 
-The authorizer at `exact_sql/guard.rs:62` captures table names from top-level
-authorized INSERT actions (`accessor.is_none()`). Its update hook at line 89
-marks `applied` for **any INSERT into those captured tables**; the hook has no
-accessor filter. Trigger inserts into a different, uncaptured table do not
-mark it, but a same-table trigger INSERT can. `exact_sql/mod.rs:1071` uses that
-fact to publish a logical last-insert-rowid
-for a handle sharing the writer connection. Replacing it with total changes,
-SQL text matching, or a trigger's last rowid changes behavior for ignored
-inserts, trigger effects and other callers. Preserve the current behavior
-through a verified native execution result or engine hook, including a
-differential case where an ignored top-level INSERT invokes a trigger that
-successfully inserts into the same captured table.
+The baseline ambient inserted-ID API and its update-hook tracker were removed
+in the implemented caller migration. Analytics, graph publication, observations,
+and the clone fixture now use statement-owned `INSERT ... RETURNING` results.
+The old observation contract no longer needs a native hook or compatibility
+alias. One-shot returned-row materialization owns a transaction in both backends
+and rolls back before returning a client output-budget error.
 
 Progress handlers enforce execution deadlines, shutdown and repeatedly
 checked authority (`exact_sql/guard.rs:118`), and request-local write
@@ -261,7 +265,7 @@ authority is not a default migration choice.
    connection, transaction/savepoint, query/value/error and prepared-program
    behavior through the current engine boundary. Wire production repository
    executors and registered callers. Provide authorizer-equivalent guards,
-   INSERT observation, cancellation/interruption, exact limits, file identity,
+   statement-owned returned rows, cancellation/interruption, exact limits, file identity,
    immutable diagnosis and MVCC recovery before selecting the target engine.
    Replace SQLite-specific WAL checkpoint/page-size/busy/VM telemetry with
    truthful target outcomes; preserve budgets and typed unavailability rather
@@ -286,29 +290,23 @@ authority is not a default migration choice.
    execution. Do not assume independent-row probe throughput predicts stores
    that update the singleton checkpoint every operation.
 
-5. **Perform a supported data conversion under exclusive registered authority.**
-   Close admission and drain all exact handles/read snapshots/background
-   workers for the exact store family; fence other processes and old engine
-   access. Use a consistent source snapshot, never a live main-file-only copy
-   omitting WAL or MVCC state. Stream every canonical table and original
-   ledger JSON/receipt/digest into a fresh target staging file; validate typed
-   rows, constraints, watermarks, outbox/inbox identities, UTF-8/value fidelity
-   and logical content before publication. Invalid SQLite TEXT bytes are a
-   known target compatibility issue: fail with an exact diagnostic instead of
-   silently replacing bytes. Rebuild derived search/artifact data through
-   canonical publication, and preserve their row identity/coverage links.
+5. **Initialize fresh stores under exclusive registered authority.**
+   The clarified request does not require converting or preserving existing
+   contents. Before deleting the exact inventoried families, obtain action-time
+   confirmation, close admission, drain handles and snapshots, and fence every
+   cooperating process through the canonical profile lifecycle authority.
+   Re-inventory changed files while the profile is offline. Remove only the
+   confirmed database families and associated state roots, including sidecars
+   and sealed graph generations. The current complete-wipe list omits two
+   existing user-memory artifacts, as the inventory documents.
 
-   Extend the existing registered admission/initialization and migration
-   authority for conversion state, file identity and recoverable switch
-   phases. Fsync target and containing directory; publish the engine/format
-   authority and new active file coherently; reopen under target admission
-   before allowing clients. A crash before publication retains the sole
-   active source; a crash after publication resumes the target. Recovery must
-   distinguish these states without exposing two writable authorities. Any
-   necessary staging is removed after completion; do not retain a rollback
-   database, rename the source to an indefinite backup, or delete the sole
-   active durable copy during cleanup. SQLite and native MVCC processes may
-   not share one active file. This plan authorizes no production conversion.
+   Create new native stores at canonical registered locations only after the
+   complete backend passes admission. Install the final schema, indexes, and
+   privacy enforcement before accepting payloads. Publish engine and format
+   authority coherently, verify file identity and recovery after reopen, and
+   restore admission only for the sole active writer authority. SQLite and
+   native MVCC processes may not share one active file. No live reset or
+   production cutover has been performed.
 
 6. **Verify and finish the cutover in one delivery slice.** Test interruption
    before admission, while opening, during SQL, during retry and around commit;
@@ -330,23 +328,19 @@ that honor existing receipts are semantics-preserving engineering choices.
 They do not require inventing a new product contract. Security, transaction
 ordering and redaction guarantees remain mandatory.
 
-The smallest product/data decision is **whether exact existing search
-behavior must remain compatible** or whether an explicitly specified new
-search contract may replace it. Under the current instruction to preserve
-search, exact behavior is the requirement: native 0.8.0's different FTS API
-is not an authorized substitution. The viable path is engine-level FTS5 parity
-or another proven compatible implementation before cutover. If changed search
-is desired, first present concrete corpus differences, ranking/tokenization
-rules, duplicate-detection consequences, pagination effects, index conversion
-and redaction/purge behavior for approval. Keeping a hidden SQLite search
-sidecar would add a second transactional/publication authority and does not
-resolve a complete native-only migration.
+Native tokenization and ranking changes were subsequently approved for the
+experiment. [NATIVE-SEARCH.md](turso-prototype/NATIVE-SEARCH.md) records the actual
+index and query differences. Existing contents are disposable, so conversion is
+no longer a cutover requirement. The user also explicitly approved logical deletion without deleted-page scrubbing.
 
-Current blockers are therefore complete schema adaptation, FTS5 search
-compatibility, hook/security and cached-program parity, complete native
-transaction/cancellation integration, owned-store snapshot/backup/recovery
-conversion, and a verified full data/caller cutover. No production backend
-adapter or migration was created by this plan. The probe establishes real
-native concurrent transactions and exposes the singleton conflict; it does
-not establish that replacing TraceDecay's current durable engine is ready or
-beneficial.
+The native deletion contract is now logical deletion without ordinary-page
+scrubbing. SQLite keeps its existing setting. The memory schema and purge
+callers select the appropriate behavior from their backend. The raw native
+pragma remains unsupported. See [SECURE-DELETE.md](turso-prototype/SECURE-DELETE.md)
+for the approved limitation and verification scope.
+
+Engineering blockers still include complete schema and operation dispatch,
+registered native attachment and writer ordering, sidecar confinement,
+snapshot/export and recovery, and final caller coverage. The native Rust work
+proves bounded real-file behavior but does not make the full production backend
+ready or establish a native throughput benefit.

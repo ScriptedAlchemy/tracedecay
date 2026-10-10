@@ -218,21 +218,59 @@ async fn runtime_connection_and_transactions_preserve_sqlite_semantics() {
         .await
         .unwrap();
 
+    let first = connection
+        .transaction_with_behavior(super::TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    let mut returned = first
+        .query(
+            "INSERT INTO items(label) VALUES (?1) RETURNING id",
+            params!["first"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        returned
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        1
+    );
+    assert!(returned.next().await.unwrap().is_none());
+    first.commit().await.unwrap();
     assert_eq!(
         connection
-            .execute("INSERT INTO items(label) VALUES (?1)", params!["first"])
+            .execute(
+                "UPDATE items SET label = ?1 WHERE id = ?2",
+                params!["first", 1_i64]
+            )
             .await
             .unwrap(),
         1
     );
-    assert_eq!(connection.last_insert_rowid(), 1);
     let statement = connection
         .prepare("INSERT INTO items(label) VALUES (?1)")
         .await
         .unwrap();
     statement.execute(params!["second"]).await.unwrap();
     statement.reset();
-    assert_eq!(connection.last_insert_rowid(), 2);
+    let mut inserted = connection
+        .query("SELECT id FROM items WHERE label = ?1", params!["second"])
+        .await
+        .unwrap();
+    assert_eq!(
+        inserted
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        2
+    );
     connection
         .execute_batch(
             "INSERT INTO items(label) VALUES ('batch-one');
@@ -240,33 +278,94 @@ async fn runtime_connection_and_transactions_preserve_sqlite_semantics() {
         )
         .await
         .unwrap();
-    assert_eq!(connection.last_insert_rowid(), 4);
+    let mut inserted = connection
+        .query(
+            "SELECT id FROM items WHERE label = ?1",
+            params!["batch-two"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        inserted
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        4
+    );
 
     let committed = connection
         .transaction_with_behavior(super::TransactionBehavior::Immediate)
         .await
         .unwrap();
-    committed
-        .execute("INSERT INTO items(label) VALUES (?1)", params!["committed"])
+    let mut returned = committed
+        .query(
+            "INSERT INTO items(label) VALUES (?1) RETURNING id",
+            params!["committed"],
+        )
         .await
         .unwrap();
-    assert_eq!(committed.last_insert_rowid(), 5);
+    assert_eq!(
+        returned
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        5
+    );
     committed.commit().await.unwrap();
-    assert_eq!(connection.last_insert_rowid(), 5);
+    let mut inserted = connection
+        .query(
+            "SELECT id FROM items WHERE label = ?1",
+            params!["committed"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        inserted
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        5
+    );
 
     let rolled_back = connection
         .transaction_with_behavior(super::TransactionBehavior::Immediate)
         .await
         .unwrap();
-    rolled_back
-        .execute(
-            "INSERT INTO items(label) VALUES (?1)",
+    let mut returned = rolled_back
+        .query(
+            "INSERT INTO items(label) VALUES (?1) RETURNING id",
             params!["rolled-back"],
         )
         .await
         .unwrap();
+    assert_eq!(
+        returned
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        6
+    );
     rolled_back.rollback().await.unwrap();
-    assert_eq!(connection.last_insert_rowid(), 6);
+    let mut absent = connection
+        .query(
+            "SELECT id FROM items WHERE label = ?1",
+            params!["rolled-back"],
+        )
+        .await
+        .unwrap();
+    assert!(absent.next().await.unwrap().is_none());
 
     let snapshot = connection.read_snapshot().await.unwrap();
     let mut rows = snapshot
@@ -475,4 +574,58 @@ fn busy_or_locked_is_the_sqlite_lock_codes_not_their_text() {
     assert!(!sqlite(1, 1, "no such table: main.locked_rows").is_busy_or_locked());
     assert!(!sqlite(19, 2067, "UNIQUE constraint failed: busy.id").is_busy_or_locked());
     assert!(!Error::Runtime("exact SQL reader lane is busy".to_owned()).is_busy_or_locked());
+}
+
+#[tokio::test]
+async fn returned_insert_ids_remain_bound_to_their_rows_after_reopen() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("returned-ids.sqlite3");
+    let connection = super::TestConnection::open(&path);
+    connection
+        .execute_batch("CREATE TABLE records(id INTEGER PRIMARY KEY, label TEXT NOT NULL UNIQUE)")
+        .await
+        .unwrap();
+    let mut inserted = Vec::new();
+    for label in ["first", "second"] {
+        let transaction = connection
+            .transaction_with_behavior(super::TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        let mut returned = transaction
+            .query(
+                "INSERT INTO records(label) VALUES (?1) RETURNING id",
+                (label,),
+            )
+            .await
+            .unwrap();
+        let id = returned
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap();
+        assert!(returned.next().await.unwrap().is_none());
+        transaction.commit().await.unwrap();
+        inserted.push((label, id));
+    }
+    assert_ne!(inserted[0].1, inserted[1].1);
+    drop(connection);
+    let reopened = super::TestConnection::open(&path);
+    for (label, id) in inserted {
+        let mut rows = reopened
+            .query("SELECT label FROM records WHERE id = ?1", (id,))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            label
+        );
+        assert!(rows.next().await.unwrap().is_none());
+    }
 }

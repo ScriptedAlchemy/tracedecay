@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use tracedecay_domain::errors::{ProjectOpenFailureKind, TraceDecayError};
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
+use tracedecay_runtime_core::db::engine::{BackendKind, Executor, QueryExecutor};
 
 use super::rows::audit_read_error;
 
@@ -23,6 +23,19 @@ pub(in crate::schema_contract) struct Invariant {
 }
 
 impl Invariant {
+    pub(in crate::schema_contract) fn triggers_for(&self, backend: BackendKind) -> &[Trigger] {
+        if backend == BackendKind::NativeTurso
+            && self
+                .triggers
+                .first()
+                .is_some_and(|trigger| trigger.name == "session_occurrences_fts_insert_v1")
+        {
+            &[]
+        } else {
+            self.triggers
+        }
+    }
+
     pub(super) fn violated(&self) -> TraceDecayError {
         TraceDecayError::project_open(
             ProjectOpenFailureKind::AuthorityVerdict {
@@ -1667,7 +1680,7 @@ pub(super) async fn trigger_contracts_intact(
     }
     Ok(INVARIANTS
         .iter()
-        .flat_map(|invariant| invariant.triggers)
+        .flat_map(|invariant| invariant.triggers_for(conn.backend_kind()))
         .all(|trigger| {
             actual
                 .get(&trigger.name.to_ascii_lowercase())

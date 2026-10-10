@@ -14,6 +14,10 @@ fn test_conn() -> (
 struct FailingQueryExecutor;
 
 impl QueryExecutor for FailingQueryExecutor {
+    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        tracedecay_runtime_core::db::engine::BackendKind::Sqlite
+    }
+
     async fn query<P>(
         &self,
         _sql: &str,

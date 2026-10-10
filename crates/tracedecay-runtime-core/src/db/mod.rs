@@ -9,6 +9,7 @@ mod graph_publication;
 mod memory_connection;
 mod memory_v2;
 mod metadata;
+pub mod native_search;
 pub mod migrations;
 mod purpose;
 mod retrieval_anchor_authority;

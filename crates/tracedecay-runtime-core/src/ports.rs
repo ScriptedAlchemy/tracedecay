@@ -134,6 +134,10 @@ pub mod registered_schema {
     }
 
     impl QueryExecutor for RegisteredSchemaInstallationV1 {
+        fn backend_kind(&self) -> crate::db::engine::BackendKind {
+            self.connection.backend_kind()
+        }
+
         async fn query<P>(
             &self,
             sql: &str,
@@ -194,6 +198,10 @@ pub mod registered_schema {
     }
 
     impl QueryExecutor for RegisteredSchemaInstallationTransactionV1<'_> {
+        fn backend_kind(&self) -> crate::db::engine::BackendKind {
+            self.transaction.backend_kind()
+        }
+
         async fn query<P>(
             &self,
             sql: &str,

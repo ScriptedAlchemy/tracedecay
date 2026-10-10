@@ -30,6 +30,10 @@ impl<'a, T> QueryCountingConnection<'a, T> {
 }
 
 impl<T: QueryExecutor> QueryExecutor for QueryCountingConnection<'_, T> {
+    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        QueryExecutor::backend_kind(self.inner)
+    }
+
     async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
     where
         P: IntoParams,
@@ -53,6 +57,10 @@ impl<T: Executor> Executor for QueryCountingConnection<'_, T> {
 }
 
 impl<T: SessionTemporalQuery> SessionTemporalQuery for QueryCountingConnection<'_, T> {
+    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        SessionTemporalQuery::backend_kind(self.inner)
+    }
+
     fn query<P>(
         &self,
         sql: &str,

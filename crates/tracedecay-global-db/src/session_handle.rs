@@ -90,6 +90,10 @@ impl SessionExec for RegisteredGlobalDbWriterConnection<'_> {
 }
 
 impl QueryExecutor for RegisteredGlobalDbWriterConnection<'_> {
+    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        RegisteredGlobalDbWriterConnection::backend_kind(self)
+    }
+
     async fn query<P>(
         &self,
         sql: &str,

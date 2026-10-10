@@ -8,3 +8,12 @@ turso_python_test(
     timeout = "short",
     tags = ["manual"],
 )
+
+turso_python_test(
+    name = "native_search_probe",
+    script = "native_search_probe.py",
+    wheel = "@pyturso_arm64//:wheel",
+    data = ["native_search_schema.sql"],
+    timeout = "moderate",
+    tags = ["manual"],
+)
