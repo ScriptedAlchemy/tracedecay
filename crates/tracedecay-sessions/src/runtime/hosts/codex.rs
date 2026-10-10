@@ -236,23 +236,33 @@ impl SettledFileWitness {
 /// Every host's history pass for a scope runs under that scope's discovery
 /// consumer, so one per-consumer record proves a file unchanged for all of
 /// them.
-pub(crate) struct PendingTranscript<'a> {
-    convergence: Option<(&'a CodexDiscoveryHub, &'a str, SettledFileWitness)>,
+pub(crate) struct PendingTranscript {
+    convergence: Option<(CodexDiscoveryHub, String, SettledFileWitness)>,
 }
 
-impl<'a> PendingTranscript<'a> {
+impl PendingTranscript {
     /// `None` when the consumer already finished this exact file, so the
     /// pass skips it without opening it.
-    pub(crate) fn observe(
-        discovery: Option<(&'a CodexDiscoveryHub, &'a str)>,
+    pub(crate) async fn observe(
+        discovery: Option<(&CodexDiscoveryHub, &str)>,
         path: &Path,
     ) -> TranscriptIngestResult<Option<Self>> {
-        run_blocking_transcript_section(|| Self::observe_blocking(discovery, path))
+        let path = path.to_path_buf();
+        let discovery = discovery.map(|(hub, consumer)| (hub.clone(), consumer.to_string()));
+        run_blocking_transcript_section("codex", move || {
+            Self::observe_blocking(
+                discovery
+                    .as_ref()
+                    .map(|(hub, consumer)| (hub, consumer.as_str())),
+                &path,
+            )
+        })
+        .await?
     }
 
     /// [`Self::observe`] for a caller already on a blocking thread.
     pub(crate) fn observe_blocking(
-        discovery: Option<(&'a CodexDiscoveryHub, &'a str)>,
+        discovery: Option<(&CodexDiscoveryHub, &str)>,
         path: &Path,
     ) -> TranscriptIngestResult<Option<Self>> {
         let Some((hub, consumer)) = discovery else {
@@ -268,15 +278,15 @@ impl<'a> PendingTranscript<'a> {
             return Ok(None);
         }
         Ok(Some(Self {
-            convergence: witness.map(|witness| (hub, consumer, witness)),
+            convergence: witness.map(|witness| (hub.clone(), consumer.to_string(), witness)),
         }))
     }
 
     pub(crate) fn cached_source_failure(&self, path: &Path) -> Option<TranscriptCatchUpFailure> {
-        let (hub, consumer, witness) = self.convergence?;
+        let (hub, consumer, witness) = self.convergence.as_ref()?;
         let inner = hub.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let recorded = inner.consumers.get(consumer)?.read_outcomes.get(path)?;
-        (recorded.witness == witness)
+        (recorded.witness == *witness)
             .then_some(recorded.failure)
             .flatten()
     }
@@ -296,7 +306,7 @@ impl<'a> PendingTranscript<'a> {
                 | TranscriptIngestError::InvalidSourceIdentity { .. }
         ) && let Some((hub, consumer, witness)) = self.convergence
         {
-            hub.record_file_result(consumer, path, witness, Some(failure))?;
+            hub.record_file_result(&consumer, path, witness, Some(failure))?;
         }
         Ok(())
     }
@@ -313,7 +323,7 @@ impl<'a> PendingTranscript<'a> {
             Some((hub, consumer, witness))
                 if !source_deferred && covered_through == witness.len =>
             {
-                hub.record_file_converged(consumer, path, witness)
+                hub.record_file_converged(&consumer, path, witness)
             }
             _ => Ok(()),
         }
@@ -325,7 +335,7 @@ impl<'a> PendingTranscript<'a> {
     /// do not re-read it to decide again.
     pub(crate) fn finished(self, path: &Path) -> TranscriptIngestResult<()> {
         match self.convergence {
-            Some((hub, consumer, witness)) => hub.record_file_converged(consumer, path, witness),
+            Some((hub, consumer, witness)) => hub.record_file_converged(&consumer, path, witness),
             None => Ok(()),
         }
     }
@@ -335,6 +345,7 @@ impl<'a> PendingTranscript<'a> {
     /// file again.
     pub(crate) fn admission_settles(&self, source_deferred: bool, covered_through: u64) -> bool {
         self.convergence
+            .as_ref()
             .is_some_and(|(_, _, witness)| !source_deferred && covered_through == witness.len)
     }
 
@@ -342,10 +353,11 @@ impl<'a> PendingTranscript<'a> {
     /// after asynchronous admission without observing it again.
     pub(crate) fn settled(&self) -> Option<SettledTranscript> {
         self.convergence
+            .as_ref()
             .map(|(hub, consumer, witness)| SettledTranscript {
                 hub: hub.clone(),
-                consumer: consumer.to_owned(),
-                witness,
+                consumer: consumer.clone(),
+                witness: *witness,
             })
     }
 }

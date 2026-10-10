@@ -127,6 +127,17 @@ pub(super) struct GraphSearchPayloadV1 {
     pub(super) results: Vec<GraphNodeV1>,
 }
 
+impl GraphSearchPayloadV1 {
+    /// A query that fully examined the launch project and found nothing.
+    /// Distinct from a wrong-project or empty-scope refusal.
+    pub(super) fn is_complete_zero_in_bound_project(&self) -> bool {
+        !self.query.is_empty()
+            && self.results.is_empty()
+            && !self.has_more
+            && self.total.unwrap_or(0) == 0
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub(super) struct GraphNodePayloadV1 {
     pub(super) node: GraphNodeV1,

@@ -143,6 +143,7 @@ mod events_delivery;
 mod explorer_api;
 pub mod feedback_api;
 mod graph_api;
+mod graph_binding;
 mod graph_service;
 mod graph_structure_api;
 mod lcm_api;
@@ -1215,7 +1216,11 @@ where
 
     // Stable, parseable line for wrappers (the Hermes plugin reads this).
     println!("tracedecay dashboard listening on {url}");
-    eprintln!("Serving project {}", cg.store_layout.project_root.display());
+    eprintln!(
+        "Dashboard bound to launch project {}",
+        cg.store_layout.project_root.display()
+    );
+    eprintln!("Code search covers this project only; rebound with --path to serve another.");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -1969,6 +1974,17 @@ async fn project_scoped_api_gateway(
         )
             .into_response();
     }
+    if is_graph_search_tail(&tail)
+        && let Some(refusal) = graph_binding::refuse_graph_search_scope(
+            runtime.active_project_id().as_deref(),
+            Some(project_id.as_str()),
+        )
+    {
+        return Json(graph_api::graph_search_scope_envelope::<
+            graph_service::GraphSearchPayloadV1,
+        >(&runtime.active_state(), refusal))
+        .into_response();
+    }
     let application_read = selected_project_application_read(req.method(), &tail);
     let event_delivery_ack = is_selected_project_event_delivery_ack(req.method(), &tail);
     if runtime.active_project_id().as_deref() != Some(project_id.as_str())
@@ -2145,6 +2161,10 @@ async fn project_scoped_api_gateway(
 
 fn is_profile_owned_automation_skills_route(tail: &str) -> bool {
     tail == "automation/skills" || tail.starts_with("automation/skills/")
+}
+
+fn is_graph_search_tail(tail: &str) -> bool {
+    tail == "plugins/graph/search"
 }
 
 /// A canonical application read a selected project answers for itself.

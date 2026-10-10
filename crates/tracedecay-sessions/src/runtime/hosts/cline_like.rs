@@ -375,21 +375,30 @@ pub async fn capture_cline_like_snapshot_observations(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
+    let source = source.clone();
+    let project_root = project_root.to_path_buf();
     capture_snapshot_observations(
         facade,
         source.provider,
         scope,
         cancellation,
         max_new_bytes,
-        || {
-            source.discover_transcript_paths(
-                project_root,
-                TranscriptDiscoveryBounds::from_discovered_units(MAX_TASKS_PER_PASS),
-            )
+        {
+            let source = source.clone();
+            let project_root = project_root.clone();
+            move || {
+                source.discover_transcript_paths(
+                    &project_root,
+                    TranscriptDiscoveryBounds::from_discovered_units(MAX_TASKS_PER_PASS),
+                )
+            }
         },
-        |path| snapshot_input_bytes(source.provider, path),
-        |path| {
-            let Some(parsed) = source.load_snapshot(path, project_root)? else {
+        {
+            let provider = source.provider;
+            move |path| snapshot_input_bytes(provider, path)
+        },
+        move |path| {
+            let Some(parsed) = source.load_snapshot(path, &project_root)? else {
                 return Ok(None);
             };
             let records =

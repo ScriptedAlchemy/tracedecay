@@ -3,6 +3,7 @@ use tracedecay_domain::ObservationScopeV1;
 
 use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
 use crate::observation::ObservationCancellation;
+use crate::runtime::hosts::codex::CodexDiscoveryHub;
 
 use super::{
     KIMI_DISCOVERY_FRONTIER_KEY, KimiSource, MAX_SESSION_FILES, capture_kimi_observations,
@@ -112,18 +113,31 @@ async fn empty_host_is_observed_once_without_revising_unchanged_frontier() {
 async fn durable_queue_revisits_a_recreated_entry() {
     let (_temp, project, sessions, source) = populated_source(MAX_SESSION_FILES + 1);
     let admission = MemoryHostAdmission::default();
-    for _ in 0..2 {
-        capture_kimi_observations(
+    let hub = CodexDiscoveryHub::default();
+    hub.register("kimi-frontier", Some(&source.share_dir));
+    // Each wake keeps the production scan deadline. Completion depends on
+    // the coverage receipt, rather than on two wakes fitting a busy host.
+    loop {
+        let before = admission.observations().len();
+        let outcome = capture_kimi_observations(
             &admission,
             &source,
             &project,
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
-            None,
+            Some((&hub, "kimi-frontier")),
         )
         .await
         .unwrap();
+        if !outcome.deferred {
+            break;
+        }
+        let admitted = admission.observations().len();
+        assert!(
+            admitted > before || admitted == MAX_SESSION_FILES + 1,
+            "a partial discovery wake must admit another source before completion"
+        );
     }
     assert_eq!(admission.observations().len(), MAX_SESSION_FILES + 1);
     let recreated = sessions.join("session-0000/agents/main/wire.jsonl");
@@ -139,18 +153,21 @@ async fn durable_queue_revisits_a_recreated_entry() {
     )
     .unwrap();
 
-    for _ in 0..2 {
-        capture_kimi_observations(
+    loop {
+        let outcome = capture_kimi_observations(
             &admission,
             &KimiSource::with_share_dir(&source.share_dir),
             &project,
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
-            None,
+            Some((&hub, "kimi-frontier")),
         )
         .await
         .unwrap();
+        if !outcome.deferred {
+            break;
+        }
     }
     assert!(admission.observations().iter().any(|stored| {
         stored

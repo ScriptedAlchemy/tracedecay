@@ -8,6 +8,8 @@ use super::*;
 
 #[derive(Default)]
 struct RecordingWorkflowSink {
+    authority_denied: bool,
+    snapshot_unavailable: bool,
     watermark: AtomicI64,
     writes: Mutex<Vec<(WorkflowRun, Vec<WorkflowAgent>)>>,
 }
@@ -20,10 +22,13 @@ impl RecordingWorkflowSink {
 
 impl WorkflowIngestSink for RecordingWorkflowSink {
     fn matches_project_sessions_authority(&self, _project_id: &ProjectId) -> bool {
-        true
+        !self.authority_denied
     }
 
     async fn read_ingest_watermark(&self) -> Option<i64> {
+        if self.snapshot_unavailable {
+            return None;
+        }
         Some(self.watermark.load(Ordering::Acquire))
     }
 
@@ -256,7 +261,8 @@ async fn workflow_discovery_keeps_the_only_tokio_worker_progressing() {
             Vec::new()
         },
     )
-    .await;
+    .await
+    .unwrap();
 
     let heartbeat = heartbeat_rx
         .recv_timeout(Duration::from_secs(2))
@@ -332,7 +338,8 @@ async fn blocking_prepare_preserves_run_order_and_large_transcript_content() {
         projects.path(),
         move |_| vec![second, first],
     )
-    .await;
+    .await
+    .unwrap();
 
     assert_eq!(
         stats,
@@ -389,6 +396,7 @@ async fn cancellation_at_sink_boundary_stops_before_the_next_run() {
             move |_| vec![first, second],
         )
         .await
+        .unwrap()
     });
 
     started_rx.recv().await.expect("first sink call must start");
@@ -422,4 +430,78 @@ fn transcript_summary_skips_malformed_and_oversized_jsonl_frames() {
         parse_timestamp("2026-07-04T05:18:00.000Z").map(|value| value as i64)
     );
     assert_eq!(summary.first_ts, summary.last_ts);
+}
+
+#[tokio::test]
+async fn workflow_ingest_rejects_unavailable_authority_before_discovery() {
+    let project = tempfile::tempdir().unwrap();
+    let project_id = ProjectId::new("project.workflow-denied").unwrap();
+    let sink = RecordingWorkflowSink {
+        authority_denied: true,
+        ..Default::default()
+    };
+    let result = ingest_workflow_runs_with_sink_and_discover(
+        &sink,
+        &project_id,
+        project.path(),
+        project.path(),
+        |_| panic!("denied authority must not discover transcripts"),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(TranscriptIngestError::HostAdmission {
+            reason: "project_sessions_authority_mismatch",
+            retryable: false,
+            ..
+        })
+    ));
+    assert!(sink.writes().is_empty());
+}
+
+#[tokio::test]
+async fn workflow_ingest_reports_unavailable_session_snapshot() {
+    let project = tempfile::tempdir().unwrap();
+    let project_id = ProjectId::new("project.workflow-unavailable").unwrap();
+    let sink = RecordingWorkflowSink {
+        snapshot_unavailable: true,
+        ..Default::default()
+    };
+    let result = ingest_workflow_runs_with_sink_and_discover(
+        &sink,
+        &project_id,
+        project.path(),
+        project.path(),
+        |_| panic!("unavailable snapshot must not discover transcripts"),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(TranscriptIngestError::BackgroundResourceUnavailable {
+            provider: "claude",
+            resource: "workflow_sessions_reader",
+        })
+    ));
+    assert!(sink.writes().is_empty());
+}
+
+#[tokio::test]
+async fn workflow_ingest_reports_discovery_worker_failure() {
+    let project = tempfile::tempdir().unwrap();
+    let project_id = ProjectId::new("project.workflow-worker-failure").unwrap();
+    let sink = RecordingWorkflowSink::default();
+    let result = ingest_workflow_runs_with_sink_and_discover(
+        &sink,
+        &project_id,
+        project.path(),
+        project.path(),
+        |_| panic!("discovery worker failure"),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(TranscriptIngestError::BlockingScanTaskFailed { provider: "claude" })
+    ));
+    assert!(sink.writes().is_empty());
+    assert_eq!(sink.watermark.load(Ordering::Acquire), 0);
 }

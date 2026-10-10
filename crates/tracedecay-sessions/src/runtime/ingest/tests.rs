@@ -562,6 +562,7 @@ async fn unchanged_codex_contract_failure_stays_blocked_without_reopening() {
         Some((&hub, "other-project")),
         &path,
     )
+    .await
     .unwrap()
     .unwrap();
     assert!(other.cached_source_failure(&path).is_none());

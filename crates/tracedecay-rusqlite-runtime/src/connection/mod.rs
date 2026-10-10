@@ -529,6 +529,89 @@ pub(crate) fn open_writer(
     Ok(connection)
 }
 
+/// The pathname SQLite is handed, spelled for its Windows VFS.
+///
+/// A `\\?\`-prefixed (extended-length/UNC-form) path makes the win32 VFS
+/// treat the database as UNC (`winIsUNCPath`), which puts every WAL
+/// shared-memory lock through the shared-handle emulation: read-lock
+/// ownership then lives in per-connection masks rather than real OS byte
+/// locks, and a failed `UnlockFile` there leaves a mask bit set forever —
+/// an error the VFS cannot see because its own bookkeeping is what lies.
+/// The classic per-handle path instead conflicts against real OS locks,
+/// so a lock the VFS records is a lock it genuinely holds.
+///
+/// `dunce::simplified` is the sole conversion gate: it returns `path`
+/// unchanged on non-Windows hosts, for non-verbatim spellings, and whenever
+/// any component would parse differently without the prefix (trailing
+/// dots/spaces, `.`/`..`, reserved DOS-device stems, invalid filename
+/// bytes, non-Unicode names, or a path beyond the classic limit). Refused
+/// verbatim paths are returned untouched — never re-examined here. Two
+/// guards sit on the accepted conversion: a reserved device stem dunce's
+/// ASCII list misses (superscript-digit COM¹..COM³, LPT¹..LPT³) must keep
+/// the prefix, and SQLite's `-wal`/`-shm` sidecars must fit the classic
+/// `CreateFileW` limit measured in UTF-16 code units.
+fn sqlite_host_path(path: &Path) -> PathBuf {
+    let simplified = dunce::simplified(path);
+    if simplified == path {
+        return path.to_path_buf();
+    }
+    let Some(text) = simplified.to_str() else {
+        return path.to_path_buf();
+    };
+    if text.split('\\').any(device_stem) {
+        return path.to_path_buf();
+    }
+    if text.encode_utf16().count() + 4 <= 259 {
+        PathBuf::from(text)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Whether a component's stem (the part Win32 checks before an extension,
+/// right-trimmed of `.`/` `) names a reserved DOS device: ASCII COM/LPT/NUL/
+/// CON/PRN/AUX plus the superscript-digit variants outside dunce's list.
+fn device_stem(component: &str) -> bool {
+    const DEVICES: &[&str] = &[
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+        "COM\u{b9}",
+        "COM\u{b2}",
+        "COM\u{b3}",
+        "LPT\u{b9}",
+        "LPT\u{b2}",
+        "LPT\u{b3}",
+    ];
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches([' ', '.']);
+    DEVICES
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device))
+}
+
 fn open_raw(
     path: &Path,
     mode: ConnectionMode,
@@ -538,6 +621,7 @@ fn open_raw(
         {
             let fresh_writer = mode == ConnectionMode::Writer
                 && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0);
+            let path = sqlite_host_path(path);
             let flags = match mode {
                 ConnectionMode::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY,
                 ConnectionMode::Writer | ConnectionMode::Maintenance => {
@@ -545,7 +629,7 @@ fn open_raw(
                 }
             } | OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
-            let connection = Connection::open_with_flags(path, flags)
+            let connection = Connection::open_with_flags(&path, flags)
                 .map_err(|source| policy("open", source))?;
 
             Ok((connection, fresh_writer))
@@ -606,7 +690,7 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
     {
         let _span = tracing::trace_span!("rusqlite.connection.open_immutable").entered();
         {
-            let uri = immutable_health_uri(path)?;
+            let uri = immutable_health_uri(&sqlite_host_path(path))?;
             let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX

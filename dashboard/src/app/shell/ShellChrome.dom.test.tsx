@@ -136,6 +136,50 @@ describe('the scope/workspace register', () => {
     ).toBeTruthy();
   });
 
+  it('names the launch project so all-projects search is not silent', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === '/api/projects' || url.startsWith('/api/projects?')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () =>
+              fixtureEnvelope({
+                status: 'ok',
+                error: null,
+                limit: 100,
+                truncated: false,
+                active_project_id: 'proj_federati',
+                active_project_root: '/repos/federati',
+                summary: null,
+                project_tree: [],
+                projects: [
+                  {
+                    project_id: 'proj_federati',
+                    label: 'federati',
+                    project_root: '/repos/federati',
+                    display_root: '/repos/federati',
+                    canonical_root: '/repos/federati',
+                    git_common_dir: '/repos/federati/.git',
+                    default_branch: 'master',
+                    head_branch: 'master',
+                    created_at: 1,
+                    last_seen_at: 1,
+                  },
+                ],
+              }),
+          } as Response;
+        }
+        throw new Error('offline');
+      }),
+    );
+    render(queryWrapper(<ScopeBar channel={{ path: 'code', label: 'Code' }} />));
+    expect(await screen.findByText(/Bound to federati/i)).toBeTruthy();
+    expect(document.querySelector('[data-launch-binding-id]')?.textContent).toBe('proj_federati');
+  });
+
   it('draws no channel cell when the route names no channel', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
     render(queryWrapper(<ScopeBar channel={null} />));

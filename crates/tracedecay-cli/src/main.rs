@@ -1296,6 +1296,13 @@ async fn dispatch_runtime_command(
             open,
         } => {
             let project_path = tracedecay_configuration::resolve_path_with_discovery(profile, path);
+            if profile.is_ambient_project_root(&project_path) {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                    message: tracedecay_runtime_core::config::ambient_project_root_guidance(
+                        &project_path,
+                    ),
+                });
+            }
             let result = tracing::Instrument::instrument(
                 commands::daemon_tool_json(
                     profile,
@@ -1329,7 +1336,13 @@ async fn dispatch_runtime_command(
             match status {
                 "already_running" | "stopping" => {
                     println!("tracedecay dashboard already listening on {url}");
-                    eprintln!("Serving project {}", project_path.display());
+                    eprintln!(
+                        "Dashboard bound to launch project {}",
+                        project_path.display()
+                    );
+                    eprintln!(
+                        "Code search covers this project only; rebound with --path to serve another."
+                    );
                     let port_honored = result
                         .get("requested_port_honored")
                         .and_then(serde_json::Value::as_bool)
@@ -1355,7 +1368,13 @@ async fn dispatch_runtime_command(
                 }
                 _ => {
                     println!("tracedecay dashboard listening on {url}");
-                    eprintln!("Serving project {}", project_path.display());
+                    eprintln!(
+                        "Dashboard bound to launch project {}",
+                        project_path.display()
+                    );
+                    eprintln!(
+                        "Code search covers this project only; rebound with --path to serve another."
+                    );
                 }
             }
             if open {

@@ -865,34 +865,55 @@ fn content_hash_stays_inside_the_persisted_cursor_domain() {
     );
 }
 
-/// The offload helper must hand the worker's run queue to another thread:
-/// with a single-worker multi-thread runtime, a task spawned *from inside*
-/// the blocking section can only run if `block_in_place` released the
-/// worker. Running the section inline would deadlock this test until the
-/// receive timeout fails it.
+/// The offload helper must run the section on the blocking pool: with a
+/// single-worker multi-thread runtime, a task spawned *from inside* the
+/// section can only run if the worker is free. Running the section inline
+/// would deadlock this test until the receive timeout fails it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn blocking_transcript_section_yields_the_worker_queue() {
     let handle = tokio::runtime::Handle::current();
-    let value = tokio::spawn(async move {
+    let worker = std::thread::current().id();
+    let (value, work_thread) = tokio::spawn(async move {
         let (sender, receiver) = std::sync::mpsc::channel();
-        run_blocking_transcript_section(move || {
+        run_blocking_transcript_section("test", move || {
+            let work_thread = std::thread::current().id();
             handle.spawn(async move {
                 let _ = sender.send(());
             });
             receiver
                 .recv_timeout(std::time::Duration::from_secs(5))
-                .map(|()| 7)
+                .map(|()| (7, work_thread))
                 .expect("a task spawned during the blocking section must run")
         })
+        .await
+        .unwrap()
     })
     .await
     .expect("join blocking section");
     assert_eq!(value, 7);
+    assert_ne!(
+        work_thread, worker,
+        "transcript sections must not execute on a Tokio worker"
+    );
 }
 
-/// On a current-thread runtime `block_in_place` would panic, so the helper
-/// must run the section inline and still return its value.
+/// Current-thread runtimes have no `block_in_place`, so the helper must
+/// still return its value through the blocking pool.
 #[tokio::test]
-async fn blocking_transcript_section_runs_inline_on_current_thread() {
-    assert_eq!(run_blocking_transcript_section(|| 11), 11);
+async fn blocking_transcript_section_runs_on_current_thread_runtime() {
+    assert_eq!(
+        run_blocking_transcript_section("test", || 11)
+            .await
+            .unwrap(),
+        11
+    );
+}
+
+#[tokio::test]
+async fn blocking_transcript_section_reports_worker_failure() {
+    let result = run_blocking_transcript_section("test", || panic!("worker failure")).await;
+    assert!(matches!(
+        result,
+        Err(TranscriptIngestError::BlockingScanTaskFailed { provider: "test" })
+    ));
 }

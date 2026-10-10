@@ -1202,8 +1202,8 @@ async fn user_session_read_bypasses_unregistered_project_route() {
     )
     .expect("message search payload");
     let message_search = &payload["outcome"]["value"]["payload"];
-    assert_eq!(message_search["status"], "ok", "{payload}");
-    assert_eq!(message_search["outcome"], "complete_zero", "{payload}");
+    assert_eq!(message_search["status"], "unavailable", "{payload}");
+    assert_eq!(message_search["outcome"], "unavailable", "{payload}");
     assert_eq!(message_search["store_scope"], "profile");
 
     server_task

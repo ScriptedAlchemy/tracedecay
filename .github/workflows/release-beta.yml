@@ -97,6 +97,10 @@ jobs:
     needs: validate
     if: needs.validate.outputs.build_required == 'true'
     name: Build ${{ matrix.name }}
+    # Gold crashes in its Cortex-A53 erratum fixup during the ARM CLI link.
+    # The workflow setting also recovers immutable release sources.
+    env:
+      BAZEL_LINKOPTS: ${{ matrix.name == 'aarch64-linux' && '-fuse-ld=bfd' || '' }}
     runs-on: ${{ matrix.runner }}
     # Windows 81 min, macOS 54 min on recent betas. 180 is ~2x the Windows max.
     timeout-minutes: 180

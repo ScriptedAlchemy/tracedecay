@@ -259,6 +259,65 @@ async fn files_lists_the_indexed_census_and_filters() {
     fixture.harness.shutdown().await;
 }
 
+/// Federati dogfood: a root `babel.config.js` that only assigns
+/// `module.exports = { … }` must appear beside a nested webpack config that
+/// already had `const` bindings. A comment-only `.js` file stays off the
+/// census so the CommonJS grain does not flood non-symbol sources.
+#[tokio::test]
+async fn files_lists_commonjs_config_object_exports() {
+    const BABEL_CONFIG_JS: &str = concat!(
+        "module.exports = {\n",
+        "  presets: [\"@babel/preset-env\", \"@babel/preset-react\"],\n",
+        "  plugins: [\"@babel/plugin-transform-runtime\"]\n",
+        "};\n",
+    );
+    const WEBPACK_CONFIG_JS: &str = concat!(
+        "const HtmlWebpackPlugin = require(\"html-webpack-plugin\");\n",
+        "module.exports = {\n",
+        "  entry: \"./src/index\"\n",
+        "};\n",
+    );
+    const COMMENT_ONLY_JS: &str = "// leftover scratch, no declarations\n";
+
+    let fixture = production_composition_fixture_with_sources(|root| {
+        write(root, "babel.config.js", BABEL_CONFIG_JS);
+        write(
+            root,
+            "packages/alpha-app/webpack.config.js",
+            WEBPACK_CONFIG_JS,
+        );
+        write(root, "scratch.js", COMMENT_ONLY_JS);
+    })
+    .await;
+    harness_wait_for_readiness(
+        &fixture.harness,
+        &fixture.project_root,
+        "ready",
+        Duration::from_secs(20),
+    )
+    .await;
+
+    let listed = call_json(&fixture, json!({"format": "json"})).await;
+    assert_eq!(
+        listed,
+        listing(
+            2,
+            "grouped",
+            json!([
+                file("babel.config.js", 1, BABEL_CONFIG_JS.len() as u64),
+                file(
+                    "packages/alpha-app/webpack.config.js",
+                    2,
+                    WEBPACK_CONFIG_JS.len() as u64
+                ),
+            ])
+        ),
+        "root CommonJS babel config must join the census; comment-only JS must not: {listed}"
+    );
+
+    fixture.harness.shutdown().await;
+}
+
 async fn files_project() -> ProductionCompositionFixture {
     let fixture = production_composition_fixture_with_sources(|root| {
         write(root, "Cargo.toml", CARGO_TOML);

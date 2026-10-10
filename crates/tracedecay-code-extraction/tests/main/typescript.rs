@@ -758,6 +758,84 @@ export const Greeting: React.FC<Props> = ({ name }) => {
 }
 
 #[test]
+fn test_js_commonjs_exports_are_public_consts() {
+    let babel = r#"
+module.exports = {
+  presets: ["@babel/preset-env", "@babel/preset-react"],
+  plugins: ["@babel/plugin-transform-runtime"]
+};
+"#;
+    let babel_result = TypeScriptExtractor
+        .extract_artifact("babel.config.js", babel)
+        .result;
+    assert!(
+        babel_result.errors.is_empty(),
+        "errors: {:?}",
+        babel_result.errors
+    );
+    let babel_consts: Vec<_> = babel_result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .collect();
+    assert_eq!(babel_consts.len(), 1, "{:?}", babel_result.nodes);
+    assert_eq!(babel_consts[0].name, "module.exports");
+    assert_eq!(babel_consts[0].visibility, Visibility::Pub);
+    assert!(
+        !babel_result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::InitBlock),
+        "an object-only CommonJS export must not need a <module> init block: {:?}",
+        babel_result.nodes
+    );
+
+    let named = r#"
+exports.presets = ["@babel/preset-env"];
+module.exports.plugins = [];
+"#;
+    let named_result = TypeScriptExtractor
+        .extract_artifact("named-exports.js", named)
+        .result;
+    assert!(
+        named_result.errors.is_empty(),
+        "errors: {:?}",
+        named_result.errors
+    );
+    let mut named_consts: Vec<_> = named_result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .map(|n| n.name.as_str())
+        .collect();
+    named_consts.sort_unstable();
+    assert_eq!(
+        named_consts,
+        ["exports.presets", "module.exports.plugins"],
+        "{:?}",
+        named_result.nodes
+    );
+
+    let comments = "// leftover scratch, no declarations\n";
+    let comments_result = TypeScriptExtractor
+        .extract_artifact("scratch.js", comments)
+        .result;
+    assert!(
+        comments_result.errors.is_empty(),
+        "errors: {:?}",
+        comments_result.errors
+    );
+    assert!(
+        !comments_result
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Const),
+        "comment-only JavaScript must not grow a fake export: {:?}",
+        comments_result.nodes
+    );
+}
+
+#[test]
 fn test_ts_const_declaration() {
     let source = r#"
 export const MAX_SIZE = 1024;

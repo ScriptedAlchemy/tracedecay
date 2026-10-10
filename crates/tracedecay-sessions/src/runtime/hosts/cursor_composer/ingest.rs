@@ -135,15 +135,6 @@ pub(super) struct ComposerIngestContext<'facade, 'root> {
 }
 
 impl ComposerIngestContext<'_, '_> {
-    /// Resolve this sweep's scope boundary once, rather than per composer
-    /// envelope and per workspace directory.
-    fn scope_matcher(&self) -> TranscriptScopeMatcher {
-        self.project_root.map_or_else(
-            || TranscriptScopeMatcher::profile_cached(self.registered_roots, self.matchers),
-            |root| TranscriptScopeMatcher::project_cached(root, self.matchers),
-        )
-    }
-
     /// The project label stored for an accepted workspace: its real path under
     /// project scope, the shared `"user"` bucket under profile scope.
     fn scoped_project_label(&self, workspace_path: &str) -> String {
@@ -546,14 +537,18 @@ impl CursorComposerSource {
             return Err(outcome.terminated(composer_cancellation_error(), 0, false));
         }
         let mut workspace_paths = HashMap::new();
-        self.ingest_state_vscdb(
-            context,
-            envelope_cap,
-            &mut byte_budget,
-            &mut outcome,
-            &mut workspace_paths,
-        )
-        .await;
+        if let Err(error) = self
+            .ingest_state_vscdb(
+                context,
+                envelope_cap,
+                &mut byte_budget,
+                &mut outcome,
+                &mut workspace_paths,
+            )
+            .await
+        {
+            return Err(outcome.terminated(error, byte_budget.consumed(), byte_budget.deferred()));
+        }
         if context.cancellation.is_cancelled() {
             return Err(outcome.terminated(
                 composer_cancellation_error(),
@@ -561,8 +556,12 @@ impl CursorComposerSource {
                 byte_budget.deferred(),
             ));
         }
-        self.ingest_chat_store_dbs(context, &workspace_paths, &mut byte_budget, &mut outcome)
-            .await;
+        if let Err(error) = self
+            .ingest_chat_store_dbs(context, &workspace_paths, &mut byte_budget, &mut outcome)
+            .await
+        {
+            return Err(outcome.terminated(error, byte_budget.consumed(), byte_budget.deferred()));
+        }
         if context.cancellation.is_cancelled() {
             return Err(outcome.terminated(
                 composer_cancellation_error(),
@@ -602,17 +601,17 @@ impl CursorComposerSource {
         byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
         workspace_paths: &mut HashMap<String, String>,
-    ) {
+    ) -> TranscriptIngestResult<()> {
         if context.cancellation.is_cancelled() {
-            return;
+            return Ok(());
         }
-        if !{
-            let _span =
-                tracing::trace_span!("sessions.hosts.cursor_composer.state_db_stat_blocking")
-                    .entered();
-            run_blocking_transcript_section(|| self.state_db_path.is_file())
-        } {
-            return;
+        let state_db_is_file = run_blocking_transcript_section("cursor", {
+            let path = self.state_db_path.clone();
+            move || path.is_file()
+        })
+        .await?;
+        if !state_db_is_file {
+            return Ok(());
         }
         let ro = match open_readonly_immutable(&self.state_db_path).await {
             Ok(ro) => ro,
@@ -623,7 +622,7 @@ impl CursorComposerSource {
                     "Cursor composer state database open failed closed"
                 );
                 byte_budget.defer();
-                return;
+                return Ok(());
             }
         };
         let conn = &ro.conn;
@@ -637,7 +636,7 @@ impl CursorComposerSource {
                     "Cursor composer scan frontier identity failed closed"
                 );
                 byte_budget.defer();
-                return;
+                return Ok(());
             }
         };
         let expected_frontier = match context
@@ -648,7 +647,7 @@ impl CursorComposerSource {
             Ok(frontier) => frontier,
             Err(_) => {
                 byte_budget.defer();
-                return;
+                return Ok(());
             }
         };
         let initial_frontier = match decode_composer_scan_frontier(expected_frontier.as_deref()) {
@@ -660,7 +659,7 @@ impl CursorComposerSource {
                     "Cursor composer scan frontier is invalid"
                 );
                 byte_budget.defer();
-                return;
+                return Ok(());
             }
         };
         let initial_after = initial_frontier.after_key.clone();
@@ -685,7 +684,7 @@ impl CursorComposerSource {
                 .is_some_and(|(after, high_water)| after > high_water)
         {
             byte_budget.defer();
-            return;
+            return Ok(());
         }
         let retry_high_water = match initial_retry_high_water.clone() {
             Some(high_water) => Some(high_water),
@@ -697,7 +696,7 @@ impl CursorComposerSource {
                 Ok(high_water) => high_water,
                 Err(_) => {
                     byte_budget.defer();
-                    return;
+                    return Ok(());
                 }
             },
         };
@@ -706,7 +705,7 @@ impl CursorComposerSource {
             .is_some_and(|key| !composer_retry_journal_key_is_valid(&retry_prefix, key))
         {
             byte_budget.defer();
-            return;
+            return Ok(());
         }
         let retry_page = if let Some(high_water) = retry_high_water.as_deref() {
             match context
@@ -722,7 +721,7 @@ impl CursorComposerSource {
                 Ok(page) => page,
                 Err(_) => {
                     byte_budget.defer();
-                    return;
+                    return Ok(());
                 }
             }
         } else {
@@ -730,9 +729,18 @@ impl CursorComposerSource {
         };
         let retry_first = initial_retry_first && !retry_page.is_empty();
         let scope_matcher = {
-            let _span = tracing::trace_span!("sessions.hosts.cursor_composer.state_scope_blocking")
-                .entered();
-            run_blocking_transcript_section(|| context.scope_matcher())
+            run_blocking_transcript_section("cursor", {
+                let project_root = context.project_root.map(Path::to_path_buf);
+                let registered_roots = context.registered_roots.to_vec();
+                let matchers = context.matchers.clone();
+                move || {
+                    project_root.map_or_else(
+                        || TranscriptScopeMatcher::profile_cached(&registered_roots, &matchers),
+                        |root| TranscriptScopeMatcher::project_cached(&root, &matchers),
+                    )
+                }
+            })
+            .await?
         };
         // Indexed prefix scan of keys + byte lengths only, never SELECT full
         // envelope text here. Point-fetch materializes only when the UTF-8 byte
@@ -1044,13 +1052,12 @@ impl CursorComposerSource {
                 // watermark, so the next sweep re-resolves membership instead
                 // of misfiling or starving the session behind a growing tail.
                 let project_membership = {
-                    let _span = tracing::trace_span!(
-                        "sessions.hosts.cursor_composer.envelope_scope_blocking"
-                    )
-                    .entered();
-                    run_blocking_transcript_section(|| {
-                        scope_matcher.membership(Some(Path::new(&project.path)))
+                    run_blocking_transcript_section("cursor", {
+                        let path = project.path.clone();
+                        let scope_matcher = scope_matcher.clone();
+                        move || scope_matcher.membership(Some(Path::new(&path)))
                     })
+                    .await?
                 };
                 match project_membership {
                     ProjectMembership::Match => {}
@@ -1440,7 +1447,7 @@ impl CursorComposerSource {
             scan_after = Some(last_key);
         }
         if context.cancellation.is_cancelled() {
-            return;
+            return Ok(());
         }
         let next_after = (!reached_end).then_some(last_scanned_key).flatten();
         let retry_cycle_complete =
@@ -1465,7 +1472,7 @@ impl CursorComposerSource {
                 Ok(replacement) => replacement,
                 Err(_) => {
                     byte_budget.defer();
-                    return;
+                    return Ok(());
                 }
             };
             match context
@@ -1482,6 +1489,7 @@ impl CursorComposerSource {
                 Ok(false) | Err(_) => byte_budget.defer(),
             }
         }
+        Ok(())
     }
 
     async fn ingest_chat_store_dbs(
@@ -1490,27 +1498,33 @@ impl CursorComposerSource {
         workspace_paths: &HashMap<String, String>,
         byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
-    ) {
+    ) -> TranscriptIngestResult<()> {
         let stores = {
-            let _span =
-                tracing::trace_span!("sessions.hosts.cursor_composer.discover_stores_blocking")
-                    .entered();
-            run_blocking_transcript_section(|| {
-                discover_chat_store_dbs(
-                    &self.chats_dir,
-                    workspace_paths,
-                    &context.scope_matcher(),
-                    context.project_root.is_some(),
-                )
+            run_blocking_transcript_section("cursor", {
+                let chats_dir = self.chats_dir.clone();
+                let workspace_paths = workspace_paths.clone();
+                let project_root = context.project_root.map(Path::to_path_buf);
+                let registered_roots = context.registered_roots.to_vec();
+                let matchers = context.matchers.clone();
+                let scoped = context.project_root.is_some();
+                move || {
+                    let matcher = project_root.map_or_else(
+                        || TranscriptScopeMatcher::profile_cached(&registered_roots, &matchers),
+                        |root| TranscriptScopeMatcher::project_cached(&root, &matchers),
+                    );
+                    discover_chat_store_dbs(&chats_dir, &workspace_paths, &matcher, scoped)
+                }
             })
+            .await?
         };
         for (store_path, project_path) in stores {
             if context.cancellation.is_cancelled() {
-                return;
+                return Ok(());
             }
             self.ingest_one_store_db(context, &store_path, &project_path, byte_budget, outcome)
                 .await;
         }
+        Ok(())
     }
 
     async fn ingest_one_store_db(

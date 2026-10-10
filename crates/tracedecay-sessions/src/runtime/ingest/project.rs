@@ -14,7 +14,7 @@ use tracedecay_store::StoreShardScopeV1;
 use super::failure::{
     IngestPassBounds, IngestPassOutcome, ProviderRunFold, RoundRobinAdmission,
     TranscriptCatchUpFailure, allocate_pass_byte_budgets, claude_catch_up_failure,
-    plan_round_robin_admission, scheduling_write_required,
+    plan_round_robin_admission, scheduling_write_required, warn_transcript_catch_up_failure,
 };
 use super::project_provider::{PROJECT_CATCH_UP_PROVIDERS, ProjectProviderRun};
 use super::scheduler::{
@@ -445,8 +445,11 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
             .failures
             .push(TranscriptCatchUpFailure::pass_backpressured());
     }
-    if !cancelled {
-        ingest_project_workflow_runs(registered, &canonical_project_id, project_root).await;
+    if !cancelled
+        && let Some(failure) =
+            ingest_project_workflow_runs(registered, &canonical_project_id, project_root).await
+    {
+        provider_runs.failures.push(failure);
     }
     // A bounded partial pass persists the rotation cursor so the next pass,
     // in this process or after a daemon restart, resumes at the provider
@@ -478,18 +481,23 @@ async fn ingest_project_workflow_runs<A: SessionIngestAuthority>(
     db: &A,
     project_id: &ProjectId,
     project_root: &Path,
-) {
-    // Index Claude Code workflow runs + their agents last, so the parent
-    // sessions' git spans already exist and each run inherits them. Fail-open:
-    // a workflow-ingest hiccup only logs at debug, never blocks session ingest.
-    // Runs live in their own tables, so they do not affect `stats`.
-    if let Some(home) = super::home_dir() {
-        let _ = crate::runtime::workflow_ingest::ingest_workflow_runs_with_sink(
-            &db.workflow_sink(),
-            project_id,
-            project_root,
-            &home.join(".claude").join("projects"),
-        )
-        .await;
+) -> Option<TranscriptCatchUpFailure> {
+    // Parent sessions must land first so workflow runs inherit their git spans.
+    let home = super::home_dir()?;
+    match crate::runtime::workflow_ingest::ingest_workflow_runs_with_sink(
+        &db.workflow_sink(),
+        project_id,
+        project_root,
+        &home.join(".claude").join("projects"),
+    )
+    .await
+    {
+        Ok(_) => None,
+        Err(error) => Some(warn_transcript_catch_up_failure(
+            "claude",
+            "workflow_ingest",
+            &error,
+            "project workflow ingest failed",
+        )),
     }
 }

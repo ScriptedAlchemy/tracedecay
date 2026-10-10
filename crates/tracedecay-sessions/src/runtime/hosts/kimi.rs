@@ -104,7 +104,6 @@ impl KimiSource {
         convergence: Option<(&CodexDiscoveryHub, &str)>,
     ) -> TranscriptIngestResult<(KimiDiscoveryReport, HostScanBudget)> {
         {
-            let _span = tracing::trace_span!("sessions.hosts.kimi.discover").entered();
             {
                 let mut discovery = KimiDiscoveryReport {
                     files: bound_path_list(Vec::new(), bounds),
@@ -334,20 +333,20 @@ impl KimiSource {
     }
 }
 
-enum CandidateConvergence<'a> {
+enum CandidateConvergence {
     /// The discovery consumer already finished this file unchanged.
     Finished,
     /// Its identity could not be read; the failure is recorded.
     Unreadable,
-    Pending(PendingTranscript<'a>),
+    Pending(PendingTranscript),
 }
 
-fn converging_candidate<'a>(
-    convergence: Option<(&'a CodexDiscoveryHub, &'a str)>,
+fn converging_candidate(
+    convergence: Option<(&CodexDiscoveryHub, &str)>,
     path: &Path,
     discovery: &mut KimiDiscoveryReport,
     budget: &mut HostScanBudget,
-) -> TranscriptIngestResult<CandidateConvergence<'a>> {
+) -> TranscriptIngestResult<CandidateConvergence> {
     match PendingTranscript::observe_blocking(convergence, path) {
         Ok(Some(pending)) => Ok(CandidateConvergence::Pending(pending)),
         Ok(None) => Ok(CandidateConvergence::Finished),
@@ -667,7 +666,7 @@ pub async fn capture_kimi_observations(
                     outcome.deferred = true;
                     break;
                 }
-                let pending = match PendingTranscript::observe(convergence, &path) {
+                let pending = match PendingTranscript::observe(convergence, &path).await {
                     Ok(Some(pending)) => pending,
                     Ok(None) => {
                         covered_wires.insert(path);
@@ -698,9 +697,11 @@ pub async fn capture_kimi_observations(
                     protect_sensitive_structural_id(&session_id).map_err(|_| invalid_frame())?;
                 let session = SessionId::new(&canonical_session_id).map_err(|_| invalid_frame())?;
                 let match_result = {
-                    let _span =
-                        tracing::trace_span!("sessions.hosts.kimi.identity_blocking").entered();
-                    run_blocking_transcript_section(|| jsonl_file_identity(&path))
+                    run_blocking_transcript_section("kimi", {
+                        let path = path.clone();
+                        move || jsonl_file_identity(&path)
+                    })
+                    .await?
                 };
                 let file_identity = match match_result {
                     Ok(file_identity) => file_identity,

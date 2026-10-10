@@ -288,17 +288,19 @@ install / update-plugin (refresh Core feedback routes).";
 pub(crate) const DASHBOARD_LONG_ABOUT: &str = "\
 Starts the local web dashboard: holographic memory curation, LCM session \
 explorer, code-graph browser, analytics, and automation review UI. Binds to \
-127.0.0.1 by default and prints the URL; leave it running while you work. \
-The graph is scoped to --path or the current project; pass --path outside a \
-project directory. Query text does not switch to another repository. Agents \
-can start the same server via the tracedecay_dashboard MCP tool.";
+one launch project (the current directory, or --path) and to 127.0.0.1 by \
+default, then prints the URL; leave it running while you work. Launching \
+from $HOME or another ambient root refuses and tells you to pass --path. \
+Code search covers only that bound project; asking about another enrolled \
+repo fails closed instead of returning an empty hit list. Agents can start \
+the same server via the tracedecay_dashboard MCP tool.";
 
 pub(crate) const DASHBOARD_AFTER_HELP: &str = "\
 Examples:
-  tracedecay dashboard                           Serve on the default port
+  tracedecay dashboard                           Serve the cwd project
   tracedecay dashboard --open                    Also open it in the browser
   tracedecay dashboard --port 8788               Fixed port (0 picks a free one)
-  tracedecay dashboard --path /path/to/repo      Serve another project
+  tracedecay dashboard --path /path/to/repo      Bind the dashboard to that repo
 
 Related: tracedecay memory (curation without the dashboard),
 tracedecay status --runtime (server resource snapshot).";

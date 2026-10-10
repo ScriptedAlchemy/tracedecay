@@ -8,6 +8,7 @@ use crate::common::{
     canonical_existing_path as canonical_temp_path, create_runtime, global_session, hermetic_path,
 };
 use crate::provision_host_cli_fixture;
+use serde_json::json;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
@@ -329,59 +330,21 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
-    // Commit the fixture before `init`, for two reasons that both end in
-    // `application.retained.authority-unavailable` otherwise: the daemon's
-    // full project open reads an attached git HEAD before it exposes the
-    // registered session authority, and `HostAdmissionTestRuntimeV1::project`
-    // below `git init`s any project root that is not already a repository.
-    // which would move the repository identity out from under the project id
-    // `init` just registered.
+    // Commit the fixture before `init`: the daemon's full project open reads
+    // an attached git HEAD before it exposes the registered session authority.
     write_git_fixture(&project_root);
     init_project_fixture(home.path(), &project_root);
-    let project_id = default_profile_project_id(&project_root);
-
-    create_runtime().block_on(async {
-        let runtime = HostAdmissionTestRuntimeV1::project(
-            profile_root(home.path()),
-            &project_root,
-            ProjectId::new(project_id).expect("valid fixture project id"),
-        )
-        .await
-        .expect("registered project runtime");
-        runtime
-            .upsert_session_for_test(
-                HostAdmissionScope::Project,
-                &global_session("cursor", "session-search", "proj_cli"),
-            )
-            .await
-            .expect("session fixture write");
-        runtime
-            .upsert_session_message_for_test(
-                HostAdmissionScope::Project,
-                &MessageRecordBuilder::new(
-                    "cursor",
-                    "message-search",
-                    "session-search",
-                    "assistant",
-                    1,
-                    "recovery evidence",
-                    "message",
-                )
-                .build(),
-            )
-            .await
-            .expect("session message fixture write");
-        // Same reason as `sessions_unfinished_lists_workflow_state_evidence`:
-        // the daemon below is a separate process opening this database.
-        runtime
-            .checkpoint_session_database_for_test(HostAdmissionScope::Project)
-            .await
-            .expect("session fixture checkpoint");
-        drop(runtime);
-    });
+    let transcript = write_claude_search_transcript(
+        home.path(),
+        &project_root,
+        "session-search-filters",
+        "recovery evidence",
+    );
+    assert_transcript_contains(&transcript, "recovery evidence");
 
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
-    for extra_args in [vec![], vec!["--provider", "cursor"]] {
+    import_sessions_until_searchable(home.path(), &project_root, "recovery");
+    for extra_args in [vec![], vec!["--provider", "claude"]] {
         let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
         command.args(["sessions", "search", "recovery", "--limit", "3"]);
         command.args(extra_args);
@@ -394,15 +357,149 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
         );
     }
 
-    // Socket readiness precedes the daemon's historical session projection.
-    // Wait for that background work, while still rejecting malformed or failed
-    // CLI responses immediately and asserting the final public status below.
-    let payload = crate::common::poll_until(
+    let payload = sessions_search_json(home.path(), &project_root, "recovery");
+    assert_eq!(payload["query"], "recovery", "{payload:#}");
+    assert_eq!(payload["status"], "ok", "{payload:#}");
+    assert!(
+        search_results_contain(&payload, "recovery evidence"),
+        "filter-omission search must prove a real hit: {payload:#}"
+    );
+}
+
+fn host_transcript_files(home: &Path) -> Vec<PathBuf> {
+    let roots = [
+        home.join(".claude/projects"),
+        home.join(".codex/sessions"),
+        home.join(".codex/archived_sessions"),
+        home.join(".cursor/projects"),
+        home.join(".cursor/chats"),
+    ];
+    let mut files = Vec::new();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        let mut pending = vec![root];
+        while let Some(dir) = pending.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+const SEARCH_HIT_PHRASE: &str = "orchid spool tension stays indexed";
+const SEARCH_MISS_QUERY: &str = "no such nautilus phrase";
+
+/// Writes a Claude Code transcript whose recorded `cwd` is the registered
+/// project. The slug can be dummy; ingest matches on `cwd`, not the folder.
+fn write_claude_search_transcript(
+    home: &Path,
+    project_root: &Path,
+    session: &str,
+    phrase: &str,
+) -> PathBuf {
+    let dir = home.join(".claude/projects/-some-slug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{session}.jsonl"));
+    let cwd = project_root.to_string_lossy();
+    let contents = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "type": "user",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": "u1",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "message": {"role": "user", "content": phrase}
+        }),
+        serde_json::json!({
+            "type": "assistant",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": "u2",
+            "timestamp": "2026-01-01T00:00:05.000Z",
+            "message": {
+                "id": format!("msg_{session}"),
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [{"type": "text", "text": format!("noted {phrase}")}]
+            }
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+fn assert_transcript_contains(path: &Path, phrase: &str) {
+    let contents = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("could not read transcript {}: {error}", path.display()));
+    assert!(
+        contents.contains(phrase),
+        "transcript {} must contain {phrase:?}: {contents}",
+        path.display()
+    );
+}
+
+fn search_results_contain(payload: &serde_json::Value, phrase: &str) -> bool {
+    payload["results"].as_array().is_some_and(|results| {
+        results.iter().any(|hit| {
+            hit["message"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(phrase))
+        })
+    })
+}
+
+fn import_sessions(home: &Path, project_root: &Path) {
+    let mut command = tracedecay_command_without_daemon(home, project_root);
+    command.args(["sessions", "import"]);
+    let output = run_with_timeout(command, cli_timeout());
+    assert!(
+        output.status.success(),
+        "sessions import should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn import_sessions_until_searchable(home: &Path, project_root: &Path, query: &str) {
+    import_sessions(home, project_root);
+    let payload = sessions_search_json_until(home, project_root, query, |payload| {
+        search_results_contain(payload, query)
+    });
+    assert_eq!(payload["status"], "ok", "{payload:#}");
+}
+
+fn sessions_search_json(home: &Path, project_root: &Path, query: &str) -> serde_json::Value {
+    sessions_search_json_until(home, project_root, query, |payload| {
+        !matches!(payload["status"].as_str(), Some("stale"))
+    })
+}
+
+fn sessions_search_json_until(
+    home: &Path,
+    project_root: &Path,
+    query: &str,
+    ready: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    crate::common::poll_until(
         Instant::now() + cli_timeout(),
         Duration::from_millis(100),
         || {
-            let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
-            command.args(["sessions", "search", "recovery", "--limit", "3", "--json"]);
+            let mut command = tracedecay_command_without_daemon(home, project_root);
+            command.args(["sessions", "search", query, "--limit", "3", "--json"]);
             let output = run_with_timeout(command, cli_timeout());
             assert!(
                 output.status.success(),
@@ -412,13 +509,130 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
             );
             let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
                 .expect("sessions search --json prints one document");
-            (payload["status"] != "stale").then_some(payload)
+            ready(&payload).then_some(payload)
         },
         || "session search projection did not finish historical convergence".to_owned(),
+    )
+}
+
+fn sessions_search_text(home: &Path, project_root: &Path, query: &str) -> String {
+    let mut command = tracedecay_command_without_daemon(home, project_root);
+    command.args(["sessions", "search", query, "--limit", "3"]);
+    let output = run_with_timeout(command, cli_timeout());
+    assert!(
+        output.status.success(),
+        "sessions search should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(payload["query"], "recovery", "{payload:#}");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn sessions_search_reports_unavailable_when_no_host_transcripts_exist() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    write_git_fixture(&project_root);
+    init_project_fixture(home.path(), &project_root);
+    let transcripts = host_transcript_files(home.path());
+    assert!(
+        transcripts.is_empty(),
+        "isolated home must have no host transcripts: {transcripts:?}"
+    );
+
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let payload = sessions_search_json(home.path(), &project_root, "indexLocalPlugins");
+    assert_eq!(payload["query"], "indexLocalPlugins", "{payload:#}");
+    assert_eq!(payload["status"], "unavailable", "{payload:#}");
+    assert_eq!(payload["outcome"], "unavailable", "{payload:#}");
+    assert_eq!(payload["count"], 0, "{payload:#}");
+    assert_eq!(payload["results"], json!([]), "{payload:#}");
+    let message = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("tracedecay sessions import"),
+        "empty source must name the import that fills it: {payload:#}"
+    );
+    assert_eq!(
+        payload["next_action"]["tool"], "tracedecay sessions import",
+        "{payload:#}"
+    );
+
+    let report = sessions_search_text(home.path(), &project_root, "indexLocalPlugins");
+    assert!(
+        !report.contains("no messages matched"),
+        "a missing source is not a query miss: {report}"
+    );
+    assert!(report.contains("status: unavailable"), "{report}");
+    assert!(report.contains("tracedecay sessions import"), "{report}");
+}
+
+#[test]
+fn sessions_search_reports_complete_zero_when_store_has_no_match() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    write_git_fixture(&project_root);
+    init_project_fixture(home.path(), &project_root);
+    let transcript = write_claude_search_transcript(
+        home.path(),
+        &project_root,
+        "session-search-miss",
+        SEARCH_HIT_PHRASE,
+    );
+    assert_transcript_contains(&transcript, SEARCH_HIT_PHRASE);
+    let transcript_text = std::fs::read_to_string(&transcript).unwrap();
+    assert!(
+        !transcript_text.contains(SEARCH_MISS_QUERY),
+        "miss query must be absent from the transcript: {transcript_text}"
+    );
+
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    import_sessions_until_searchable(home.path(), &project_root, SEARCH_HIT_PHRASE);
+    let payload = sessions_search_json(home.path(), &project_root, SEARCH_MISS_QUERY);
+    assert_eq!(payload["query"], SEARCH_MISS_QUERY, "{payload:#}");
+    assert_eq!(payload["status"], "complete_zero", "{payload:#}");
+    assert_eq!(payload["outcome"], "complete_zero", "{payload:#}");
+    assert_eq!(payload["count"], 0, "{payload:#}");
+    assert_eq!(payload["results"], json!([]), "{payload:#}");
+
+    let report = sessions_search_text(home.path(), &project_root, SEARCH_MISS_QUERY);
+    assert!(
+        report.contains(&format!(
+            "no messages matched query \"{SEARCH_MISS_QUERY}\""
+        )),
+        "{report}"
+    );
+    assert!(report.contains("status: complete_zero"), "{report}");
+}
+
+#[test]
+fn sessions_search_returns_a_hit_when_the_store_has_a_match() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    write_git_fixture(&project_root);
+    init_project_fixture(home.path(), &project_root);
+    let transcript = write_claude_search_transcript(
+        home.path(),
+        &project_root,
+        "session-search-hit",
+        SEARCH_HIT_PHRASE,
+    );
+    assert_transcript_contains(&transcript, SEARCH_HIT_PHRASE);
+
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    import_sessions_until_searchable(home.path(), &project_root, SEARCH_HIT_PHRASE);
+    let payload = sessions_search_json(home.path(), &project_root, SEARCH_HIT_PHRASE);
+    assert_eq!(payload["query"], SEARCH_HIT_PHRASE, "{payload:#}");
     assert_eq!(payload["status"], "ok", "{payload:#}");
-    assert!(payload["results"].is_array(), "{payload:#}");
+    assert!(
+        search_results_contain(&payload, SEARCH_HIT_PHRASE),
+        "imported transcript must be searchable: {payload:#}"
+    );
+
+    let report = sessions_search_text(home.path(), &project_root, SEARCH_HIT_PHRASE);
+    assert!(report.contains(SEARCH_HIT_PHRASE), "{report}");
 }
 
 fn poll_git_sync(
@@ -633,6 +847,35 @@ fn dashboard_started_while_the_project_opens_mounts_sessions_on_publication() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// `tracedecay dashboard` from the user home must name `--path` instead of
+/// stopping at the ambient-root diagnosis. The README launch example is this
+/// command, and operators cannot guess the flag from the inner config error.
+#[test]
+fn dashboard_from_home_tells_the_operator_to_pass_path() {
+    let home = TempDir::new().unwrap();
+    let mut command = tracedecay_command_without_daemon(home.path(), home.path());
+    command.args(["dashboard", "--host", "127.0.0.1", "--port", "0"]);
+    let output = run_with_timeout(command, cli_timeout());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "dashboard from $HOME must refuse\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("ambient user/filesystem root"),
+        "dashboard from $HOME must keep the ambient-root diagnosis\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--path"),
+        "dashboard from $HOME must tell the operator to pass --path\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("tracedecay dashboard listening on"),
+        "an ambient-root refusal must not start a listener\nstdout:\n{stdout}"
+    );
 }
 
 fn refresh_json(output: &Output, step: &str) -> serde_json::Value {

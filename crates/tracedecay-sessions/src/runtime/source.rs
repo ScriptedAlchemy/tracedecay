@@ -400,35 +400,42 @@ pub trait TranscriptSource: Send + Sync {
     }
 }
 
-/// Runs one synchronous transcript discovery/parse section without stalling
-/// the async worker that drives ingest.
+/// Runs one synchronous transcript discovery/parse section on Tokio's
+/// blocking pool so historical ingest cannot pin a request-runtime worker.
 ///
 /// [`TranscriptSource`] is deliberately synchronous: adapters walk host
-/// directories and read transcript files with plain `std` IO. Ingest runs on
-/// the daemon's Tokio workers, and a catch-up walk or a large parse would
-/// otherwise pin one worker for its whole duration. `block_in_place` hands
-/// the worker's run queue to another thread for the section; it panics
-/// outside a multi-thread runtime, so the flavor is checked first and
-/// everything else (current-thread runtimes, plain threads) keeps the
-/// previous inline behavior. The remaining `block_in_place` panic case is a
-/// `LocalSet` on a multi-thread runtime, which this workspace does not use.
-/// `spawn_blocking` is not usable at this boundary because the section
-/// borrows `&dyn TranscriptSource`, which is not `'static`.
-pub(crate) fn run_blocking_transcript_section<T>(work: impl FnOnce() -> T) -> T {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(work)
-        }
-        _ => work(),
-    }
+/// directories and read transcript files with plain `std` IO. Ingest is an
+/// async pipeline whose CPU/IO slices sit between store awaits. Those
+/// slices must own their inputs so the worker can return from `poll` at
+/// the `.await` point. `block_in_place` only hands the run queue away; the
+/// original worker thread still executes the section, so daemon requests
+/// share cores with ingest and a narrow pool loses its parked-worker
+/// headroom.
+#[tracing::instrument(
+    name = "sessions.blocking_transcript_section",
+    level = "trace",
+    skip_all
+)]
+pub(crate) async fn run_blocking_transcript_section<T, F>(
+    provider: &'static str,
+    work: F,
+) -> TranscriptIngestResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(work).await.map_err(|error| {
+        tracing::error!(provider, error = %error, "blocking transcript section failed");
+        TranscriptIngestError::BlockingScanTaskFailed { provider }
+    })
 }
 
 /// Spawns a task on `handle` and waits for it from a blocking section.
 ///
 /// On a one-worker multi-thread runtime this only succeeds when the caller
-/// is inside [`run_blocking_transcript_section`]: `block_in_place` hands the
-/// worker queue to another thread so the spawned task can run. An inline
-/// filesystem/JSONL section deadlocks until the receive timeout fails.
+/// is inside [`run_blocking_transcript_section`]: `spawn_blocking` frees
+/// the worker so the spawned task can run. An inline filesystem/JSONL
+/// section deadlocks until the receive timeout fails.
 #[cfg(test)]
 pub(crate) fn require_blocking_section_releases_worker(handle: tokio::runtime::Handle) {
     let (sender, receiver) = std::sync::mpsc::channel();
