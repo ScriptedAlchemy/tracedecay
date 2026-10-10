@@ -30,16 +30,13 @@ const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 /// GitHub or worker never blocks those paths.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Deadline for an operator-initiated channel/version lookup
-/// (`tracedecay upgrade` / channel switch). Advisory worldwide-counter and
-/// status probes keep [`FETCH_TIMEOUT`].
-///
-/// Five seconds is a hard bound above measured GitHub release-lookup
-/// totals on this VM (HTTP/1.1 no-keepalive `GET /releases?per_page=10`:
-/// 0.03s–0.29s; `gh api` of the same URL: 0.39s–0.65s) and the reporter's
-/// ~1.06s unauthenticated quota refusal, plus the 1.5s delayed-server
-/// proof that the previous one-second budget could not wait for.
-const RELEASE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bound for each GitHub release-metadata read of an explicit `tracedecay
+/// upgrade` or channel switch: the channel lookup, the tag lookup and the
+/// attestation lookup. It covers the whole body, and the beta channel
+/// lookup lists ten releases with every asset (about 260 KB), so it is sized
+/// for that transfer on a slow link, not for one round trip. Advisory reads
+/// keep [`FETCH_TIMEOUT`].
+pub(crate) const UPGRADE_RELEASE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Response from the worker's POST /increment and GET /total endpoints.
 #[derive(serde::Deserialize)]
@@ -305,13 +302,18 @@ pub fn fetch_latest_version() -> Result<String, ReleaseLookupError> {
 /// Fetches the latest installable version of one channel from GitHub.
 ///
 /// This is the explicit upgrade/channel-switch lookup and uses
-/// [`RELEASE_LOOKUP_TIMEOUT`], not the one-second advisory budget.
+/// [`UPGRADE_RELEASE_LOOKUP_TIMEOUT`], not the one-second advisory budget.
 pub fn fetch_latest_channel_version(
     api_base: &str,
     is_beta: bool,
     authorization: Option<&str>,
 ) -> Result<String, ReleaseLookupError> {
-    latest_release_version(api_base, is_beta, authorization, RELEASE_LOOKUP_TIMEOUT)
+    latest_release_version(
+        api_base,
+        is_beta,
+        authorization,
+        UPGRADE_RELEASE_LOOKUP_TIMEOUT,
+    )
 }
 
 #[tracing::instrument(name = "cloud.latest_release_version", level = "trace", skip_all)]
@@ -496,7 +498,7 @@ mod tests {
 
     /// Like [`stub`], but waits `delay` after reading the request before
     /// writing the response. A 1.5s delay is past [`FETCH_TIMEOUT`] and
-    /// inside [`RELEASE_LOOKUP_TIMEOUT`].
+    /// inside [`UPGRADE_RELEASE_LOOKUP_TIMEOUT`].
     fn stub_after(
         delay: Duration,
         response: Option<&'static str>,

@@ -137,14 +137,15 @@ fn fetch_release_download(
     }
 
     let url = format!("{}/tags/{tag}", cloud::releases_url(api_base));
-    let release: Release = cloud::get_release_json(&url, authorization, Duration::from_secs(30))
-        .and_then(|release| {
-            release.ok_or(ReleaseLookupError::NoAssetForPlatform {
-                channel: if is_beta { "beta" } else { "stable" },
-                platform: cloud::current_platform(),
+    let release: Release =
+        cloud::get_release_json(&url, authorization, cloud::UPGRADE_RELEASE_LOOKUP_TIMEOUT)
+            .and_then(|release| {
+                release.ok_or(ReleaseLookupError::NoAssetForPlatform {
+                    channel: if is_beta { "beta" } else { "stable" },
+                    platform: cloud::current_platform(),
+                })
             })
-        })
-        .map_err(release_lookup_failed)?;
+            .map_err(release_lookup_failed)?;
 
     let archive = release
         .assets
