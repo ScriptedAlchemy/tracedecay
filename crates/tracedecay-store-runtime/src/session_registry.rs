@@ -379,17 +379,6 @@ impl ProjectRuntimeOwnerRegistryV1 {
         }
     }
 
-    fn session_graph_open_task_key(&self, project_id: &ProjectId) -> Option<String> {
-        let entries = self.lock().ok()?;
-        match entries.get(project_id) {
-            Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => owners
-                .sessions
-                .as_ref()
-                .map(|sessions| sessions.graph_open_task_key.clone()),
-            _ => None,
-        }
-    }
-
     fn take_unattached_session_owner(
         &self,
         project_id: &ProjectId,
@@ -1373,8 +1362,7 @@ impl Drop for ProjectRuntimeOwnerRetirementReservationV1 {
 
 /// Database-only retirement when the session relation graph never attached.
 ///
-/// Capacity reuse joins the open task first. Cancellation leaves Warming or
-/// Detached, which cannot enter the paired graph/Store vacancy proof. The
+/// A Detached open cannot enter the paired graph/Store vacancy proof. The
 /// graph registry never received an owner, so only the session Store closes.
 struct UnattachedSessionRetirementV1 {
     owners: ProjectRuntimeOwnerRegistryV1,
