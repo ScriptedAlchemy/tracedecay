@@ -37,7 +37,6 @@
 #![allow(clippy::unnecessary_wraps)]
 
 pub mod clock;
-pub mod compaction_receipt;
 pub mod generation;
 pub mod lease;
 pub mod loop_run;
@@ -62,15 +61,6 @@ mod logging_tests {
         assert_eq!(
             format_daemon_log_line("retention_degraded", &fields),
             "[tracedecay] event=retention_degraded pass=code_generations failure=registered_enrollment_inventory_unavailable"
-        );
-    }
-
-    #[test]
-    fn retention_compaction_formats_freed_pages() {
-        let fields = [("freed_pages", "12".to_owned())];
-        assert_eq!(
-            format_daemon_log_line("retention_compaction", &fields),
-            "[tracedecay] event=retention_compaction freed_pages=12"
         );
     }
 }

@@ -279,27 +279,3 @@ impl CheckpointReply {
         let _ = self.0.send(result);
     }
 }
-
-pub(super) struct IncrementalVacuumCommand {
-    pub(super) max_pages: u32,
-    pub(super) authority: Arc<dyn RuntimeWriteAuthority>,
-    reply: oneshot::Sender<Result<(), WriterActorError>>,
-}
-
-impl IncrementalVacuumCommand {
-    pub(super) fn new(
-        max_pages: u32,
-        authority: Arc<dyn RuntimeWriteAuthority>,
-        reply: oneshot::Sender<Result<(), WriterActorError>>,
-    ) -> Self {
-        Self {
-            max_pages: max_pages.max(1),
-            authority,
-            reply,
-        }
-    }
-
-    pub(super) fn settle(self, result: Result<(), WriterActorError>) {
-        let _ = self.reply.send(result);
-    }
-}

@@ -617,14 +617,6 @@ impl RegisteredGlobalDb {
         self.database.storage_page_counts().await
     }
 
-    #[tracing::instrument(name = "global_db.registered.compact", level = "trace", skip_all)]
-    pub async fn run_bounded_incremental_compaction(
-        &self,
-        max_pages: u64,
-    ) -> tracedecay_domain::errors::Result<()> {
-        self.database.run_incremental_vacuum(max_pages).await
-    }
-
     #[tracing::instrument(
         name = "global_db.registered.retention.sessions",
         level = "trace",

@@ -36,8 +36,6 @@ pub mod diagnostics;
 /// Detection and deletion of corruption/recovery artifacts found beside live
 /// databases (plan 38, §5).
 pub mod incident_debris;
-/// Bounded compaction for stores retained by live runtime authorities.
-pub mod live_compaction;
 /// Store-level (whole-directory) orphan detection and collection. Row-level
 /// pruning below stays inside a live store; `orphan_stores` collects entire
 /// profile-sharded store directories whose project identity no longer resolves
