@@ -936,6 +936,10 @@ enum LaunchdJobActivity {
     Running,
     Stopped,
     Stopping,
+    /// Native launchd spawn window: `xpcproxy` is the job process before
+    /// exec of the daemon. Treat it as pending startup so ownership stays
+    /// exact and the existing readiness wait can finish.
+    Starting,
 }
 
 /// A shared launchd domain must never act on a label loaded from another
@@ -985,6 +989,7 @@ fn launchd_owned_service_activity(
                 Some("running") => return Ok(Some(LaunchdJobActivity::Running)),
                 Some("waiting" | "not running") => return Ok(Some(LaunchdJobActivity::Stopped)),
                 Some("SIGTERMed") => return Ok(Some(LaunchdJobActivity::Stopping)),
+                Some("xpcproxy") => return Ok(Some(LaunchdJobActivity::Starting)),
                 _ => {}
             }
         }
@@ -1015,8 +1020,12 @@ pub(super) fn launchd_service_state(
     }
     let enabled = !launchd_service_is_disabled(launchctl, id, profile)?;
     Ok(match (loaded, enabled) {
-        (Some(LaunchdJobActivity::Running), true) => DaemonServiceState::RunningEnabled,
-        (Some(LaunchdJobActivity::Running), false) => DaemonServiceState::RunningDisabled,
+        (Some(LaunchdJobActivity::Running | LaunchdJobActivity::Starting), true) => {
+            DaemonServiceState::RunningEnabled
+        }
+        (Some(LaunchdJobActivity::Running | LaunchdJobActivity::Starting), false) => {
+            DaemonServiceState::RunningDisabled
+        }
         (Some(LaunchdJobActivity::Stopping), true) => DaemonServiceState::StoppingEnabled,
         (Some(LaunchdJobActivity::Stopping), false) => DaemonServiceState::StoppingDisabled,
         (Some(LaunchdJobActivity::Stopped) | None, true) => DaemonServiceState::StoppedEnabled,
