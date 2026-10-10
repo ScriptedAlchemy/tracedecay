@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 * **daemon:** settle observability drains and session-graph open tasks so idle projects retire under capacity=8; stalled `status --json` and Doctor return a typed `project_server_capacity_reached` error instead of exit 0 ([#3386](https://github.com/ScriptedAlchemy/tracedecay/issues/3386))
+* **cli:** give explicit upgrade lookups their own GitHub deadline so a 1s advisory budget cannot fail `tracedecay upgrade` ([#3371](https://github.com/ScriptedAlchemy/tracedecay/issues/3371))
 
 ### Performance Improvements
 
