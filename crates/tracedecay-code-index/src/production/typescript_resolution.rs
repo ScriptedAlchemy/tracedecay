@@ -1124,6 +1124,7 @@ mod tests {
         assert_eq!(babel_src_to_out("BABEL_ENV=production yarn compile"), None);
     }
 
+    #[test]
     fn declared_mapping_rewrites_published_root_and_out_dir() {
         let root = BuildMappingV1 {
             source_root: "src".to_owned(),
