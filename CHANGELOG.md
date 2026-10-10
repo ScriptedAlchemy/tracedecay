@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+* **mcp:** carry request cancellation into the verified files resource ([#3339](https://github.com/ScriptedAlchemy/tracedecay/issues/3339))
 * **callers:** keep import and `new` sites instead of an empty complete page, scope `require` rows to module top level, and bind `exports.Name` / `module.exports.Name` assignments ([#3301](https://github.com/ScriptedAlchemy/tracedecay/issues/3301))
 
 ## [1.0.0-beta.78](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.77...v1.0.0-beta.78) (2026-10-10)
