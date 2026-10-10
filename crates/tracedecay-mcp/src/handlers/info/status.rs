@@ -6,9 +6,9 @@ use serde_json::{Value, json};
 use tracedecay_application::advisory::github_runtime::github_source_status_v1;
 use tracedecay_application::tracedecay::BranchDiagnostics;
 use tracedecay_contracts::code_index_freshness::{
-    CODE_INDEX_MOUNT_FAILED, CodeGraphServingReadinessV1, CodeIndexReadinessWaitOutcomeV1,
-    CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
-    GRAPH_PUBLICATION_DEADLINE_REASON,
+    CODE_INDEX_MOUNT_FAILED, CodeGraphServingReadinessV1, CodeIndexOmittedSourcesV1,
+    CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
+    CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::doctor::ResidentMemoryHolderReadV1;
 use tracedecay_contracts::retrieval::{
@@ -669,14 +669,36 @@ fn code_index_freshness_projection(
         };
         return (status, Some(warning));
     }
-    if authoritative {
-        let warning = freshness.omitted_sources.as_ref().map(|omitted| {
-            format!(
-                "{} captured source file(s) are not indexed; code_index_freshness.worktree.omitted_sources names them and why",
-                omitted.count
-            )
-        });
-        (FreshnessLabelV1::Current, warning)
+    if let Some(readiness @ CodeGraphServingReadinessV1::Refused { reason }) =
+        freshness.code_graph_serving.as_ref()
+        && readiness.is_terminal_verdict()
+        && !freshness.rebuild_in_flight
+        && freshness.latest_generation_id.is_some()
+    {
+        // A spent publication-budget refusal is a terminal verdict for this
+        // sealed generation: waiting cannot change it, so it never reads
+        // warming and its reason stays visible even when the read is
+        // otherwise authoritative. Retryable refusals stay parked instead.
+        let status = match freshness.staleness_state {
+            Some(CodeIndexStalenessStateV1::Restoring) => FreshnessLabelV1::Restoring,
+            Some(CodeIndexStalenessStateV1::Verifying) => FreshnessLabelV1::Stale,
+            _ => FreshnessLabelV1::Current,
+        };
+        let mut warning =
+            format!("the sealed generation's native graph activation was refused: {reason}");
+        if let Some(omitted) = freshness.omitted_sources.as_ref() {
+            warning.push_str("; ");
+            warning.push_str(&omitted_sources_warning(omitted));
+        }
+        (status, Some(warning))
+    } else if authoritative {
+        (
+            FreshnessLabelV1::Current,
+            freshness
+                .omitted_sources
+                .as_ref()
+                .map(omitted_sources_warning),
+        )
     } else if freshness.staleness_state == Some(CodeIndexStalenessStateV1::Restoring) {
         let warning = if freshness.restore_progress.is_some() {
             "the sealed lexical artifact is completing bounded authentication before serving"
@@ -692,18 +714,6 @@ fn code_index_freshness_projection(
                     .to_owned(),
             ),
         )
-    } else if let Some(CodeGraphServingReadinessV1::Refused { reason }) =
-        freshness.code_graph_serving.as_ref()
-        && reason == GRAPH_PUBLICATION_DEADLINE_REASON
-        && !freshness.rebuild_in_flight
-        && freshness.latest_generation_id.is_some()
-    {
-        (
-            FreshnessLabelV1::Current,
-            Some(format!(
-                "exact and lexical are serving this sealed generation; native graph activation was refused: {reason}"
-            )),
-        )
     } else {
         (
             FreshnessLabelV1::Warming,
@@ -713,6 +723,14 @@ fn code_index_freshness_projection(
             ),
         )
     }
+}
+
+/// The omitted-source sentence shared by the `current` and refused warnings.
+fn omitted_sources_warning(omitted: &CodeIndexOmittedSourcesV1) -> String {
+    format!(
+        "{} captured source file(s) are not indexed; code_index_freshness.worktree.omitted_sources names them and why",
+        omitted.count
+    )
 }
 
 async fn session_git_evidence(ctx: &McpToolContext<'_>) -> StatusSessionGitEvidenceV1 {
@@ -1474,12 +1492,19 @@ mod tests {
 
     #[test]
     fn a_terminal_graph_refusal_is_not_warming() {
+        // The settled read the scheduler projects once a refused generation
+        // finishes: authoritative coverage, `fresh` staleness, and the
+        // omitted-source detail the plain `current` warning already carries.
         let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
             worktree_root: "/project".to_owned(),
             latest_generation_id: Some("generation.fixture".to_owned()),
-            staleness_state: Some(CodeIndexStalenessStateV1::Indexing),
+            staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
             rebuild_in_flight: false,
             coverage: CodeIndexFreshnessCoverageV1::PartialOmittedSources,
+            omitted_sources: Some(CodeIndexOmittedSourcesV1 {
+                count: 2,
+                sources: Vec::new(),
+            }),
             code_graph_serving: Some(
                 tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Refused {
                     reason: GRAPH_PUBLICATION_DEADLINE_REASON.to_owned(),
@@ -1490,15 +1515,110 @@ mod tests {
 
         let (status, warning) = code_index_freshness_projection(&freshness);
 
-        assert_ne!(
-            status,
-            FreshnessLabelV1::Warming,
-            "a spent publication budget is a terminal verdict, not active warming: {warning:?}"
-        );
+        assert_eq!(status, FreshnessLabelV1::Current);
         let warning = warning.expect("the refusal stays visible");
         assert!(
             warning.contains("exceeded its background budget"),
             "{warning}"
+        );
+        assert!(warning.contains("2 captured source file(s)"), "{warning}");
+
+        // The same refusal seen before the lane owners settle the `fresh`
+        // verdict is still terminal: it must not read warming either.
+        let indexing = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            staleness_state: Some(CodeIndexStalenessStateV1::Indexing),
+            omitted_sources: None,
+            ..freshness.clone()
+        };
+        let (status, warning) = code_index_freshness_projection(&indexing);
+        assert_eq!(
+            status,
+            FreshnessLabelV1::Current,
+            "a spent publication budget is a terminal verdict, not active warming"
+        );
+        assert!(
+            warning
+                .expect("the refusal stays visible")
+                .contains("exceeded its background budget")
+        );
+    }
+
+    #[test]
+    fn a_refusal_during_bounded_restore_keeps_restoring() {
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            latest_generation_id: Some("generation.fixture".to_owned()),
+            staleness_state: Some(CodeIndexStalenessStateV1::Restoring),
+            rebuild_in_flight: false,
+            coverage: CodeIndexFreshnessCoverageV1::PartialArtifactRestore,
+            code_graph_serving: Some(
+                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Refused {
+                    reason: GRAPH_PUBLICATION_DEADLINE_REASON.to_owned(),
+                },
+            ),
+            ..Default::default()
+        };
+
+        let (status, warning) = code_index_freshness_projection(&freshness);
+
+        assert_eq!(
+            status,
+            FreshnessLabelV1::Restoring,
+            "lexical seats still restoring is not `current`, refused graph or not"
+        );
+        assert!(
+            warning
+                .expect("the refusal stays visible")
+                .contains("exceeded its background budget")
+        );
+    }
+
+    #[test]
+    fn a_retryable_refusal_stays_behind_the_lanes() {
+        // Resident-memory refusals are not verdicts — the next read retries,
+        // so an authoritative read stays plain `current` and an in-progress
+        // read keeps reporting its real lane instead of the refusal.
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            latest_generation_id: Some("generation.fixture".to_owned()),
+            staleness_state: Some(CodeIndexStalenessStateV1::Fresh),
+            rebuild_in_flight: false,
+            coverage: CodeIndexFreshnessCoverageV1::PartialOmittedSources,
+            omitted_sources: Some(CodeIndexOmittedSourcesV1 {
+                count: 1,
+                sources: Vec::new(),
+            }),
+            code_graph_serving: Some(
+                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Refused {
+                    reason: "code graph activation was refused by the resident-memory policy"
+                        .to_owned(),
+                },
+            ),
+            ..Default::default()
+        };
+
+        let (status, warning) = code_index_freshness_projection(&freshness);
+
+        assert_eq!(status, FreshnessLabelV1::Current);
+        let warning = warning.expect("the omission still warns");
+        assert!(warning.contains("1 captured source file(s)"), "{warning}");
+        assert!(!warning.contains("refused"), "{warning}");
+
+        let indexing = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            staleness_state: Some(CodeIndexStalenessStateV1::Indexing),
+            omitted_sources: None,
+            ..freshness.clone()
+        };
+        let (status, warning) = code_index_freshness_projection(&indexing);
+        assert_eq!(
+            status,
+            FreshnessLabelV1::Warming,
+            "a retryable refusal parks the read, so warming is still truthful"
+        );
+        assert!(
+            warning
+                .expect("warming names itself")
+                .contains("not authoritative")
         );
     }
 
