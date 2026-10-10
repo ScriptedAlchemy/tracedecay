@@ -149,8 +149,7 @@ impl McpServer {
         let worktree_omitted_sources = freshness_payload.as_ref().and_then(|payload| {
             payload
                 .worktrees
-                .iter()
-                .next()
+                .first()
                 .filter(|worktree| {
                     worktree.latest_generation_id.as_deref() == Some(graph.generation().as_str())
                 })
