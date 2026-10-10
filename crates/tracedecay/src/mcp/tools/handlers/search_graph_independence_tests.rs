@@ -88,11 +88,13 @@ fn lexical_file_candidate() -> RankedCandidate {
 fn completed_lexical_search() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
     completed_lexical_search_with(
         "src/lib.rs",
-        lexical_symbol_lines(0, 0, "pub fn LexicalWidget() {}"),
+        lexical_symbol_window(0, 0, "pub fn LexicalWidget() {}"),
     )
 }
 
-fn lexical_symbol_lines(
+/// A lineage site whose chunk admitted `attested` at byte 0 — the file
+/// head, as the fixtures write their declaration first.
+fn lexical_symbol_window(
     start_line: u32,
     end_line: u32,
     attested: &str,
@@ -101,7 +103,14 @@ fn lexical_symbol_lines(
         tracedecay_query::code_search::CodeIndexSearchSiteV1::SymbolLines {
             start_line,
             end_line,
-            content_digest: tracedecay_domain::ContentDigest::of_bytes(attested.as_bytes()),
+            code_window: Some(tracedecay_query::code_search::CodeIndexSearchWindowV1 {
+                source_span: tracedecay_domain::SourceSpan {
+                    start_byte: 0,
+                    end_byte: attested.len() as u64,
+                },
+                sanitized_text: tracedecay_domain::BoundedSanitizedText::new(attested)
+                    .expect("bounded window text"),
+            }),
         },
     )
 }
@@ -554,7 +563,7 @@ async fn tracedecay_context_hydrates_search_matches_when_catalog_is_warming() {
         Box::pin(async {
             completed_lexical_search_with(
                 "src/lib.rs",
-                lexical_symbol_lines(
+                lexical_symbol_window(
                     0,
                     3,
                     "pub fn LexicalWidget() {\n    let ready = true;\n    let _ = ready;\n}",
@@ -778,7 +787,7 @@ async fn tracedecay_context_marks_code_unavailable_when_symbol_lines_drift() {
         Box::pin(async {
             completed_lexical_search_with(
                 "src/lib.rs",
-                lexical_symbol_lines(0, 0, "pub fn LexicalWidget() {}"),
+                lexical_symbol_window(0, 0, "pub fn LexicalWidget() {}"),
             )
         })
     });
@@ -852,7 +861,7 @@ async fn tracedecay_context_excludes_file_hits_from_symbols_but_serves_their_win
                         qualified_name: "crate::LexicalWidget".to_owned(),
                         kind: "function".to_owned(),
                         path: "src/lib.rs".to_owned(),
-                        site: lexical_symbol_lines(0, 0, "fn caller() { LexicalWidget(); }"),
+                        site: lexical_symbol_window(0, 0, "fn caller() { LexicalWidget(); }"),
                     },
                 ),
                 (

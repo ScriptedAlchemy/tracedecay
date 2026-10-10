@@ -384,6 +384,17 @@ impl CodeIndexSearchCoverageV1 {
     }
 }
 
+/// A bounded byte interval of sanitized source and the text extraction
+/// admitted for it. Serving verifies the current file still carries
+/// exactly `sanitized_text` at exactly `source_span` before trusting
+/// the site; a drifted file has no attested site and reports typed
+/// unavailability instead of unrelated text.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct CodeIndexSearchWindowV1 {
+    pub source_span: tracedecay_domain::SourceSpan,
+    pub sanitized_text: tracedecay_domain::BoundedSanitizedText,
+}
+
 /// The site the serving lane attests for a display match inside `path`.
 ///
 /// Hydration may only serve symbol locations and code the index itself
@@ -394,21 +405,22 @@ impl CodeIndexSearchCoverageV1 {
 /// unavailable rather than invented.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum CodeIndexSearchSiteV1 {
-    /// Inclusive 0-based line extent of the named symbol from the
-    /// published generation's extraction-attested lineage record, with the
-    /// content digest extraction minted over the declaration's sanitized
-    /// bytes. Serving verifies the live window still hashes to
-    /// `content_digest` before returning code, so a drifted file yields
-    /// typed unavailability rather than unrelated text at the old lines.
+    /// Inclusive 0-based line extent of the named symbol's declaration
+    /// from the published generation's extraction-attested lineage
+    /// record — the reported `symbols[]` location, distinct from the
+    /// byte interval code serving verifies.
     SymbolLines {
         start_line: u32,
         end_line: u32,
-        content_digest: tracedecay_domain::ContentDigest,
+        /// The chunk's attested byte window that verifies served code.
+        /// `None` when the serving lane admitted no bounded text for the
+        /// symbol: the lineage location still stands and the code stage
+        /// reports typed unavailability rather than guessing a window.
+        code_window: Option<CodeIndexSearchWindowV1>,
     },
-    /// Byte range over the file's sanitized source plus the bytes that
-    /// range admitted at extraction. Serving verifies the current file
-    /// still carries exactly those bytes at exactly that range before
-    /// mapping the site to lines.
+    /// An attested byte window over the file's sanitized source. Serving
+    /// verifies the current file still carries exactly those bytes at
+    /// exactly that range before mapping the site to lines.
     ArtifactWindow {
         source_span: tracedecay_domain::SourceSpan,
         sanitized_text: tracedecay_domain::BoundedSanitizedText,
