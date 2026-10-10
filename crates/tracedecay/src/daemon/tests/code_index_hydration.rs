@@ -9,9 +9,9 @@ use tracedecay_domain::{
     FreshnessCompatibilityV1, FreshnessVectorDigest, FusedCandidate, FusionProfileId,
     HydrationReceipt, HydrationRevision, LogicalEvidenceId, OccurrenceProvenance, PrincipalId,
     PrivacyDomainId, RankedCandidate, RefId, RepositoryId, RetrievalAnchorId, RetrievalBudget,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, SingleRootScopeV1, SourceFreshness,
-    SourceInstanceKey, SourceNamespace, SourceOccurrenceId, TemporalModeV1, UtcMicros,
-    VectorWatermark, WorktreeId,
+    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrievalSourceRoleV1, SingleRootScopeV1,
+    SourceFreshness, SourceInstanceKey, SourceNamespace, SourceOccurrenceId, TemporalModeV1,
+    UtcMicros, VectorWatermark, WorktreeId,
 };
 
 use super::super::code_index_search_display_binding;
@@ -91,7 +91,7 @@ fn ranked() -> RankedCandidate {
                 freshness,
             }],
             exact_class: ExactClass::Approximate,
-            source_role: Default::default(),
+            source_role: RetrievalSourceRoleV1::default(),
             utility_micros: 1,
             contributions: Vec::new(),
             freshness: Vec::new(),
@@ -338,7 +338,7 @@ fn production_chunk_candidate_hydrates_from_frozen_generation() {
                 freshness: freshness.clone(),
             }],
             exact_class: ExactClass::Approximate,
-            source_role: Default::default(),
+            source_role: RetrievalSourceRoleV1::default(),
             utility_micros: 1,
             contributions: Vec::new(),
             freshness: vec![freshness],
