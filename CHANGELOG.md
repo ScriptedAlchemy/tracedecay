@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance Improvements
 
-* **daemon:** release the seated decode when a worktree parks; search and callers keep serving from sealed text and the warm catalog/engine ([#3328](https://github.com/ScriptedAlchemy/tracedecay/issues/3328))
+* **daemon:** release the seated decode, interactive catalog, and graph engine when a worktree parks; `code_graph_serving` stays ready and the next graph read reseats the store ([#3328](https://github.com/ScriptedAlchemy/tracedecay/issues/3328))
 
 ## [1.0.0-beta.81](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.80...v1.0.0-beta.81) (2026-10-10)
 

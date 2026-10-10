@@ -2207,8 +2207,10 @@ impl LatestCodeTextGenerationV1 {
 }
 
 impl LatestCodeTextGenerationV1 {
-    /// An activated graph reports what its reads would find: `ready` only
-    /// while the engine and catalog they need are resident.
+    /// An activated graph reports `ready` once the verified projection is
+    /// installed. A later memory release of the engine or catalog stays
+    /// `ready`: the next graph read reseats them. `warming` is the first
+    /// activation, before the store has ever served.
     pub fn code_graph_serving_readiness(&self) -> CodeGraphServingReadinessV1 {
         let store = match &*self
             .graph_activation
@@ -2234,7 +2236,14 @@ impl LatestCodeTextGenerationV1 {
         {
             None | Some(Ok(CodeGraphServingWarmthV1::Warm)) => CodeGraphServingReadinessV1::Ready,
             Some(Ok(CodeGraphServingWarmthV1::Warming(reason))) => {
-                CodeGraphServingReadinessV1::Warming { reason }
+                if store
+                    .as_ref()
+                    .is_some_and(|store| store.released_for_memory())
+                {
+                    CodeGraphServingReadinessV1::Ready
+                } else {
+                    CodeGraphServingReadinessV1::Warming { reason }
+                }
             }
             Some(Ok(CodeGraphServingWarmthV1::Failed(reason))) => {
                 CodeGraphServingReadinessV1::Unavailable { reason }

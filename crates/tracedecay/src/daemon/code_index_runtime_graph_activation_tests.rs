@@ -2295,16 +2295,8 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
     );
     assert_eq!(
         serving().await,
-        (
-            Some(
-                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Warming {
-                    reason: "code graph engine was released for memory; the next graph read \
-                             re-warms it"
-                        .to_owned(),
-                }
-            ),
-            fresh,
-        )
+        (ready, fresh),
+        "a memory release of an already-activated store stays ready; the next graph read reseats it"
     );
     assert_eq!(
         tracedecay_daemon_service::doctor_kernel::code_index_read_from_registry(

@@ -41,6 +41,22 @@ fn decoded_kinds(report: &ResidentOwnersReportV1) -> Vec<ResidentOwnerKindV1> {
         .collect()
 }
 
+fn index_copy_kinds(report: &ResidentOwnersReportV1) -> Vec<ResidentOwnerKindV1> {
+    report
+        .owners
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.kind,
+                ResidentOwnerKindV1::DecodedGeneration
+                    | ResidentOwnerKindV1::GraphCatalog
+                    | ResidentOwnerKindV1::GraphEngine
+            )
+        })
+        .map(|row| row.kind)
+        .collect()
+}
+
 fn search_anchors(search: &super::super::query_runtime::ExecutedQuerySearchV1) -> Vec<String> {
     search
         .authorized
@@ -112,6 +128,76 @@ async fn a_parked_worktree_releases_its_decode_and_search_still_answers() {
         .await
         .expect("search still answers after a demanded decode");
     assert_eq!(search_anchors(&with_decode), anchors);
+
+    registry.shutdown().await;
+}
+
+/// Park drops catalog and engine after activation. Status stays `ready`;
+/// the next graph read reseats the store (#3328).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_worktree_releases_catalog_and_engine_and_stays_ready() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn park_graph_target() -> u32 { 7 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, scope) = mounted_text_query_worktree_at(
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
+        fixture.path(),
+        store.path().to_path_buf(),
+    )
+    .await;
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    install_verified_graph_store_on_text(&text, &seated);
+    drop(seated);
+    text.interactive_graph_store()
+        .expect("installed graph store")
+        .warm_serving_engine()
+        .expect("pin the serving engine so park has something to release");
+    assert_eq!(
+        text.code_graph_serving_readiness(),
+        CodeGraphServingReadinessV1::Ready
+    );
+    let warm = owners.report(Instant::now());
+    assert!(
+        index_copy_kinds(&warm)
+            .iter()
+            .any(|kind| *kind == ResidentOwnerKindV1::GraphCatalog),
+        "the installed catalog must be visible before park: {warm:?}"
+    );
+    assert!(
+        index_copy_kinds(&warm)
+            .iter()
+            .any(|kind| *kind == ResidentOwnerKindV1::GraphEngine),
+        "the pinned engine must be visible before park: {warm:?}"
+    );
+
+    registry
+        .release_decode_when_parked_for_test(fixture.path())
+        .await;
+
+    let parked = owners.report(Instant::now());
+    assert_eq!(
+        index_copy_kinds(&parked),
+        [],
+        "a parked worktree must not keep decode, catalog, or engine: {parked:?}"
+    );
+    assert_eq!(
+        text.code_graph_serving_readiness(),
+        CodeGraphServingReadinessV1::Ready,
+        "memory release of an activated store stays ready"
+    );
+
+    let search = registry
+        .execute_query_search(&scope, core_search_request("park_graph_target"))
+        .await
+        .expect("search serves from text after catalog and engine are released");
+    assert!(!search_anchors(&search).is_empty());
+    assert_eq!(
+        index_copy_kinds(&owners.report(Instant::now())),
+        [],
+        "search must not re-pin catalog or engine"
+    );
 
     registry.shutdown().await;
 }
