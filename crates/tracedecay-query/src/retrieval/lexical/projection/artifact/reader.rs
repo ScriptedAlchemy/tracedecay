@@ -2237,7 +2237,12 @@ impl<'a> ArtifactQueryV1<'a> {
                 &mut ranked,
                 cap,
                 Keyed {
-                    key: (Reverse(matched_literals.len()), test_reference, row_id, document),
+                    key: (
+                        Reverse(matched_literals.len()),
+                        test_reference,
+                        row_id,
+                        document,
+                    ),
                     value: (admitted_ordinal, matched_literals, matched_kinds),
                 },
             );
