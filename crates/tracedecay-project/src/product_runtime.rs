@@ -11,9 +11,9 @@
 
 use std::sync::OnceLock;
 
+use tracedecay_api::StaticDashboardAssets;
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_api::{StaticAssetEncoding, StaticDashboardAsset};
-use tracedecay_api::StaticDashboardAssets;
 
 use crate::version::PACKAGE_VERSION;
 
