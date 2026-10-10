@@ -625,11 +625,11 @@ where
         return Err(ObservationApplicationError::Cancelled.into());
     }
     let identity = {
-        run_blocking_transcript_section({
+        run_blocking_transcript_section("claude", {
             let path = path.to_path_buf();
             move || identify_claude_source(&path)
         })
-        .await
+        .await?
     }
     .ok_or_else(|| TranscriptIngestError::InvalidSourceIdentity {
         provider: "claude",
@@ -655,7 +655,7 @@ where
     let mut prefix_recovery = JsonlPrefixRecovery::Report;
     let scan = loop {
         let scan = {
-            run_blocking_transcript_section({
+            run_blocking_transcript_section("claude", {
                 let identity = identity.clone();
                 let prefix_recovery = prefix_recovery.clone();
                 move || {
@@ -668,7 +668,7 @@ where
                     )
                 }
             })
-            .await
+            .await?
         }?;
         // Only `Report` stops at a diverged prefix, and the retry supplies
         // checkpoints, so this runs at most twice.
@@ -716,7 +716,7 @@ where
         };
     }
     let (scan, retained) = {
-        run_blocking_transcript_section({
+        run_blocking_transcript_section("claude", {
             let source_adapter = context.source_adapter.clone();
             let project_root = context.project_root.to_path_buf();
             move || {
@@ -724,7 +724,7 @@ where
                 (scan, retained)
             }
         })
-        .await
+        .await?
     };
     let mut scan = scan;
     scan.coverage = coverage;
@@ -1280,11 +1280,11 @@ async fn scheduled_source_paths<A: HostAdmission + ?Sized>(
     source: &ClaudeSource,
 ) -> Result<(Vec<PathBuf>, usize, bool), ClaudeObservationIngestError> {
     let discovery = {
-        run_blocking_transcript_section({
+        run_blocking_transcript_section("claude", {
             let source = source.clone();
             move || source.discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
         })
-        .await
+        .await?
     };
     let discovery_truncated = discovery.is_truncated();
     let mut paths = discovery.paths;

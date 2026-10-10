@@ -391,11 +391,12 @@ async fn open_state_source(
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
     let (generation, file_identity, resume_fingerprint) = {
-        run_blocking_transcript_section({
+        run_blocking_transcript_section("hermes", {
             let state_db = state_db.to_path_buf();
             move || sqlite_incarnation(&state_db)
         })
         .await
+        .map_err(|error| error.to_string())?
     }?;
     let message_columns = message_columns(&conn).await?;
     let session_columns = table_columns(&conn, "sessions").await?;
@@ -457,11 +458,12 @@ where
         let mut items = new.items;
         let bounded = items.drain(..bounded_count).collect::<Vec<_>>();
         let (route, bounded, next_route_page) = {
-            run_blocking_transcript_section(move || {
+            run_blocking_transcript_section("hermes", move || {
                 let route = route_page(&bounded);
                 (route, bounded, route_page)
             })
             .await
+            .map_err(|error| error.to_string())?
         };
         route_page = next_route_page;
         let admitted = admit_rows_with_admission_and_cancellation(
@@ -558,7 +560,7 @@ pub(super) async fn try_ingest_state_db_for_projects(
         })
         .collect::<Vec<_>>();
     let destination_matchers = {
-        run_blocking_transcript_section({
+        run_blocking_transcript_section("hermes", {
             let roots = destinations
                 .iter()
                 .map(|destination| destination.project_root.to_path_buf())
@@ -571,6 +573,7 @@ pub(super) async fn try_ingest_state_db_for_projects(
             }
         })
         .await
+        .map_err(|error| error.to_string())?
     };
     let destination_matchers = Arc::new(destination_matchers);
     let mut read_cursor = StoredCursor::default();
@@ -594,7 +597,7 @@ pub(super) async fn try_ingest_state_db_for_projects(
         // Per-page route cache: avoid unbounded growth across many SQLite pages.
         let (locations, bounded) = {
             let destination_matchers = Arc::clone(&destination_matchers);
-            run_blocking_transcript_section(move || {
+            run_blocking_transcript_section("hermes", move || {
                 let mut destination_routes = HashMap::<PathBuf, Vec<usize>>::new();
                 turn_project_locations_for_destinations(
                     &bounded,
@@ -604,6 +607,7 @@ pub(super) async fn try_ingest_state_db_for_projects(
                 .map(|locations| (locations, bounded))
             })
             .await
+            .map_err(|error| error.to_string())?
         }
         .map_err(|_| {
             format!(

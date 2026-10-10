@@ -201,13 +201,13 @@ pub async fn capture_vibe_observations(
     let discovery = {
         let source = source.clone();
         let project_root = project_root.to_path_buf();
-        run_blocking_transcript_section(move || {
+        run_blocking_transcript_section("vibe", move || {
             source.discover_transcript_paths(
                 &project_root,
                 TranscriptDiscoveryBounds::from_discovered_units(MAX_SESSION_FILES),
             )
         })
-        .await
+        .await?
     };
     let mut outcome = VibeCaptureOutcome {
         deferred: discovery.is_truncated(),
@@ -229,7 +229,7 @@ pub async fn capture_vibe_observations(
             let session_path = path.clone();
             let convergence =
                 convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_string()));
-            run_blocking_transcript_section(move || {
+            run_blocking_transcript_section("vibe", move || {
                 pending_session(
                     &source,
                     &session_path,
@@ -239,7 +239,7 @@ pub async fn capture_vibe_observations(
                         .map(|(hub, consumer)| (hub, consumer.as_str())),
                 )
             })
-            .await
+            .await?
         }?
         else {
             continue;

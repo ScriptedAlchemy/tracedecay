@@ -416,19 +416,18 @@ pub trait TranscriptSource: Send + Sync {
     level = "trace",
     skip_all
 )]
-pub(crate) async fn run_blocking_transcript_section<T, F>(work: F) -> T
+pub(crate) async fn run_blocking_transcript_section<T, F>(
+    provider: &'static str,
+    work: F,
+) -> TranscriptIngestResult<T>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    tokio::task::spawn_blocking(work)
-        .await
-        .unwrap_or_else(|error| match error.try_into_panic() {
-            Ok(payload) => std::panic::resume_unwind(payload),
-            Err(error) => {
-                panic!("blocking transcript section worker stopped: {error}")
-            }
-        })
+    tokio::task::spawn_blocking(work).await.map_err(|error| {
+        tracing::error!(provider, error = %error, "blocking transcript section failed");
+        TranscriptIngestError::BlockingScanTaskFailed { provider }
+    })
 }
 
 /// Spawns a task on `handle` and waits for it from a blocking section.

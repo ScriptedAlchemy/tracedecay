@@ -786,7 +786,9 @@ async fn hermes_shared_sweep_routes_one_source_to_multiple_project_stores() {
             project_id: second_db.project_id().clone(),
         },
     ];
-    let stats = ingest_homes_for_projects(std::slice::from_ref(&hermes_home), &destinations).await;
+    let stats = ingest_homes_for_projects(std::slice::from_ref(&hermes_home), &destinations)
+        .await
+        .unwrap();
 
     assert_eq!(stats.messages_upserted, 5);
     assert!(first_db.get_session("hermes", SESSION_ID).await.is_some());
@@ -806,6 +808,7 @@ async fn hermes_shared_sweep_routes_one_source_to_multiple_project_stores() {
     assert_eq!(
         ingest_homes_for_projects(std::slice::from_ref(&hermes_home), &destinations)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );

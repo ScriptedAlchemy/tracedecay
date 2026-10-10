@@ -199,7 +199,7 @@ where
         + 'static,
 {
     ensure_snapshot_admission_active(provider, cancellation)?;
-    let discovery = { run_blocking_transcript_section(discover).await };
+    let discovery = { run_blocking_transcript_section(provider, discover).await? };
     ensure_snapshot_admission_active(provider, cancellation)?;
     let mut runner = SnapshotAdmissionRunner::new(provider, max_new_bytes);
     if discovery.is_truncated() {
@@ -212,7 +212,7 @@ where
         let input_bytes = {
             let input_bytes_fn = Arc::clone(&input_bytes_fn);
             let path = path.clone();
-            run_blocking_transcript_section(move || input_bytes_fn(&path)).await
+            run_blocking_transcript_section(provider, move || input_bytes_fn(&path)).await?
         }?;
         ensure_snapshot_admission_active(provider, cancellation)?;
         let load_fn = Arc::clone(&load_fn);
@@ -269,7 +269,7 @@ impl SnapshotAdmissionRunner {
             return Ok(());
         }
         ensure_snapshot_admission_active(self.provider, cancellation)?;
-        let loaded = { run_blocking_transcript_section(load).await }?;
+        let loaded = { run_blocking_transcript_section(self.provider, load).await? }?;
         ensure_snapshot_admission_active(self.provider, cancellation)?;
         let Some(batches) = loaded else {
             return Ok(());

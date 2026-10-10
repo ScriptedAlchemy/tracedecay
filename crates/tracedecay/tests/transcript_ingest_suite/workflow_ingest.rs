@@ -178,7 +178,8 @@ async fn sweep_ingests_runs_scoped_to_project_and_is_incremental() {
     let stats = store
         .workflow_store()
         .ingest_workflow_runs_from(&store.project_id, &project_root, &projects)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(stats.runs_ingested, 2);
     assert_eq!(stats.agents_ingested, 3);
 
@@ -217,7 +218,8 @@ async fn sweep_ingests_runs_scoped_to_project_and_is_incremental() {
     let again = store
         .workflow_store()
         .ingest_workflow_runs_from(&store.project_id, &project_root, &projects)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(again, WorkflowIngestStats::default());
 }
 
@@ -233,7 +235,8 @@ async fn sweep_skips_runs_owned_by_a_different_project() {
     let stats = store
         .workflow_store()
         .ingest_workflow_runs_from(&store.project_id, &target_root, &projects)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(stats, WorkflowIngestStats::default());
     assert!(
         store
@@ -277,7 +280,8 @@ async fn other_project_run_does_not_advance_watermark() {
     let stats = store
         .workflow_store()
         .ingest_workflow_runs_from(&store.project_id, &target_root, &projects)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(stats.runs_ingested, 2);
     assert!(
         store
@@ -306,7 +310,8 @@ async fn other_project_run_does_not_advance_watermark() {
     let again = store
         .workflow_store()
         .ingest_workflow_runs_from(&store.project_id, &target_root, &projects)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
         again.runs_ingested, 1,
         "the still-Running target run must be re-ingested, not stranded"

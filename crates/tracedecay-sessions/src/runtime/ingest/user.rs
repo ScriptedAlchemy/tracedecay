@@ -195,7 +195,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
             }
         },
         None => std::sync::Arc::new(
-            source::run_blocking_transcript_section({
+            source::run_blocking_transcript_section("codex", {
                 let source = source.clone();
                 move || {
                     source.discover_transcript_paths_with_frontier(
@@ -204,7 +204,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                     )
                 }
             })
-            .await?,
+            .await??,
         ),
     };
     let next_frontier = pass.next_frontier;

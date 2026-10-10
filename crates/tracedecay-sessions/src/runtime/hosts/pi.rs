@@ -703,7 +703,8 @@ pub async fn capture_pi_session(
         let source = source.clone();
         let cwd = cwd.to_path_buf();
         let session_id = session_id.to_string();
-        run_blocking_transcript_section(move || source.session_files(&cwd, &session_id)).await
+        run_blocking_transcript_section("pi", move || source.session_files(&cwd, &session_id))
+            .await?
     }?;
     let matcher = source.matcher(project_root);
     let mut outcome = PiCaptureOutcome::default();
@@ -743,7 +744,8 @@ async fn admit_scheduled_file(
     outcome: &mut PiCaptureOutcome,
 ) -> TranscriptIngestResult<Option<JsonlObservationAdmissionProgress>> {
     let path_buf = path.to_path_buf();
-    let header = match run_blocking_transcript_section(move || read_session_header(&path_buf)).await
+    let header = match run_blocking_transcript_section("pi", move || read_session_header(&path_buf))
+        .await?
     {
         Ok(HeaderRead::Header(header)) => header,
         Ok(HeaderRead::Incomplete) => {
@@ -802,11 +804,11 @@ async fn admit_session_file(
     let canonical_session_id =
         protect_sensitive_structural_id(&header.session_id).map_err(|_| invalid_frame())?;
     let session = SessionId::new(&canonical_session_id).map_err(|_| invalid_frame())?;
-    let file_identity = run_blocking_transcript_section({
+    let file_identity = run_blocking_transcript_section("pi", {
         let path = path.to_path_buf();
         move || jsonl_file_identity(&path)
     })
-    .await
+    .await?
     .map_err(|source| TranscriptIngestError::ScanIo {
         operation: "read Pi session identity",
         path: path.to_path_buf(),

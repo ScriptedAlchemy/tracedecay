@@ -697,11 +697,11 @@ pub async fn capture_kimi_observations(
                     protect_sensitive_structural_id(&session_id).map_err(|_| invalid_frame())?;
                 let session = SessionId::new(&canonical_session_id).map_err(|_| invalid_frame())?;
                 let match_result = {
-                    run_blocking_transcript_section({
+                    run_blocking_transcript_section("kimi", {
                         let path = path.clone();
                         move || jsonl_file_identity(&path)
                     })
-                    .await
+                    .await?
                 };
                 let file_identity = match match_result {
                     Ok(file_identity) => file_identity,

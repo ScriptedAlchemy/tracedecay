@@ -235,20 +235,19 @@ impl<'a> ProjectProviderRun<'a> {
                 }
                 Err(error) => Err(error),
             },
-            None => {
-                run_blocking_transcript_section({
-                    let source = source.clone();
-                    move || {
-                        source
-                            .discover_transcript_paths_with_frontier(
-                                TranscriptDiscoveryBounds::default_walk(),
-                                frontier,
-                            )
-                            .map(Arc::new)
-                    }
-                })
-                .await
-            }
+            None => run_blocking_transcript_section("codex", {
+                let source = source.clone();
+                move || {
+                    source
+                        .discover_transcript_paths_with_frontier(
+                            TranscriptDiscoveryBounds::default_walk(),
+                            frontier,
+                        )
+                        .map(Arc::new)
+                }
+            })
+            .await
+            .and_then(|pass| pass),
         };
         let pass = match discovered {
             Ok(pass) => pass,
@@ -298,8 +297,8 @@ impl<'a> ProjectProviderRun<'a> {
             else {
                 continue;
             };
-            if persisted_day.is_some_and(|day| path.parent() != Some(day))
-                && run_blocking_transcript_section({
+            if persisted_day.is_some_and(|day| path.parent() != Some(day)) {
+                let membership = run_blocking_transcript_section("codex", {
                     let path = path.clone();
                     let project_root = self.project_root.to_path_buf();
                     move || {
@@ -307,11 +306,26 @@ impl<'a> ProjectProviderRun<'a> {
                             == Some(ProjectMembership::NoMatch)
                     }
                 })
-                .await
-            {
-                deferred = true;
-                frontier_committable = false;
-                break;
+                .await;
+                match membership {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        deferred = true;
+                        frontier_committable = false;
+                        break;
+                    }
+                    Err(error) => {
+                        outcome.add_failure(warn_transcript_catch_up_failure(
+                            "codex",
+                            "membership",
+                            &error,
+                            "project Codex membership read failed",
+                        ));
+                        deferred = true;
+                        frontier_committable = false;
+                        break;
+                    }
+                }
             }
             let pending = match pending {
                 Ok(pending) => pending,

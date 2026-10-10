@@ -249,7 +249,7 @@ impl PendingTranscript {
     ) -> TranscriptIngestResult<Option<Self>> {
         let path = path.to_path_buf();
         let discovery = discovery.map(|(hub, consumer)| (hub.clone(), consumer.to_string()));
-        run_blocking_transcript_section(move || {
+        run_blocking_transcript_section("codex", move || {
             Self::observe_blocking(
                 discovery
                     .as_ref()
@@ -257,7 +257,7 @@ impl PendingTranscript {
                 &path,
             )
         })
-        .await
+        .await?
     }
 
     /// [`Self::observe`] for a caller already on a blocking thread.

@@ -229,7 +229,7 @@ fn admit_cursor_jsonl_observations<'a>(
         .with_max_new_bytes(max_new_bytes)
         .with_cancellation(cancellation.clone());
         let subagent_model = {
-            run_blocking_transcript_section({
+            run_blocking_transcript_section("cursor", {
                 let path = path.to_path_buf();
                 let parent_session_id = parent_session_id.to_string();
                 let agent_id = subagent.as_ref().map(|(_, agent_id)| agent_id.clone());
@@ -239,7 +239,7 @@ fn admit_cursor_jsonl_observations<'a>(
                     })
                 }
             })
-            .await
+            .await?
         };
         let progress = admit_jsonl_observations(
             request,
@@ -471,12 +471,12 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
         None => IngestByteBudget::unbounded(),
     };
     let paths = {
-        run_blocking_transcript_section({
+        run_blocking_transcript_section("cursor", {
             let source = source.clone();
             let project_root = project_root.clone();
             move || source.transcript_paths(&project_root)
         })
-        .await
+        .await?
     };
     let mut admitted = CursorSourceAdmissionTally::default();
     for path in paths {
@@ -624,11 +624,11 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
         None => IngestByteBudget::unbounded(),
     };
     let paths = {
-        run_blocking_transcript_section({
+        run_blocking_transcript_section("cursor", {
             let source = source.clone();
             move || source.transcript_paths(&placeholder)
         })
-        .await
+        .await?
     };
     let mut admitted = CursorSourceAdmissionTally::default();
     for path in paths {
@@ -750,13 +750,13 @@ async fn admit_cursor_sweep_observations_with_session_ids(
         .map_err(|outcome| host_admission_error("cursor", outcome))?
         .unwrap_or_default();
     let page = {
-        run_blocking_transcript_section({
+        run_blocking_transcript_section("cursor", {
             let source = source.clone();
             let project_root = project_root.to_path_buf();
             let byte_offset = frontier.byte_offset;
             move || source.sweep_page(&project_root, byte_offset)
         })
-        .await
+        .await?
     };
     let mut admitted = CursorSourceAdmissionTally::default();
     let mut unfinished = None;

@@ -20,7 +20,8 @@ use crate::runtime::snapshot_observation::{
 };
 use crate::runtime::source::{
     MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader, TranscriptDiscoveryBounds,
-    collect_files_with_ext_bounded, path_byte_len, run_blocking_transcript_section,
+    TranscriptIngestError, TranscriptIngestResult, collect_files_with_ext_bounded, path_byte_len,
+    run_blocking_transcript_section,
 };
 use crate::runtime::workflow_index::WorkflowIngestSink;
 use crate::runtime::workflow_index::{WorkflowAgent, WorkflowRun, WorkflowStatus};
@@ -60,9 +61,8 @@ struct PreparedRun {
     agents: Vec<WorkflowAgent>,
 }
 
-/// Fail-open at every level: a store that cannot be read, a project whose home
-/// cannot be resolved, or an individual malformed run all degrade to "ingest
-/// less", never an error. Returns the number of runs and agents upserted.
+/// Malformed individual runs are isolated. Authority, store availability, and
+/// worker failures are returned so callers cannot claim a complete sweep.
 ///
 /// The registered-database entry points live on the root store adapter, which
 /// implements [`WorkflowIngestSink`]; this sweep sees only that port.
@@ -72,7 +72,7 @@ pub async fn ingest_workflow_runs_with_sink<S: WorkflowIngestSink>(
     project_id: &ProjectId,
     project_root: &Path,
     projects_dir: &Path,
-) -> WorkflowIngestStats {
+) -> TranscriptIngestResult<WorkflowIngestStats> {
     ingest_workflow_runs_with_sink_and_discover(
         sink,
         project_id,
@@ -89,7 +89,7 @@ async fn ingest_workflow_runs_with_sink_and_discover<S, D>(
     project_root: &Path,
     projects_dir: &Path,
     discover: D,
-) -> WorkflowIngestStats
+) -> TranscriptIngestResult<WorkflowIngestStats>
 where
     S: WorkflowIngestSink,
     D: FnOnce(&Path) -> Vec<DiscoveredRun> + Send + 'static,
@@ -100,10 +100,18 @@ where
             reason_code = "project_sessions_authority_mismatch",
             "workflow ingest rejected non-matching session authority"
         );
-        return WorkflowIngestStats::default();
+        return Err(TranscriptIngestError::HostAdmission {
+            provider: "claude",
+            reason: "project_sessions_authority_mismatch",
+            retryable: false,
+            detail: None,
+        });
     }
     let Some(watermark) = sink.read_ingest_watermark().await else {
-        return WorkflowIngestStats::default();
+        return Err(TranscriptIngestError::BackgroundResourceUnavailable {
+            provider: "claude",
+            resource: "workflow_sessions_reader",
+        });
     };
 
     let mut stats = WorkflowIngestStats::default();
@@ -112,7 +120,7 @@ where
     let (project_matcher, discovered) = {
         let project_root = project_root.to_path_buf();
         let projects_dir = projects_dir.to_path_buf();
-        run_blocking_transcript_section(move || {
+        run_blocking_transcript_section("claude", move || {
             // Resolve the fixed project-side git identity once; every
             // in-window run's membership test reuses it instead of
             // re-resolving the same project root.
@@ -121,16 +129,16 @@ where
                 discover(&projects_dir),
             )
         })
-        .await
+        .await?
     };
     let project_matcher = Arc::new(project_matcher);
     for run in discovered {
         let prepared = {
             let project_matcher = Arc::clone(&project_matcher);
-            run_blocking_transcript_section(move || {
+            run_blocking_transcript_section("claude", move || {
                 prepare_discovered_run(run, &project_matcher, watermark)
             })
-            .await
+            .await?
         };
         let Some(prepared) = prepared else {
             continue;
@@ -158,7 +166,7 @@ where
         sink.bump_ingest_watermark(max_mtime).await;
     }
 
-    stats
+    Ok(stats)
 }
 
 fn prepare_discovered_run(
