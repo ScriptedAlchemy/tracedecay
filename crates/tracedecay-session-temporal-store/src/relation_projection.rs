@@ -303,28 +303,10 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 .await
                 .map(|_| ()),
             };
-            let mut item_outcome = outcome;
-            if item_outcome.is_ok() {
-                // was_pending rides the same shared snapshot as the apply
-                // reads; the UPDATE's own state-and-watermark guard still
-                // rejects a concurrent settle atomically inside the commit.
-                match SessionProjectionGenerationV1::new(projection.generation) {
-                    Ok(generation) => {
-                        match super::relation_receipts::expected_receipt(
-                            &snapshot,
-                            &projection.session_id,
-                            generation,
-                        )
-                        .await
-                        {
-                            Ok((_, was_pending)) => acknowledge.push((index, was_pending)),
-                            Err(error) => item_outcome = Err(error),
-                        }
-                    }
-                    Err(error) => item_outcome = Err(storage(RECONSTRUCT_OPERATION, error)),
-                }
+            if outcome.is_ok() {
+                acknowledge.push(index);
             }
-            outcomes.push(item_outcome);
+            outcomes.push(outcome);
         }
         drop(snapshot);
         if acknowledge.is_empty() {
@@ -344,8 +326,35 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         // transaction-critical: when SAVEPOINT or RELEASE/ROLLBACK TO fails,
         // the whole transaction rolls back rather than letting any partially
         // mutated acknowledgement reach the shared commit.
-        for (index, was_pending) in acknowledge {
+        for index in acknowledge {
             let projection = &projections[index];
+            // The receipt state must be read inside this transaction exactly
+            // like the serial acknowledgement: a peer that settles between
+            // the shared snapshot and this batch has already applied the
+            // receipt and deleted its journal row, so only the in-transaction
+            // read can distinguish that progress from a missing journal for a
+            // genuinely pending receipt. A failed read is item-level, exactly
+            // like a failed read inside the serial savepoint.
+            let generation = match SessionProjectionGenerationV1::new(projection.generation) {
+                Ok(generation) => generation,
+                Err(error) => {
+                    outcomes[index] = Err(storage(RECONSTRUCT_OPERATION, error));
+                    continue;
+                }
+            };
+            let (_, was_pending) = match super::relation_receipts::expected_receipt(
+                &transaction,
+                &projection.session_id,
+                generation,
+            )
+            .await
+            {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    outcomes[index] = Err(storage(RECONSTRUCT_OPERATION, error));
+                    continue;
+                }
+            };
             let group =
                 match super::relation_receipts::acknowledge_relation_receipt_statements(projection)
                 {
@@ -359,12 +368,13 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                         return Err(error);
                     }
                 };
-            // [SAVEPOINT, guarded UPDATE, guarded journal DELETE, RELEASE]: a
-            // failure at the SAVEPOINT or RELEASE edge is transaction-critical
-            // exactly like the serial path; a failing guarded write or a
-            // short-circuit row-count check takes the same savepoint recovery
-            // and lands on the item outcome.
-            let outcome = match transaction.execute_statements(group).await {
+            // [SAVEPOINT, guarded UPDATE, guarded journal DELETE]: a failure
+            // at the SAVEPOINT edge is transaction-critical exactly like the
+            // serial path; a failing guarded write or a short-circuit row-count
+            // check takes the same savepoint recovery and lands on the item
+            // outcome. RELEASE runs only after the guards pass so a failed
+            // item can still roll its savepoint back.
+            let item_error = match transaction.execute_statements(group).await {
                 Ok(changed) => {
                     let update_changed = changed.get(1).copied().unwrap_or(0);
                     let delete_removed = changed.get(2).copied().unwrap_or(0);
@@ -397,20 +407,20 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                     }
                 },
             };
-            if let Some(item_error) = outcome {
-                if let Err(error) = transaction
-                    .execute_batch(
-                        "ROLLBACK TO relation_projection_ack; RELEASE relation_projection_ack",
-                    )
+            let savepoint = if item_error.is_some() {
+                "ROLLBACK TO relation_projection_ack; RELEASE relation_projection_ack"
+            } else {
+                "RELEASE relation_projection_ack"
+            };
+            if let Err(error) = transaction.execute_batch(savepoint).await {
+                transaction
+                    .rollback()
+                    .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
                     .await
-                {
-                    transaction
-                        .rollback()
-                        .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
-                        .await
-                        .map_err(|rollback| storage(RECONSTRUCT_OPERATION, rollback))?;
-                    return Err(storage(RECONSTRUCT_OPERATION, error));
-                }
+                    .map_err(|rollback| storage(RECONSTRUCT_OPERATION, rollback))?;
+                return Err(storage(RECONSTRUCT_OPERATION, error));
+            }
+            if let Some(item_error) = item_error {
                 outcomes[index] = Err(item_error);
             }
         }

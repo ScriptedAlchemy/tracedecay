@@ -1126,8 +1126,20 @@ fn execute_request(
                 let mut results = Vec::with_capacity(statements.len());
                 let mut item_result = Ok(SqlResult::ExecutedMany(Vec::new()));
                 for (index, statement) in statements.into_iter().enumerate() {
+                    let before_rowid = connection.last_insert_rowid();
                     match execute_statement(connection, statement) {
-                        Ok(result) => results.push(result),
+                        Ok(mut result) => {
+                            if connection.last_insert_rowid() == before_rowid {
+                                // Non-inserting member: sequential dispatch
+                                // would publish the calling handle's logical
+                                // rowid, which only the caller of
+                                // execute_request knows. Mark the slot so
+                                // publish_last_insert_rowid normalizes it in
+                                // order against the handle's real value.
+                                result.last_insert_rowid = ROWID_FROM_HANDLE;
+                            }
+                            results.push(result);
+                        }
                         Err(error) => {
                             item_result = Err(ExactSqlError::StatementBatch {
                                 index,
@@ -1157,12 +1169,19 @@ fn verify_write_authority(
     }
 }
 
+/// Marker placed on non-inserting members of an [`SqlRequest::ExecuteMany`]
+/// group: sequential dispatch reports the calling handle's logical rowid for
+/// these, which `execute_request` cannot see, so
+/// [`publish_last_insert_rowid`] resolves it against the handle's real value.
+const ROWID_FROM_HANDLE: i64 = i64::MIN;
+
 fn publish_last_insert_rowid(
     result: &mut Result<SqlResult, ExactSqlError>,
     inserted: bool,
     connection_rowid: i64,
     logical_rowid: &AtomicI64,
 ) {
+    let before_group_rowid = logical_rowid.load(Ordering::Acquire);
     if inserted {
         logical_rowid.store(connection_rowid, Ordering::Release);
     }
@@ -1171,8 +1190,17 @@ fn publish_last_insert_rowid(
         Ok(SqlResult::Executed(result)) => result.last_insert_rowid = rowid,
         Ok(SqlResult::BatchExecuted(result)) => result.last_insert_rowid = rowid,
         Ok(SqlResult::ExecutedMany(results)) => {
-            if let Some(last) = results.last_mut() {
-                last.last_insert_rowid = rowid;
+            // Walk the group in order: an inserting member advances the
+            // handle's logical rowid to its own insert id, while a
+            // non-inserting member reports whatever the handle's rowid was at
+            // that position — identical to publishing after each dispatch.
+            let mut current = before_group_rowid;
+            for item in results.iter_mut() {
+                if item.last_insert_rowid == ROWID_FROM_HANDLE {
+                    item.last_insert_rowid = current;
+                } else {
+                    current = item.last_insert_rowid;
+                }
             }
         }
         Ok(SqlResult::Validated | SqlResult::Queried(_)) | Err(_) => {}

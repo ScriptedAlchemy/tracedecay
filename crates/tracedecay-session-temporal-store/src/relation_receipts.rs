@@ -270,11 +270,12 @@ pub(crate) async fn acknowledge_relation_receipt(
 /// Builds the fused acknowledgement group for one validated projection.
 ///
 /// The shared-commit caller issues the group as one writer submission under
-/// its own savepoint: [SAVEPOINT, guarded UPDATE, guarded journal DELETE,
-/// RELEASE]. The UPDATE keeps its atomic state-and-watermark guard; the
-/// caller still checks the UPDATE and DELETE row counts after the group
-/// returns and replays the savepoint recovery on any short-circuit, so a
-/// concurrent receipt settle fails the item identically to the serial path.
+/// its own savepoint: [SAVEPOINT, guarded UPDATE, guarded journal DELETE].
+/// The UPDATE keeps its atomic state-and-watermark guard; the caller checks
+/// the UPDATE and DELETE row counts after the group returns, issues RELEASE
+/// only on success, and replays the savepoint recovery on any short-circuit,
+/// so a concurrent receipt settle fails the item identically to the serial
+/// path.
 pub(crate) fn acknowledge_relation_receipt_statements(
     projection: &SessionRelationProjection,
 ) -> SessionStoreResult<Vec<WriteStatement>> {
@@ -305,8 +306,6 @@ pub(crate) fn acknowledge_relation_receipt_statements(
             params![projection.session_id.as_str(), generation],
         )
         .map_err(|error| storage(RECEIPT_OPERATION, error))?,
-        WriteStatement::new("RELEASE relation_projection_ack", ())
-            .map_err(|error| storage(RECEIPT_OPERATION, error))?,
     ])
 }
 
