@@ -10,6 +10,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use tracedecay_domain::{
@@ -17,12 +18,16 @@ use tracedecay_domain::{
     GitIndexPreviewDispositionV1, GitIndexPreviewV1, GitOidV1, HunkDirectionV1, HunkRefV1,
     ManifestDigest, canonical_sha256,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_command_output};
 use tracedecay_runtime_core::git_discovery::{
     GitRepositoryIdentity, GitRepositoryIdentityOutcome, discover_repository_identity_bounded,
 };
 use tracedecay_runtime_core::path_safety::plain_host_path;
 
 pub const GIT_INDEX_ADAPTER_REVISION: &str = "tracedecay.git-index-adapter.v1";
+const SNAPSHOT_GIT_STDOUT_LIMIT: usize = 64 * 1024 * 1024;
+const WRITE_GIT_DEADLINE: Duration = Duration::from_secs(60 * 60);
 
 mod patch;
 mod process;
@@ -99,6 +104,7 @@ pub struct FixedGitIndexRunner {
     common_dir: PathBuf,
     index_path: PathBuf,
     objects_path: PathBuf,
+    command_bounds: GitCommandBounds,
 }
 
 /// Exclusive ownership of Git's real `index.lock` path. The lock is acquired
@@ -125,6 +131,7 @@ impl Drop for NativeIndexLock {
 fn bare_repository_identity(directory: &Path) -> Option<GitRepositoryIdentity> {
     let root = directory.canonicalize().ok()?;
     let output = git_command(&root)
+        .ok()?
         .args(["rev-parse", "--is-bare-repository", "--absolute-git-dir"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -176,7 +183,34 @@ impl FixedGitIndexRunner {
             common_dir,
             index_path,
             objects_path,
+            command_bounds: GitCommandBounds {
+                deadline: Instant::now() + WRITE_GIT_DEADLINE,
+                cancel: None,
+                max_stdout_bytes: SNAPSHOT_GIT_STDOUT_LIMIT,
+                max_stderr_bytes: GitCommandBounds::default().max_stderr_bytes,
+            },
         })
+    }
+
+    /// Bind snapshot Git children to the request deadline and cancel token.
+    #[must_use]
+    pub fn with_command_bounds(mut self, bounds: GitCommandBounds) -> Self {
+        self.command_bounds = bounds;
+        self
+    }
+
+    pub(crate) fn check_cancelled(&self) -> Result<(), NativeGitIndexError> {
+        if self
+            .command_bounds
+            .cancel
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+            || Instant::now() >= self.command_bounds.deadline
+        {
+            Err(NativeGitIndexError::Cancelled)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn ensure_index_unlocked(&self) -> Result<(), NativeGitIndexError> {
@@ -387,7 +421,7 @@ impl FixedGitIndexRunner {
 
         let patch_bytes = joined_patch_bytes(patches);
         if !patch_bytes.is_empty() {
-            let mut apply = self.quarantine_command(&index_path, &object_path);
+            let mut apply = self.quarantine_command(&index_path, &object_path)?;
             apply
                 .arg("apply")
                 .arg("--cached")
@@ -403,7 +437,7 @@ impl FixedGitIndexRunner {
         }
 
         let output = self
-            .quarantine_command(&index_path, &object_path)
+            .quarantine_command(&index_path, &object_path)?
             .arg("write-tree")
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -472,7 +506,7 @@ impl FixedGitIndexRunner {
         }
 
         let patch_bytes = joined_patch_bytes(patches);
-        let mut command = self.command();
+        let mut command = self.command()?;
         command
             .env("GIT_INDEX_FILE", &candidate_index)
             .arg("apply")
@@ -493,7 +527,7 @@ impl FixedGitIndexRunner {
         let candidate_tree = {
             let _span = tracing::trace_span!("usecases.git_index_tx.apply.write_tree").entered();
             {
-                self.command()
+                self.command()?
                     .env("GIT_INDEX_FILE", &candidate_index)
                     .arg("write-tree")
                     .stdout(Stdio::piped())
@@ -726,8 +760,8 @@ impl FixedGitIndexRunner {
         self.index_path.with_file_name(name)
     }
 
-    fn command(&self) -> Command {
-        let mut command = git_command(&self.repository_root);
+    fn command(&self) -> Result<Command, NativeGitIndexError> {
+        let mut command = git_command(&self.repository_root)?;
         // Exporting GIT_DIR without GIT_WORK_TREE makes git adopt the current
         // directory as a work tree, and exporting either onto a bare root
         // silently un-bares it, defeating bare-blocker preflight. A bare
@@ -738,11 +772,15 @@ impl FixedGitIndexRunner {
                 .env("GIT_COMMON_DIR", plain_host_path(&self.common_dir))
                 .env("GIT_WORK_TREE", plain_host_path(&self.repository_root));
         }
-        command
+        Ok(command)
     }
 
-    fn quarantine_command(&self, index_path: &Path, object_path: &Path) -> Command {
-        let mut command = self.command();
+    fn quarantine_command(
+        &self,
+        index_path: &Path,
+        object_path: &Path,
+    ) -> Result<Command, NativeGitIndexError> {
+        let mut command = self.command()?;
         // `GIT_ALTERNATE_OBJECT_DIRECTORIES` is the strictest of the three:
         // git normalizes every entry before linking it, so a verbatim
         // `\\?\` path there fails every object-writing command in the
@@ -754,7 +792,7 @@ impl FixedGitIndexRunner {
                 "GIT_ALTERNATE_OBJECT_DIRECTORIES",
                 plain_host_path(&self.objects_path),
             );
-        command
+        Ok(command)
     }
 
     fn run_git(
@@ -774,11 +812,38 @@ impl FixedGitIndexRunner {
     }
 
     fn run_git_output(&self, args: &[&str]) -> Result<Output, NativeGitIndexError> {
-        self.command()
+        self.check_cancelled()?;
+        let mut command = self.command()?;
+        command
             .args(args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(|error| NativeGitIndexError::Io(error.to_string()))
+            .stderr(Stdio::null());
+        bounded_command_output(command, None, &self.command_bounds).map_err(map_bounded_git_error)
+    }
+
+    pub(crate) fn run_bounded_stdin(
+        &self,
+        command: Command,
+        input: &[u8],
+    ) -> Result<Output, NativeGitIndexError> {
+        self.check_cancelled()?;
+        bounded_command_output(command, Some(input), &self.command_bounds)
+            .map_err(map_bounded_git_error)
+    }
+}
+
+fn map_bounded_git_error(error: GitCommandError) -> NativeGitIndexError {
+    match error {
+        GitCommandError::Cancelled | GitCommandError::DeadlineExceeded => {
+            NativeGitIndexError::Cancelled
+        }
+        GitCommandError::Unavailable(error) => NativeGitIndexError::Io(error.to_string()),
+        GitCommandError::OutputLimitExceeded { stream, bound } => {
+            NativeGitIndexError::Io(format!("git {stream} exceeded {bound} bytes"))
+        }
+        GitCommandError::ReadOutput { stream, source } => {
+            NativeGitIndexError::Io(format!("git {stream}: {source}"))
+        }
+        GitCommandError::Wait(error) => NativeGitIndexError::Io(error.to_string()),
     }
 }

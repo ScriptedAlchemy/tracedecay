@@ -127,23 +127,7 @@ impl NativeGitIndexPreviewAssembler {
         runner: &FixedGitIndexRunner,
         lock: &NativeIndexLock,
     ) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
-        self.capture_snapshot_until(template, runner, lock, &|| false)
-    }
-
-    fn capture_snapshot_until(
-        &self,
-        template: &RepositoryStateSnapshotV1,
-        runner: &FixedGitIndexRunner,
-        lock: &NativeIndexLock,
-        cancelled: &dyn Fn() -> bool,
-    ) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
-        let checkpoint = || {
-            if cancelled() {
-                Err(map_native_error(NativeGitIndexError::Cancelled))
-            } else {
-                Ok(())
-            }
-        };
+        let checkpoint = || runner.check_cancelled().map_err(map_native_error);
         checkpoint()?;
         if template.project_id != self.project_id
             || template.repository_id != self.repository_id
@@ -171,9 +155,7 @@ impl NativeGitIndexPreviewAssembler {
             .iter()
             .filter(|entry| matches!(entry, GitStatusEntryV1::Tracked(_)))
             .collect::<Vec<_>>();
-        let tracked_digest = runner
-            .tracked_worktree_digest_until(cancelled)
-            .map_err(map_native_error)?;
+        let tracked_digest = runner.tracked_worktree_digest().map_err(map_native_error)?;
         checkpoint()?;
         let untracked_name_digest = runner.untracked_name_digest().map_err(map_native_error)?;
         checkpoint()?;
@@ -1298,29 +1280,22 @@ pub fn capture_exact_snapshot(
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
     captured_at: UtcMicros,
+    bounds: &tracedecay_runtime_core::git::GitCommandBounds,
 ) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
-    capture_exact_snapshot_until(
-        repository_root,
-        project_id,
-        repository_id,
-        worktree_id,
-        captured_at,
-        &|| false,
-    )
-}
-
-#[tracing::instrument(name = "daemon.git.tx.snapshot_until", level = "trace", skip_all)]
-pub fn capture_exact_snapshot_until(
-    repository_root: &std::path::Path,
-    project_id: ProjectId,
-    repository_id: RepositoryId,
-    worktree_id: WorktreeId,
-    captured_at: UtcMicros,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
-    if cancelled() {
-        return Err(map_native_error(NativeGitIndexError::Cancelled));
-    }
+    let runner_bounds = bounds.clone();
+    let cancelled = || {
+        if runner_bounds
+            .cancel
+            .as_ref()
+            .is_some_and(tracedecay_runtime_core::cancellation::CancellationToken::is_cancelled)
+            || std::time::Instant::now() >= runner_bounds.deadline
+        {
+            Err(map_native_error(NativeGitIndexError::Cancelled))
+        } else {
+            Ok(())
+        }
+    };
+    cancelled()?;
     // Same canonical root the daemon owner mounts; alias paths must not mint a
     // divergent snapshot that later fails exact preview CAS.
     let repository_root = super::canonicalize_repository_root(repository_root)
@@ -1331,21 +1306,17 @@ pub fn capture_exact_snapshot_until(
         repository_id,
         worktree_id,
     );
-    let runner = FixedGitIndexRunner::new(&repository_root).map_err(map_native_error)?;
-    if cancelled() {
-        return Err(map_native_error(NativeGitIndexError::Cancelled));
-    }
+    let runner = FixedGitIndexRunner::new(&repository_root)
+        .map_err(map_native_error)?
+        .with_command_bounds(bounds.clone());
+    cancelled()?;
     let status = assembler
         .read_authority()
         .status()
         .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
-    if cancelled() {
-        return Err(map_native_error(NativeGitIndexError::Cancelled));
-    }
+    cancelled()?;
     let lock = runner.acquire_index_lock().map_err(map_native_error)?;
-    if cancelled() {
-        return Err(map_native_error(NativeGitIndexError::Cancelled));
-    }
+    cancelled()?;
     let tree = runner
         .index_tree_under_lock(&lock)
         .map_err(map_native_error)?;
@@ -1380,7 +1351,7 @@ pub fn capture_exact_snapshot_until(
         tracedecay_domain::GitCoverageV1::complete(),
     )
     .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
-    assembler.capture_snapshot_until(&placeholder, &runner, &lock, cancelled)
+    assembler.capture_snapshot(&placeholder, &runner, &lock)
 }
 
 #[cfg(any(test, feature = "test-transport"))]
@@ -1398,6 +1369,7 @@ pub fn capture_exact_snapshot_for_test(
         repository_id,
         worktree_id,
         captured_at,
+        &tracedecay_runtime_core::git::GitCommandBounds::default(),
     )
     .map_err(test_snapshot_error)
 }
@@ -1456,19 +1428,40 @@ mod tests {
     #[test]
     fn cancelled_snapshot_releases_the_index_lock() {
         let (directory, _assembler, runner) = repository_fixture();
+        let lock_path = runner.index_lock_path();
+        let cancel = tracedecay_runtime_core::cancellation::CancellationToken::new();
+        let watch = cancel.clone();
+        let watch_path = lock_path.clone();
+        let watcher = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while !watch_path.exists() {
+                if started.elapsed() > std::time::Duration::from_secs(5) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            watch.cancel();
+        });
+        let result = capture_exact_snapshot(
+            directory.path(),
+            ProjectId::new("project.fixture").expect("project id"),
+            RepositoryId::new("repository.fixture").expect("repository id"),
+            WorktreeId::new("worktree.fixture").expect("worktree id"),
+            UtcMicros(1),
+            &tracedecay_runtime_core::git::GitCommandBounds {
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+                cancel: Some(cancel),
+                ..tracedecay_runtime_core::git::GitCommandBounds::default()
+            },
+        );
+        let _ = watcher.join();
         assert!(
-            matches!(
-                capture_exact_snapshot_until(
-                    directory.path(),
-                    ProjectId::new("project.fixture").expect("project id"),
-                    RepositoryId::new("repository.fixture").expect("repository id"),
-                    WorktreeId::new("worktree.fixture").expect("worktree id"),
-                    UtcMicros(1),
-                    &|| true,
-                ),
-                Err(GitIndexTransactionPortError::NativeFailure)
-            ),
-            "cancellation must fail closed instead of minting a snapshot"
+            matches!(result, Err(GitIndexTransactionPortError::NativeFailure)),
+            "cancellation after acquiring the real index lock must fail closed, got {result:?}"
+        );
+        assert!(
+            !lock_path.exists(),
+            "the real index.lock must be gone after the cancelled snapshot returns"
         );
         runner
             .acquire_index_lock()

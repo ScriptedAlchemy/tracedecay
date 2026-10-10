@@ -6,6 +6,7 @@ use std::process::{Child, Command, Output};
 
 use tracedecay_domain::{GitFileModeV1, GitOidV1, GitOperationStateV1};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
+use tracedecay_runtime_core::git::try_git_program;
 use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use super::NativeGitIndexError;
@@ -28,8 +29,9 @@ pub fn joined_patch_bytes(patches: &[ValidatedIndexPatch]) -> Vec<u8> {
 /// Every path handed to git is spelled plainly first: this runtime resolves
 /// paths with `fs::canonicalize`, which on Windows returns the `\\?\`
 /// extended-length form that Git for Windows refuses to normalize.
-pub fn git_command(repository_root: &Path) -> Command {
-    let mut command = Command::new("git");
+pub fn git_command(repository_root: &Path) -> Result<Command, NativeGitIndexError> {
+    let program = try_git_program().map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+    let mut command = Command::new(program);
     command.current_dir(plain_host_path(repository_root));
     for (key, _) in env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
@@ -39,7 +41,7 @@ pub fn git_command(repository_root: &Path) -> Command {
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0");
-    command
+    Ok(command)
 }
 
 pub fn run_command_with_stdin(

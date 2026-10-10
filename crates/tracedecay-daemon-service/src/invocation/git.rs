@@ -284,16 +284,20 @@ pub(super) async fn execute_git_read(
         let project_id = selected_scope.project_id.clone();
         let repository_id = selected_scope.repository_id.clone();
         let worktree_id = selected_scope.worktree_id.clone();
-        let snapshot_cancel = request_cancellation.clone();
-        let snapshot_deadline = deadline.clone();
+        let snapshot_bounds = tracedecay_runtime_core::git::GitCommandBounds {
+            deadline: std::time::Instant::now() + Duration::from_micros(remaining_micros),
+            cancel: Some(request_cancellation.clone()),
+            max_stdout_bytes: 64 * 1024 * 1024,
+            max_stderr_bytes: 64 * 1024,
+        };
         let mut worker = tokio::task::spawn_blocking(move || {
-            capture_exact_snapshot_until(
+            capture_exact_snapshot(
                 &root,
                 project_id,
                 repository_id,
                 worktree_id,
                 input_created_at,
-                &|| snapshot_cancel.is_cancelled() || snapshot_deadline.is_elapsed_at(now_micros()),
+                &snapshot_bounds,
             )
         });
         let snapshot = match settle_blocking_git_worker(

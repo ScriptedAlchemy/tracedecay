@@ -1,10 +1,13 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use super::process::run_command_with_stdin;
 use super::{FixedGitIndexRunner, NativeGitIndexError};
 use tempfile::tempdir;
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::git::GitCommandBounds;
 
 const PIPE_ECHO_HELPER_ENV: &str = "TRACEDECAY_GIT_INDEX_PIPE_ECHO_HELPER";
 const PIPE_EARLY_EXIT_HELPER_ENV: &str = "TRACEDECAY_GIT_INDEX_PIPE_EARLY_EXIT_HELPER";
@@ -667,10 +670,19 @@ fn committed_file(name: &str, contents: &[u8]) -> (tempfile::TempDir, FixedGitIn
 
 #[test]
 fn tracked_worktree_digest_honors_cancellation_before_filesystem_walk() {
-    let (_directory, runner) = committed_file("tracked.txt", b"before\n");
+    let (directory, _runner) = committed_file("tracked.txt", b"before\n");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let runner = FixedGitIndexRunner::new(directory.path())
+        .expect("runner")
+        .with_command_bounds(GitCommandBounds {
+            deadline: Instant::now() + Duration::from_secs(30),
+            cancel: Some(cancel),
+            ..GitCommandBounds::default()
+        });
     assert!(
         matches!(
-            runner.tracked_worktree_digest_until(&|| true),
+            runner.tracked_worktree_digest(),
             Err(NativeGitIndexError::Cancelled)
         ),
         "a cancelled digest must fail closed instead of minting identity"
@@ -680,35 +692,143 @@ fn tracked_worktree_digest_honors_cancellation_before_filesystem_walk() {
         .expect("cancellation must not leave the real index lock held");
 }
 
-#[cfg(unix)]
-#[test]
-fn tracked_worktree_digest_does_not_read_clean_head_bytes() {
-    use std::os::unix::fs::PermissionsExt;
+fn assert_git_diff_head_hides(repository: &std::path::Path, path: &str) {
+    let output = Command::new("git")
+        .current_dir(repository)
+        .args([
+            "diff",
+            "-z",
+            "--name-only",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "HEAD",
+        ])
+        .output()
+        .expect("git diff HEAD starts");
+    assert!(output.status.success(), "git diff HEAD");
+    assert!(
+        !output
+            .stdout
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == path.as_bytes()),
+        "git diff HEAD must omit {path} when a worktree check flag hides it"
+    );
+}
 
-    let (directory, runner) = committed_file("secret.txt", b"must-not-read\n");
-    let clean = runner
-        .tracked_worktree_digest()
-        .expect("clean HEAD digest");
+#[test]
+fn tracked_worktree_digest_changes_when_assume_unchanged_bytes_change() {
+    let (directory, runner) = committed_file("source.rs", b"committed\n");
     assert!(
         Command::new("git")
             .current_dir(directory.path())
-            .args(["update-index", "--assume-unchanged", "--", "secret.txt"])
+            .args(["update-index", "--assume-unchanged", "--", "source.rs"])
             .status()
             .expect("assume-unchanged starts")
             .success()
     );
-    let path = directory.path().join("secret.txt");
-    fs::write(&path, b"hidden worktree drift\n").expect("hide worktree drift");
-    let original = fs::metadata(&path).expect("metadata").permissions();
-    let mut locked = original.clone();
-    locked.set_mode(0o000);
-    fs::set_permissions(&path, locked).expect("deny worktree reads");
-    let digest = runner.tracked_worktree_digest();
-    fs::set_permissions(&path, original).expect("restore worktree reads");
+    let before = runner
+        .tracked_worktree_digest()
+        .expect("digest before hidden edit");
+    fs::write(
+        directory.path().join("source.rs"),
+        b"hidden worktree drift\n",
+    )
+    .expect("hidden edit");
+    assert_git_diff_head_hides(directory.path(), "source.rs");
+    let after = runner
+        .tracked_worktree_digest()
+        .expect("digest after hidden edit");
+    assert_ne!(
+        before, after,
+        "assume-unchanged is not byte evidence; the digest must bind worktree bytes"
+    );
+}
+
+#[test]
+fn tracked_worktree_digest_changes_when_skip_worktree_bytes_change() {
+    let (directory, runner) = committed_file("source.rs", b"committed\n");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["update-index", "--skip-worktree", "--", "source.rs"])
+            .status()
+            .expect("skip-worktree starts")
+            .success()
+    );
+    let before = runner
+        .tracked_worktree_digest()
+        .expect("digest before hidden edit");
+    fs::write(
+        directory.path().join("source.rs"),
+        b"hidden skip-worktree drift\n",
+    )
+    .expect("hidden edit");
+    assert_git_diff_head_hides(directory.path(), "source.rs");
+    let after = runner
+        .tracked_worktree_digest()
+        .expect("digest after hidden edit");
+    assert_ne!(
+        before, after,
+        "skip-worktree is not byte evidence; the digest must bind worktree bytes"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn tracked_worktree_digest_preserves_mode_symlink_and_absent_identity() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let (directory, runner) = committed_file("regular.txt", b"regular\n");
+    fs::write(directory.path().join("exec.sh"), b"#!/bin/sh\n").expect("executable");
+    let mut permissions = fs::metadata(directory.path().join("exec.sh"))
+        .expect("executable metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(directory.path().join("exec.sh"), permissions).expect("chmod +x");
+    symlink("regular.txt", directory.path().join("link.txt")).expect("symlink");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["add", "--", "exec.sh", "link.txt"])
+            .status()
+            .expect("git add starts")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args([
+                "-c",
+                "user.name=TraceDecay",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "mode and symlink",
+            ])
+            .status()
+            .expect("git commit starts")
+            .success()
+    );
+    let with_present = runner
+        .tracked_worktree_digest()
+        .expect("present mode and symlink digest");
+    fs::remove_file(directory.path().join("regular.txt")).expect("absent regular file");
+    let with_absent = runner
+        .tracked_worktree_digest()
+        .expect("absent file digest");
+    assert_ne!(
+        with_present, with_absent,
+        "an absent worktree file must change identity"
+    );
+    fs::write(directory.path().join("regular.txt"), b"regular\n").expect("restore regular");
     assert_eq!(
-        clean,
-        digest.expect("clean HEAD identity must bind the tree object, not worktree bytes"),
-        "an assume-unchanged worktree edit must not change HEAD identity"
+        with_present,
+        runner.tracked_worktree_digest().expect("restored digest"),
+        "restoring the absent file must recover the prior identity"
     );
 }
 
