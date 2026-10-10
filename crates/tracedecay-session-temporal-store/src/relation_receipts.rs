@@ -270,12 +270,15 @@ pub(crate) async fn acknowledge_relation_receipt(
 /// Builds the fused acknowledgement group for one validated projection.
 ///
 /// The shared-commit caller issues the group as one writer submission under
-/// its own savepoint: [SAVEPOINT, guarded UPDATE, guarded journal DELETE].
-/// The UPDATE keeps its atomic state-and-watermark guard; the caller checks
-/// the UPDATE and DELETE row counts after the group returns, issues RELEASE
-/// only on success, and replays the savepoint recovery on any short-circuit,
-/// so a concurrent receipt settle fails the item identically to the serial
-/// path.
+/// its own savepoint: [SAVEPOINT, applied-guard UPDATE, pending-guard UPDATE,
+/// guarded journal DELETE]. The already-applied guard must precede the
+/// pending guard so the pair distinguishes a receipt the peer already
+/// settled (first guard changes) from one this group transitions (second
+/// guard changes) — the same `was_pending` the serial path reads inside its
+/// transaction — without a separate query dispatch. The caller checks every
+/// row count after the group returns, issues RELEASE only on success, and
+/// replays the savepoint recovery on any short-circuit, so a concurrent
+/// receipt settle fails the item identically to the serial path.
 pub(crate) fn acknowledge_relation_receipt_statements(
     projection: &SessionRelationProjection,
 ) -> SessionStoreResult<Vec<WriteStatement>> {
@@ -286,12 +289,30 @@ pub(crate) fn acknowledge_relation_receipt_statements(
     Ok(vec![
         WriteStatement::new("SAVEPOINT relation_projection_ack", ())
             .map_err(|error| storage(RECEIPT_OPERATION, error))?,
+        // Already-applied guard first: it must run before the pending guard so
+        // a peer-settled receipt is observed as `applied` rather than freshly
+        // transitioned — the pending guard can never satisfy this clause
+        // because it runs after it in the same statement group.
         WriteStatement::new(
             "UPDATE session_relation_receipts
              SET state = 'applied', graph_watermark = ?3, applied_at = ?4
              WHERE session_id = ?1 AND generation = ?2
                AND expected_graph_watermark = ?3
-               AND state IN ('pending', 'applied')",
+               AND state = 'applied'",
+            params![
+                projection.session_id.as_str(),
+                generation,
+                applied.as_str(),
+                now_micros(RECEIPT_OPERATION)?.0,
+            ],
+        )
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?,
+        WriteStatement::new(
+            "UPDATE session_relation_receipts
+             SET state = 'applied', graph_watermark = ?3, applied_at = ?4
+             WHERE session_id = ?1 AND generation = ?2
+               AND expected_graph_watermark = ?3
+               AND state = 'pending'",
             params![
                 projection.session_id.as_str(),
                 generation,

@@ -328,33 +328,12 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         // mutated acknowledgement reach the shared commit.
         for index in acknowledge {
             let projection = &projections[index];
-            // The receipt state must be read inside this transaction exactly
-            // like the serial acknowledgement: a peer that settles between
-            // the shared snapshot and this batch has already applied the
-            // receipt and deleted its journal row, so only the in-transaction
-            // read can distinguish that progress from a missing journal for a
-            // genuinely pending receipt. A failed read is item-level, exactly
-            // like a failed read inside the serial savepoint.
-            let generation = match SessionProjectionGenerationV1::new(projection.generation) {
-                Ok(generation) => generation,
-                Err(error) => {
-                    outcomes[index] = Err(storage(RECONSTRUCT_OPERATION, error));
-                    continue;
-                }
-            };
-            let (_, was_pending) = match super::relation_receipts::expected_receipt(
-                &transaction,
-                &projection.session_id,
-                generation,
-            )
-            .await
-            {
-                Ok(receipt) => receipt,
-                Err(error) => {
-                    outcomes[index] = Err(storage(RECONSTRUCT_OPERATION, error));
-                    continue;
-                }
-            };
+            // The receipt state is decided inside this transaction by the
+            // paired guards in the group: an applied-state guard runs before
+            // the pending-state guard, so the pair distinguishes a peer that
+            // settled between the shared snapshot and this batch — exactly
+            // what the serial acknowledgement reads inside its transaction —
+            // without a separate query dispatch.
             let group =
                 match super::relation_receipts::acknowledge_relation_receipt_statements(projection)
                 {
@@ -368,17 +347,19 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                         return Err(error);
                     }
                 };
-            // [SAVEPOINT, guarded UPDATE, guarded journal DELETE]: a failure
-            // at the SAVEPOINT edge is transaction-critical exactly like the
-            // serial path; a failing guarded write or a short-circuit row-count
-            // check takes the same savepoint recovery and lands on the item
-            // outcome. RELEASE runs only after the guards pass so a failed
-            // item can still roll its savepoint back.
+            // [SAVEPOINT, applied-guard UPDATE, pending-guard UPDATE,
+            // guarded journal DELETE]: a failure at the SAVEPOINT edge is
+            // transaction-critical exactly like the serial path; a failing
+            // guarded write or a short-circuit row-count check takes the same
+            // savepoint recovery and lands on the item outcome. RELEASE runs
+            // only after the guards pass so a failed item can still roll its
+            // savepoint back.
             let item_error = match transaction.execute_statements(group).await {
                 Ok(changed) => {
-                    let update_changed = changed.get(1).copied().unwrap_or(0);
-                    let delete_removed = changed.get(2).copied().unwrap_or(0);
-                    if update_changed != 1 {
+                    let already_applied = changed.get(1).copied().unwrap_or(0) == 1;
+                    let was_pending = changed.get(2).copied().unwrap_or(0) == 1;
+                    let delete_removed = changed.get(3).copied().unwrap_or(0);
+                    if !already_applied && !was_pending {
                         Some(storage_message(
                             RECONSTRUCT_OPERATION,
                             "relation receipt changed during native graph acknowledgement",
@@ -394,7 +375,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 }
                 Err(error) => match error {
                     tracedecay_runtime_core::db::engine::Error::StatementBatch {
-                        index: 1 | 2,
+                        index: 1 | 2 | 3,
                         source,
                     } => Some(storage(RECONSTRUCT_OPERATION, *source)),
                     other => {
