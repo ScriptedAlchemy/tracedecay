@@ -2150,10 +2150,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 None,
             )?;
             candidate.ordinal_rank = ordinal as u32;
-            let definition_match = score
-                .field_scores
-                .iter()
-                .any(|(field, micros)| *micros > 0 && is_definition_field(*field));
+            let definition_match = lexical_definition_match(&row, &prepared, &fuzzy);
             let evidence = LexicalLaneEvidence {
                 binding: lexical_lane_binding(&row, &candidate, score.matched_kinds),
                 field_scores_micros: score.field_scores,
@@ -2476,7 +2473,8 @@ impl<'a> ArtifactQueryV1<'a> {
                     // outrank every test hit, so their path is read before the
                     // bound can reject them. Other hits share one measured-score
                     // tier and do not inflate just to classify a test path.
-                    let role_rank = lexical_admission_rank(self, document, &draft)?;
+                    let role_rank =
+                        lexical_admission_rank(self, document, &draft, prepared, fuzzy)?;
                     let best_key = (role_rank, Reverse(upper), draft.chunk_id.clone(), document);
                     if ranked.len() == cap
                         && ranked.peek().is_some_and(|worst| best_key >= worst.key)
@@ -3164,11 +3162,38 @@ fn lexical_admission_rank(
     query: &ArtifactQueryV1<'_>,
     document: u32,
     draft: &LexicalDraftV1,
+    prepared: &PreparedLexicalQueryV1<'_>,
+    fuzzy: &FuzzyExpansionsV1,
 ) -> Result<u8, RetrievalPortError> {
     if !draft_definition_match(draft) {
         return Ok(tracedecay_domain::RetrievalSourceRoleV1::ProductionOther.admission_rank());
     }
-    Ok(classify_source_role(&query.row(document)?.logical_path, true).admission_rank())
+    let row = query.row(document)?;
+    let definition_match = lexical_definition_match(&row, prepared, fuzzy);
+    Ok(classify_source_role(&row.logical_path, definition_match).admission_rank())
+}
+
+// A signature's parameter and return types reference other symbols. Definition
+// priority requires the query or its admitted spelling variant to name this row.
+fn lexical_definition_match(
+    row: &ArtifactRowV1,
+    prepared: &PreparedLexicalQueryV1<'_>,
+    fuzzy: &FuzzyExpansionsV1,
+) -> bool {
+    let Some(name) = row.symbol_simple_name.as_deref() else {
+        return false;
+    };
+    let name = normalize_lexical(name);
+    exact_definition_match(
+        row.anchor.grain,
+        Some(&name),
+        prepared
+            .whole_terms
+            .iter()
+            .chain(&prepared.phrases)
+            .map(|(_, normalized)| normalized.as_str())
+            .chain(fuzzy.by_query.values().flatten().map(String::as_str)),
+    )
 }
 
 /// Heap entry ordered by `key` alone. Payload is excluded from equality so a
