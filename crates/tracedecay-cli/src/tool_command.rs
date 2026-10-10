@@ -1393,12 +1393,11 @@ fn json_tool_document(result: &ToolResult) -> Result<Value> {
     if !is_error {
         let encoded = serde_json::to_string(&document)?;
         if encoded.len() > PIPE_SAFE_JSON_BYTES {
-            let structured = document
-                .get("structuredContent")
-                .cloned()
-                .ok_or_else(|| TraceDecayError::Config {
+            let structured = document.get("structuredContent").cloned().ok_or_else(|| {
+                TraceDecayError::Config {
                     message: "the tool rendered its answer without its typed result".to_owned(),
-                })?;
+                }
+            })?;
             let slim = pipe_safe_structured_content(&document, &structured)?;
             document
                 .as_object_mut()
