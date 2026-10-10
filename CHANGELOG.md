@@ -5,12 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0-beta.82](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.81...v1.0.0-beta.82) (2026-10-10)
+
 
 ### Bug Fixes
 
-* **graph:** publish sealed generations with the in-place parallel digest path and report a terminal graph refusal as current instead of warming forever ([#3338](https://github.com/ScriptedAlchemy/tracedecay/issues/3338))
-- **grep:** prune unrelated path-glob subtrees and read bounded batches on the admitted source worker pool, preserving ignore policy, hit order and coverage omissions; cancellation releases queued CPU demand before capacity becomes available.
+* **ci:** type source_role defaults and pin extractor v21 ([#3363](https://github.com/ScriptedAlchemy/tracedecay/issues/3363)) ([73883d8](https://github.com/ScriptedAlchemy/tracedecay/commit/73883d80b503bd704fbdcba89128a252b24baac8))
+* **graph:** publish digest in-place and stop refused warming ([#3343](https://github.com/ScriptedAlchemy/tracedecay/issues/3343)) ([1a9f61e](https://github.com/ScriptedAlchemy/tracedecay/commit/1a9f61e75c0c906c0081633fdeceb9ec101b8474))
+* **grep:** prune scopes and batch admitted source reads ([#3365](https://github.com/ScriptedAlchemy/tracedecay/issues/3365)) ([1f9758e](https://github.com/ScriptedAlchemy/tracedecay/commit/1f9758e0fdea9221d1c8be483a7f02af77b51e1d))
+* **search:** keep name-whitelisted routes scoring symbols ([#3361](https://github.com/ScriptedAlchemy/tracedecay/issues/3361)) ([72bd91f](https://github.com/ScriptedAlchemy/tracedecay/commit/72bd91fba7f14bbb425aa67f3dd183ffb0ae2922))
+* **search:** recover labeled needs on own-symbol definition ranking ([#3355](https://github.com/ScriptedAlchemy/tracedecay/issues/3355)) ([7245fe6](https://github.com/ScriptedAlchemy/tracedecay/commit/7245fe6e9cb7d41e47f71156dda31010995cfea5))
+* Windows mcp template paths and cancel-before-park ([#3350](https://github.com/ScriptedAlchemy/tracedecay/issues/3350)) ([ea789c6](https://github.com/ScriptedAlchemy/tracedecay/commit/ea789c683640552c05d3c27c814950b3fd1b717e))
+
+
+### Performance Improvements
+
+* **ci:** three-way workspace shards + single disk-cache family ([#3337](https://github.com/ScriptedAlchemy/tracedecay/issues/3337)) ([4b800ff](https://github.com/ScriptedAlchemy/tracedecay/commit/4b800ff6b880e1f7a75869ef9bdd26a203760a54))
 
 ## [1.0.0-beta.81](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.80...v1.0.0-beta.81) (2026-10-10)
 
@@ -49,18 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * **ci:** overlap workspace tests and warm their disk cache ([#3323](https://github.com/ScriptedAlchemy/tracedecay/issues/3323)) ([6c72cd2](https://github.com/ScriptedAlchemy/tracedecay/commit/6c72cd221c361b2e36b3db73d45bbde5827d02ea))
 * **index:** assign audit source ownership once per package ([#3322](https://github.com/ScriptedAlchemy/tracedecay/issues/3322)) ([fb5f5c3](https://github.com/ScriptedAlchemy/tracedecay/commit/fb5f5c3c1d6e95bae051e2b42497ff6d28dea157))
-
-## [Unreleased]
-
-### Bug Fixes
-
-* **search:** keep name-whitelisted lexical routes (preferred-symbol and name-filtered phrase/proximity reads) scoring undocumented symbols instead of dropping every match
-* **search:** keep own-symbol definition priority from #3356 and recover remaining labeled direct retrieval needs by treating a short alias as a definition when every term is a name subtoken, scoring name fields on longer natural-language queries only when rustdoc also matches, and weighting that rustdoc above a one-token signature parameter ([#3353](https://github.com/ScriptedAlchemy/tracedecay/issues/3353))
-* **http:** preserve the original timeout when resuming interrupted socket waits
-* **callers:** require tuple-constructor evidence before treating a Rust struct as a callee, including imported and qualified calls
-* **search:** rank production symbol definitions above stronger test-file hits ([#3332](https://github.com/ScriptedAlchemy/tracedecay/issues/3332))
-* **mcp:** carry request cancellation into the verified files resource ([#3339](https://github.com/ScriptedAlchemy/tracedecay/issues/3339))
-* **callers:** keep import and `new` sites instead of an empty complete page, scope `require` rows to module top level, and bind `exports.Name` / `module.exports.Name` assignments ([#3301](https://github.com/ScriptedAlchemy/tracedecay/issues/3301))
 
 ## [1.0.0-beta.78](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.77...v1.0.0-beta.78) (2026-10-10)
 
