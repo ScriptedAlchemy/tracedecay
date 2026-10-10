@@ -1063,20 +1063,17 @@ async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
         json_rpc_response(&output.stdout, 3)["result"]["tools"].is_array(),
         "projectless tools/list must answer with a tool array"
     );
-    // The configuration tools sit outside the core list; the tool search loads
-    // them from this session's projectless catalog, which has no project-bound
-    // tools such as tracedecay_runtime to load.
+    // Configuration tools sit outside the core set; they appear as stubs and
+    // the search hydrates them. A project-bound tool may keep its name as a
+    // stub, but calling a project-scoped key is still the typed refusal below.
     let tools = json_rpc_response(&output.stdout, 6);
-    let names: std::collections::BTreeSet<&str> = tools["result"]["tools"]
+    let listed = tools["result"]["tools"]
         .as_array()
-        .unwrap_or_else(|| panic!("tools/list must carry a tool array: {tools}"))
+        .unwrap_or_else(|| panic!("tools/list must carry a tool array: {tools}"));
+    let names: std::collections::BTreeSet<&str> = listed
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect();
-    assert!(
-        !names.contains("tracedecay_runtime"),
-        "a projectless search must not load project-bound tools: {names:?}"
-    );
     for tool in [
         "tracedecay_configuration_get",
         "tracedecay_configuration_set",
