@@ -1,9 +1,10 @@
 # Measuring returned context agents never use
 
 `scripts/measure-unused-tool-context.py` reads stored agent sessions and
-reports, per `tracedecay_*` MCP tool, how many result bytes and estimated
-tokens the agent later referenced versus ignored. It drives output-trimming
-work (#3372): a tool whose results are mostly unused is a trimming target.
+reports, per `tracedecay_*` MCP tool, how many result bytes the agent later
+referenced versus ignored. Token columns are stored real counts or null. It
+drives output-trimming work (#3372): a tool whose results are mostly unused
+is a trimming target.
 
 ## Run it
 
@@ -35,12 +36,14 @@ lines are reduced to `quote:<chars>c`). Those sanitized rows are safe to cite.
 | `calls` | Calls paired with a stored result, including error results |
 | `errors` | Calls whose result is an error (`isError`); they add no bytes |
 | `calls 0 used` | Non-error calls where no result line was used |
-| `rerequests` | Later same-tool calls that asked for an already-returned path/symbol/quote. Not counted as use. Re-request-after-cut is null until #3373 lands. |
+| `rerequests` | Later same-tool calls that asked for an already-returned path/symbol/quote. Not counted as use. |
+| `after cut` | Those rerequests whose original result recorded an explicit cut. `null` when cut state is unknown, never an estimated 0. |
 | `bytes` | UTF-8 bytes of the result text after removing the MCP envelope |
 | `used bytes` / `unused bytes` | Bytes of used lines / all other lines |
 | `unused %` | `unused bytes / bytes` |
-| `tokens` / `used tokens` | `chars / 4` rounded up, the estimate MCP trailers print; not provider billing |
-| `unused tokens %` | `(tokens - used tokens) / tokens` |
+| `tokens` | Stored `token_count` on the result fact or top-level result object. `null` when that count is missing. Never `chars/4`, tiktoken, or an MCP trailer. |
+| `used tokens` / `unused tokens` | The stored total when every line is used or every line is unused. Mixed lines are `null` (splitting would be an estimate). |
+| `unused tokens %` | `unused tokens / tokens`, or `null` when either side is unmeasured |
 
 The `Coverage` line reports, per provider, how many sessions were discovered,
 loaded, empty, or unreadable (with the daemon's problem code), plus calls whose
@@ -75,7 +78,11 @@ The rules are conservative: a line counts as used only on direct evidence.
    query back never counts as use.
 5. Re-request: a later call of the same `tracedecay_*` tool whose arguments
    share a novelty-filtered anchor is a `rerequest`, not use. Re-request after
-   a cut is not scored until #3373 exists; treat that count as null.
+   a cut is counted only when the original result records `cut` (boolean or
+   `{applied: bool}`). Unknown cut state is `null`, never a guessed 0.
+6. Tokens: only a stored `token_count`. A failed or absent count is `null`.
+   Used/unused tokens are filled only when every line is used or every line
+   is unused. MCP `tracedecay_metrics` trailers are chars/4 and are ignored.
 
 These rules undercount use. An agent that acts on a fact without naming a
 path, symbol, or line (for example "no callers, so it is safe") is scored as
@@ -100,6 +107,8 @@ python3 scripts/test-measure-unused-tool-context.py
 The tests score synthetic transcripts and pin each rule: a read of a returned
 path is used, an unreferenced result is unused, query echoes and earlier
 mentions are not use, later tool output is not use, a later same-tool call
-that repeats a returned path is a rerequest rather than use, JSON keys and
+that repeats a returned path is a rerequest rather than use, a rerequest
+after a recorded cut is counted and an unknown cut is null, missing token
+counts are null, mixed-use results do not split tokens, JSON keys and
 partial words do not match, parallel results in one row keep their own
 content, and error results add no bytes.

@@ -122,10 +122,89 @@ class MatchingRules(unittest.TestCase):
         report = score(Call("g1", "Grep", "{}"), Result("g1", "crates/config/src/loader.rs:42: fn parse_config_file()"))
         self.assertEqual(report.used_lines, 0)
 
-    def test_tokens_use_the_chars_div_four_meter(self) -> None:
+    def test_missing_real_tokens_are_null(self) -> None:
         report = score()
+        self.assertIsNone(report.total_tokens)
+        self.assertIsNone(report.used_tokens)
+        self.assertIsNone(report.unused_tokens)
         row = measure.aggregate([report])[0]
-        self.assertEqual(row["total_tokens"], -(-(len(RESULT) + 1) // 4))
+        self.assertIsNone(row["total_tokens"])
+        self.assertIsNone(row["used_tokens"])
+        self.assertIsNone(row["unused_tokens"])
+        self.assertEqual(row["calls_without_tokens"], 1)
+
+    def test_all_unused_keeps_real_token_total(self) -> None:
+        events = [Call("c1", SEARCH, "{}"), Result("c1", RESULT, tokens=40)]
+        (report,), _ = measure.analyze(events)
+        self.assertEqual((report.total_tokens, report.used_tokens, report.unused_tokens), (40, 0, 40))
+
+    def test_all_used_keeps_real_token_total(self) -> None:
+        events = [
+            Call("c1", SEARCH, "{}"),
+            Result("c1", "fn parse_config_file (crates/config/src/loader.rs:42)", tokens=12),
+            Call("r1", "Read", measure.argument_values({"file_path": "crates/config/src/loader.rs"})),
+        ]
+        (report,), _ = measure.analyze(events)
+        self.assertEqual(report.used_lines, 1)
+        self.assertEqual((report.total_tokens, report.used_tokens, report.unused_tokens), (12, 12, 0))
+
+    def test_mixed_use_does_not_split_tokens(self) -> None:
+        events = [
+            Call("c1", SEARCH, "{}"),
+            Result("c1", RESULT, tokens=40),
+            Call("r1", "Read", measure.argument_values({"file_path": "crates/config/src/loader.rs"})),
+        ]
+        (report,), _ = measure.analyze(events)
+        self.assertEqual(report.used_lines, 1)
+        self.assertEqual(report.total_tokens, 40)
+        self.assertIsNone(report.used_tokens)
+        self.assertIsNone(report.unused_tokens)
+
+    def test_chars_div_four_and_metrics_trailer_are_not_tokens(self) -> None:
+        self.assertFalse(hasattr(measure, "estimate_tokens"))
+        self.assertIsNone(measure.stored_token_count({"after": 9}))
+        self.assertIsNone(measure.stored_token_count({"token_count": "12"}))
+        self.assertEqual(measure.stored_token_count({"token_count": 12}), 12)
+        self.assertIsNone(measure.stored_token_count({"token_count": -1}))
+
+    def test_rerequest_after_cut_is_null_when_cut_is_unknown(self) -> None:
+        events = [
+            Call("c1", SEARCH, "{}"),
+            Result("c1", RESULT),
+            Call("c2", SEARCH, measure.argument_values({"query": "crates/config/src/loader.rs"})),
+            Result("c2", "no later hit"),
+        ]
+        first, _ = measure.analyze(events)[0]
+        self.assertEqual(first.rerequest_calls, 1)
+        self.assertIsNone(first.rerequest_after_cut)
+        self.assertIsNone(measure.aggregate([first])[0]["rerequest_after_cut"])
+
+    def test_rerequest_after_recorded_cut_is_counted(self) -> None:
+        events = [
+            Call("c1", SEARCH, "{}"),
+            Result("c1", RESULT, cut=True),
+            Call("c2", SEARCH, measure.argument_values({"query": "crates/config/src/loader.rs"})),
+            Result("c2", "no later hit", cut=False),
+        ]
+        first, second = measure.analyze(events)[0]
+        self.assertEqual(first.rerequest_after_cut, 1)
+        self.assertEqual(second.rerequest_after_cut, 0)
+        row = measure.aggregate([first, second])[0]
+        self.assertEqual(row["rerequest_after_cut"], 1)
+
+    def test_recorded_cut_without_rerequest_is_zero(self) -> None:
+        events = [Call("c1", SEARCH, "{}"), Result("c1", RESULT, cut=True)]
+        (report,), _ = measure.analyze(events)
+        self.assertEqual(report.rerequest_after_cut, 0)
+
+    def test_aggregate_tokens_are_null_if_any_call_lacks_a_count(self) -> None:
+        measured = measure.analyze([Call("c1", SEARCH, "{}"), Result("c1", RESULT, tokens=40)])[0][0]
+        missing = measure.analyze([Call("c2", SEARCH, "{}"), Result("c2", RESULT)])[0][0]
+        row = measure.aggregate([measured, missing])[0]
+        self.assertIsNone(row["total_tokens"])
+        table = measure.render([row], {"sessions_with_calls": 1})
+        self.assertIn("| null | null | null | null |", table)
+        self.assertNotIn("chars / 4", table)
 
     def test_non_tracedecay_calls_and_unpaired_calls(self) -> None:
         events = [Call("b1", "Bash", "{}"), Result("b1", "src/a.rs"), Call("c9", SEARCH, "{}")]
@@ -171,6 +250,29 @@ class TranscriptNormalization(unittest.TestCase):
         }
         results = [(event.id, event.text, event.is_error) for event in measure.events_from_messages([row])]
         self.assertEqual(results, [("a", "first result", False), ("b", "second result", True)])
+
+    def test_fact_token_count_and_cut_survive_normalization(self) -> None:
+        row = {
+            "timestamp": 1,
+            "role": "tool",
+            "content": RESULT,
+            "message_id": "m",
+            "content_range": {"truncated": False},
+            "metadata_json": json.dumps(
+                {
+                    "facts": [
+                        {
+                            "kind": "tool_result",
+                            "invocation_id": "c1",
+                            "token_count": 18,
+                            "cut": {"applied": True},
+                        }
+                    ]
+                }
+            ),
+        }
+        results = [event for event in measure.events_from_messages([row]) if isinstance(event, Result)]
+        self.assertEqual([(event.tokens, event.cut) for event in results], [(18, True)])
 
     def test_unwrap_mcp_text_envelope(self) -> None:
         text, is_error = measure.unwrap_result(json.dumps([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]))
