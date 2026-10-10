@@ -450,24 +450,24 @@ impl FixedGitIndexRunner {
     }
 
     /// Checks request cancellation and deadline between bounded read chunks.
-    /// Small files allocate only their current size, rather than a full chunk.
+    /// The sampled size only sizes the first allocation; a file that grows
+    /// meanwhile is still read in whole chunks.
     fn read_file_chunks(&self, mut file: File) -> Result<Vec<u8>, NativeGitIndexError> {
-        let mut bytes = Vec::new();
-        let chunk_size = file
+        let size = file
             .metadata()
             .map_err(|error| NativeGitIndexError::Io(error.to_string()))?
             .len()
-            .clamp(1, SNAPSHOT_READ_CHUNK_BYTES as u64) as usize;
-        let mut chunk = vec![0u8; chunk_size];
+            .min(SNAPSHOT_READ_CHUNK_BYTES as u64);
+        let mut bytes = Vec::with_capacity(size as usize);
         loop {
             self.check_cancelled()?;
-            let read = file
-                .read(&mut chunk)
+            let read = (&mut file)
+                .take(SNAPSHOT_READ_CHUNK_BYTES as u64)
+                .read_to_end(&mut bytes)
                 .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
             if read == 0 {
                 return Ok(bytes);
             }
-            bytes.extend_from_slice(&chunk[..read]);
         }
     }
 
