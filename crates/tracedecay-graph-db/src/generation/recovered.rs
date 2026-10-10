@@ -5,7 +5,7 @@ use std::sync::Arc;
 use grafeo_common::types::{ArcStr, NodeId};
 use grafeo_core::graph::GraphStore;
 use grafeo_engine::GrafeoDB;
-use rayon::prelude::*;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_store::runtime::MAX_GRAPH_REPLAY_SOURCE_BYTES_V1;
