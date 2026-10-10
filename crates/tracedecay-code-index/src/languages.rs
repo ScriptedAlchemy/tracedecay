@@ -288,7 +288,7 @@ impl StaticLanguageRegistry {
             // generic call paths. TypeScript v15 (Svelte and Astro v11)
             // retains constructor uses and CommonJS re-export evidence.
             let extractor_revision = match language.as_str() {
-                "rust" => 20,
+                "rust" => 21,
                 "typescript" => 15,
                 "svelte" | "astro" => 11,
                 "go" => 10,
@@ -495,7 +495,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v20");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v21");
 
         assert_eq!(
             registry
