@@ -725,20 +725,27 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
             .is_some_and(json_rpc_error_is_project_open_retryable)
 }
 
-/// Sends one host request through this session's tool surface: a `tools/list`
-/// answer stubs pruned tools, and a stub `tools/call` hydrates the full schema.
+/// Sends one host request through this session's tool surface: a tool search
+/// is answered from the daemon's session catalog, and `tools/list` is narrowed
+/// to the core set plus tools this session already loaded.
 async fn send_host_request(
     surface: &mut ToolSurface,
     socket_path: &Path,
     handshake: &DaemonHandshake,
     request: &DaemonProxyRequest<'_>,
 ) -> Result<Vec<String>> {
+    if let Some((id, query)) = surface.search_request(request.parsed.as_ref()) {
+        let catalog_line =
+            serde_json::json!({ "jsonrpc": "2.0", "id": "tool-search", "method": "tools/list" })
+                .to_string();
+        let catalog = DaemonProxyRequest::new(&catalog_line);
+        let listing =
+            send_daemon_request_with_project_open_retry(socket_path, handshake, &catalog).await?;
+        return Ok(surface.answer_search(&id, &query, &listing));
+    }
     let mut responses =
         send_daemon_request_with_project_open_retry(socket_path, handshake, request).await?;
     surface.rewrite(request.parsed.as_ref(), &mut responses);
-    if let Some(changed) = surface.unfreeze_call(request.parsed.as_ref()) {
-        responses.push(changed);
-    }
     Ok(responses)
 }
 

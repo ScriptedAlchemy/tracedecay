@@ -316,8 +316,9 @@ Runs the MCP server on stdin/stdout for a single client. This is the command \
 agent hosts execute from their MCP configuration, you rarely run it by hand \
 except to debug the protocol. For ad-hoc tool calls from a shell, use \
 `tracedecay tool` instead; both dispatch the same tool registry. `tools/list` \
-starts with a core tool set plus stubs for the rest; calling a stub hydrates \
-the full schema; every tool also answers a direct `tools/call` by name.";
+starts with a core tool set plus `tracedecay_tool_search`; search loads any \
+other catalog tool into the list; every tool also answers a direct \
+`tools/call` by name.";
 
 pub(crate) const SERVE_AFTER_HELP: &str = "\
 Examples:

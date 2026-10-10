@@ -28,10 +28,13 @@ INSPECTOR_VERSION = os.environ.get(
 )
 REQUIRED_TOOLS = {
     "tracedecay_search",
+    "tracedecay_tool_search",
+    "tracedecay_test_map",
+}
+SEARCHABLE_TOOLS = {
     "tracedecay_diagnostics",
     "tracedecay_impact",
     "tracedecay_affected",
-    "tracedecay_test_map",
 }
 
 
@@ -229,6 +232,41 @@ def main() -> int:
         if missing:
             raise SystemExit(
                 "MCP tools/list omitted required tools: " + ", ".join(missing)
+            )
+
+        search = inspect(
+            npx,
+            binary,
+            fixture,
+            environment,
+            "--method",
+            "tools/call",
+            "--tool-name",
+            "tracedecay_tool_search",
+            "--tool-arg",
+            "query=",
+        )
+        try:
+            search_payload = json.loads(search.stdout)
+        except json.JSONDecodeError as error:
+            raise SystemExit(
+                "tracedecay_tool_search returned no typed payload: "
+                + search.stderr.strip()
+            ) from error
+        search_text = "\n".join(
+            item.get("text", "")
+            for item in search_payload.get("content", [])
+            if isinstance(item, dict)
+            and item.get("type") == "text"
+            and isinstance(item.get("text"), str)
+        )
+        missing_searchable = sorted(
+            name for name in SEARCHABLE_TOOLS if name not in search_text
+        )
+        if missing_searchable:
+            raise SystemExit(
+                "tracedecay_tool_search omitted withheld tools: "
+                + ", ".join(missing_searchable)
             )
 
         diagnostics = inspect(
