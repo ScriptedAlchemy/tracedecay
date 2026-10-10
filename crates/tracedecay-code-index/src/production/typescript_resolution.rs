@@ -919,39 +919,89 @@ fn project_join(dir: &str, declared: &str) -> String {
     }
 }
 
-/// `babel src -d .` / `babel src --out-dir dist` inside a package script.
+/// `babel src -d .` / `babel src --out-dir dist` as a shell command, not as
+/// another command's arguments (`echo babel src -d dist`).
 fn babel_src_to_out(script: &str) -> Option<(String, String)> {
-    let tokens: Vec<&str> = script
-        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|'))
-        .filter(|token| !token.is_empty())
-        .collect();
+    shell_simple_commands(script)
+        .into_iter()
+        .find_map(babel_command_src_to_out)
+}
+
+/// Simple commands after `;`, `&&`, `||`, `|`, and `&`. Quotes are not
+/// interpreted: package scripts that declare a babel mapping write the
+/// compiler as a literal command word.
+fn shell_simple_commands(script: &str) -> Vec<&str> {
+    let bytes = script.as_bytes();
+    let mut commands = Vec::new();
+    let mut start = 0;
     let mut index = 0;
-    while index < tokens.len() {
-        if tokens[index] != "babel" && !tokens[index].ends_with("/babel") {
+    while index < bytes.len() {
+        let separator = match bytes[index] {
+            b';' => 1,
+            b'&' if bytes.get(index + 1) == Some(&b'&') => 2,
+            b'&' => 1,
+            b'|' if bytes.get(index + 1) == Some(&b'|') => 2,
+            b'|' => 1,
+            _ => 0,
+        };
+        if separator == 0 {
             index += 1;
             continue;
         }
-        index += 1;
-        let mut source = None;
-        let mut output = None;
-        while index < tokens.len() && tokens[index] != "babel" && !tokens[index].ends_with("/babel")
-        {
-            match tokens[index] {
-                "-d" | "--out-dir" => {
-                    index += 1;
-                    output = tokens.get(index).copied();
-                }
-                token if token.starts_with('-') => {}
-                token if source.is_none() => source = Some(token),
-                _ => {}
-            }
-            index += 1;
-        }
-        if let (Some(source), Some(output)) = (source, output) {
-            return Some((source.to_owned(), output.to_owned()));
-        }
+        commands.push(script[start..index].trim());
+        index += separator;
+        start = index;
     }
-    None
+    commands.push(script[start..].trim());
+    commands.retain(|command| !command.is_empty());
+    commands
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    let Some((key, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_babel_command_word(token: &str) -> bool {
+    token == "babel" || token.ends_with("/babel")
+}
+
+fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let mut index = 0;
+    while index < tokens.len() && is_env_assignment(tokens[index]) {
+        index += 1;
+    }
+    let command_word = tokens.get(index)?;
+    if !is_babel_command_word(command_word) {
+        return None;
+    }
+    index += 1;
+    let mut source = None;
+    let mut output = None;
+    while index < tokens.len() {
+        match tokens[index] {
+            "-d" | "--out-dir" => {
+                index += 1;
+                output = tokens.get(index).copied();
+            }
+            token if token.starts_with('-') => {}
+            token if source.is_none() => source = Some(token),
+            _ => {}
+        }
+        index += 1;
+    }
+    match (source, output) {
+        (Some(source), Some(output)) => Some((source.to_owned(), output.to_owned())),
+        _ => None,
+    }
 }
 
 fn package_script_mappings(
@@ -1122,6 +1172,16 @@ mod tests {
             Some(("src".to_owned(), "dist".to_owned()))
         );
         assert_eq!(babel_src_to_out("BABEL_ENV=production yarn compile"), None);
+        assert_eq!(babel_src_to_out("echo babel src -d dist"), None);
+        assert_eq!(babel_src_to_out("printf babel src -d dist"), None);
+        assert_eq!(
+            babel_src_to_out("echo babel src -d dist && echo still not a compiler"),
+            None
+        );
+        assert_eq!(
+            babel_src_to_out("NODE_ENV=production ./node_modules/.bin/babel src --out-dir dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
     }
 
     #[test]

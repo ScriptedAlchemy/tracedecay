@@ -502,6 +502,38 @@ fn undeclared_missing_relative_stays_unresolved() {
     );
 }
 
+/// `echo babel src -d dist` mentions the compiler as an argument. That is
+/// not a declared mapping, so `./dist/foo` stays unresolved.
+#[test]
+fn echo_babel_script_does_not_declare_mapping() {
+    let root = tempfile::tempdir().expect("echo-babel fixture");
+    std::fs::create_dir_all(root.path().join("src")).expect("src");
+    std::fs::write(
+        root.path().join("package.json"),
+        "{\n  \"name\": \"app\",\n  \"files\": [\"dist\"],\n  \
+         \"scripts\": { \"hint\": \"echo babel src -d dist\" }\n}\n",
+    )
+    .expect("echo babel script");
+    std::fs::write(
+        root.path().join("src/foo.ts"),
+        "export function foo() { return 1; }\n",
+    )
+    .expect("source");
+    std::fs::write(
+        root.path().join("app.ts"),
+        "import { foo } from './dist/foo';\nfoo();\n",
+    )
+    .expect("importer");
+
+    let generation =
+        crate::cross_file_import_calls::publish_fixture_tree(root.path(), "echo-babel-script");
+    let target = symbol(&generation, "src/foo.ts::foo");
+    assert!(
+        resolved_callers(&generation, &target).is_empty(),
+        "echo babel src -d dist must not invent src/foo.ts"
+    );
+}
+
 /// `./dist/foo` is not `src/foo` without a `rootDir`/`outDir` (or babel)
 /// mapping, even when `src/foo.ts` exists.
 #[test]
