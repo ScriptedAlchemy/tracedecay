@@ -355,9 +355,33 @@ fn project_scoped_graph_search_refuses_a_non_launch_project() {
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
         let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
-        let (_target_root, target_cg) = setup_target_project(&fixture).await;
+        let (target_root, target_cg) = setup_target_project(&fixture).await;
         let target_project_id = project_id(&target_cg);
         drop(target_cg);
+        write_file(
+            &target_root.join("src/core/gateway.js"),
+            "export function connectGateway() { return true; }\n",
+        );
+        let rg_other = std::process::Command::new("rg")
+            .args(["-n", "-w", "--", "connectGateway"])
+            .current_dir(&target_root)
+            .output()
+            .unwrap_or_else(|error| panic!("rg must be available: {error}"));
+        let rg_other_text = String::from_utf8_lossy(&rg_other.stdout);
+        assert!(
+            rg_other.status.success() && rg_other_text.contains("src/core/gateway.js"),
+            "rg must see connectGateway in the other enrolled repo: {rg_other_text}"
+        );
+        let rg_launch = std::process::Command::new("rg")
+            .args(["-n", "-w", "--", "connectGateway"])
+            .current_dir(&fixture.project_root)
+            .output()
+            .unwrap_or_else(|error| panic!("rg must be available: {error}"));
+        assert!(
+            rg_launch.status.code() == Some(1),
+            "rg must not see connectGateway in the launch project: {}",
+            String::from_utf8_lossy(&rg_launch.stdout)
+        );
 
         let (status, search) = get_json(
             &agent,

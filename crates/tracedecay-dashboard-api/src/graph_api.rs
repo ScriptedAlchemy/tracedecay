@@ -231,6 +231,12 @@ fn graph_search_complete_zero(
     state: &DashboardState,
     read: graph_service::GraphServiceReadV1<graph_service::GraphSearchPayloadV1>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphSearchPayloadV1>>> {
+    // The match-set denominator is zero findings. `complete_zero_findings`
+    // requires complete coverage, and `DashboardCoverageV1::complete` is the
+    // only constructor that can say that. This is not the indexed-symbol
+    // count; the search payload does not carry one, and inventing it would
+    // look like a second graph read. The domain state is the empty-in-bound
+    // project signal; wrong-project / empty-scope stay on the unavailable path.
     let mut envelope = DashboardEnvelopeV1::complete_zero_findings(
         scope_from_state(state),
         DashboardCoverageV1::complete(0, "symbols"),

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 
 use crate::common::{
@@ -58,6 +59,7 @@ use tracedecay_session_memory::context::RegisteredScopeResolver;
 
 struct DashboardFixture {
     _tmp: TempDir,
+    project_root: std::path::PathBuf,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
 }
@@ -824,9 +826,31 @@ async fn start_dashboard_fixture_seeded(
 
     DashboardFixture {
         _tmp: tmp,
+        project_root,
         base_url,
         server,
     }
+}
+
+/// Ground-truth paths for a word search. Exit 1 is "no hits", not a tool failure.
+fn rg_word_paths(root: &Path, query: &str) -> Vec<String> {
+    let output = Command::new("rg")
+        .args(["-l", "-w", "--glob", "!**/.git/**", "--", query])
+        .current_dir(root)
+        .output()
+        .unwrap_or_else(|error| panic!("rg must be available to ground-truth graph search: {error}"));
+    assert!(
+        output.status.success() || output.status.code() == Some(1),
+        "rg -w {query} failed in {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut paths: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    paths.sort();
+    paths
 }
 
 #[test]
@@ -881,21 +905,60 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
         assert_eq!(status, 200);
         assert_ready_verified_generation(&search);
         assert_eq!(search["payload"]["query"], "dashboard");
+        let rg_dashboard = rg_word_paths(&fixture.project_root, "dashboard");
         assert!(
-            search["payload"]["results"]
-                .as_array()
-                .is_some_and(|rows| rows.iter().any(|row| row["id"] == "n-dashboard")),
-            "search should include the exact dashboard symbol"
+            rg_dashboard
+                .iter()
+                .any(|path| path == "src/dashboard/mod.rs"),
+            "rg must see dashboard in the launch fixture: {rg_dashboard:?}"
         );
+        assert!(
+            search["payload"]["results"].as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["id"] == "n-dashboard" && row["file_path"] == "src/dashboard/mod.rs"
+                })
+            }),
+            "search should include the exact dashboard symbol at the rg path: {search}"
+        );
+
+        let (status, route_search) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/search?q=route_graph&limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_ready_verified_generation(&route_search);
+        let rg_route = rg_word_paths(&fixture.project_root, "route_graph");
+        assert!(
+            rg_route.iter().any(|path| path == "src/dashboard/mod.rs"),
+            "rg must see route_graph in the launch fixture: {rg_route:?}"
+        );
+        assert!(
+            route_search["payload"]["results"]
+                .as_array()
+                .is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row["id"] == "n-route" && row["file_path"] == "src/dashboard/mod.rs"
+                    })
+                }),
+            "search should include route_graph at the rg path: {route_search}"
+        );
+
         let bound_project = search["scope"]["project_id"]
             .as_str()
             .expect("bound search must name its launch project")
             .to_owned();
 
+        assert!(
+            rg_word_paths(&fixture.project_root, "connectGateway").is_empty(),
+            "rg must not see connectGateway in the launch fixture"
+        );
         let (status, empty) = get_json(
             &agent,
             &format!(
-                "{}/api/plugins/graph/search?q=connectGateway_absent_from_this_project&limit=10",
+                "{}/api/plugins/graph/search?q=connectGateway&limit=10",
                 fixture.base_url
             ),
         );
