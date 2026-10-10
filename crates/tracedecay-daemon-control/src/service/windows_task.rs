@@ -1481,6 +1481,13 @@ fn apply_state_with(api: &mut dyn TaskSchedulerApi, desired: DaemonServiceState)
                     api.set_enabled(false)?;
                 }
             }
+            DaemonServiceState::StoppingEnabled | DaemonServiceState::StoppingDisabled => {
+                return Err(TraceDecayError::Config {
+                    message:
+                        "a stopping service observation cannot be applied to a Windows daemon task"
+                            .to_owned(),
+                });
+            }
             DaemonServiceState::Missing | DaemonServiceState::Masked => {}
         }
         Ok(())
@@ -1568,6 +1575,13 @@ fn apply_managed_state_with(
             )
         }),
         DaemonServiceState::Missing => return delete_with(api),
+        DaemonServiceState::StoppingEnabled | DaemonServiceState::StoppingDisabled => {
+            return Err(TraceDecayError::Config {
+                message:
+                    "a stopping service observation cannot be applied to a Windows daemon task"
+                        .to_owned(),
+            });
+        }
     };
     if let Err(operation_error) = operation_result {
         let restore_result = restore_snapshot_with(api, previous);

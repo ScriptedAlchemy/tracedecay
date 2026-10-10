@@ -912,13 +912,20 @@ fn launchd_service_target(id: &Path, profile: &ProfileRoot) -> Result<String> {
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaunchdJobActivity {
+    Running,
+    Stopped,
+    Stopping,
+}
+
 /// A shared launchd domain must never act on a label loaded from another
 /// profile's plist, even when both profiles retain the default label.
-fn launchd_owned_service_running(
+fn launchd_owned_service_activity(
     launchctl: &Path,
     target: &str,
     profile: &ProfileRoot,
-) -> Result<Option<bool>> {
+) -> Result<Option<LaunchdJobActivity>> {
     let output = launchctl_spawn(launchctl, &["print", target])?;
     if !output.status.success() {
         if launchctl_stderr_is_not_loaded(&String::from_utf8_lossy(&output.stderr))
@@ -956,8 +963,9 @@ fn launchd_owned_service_running(
         let state = states.next();
         if states.next().is_none() {
             match state {
-                Some("running") => return Ok(Some(true)),
-                Some("waiting" | "not running") => return Ok(Some(false)),
+                Some("running") => return Ok(Some(LaunchdJobActivity::Running)),
+                Some("waiting" | "not running") => return Ok(Some(LaunchdJobActivity::Stopped)),
+                Some("SIGTERMed") => return Ok(Some(LaunchdJobActivity::Stopping)),
                 _ => {}
             }
         }
@@ -982,17 +990,18 @@ pub(super) fn launchd_service_state(
     profile: &ProfileRoot,
 ) -> Result<DaemonServiceState> {
     let target = launchd_service_target(id, profile)?;
-    let loaded = launchd_owned_service_running(launchctl, &target, profile)?;
+    let loaded = launchd_owned_service_activity(launchctl, &target, profile)?;
     if loaded.is_none() && !launchd_user_service_path(profile)?.try_exists()? {
         return Ok(DaemonServiceState::Missing);
     }
-    let running = loaded == Some(true);
     let enabled = !launchd_service_is_disabled(launchctl, id, profile)?;
-    Ok(match (running, enabled) {
-        (true, true) => DaemonServiceState::RunningEnabled,
-        (true, false) => DaemonServiceState::RunningDisabled,
-        (false, true) => DaemonServiceState::StoppedEnabled,
-        (false, false) => DaemonServiceState::StoppedDisabled,
+    Ok(match (loaded, enabled) {
+        (Some(LaunchdJobActivity::Running), true) => DaemonServiceState::RunningEnabled,
+        (Some(LaunchdJobActivity::Running), false) => DaemonServiceState::RunningDisabled,
+        (Some(LaunchdJobActivity::Stopping), true) => DaemonServiceState::StoppingEnabled,
+        (Some(LaunchdJobActivity::Stopping), false) => DaemonServiceState::StoppingDisabled,
+        (Some(LaunchdJobActivity::Stopped) | None, true) => DaemonServiceState::StoppedEnabled,
+        (Some(LaunchdJobActivity::Stopped) | None, false) => DaemonServiceState::StoppedDisabled,
     })
 }
 
@@ -1044,7 +1053,7 @@ fn launchd_install(
     if !start {
         // launchd bootstraps every plist in ~/Library/LaunchAgents at login,
         // so persist a disabled state to keep --no-start meaning "do not run".
-        launchd_owned_service_running(launchctl, &target, profile)?;
+        launchd_owned_service_activity(launchctl, &target, profile)?;
         run_launchctl(launchctl, &["disable", &target])?;
         return Ok(());
     }
@@ -1096,7 +1105,7 @@ fn launchd_start(
     service_path: &Path,
     socket_path: &Path,
 ) -> Result<()> {
-    launchd_owned_service_running(launchctl, target, profile)?;
+    launchd_owned_service_activity(launchctl, target, profile)?;
     let domain = launchd_domain(id)?;
     run_launchd_commands(
         launchctl,
@@ -1115,7 +1124,7 @@ fn launchd_before_uninstall(
         return Ok(());
     }
     let target = launchd_service_target(id, profile)?;
-    if launchd_owned_service_running(launchctl, &target, profile)?.is_none() {
+    if launchd_owned_service_activity(launchctl, &target, profile)?.is_none() {
         return Ok(());
     }
     run_launchd_commands(launchctl, &launchd_uninstall_command_plan(&target))
@@ -1123,7 +1132,7 @@ fn launchd_before_uninstall(
 
 fn launchd_stop(launchctl: &Path, id: &Path, profile: &ProfileRoot) -> Result<()> {
     let target = launchd_service_target(id, profile)?;
-    if launchd_owned_service_running(launchctl, &target, profile)?.is_none() {
+    if launchd_owned_service_activity(launchctl, &target, profile)?.is_none() {
         return Ok(());
     }
     run_launchctl_allow_not_loaded(launchctl, &["bootout", &target])

@@ -2947,3 +2947,108 @@ fn socket_advice_names_what_it_observed_about_the_unit() {
         "a profile with no home cannot see the unit, so it must not claim none is installed"
     );
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn launchd_termination_preserves_ownership_and_enablement() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let launchctl = fake_service_program(&bin, "launchctl", "#!/bin/sh\nexit 0\n");
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    for (disabled, expected) in [
+        (false, DaemonServiceState::StoppingEnabled),
+        (true, DaemonServiceState::StoppingDisabled),
+    ] {
+        write_executable_script(&launchctl, format!(
+            "#!/bin/sh\nif [ \"$1\" = print ]; then\n  printf 'path = %s\\nstate = SIGTERMed\\n' '{}'\nelif [ \"$1\" = print-disabled ]; then\n  echo '\"com.tracedecay.daemon\" => {disabled}'\nfi\n",
+            plist.display()
+        )).unwrap();
+        let observed = runner.service_state().unwrap();
+        assert_eq!(observed, expected);
+        assert!(!observed.is_running());
+        assert_eq!(observed.is_enabled(), !disabled);
+    }
+    write_executable_script(
+        &launchctl,
+        "#!/bin/sh\necho 'path = /foreign/daemon.plist'\necho 'state = SIGTERMed'\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        runner.service_state(),
+        Err(tracedecay_domain::errors::TraceDecayError::ServiceUnitNotOwned { .. })
+    ));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn launchd_start_replaces_an_owned_terminating_job() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let log = root.path().join("commands");
+    let launchctl = fake_service_program(
+        &bin,
+        "launchctl",
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = print ]; then\n  printf 'path = %s\\nstate = SIGTERMed\\n' '{}'\nelse\n  printf '%s\\n' \"$*\" >> '{}'\nfi\n",
+            plist.display(),
+            log.display()
+        ),
+    );
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    let socket = root.path().join("daemon.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    runner.start(&plist, &socket, TEST_BUILD_VERSION).unwrap();
+    let commands = std::fs::read_to_string(log).unwrap();
+    assert!(commands.contains("bootout gui/501/com.tracedecay.daemon"));
+    assert!(commands.contains("bootstrap gui/501"));
+    assert!(commands.contains("kickstart -k gui/501/com.tracedecay.daemon"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn launchd_termination_is_not_quiescence_while_the_socket_serves() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    std::fs::create_dir_all(profile.data_dir()).unwrap();
+    let socket = profile.data_dir().join("daemon.sock");
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: bin.join("tracedecay"),
+        socket_path: socket.clone(),
+        data_dir_override: None,
+        profile: profile.clone(),
+        remote_tls: None,
+        memory: DaemonServiceMemoryLimitsV1::for_physical_memory(64 << 30),
+    };
+    let plist = super::write_service_unit(&spec).unwrap();
+    let launchctl = fake_service_program(
+        &bin,
+        "launchctl",
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = print ]; then\n  printf 'path = %s\\nstate = SIGTERMed\\n' '{}'\nfi\n",
+            plist.display()
+        ),
+    );
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let error = super::verify_installed_service_quiesced_under_lease_with_runner(&profile, &runner)
+        .unwrap_err();
+    assert!(error.to_string().contains("connectable"));
+    drop(listener);
+    std::fs::remove_file(&socket).unwrap();
+    assert_eq!(
+        super::verify_installed_service_quiesced_under_lease_with_runner(&profile, &runner)
+            .unwrap(),
+        DaemonServiceState::StoppingEnabled
+    );
+}

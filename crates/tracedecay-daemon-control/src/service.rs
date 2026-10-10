@@ -152,6 +152,8 @@ pub enum DaemonServiceState {
     RunningDisabled,
     StoppedEnabled,
     StoppedDisabled,
+    StoppingEnabled,
+    StoppingDisabled,
     Masked,
 }
 
@@ -478,7 +480,10 @@ impl DaemonServiceState {
     }
 
     fn is_enabled(self) -> bool {
-        matches!(self, Self::RunningEnabled | Self::StoppedEnabled)
+        matches!(
+            self,
+            Self::RunningEnabled | Self::StoppedEnabled | Self::StoppingEnabled
+        )
     }
 
     pub fn lifecycle_operator_advice(self) -> String {
@@ -492,6 +497,8 @@ impl DaemonServiceState {
                 .to_string(),
             Self::StoppedDisabled => "TraceDecay daemon unit is installed but stopped and disabled, and may be intentionally held; passive clients do not start or enable it. Run `tracedecay daemon start` only if you want it running while remaining disabled."
                 .to_string(),
+            Self::StoppingEnabled => "TraceDecay daemon unit is stopping and remains enabled; passive clients leave that transition unchanged.".to_string(),
+            Self::StoppingDisabled => "TraceDecay daemon unit is stopping and disabled; passive clients do not restart or enable it.".to_string(),
             Self::Masked => "TraceDecay daemon unit is masked, which is an intentional hold; passive clients leave it masked. Unmask it and run `tracedecay daemon start` only if you want it running."
                 .to_string(),
             Self::Missing => {
@@ -1476,12 +1483,12 @@ pub fn start_service(profile: &ProfileRoot, expected_version: &str) -> Result<()
     // running unit and never changes enablement, so the pre-start enablement
     // names the state an authenticated daemon must actually reach.
     let expected = match pre_start_state {
-        DaemonServiceState::RunningEnabled | DaemonServiceState::StoppedEnabled => {
-            DaemonServiceState::RunningEnabled
-        }
-        DaemonServiceState::RunningDisabled | DaemonServiceState::StoppedDisabled => {
-            DaemonServiceState::RunningDisabled
-        }
+        DaemonServiceState::RunningEnabled
+        | DaemonServiceState::StoppedEnabled
+        | DaemonServiceState::StoppingEnabled => DaemonServiceState::RunningEnabled,
+        DaemonServiceState::RunningDisabled
+        | DaemonServiceState::StoppedDisabled
+        | DaemonServiceState::StoppingDisabled => DaemonServiceState::RunningDisabled,
         // The unit file exists (checked above), so `service_state` cannot
         // report `Missing`, and both Unix service managers refuse to start a
         // masked unit, so a successful start cannot originate from `Masked`;
