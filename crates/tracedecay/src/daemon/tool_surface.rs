@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_mcp::JsonRpcRequest;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
@@ -306,10 +306,7 @@ pub(super) fn roster_sha256(tools: &[Value]) -> String {
         .filter_map(|tool| tool.get("name").and_then(Value::as_str))
         .collect::<Vec<_>>();
     names.sort_unstable();
-    format!(
-        "sha256:{}",
-        hex::encode(Sha256::digest(names.join("\n").as_bytes()))
-    )
+    format!("sha256:{}", sha256_hex(names.join("\n").as_bytes()))
 }
 
 /// An exact name wins; otherwise a term in the name outweighs one in the prose.
@@ -530,7 +527,7 @@ mod tests {
             json!({"name": "a"}),
             json!({"name": "c"}),
         ]);
-        let expected = format!("sha256:{}", hex::encode(Sha256::digest(b"a\nb\nc")));
+        let expected = format!("sha256:{}", sha256_hex(b"a\nb\nc"));
         assert_eq!(hash, expected);
         assert_eq!(
             hash,
