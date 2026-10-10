@@ -29,7 +29,9 @@ use scheduler::{
     AutomationSchedulerHandle, automation_scheduler_configured,
     automation_scheduler_tick_secs_for_project, run_automation_scheduler_tick,
 };
-use tracedecay_contracts::project_open::{ProjectOpenStatusReasonV1, ProjectOpenStatusV1};
+use tracedecay_contracts::project_open::{
+    ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
+};
 #[allow(unused_imports)]
 pub(crate) use tracedecay_daemon_protocol::{
     BrokerListener, BrokerStream, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
@@ -103,6 +105,25 @@ pub fn stalled_project_open_error(status: &ProjectOpenStatusV1) -> TraceDecayErr
             detail,
         ),
     }
+}
+
+/// Reject a successful status/Doctor payload that still carries a stalled
+/// `project_open` snapshot. CLI status and Doctor both use this so a leaked
+/// snapshot cannot stay a printed success or a warning.
+pub fn reject_stalled_project_open_status(daemon_status: &serde_json::Value) -> Result<()> {
+    let Some(project_open) = daemon_status
+        .get("project_open")
+        .cloned()
+        .filter(|value| !value.is_null())
+        .map(serde_json::from_value::<ProjectOpenStatusV1>)
+        .transpose()?
+    else {
+        return Ok(());
+    };
+    if project_open.state != ProjectOpenStatusStateV1::Stalled {
+        return Ok(());
+    }
+    Err(stalled_project_open_error(&project_open))
 }
 
 /// Typed reason a handshake route names a directory the authenticated profile

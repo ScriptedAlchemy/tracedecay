@@ -465,6 +465,35 @@ fn doctor_reports_a_discovery_blocked_daemon_without_recovery_guidance() {
 }
 
 #[test]
+fn stalled_snapshot_on_successful_status_is_a_typed_doctor_failure() {
+    let status = serde_json::json!({
+        "project_open": {
+            "state": "stalled",
+            "reason": "retry_backoff",
+            "retry_after_ms": 1000,
+            "detail": "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases / ProjectSessions",
+        }
+    });
+    let mut counters = DoctorCounters::new();
+    let mut pending_reset = false;
+    let findings = super::render_current_project_daemon_status(
+        &mut counters,
+        std::path::Path::new("/tmp/profile"),
+        std::path::Path::new("/tmp/project.capacity"),
+        Some(&Ok(Some(status))),
+        &mut pending_reset,
+    )
+    .expect("a leaked stalled snapshot must stay a doctor finding");
+    let super::DoctorDaemonFindingsV1::Unread { reason } = findings else {
+        panic!("a leaked stalled snapshot must stay an unread report: {findings:?}");
+    };
+    assert_eq!(
+        (reason, counters.issues, counters.warnings, pending_reset),
+        ("project_server_capacity_reached", 1, 0, false)
+    );
+}
+
+#[test]
 fn stalled_capacity_status_is_a_typed_doctor_failure_not_a_closed_connection() {
     let path = std::path::Path::new("/tmp/project.capacity");
     let capacity = tracedecay_domain::errors::TraceDecayError::project_route(

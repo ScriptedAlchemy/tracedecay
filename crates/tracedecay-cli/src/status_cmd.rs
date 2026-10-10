@@ -152,24 +152,6 @@ fn schema_convergence_line(finding: &SchemaConvergenceFindingV1) -> String {
     )
 }
 
-fn reject_stalled_project_open(daemon_status: &Value) -> tracedecay_domain::errors::Result<()> {
-    let Some(project_open) = daemon_status
-        .get("project_open")
-        .cloned()
-        .filter(|value| !value.is_null())
-        .map(serde_json::from_value::<ProjectOpenStatusV1>)
-        .transpose()?
-    else {
-        return Ok(());
-    };
-    if project_open.state != ProjectOpenStatusStateV1::Stalled {
-        return Ok(());
-    }
-    Err(tracedecay::daemon::stalled_project_open_error(
-        &project_open,
-    ))
-}
-
 fn project_open_line(status: &ProjectOpenStatusV1) -> String {
     let reason = match status.reason {
         ProjectOpenStatusReasonV1::Converging => "converging",
@@ -354,12 +336,12 @@ async fn handle_status_command_within(
     reject_truncation_envelope(&daemon_status, "tracedecay_status")?;
     if json {
         reject_problem_envelope(&daemon_status, "tracedecay_status")?;
-        reject_stalled_project_open(&daemon_status)?;
+        tracedecay::daemon::reject_stalled_project_open_status(&daemon_status)?;
         println!("{}", serde_json::to_string_pretty(&daemon_status)?);
         return Ok(());
     }
     reject_problem_envelope(&daemon_status, "tracedecay_status")?;
-    reject_stalled_project_open(&daemon_status)?;
+    tracedecay::daemon::reject_stalled_project_open_status(&daemon_status)?;
     if let Some(project_open) = daemon_status
         .get("project_open")
         .cloned()
@@ -537,9 +519,9 @@ fn status_branch_info(
 #[cfg(test)]
 mod tests {
     use super::{
-        await_daemon_tool_result, project_open_line, reject_stalled_project_open,
-        reject_truncation_envelope, schema_convergence_line, status_branch_info,
-        status_command_deadline_from, status_server_request_budget,
+        await_daemon_tool_result, project_open_line, reject_truncation_envelope,
+        schema_convergence_line, status_branch_info, status_command_deadline_from,
+        status_server_request_budget,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -639,14 +621,18 @@ mod tests {
                 "detail": "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases / ProjectSessions",
             }
         });
-        let error = reject_stalled_project_open(&stalled).expect_err("stalled must fail");
+        let error = tracedecay::daemon::reject_stalled_project_open_status(&stalled)
+            .expect_err("stalled must fail");
         assert_eq!(
             error
                 .project_route_context()
                 .map(|(reason, retryable, _)| (reason, retryable)),
             Some(("project_server_capacity_reached", true))
         );
-        assert!(reject_stalled_project_open(&json!({ "node_count": 1 })).is_ok());
+        assert!(
+            tracedecay::daemon::reject_stalled_project_open_status(&json!({ "node_count": 1 }))
+                .is_ok()
+        );
     }
 
     #[test]

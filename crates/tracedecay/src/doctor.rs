@@ -307,19 +307,18 @@ fn render_current_project_daemon_status(
             dc.warn(&format!("{RUNTIME_TELEMETRY_PENDING} within {RUNTIME_TELEMETRY_WARMUP:?}; health remains unknown until the project is admitted"));
             DoctorDaemonFindingsV1::unread("daemon_storage_telemetry_pending")
         }
-        Some(Ok(Some(status))) => render_daemon_status(dc, status)?,
+        Some(Ok(Some(status))) => match crate::daemon::reject_stalled_project_open_status(status) {
+            Ok(()) => render_daemon_status(dc, status)?,
+            Err(error) => classify_daemon_status_or_reset(
+                dc,
+                profile_root,
+                project_path,
+                pending_reset,
+                &error,
+            ),
+        },
         Some(Err(error)) => {
-            if let Some((authority, reason)) = tracedecay_mcp::reset_required_context(error) {
-                *pending_reset = true;
-                dc.pending(&format!(
-                    "Current project is not served: {authority} requires reset ({reason}). \
-                     Pending operator action: run `{}`",
-                    tracedecay_mcp::reset_required_command(&authority, Some(project_path))
-                ));
-                DoctorDaemonFindingsV1::unread("reset_required")
-            } else {
-                classify_daemon_status_error(dc, profile_root, project_path, error)
-            }
+            classify_daemon_status_or_reset(dc, profile_root, project_path, pending_reset, error)
         }
     })
 }
@@ -331,6 +330,7 @@ fn render_daemon_status(
     dc: &mut DoctorCounters,
     status: &serde_json::Value,
 ) -> tracedecay_domain::errors::Result<DoctorDaemonFindingsV1> {
+    crate::daemon::reject_stalled_project_open_status(status)?;
     render_project_open_status(dc, status)?;
     let schema_convergences = render_schema_convergences(dc, status)?;
     Ok(match canonical_daemon_doctor_report(status)? {
@@ -497,6 +497,9 @@ fn render_project_open_status(
             .as_deref()
             .map_or_else(String::new, |detail| format!(": {detail}")),
     );
+    if project_open.state == ProjectOpenStatusStateV1::Stalled {
+        return Err(crate::daemon::stalled_project_open_error(&project_open));
+    }
     if project_open.state == ProjectOpenStatusStateV1::Completed {
         dc.pass(&message);
     } else if project_open.reason == ProjectOpenStatusReasonV1::UnrepairableVerdict {
@@ -781,6 +784,25 @@ fn daemon_runtime_status(
 /// The closed-connection / WAL recovery text belongs to a daemon that
 /// disappeared while owning the store. A profile that is still warming, or a
 /// repository walk blocked on one path, is a retryable state.
+fn classify_daemon_status_or_reset(
+    dc: &mut DoctorCounters,
+    profile_root: &Path,
+    project_path: &Path,
+    pending_reset: &mut bool,
+    error: &tracedecay_domain::errors::TraceDecayError,
+) -> DoctorDaemonFindingsV1 {
+    if let Some((authority, reason)) = tracedecay_mcp::reset_required_context(error) {
+        *pending_reset = true;
+        dc.pending(&format!(
+            "Current project is not served: {authority} requires reset ({reason}). \
+             Pending operator action: run `{}`",
+            tracedecay_mcp::reset_required_command(&authority, Some(project_path))
+        ));
+        return DoctorDaemonFindingsV1::unread("reset_required");
+    }
+    classify_daemon_status_error(dc, profile_root, project_path, error)
+}
+
 fn classify_daemon_status_error(
     dc: &mut DoctorCounters,
     profile_root: &Path,
