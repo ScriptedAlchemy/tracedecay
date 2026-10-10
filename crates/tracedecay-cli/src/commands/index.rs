@@ -246,8 +246,10 @@ async fn brokered_init(
 }
 
 /// How long `init --wait` holds for the first ready generation after
-/// reconcile is queued. Matches the existing init admission budget.
+/// reconcile is queued. The CLI deadline is slightly longer than the
+/// `wait_for` budget so dispatch cannot refuse `timeout_ms` as oversized.
 const INIT_FIRST_GENERATION_WAIT: Duration = Duration::from_secs(120);
+const INIT_FIRST_GENERATION_WAIT_MS: u64 = 110_000;
 
 fn init_queued_not_ready_receipt(project_path: &Path) -> String {
     format!(
@@ -284,17 +286,13 @@ async fn wait_for_first_generation(
     project_path: &Path,
 ) -> tracedecay_domain::errors::Result<()> {
     let deadline = Instant::now() + INIT_FIRST_GENERATION_WAIT;
-    let timeout_ms = match u64::try_from(INIT_FIRST_GENERATION_WAIT.as_millis()) {
-        Ok(ms) => ms,
-        Err(_) => u64::MAX,
-    };
     let result = tracedecay::daemon::call_default_tool_awaiting_project_open(
         profile,
         handshake,
         "tracedecay_status",
         serde_json::json!({
             "format": "json",
-            "wait_for": {"state": "ready", "timeout_ms": timeout_ms}
+            "wait_for": {"state": "ready", "timeout_ms": INIT_FIRST_GENERATION_WAIT_MS}
         }),
         deadline,
     )
