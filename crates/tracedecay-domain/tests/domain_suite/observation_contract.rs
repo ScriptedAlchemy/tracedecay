@@ -17,7 +17,7 @@ use tracedecay_domain::{
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId, classify_observation_collision, cline_native_source_successor_id,
     cline_task_native_observation_id, prove_cline_native_source_transition,
-    tool_result_output_was_cut, tool_result_visible_text,
+    tool_result_output_cut_state, tool_result_visible_text,
 };
 
 fn source(session_id: &str) -> ObservationSourceIdentityV1 {
@@ -1441,11 +1441,17 @@ fn tool_result_visible_text_unwraps_mcp_envelopes() {
             .as_deref(),
         Some("hello")
     );
-    assert!(tool_result_output_was_cut(
-        &json!({"truncated": true, "preview": "x"})
-    ));
-    assert!(tool_result_output_was_cut(&json!(
-        "# Truncated Response\n\npreview"
-    )));
-    assert!(!tool_result_output_was_cut(&json!("plain result")));
+    assert_eq!(
+        tool_result_output_cut_state(&json!({"truncated": true, "preview": "x"})),
+        Some(true)
+    );
+    assert_eq!(
+        tool_result_output_cut_state(&json!("# Truncated Response\n\npreview")),
+        Some(true)
+    );
+    assert_eq!(tool_result_output_cut_state(&json!("plain result")), None);
+    assert_eq!(
+        tool_result_output_cut_state(&json!({"truncated": false, "preview": "x"})),
+        Some(false)
+    );
 }

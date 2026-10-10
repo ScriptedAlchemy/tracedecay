@@ -2248,28 +2248,61 @@ fn envelope_text(value: &Value) -> Option<String> {
     }
 }
 
-/// Whether served tool output was trimmed or truncated.
-pub fn tool_result_output_was_cut(content: &Value) -> bool {
+/// Evidence that served tool output was or was not trimmed or truncated.
+///
+/// `Some(true)` means an explicit truncation marker was found: the
+/// `# Truncated Response` header, a `truncated: true` field, or a host
+/// warning such as Codex's `truncated output` notice. `Some(false)` means an
+/// explicit `truncated: false` field declared the output complete. `None`
+/// means there is no evidence for either state; opaque output must not be
+/// certified uncut.
+pub fn tool_result_output_cut_state(content: &Value) -> Option<bool> {
     match content {
-        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+        Value::Null | Value::Bool(_) | Value::Number(_) => None,
         Value::String(text) => {
             let trimmed = text.trim_start();
             if trimmed.starts_with("# Truncated Response") {
-                return true;
+                return Some(true);
             }
-            serde_json::from_str::<Value>(text)
-                .ok()
-                .is_some_and(|value| tool_result_output_was_cut(&value))
+            if let Ok(value) = serde_json::from_str::<Value>(text) {
+                return tool_result_output_cut_state(&value);
+            }
+            native_truncation_marker(trimmed).then_some(true)
         }
-        Value::Array(items) => items.iter().any(tool_result_output_was_cut),
+        Value::Array(items) => items
+            .iter()
+            .map(tool_result_output_cut_state)
+            .fold(None, combine_cut_state),
         Value::Object(map) => {
-            map.get("truncated") == Some(&Value::Bool(true))
-                || map.get("content").is_some_and(tool_result_output_was_cut)
-                || map.get("output").is_some_and(tool_result_output_was_cut)
-                || map.get("text").is_some_and(tool_result_output_was_cut)
-                || map.get("preview").is_some_and(tool_result_output_was_cut)
+            if let Some(truncated) = map.get("truncated").and_then(Value::as_bool) {
+                return Some(truncated);
+            }
+            ["content", "output", "text", "preview", "metadata"]
+                .into_iter()
+                .filter_map(|key| map.get(key))
+                .map(tool_result_output_cut_state)
+                .fold(None, combine_cut_state)
         }
     }
+}
+
+/// The strongest of two cut states: truncation evidence wins over an explicit
+/// complete marker, and either wins over unknown.
+fn combine_cut_state(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether free-text output carries a host truncation warning, such as
+/// Codex's `Warning: truncated output (original token count: N)`.
+fn native_truncation_marker(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("truncated output")
+        || lower.contains("output truncated")
+        || lower.contains("output was truncated")
 }
 
 fn validate_canonical_label(value: &str) -> Result<(), ObservationContractError> {

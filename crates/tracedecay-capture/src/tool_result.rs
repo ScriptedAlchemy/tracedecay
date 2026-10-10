@@ -1,6 +1,7 @@
 use serde_json::Value;
 use tracedecay_domain::{
-    CanonicalObservationFactV1, ObservationId, tool_result_output_was_cut, tool_result_visible_text,
+    CanonicalObservationFactV1, ObservationId, tool_result_output_cut_state,
+    tool_result_visible_text,
 };
 use tracedecay_tokenizer::count_ordinary_tokens;
 
@@ -35,10 +36,14 @@ pub fn accounted_tool_result_with_recorded_output(
     let token_count = visible
         .as_deref()
         .and_then(|text| count_ordinary_tokens(text).ok());
-    let cut = visible.as_ref().map(|_| {
-        tool_result_output_was_cut(&content)
-            || recorded_output.is_some_and(tool_result_output_was_cut)
-    });
+    let cut = match (
+        tool_result_output_cut_state(&content),
+        recorded_output.and_then(tool_result_output_cut_state),
+    ) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        _ => None,
+    };
     CanonicalObservationFactV1::tool_result(invocation_id, content, success, token_count, cut)
 }
 
@@ -76,12 +81,12 @@ mod tests {
     }
 
     #[test]
-    fn records_the_real_tokenizer_count_and_uncut_marker() {
+    fn records_the_real_tokenizer_count_with_unknown_cut_state() {
         let text = "crates/tracedecay-graph-query/src/context/source_read.rs";
         let fact = accounted_tool_result(None, json!(text), Some(true));
         let (token_count, cut, _) = result_fields(&fact);
         assert_eq!(token_count, Some(count_ordinary_tokens(text).unwrap()));
-        assert_eq!(cut, Some(false));
+        assert_eq!(cut, None);
     }
 
     #[test]
@@ -118,7 +123,7 @@ mod tests {
         let expected = count_ordinary_tokens(&visible).unwrap();
         assert_eq!(token_count, Some(expected));
         assert_ne!(token_count, Some(4));
-        assert_eq!(cut, Some(false));
+        assert_eq!(cut, None);
     }
 
     #[test]
@@ -143,7 +148,7 @@ mod tests {
             token_count,
             Some(count_ordinary_tokens("test result: ok").unwrap())
         );
-        assert_eq!(cut, Some(false));
+        assert_eq!(cut, None);
     }
 
     #[test]
@@ -160,7 +165,7 @@ mod tests {
             token_count,
             Some(count_ordinary_tokens("{\"ok\":true}").unwrap())
         );
-        assert_eq!(cut, Some(false));
+        assert_eq!(cut, None);
     }
 
     #[test]
@@ -180,7 +185,7 @@ mod tests {
             token_count,
             Some(count_ordinary_tokens("{\"output\":\"ok\",\"duration\":12}").unwrap())
         );
-        assert_eq!(cut, Some(false));
+        assert_eq!(cut, None);
     }
 
     #[test]
@@ -210,11 +215,56 @@ mod tests {
             let fact = accounted_tool_result(None, json!(body), Some(true));
             let (token_count, cut, _) = result_fields(&fact);
             let expected = count_ordinary_tokens(body).unwrap();
+            let expected_cut = body.contains("# Truncated Response").then_some(true);
             assert_eq!(token_count, Some(expected), "{body}");
-            assert_eq!(cut, Some(body.contains("# Truncated Response")), "{body}");
+            assert_eq!(cut, expected_cut, "{body}");
             let wire = serde_json::to_value(&fact).unwrap();
             assert_eq!(wire["token_count"], expected, "{body}");
-            assert_eq!(wire["cut"], body.contains("# Truncated Response"), "{body}");
+            assert_eq!(
+                wire.get("cut").cloned(),
+                expected_cut.map(|value| json!(value)),
+                "{body}"
+            );
         }
+    }
+
+    #[test]
+    fn marks_native_truncation_warning_as_cut() {
+        let recorded = json!("Warning: truncated output (original token count: 6923)\nfirst page");
+        let fact = accounted_tool_result_with_recorded_output(
+            None,
+            json!(null),
+            Some(true),
+            Some(&recorded),
+        );
+        let (_, cut, _) = result_fields(&fact);
+        assert_eq!(cut, Some(true));
+    }
+
+    #[test]
+    fn honors_an_explicit_truncated_false_marker() {
+        let fact = accounted_tool_result(
+            None,
+            json!({"metadata": {"truncated": false}, "content": "full page"}),
+            Some(true),
+        );
+        let (_, cut, _) = result_fields(&fact);
+        assert_eq!(cut, Some(false));
+    }
+
+    #[test]
+    fn leaves_opaque_output_cut_state_unknown() {
+        let fact = accounted_tool_result_with_recorded_output(
+            None,
+            json!(null),
+            Some(true),
+            Some(&json!("an unmarked legacy result")),
+        );
+        let (token_count, cut, _) = result_fields(&fact);
+        assert_eq!(
+            token_count,
+            Some(count_ordinary_tokens("an unmarked legacy result").unwrap())
+        );
+        assert_eq!(cut, None);
     }
 }
