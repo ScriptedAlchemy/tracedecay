@@ -724,6 +724,19 @@ mod tests {
     }
 
     #[test]
+    fn denied_message_search_with_an_empty_page_stays_denied() {
+        let result = RetainedSurfaceResultV1::MessageSearch(message_search_result(
+            RetainedOutcomeStatusV1::Denied,
+            Some(0),
+            Some(Vec::new()),
+        ));
+        assert_eq!(
+            result.evidence_facts(),
+            Err(RetainedSurfaceEvidenceTerminalV1::Denied)
+        );
+    }
+
+    #[test]
     fn cancelled_refresh_receipt_remains_status_evidence() {
         let facts = cancelled_refresh_status(Some(refresh_receipt(
             SessionRefreshTerminalStateResultV1::Cancelled,
