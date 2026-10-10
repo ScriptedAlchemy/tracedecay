@@ -1136,6 +1136,7 @@ async fn dispatch_project_command(
             path_flag,
             adopt_project,
             fresh,
+            wait,
         } => {
             // clap enforces that at most one of these is present.
             commands::handle_init(
@@ -1144,6 +1145,7 @@ async fn dispatch_project_command(
                 adopt_project,
                 fresh,
                 assume_yes,
+                wait,
             )
             .await?;
         }

@@ -11,6 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * **callers:** keep import and `new` sites instead of an empty complete page, scope `require` rows to module top level, and bind `exports.Name` / `module.exports.Name` assignments ([#3301](https://github.com/ScriptedAlchemy/tracedecay/issues/3301))
 
+## [1.0.0-beta.78](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.77...v1.0.0-beta.78) (2026-10-10)
+
+
+### Bug Fixes
+
+* **cli:** report daemon readiness through the status exit code ([#3317](https://github.com/ScriptedAlchemy/tracedecay/issues/3317)) ([4561a09](https://github.com/ScriptedAlchemy/tracedecay/commit/4561a09be3b9cd023923ca5ebe2bf19c2bb3722b))
+* **daemon:** fail closed without a systemd user bus ([#3316](https://github.com/ScriptedAlchemy/tracedecay/issues/3316)) ([19f93ed](https://github.com/ScriptedAlchemy/tracedecay/commit/19f93ed62b3a181ed6923b42d4908ea6a6bb649a))
+* **daemon:** preserve launchd stopping state during updates ([#3320](https://github.com/ScriptedAlchemy/tracedecay/issues/3320)) ([1315bea](https://github.com/ScriptedAlchemy/tracedecay/commit/1315bea99e86817f35c8ec73ecc5ddca9e293b06))
+* **dashboard:** fail closed on ambient launch and wrong-project search ([#3309](https://github.com/ScriptedAlchemy/tracedecay/issues/3309)) ([d154f30](https://github.com/ScriptedAlchemy/tracedecay/commit/d154f309cc6a94400e5b68a1036ee7de49bd87bd))
+* **extraction:** emit symbols for CommonJS module.exports ([#3308](https://github.com/ScriptedAlchemy/tracedecay/issues/3308)) ([657eae6](https://github.com/ScriptedAlchemy/tracedecay/commit/657eae6948a1a6350d73e089c82f7a1c27419112))
+* **release:** use BFD for ARM Linux binary links ([#3314](https://github.com/ScriptedAlchemy/tracedecay/issues/3314)) ([79b1279](https://github.com/ScriptedAlchemy/tracedecay/commit/79b12797b4338bcc2ba9f160a4373b6c1e2f05ad))
+* **sessions:** type empty search source vs query miss ([#3311](https://github.com/ScriptedAlchemy/tracedecay/issues/3311)) ([17c342e](https://github.com/ScriptedAlchemy/tracedecay/commit/17c342ebaf2aaa069cabba5d88e1794668ddcbb6))
+* **tool-sweep:** recognize owner side effect classes ([#3300](https://github.com/ScriptedAlchemy/tracedecay/issues/3300)) ([34e94c9](https://github.com/ScriptedAlchemy/tracedecay/commit/34e94c9b4052d80c4900c44323810771234cfc48))
+* **windows:** unblock WAL checkpoint drain and crate_universe regen on Windows ([#3298](https://github.com/ScriptedAlchemy/tracedecay/issues/3298)) ([15661d0](https://github.com/ScriptedAlchemy/tracedecay/commit/15661d05d250c80195efefb2ecf0658853589590))
+
+
+### Performance Improvements
+
+* **sessions:** offload historical ingest off Tokio workers ([#3294](https://github.com/ScriptedAlchemy/tracedecay/issues/3294)) ([cba2358](https://github.com/ScriptedAlchemy/tracedecay/commit/cba2358c1fe60e641557bae096399fde1e9c13d1))
+* **token-counting:** share fallible compressed vocabulary loading ([#3293](https://github.com/ScriptedAlchemy/tracedecay/issues/3293)) ([d762170](https://github.com/ScriptedAlchemy/tracedecay/commit/d762170e8e4f2c0422991208387876855264a5a8))
+
 ## [1.0.0-beta.77](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.76...v1.0.0-beta.77) (2026-10-10)
 
 

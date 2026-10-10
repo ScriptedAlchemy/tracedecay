@@ -95,19 +95,23 @@ Error: project route error (code_index_scheduler_unavailable): project initializ
 
 Confirm the daemon with `tracedecay daemon status` and re-run `init`.
 
-TraceDecay enrolls the repository with the daemon, captures an exact checkout
-snapshot, and publishes a validated code generation. Project facts, sessions,
-and lossless LCM remain project-wide; code generations retain exact repository,
-checkout, worktree, ref, commit/tree, snapshot, and generation provenance.
-Storage is daemon-owned (an explicit local `.tracedecay/` install is only a
-location choice), and clients never open a project database directly.
+`tracedecay init` enrolls the repository with the daemon and requests the
+first code generation. The default command returns a typed not-ready receipt
+(`first generation not ready` / `code_index_reconciliation_requested`) once
+that request is queued; the generation publishes in the background. Pass
+`--wait` to hold until it is ready. Project facts, sessions, and lossless LCM
+remain project-wide; code generations retain exact repository, checkout,
+worktree, ref, commit/tree, snapshot, and generation provenance. Storage is
+daemon-owned (an explicit local `.tracedecay/` install is only a location
+choice), and clients never open a project database directly.
 
-`init` returns when enrollment and the code-index request are accepted. The
-first generation is built in the background. Run `tracedecay status --json`
-to inspect progress, the selected generation, and its coverage. A `converging`
-project or `unavailable` graph is not ready; a successful status command only
-means the diagnostic request completed. Once the requested generation is
-current, inspect what was indexed:
+`init` returns a typed not-ready receipt when enrollment and the code-index
+request are accepted. The first generation is built in the background. Run
+`tracedecay status --json` to inspect progress, the selected generation, and
+its coverage. A `converging` project or `unavailable` graph is not ready; a
+successful status command only means the diagnostic request completed. Pass
+`tracedecay init --wait` to hold until the first generation is ready. Once
+that generation is current, inspect what was indexed:
 
 ```bash
 tracedecay status
