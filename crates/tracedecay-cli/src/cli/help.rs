@@ -29,7 +29,9 @@ For more help on a command: tracedecay <command> --help";
 
 pub(crate) const INIT_LONG_ABOUT: &str = "\
 Enrolls the repository and requests its first code generation. Returns once \
-the daemon accepts the request; indexing continues in the background. Check \
+the daemon accepts the request; the default receipt is typed `not_ready` / \
+`code_index_reconciliation_requested` and indexing continues in the \
+background. Pass `--wait` to hold until that generation is ready. Check \
 `tracedecay status --json` for current generation coverage: converging or \
 unavailable is not ready, and exit 0 alone does not establish readiness. Requires a \
 running daemon: init is brokered through the daemon-owned code-index \
@@ -47,6 +49,7 @@ pub(crate) const INIT_AFTER_HELP: &str = "\
 Examples:
   tracedecay daemon install-service              Start the daemon init brokers through
   tracedecay init                                Enroll and request the first index
+  tracedecay init --wait                         Enroll and hold until the first generation is ready
   tracedecay init /path/to/repo                  Enroll another repository
   tracedecay init /new/path --adopt-project proj_abc123
   tracedecay init /new/path --yes                Adopt the unique moved non-git store
@@ -72,9 +75,12 @@ Related: tracedecay init (first index), tracedecay status (freshness check).";
 
 pub(crate) const STATUS_LONG_ABOUT: &str = "\
 Reports node/edge/file counts, database size, index freshness, active branch, \
-and tokens saved for the resolved project. Reach for it first when deciding \
-whether the index is stale or when an agent needs project statistics; \
-`--json` emits the same data machine-readably.";
+and tokens saved for the resolved project. Immediately after `init`, status \
+can still be typed `project_open.state=converging` and \
+`graph_statistics.state=unavailable`; that is a not-ready reading, not a \
+usable index, and it still exits 0 because it is a typed state. Reach for \
+status when deciding whether the index is ready or stale; `--json` emits \
+the same data machine-readably.";
 
 pub(crate) const STATUS_AFTER_HELP: &str = "\
 Examples:

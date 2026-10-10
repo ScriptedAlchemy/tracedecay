@@ -1,8 +1,14 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+use tokio::time::Instant;
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_project::project::TraceDecay;
 
+use tracedecay_contracts::code_index_freshness::{
+    CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
+    CodeIndexReadinessWaitOutcomeV1,
+};
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::{
     AdminCliRegistryEmptyV1, AdminCliResultV1, AdminCliSurfaceRequestV1, AdminSyncAdmissionV1,
@@ -65,6 +71,7 @@ pub(crate) async fn handle_init(
     adopt_project: Option<String>,
     fresh: bool,
     assume_yes: bool,
+    wait: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     let project_path = tracedecay_configuration::resolve_path(path);
     let profile_root = profile.data_dir().to_path_buf();
@@ -85,7 +92,7 @@ pub(crate) async fn handle_init(
     let daemon_available = init_daemon_available(profile);
 
     let project_path_for_remedy = project_path.clone();
-    handle_init_with_daemon_availability(profile, project_path, handshake, daemon_available)
+    handle_init_with_daemon_availability(profile, project_path, handshake, daemon_available, wait)
         .await
         .map_err(|error| annotate_reset_required_init_error(error, &project_path_for_remedy))
 }
@@ -171,9 +178,10 @@ async fn handle_init_with_daemon_availability(
     project_path: PathBuf,
     handshake: tracedecay_daemon_protocol::DaemonHandshake,
     daemon_available: bool,
+    wait: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     if daemon_available {
-        return brokered_init(profile, &project_path, &handshake).await;
+        return brokered_init(profile, &project_path, &handshake, wait).await;
     }
     Err(tracedecay_domain::errors::TraceDecayError::project_route(
         "code_index_scheduler_unavailable",
@@ -186,6 +194,7 @@ async fn brokered_init(
     profile: &ProfileRoot,
     project_path: &Path,
     handshake: &tracedecay_daemon_protocol::DaemonHandshake,
+    wait: bool,
 ) -> tracedecay_domain::errors::Result<()> {
     // Init deliberately triggers a cold project open behind this single
     // status call. The default warming-retry grace is far tighter than a cold
@@ -193,7 +202,7 @@ async fn brokered_init(
     // "daemon tracedecay_status timed out during read before deadline" failures
     // in CI. Give the bootstrap a generous budget so the client waits out the
     // background open instead of abandoning it just before it completes.
-    let init_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    let init_deadline = Instant::now() + Duration::from_secs(120);
     tracedecay::daemon::call_default_tool_awaiting_project_open(
         profile,
         handshake,
@@ -205,7 +214,7 @@ async fn brokered_init(
     // Admission alone does not start indexing: the code-index scheduler mounts
     // on first demand, and the background full-server upgrade that would
     // eventually demand it does not survive a daemon restart. Request the
-    // reconciliation explicitly so the message below reports something that
+    // reconciliation explicitly so the receipt below reports something that
     // actually happened.
     let reconcile = admin_sync(profile, handshake.clone(), init_deadline).await;
     let reconcile = match reconcile {
@@ -213,27 +222,117 @@ async fn brokered_init(
             if !code_index_reconciliation_is_optional(project_path, &error).await {
                 return Err(error);
             }
-            eprintln!(
-                "initialized {}; code indexing is unavailable for this non-Git project",
-                project_path.display()
-            );
+            eprintln!("{}", init_unavailable_receipt(project_path));
             return Ok(());
         }
         Ok(reconcile) => reconcile,
     };
     match reconcile.status {
         // `queued` means the daemon accepted the reconcile demand into its
-        // pre-mount queue. Init's confirmation names that request
-        // (`requested`), not the internal queue noun.
-        AdminSyncAdmissionV1::Queued => eprintln!(
-            "initialized {}; daemon code-index reconciliation requested",
-            project_path.display()
-        ),
-        AdminSyncAdmissionV1::NotApplicable => eprintln!(
-            "initialized {}; code indexing does not apply to this non-Git project",
-            project_path.display()
-        ),
+        // pre-mount queue. Default init names that request as a typed
+        // not-ready receipt; `--wait` holds on the existing status
+        // `wait_for` ready gate until the first generation serves.
+        AdminSyncAdmissionV1::Queued => {
+            if wait {
+                return wait_for_first_generation(profile, handshake, project_path).await;
+            }
+            eprintln!("{}", init_queued_not_ready_receipt(project_path));
+        }
+        AdminSyncAdmissionV1::NotApplicable => {
+            eprintln!("{}", init_not_applicable_receipt(project_path));
+        }
     }
+    Ok(())
+}
+
+/// How long `init --wait` holds for the first ready generation after
+/// reconcile is queued. Matches the existing init admission budget.
+const INIT_FIRST_GENERATION_WAIT: Duration = Duration::from_secs(120);
+
+fn init_queued_not_ready_receipt(project_path: &Path) -> String {
+    format!(
+        "enrolled {}; first generation not ready (code_index_reconciliation_requested)\n\
+         poll `tracedecay status` until graph_statistics.state is available, or rerun `tracedecay init --wait`",
+        project_path.display()
+    )
+}
+
+fn init_ready_receipt(project_path: &Path) -> String {
+    format!(
+        "enrolled {}; first generation ready",
+        project_path.display()
+    )
+}
+
+fn init_not_applicable_receipt(project_path: &Path) -> String {
+    format!(
+        "enrolled {}; code indexing does not apply to this non-Git project",
+        project_path.display()
+    )
+}
+
+fn init_unavailable_receipt(project_path: &Path) -> String {
+    format!(
+        "enrolled {}; code indexing is unavailable for this non-Git project",
+        project_path.display()
+    )
+}
+
+async fn wait_for_first_generation(
+    profile: &ProfileRoot,
+    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
+    project_path: &Path,
+) -> tracedecay_domain::errors::Result<()> {
+    let deadline = Instant::now() + INIT_FIRST_GENERATION_WAIT;
+    let timeout_ms = match u64::try_from(INIT_FIRST_GENERATION_WAIT.as_millis()) {
+        Ok(ms) => ms,
+        Err(_) => u64::MAX,
+    };
+    let result = tracedecay::daemon::call_default_tool_awaiting_project_open(
+        profile,
+        handshake,
+        "tracedecay_status",
+        serde_json::json!({
+            "format": "json",
+            "wait_for": {"state": "ready", "timeout_ms": timeout_ms}
+        }),
+        deadline,
+    )
+    .await?;
+    let payload = tracedecay::daemon::recover_truncated_tool_payload(
+        profile,
+        handshake,
+        "tracedecay_status",
+        result,
+        Some(deadline),
+    )
+    .await?;
+    crate::commands::reject_problem_envelope(&payload, "tracedecay_status")?;
+    if let Some(wait) = payload.get("wait").cloned() {
+        match serde_json::from_value::<CodeIndexReadinessWaitOutcomeV1>(wait)? {
+            CodeIndexReadinessWaitOutcomeV1::Reached => {}
+            CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => {
+                return Err(tracedecay_domain::errors::TraceDecayError::tool_refused(
+                    "tracedecay_status",
+                    Some(CODE_INDEX_READINESS_WAIT_TIMED_OUT.to_owned()),
+                    Some(format!(
+                        "init --wait timed out before the first generation was ready; last \
+                         state: {last_state}"
+                    )),
+                ));
+            }
+            CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => {
+                return Err(tracedecay_domain::errors::TraceDecayError::tool_refused(
+                    "tracedecay_status",
+                    Some(CODE_INDEX_READINESS_WAIT_UNAVAILABLE.to_owned()),
+                    Some(format!(
+                        "init --wait cannot reach a ready first generation: {reason}"
+                    )),
+                ));
+            }
+        }
+    }
+    eprintln!("{}", init_ready_receipt(project_path));
     Ok(())
 }
 
@@ -337,6 +436,27 @@ mod daemon_precondition_tests {
             "an endpoint with no listener must not count as an available daemon"
         );
     }
+
+    #[test]
+    fn queued_init_receipt_is_typed_not_ready() {
+        let text = super::init_queued_not_ready_receipt(Path::new("/repo"));
+        assert!(
+            text.contains("enrolled /repo"),
+            "receipt must name enrollment, not a finished index: {text}"
+        );
+        assert!(
+            text.contains("first generation not ready"),
+            "receipt must say the first generation is not ready: {text}"
+        );
+        assert!(
+            text.contains("code_index_reconciliation_requested"),
+            "receipt must carry the typed not-ready reason: {text}"
+        );
+        assert!(
+            !text.contains("initialized "),
+            "receipt must not look like a finished index: {text}"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -378,6 +498,7 @@ mod init_bootstrap_tests {
             &ProfileRoot::new(&profile),
             project.clone(),
             handshake,
+            false,
             false,
         )
         .await

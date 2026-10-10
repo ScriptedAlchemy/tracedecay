@@ -182,6 +182,11 @@ pub enum Commands {
         /// could be adopted at this root.
         #[arg(long)]
         fresh: bool,
+        /// Hold until the first code generation is ready. Without this flag,
+        /// init returns a typed not-ready receipt once reconciliation is
+        /// requested and the index continues in the background.
+        #[arg(long)]
+        wait: bool,
     },
     /// Incremental sync (project must already be initialized with `tracedecay init`)
     #[command(long_about = SYNC_LONG_ABOUT, after_help = SYNC_AFTER_HELP)]

@@ -65,6 +65,15 @@ tracedecay install
 tracedecay status --json            # inspect readiness and coverage
 ```
 
+`tracedecay init` enrolls the project and requests the first code
+generation. It returns a typed not-ready receipt once that request is
+accepted; the index continues in the background. `tracedecay status`
+immediately afterwards can still show `project_open.state=converging` and
+`graph_statistics.state=unavailable` with exit 0 — that is a typed
+not-ready reading, not a usable project. Pass `tracedecay init --wait` to
+block until the first generation is ready, or poll `status` until
+`graph_statistics.state` is available.
+
 The daemon comes first. `tracedecay init` is brokered through the
 daemon-owned code-index scheduler, so without a running daemon it refuses
 before it writes anything:
@@ -72,12 +81,6 @@ before it writes anything:
 ```
 Error: project route error (code_index_scheduler_unavailable): project initialization requires the daemon-owned code-index scheduler; start the daemon and retry
 ```
-
-`init` returns after enrollment and the indexing request are accepted; the first
-code generation is published in the background. Check `tracedecay status --json`
-for the requested generation's freshness and coverage before using it.
-`converging` or `unavailable` means the index is still not ready; exit 0 alone
-is not a readiness signal.
 
 On headless Linux without a systemd user bus, run `tracedecay daemon run` in
 one terminal and keep it running while using the commands above in another.

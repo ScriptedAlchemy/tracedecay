@@ -936,12 +936,60 @@ fn init_skips_gitignore_prompt_when_stdin_not_a_terminal() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     // `init` is brokered through the daemon now: it admits the project and
-    // then asks the daemon-owned code-index scheduler to reconcile, so the
-    // confirmation names the reconciliation it actually requested rather than
-    // an index it wrote itself.
+    // then asks the daemon-owned code-index scheduler to reconcile. The
+    // default confirmation is a typed not-ready receipt, not a finished index.
     assert!(
-        stderr.contains("daemon code-index reconciliation requested"),
-        "stderr should confirm non-interactive initialization\nstderr:\n{stderr}"
+        stderr.contains("first generation not ready")
+            && stderr.contains("code_index_reconciliation_requested"),
+        "stderr should confirm enrollment without looking finished\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("initialized "),
+        "default init must not look like a finished index\nstderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn init_wait_holds_until_first_generation_is_ready() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
+    git(project.path(), &["init", "-b", "main"]);
+    commit_all(project.path(), "fixture repository");
+
+    let mut command = tracedecay_command(home.path(), project.path());
+    command.args(["init", "--wait"]);
+    let output = run_with_timeout(command, cli_timeout());
+    assert!(
+        output.status.success(),
+        "init --wait should succeed once the first generation is ready\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("first generation ready"),
+        "init --wait must report a ready receipt\nstderr:\n{stderr}"
+    );
+
+    let mut status = tracedecay_command(home.path(), project.path());
+    status.args(["status", "--json"]);
+    let status_output = run_with_timeout(status, cli_timeout());
+    assert!(
+        status_output.status.success(),
+        "status after init --wait should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status_output.stdout),
+        String::from_utf8_lossy(&status_output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&status_output.stdout)
+        .expect("status --json should print one document");
+    assert_ne!(
+        payload
+            .pointer("/graph_statistics/state")
+            .and_then(serde_json::Value::as_str),
+        Some("unavailable"),
+        "init --wait must leave a usable graph\n{payload}"
     );
 }
 

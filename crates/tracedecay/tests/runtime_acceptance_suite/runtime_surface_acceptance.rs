@@ -600,7 +600,8 @@ fn run_storage_status(home: &Path, project: &Path, json_output: bool) -> Output 
 /// `tracedecay init` deliberately returns once reconciliation is *requested*:
 /// `handle_admin_sync` answers `"status": "queued"`
 /// (`crates/tracedecay/src/mcp/tools/handlers/info/status.rs`) and the CLI
-/// reports "daemon code-index reconciliation requested"
+/// prints a typed not-ready receipt
+/// (`first generation not ready` / `code_index_reconciliation_requested`)
 /// (`crates/tracedecay-cli/src/commands/index.rs`). Project open publishes the
 /// route immediately and, with no sealed generation yet, registers a warming
 /// LSP owner carrying no analyzer providers at all
