@@ -3,9 +3,11 @@
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use tracedecay::mcp::McpServer;
+use tracedecay_mcp::transport::ChannelTransport;
 
 use super::support::{
-    jsonrpc_request, response_with_id, run_client_connection_with_messages,
+    jsonrpc_request, parse_response, response_with_id, run_client_connection_with_messages,
     spec_initialize_request, successful_tool_text,
 };
 
@@ -16,6 +18,80 @@ fn listed_tool_names(listed: &Value) -> BTreeSet<String> {
         .iter()
         .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
         .collect()
+}
+
+async fn read_response_id(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    id: u64,
+) -> Value {
+    loop {
+        let line = receiver.recv().await.expect("response line");
+        let parsed = parse_response(&line);
+        if parsed["id"] == json!(id) {
+            return parsed;
+        }
+    }
+}
+
+/// Reads back a stored oversized response the way a host would: page through
+/// `tracedecay_retrieve` until the body is whole, then parse it.
+async fn retrieve_stored_response(server: &Arc<McpServer>, envelope: &Value) -> Value {
+    let handle = envelope["handle"]
+        .as_str()
+        .unwrap_or_else(|| panic!("truncated response must mint a retrieval handle: {envelope}"));
+    assert_eq!(
+        envelope["retrieve_tool"].as_str(),
+        Some("tracedecay_retrieve"),
+        "truncated response must name the retrieval tool: {envelope}"
+    );
+    let (mut transport, sender, mut receiver) = ChannelTransport::new();
+    let task = {
+        let server = Arc::clone(server);
+        tokio::spawn(async move {
+            Box::pin(server.run_connection(&mut transport))
+                .await
+                .unwrap();
+        })
+    };
+    sender
+        .send(spec_initialize_request(json!(10)))
+        .expect("send initialize");
+    read_response_id(&mut receiver, 10).await;
+    let mut offset = 0_u64;
+    let mut request_id = 11_u64;
+    let mut body = String::new();
+    loop {
+        sender
+            .send(jsonrpc_request(
+                json!(request_id),
+                "tools/call",
+                json!({
+                    "name": "tracedecay_retrieve",
+                    "arguments": { "handle": handle, "offset": offset, "format": "json" }
+                }),
+            ))
+            .expect("send retrieve");
+        let page_response = read_response_id(&mut receiver, request_id).await;
+        request_id += 1;
+        let page: Value =
+            serde_json::from_str(successful_tool_text(&page_response, "tracedecay_retrieve"))
+                .expect("retrieve page JSON");
+        body.push_str(
+            page["content"]
+                .as_str()
+                .unwrap_or_else(|| panic!("retrieve page must carry content: {page}")),
+        );
+        if page["has_more"].as_bool() != Some(true) {
+            break;
+        }
+        offset = page["next_offset"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("a continued page must name its offset: {page}"));
+    }
+    drop(sender);
+    while receiver.recv().await.is_some() {}
+    task.await.expect("retrieve connection task");
+    serde_json::from_str(&body).expect("retrieved catalog JSON")
 }
 
 #[cfg(feature = "test-transport")]
@@ -103,16 +179,18 @@ async fn default_handshake_is_cheaper_and_every_tool_stays_reachable() {
         handshake_names.len(),
         full["tools"].as_array().map(Vec::len).unwrap_or(0)
     );
-    eprintln!(
-        "mcp tool-list handshake tokens before={before_tokens} after={default_tokens} default_tools={} full_tools={}",
-        handshake_names.len(),
-        full["tools"].as_array().map(Vec::len).unwrap_or(0)
-    );
 
     let search = response_with_id(&responses, json!(3));
-    let catalog: Value =
+    let search_body: Value =
         serde_json::from_str(successful_tool_text(&search, "tracedecay_tool_search"))
             .expect("tool search catalog JSON");
+    // A catalog larger than one response frame arrives as a bounded preview
+    // plus a retrieval handle; page the stored body back like a host would.
+    let catalog: Value = if search_body["truncated"].as_bool() == Some(true) {
+        retrieve_stored_response(&server, &search_body).await
+    } else {
+        search_body
+    };
     let reachable: BTreeSet<String> = catalog["tools"]
         .as_array()
         .unwrap_or_else(|| panic!("tool search catalog: {catalog}"))

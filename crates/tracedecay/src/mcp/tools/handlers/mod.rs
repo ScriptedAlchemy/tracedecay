@@ -433,6 +433,29 @@ impl ToolCallRegistryOptions<'_> {
     }
 }
 
+/// `tracedecay_tool_search` under the mounted project's response-handle
+/// root: an oversized catalog body binds to a `tracedecay_retrieve` handle
+/// instead of one oversized frame.
+fn catalog_discovery_tool_search(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
+    tracedecay_mcp::tools::catalog_discovery::execute_tool_search(
+        Some(&cg.store_layout().response_handle_root),
+        args,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: error.to_string(),
+    })
+}
+
+fn reject_hermes_home_argument(tool_name: &str, args: &Value) -> Result<()> {
+    if args.get("hermes_home").is_none() {
+        return Ok(());
+    }
+    Err(ApplicationSurfaceAdapterError::invalid_request(format!(
+        "unknown parameter `hermes_home` for `{tool_name}`"
+    ))
+    .into_trace_decay_error())
+}
+
 pub fn handle_tool_call_with_registry_options<'a>(
     cg: &'a TraceDecay,
     tool_name: &'a str,
@@ -441,12 +464,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
     let dispatch = async move {
         tracing::trace!(name: "mcp.tool.name", value = ?mcp_tool_bounded_identity(tool_name));
-        if args.get("hermes_home").is_some() {
-            return Err(ApplicationSurfaceAdapterError::invalid_request(format!(
-                "unknown parameter `hermes_home` for `{tool_name}`"
-            ))
-            .into_trace_decay_error());
-        }
+        reject_hermes_home_argument(tool_name, &args)?;
         if let Some(retained) = RetainedSurfaceOperation::from_tool_name(tool_name) {
             // A profile-targeted call names no project, so it skips project
             // selector routing and goes straight to the profile owner.
@@ -493,11 +511,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
         let dispatch_group = classify_mcp_tool_dispatch_group(tool_name);
         if dispatch_group == Some(McpToolDispatchGroup::CatalogDiscovery) {
             ensure_mcp_dispatch_available(tool_name)?;
-            return tracedecay_mcp::tools::catalog_discovery::execute_tool_search(&args).map_err(
-                |error| TraceDecayError::Config {
-                    message: error.to_string(),
-                },
-            );
+            return catalog_discovery_tool_search(cg, &args);
         }
         if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
             // Application-surface tools return before the root guard below.

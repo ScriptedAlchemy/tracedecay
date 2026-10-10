@@ -447,10 +447,11 @@ fn run_inner(
             .await;
         }
         if def.name == tracedecay_mcp::TOOL_SEARCH_TOOL_NAME {
-            let result = tracedecay_mcp::tools::catalog_discovery::execute_tool_search(&tool_args)
-                .map_err(|error| TraceDecayError::Config {
-                    message: error.to_string(),
-                })?;
+            let result =
+                tracedecay_mcp::tools::catalog_discovery::execute_tool_search(None, &tool_args)
+                    .map_err(|error| TraceDecayError::Config {
+                        message: error.to_string(),
+                    })?;
             print!(
                 "{}",
                 rendered_tool_output(

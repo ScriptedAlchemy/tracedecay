@@ -1120,6 +1120,90 @@ async fn projectless_tools_list_advertises_registry_tools() {
         .expect("projectless client shutdown should be clean");
 }
 
+/// A projectless `tracedecay_tool_search` must stay inside the same callable
+/// set `tools/list` advertises: it never names a project-bound tool the
+/// connection cannot call, and a `names` load reports the filtered names.
+#[cfg(unix)]
+#[tokio::test]
+async fn projectless_tool_search_stays_inside_the_callable_set() {
+    let home = TempDir::new().expect("home");
+    let profile_root = home
+        .path()
+        .canonicalize()
+        .expect("canonical home")
+        .join(".tracedecay");
+    let client_identity = test_client_identity_for(profile_root);
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &client_identity.profile_root,
+        "projectless-tool-search-test",
+    );
+
+    let call = |arguments: serde_json::Value| {
+        let params = serde_json::json!({
+            "name": "tracedecay_tool_search",
+            "arguments": arguments
+        });
+        let identity = &client_identity;
+        let engine = &engine;
+        async move {
+            let response = super::super::projectless_tools_call_response(
+                serde_json::json!(1),
+                Some(&params),
+                identity,
+                &engine.store_administration,
+            )
+            .await;
+            let result = response
+                .result
+                .unwrap_or_else(|| panic!("projectless tool search failed: {:?}", response.error));
+            serde_json::from_str::<serde_json::Value>(
+                result["content"][0]["text"].as_str().expect("tool text"),
+            )
+            .expect("tool search JSON")
+        }
+    };
+
+    let queried = call(serde_json::json!({
+        "query": "runtime",
+        "format": "json"
+    }))
+    .await;
+    let queried_names: Vec<&str> = queried["tools"]
+        .as_array()
+        .expect("query tools")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(
+        !queried_names.contains(&"tracedecay_runtime"),
+        "projectless search must not name a project-bound tool the connection \
+         cannot call: {queried_names:?}"
+    );
+
+    let loaded = call(serde_json::json!({
+        "names": ["tracedecay_runtime", "tracedecay_project_list"],
+        "format": "json"
+    }))
+    .await;
+    assert_eq!(
+        loaded["missing_names"],
+        serde_json::json!(["tracedecay_runtime"]),
+        "a project-bound name must be reported missing, not loaded: {loaded}"
+    );
+    let loaded_names: Vec<&str> = loaded["tools"]
+        .as_array()
+        .expect("load tools")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert_eq!(
+        loaded_names,
+        ["tracedecay_project_list"],
+        "only the discoverable name loads: {loaded}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn user_session_read_bypasses_unregistered_project_route() {

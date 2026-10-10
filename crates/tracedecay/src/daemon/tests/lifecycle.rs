@@ -639,13 +639,42 @@ async fn tools_list_answers_under_general_saturation() {
     let tools = response["result"]["tools"]
         .as_array()
         .unwrap_or_else(|| panic!("tools/list carried no tool array: {response}"));
-    let names: Vec<&str> = tools
+    let names: std::collections::BTreeSet<&str> = tools
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect();
-    assert!(
-        names.contains(&"tracedecay_tool_search") && names.contains(&"tracedecay_search"),
-        "saturated daemon must still serve the default handshake, not a degraded catalog: {names:?}"
+    // Compare the complete default advertisement: spot-checking two names
+    // would still pass on a partially degraded handshake.
+    let expected: std::collections::BTreeSet<String> = {
+        let profile_id = tracedecay_tool_catalog::ProfileId::new(
+            tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID,
+        )
+        .expect("default profile");
+        let advertised = tracedecay_mcp::tools::catalog_discovery::advertised_catalog_discovery_tools_list_payload_with_mode(
+            None,
+            tracedecay_mcp::explore_call_budget(0),
+            &profile_id,
+            &tracedecay_mcp::tools::catalog_discovery::default_catalog_discovery_authority()
+                .expect("discovery authority"),
+            &tracedecay_mcp::project_catalog_discovery_scope(),
+            tracedecay_mcp::ToolRegistryMode::HostAvailable,
+            tracedecay_mcp::ToolListAdvertisement::Default,
+        )
+        .expect("default advertised handshake");
+        advertised["tools"]
+            .as_array()
+            .expect("advertised tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect()
+    };
+    assert_eq!(
+        names,
+        expected
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        "saturated daemon must serve the complete default handshake, not a degraded catalog"
     );
     drop(general);
     server.await.expect("discovery server task");

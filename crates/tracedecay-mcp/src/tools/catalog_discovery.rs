@@ -5,6 +5,7 @@
 //! dispatch metadata from the daemon-coupled binding table.
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 use std::sync::{Arc, LazyLock, RwLock};
 
 use crate::{
@@ -319,17 +320,61 @@ pub fn advertised_catalog_discovery_tools_list_payload_with_mode(
     Ok(advertise_tool_list_payload(payload, advertisement)?)
 }
 
+/// The host-available catalog the default tool search reads.
+///
+/// Mounted sessions search this whole set. A projectless session passes only
+/// its discoverable subset to [`execute_tool_search_within`] so search never
+/// names a tool that connection cannot call.
+pub fn catalog_tool_search_definitions() -> Result<Vec<ToolDefinition>, McpDispatchMetadataError> {
+    let profile_id =
+        ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID).map_err(|error| {
+            McpDispatchMetadataError::Initialization(format!(
+                "invalid MCP discovery profile: {error}"
+            ))
+        })?;
+    get_catalog_filtered_tool_definitions_with_budget(
+        0,
+        crate::explore_call_budget(0),
+        &profile_id,
+        &default_catalog_discovery_authority()?,
+        &crate::project_catalog_discovery_scope(),
+        ToolRegistryMode::HostAvailable,
+    )
+}
+
 /// Search the full catalog-filtered set by relevance or exact name.
 ///
 /// This is the on-demand path for tools the default handshake withholds.
 /// An empty query returns every reachable name. `names` loads those exact
-/// definitions. `include_schema` defaults to true when `names` is set.
-pub fn execute_tool_search(args: &Value) -> Result<ToolResult, McpDispatchMetadataError> {
+/// definitions. `include_schema` defaults to true when `names` is set. The
+/// rendered body runs through the shared response budget: an oversized
+/// catalog lands in a retrieval handle instead of flooding one frame.
+pub fn execute_tool_search(
+    response_handle_root: Option<&Path>,
+    args: &Value,
+) -> Result<ToolResult, McpDispatchMetadataError> {
+    execute_tool_search_within(
+        response_handle_root,
+        args,
+        catalog_tool_search_definitions()?,
+    )
+}
+
+/// [`execute_tool_search`] over a caller-visible definition set.
+///
+/// `definitions` is the set this connection may call: a mounted session the
+/// full host-available catalog, a projectless session its discoverable
+/// subset, so a listing or schema load never names a tool the connection
+/// cannot call.
+pub fn execute_tool_search_within(
+    response_handle_root: Option<&Path>,
+    args: &Value,
+    definitions: Vec<ToolDefinition>,
+) -> Result<ToolResult, McpDispatchMetadataError> {
     let query = args
         .get("query")
         .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("")
+        .map_or("", str::trim)
         .to_owned();
     let names = args
         .get("names")
@@ -349,37 +394,23 @@ pub fn execute_tool_search(args: &Value) -> Result<ToolResult, McpDispatchMetada
         .get("limit")
         .and_then(Value::as_u64)
         .map_or(50, |value| value.clamp(1, 500) as usize);
-    let want_json = args.get("format").and_then(Value::as_str) == Some("json");
 
-    let profile_id =
-        ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID).map_err(|error| {
-            McpDispatchMetadataError::Initialization(format!(
-                "invalid MCP discovery profile: {error}"
-            ))
-        })?;
-    let definitions = get_catalog_filtered_tool_definitions_with_budget(
-        0,
-        crate::explore_call_budget(0),
-        &profile_id,
-        &default_catalog_discovery_authority()?,
-        &crate::project_catalog_discovery_scope(),
-        ToolRegistryMode::HostAvailable,
-    )?;
-
-    let (mode, selected, total) = if !names.is_empty() {
-        let selected = names
-            .iter()
-            .filter_map(|name| {
-                definitions
-                    .iter()
-                    .find(|definition| definition.name == *name)
-                    .cloned()
-            })
-            .collect::<Vec<_>>();
-        ("load", selected, names.len())
+    let (mode, selected, total, missing_names) = if !names.is_empty() {
+        let mut selected = Vec::new();
+        let mut missing = Vec::new();
+        for name in &names {
+            match definitions
+                .iter()
+                .find(|definition| definition.name == *name)
+            {
+                Some(definition) => selected.push(definition.clone()),
+                None => missing.push(name.clone()),
+            }
+        }
+        ("load", selected, names.len(), missing)
     } else if query.is_empty() {
         let total = definitions.len();
-        ("catalog", definitions, total)
+        ("catalog", definitions, total, Vec::new())
     } else {
         let mut ranked = definitions
             .into_iter()
@@ -402,6 +433,7 @@ pub fn execute_tool_search(args: &Value) -> Result<ToolResult, McpDispatchMetada
                 .map(|(_, definition)| definition)
                 .collect(),
             total,
+            Vec::new(),
         )
     };
     let tools = selected
@@ -413,23 +445,16 @@ pub fn execute_tool_search(args: &Value) -> Result<ToolResult, McpDispatchMetada
         "query": if query.is_empty() { Value::Null } else { Value::String(query) },
         "total": total,
         "returned": tools.len(),
-        "truncated": mode == "query" && tools.len() == limit,
+        "truncated": mode == "query" && total > tools.len(),
+        "missing_names": missing_names,
         "tools": tools,
     });
-    let body = if want_json {
-        serde_json::to_string(&payload).map_err(|error| {
-            McpDispatchMetadataError::Initialization(format!(
-                "tool search payload must serialize: {error}"
-            ))
-        })?
-    } else {
-        render_tool_search_markdown(&payload)
-    };
-    Ok(ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": body }] }),
-        Vec::new(),
-    )
-    .with_structured_result(payload))
+    Ok(crate::tool_json_with_md(
+        response_handle_root,
+        args,
+        &payload,
+        || render_tool_search_markdown(&payload),
+    ))
 }
 
 fn tool_search_score(query: &str, definition: &ToolDefinition) -> Option<u32> {
@@ -500,6 +525,19 @@ fn render_tool_search_markdown(payload: &Value) -> String {
                 serde_json::to_string(schema).unwrap_or_else(|_| "{}".to_owned())
             ));
         }
+    }
+    if let Some(missing) = payload["missing_names"]
+        .as_array()
+        .filter(|missing| !missing.is_empty())
+    {
+        lines.push(format!(
+            "missing names: {}",
+            missing
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     lines.join("\n")
 }
@@ -991,9 +1029,71 @@ mod tests {
         );
     }
 
+    fn fixture_tool_definition(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_owned(),
+            description: format!("{name} description"),
+            input_schema: json!({ "type": "object" }),
+            annotations: None,
+            meta: None,
+        }
+    }
+
+    #[test]
+    fn tool_search_names_missing_names_and_truncates_only_real_omissions() {
+        let definitions = vec![
+            fixture_tool_definition("tracedecay_alpha"),
+            fixture_tool_definition("tracedecay_alpine"),
+            fixture_tool_definition("tracedecay_beta"),
+        ];
+
+        // Two matches against limit=2 return the whole set: no omission, no
+        // truncation claim.
+        let exact = execute_tool_search_within(
+            None,
+            &json!({ "query": "alp", "limit": 2, "format": "json" }),
+            definitions.clone(),
+        )
+        .expect("exact-limit query");
+        let exact_payload = exact.structured_result().expect("structured exact");
+        assert_eq!(exact_payload["total"], 2);
+        assert_eq!(exact_payload["returned"], 2);
+        assert_eq!(
+            exact_payload["truncated"], false,
+            "an exact-limit query must not claim truncation: {exact_payload}"
+        );
+
+        let cut = execute_tool_search_within(
+            None,
+            &json!({ "query": "alp", "limit": 1, "format": "json" }),
+            definitions.clone(),
+        )
+        .expect("cut query");
+        assert_eq!(
+            cut.structured_result().expect("structured cut")["truncated"],
+            true,
+            "a query that drops real matches must claim truncation"
+        );
+
+        let loaded = execute_tool_search_within(
+            None,
+            &json!({ "names": ["tracedecay_alpha", "tracedecay_typo"], "format": "json" }),
+            definitions,
+        )
+        .expect("partial load");
+        let loaded_payload = loaded.structured_result().expect("structured load");
+        assert_eq!(
+            loaded_payload["missing_names"],
+            json!(["tracedecay_typo"]),
+            "an unresolvable name must be reported, not dropped: {loaded_payload}"
+        );
+        assert_eq!(loaded_payload["returned"], 1);
+    }
+
     #[test]
     fn tool_search_reaches_every_catalog_filtered_tool() {
-        let catalog = execute_tool_search(&json!({ "format": "json" })).expect("catalog search");
+        let catalog =
+            execute_tool_search(None, &json!({ "format": "json" })).expect("catalog search");
         let payload = catalog.structured_result().expect("structured catalog");
         assert_eq!(payload["mode"], "catalog");
         let names = payload["tools"]
@@ -1027,10 +1127,13 @@ mod tests {
             "catalog search must not collapse to the default handshake: {names:?}"
         );
 
-        let loaded = execute_tool_search(&json!({
-            "names": ["tracedecay_retrieve"],
-            "format": "json"
-        }))
+        let loaded = execute_tool_search(
+            None,
+            &json!({
+                "names": ["tracedecay_retrieve"],
+                "format": "json"
+            }),
+        )
         .expect("load retrieve");
         let loaded_payload = loaded.structured_result().expect("structured load");
         assert_eq!(loaded_payload["mode"], "load");
@@ -1042,10 +1145,13 @@ mod tests {
             "loading a deferred tool must return its full schema: {loaded_payload}"
         );
 
-        let ranked = execute_tool_search(&json!({
-            "query": "impact",
-            "format": "json"
-        }))
+        let ranked = execute_tool_search(
+            None,
+            &json!({
+                "query": "impact",
+                "format": "json"
+            }),
+        )
         .expect("relevance search");
         let ranked_payload = ranked.structured_result().expect("structured query");
         assert_eq!(ranked_payload["mode"], "query");

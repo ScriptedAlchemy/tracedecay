@@ -10,7 +10,8 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::tools::catalog_discovery::{
-    catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
+    catalog_discovery_tools_list_payload, catalog_tool_search_definitions,
+    default_catalog_discovery_authority, execute_tool_search_within,
 };
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, ToolRegistryMode,
@@ -404,9 +405,9 @@ async fn dispatch_admitted_projectless_call(
         .await;
     }
     if tool_name == tracedecay_mcp::TOOL_SEARCH_TOOL_NAME {
-        return match tracedecay_mcp::tools::catalog_discovery::execute_tool_search(&arguments) {
+        return match projectless_tool_search_result(&arguments) {
             Ok(result) => JsonRpcResponse::success(id, result.value),
-            Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+            Err(message) => JsonRpcResponse::error(id, ErrorCode::InternalError, message),
         };
     }
     // `projectless_tool_is_discoverable` admitted the name above, so any
@@ -424,6 +425,20 @@ async fn dispatch_admitted_projectless_call(
         store_administration,
     ))
     .await
+}
+
+/// `tracedecay_tool_search` over the same discoverable set `tools/list`
+/// advertises: a projectless search never names a project-bound tool this
+/// connection cannot call. No project handle root exists, so an oversized
+/// result binds to a preview without a retrieval handle.
+fn projectless_tool_search_result(
+    arguments: &serde_json::Value,
+) -> std::result::Result<tracedecay_mcp::ToolResult, String> {
+    let mut definitions = catalog_tool_search_definitions()
+        .map_err(|error| format!("MCP catalog discovery unavailable: {error}"))?;
+    definitions.retain(|definition| projectless_tool_is_discoverable(&definition.name));
+    execute_tool_search_within(None, arguments, definitions)
+        .map_err(|error| format!("MCP catalog discovery unavailable: {error}"))
 }
 
 fn requires_project_error(
