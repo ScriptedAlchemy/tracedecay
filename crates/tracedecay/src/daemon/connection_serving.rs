@@ -170,7 +170,7 @@ fn serve_routed_rmcp_connection_inner(
         let transport = transport
             .with_rmcp_selected_project_responses(adapter.selected_project_responses())
             .with_rmcp_work_delivery_settlement(adapter.work_delivery_settlement());
-        let running = match adapter.serve(transport).await {
+        let running = match transport.serve(adapter).await {
             Ok(running) => running,
             // The client left before a request settled the handshake; every
             // frame it sent was already answered or refused on the wire.

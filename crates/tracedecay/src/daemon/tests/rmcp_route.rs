@@ -341,10 +341,14 @@ async fn assert_initialized_route_is_rmcp<R, W>(
     assert!(ping.get("result").is_some(), "{ping}");
 
     write_line(&mut writer, &cancellation(2)).await;
+    write_line(&mut writer, &ping_request(4)).await;
+    let ping = read_value(&mut reader, "cancellation control did not precede ping").await;
+    assert_eq!(ping["id"], json!(4));
     writer
         .shutdown()
         .await
         .expect("shutdown initialized client");
+    drop(gate);
     let cancellation = read_value(
         &mut reader,
         "cancelled RMCP route did not emit its terminal response",
@@ -355,7 +359,6 @@ async fn assert_initialized_route_is_rmcp<R, W>(
         2,
         "response-gate cancellation before request registration",
     );
-    drop(gate);
     drop(writer);
     drop(reader);
     if let Some(lifecycle) = lifecycle {
@@ -1230,37 +1233,7 @@ fn production_rmcp_cancels_concurrent_requests_before_or_after_registration() {
 #[cfg(unix)]
 async fn production_rmcp_cancels_concurrent_requests_before_or_after_registration_inner() {
     let fixture = rmcp_route_fixture("rmcp-live-cancellation").await;
-    let executor = Arc::new(ControlledCancellationExecutor::new());
-    let project_path = fixture
-        .handshake
-        .project_path
-        .as_deref()
-        .expect("fixture project");
-    let cg = super::super::open_project_for_handshake(
-        project_path,
-        &fixture.handshake,
-        &fixture.engine.store_administration,
-        &CancellationToken::new(),
-    )
-    .await
-    .expect("open controlled project");
-    let key = ProjectServerKey::from_open_project(&cg, &fixture.handshake)
-        .expect("controlled project key");
-    let route =
-        ProjectRouteKey::from_handshake(project_path, &fixture.handshake).expect("project route");
-    let context = crate::mcp::server::McpServerConstructionContext::direct(cg, None)
-        .with_application_invocation_executor(executor.clone());
-    let controlled_server = crate::mcp::McpServer::new_with_context(context).await;
-    {
-        let mut owners = fixture
-            .engine
-            .store_administration
-            .project_servers()
-            .lock()
-            .await;
-        owners.insert_route(route, key.clone(), Arc::clone(&controlled_server));
-        assert!(owners.mark_ready(&key));
-    }
+    let (executor, key, controlled_server) = mount_cancellation_executor(&fixture).await;
 
     let (server_stream, client_stream) =
         tokio::net::UnixStream::pair().expect("cancellation socket pair");
@@ -1367,5 +1340,261 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
     assert!(
         shutdown.project_servers.is_clean(),
         "cancelled route owners must shut down cleanly: {shutdown:?}"
+    );
+}
+
+#[cfg(unix)]
+async fn mount_cancellation_executor(
+    fixture: &RmcpRouteFixture,
+) -> (
+    Arc<ControlledCancellationExecutor>,
+    ProjectServerKey,
+    Arc<crate::mcp::McpServer>,
+) {
+    let executor = Arc::new(ControlledCancellationExecutor::new());
+    let project_path = fixture
+        .handshake
+        .project_path
+        .as_deref()
+        .expect("fixture project");
+    let cg = super::super::open_project_for_handshake(
+        project_path,
+        &fixture.handshake,
+        &fixture.engine.store_administration,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("open controlled project");
+    let key = ProjectServerKey::from_open_project(&cg, &fixture.handshake)
+        .expect("controlled project key");
+    let route =
+        ProjectRouteKey::from_handshake(project_path, &fixture.handshake).expect("project route");
+    let context = crate::mcp::server::McpServerConstructionContext::direct(cg, None)
+        .with_application_invocation_executor(executor.clone());
+    let controlled_server = crate::mcp::McpServer::new_with_context(context).await;
+    {
+        let mut owners = fixture
+            .engine
+            .store_administration
+            .project_servers()
+            .lock()
+            .await;
+        owners.insert_route(route, key.clone(), Arc::clone(&controlled_server));
+        assert!(owners.mark_ready(&key));
+    }
+
+    (executor, key, controlled_server)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_proxy_cancels_running_and_queued_requests_without_host_disconnect() {
+    let fixture = rmcp_route_fixture("serve-proxy-cancellation").await;
+    let (executor, key, controlled_server) = mount_cancellation_executor(&fixture).await;
+    let socket = fixture._temp.path().join("daemon.sock");
+    let authority = super::seed_socket_authority(&socket);
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind proxy socket");
+    let engine = fixture.engine.clone();
+    let token = authority.auth_token().to_owned();
+    let accepting = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.expect("accept proxy connection");
+            let engine = engine.clone();
+            let token = token.clone();
+            tokio::spawn(async move {
+                Box::pin(super::super::serve_authenticated_socket_client_with_class(
+                    tracedecay_daemon_protocol::BrokerStream::Unix(stream),
+                    engine,
+                    token,
+                    super::super::DaemonClientAdmissionClass::General,
+                ))
+                .await
+            });
+        }
+    });
+    let (mut host, host_lines, mut host_output) =
+        tracedecay_mcp::transport::ChannelTransport::new();
+    let handshake = fixture.handshake.clone();
+    let proxy = tokio::spawn(async move {
+        super::super::proxy_transport_to_daemon(&socket, &handshake, None, &mut host).await
+    });
+    host_lines
+        .send(blocked_tool_request(10).to_string())
+        .expect("first tool");
+    wait_for_count(&executor.started, 1, "proxy tool did not reach executor").await;
+    host_lines
+        .send(blocked_tool_request(11).to_string())
+        .expect("queued tool");
+    host_lines
+        .send(cancellation(11).to_string())
+        .expect("queued cancellation");
+    host_lines
+        .send(cancellation(10).to_string())
+        .expect("running cancellation");
+    wait_for_count(
+        &executor.cancellation_observed,
+        1,
+        "proxy withheld running cancellation",
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), host_output.recv())
+            .await
+            .is_err(),
+        "cancellation must not acknowledge a worker that still owns its resources"
+    );
+    assert_eq!(executor.started.load(Ordering::SeqCst), 1);
+    assert_eq!(executor.completed.load(Ordering::SeqCst), 0);
+    assert!(
+        !proxy.is_finished(),
+        "the cancelled worker and host session must remain owned"
+    );
+    executor.release_first.store(true, Ordering::SeqCst);
+    wait_for_count(
+        &executor.completed,
+        2,
+        "proxy failed to settle queued cancellation",
+    )
+    .await;
+    let mut responses = Vec::new();
+    for _ in 0..2 {
+        let line = tokio::time::timeout(PHASE_TIMEOUT, host_output.recv())
+            .await
+            .expect("proxy cancellation response timed out")
+            .expect("proxy response");
+        responses.push(serde_json::from_str(&line).expect("proxy response JSON"));
+    }
+    assert_delivered_cancellation(&responses, 10, "live host cancellation");
+    assert_delivered_cancellation(&responses, 11, "queued host cancellation");
+    assert_eq!(executor.cancellation_observed.load(Ordering::SeqCst), 2);
+    assert!(
+        !proxy.is_finished(),
+        "cancellation must preserve the host session"
+    );
+    drop(host_lines);
+    tokio::time::timeout(PHASE_TIMEOUT, proxy)
+        .await
+        .expect("proxy did not stop on EOF")
+        .expect("join proxy")
+        .expect("proxy session");
+    accepting.abort();
+    fixture
+        .engine
+        .store_administration
+        .project_servers()
+        .lock()
+        .await
+        .remove(&key);
+    controlled_server.shutdown().await;
+    fixture.server.shutdown().await;
+    let shutdown = fixture.engine.shutdown_all().await;
+    assert!(
+        shutdown.project_servers.is_clean(),
+        "proxy route shutdown: {shutdown:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deadline_reply_does_not_wait_for_a_worker_that_ignores_cancellation() {
+    let fixture = rmcp_route_fixture("rmcp-deadline-uncooperative").await;
+    let (executor, key, controlled_server) = mount_cancellation_executor(&fixture).await;
+    let (server_stream, client_stream) =
+        tokio::net::UnixStream::pair().expect("deadline socket pair");
+    let engine = fixture.engine.clone();
+    let server_task = tokio::spawn(async move {
+        Box::pin(super::serve_authenticated_test_client(
+            server_stream,
+            engine,
+        ))
+        .await
+    });
+    let (reader, mut writer) = client_stream.into_split();
+    super::write_test_auth_preface(&mut writer).await;
+    let mut reader = tokio::io::BufReader::new(reader);
+    writer
+        .write_all(
+            fixture
+                .handshake
+                .to_line()
+                .expect("deadline handshake")
+                .as_bytes(),
+        )
+        .await
+        .expect("write deadline handshake");
+    writer.write_all(b"\n").await.expect("handshake newline");
+    write_line(&mut writer, &initialize_request()).await;
+    assert_eq!(
+        read_value(&mut reader, "initialize deadline route").await["id"],
+        json!(1)
+    );
+
+    let budget = Duration::from_secs(5);
+    let mut request = blocked_tool_request(10);
+    request["params"]["_meta"] =
+        tracedecay_mcp::tool_call_deadline_meta(tracedecay_domain::UtcMicros(
+            tracedecay_contracts::clock::now_micros().0
+                + i64::try_from(budget.as_micros()).expect("budget micros"),
+        ));
+    let sent = std::time::Instant::now();
+    write_line(&mut writer, &request).await;
+    wait_for_count(
+        &executor.started,
+        1,
+        "deadline request never reached executor",
+    )
+    .await;
+    let response = read_value(
+        &mut reader,
+        "deadline reply waited for a worker that ignores cancellation",
+    )
+    .await;
+    let elapsed = sent.elapsed();
+    assert_eq!(response["id"], json!(10), "{response}");
+    wait_for_count(
+        &executor.cancellation_observed,
+        1,
+        "the deadline must cancel the admitted worker",
+    )
+    .await;
+    assert_eq!(
+        executor.completed.load(Ordering::SeqCst),
+        0,
+        "the reply must not wait for the worker to exit"
+    );
+    assert!(
+        elapsed < budget + Duration::from_secs(2),
+        "deadline reply took {elapsed:?} for a {budget:?} budget"
+    );
+    assert!(
+        response
+            .to_string()
+            .contains("tool_dispatch_deadline_exceeded"),
+        "expected the typed dispatch deadline terminal: {response}"
+    );
+
+    executor.release_first.store(true, Ordering::SeqCst);
+    wait_for_count(&executor.completed, 1, "released worker did not exit").await;
+    writer.shutdown().await.expect("shutdown deadline client");
+    drop(writer);
+    drop(reader);
+    tokio::time::timeout(PHASE_TIMEOUT, server_task)
+        .await
+        .expect("deadline RMCP connection did not close")
+        .expect("join deadline RMCP task")
+        .expect("serve deadline RMCP task");
+    fixture
+        .engine
+        .store_administration
+        .project_servers()
+        .lock()
+        .await
+        .remove(&key);
+    controlled_server.shutdown().await;
+    fixture.server.shutdown().await;
+    let shutdown = fixture.engine.shutdown_all().await;
+    assert!(
+        shutdown.project_servers.is_clean(),
+        "deadline route shutdown: {shutdown:?}"
     );
 }
