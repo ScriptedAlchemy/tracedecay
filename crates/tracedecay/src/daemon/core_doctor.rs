@@ -10,7 +10,7 @@ use tracedecay_contracts::project_open::{
     ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
 };
 use tracedecay_daemon_service::shutdown::DaemonActivity;
-use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
@@ -113,34 +113,7 @@ fn stalled_project_open_error(
     if let Some(failure) = stalled_failure {
         return failure.to_error();
     }
-    let detail = project_open
-        .detail
-        .clone()
-        .unwrap_or_else(|| "project open stalled".to_owned());
-    match project_open.reason {
-        ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery => TraceDecayError::project_route(
-            super::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
-            true,
-            detail,
-        ),
-        ProjectOpenStatusReasonV1::RetryBackoff => {
-            TraceDecayError::project_route(super::PROJECT_SERVER_CAPACITY_REASON_CODE, true, detail)
-        }
-        ProjectOpenStatusReasonV1::UnrepairableVerdict => TraceDecayError::project_open(
-            ProjectOpenFailureKind::AuthorityVerdict {
-                migration_pending: false,
-            },
-            detail,
-        ),
-        ProjectOpenStatusReasonV1::Unavailable
-        | ProjectOpenStatusReasonV1::Converging
-        | ProjectOpenStatusReasonV1::Ready => TraceDecayError::project_open(
-            ProjectOpenFailureKind::BackedOff {
-                retry_after_ms: project_open.retry_after_ms.unwrap_or(0),
-            },
-            detail,
-        ),
-    }
+    super::stalled_project_open_error(project_open)
 }
 
 fn project_open_status_value(

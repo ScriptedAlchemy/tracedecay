@@ -152,49 +152,6 @@ fn schema_convergence_line(finding: &SchemaConvergenceFindingV1) -> String {
     )
 }
 
-fn stalled_project_open_error(
-    status: &ProjectOpenStatusV1,
-) -> tracedecay_domain::errors::TraceDecayError {
-    let detail = status
-        .detail
-        .clone()
-        .unwrap_or_else(|| "project open stalled".to_owned());
-    match status.reason {
-        ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                tracedecay::daemon::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
-                true,
-                detail,
-            )
-        }
-        ProjectOpenStatusReasonV1::RetryBackoff => {
-            tracedecay_domain::errors::TraceDecayError::project_route(
-                tracedecay::daemon::PROJECT_SERVER_CAPACITY_REASON_CODE,
-                true,
-                detail,
-            )
-        }
-        ProjectOpenStatusReasonV1::UnrepairableVerdict => {
-            tracedecay_domain::errors::TraceDecayError::project_open(
-                tracedecay_domain::errors::ProjectOpenFailureKind::AuthorityVerdict {
-                    migration_pending: false,
-                },
-                detail,
-            )
-        }
-        ProjectOpenStatusReasonV1::Unavailable
-        | ProjectOpenStatusReasonV1::Converging
-        | ProjectOpenStatusReasonV1::Ready => {
-            tracedecay_domain::errors::TraceDecayError::project_open(
-                tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff {
-                    retry_after_ms: status.retry_after_ms.unwrap_or(0),
-                },
-                detail,
-            )
-        }
-    }
-}
-
 fn reject_stalled_project_open(daemon_status: &Value) -> tracedecay_domain::errors::Result<()> {
     let Some(project_open) = daemon_status
         .get("project_open")
@@ -208,7 +165,9 @@ fn reject_stalled_project_open(daemon_status: &Value) -> tracedecay_domain::erro
     if project_open.state != ProjectOpenStatusStateV1::Stalled {
         return Ok(());
     }
-    Err(stalled_project_open_error(&project_open))
+    Err(tracedecay::daemon::stalled_project_open_error(
+        &project_open,
+    ))
 }
 
 fn project_open_line(status: &ProjectOpenStatusV1) -> String {

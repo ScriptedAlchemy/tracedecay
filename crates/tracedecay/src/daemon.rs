@@ -29,6 +29,7 @@ use scheduler::{
     AutomationSchedulerHandle, automation_scheduler_configured,
     automation_scheduler_tick_secs_for_project, run_automation_scheduler_tick,
 };
+use tracedecay_contracts::project_open::{ProjectOpenStatusReasonV1, ProjectOpenStatusV1};
 #[allow(unused_imports)]
 pub(crate) use tracedecay_daemon_protocol::{
     BrokerListener, BrokerStream, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
@@ -72,6 +73,38 @@ pub const PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE: &str = "project_server_re
 pub const PROJECT_OPEN_TASK_CAPACITY_REASON_CODE: &str = "project_open_task_capacity_reached";
 /// Typed reason the cached project-server table is full.
 pub const PROJECT_SERVER_CAPACITY_REASON_CODE: &str = "project_server_capacity_reached";
+
+/// Typed error for a stalled `project_open` snapshot. Status, Doctor, and
+/// the CLI all use this so a stalled open is never a successful empty report.
+pub fn stalled_project_open_error(status: &ProjectOpenStatusV1) -> TraceDecayError {
+    let detail = status
+        .detail
+        .clone()
+        .unwrap_or_else(|| "project open stalled".to_owned());
+    match status.reason {
+        ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery => {
+            TraceDecayError::project_route(REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, true, detail)
+        }
+        ProjectOpenStatusReasonV1::RetryBackoff => {
+            TraceDecayError::project_route(PROJECT_SERVER_CAPACITY_REASON_CODE, true, detail)
+        }
+        ProjectOpenStatusReasonV1::UnrepairableVerdict => TraceDecayError::project_open(
+            ProjectOpenFailureKind::AuthorityVerdict {
+                migration_pending: false,
+            },
+            detail,
+        ),
+        ProjectOpenStatusReasonV1::Unavailable
+        | ProjectOpenStatusReasonV1::Converging
+        | ProjectOpenStatusReasonV1::Ready => TraceDecayError::project_open(
+            ProjectOpenFailureKind::BackedOff {
+                retry_after_ms: status.retry_after_ms.unwrap_or(0),
+            },
+            detail,
+        ),
+    }
+}
+
 /// Typed reason a handshake route names a directory the authenticated profile
 /// has not enrolled (no `tracedecay init`, no registry row, no durable store).
 /// It is a client state, not a daemon failure: `initialize` and `tools/list`
