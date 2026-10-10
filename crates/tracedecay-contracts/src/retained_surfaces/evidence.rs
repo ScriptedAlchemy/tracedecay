@@ -360,11 +360,15 @@ impl RetainedSurfaceResultV1 {
             Self::MessageSearch(value) => {
                 let mut facts =
                     RetainedSurfaceEvidenceFactsV1::unknown(EvidenceDomain::Temporal, 0)?;
+                // Terminal statuses refuse before the page is counted. A
+                // denied or failed search may omit count/results; that is
+                // not InvalidOutput. Only an empty Unavailable page is a
+                // typed empty source rather than a terminal refusal.
+                if value.status != RetainedOutcomeStatusV1::Unavailable {
+                    facts.apply_status(value.status)?;
+                }
                 let returned = message_search_returned(value)?;
-                if value.status == RetainedOutcomeStatusV1::Unavailable && returned == 0 {
-                    // An empty mounted store is a typed source state, not a
-                    // terminal retrieval refusal.
-                } else {
+                if value.status == RetainedOutcomeStatusV1::Unavailable && returned != 0 {
                     facts.apply_status(value.status)?;
                 }
                 facts.returned = count(returned)?;
