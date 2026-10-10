@@ -216,6 +216,20 @@ impl CodeGraphServingReadinessV1 {
     pub const fn is_activated(&self) -> bool {
         matches!(self, Self::Ready | Self::Warming { .. })
     }
+
+    /// Activation reached a lasting verdict for this sealed generation.
+    ///
+    /// `Ready` and `Warming` can serve. `Refused` cannot, but the attempt is
+    /// finished: the build is a pure function of the sealed generation, so
+    /// waiting cannot change the answer. `Pending` and `Unavailable` are not
+    /// verdicts; freshness must not treat them as terminal.
+    #[must_use]
+    pub const fn is_terminal_verdict(&self) -> bool {
+        matches!(
+            self,
+            Self::Ready | Self::Warming { .. } | Self::Refused { .. }
+        )
+    }
 }
 
 /// Coverage retained by one clone-index artifact or in-progress successor.
@@ -1003,6 +1017,33 @@ mod tests {
             serde_json::from_value(value).expect("older response remains readable");
         assert_eq!(decoded.code_graph_serving, None);
         assert!(!decoded.rebuild_in_flight);
+
+        assert!(CodeGraphServingReadinessV1::Ready.is_terminal_verdict());
+        assert!(
+            CodeGraphServingReadinessV1::Warming {
+                reason: "catalog".to_owned()
+            }
+            .is_terminal_verdict()
+        );
+        assert!(
+            CodeGraphServingReadinessV1::Refused {
+                reason: "budget".to_owned()
+            }
+            .is_terminal_verdict()
+        );
+        assert!(!CodeGraphServingReadinessV1::Pending.is_terminal_verdict());
+        assert!(
+            !CodeGraphServingReadinessV1::Unavailable {
+                reason: "missing".to_owned()
+            }
+            .is_terminal_verdict()
+        );
+        assert!(
+            !CodeGraphServingReadinessV1::Refused {
+                reason: "budget".to_owned()
+            }
+            .is_activated()
+        );
 
         let ready = serde_json::to_value(CodeGraphServingReadinessV1::Ready)
             .expect("ready state serializes");

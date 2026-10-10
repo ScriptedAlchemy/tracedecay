@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+* **graph:** publish sealed generations with the in-place parallel digest path and report a terminal graph refusal as current instead of warming forever ([#3338](https://github.com/ScriptedAlchemy/tracedecay/issues/3338))
 - **grep:** prune unrelated path-glob subtrees and read bounded batches on the admitted source worker pool, preserving ignore policy, hit order and coverage omissions; cancellation releases queued CPU demand before capacity becomes available.
 
 ## [1.0.0-beta.81](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.80...v1.0.0-beta.81) (2026-10-10)

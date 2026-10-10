@@ -41,9 +41,6 @@ fn dashboard_ready_requires_text_and_graph_lane_owners() {
     );
     for graph in [
         CodeGraphServingReadinessV1::Pending,
-        CodeGraphServingReadinessV1::Refused {
-            reason: "fixture refusal".to_owned(),
-        },
         CodeGraphServingReadinessV1::Unavailable {
             reason: "fixture unavailable".to_owned(),
         },
@@ -53,6 +50,17 @@ fn dashboard_ready_requires_text_and_graph_lane_owners() {
             "freshness must not report ready while graph lane coverage is incomplete: {graph:?}"
         );
     }
+    assert!(
+        dashboard_generation_is_ready(
+            None,
+            true,
+            true,
+            &Some(CodeGraphServingReadinessV1::Refused {
+                reason: "the sealed code graph publication exceeded its background budget; this generation serves exact and lexical without a native graph until the next generation seals".to_owned(),
+            }),
+        ),
+        "a terminal graph refusal is a finished verdict for this generation, not active warming"
+    );
 }
 
 /// The graph-rebuild receipt (transport acceptance, both ~90s attempts): lane

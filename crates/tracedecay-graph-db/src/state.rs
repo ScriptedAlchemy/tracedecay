@@ -712,39 +712,14 @@ pub(crate) fn projection_entity_nodes_sorted_checked(
     projection: &GraphProjectionId,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Vec<(ArcStr, NodeId)>, GraphDbError> {
-    let nodes = labeled_projection_nodes_checked(
+    labeled_projection_identities_sorted_checked(
         database,
         &entity_projection_label(namespace, projection),
         ENTITY_LABEL,
+        ENTITY_ID_PROPERTY,
         MAX_VERIFIED_GENERATION_ENTITIES,
         check,
-    )?;
-    let store = database.graph_store();
-    let mut keyed = Vec::new();
-    keyed
-        .try_reserve_exact(nodes.len())
-        .map_err(|_| GraphDbError::unavailable("native graph entity identity sort is too large"))?;
-    for node in nodes {
-        check()?;
-        let record = store.get_node(node).ok_or_else(|| GraphDbError::Corrupt {
-            message: "native graph entity disappeared during verification".to_owned(),
-        })?;
-        keyed.push((
-            identity_arc(
-                record.get_property(ENTITY_ID_PROPERTY),
-                "native graph entity identity",
-            )?,
-            node,
-        ));
-    }
-    check()?;
-    keyed.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    if keyed.windows(2).any(|window| window[0].0 == window[1].0) {
-        return Err(GraphDbError::Corrupt {
-            message: "native graph generation repeats an entity identity".to_owned(),
-        });
-    }
-    Ok(keyed)
+    )
 }
 
 pub(crate) fn projection_relations(
@@ -928,36 +903,76 @@ pub(crate) fn projection_relation_nodes_sorted_checked(
     projection: &GraphProjectionId,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Vec<(ArcStr, NodeId)>, GraphDbError> {
-    let nodes = labeled_projection_nodes_checked(
+    labeled_projection_identities_sorted_checked(
         database,
         &relation_projection_label(namespace, projection),
         RELATION_LABEL,
+        crate::schema::RELATION_ID_PROPERTY,
         MAX_VERIFIED_GENERATION_RELATIONS,
         check,
-    )?;
+    )
+}
+
+fn labeled_projection_identities_sorted_checked(
+    database: &GrafeoDB,
+    owner_label: &str,
+    record_label: &str,
+    identity_property: &str,
+    maximum: usize,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Vec<(ArcStr, NodeId)>, GraphDbError> {
+    let (capacity_kind, identity_description, repeat_kind) = if record_label == ENTITY_LABEL {
+        ("entities", "native graph entity identity", "entity")
+    } else {
+        ("relations", "native graph relation identity", "relation")
+    };
+    check()?;
     let store = database.graph_store();
+    {
+        let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.capacity").entered();
+        require_generation_capacity(
+            capacity_kind,
+            nodes_with_label_count(store.as_ref(), owner_label),
+            0,
+            maximum,
+        )?;
+    }
+    let candidates = {
+        let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.scan").entered();
+        nodes_with_label(store.as_ref(), owner_label)
+    };
+    check()?;
+    require_generation_capacity(capacity_kind, candidates.len(), 0, maximum)?;
     let mut keyed = Vec::new();
-    keyed.try_reserve_exact(nodes.len()).map_err(|_| {
-        GraphDbError::unavailable("native graph relation identity sort is too large")
-    })?;
-    for node in nodes {
-        check()?;
-        let record = store.get_node(node).ok_or_else(|| GraphDbError::Corrupt {
-            message: "native graph relation disappeared during verification".to_owned(),
+    {
+        let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.reserve").entered();
+        keyed.try_reserve_exact(candidates.len()).map_err(|_| {
+            GraphDbError::unavailable(format!(
+                "native graph {repeat_kind} identity sort is too large"
+            ))
         })?;
-        keyed.push((
-            identity_arc(
-                record.get_property(crate::schema::RELATION_ID_PROPERTY),
-                "native graph relation identity",
-            )?,
-            node,
-        ));
+    }
+    {
+        let _span = tracing::trace_span!("graph_db.projection.labeled_nodes.filter").entered();
+        for node in candidates {
+            check()?;
+            let Some(record) = store
+                .get_node(node)
+                .filter(|record| has_native_label(record, record_label))
+            else {
+                continue;
+            };
+            keyed.push((
+                identity_arc(record.get_property(identity_property), identity_description)?,
+                node,
+            ));
+        }
     }
     check()?;
     keyed.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     if keyed.windows(2).any(|window| window[0].0 == window[1].0) {
         return Err(GraphDbError::Corrupt {
-            message: "native graph generation repeats a relation identity".to_owned(),
+            message: format!("native graph generation repeats a {repeat_kind} identity"),
         });
     }
     Ok(keyed)

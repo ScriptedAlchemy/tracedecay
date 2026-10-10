@@ -114,11 +114,13 @@ pub(crate) fn recovered_generation_digest_chunked(
     )?;
     let namespace_projection = physical_namespace_projection_map(identity)?;
 
-    // A caller already on a Rayon worker would block that worker on chunks
-    // queued behind it on the same pool, so it proves serially.
-    if entities.len().saturating_add(relations.len()) <= chunk_rows
-        || rayon::current_thread_index().is_some()
-    {
+    // Publication already runs under `parallelism::install`, so this proof
+    // is almost always on a Rayon worker. `digest_rows_parallel` uses
+    // `in_place_scope`, which lets that worker join the encode chunks
+    // instead of blocking behind them. Forcing the serial stream here made
+    // the production caller hash every row on one thread (measured 2.57s
+    // serial vs a parallel encode path that already exists).
+    if entities.len().saturating_add(relations.len()) <= chunk_rows {
         digest_rows_serial(
             store.as_ref(),
             &entities,
@@ -732,5 +734,30 @@ mod tests {
             "cancellation must stop the pipeline early: {} polls of {total}",
             polls.get()
         );
+    }
+
+    /// Publication already sits on a Rayon worker via `parallelism::install`.
+    /// The recovered digest must still take the in-place parallel encode path
+    /// there; forcing serial because `current_thread_index` is `Some` was the
+    /// measured mis-sized work on a Rspack-sized generation.
+    #[test]
+    fn parallel_digest_from_a_rayon_worker_matches_the_serial_stream() {
+        let (_owner, database, manifest) = staged_database();
+        let identity = manifest.identity();
+        let guard = database.read_guard().unwrap();
+        let native = guard.as_ref().unwrap();
+
+        let (serial, serial_bytes) =
+            recovered_generation_digest_chunked(native, &identity, &|| Ok(()), usize::MAX).unwrap();
+
+        let (parallel, parallel_bytes) = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("rayon pool")
+            .install(|| recovered_generation_digest_chunked(native, &identity, &|| Ok(()), 16))
+            .expect("parallel digest on a rayon worker");
+
+        assert_eq!(parallel, serial);
+        assert_eq!(parallel_bytes, serial_bytes);
     }
 }

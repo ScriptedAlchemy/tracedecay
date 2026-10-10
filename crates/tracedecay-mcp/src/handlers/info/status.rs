@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use tracedecay_application::advisory::github_runtime::github_source_status_v1;
 use tracedecay_application::tracedecay::BranchDiagnostics;
 use tracedecay_contracts::code_index_freshness::{
-    CODE_INDEX_MOUNT_FAILED, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
-    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+    CODE_INDEX_MOUNT_FAILED, CodeGraphServingReadinessV1, CodeIndexReadinessWaitOutcomeV1,
+    CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::doctor::ResidentMemoryHolderReadV1;
 use tracedecay_contracts::retrieval::{
@@ -690,6 +690,17 @@ fn code_index_freshness_projection(
                 "the last complete code index remains available while the scheduler verifies source freshness"
                     .to_owned(),
             ),
+        )
+    } else if let Some(CodeGraphServingReadinessV1::Refused { reason }) =
+        freshness.code_graph_serving.as_ref()
+        && !freshness.rebuild_in_flight
+        && freshness.latest_generation_id.is_some()
+    {
+        (
+            FreshnessLabelV1::Current,
+            Some(format!(
+                "exact and lexical are serving this sealed generation; native graph activation was refused: {reason}"
+            )),
         )
     } else {
         (
@@ -1457,6 +1468,36 @@ mod tests {
 
         assert_eq!(status, FreshnessLabelV1::Current);
         assert!(warning.expect("the park stays visible").contains("parked"));
+    }
+
+    #[test]
+    fn a_terminal_graph_refusal_is_not_warming() {
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: "/project".to_owned(),
+            latest_generation_id: Some("generation.fixture".to_owned()),
+            staleness_state: Some(CodeIndexStalenessStateV1::Indexing),
+            rebuild_in_flight: false,
+            coverage: CodeIndexFreshnessCoverageV1::PartialOmittedSources,
+            code_graph_serving: Some(
+                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Refused {
+                    reason: "the sealed code graph publication exceeded its background budget; this generation serves exact and lexical without a native graph until the next generation seals".to_owned(),
+                },
+            ),
+            ..Default::default()
+        };
+
+        let (status, warning) = code_index_freshness_projection(&freshness);
+
+        assert_ne!(
+            status,
+            FreshnessLabelV1::Warming,
+            "a spent publication budget is a terminal verdict, not active warming: {warning:?}"
+        );
+        let warning = warning.expect("the refusal stays visible");
+        assert!(
+            warning.contains("exceeded its background budget"),
+            "{warning}"
+        );
     }
 
     #[test]
