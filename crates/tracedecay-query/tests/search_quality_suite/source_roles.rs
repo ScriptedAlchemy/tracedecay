@@ -97,3 +97,61 @@ fn artifact_definition_priority_names_the_symbol_instead_of_its_signature_types(
         );
     }
 }
+
+#[test]
+fn artifact_definition_priority_covers_short_aliases_of_the_own_symbol() {
+    let fixture = real_lexical_source_fixture_from_sources(vec![
+        (
+            "file.definition".to_owned(),
+            "src/coverage.rs".to_owned(),
+            b"/// Signed cache-grant state.\npub struct VerifiedCacheGrantSnapshotV1 {\n    pub grant_digest: u64,\n}\n".to_vec(),
+        ),
+        (
+            "file.field".to_owned(),
+            "src/remote.rs".to_owned(),
+            b"pub struct Remote {\n    pub grant_digest: u64,\n}\n".to_vec(),
+        ),
+    ]);
+    let artifact = sealed_artifact(&fixture, fixture.metadata.clone());
+    let lane = LexicalLane::new(artifact.reader.clone());
+    let request = artifact.request("cache grant", &["cache", "grant"], &[], &[], 0, 64);
+    let result = complete(
+        lane.retrieve_lexical(&request)
+            .expect("indexed lexical query"),
+    );
+    let definition = result
+        .candidates
+        .iter()
+        .find(|candidate| {
+            candidate
+                .file_occurrence_id
+                .as_ref()
+                .is_some_and(|file| file.as_str() == "file.definition")
+        })
+        .expect("own-symbol alias hit");
+    assert_eq!(
+        result.evidence_by_occurrence[&definition.source_occurrence_id].source_role,
+        RetrievalSourceRoleV1::ProductionDefinition,
+        "every alias term is a subtoken of VerifiedCacheGrantSnapshotV1"
+    );
+    if let Some(field) = result.candidates.iter().find(|candidate| {
+        candidate
+            .file_occurrence_id
+            .as_ref()
+            .is_some_and(|file| file.as_str() == "file.field")
+    }) {
+        assert_eq!(
+            result.evidence_by_occurrence[&field.source_occurrence_id].source_role,
+            RetrievalSourceRoleV1::ProductionOther,
+            "grant_digest is not named by cache+grant"
+        );
+    }
+    assert_eq!(
+        result.candidates[0]
+            .file_occurrence_id
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "file.definition"
+    );
+}

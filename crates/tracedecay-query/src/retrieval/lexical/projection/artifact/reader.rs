@@ -34,7 +34,7 @@ use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
     CompactCandidate, ExactFieldV1, ExactTechnicalTermKindV1, LanguageDescriptorRevision,
     ManifestDigest, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
-    SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, canonical_sha256,
+    SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, canonical_sha256, split_subtokens,
 };
 use tracedecay_private_fs::{RewriteWitness, open_private_file};
 
@@ -3174,7 +3174,9 @@ fn lexical_admission_rank(
 }
 
 // A signature's parameter and return types reference other symbols. Definition
-// priority requires the query or its admitted spelling variant to name this row.
+// priority requires the query or its admitted spelling variant to name this
+// row. A short alias still names the row when every term is a subtoken of the
+// declared identifier (`cache grant` → `VerifiedCacheGrantSnapshotV1`).
 fn lexical_definition_match(
     row: &ArtifactRowV1,
     prepared: &PreparedLexicalQueryV1<'_>,
@@ -3183,17 +3185,32 @@ fn lexical_definition_match(
     let Some(name) = row.symbol_simple_name.as_deref() else {
         return false;
     };
-    let name = normalize_lexical(name);
-    exact_definition_match(
+    let normalized_name = normalize_lexical(name);
+    if exact_definition_match(
         row.anchor.grain,
-        Some(&name),
+        Some(&normalized_name),
         prepared
             .whole_terms
             .iter()
             .chain(&prepared.phrases)
             .map(|(_, normalized)| normalized.as_str())
             .chain(fuzzy.by_query.values().flatten().map(String::as_str)),
-    )
+    ) {
+        return true;
+    }
+    let terms = prepared
+        .whole_terms
+        .iter()
+        .map(|(_, normalized)| normalized.as_str())
+        .collect::<Vec<_>>();
+    if !(2..=3).contains(&terms.len()) {
+        return false;
+    }
+    let name_tokens = split_subtokens(name);
+    !name_tokens.is_empty()
+        && terms
+            .iter()
+            .all(|term| name_tokens.iter().any(|token| token == term))
 }
 
 /// Heap entry ordered by `key` alone. Payload is excluded from equality so a
