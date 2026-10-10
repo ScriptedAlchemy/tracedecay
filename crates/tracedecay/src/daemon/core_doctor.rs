@@ -106,16 +106,6 @@ fn core_status_request_id(request: Option<&JsonRpcRequest>) -> Option<serde_json
     .then(|| request.id.clone().unwrap_or(serde_json::Value::Null))
 }
 
-fn stalled_project_open_error(
-    project_open: &ProjectOpenStatusV1,
-    stalled_failure: Option<&super::ProjectOpenFailure>,
-) -> TraceDecayError {
-    if let Some(failure) = stalled_failure {
-        return failure.to_error();
-    }
-    super::stalled_project_open_error(project_open)
-}
-
 fn project_open_status_value(
     handshake: &DaemonHandshake,
     project_open: &ProjectOpenStatusV1,
@@ -641,7 +631,10 @@ where
     {
         drop(setup_activity);
         if project_open.state == ProjectOpenStatusStateV1::Stalled {
-            let error = stalled_project_open_error(project_open, status.stalled_failure.as_ref());
+            let error = status.stalled_failure.as_ref().map_or_else(
+                || super::stalled_project_open_error(project_open),
+                super::ProjectOpenFailure::to_error,
+            );
             Box::pin(write_json_rpc_response(
                 transport,
                 &super::project_open_handshake::project_open_error_response(id, &error),
@@ -672,7 +665,10 @@ where
         && project_open.state == ProjectOpenStatusStateV1::Stalled
     {
         drop(setup_activity);
-        let error = stalled_project_open_error(project_open, status.stalled_failure.as_ref());
+        let error = status.stalled_failure.as_ref().map_or_else(
+            || super::stalled_project_open_error(project_open),
+            super::ProjectOpenFailure::to_error,
+        );
         Box::pin(write_json_rpc_response(
             transport,
             &super::project_open_handshake::project_open_error_response(request.id.clone(), &error),
