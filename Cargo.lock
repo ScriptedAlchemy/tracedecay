@@ -6494,6 +6494,7 @@ name = "tracedecay-rusqlite-runtime"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "dunce",
  "proptest",
  "ring",
  "rusqlite",

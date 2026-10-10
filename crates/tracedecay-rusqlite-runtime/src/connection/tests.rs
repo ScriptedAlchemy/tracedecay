@@ -571,16 +571,29 @@ fn sqlite_host_path_shortens_verbatim_disk_paths_only() {
         PathBuf::from(format!("C:\\{}", "é".repeat(150)))
     );
 
-    // Components that parse differently without the prefix must keep it:
-    // trailing dots/spaces are stripped, dot components resolve, `/` is a
-    // separator, and reserved DOS-device stems get special treatment.
+    // Components SQLite canonicalizes identically either way (trailing
+    // dots/spaces, `.`/`..`, empty `\\` — `GetFullPathNameW` collapses them
+    // even under `\\?\`) strip too: the prefix buys no identity and would
+    // only re-trigger the UNC shared-lock path on the resolved name.
+    for (raw, expected) in [
+        (r"\\?\C:\data\store.", r"C:\data\store."),
+        (r"\\?\C:\data\store ", r"C:\data\store "),
+        (r"\\?\C:\data\.\store.db", r"C:\data\.\store.db"),
+        (r"\\?\C:\data\..\store.db", r"C:\data\..\store.db"),
+        (r"\\?\C:\data\\store.db", r"C:\data\\store.db"),
+    ] {
+        assert_eq!(
+            sqlite_host_path(Path::new(raw)),
+            Path::new(expected),
+            "{raw}"
+        );
+    }
+
+    // Components whose identity genuinely depends on verbatim parsing keep
+    // the prefix: reserved DOS-device stems open the literal file only
+    // under `\\?\`, and `/`-components parse as subdirectories without it.
     for raw in [
-        r"\\?\C:\data\store.",
-        r"\\?\C:\data\store ",
-        r"\\?\C:\data\.\store.db",
-        r"\\?\C:\data\..\store.db",
         r"\\?\C:\data/store.db",
-        r"\\?\C:\data\\store.db",
         r"\\?\C:\data\CON.db",
         r"\\?\C:\data\con.db",
         r"\\?\C:\data\NUL",
@@ -612,12 +625,15 @@ fn sqlite_host_path_keeps_literal_windows_prefix_names() {
 }
 
 /// Two real directories can coexist whose names differ only by a trailing
-/// dot — `\\?\` verbatim opens the literal one while the same spelling
-/// without the prefix resolves to the dot-less sibling. The mapping must
-/// keep the prefix, or it would silently open the wrong object.
+/// dot — but SQLite canonicalizes every database name through
+/// `GetFullPathNameW`, which collapses `store.` to `store` even under
+/// `\\?\`. Verified on this platform: both verbatim spellings open the
+/// same database, so the prefix cannot keep the dotted object distinct and
+/// `sqlite_host_path` strips it rather than re-triggering UNC shared-lock
+/// handling on the name SQLite actually opens.
 #[cfg(windows)]
 #[test]
-fn dot_suffixed_directory_keeps_verbatim_identity() {
+fn dot_suffixed_directory_resolves_to_sqlite_canonical_identity() {
     use super::sqlite_host_path;
 
     let temp = tempfile::tempdir().unwrap();
@@ -635,10 +651,31 @@ fn dot_suffixed_directory_keeps_verbatim_identity() {
     std::fs::create_dir(&plain).unwrap();
     assert!(dotted.is_dir() && plain.is_dir());
 
-    // The identity test: the verbatim path must not be shortened into a
-    // name that resolves to the sibling directory.
-    assert_eq!(sqlite_host_path(&dotted), dotted);
-    assert_ne!(sqlite_host_path(&dotted).file_name(), plain.file_name());
+    // The dotted component survives name conversion verbatim — SQLite owns
+    // the canonicalization that collapses it.
+    let dotted_db = dotted.join("db.sqlite");
+    assert_eq!(
+        sqlite_host_path(&dotted_db),
+        PathBuf::from(dotted_db.to_str().unwrap().strip_prefix(r"\\?\").unwrap()),
+    );
+
+    // Seed the `store` database (production open is READ_WRITE-only).
+    let db = Connection::open(plain.join("db.sqlite")).expect("create database");
+    db.execute_batch(
+        "CREATE TABLE sentinel(v TEXT); INSERT INTO sentinel VALUES('canonical-store');",
+    )
+    .unwrap();
+    drop(db);
+
+    // The verbatim dotted open resolves to `store`'s database through
+    // SQLite's own canonicalization — proven by the sentinel row, not the
+    // mapped string. A separate `store.` database is unreachable through
+    // SQLite either way.
+    let reader = open(&dotted_db, ConnectionMode::Writer).expect("open via dotted verbatim path");
+    let value: String = reader
+        .query_row("SELECT v FROM sentinel", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(value, "canonical-store");
 }
 
 /// A database opened through a verbatim `\\?\` path is the same file, the
