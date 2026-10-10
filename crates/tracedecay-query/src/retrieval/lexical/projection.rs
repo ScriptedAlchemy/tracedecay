@@ -14,8 +14,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    LexicalFieldV1, LexicalLaneRequest, LexicalProximityV1, LexicalSpellingVariantV1,
-    normalize_lexical,
+    LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest, LexicalProximityV1,
+    LexicalSpellingVariantV1, normalize_lexical,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneRequest};
 use crate::retrieval::ports::{
@@ -983,6 +983,7 @@ fn score_lexical_row(
     field_lengths: &BTreeMap<LexicalFieldV1, usize>,
     exact_terms: &[ExactTechnicalTermV1],
     prepared: &PreparedLexicalQueryV1<'_>,
+    field_filters: &[LexicalFieldFilterV1],
     fuzzy: &FuzzyExpansionsV1,
     phrase_document_frequencies: &BTreeMap<String, usize>,
     mut term_frequency: impl FnMut(LexicalFieldV1, &str) -> usize,
@@ -1004,8 +1005,14 @@ fn score_lexical_row(
     // natural-language questions keep them only when rustdoc also matches,
     // so test helpers that share a name token (`canonical`, `grant`) cannot
     // consume the per-file diversity cap. Signature stays: error-contract
-    // needs match `#[error]` text there.
-    let score_name_fields = prepared.whole_terms.len() == 1
+    // needs match `#[error]` text there. A route that whitelists a name
+    // field — preferred-symbol or a name-filtered phrase/proximity read —
+    // exists to score names; suppressing them leaves it no admitted score.
+    let name_fields_requested = field_filters
+        .iter()
+        .any(|filter| filter.include && is_identifier_name_field(filter.field));
+    let score_name_fields = name_fields_requested
+        || prepared.whole_terms.len() == 1
         || (field_lengths.contains_key(&LexicalFieldV1::Documentation)
             && prepared.whole_terms.iter().any(|(_, normalized)| {
                 term_frequency(LexicalFieldV1::Documentation, normalized) > 0
@@ -1097,10 +1104,10 @@ fn score_lexical_row(
             matched_proximities.insert(proximity.original.clone());
         }
     }
-    if prepared.whole_terms.len() != 1 {
-        if let Some(score) = field_scores.get_mut(&LexicalFieldV1::Documentation) {
-            *score = score.saturating_mul(DOCUMENTATION_NL_SCORE_MILLIS) / 1_000;
-        }
+    if prepared.whole_terms.len() != 1
+        && let Some(score) = field_scores.get_mut(&LexicalFieldV1::Documentation)
+    {
+        *score = score.saturating_mul(DOCUMENTATION_NL_SCORE_MILLIS) / 1_000;
     }
     let echo_penalty_applied = echo_penalty;
     if echo_penalty_applied {

@@ -1,7 +1,10 @@
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use tracedecay_domain::RetrievalSourceRoleV1;
-use tracedecay_query::retrieval::lexical::{LexicalLane, LexicalLaneRetriever};
+use tracedecay_query::retrieval::lexical::{
+    LexicalFieldFilterV1, LexicalFieldV1, LexicalLane, LexicalLaneRetriever,
+};
 
 use super::candidate_producers::{
     complete, real_lexical_source_fixture_from_sources, sealed_artifact,
@@ -154,4 +157,60 @@ fn artifact_definition_priority_covers_short_aliases_of_the_own_symbol() {
             .as_str(),
         "file.definition"
     );
+}
+
+#[test]
+fn name_filtered_routes_keep_undocumented_symbol_hits() {
+    let fixture = real_lexical_source_fixture_from_sources(vec![(
+        "file.definition".to_owned(),
+        "src/lookup.rs".to_owned(),
+        b"pub fn getUserById(id: u64) -> u64 { id }\n".to_vec(),
+    )]);
+    let artifact = sealed_artifact(&fixture, fixture.metadata.clone());
+    let lane = LexicalLane::new(artifact.reader.clone());
+    // A preferred-symbol route admits only SymbolName and can carry several
+    // whole terms; a phrase-only read can whitelist the same field. Both must
+    // keep their name score when the row carries no rustdoc.
+    let mut terms_request = artifact.request(
+        "getUserById grant",
+        &["getUserById", "grant"],
+        &[],
+        &[],
+        0,
+        64,
+    );
+    terms_request.field_filters = Cow::Owned(vec![LexicalFieldFilterV1 {
+        field: LexicalFieldV1::SymbolName,
+        include: true,
+    }]);
+    let mut phrase_request = artifact.request("getUserById", &[], &[], &["getUserById"], 0, 64);
+    phrase_request.field_filters = Cow::Owned(vec![LexicalFieldFilterV1 {
+        field: LexicalFieldV1::SymbolName,
+        include: true,
+    }]);
+    for (label, request) in [
+        ("multi-term preferred-symbol", terms_request),
+        ("phrase-only", phrase_request),
+    ] {
+        let result = complete(
+            lane.retrieve_lexical(&request)
+                .expect("indexed lexical query"),
+        );
+        let files: BTreeSet<&str> = result
+            .candidates
+            .iter()
+            .map(|candidate| {
+                candidate
+                    .file_occurrence_id
+                    .as_ref()
+                    .expect("candidate file")
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(
+            files,
+            BTreeSet::from(["file.definition"]),
+            "{label}: the name-whitelisted route keeps its undocumented name hit"
+        );
+    }
 }
