@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+* **cli:** give explicit upgrade lookups their own GitHub deadline so a 1s advisory budget cannot fail `tracedecay upgrade` ([#3371](https://github.com/ScriptedAlchemy/tracedecay/issues/3371))
 * **grep:** admit interactive source scans on their own worker pool so background verification cannot hold the indexing CPU FIFO across the 10s source-search deadline ([#3359](https://github.com/ScriptedAlchemy/tracedecay/issues/3359))
 
 ### Performance Improvements

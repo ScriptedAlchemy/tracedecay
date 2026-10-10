@@ -130,6 +130,24 @@ class CommitRangeLintTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_a_squash_pull_request_reference_is_not_authored_header_text(self) -> None:
+        base = self.commit("chore(test): establish fixture base")
+        squashed = self.commit(
+            "fix(callers): keep import and new sites instead of empty complete (#3315)",
+            base,
+        )
+        result = self.lint(base, squashed)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        overlong = self.commit(
+            "fix(windows): unblock WAL checkpoint drain and crate_universe regen on Windows (#3298)",
+            squashed,
+        )
+        result = self.lint(squashed, overlong)
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn(overlong, output)
+
     def test_node_startup_count_is_constant_for_a_large_range(self) -> None:
         base = self.commit("chore(test): establish fixture base")
         head = base
