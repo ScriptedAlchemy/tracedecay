@@ -513,7 +513,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.remote_replay_transaction
             .unregister_target(project_id, &replay_binding)
             .map_err(|error| session_registry_error("quiesce project replay target", error))?;
-        if let Err(error) = self.retire_project_session_sync(project_id).await {
+        // Unattached stores never received a sync owner. A missing
+        // authority is already retired, not a blocked close.
+        if self.session_sync_service.get().is_some()
+            && let Err(error) = self.retire_project_session_sync(project_id).await
+        {
             restore_replay(&mut retirement)?;
             return Err(error);
         }
