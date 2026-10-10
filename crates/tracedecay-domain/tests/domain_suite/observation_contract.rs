@@ -1454,4 +1454,16 @@ fn tool_result_visible_text_unwraps_mcp_envelopes() {
         tool_result_output_cut_state(&json!({"truncated": false, "preview": "x"})),
         Some(false)
     );
+    // Truncation evidence inside output fields beats a complete marker.
+    assert_eq!(
+        tool_result_output_cut_state(
+            &json!({"truncated": false, "content": "# Truncated Response\n\npreview"})
+        ),
+        Some(true)
+    );
+    // A source read whose text merely mentions truncation is not evidence.
+    assert_eq!(
+        tool_result_output_cut_state(&json!("// handle truncated output here\nfn parse() {}")),
+        None
+    );
 }

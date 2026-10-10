@@ -242,6 +242,17 @@ mod tests {
     }
 
     #[test]
+    fn does_not_mark_truncation_words_in_served_text() {
+        let fact = accounted_tool_result(
+            None,
+            json!("// handle truncated output here\nfn parse() {}"),
+            Some(true),
+        );
+        let (_, cut, _) = result_fields(&fact);
+        assert_eq!(cut, None);
+    }
+
+    #[test]
     fn honors_an_explicit_truncated_false_marker() {
         let fact = accounted_tool_result(
             None,

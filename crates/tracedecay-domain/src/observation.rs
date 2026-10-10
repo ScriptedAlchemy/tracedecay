@@ -2274,14 +2274,12 @@ pub fn tool_result_output_cut_state(content: &Value) -> Option<bool> {
             .map(tool_result_output_cut_state)
             .fold(None, combine_cut_state),
         Value::Object(map) => {
-            if let Some(truncated) = map.get("truncated").and_then(Value::as_bool) {
-                return Some(truncated);
-            }
+            let declared = map.get("truncated").and_then(Value::as_bool);
             ["content", "output", "text", "preview", "metadata"]
                 .into_iter()
                 .filter_map(|key| map.get(key))
                 .map(tool_result_output_cut_state)
-                .fold(None, combine_cut_state)
+                .fold(declared, combine_cut_state)
         }
     }
 }
@@ -2296,13 +2294,13 @@ fn combine_cut_state(a: Option<bool>, b: Option<bool>) -> Option<bool> {
     }
 }
 
-/// Whether free-text output carries a host truncation warning, such as
-/// Codex's `Warning: truncated output (original token count: N)`.
+/// Whether output opens with a host truncation warning, such as Codex's
+/// `Warning: truncated output (original token count: N)` header. Only the
+/// first line is inspected: a `warning:` line is a host-generated notice,
+/// while a `truncated` phrase deeper in served text is ordinary content.
 fn native_truncation_marker(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    lower.contains("truncated output")
-        || lower.contains("output truncated")
-        || lower.contains("output was truncated")
+    let first_line = text.lines().next().unwrap_or_default().to_lowercase();
+    first_line.contains("warning:") && first_line.contains("truncated")
 }
 
 fn validate_canonical_label(value: &str) -> Result<(), ObservationContractError> {
