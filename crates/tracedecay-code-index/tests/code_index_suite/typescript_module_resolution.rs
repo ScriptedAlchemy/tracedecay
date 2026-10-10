@@ -414,3 +414,40 @@ fn sealed_replay_recomputes_identical_typescript_edges() {
         ]
     );
 }
+
+/// webpack-external-import compiles `src/` to the package root. A factory
+/// that `require`s the published path and `new`s the class must still bind
+/// while only the source tree is indexed.
+#[test]
+fn published_root_require_binds_src_constructor() {
+    let root = tempfile::tempdir().expect("published-root fixture");
+    std::fs::create_dir_all(root.path().join("src/webpack")).expect("src/webpack");
+    std::fs::create_dir_all(root.path().join("manual/webpack")).expect("manual/webpack");
+    std::fs::write(
+        root.path().join("src/webpack/index.js"),
+        "class URLImportPlugin {\n  constructor(opts) { this.opts = opts; }\n}\n\
+         module.exports = URLImportPlugin;\n",
+    )
+    .expect("plugin source");
+    std::fs::write(
+        root.path().join("manual/webpack/webpackConfigFactory.js"),
+        "const URLImportPlugin = require(\"../../webpack\");\n\
+         module.exports = (siteId) => {\n\
+           return new URLImportPlugin({ manifestName: `website-${siteId}` });\n\
+         };\n",
+    )
+    .expect("factory source");
+
+    let generation = crate::cross_file_import_calls::publish_fixture_tree(
+        root.path(),
+        "published-root-require",
+    );
+    let target = symbol(&generation, "src/webpack/index.js::URLImportPlugin");
+    let callers = resolved_callers(&generation, &target);
+    assert!(
+        callers
+            .keys()
+            .any(|name| name.contains("webpackConfigFactory.js")),
+        "new URLImportPlugin after require(\"../../webpack\") must bind: {callers:?}"
+    );
+}

@@ -12,9 +12,10 @@
 //! `types`, `source`, then the conventional `index`/`src/index`), and
 //! `export … from` chains through barrels, including same-module
 //! `export { a as b }` clauses and `export default <name>` that forward a
-//! declaration or a local import (`export *` never forwards `default`), and
-//! member calls through module namespaces (`import * as ns`, `export * as
-//! ns`).
+//! declaration or a local import (`export *` never forwards `default`),
+//! CommonJS `require`/`module.exports`, published-root paths whose source
+//! still lives under `src/`, and member calls through module namespaces
+//! (`import * as ns`, `export * as ns`).
 //!
 //! A specifier that matches no alias and no workspace package is an external
 //! dependency and binds nothing. A specifier that names a project module but
@@ -194,8 +195,10 @@ impl TypeScriptModuleIndexV1 {
             || specifier.starts_with("./")
             || specifier.starts_with("../")
         {
+            let published = join_normalized(from_dir, specifier);
             return self
-                .probe(&join_normalized(from_dir, specifier))
+                .probe(&published)
+                .or_else(|| self.probe_published_from_src(&published))
                 .map_or(ModuleTargetV1::Unresolved, ModuleTargetV1::File);
         }
         let mut names_project_code = false;
@@ -581,6 +584,17 @@ impl TypeScriptModuleIndexV1 {
         }
     }
 
+    /// `babel src -d .` (and similar) publish `src/foo` as `foo`. A relative
+    /// require of the published path must still bind the indexed source, or
+    /// `new URLImportPlugin()` after `require("../../webpack")` never reaches
+    /// `src/webpack`.
+    fn probe_published_from_src(&self, published: &str) -> Option<usize> {
+        if published.is_empty() || published == "src" || published.starts_with("src/") {
+            return None;
+        }
+        self.probe(&join_normalized("src", published))
+    }
+
     /// Node/TypeScript file probing over the indexed set: the path itself, the
     /// TypeScript source behind a `.js` specifier, an added extension, then the
     /// directory `index`.
@@ -935,6 +949,10 @@ mod tests {
         assert_eq!(join_normalized("src", "./lib"), "src/lib");
         assert_eq!(join_normalized("src", "../../escape"), "escape");
         assert_eq!(join_normalized("", "./index"), "index");
+        assert_eq!(
+            join_normalized("src", &join_normalized("manual/webpack", "../../webpack")),
+            "src/webpack"
+        );
     }
 
     #[test]

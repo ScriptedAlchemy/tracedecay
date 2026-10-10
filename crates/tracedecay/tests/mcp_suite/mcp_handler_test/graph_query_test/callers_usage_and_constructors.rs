@@ -146,8 +146,9 @@ async fn callers_return_type_import_usage_sites_instead_of_empty_complete() {
     shutdown_graph_fixture(fixture).await;
 }
 
-/// `const Plugin = require("./plugin"); new Plugin()` is a real constructor
-/// call site. Callers of the exported class must name that factory.
+/// `require("../../webpack")` plus `module.exports = () => new Plugin()` is
+/// the webpack-external-import factory. The published path is missing; the
+/// class still lives under `src/webpack`. Callers must name that `new`.
 #[tokio::test]
 async fn callers_return_commonjs_constructor_sites() {
     let fixture = graph_query_fixture_with_sources(|project| {
@@ -161,11 +162,10 @@ async fn callers_return_commonjs_constructor_sites() {
         .unwrap();
         fs::write(
             project.join("manual/webpack/webpackConfigFactory.js"),
-            "const URLImportPlugin = require(\"../../src/webpack\");\n\
-             function build(siteId) {\n\
+            "const URLImportPlugin = require(\"../../webpack\");\n\
+             module.exports = (siteId, options) => {\n\
                return new URLImportPlugin({ manifestName: `website-${siteId}` });\n\
-             }\n\
-             module.exports = build;\n",
+             };\n",
         )
         .unwrap();
     })
@@ -173,7 +173,9 @@ async fn callers_return_commonjs_constructor_sites() {
 
     let evidence = callers_of(&fixture, "src/webpack/index.js::URLImportPlugin").await;
     assert!(
-        caller_names(&evidence).iter().any(|name| name == "build"),
+        caller_names(&evidence)
+            .iter()
+            .any(|name| name == "<module>" || name == "build"),
         "new URLImportPlugin in the factory must appear: {evidence:#}"
     );
     assert!(
@@ -185,6 +187,14 @@ async fn callers_return_commonjs_constructor_sites() {
     assert_eq!(
         evidence["coverage"]["completeness"], "complete",
         "{evidence:#}"
+    );
+    assert_ne!(
+        evidence["payload"]["items"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0),
+        0,
+        "a bound constructor site must not become items=[]: {evidence:#}"
     );
 
     shutdown_graph_fixture(fixture).await;

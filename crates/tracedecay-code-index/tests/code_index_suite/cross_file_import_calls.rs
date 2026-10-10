@@ -238,7 +238,8 @@ fn language_for(path: &str) -> &'static str {
         Some("rb") => "ruby",
         Some("rs") => "rust",
         Some("toml") => "toml",
-        Some("ts" | "tsx") => "typescript",
+        Some("ts" | "tsx" | "mts" | "cts") => "typescript",
+        Some("js" | "jsx" | "mjs" | "cjs") => "javascript",
         Some("json") => "json",
         other => panic!("fixture file {path} has an unexpected extension {other:?}"),
     }
