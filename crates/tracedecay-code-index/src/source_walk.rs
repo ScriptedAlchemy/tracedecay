@@ -22,18 +22,20 @@ pub struct SourceWalkError {
     pub message: String,
 }
 
-/// The directories a positive `path_glob` may descend into on its way to a
-/// match, so a scope such as `dist/**/*.js` or `*.js` reaches generated
-/// directories the default policy would otherwise prune before listing.
-struct GeneratedDirScope {
+/// Conservative directory reachability for a positive override. The override
+/// matcher remains authoritative for files, including directory inheritance.
+struct PathGlobScope {
     literal_prefix: PathBuf,
     may_match_descendants: bool,
 }
 
-impl GeneratedDirScope {
+impl PathGlobScope {
     fn from_path_glob(path_glob: &str) -> Option<Self> {
+        if path_glob != path_glob.trim() {
+            return None;
+        }
         let path_glob = path_glob.trim();
-        if path_glob.is_empty() || path_glob.starts_with('!') {
+        if path_glob.is_empty() || path_glob.starts_with('!') || path_glob.contains('\\') {
             return None;
         }
         let segments = path_glob
@@ -41,6 +43,12 @@ impl GeneratedDirScope {
             .split('/')
             .filter(|segment| !segment.is_empty())
             .collect::<Vec<_>>();
+        if segments
+            .iter()
+            .any(|segment| matches!(*segment, "." | ".."))
+        {
+            return None;
+        }
         let matches_basename_at_any_depth = !path_glob.contains('/');
         let wildcard_start = segments
             .iter()
@@ -84,6 +92,15 @@ impl GeneratedDirScope {
             || relative == self.literal_prefix
             || (self.may_match_descendants && relative.starts_with(&self.literal_prefix))
     }
+
+    fn may_contain_match(&self, project_root: &Path, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(project_root) else {
+            return false;
+        };
+        // A literal override can also name a directory, whose descendants
+        // inherit its whitelist. Never prune below that literal prefix.
+        self.literal_prefix.starts_with(relative) || relative.starts_with(&self.literal_prefix)
+    }
 }
 
 #[tracing::instrument(name = "code_index.capture.source_walk", level = "trace", skip_all)]
@@ -97,7 +114,7 @@ pub fn source_walk(
         .as_ref()
         .is_some_and(|overrides| overrides.num_whitelists() > 0);
     let generated_dir_overrides = overrides.clone();
-    let generated_dir_scope = path_glob.and_then(GeneratedDirScope::from_path_glob);
+    let path_glob_scope = path_glob.and_then(PathGlobScope::from_path_glob);
     let filter_root = project_root.to_path_buf();
     let path_policy = path_policy.clone();
 
@@ -122,6 +139,13 @@ pub fn source_walk(
             };
             let relative = forward_slash_path(relative);
             let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+            if is_dir
+                && path_glob_scope
+                    .as_ref()
+                    .is_some_and(|scope| !scope.may_contain_match(&filter_root, entry.path()))
+            {
+                return false;
+            }
             // An entry the glob names, or a directory it must pass through,
             // is judged without the generated-directory defaults: the scope
             // is the operator asking for that noise. Every other exclusion
@@ -130,7 +154,7 @@ pub fn source_walk(
                 && (generated_dir_overrides.as_ref().is_some_and(|overrides| {
                     overrides.matched(entry.path(), is_dir).is_whitelist()
                 }) || (is_dir
-                    && generated_dir_scope
+                    && path_glob_scope
                         .as_ref()
                         .is_some_and(|scope| scope.allows(&filter_root, entry.path()))));
             let path_policy = if explicitly_requested {
@@ -214,6 +238,105 @@ mod tests {
             .collect::<Vec<_>>();
         files.sort();
         files
+    }
+
+    #[test]
+    fn a_literal_file_scope_prunes_unrelated_subtrees() {
+        let root = TempDir::new().unwrap();
+        for path in [
+            "crates/core/src/compiler.rs",
+            "crates/other/deep/noise.rs",
+            "packages/deep/noise.rs",
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "pub struct Compiler;\n").unwrap();
+        }
+        let entries = source_walk(
+            root.path(),
+            Some("crates/core/src/compiler.rs"),
+            &IndexPathPolicyV1::new(vec![], vec![]).unwrap(),
+        )
+        .unwrap()
+        .map(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .strip_prefix(root.path())
+                .unwrap()
+                .to_path_buf()
+        })
+        .collect::<Vec<_>>();
+        assert!(entries.contains(&PathBuf::from("crates/core/src/compiler.rs")));
+        assert!(
+            entries
+                .iter()
+                .all(|path| !path.starts_with("packages") && !path.starts_with("crates/other"))
+        );
+    }
+
+    #[test]
+    fn path_pruning_preserves_directory_inheritance_and_basename_globs() {
+        let root = TempDir::new().unwrap();
+        for path in ["src/deep/keep.rs", "other/deep/also.rs"] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "source\n").unwrap();
+        }
+        let files = |glob| {
+            let mut paths = source_walk(
+                root.path(),
+                Some(glob),
+                &IndexPathPolicyV1::new(vec![], vec![]).unwrap(),
+            )
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+            .map(|entry| {
+                entry
+                    .path()
+                    .strip_prefix(root.path())
+                    .unwrap()
+                    .to_path_buf()
+            })
+            .collect::<Vec<_>>();
+            paths.sort();
+            paths
+        };
+        assert_eq!(files("/src/**"), vec![PathBuf::from("src/deep/keep.rs")]);
+        assert_eq!(
+            files("*.rs"),
+            vec![
+                PathBuf::from("other/deep/also.rs"),
+                PathBuf::from("src/deep/keep.rs")
+            ]
+        );
+        assert_eq!(files("{src,other}/**/*.rs"), files("*.rs"));
+        assert_eq!(files("!src/**"), vec![PathBuf::from("other/deep/also.rs")]);
+    }
+
+    #[test]
+    fn escaped_literal_prefixes_keep_the_override_matcher_authoritative() {
+        let root = TempDir::new().unwrap();
+        fs::create_dir_all(root.path().join("src/a[1]")).unwrap();
+        fs::write(root.path().join("src/a[1]/keep.rs"), "source\n").unwrap();
+        let files = source_walk(
+            root.path(),
+            Some(r"src/a\[1\]/keep.rs"),
+            &IndexPathPolicyV1::new(vec![], vec![]).unwrap(),
+        )
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .map(|entry| {
+            entry
+                .path()
+                .strip_prefix(root.path())
+                .unwrap()
+                .to_path_buf()
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(files, vec![PathBuf::from("src/a[1]/keep.rs")]);
     }
 
     #[test]

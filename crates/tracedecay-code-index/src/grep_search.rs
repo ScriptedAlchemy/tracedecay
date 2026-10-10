@@ -2,9 +2,12 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 
+use ignore::DirEntry;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::{Regex, RegexBuilder};
 use tracedecay_domain::IndexPathPolicyV1;
 
+use crate::parallelism::{CodeIndexParallelismErrorV1, install, with_background_cpu_permit};
 use crate::source_walk::{forward_slash_relative, source_walk};
 
 const MAX_HITS_PER_FILE: usize = 20;
@@ -72,6 +75,7 @@ impl GrepScanOmissionsV1 {
 pub enum GrepSearchError {
     InvalidPattern { pattern: String, message: String },
     InvalidGlob { glob: String, message: String },
+    Parallelism(CodeIndexParallelismErrorV1),
 }
 
 impl std::fmt::Display for GrepSearchError {
@@ -83,6 +87,7 @@ impl std::fmt::Display for GrepSearchError {
             Self::InvalidGlob { glob, message } => {
                 write!(formatter, "invalid path_glob '{glob}': {message}")
             }
+            Self::Parallelism(error) => error.fmt(formatter),
         }
     }
 }
@@ -94,88 +99,143 @@ pub fn search_tree_with_cancel(
     project_root: &Path,
     query: &GrepSearchQuery,
     path_policy: &IndexPathPolicyV1,
-    is_cancelled: impl Fn() -> bool,
+    is_cancelled: impl Fn() -> bool + Sync,
 ) -> Result<GrepSearchResult, GrepSearchError> {
     let matcher = build_matcher(query)?;
-    let walker =
+    let mut walker =
         source_walk(project_root, query.path_glob.as_deref(), path_policy).map_err(|error| {
             GrepSearchError::InvalidGlob {
                 glob: error.glob,
                 message: error.message,
             }
         })?;
+    install(|| {
+        let mut result = GrepSearchResult::default();
+        let max_results = query.max_results.max(1);
+        // Bound retained source and reads to the existing owner's worker width.
+        // Indexed collection preserves walk order before applying the hit cap.
+        let width = rayon::current_num_threads();
+        loop {
+            let mut batch = Vec::with_capacity(width);
+            while batch.len() < width {
+                if is_cancelled() {
+                    result.cancelled = true;
+                    return result;
+                }
+                let Some(entry) = walker.next() else { break };
+                match entry {
+                    Ok(entry) if entry.file_type().is_some_and(|kind| kind.is_file()) => {
+                        batch.push(entry);
+                    }
+                    Ok(_) => {}
+                    Err(_) => result.omissions.unavailable_sources += 1,
+                }
+            }
+            if batch.is_empty() {
+                return result;
+            }
+            let scans = batch
+                .par_iter()
+                .map(|entry| {
+                    with_background_cpu_permit(|| {
+                        scan_grep_file(entry, project_root, &matcher, query, &is_cancelled)
+                    })
+                })
+                .collect::<Vec<_>>();
+            for scan in scans {
+                result.files_scanned += scan.files_scanned;
+                result.lines_examined += scan.lines_examined;
+                result.lines_visited += scan.lines_visited;
+                result.omissions.oversized_files += scan.omissions.oversized_files;
+                result.omissions.oversized_lines += scan.omissions.oversized_lines;
+                result.omissions.unavailable_sources += scan.omissions.unavailable_sources;
+                result.truncated |= scan.truncated;
+                result.cancelled |= scan.cancelled;
+                let remaining = max_results
+                    .saturating_add(1)
+                    .saturating_sub(result.hits.len());
+                if scan.hits.len() > remaining {
+                    result.truncated = true;
+                }
+                result.hits.extend(scan.hits.into_iter().take(remaining));
+            }
+            if result.cancelled || result.hits.len() > max_results {
+                result.truncated |= result.hits.len() > max_results;
+                return result;
+            }
+        }
+    })
+    .map_err(GrepSearchError::Parallelism)
+}
+
+fn scan_grep_file(
+    entry: &DirEntry,
+    project_root: &Path,
+    matcher: &Regex,
+    query: &GrepSearchQuery,
+    is_cancelled: &(impl Fn() -> bool + Sync),
+) -> GrepSearchResult {
     let mut result = GrepSearchResult::default();
     let max_results = query.max_results.max(1);
+    if is_cancelled() {
+        result.cancelled = true;
+        return result;
+    }
+    let path = entry.path();
+    let Ok(relative) = path.strip_prefix(project_root) else {
+        return result;
+    };
+    let Ok(metadata) = entry.metadata() else {
+        result.omissions.unavailable_sources += 1;
+        return result;
+    };
+    if metadata.len() > MAX_INTERACTIVE_SOURCE_BYTES {
+        result.omissions.oversized_files += 1;
+        return result;
+    }
+    if is_cancelled() {
+        result.cancelled = true;
+        return result;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        result.omissions.unavailable_sources += 1;
+        return result;
+    };
+    if looks_binary(&bytes) {
+        return result;
+    }
+    let Ok(content) = String::from_utf8(bytes) else {
+        result.omissions.unavailable_sources += 1;
+        return result;
+    };
 
-    for entry in walker {
-        if is_cancelled() {
-            result.cancelled = true;
-            break;
-        }
-        let Ok(entry) = entry else { continue };
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let Ok(relative) = path.strip_prefix(project_root) else {
-            continue;
-        };
-        let Ok(metadata) = entry.metadata() else {
-            result.omissions.unavailable_sources += 1;
-            continue;
-        };
-        if metadata.len() > MAX_INTERACTIVE_SOURCE_BYTES {
-            result.omissions.oversized_files += 1;
-            continue;
-        }
-        if is_cancelled() {
-            result.cancelled = true;
-            break;
-        }
-        let Ok(bytes) = std::fs::read(path) else {
-            result.omissions.unavailable_sources += 1;
-            continue;
-        };
-        if looks_binary(&bytes) {
-            continue;
-        }
-        let Ok(content) = String::from_utf8(bytes) else {
-            result.omissions.unavailable_sources += 1;
-            continue;
-        };
-
-        // Defer path materialization until the file yields a hit so zero-hit
-        // files never pay normalize+alloc on the grep hot path.
-        let stop = if crate::observe::sample_hot_loop() {
-            {
-                let _span = tracing::trace_span!("code_index_grep_file").entered();
-                examine_grep_file(
-                    &matcher,
-                    query,
-                    relative,
-                    &content,
-                    &mut result,
-                    max_results,
-                    &is_cancelled,
-                )
-            }
-        } else {
+    // Defer path materialization until the file yields a hit so zero-hit
+    // files never pay normalize+alloc on the grep hot path.
+    if crate::observe::sample_hot_loop() {
+        {
+            let _span = tracing::trace_span!("code_index_grep_file").entered();
             examine_grep_file(
-                &matcher,
+                matcher,
                 query,
                 relative,
                 &content,
                 &mut result,
                 max_results,
-                &is_cancelled,
+                is_cancelled,
             )
-        };
-        if stop {
-            return Ok(result);
         }
-    }
-
-    Ok(result)
+    } else {
+        examine_grep_file(
+            matcher,
+            query,
+            relative,
+            &content,
+            &mut result,
+            max_results,
+            is_cancelled,
+        )
+    };
+    result
 }
 
 fn examine_grep_file<C: Fn() -> bool>(
@@ -312,6 +372,43 @@ mod tests {
             context_lines: 0,
             max_results: 10,
         }
+    }
+
+    #[test]
+    fn parallel_reads_preserve_walk_order_and_the_global_cap() {
+        let project = tempfile::tempdir().unwrap();
+        for index in 0..8 {
+            std::fs::write(project.path().join(format!("{index}.rs")), "HIT_TOKEN\n").unwrap();
+        }
+        let mut query = query("HIT_TOKEN");
+        query.max_results = 1;
+        let scan = |workers| {
+            let runtime = crate::parallelism::CodeIndexWorkerRuntimeV1::build(
+                tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Exact { workers },
+                4,
+                16 * 1024 * 1024 * 1024,
+            )
+            .unwrap();
+            let _entered = runtime.enter();
+            search_tree_with_cancel(project.path(), &query, &no_exclusions(), || false).unwrap()
+        };
+        let serial = scan(1);
+        let parallel = scan(4);
+        assert_eq!(serial.hits, parallel.hits);
+        assert_eq!(parallel.hits.len(), 2);
+        assert!(parallel.truncated);
+        assert!(!parallel.cancelled);
+        assert!(parallel.files_scanned <= 4);
+    }
+
+    #[test]
+    fn worker_pool_failure_is_typed_instead_of_an_empty_scan() {
+        let project = tempfile::tempdir().unwrap();
+        crate::parallelism::force_install_failure_for_test(true);
+        let outcome =
+            search_tree_with_cancel(project.path(), &query("token"), &no_exclusions(), || false);
+        crate::parallelism::force_install_failure_for_test(false);
+        assert!(matches!(outcome, Err(GrepSearchError::Parallelism(_))));
     }
 
     #[test]

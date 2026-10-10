@@ -417,7 +417,7 @@ mod tests {
         pattern: &str,
         path_glob: Option<&str>,
         max_results: usize,
-        is_cancelled: impl Fn() -> bool,
+        is_cancelled: impl Fn() -> bool + Sync,
     ) -> GrepSearchResult {
         search_tree_with_cancel(
             project,
