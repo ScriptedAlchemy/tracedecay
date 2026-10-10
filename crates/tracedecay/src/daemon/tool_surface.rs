@@ -306,8 +306,10 @@ pub(super) fn roster_sha256(tools: &[Value]) -> String {
         .filter_map(|tool| tool.get("name").and_then(Value::as_str))
         .collect::<Vec<_>>();
     names.sort_unstable();
-    let digest = Sha256::digest(names.join("\n").as_bytes());
-    format!("sha256:{digest:x}")
+    format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(names.join("\n").as_bytes()))
+    )
 }
 
 /// An exact name wins; otherwise a term in the name outweighs one in the prose.
@@ -528,7 +530,7 @@ mod tests {
             json!({"name": "a"}),
             json!({"name": "c"}),
         ]);
-        let expected = format!("sha256:{:x}", Sha256::digest(b"a\nb\nc"));
+        let expected = format!("sha256:{}", hex::encode(Sha256::digest(b"a\nb\nc")));
         assert_eq!(hash, expected);
         assert_eq!(
             hash,
