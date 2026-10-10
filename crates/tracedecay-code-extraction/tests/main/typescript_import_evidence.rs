@@ -672,6 +672,38 @@ fn require_assignment_is_a_default_import_row() {
     );
 }
 
+/// A `require` inside a test callback or `namespace` block binds a name
+/// only that body sees. Emitting a file-scope row would let `new` sites in
+/// unrelated functions claim the module.
+#[test]
+fn require_outside_module_scope_emits_no_import_row() {
+    for source in [
+        // Test callbacks traverse their body statements, but the binding is
+        // still local to the callback.
+        "describe('loads', () => {\n\
+         \x20 const Plugin = require('./plugin');\n\
+         \x20 new Plugin();\n\
+         });\n",
+        // A `namespace` block is its own scope.
+        "namespace inner {\n\
+         \x20 const Plugin = require('./plugin');\n\
+         \x20 export function build() { return new Plugin(); }\n\
+         }\n",
+    ] {
+        let artifact = TypeScriptExtractor.extract_artifact("factory.test.ts", source);
+        assert!(
+            artifact.result.errors.is_empty(),
+            "{source}: {:?}",
+            artifact.result.errors
+        );
+        assert!(
+            artifact.imports.is_empty(),
+            "{source}: {:?}",
+            artifact.imports
+        );
+    }
+}
+
 /// `const { Foo } = require("./m")` binds the named export, matching ESM
 /// `import { Foo } from "./m"`.
 #[test]
@@ -734,6 +766,53 @@ fn module_exports_assignment_is_a_default_export_row() {
             "./index.js",
             ImportNamespaceV1::Value,
         )],
+        "{:?}",
+        artifact.imports
+    );
+}
+
+/// `exports.Name = Local` and `module.exports.Name = Local` are named
+/// CommonJS exports. `const { Name } = require("./m")` binds `Local`
+/// through these forwarding rows.
+#[test]
+fn member_exports_assignments_are_named_export_rows() {
+    let source =
+        "class Internal {}\nexports.Plugin = Internal;\nmodule.exports.Factory = Internal;\n";
+    let artifact = TypeScriptExtractor.extract_artifact("src/plugin.js", source);
+    assert!(
+        artifact.result.errors.is_empty(),
+        "errors: {:?}",
+        artifact.result.errors
+    );
+    let rows = artifact
+        .imports
+        .iter()
+        .filter(|row| row.is_public)
+        .map(|row| {
+            (
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.module_specifier.as_str(),
+                row.namespace,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [
+            (
+                Some("Internal"),
+                Some("Plugin"),
+                "./plugin.js",
+                ImportNamespaceV1::Value,
+            ),
+            (
+                Some("Internal"),
+                Some("Factory"),
+                "./plugin.js",
+                ImportNamespaceV1::Value,
+            ),
+        ],
         "{:?}",
         artifact.imports
     );

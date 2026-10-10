@@ -488,9 +488,34 @@ fn unquote(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Only a declarator at module top level introduces a file-scope binding:
+/// `lexical_declaration`/`variable_declaration` directly under `program`
+/// (or under `export`). A `statement_block`, `internal_module`, or any
+/// other ancestor means the name is local to that body.
+fn is_module_scope(declarator: TsNode<'_>) -> bool {
+    let mut node = declarator;
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            "program" => return true,
+            "lexical_declaration" | "variable_declaration" | "export_statement" => {
+                node = parent;
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// `const X = require("./m")` and `const { A: B } = require("./m")` are
 /// CommonJS import rows. Without them, a later `new X()` cannot bind.
 pub(super) fn visit_require_declarator(state: &mut ExtractionState<'_>, declarator: TsNode<'_>) {
+    // The row is file-scoped evidence, so only a declarator at module top
+    // level may emit one. A require inside a function, test callback, or
+    // `namespace` block binds a name the rest of the file never sees; a
+    // file-scope row would let unrelated `new` sites claim that module.
+    if !is_module_scope(declarator) {
+        return;
+    }
     let Some(value) = declarator.child_by_field_name("value") else {
         return;
     };
@@ -595,8 +620,10 @@ fn visit_require_object_pattern(
     }
 }
 
-/// `module.exports = Name` is the CommonJS default export. `require()` of
-/// this file binds `Name` through the same `default` row ESM uses.
+/// `module.exports = Name` is the CommonJS default export; `exports.Name =
+/// Local` and `module.exports.Name = Local` are the named-export forms.
+/// `require()` of this file binds `Name` through the same rows ESM exports
+/// use.
 pub(super) fn visit_commonjs_export(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
     let assignment = match node.kind() {
         "assignment_expression" => node,
@@ -611,23 +638,26 @@ pub(super) fn visit_commonjs_export(state: &mut ExtractionState<'_>, node: TsNod
     let Some(left) = assignment.child_by_field_name("left") else {
         return;
     };
-    if !is_module_exports(state, left) {
+    let Some(exported) = commonjs_exported_name(state, left) else {
         return;
-    }
+    };
     let Some(right) = assignment.child_by_field_name("right") else {
         return;
     };
-    let exported = match right.kind() {
+    let local = match right.kind() {
         "identifier" => Some(state.node_text(right).to_string()),
         "function_declaration"
         | "generator_function_declaration"
         | "class_declaration"
-        | "abstract_class_declaration" => right
+        | "abstract_class_declaration"
+        | "function_expression"
+        | "generator_function"
+        | "class" => right
             .child_by_field_name("name")
             .map(|name| state.node_text(name).to_string()),
         _ => None,
     };
-    let Some(exported) = exported else {
+    let Some(local) = local else {
         return;
     };
     let file_name = state.file_path.rsplit('/').next().unwrap_or_default();
@@ -641,12 +671,37 @@ pub(super) fn visit_commonjs_export(state: &mut ExtractionState<'_>, node: TsNod
     push_evidence(
         state,
         &module_specifier,
-        (Some(exported), Some("default".to_owned())),
+        (Some(local), Some(exported)),
         BindingShape::REEXPORT,
         ImportNamespaceV1::Value,
         module_kind,
         right,
     );
+}
+
+/// The name a CommonJS member target exports: `module.exports` assigns
+/// `default`; `exports.Name` and `module.exports.Name` assign `Name`.
+fn commonjs_exported_name(state: &ExtractionState<'_>, left: TsNode<'_>) -> Option<String> {
+    if is_module_exports(state, left) {
+        return Some("default".to_owned());
+    }
+    if left.kind() != "member_expression" {
+        return None;
+    }
+    let object = left
+        .child_by_field_name("object")
+        .or_else(|| left.named_child(0))?;
+    if state.node_text(object) != "exports" && !is_module_exports(state, object) {
+        return None;
+    }
+    let property = left
+        .child_by_field_name("property")
+        .or_else(|| left.named_child(1))?;
+    let name = state.node_text(property);
+    if name.is_empty() || name == "<invalid utf8>" {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 fn is_module_exports(state: &ExtractionState<'_>, node: TsNode<'_>) -> bool {

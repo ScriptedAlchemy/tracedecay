@@ -565,6 +565,34 @@ fn tsconfig_out_dir_require_binds_root_dir_source() {
     );
 }
 
+/// `exports.Name = Local` forwards a local binding as a named CommonJS
+/// export, so a destructured require followed by `new` binds the
+/// constructor's caller.
+#[test]
+fn named_commonjs_export_binds_constructor_require() {
+    let root = tempfile::tempdir().expect("named-cjs-export fixture");
+    std::fs::create_dir_all(root.path().join("src")).expect("src");
+    std::fs::write(
+        root.path().join("src/plugin.js"),
+        "class Internal {}\nexports.Plugin = Internal;\n",
+    )
+    .expect("plugin source");
+    std::fs::write(
+        root.path().join("src/factory.js"),
+        "const { Plugin } = require('./plugin');\nmodule.exports = () => new Plugin();\n",
+    )
+    .expect("factory source");
+
+    let generation =
+        crate::cross_file_import_calls::publish_fixture_tree(root.path(), "named-cjs-export");
+    let target = symbol(&generation, "src/plugin.js::Internal");
+    let callers = resolved_callers(&generation, &target);
+    assert!(
+        callers.keys().any(|name| name.contains("factory.js")),
+        "new Plugin after require(\"./plugin\") must bind through exports.Plugin: {callers:?}"
+    );
+}
+
 /// Type-only imports still produce Uses from the methods that name the
 /// class. Callers of that class must list those methods.
 #[test]
