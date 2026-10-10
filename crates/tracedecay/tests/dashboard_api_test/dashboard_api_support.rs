@@ -323,7 +323,7 @@ pub(crate) fn write_file(path: &Path, content: &str) {
 }
 
 /// Ground-truth paths for a whole-word search. Matches `rg -l -w` on ASCII
-/// identifiers without requiring a host `rg` in the Bazel sandbox.
+/// identifiers without spawning a host `rg` that the Bazel sandbox lacks.
 pub(crate) fn rg_word_paths(root: &Path, query: &str) -> Vec<String> {
     let mut paths = Vec::new();
     collect_whole_word_paths(root, root, query, &mut paths);
