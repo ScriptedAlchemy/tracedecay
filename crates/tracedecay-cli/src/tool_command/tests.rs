@@ -1047,7 +1047,7 @@ fn successful_tool_result_exits_zero() {
 
 #[test]
 fn json_document_for_a_mid_size_files_result_fits_a_pipe_as_one_compact_line() {
-    let files = (0..520)
+    let files = (0..800)
         .map(|index| {
             json!({
                 "path": format!("src/pipe_boundary_{index:04}.rs"),
@@ -1056,17 +1056,22 @@ fn json_document_for_a_mid_size_files_result_fits_a_pipe_as_one_compact_line() {
             })
         })
         .collect::<Vec<_>>();
-    let typed = json!({ "count": 520, "layout": "flat", "files": files });
+    let typed = json!({ "count": 800, "layout": "flat", "files": files });
     let result = ToolResult::new(
         json!({
-            "content": [{ "type": "text", "text": "## Files\nindexed files: 520" }],
+            "content": [{ "type": "text", "text": "## Files\nindexed files: 800" }],
             "isError": false
         }),
         Vec::new(),
     )
-    .with_structured_result(typed);
+    .with_structured_result(typed.clone());
     let compact = rendered_tool_output(&result, CliToolOutput::Document).unwrap();
-    let pretty = serde_json::to_string_pretty(&json_tool_document(&result).unwrap()).unwrap();
+    let pretty = serde_json::to_string_pretty(&json!({
+        "content": [{ "type": "text", "text": "## Files\nindexed files: 800" }],
+        "isError": false,
+        "structuredContent": typed,
+    }))
+    .unwrap();
     assert!(
         !compact.contains('\n'),
         "--json must stay one line: {compact}"
@@ -1087,7 +1092,7 @@ fn json_document_for_a_mid_size_files_result_fits_a_pipe_as_one_compact_line() {
             .as_array()
             .unwrap()
             .len(),
-        520
+        800
     );
 }
 
