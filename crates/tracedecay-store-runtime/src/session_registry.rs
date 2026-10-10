@@ -379,6 +379,65 @@ impl ProjectRuntimeOwnerRegistryV1 {
         }
     }
 
+    fn take_unattached_session_owner(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Option<UnattachedSessionRetirementV1>> {
+        let mut entries = self.lock().map_err(|_| {
+            session_registry_error(
+                "reserve unattached project session retirement",
+                "project runtime owner map lock is poisoned".to_owned(),
+            )
+        })?;
+        let Some(state) = entries.remove(project_id) else {
+            return Ok(None);
+        };
+        let ProjectRuntimeOwnerStateV1::Ready(mut owners) = state else {
+            entries.insert(project_id.clone(), state);
+            return Err(TraceDecayError::project_route(
+                "project_runtime_replacing_sessions",
+                true,
+                "Project session runtime is not accepting unattached retirement",
+            ));
+        };
+        let Some(sessions) = owners.sessions.take() else {
+            entries.insert(
+                project_id.clone(),
+                ProjectRuntimeOwnerStateV1::Ready(owners),
+            );
+            return Ok(None);
+        };
+        if matches!(
+            &*sessions
+                .relation_graph
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            SessionGraphAttachmentStateV1::Attached { owner: Some(_) }
+        ) {
+            owners.sessions = Some(sessions);
+            entries.insert(
+                project_id.clone(),
+                ProjectRuntimeOwnerStateV1::Ready(owners),
+            );
+            return Err(TraceDecayError::project_route(
+                "project_session_graph_attached",
+                true,
+                "Project session relation graph attached during unattached retirement",
+            ));
+        }
+        entries.insert(
+            project_id.clone(),
+            ProjectRuntimeOwnerStateV1::ReplacingSessions,
+        );
+        Ok(Some(UnattachedSessionRetirementV1 {
+            owners: self.clone(),
+            project_id: project_id.clone(),
+            sessions: Some(sessions),
+            memory: owners.memory,
+            armed: true,
+        }))
+    }
+
     async fn wait_for_serving_session_graph(&self, project_id: &ProjectId) -> Result<()> {
         self.wait_for_session_graph(project_id).await?;
         let entries = self.lock().map_err(|_| {
@@ -1298,6 +1357,130 @@ impl Drop for ProjectRuntimeOwnerRetirementReservationV1 {
             );
         }
         self.armed = false;
+    }
+}
+
+/// Database-only retirement when the session relation graph never attached.
+///
+/// A Detached open cannot enter the paired graph/Store vacancy proof. The
+/// graph registry never received an owner, so only the session Store closes.
+struct UnattachedSessionRetirementV1 {
+    owners: ProjectRuntimeOwnerRegistryV1,
+    project_id: ProjectId,
+    sessions: Option<RegisteredSessionOwnerV1>,
+    memory: Option<MemoryStoreOwnerV1>,
+    armed: bool,
+}
+
+impl UnattachedSessionRetirementV1 {
+    fn database(&self) -> Result<&RegisteredGlobalDbOwnerV1> {
+        self.sessions
+            .as_ref()
+            .map(|sessions| &sessions.database)
+            .ok_or_else(|| {
+                session_registry_error(
+                    "retire unattached project session store",
+                    "unattached session retirement lost its database owner".to_owned(),
+                )
+            })
+    }
+
+    fn restore_ready(&mut self) -> Result<()> {
+        let mut entries = self.owners.lock().map_err(|_| {
+            session_registry_error(
+                "restore unattached project session owner",
+                "project runtime owner map lock is poisoned".to_owned(),
+            )
+        })?;
+        if !matches!(
+            entries.get(&self.project_id),
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
+        ) {
+            return Err(session_registry_error(
+                "restore unattached project session owner",
+                "unattached session retirement lost its map fence".to_owned(),
+            ));
+        }
+        entries.insert(
+            self.project_id.clone(),
+            ProjectRuntimeOwnerStateV1::Ready(ProjectRuntimeOwnersV1 {
+                sessions: self.sessions.take(),
+                memory: self.memory.take(),
+            }),
+        );
+        self.armed = false;
+        Ok(())
+    }
+
+    fn commit_without_sessions(&mut self) -> Result<()> {
+        let mut entries = self.owners.lock().map_err(|_| {
+            session_registry_error(
+                "complete unattached project session retirement",
+                "project runtime owner map lock is poisoned".to_owned(),
+            )
+        })?;
+        if !matches!(
+            entries.get(&self.project_id),
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
+        ) {
+            return Err(session_registry_error(
+                "complete unattached project session retirement",
+                "unattached session retirement lost its map fence".to_owned(),
+            ));
+        }
+        drop(self.sessions.take());
+        entries.insert(
+            self.project_id.clone(),
+            ProjectRuntimeOwnerStateV1::Ready(ProjectRuntimeOwnersV1 {
+                sessions: None,
+                memory: self.memory.take(),
+            }),
+        );
+        self.armed = false;
+        Ok(())
+    }
+
+    /// A rollback that cannot reach a truthful `Ready` keeps the retained
+    /// owner fenced as `RecoveryRequired` rather than publishing it while its
+    /// session sync binding was cleared. The unattached owner has no paired
+    /// graph/Store target, so it parks in `candidate_sessions` where
+    /// shutdown's graph-identity drain still drops it in order.
+    fn commit_recovery_required(mut self, phase: ProjectSessionRecoveryPhaseV1) -> Result<()> {
+        let mut entries = self.owners.lock().map_err(|_| {
+            session_registry_error(
+                "commit unattached project session recovery required",
+                "project runtime owner map lock is poisoned".to_owned(),
+            )
+        })?;
+        if !matches!(
+            entries.get(&self.project_id),
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
+        ) {
+            return Err(session_registry_error(
+                "commit unattached project session recovery required",
+                "unattached session retirement lost its map fence".to_owned(),
+            ));
+        }
+        entries.insert(
+            self.project_id.clone(),
+            ProjectRuntimeOwnerStateV1::RecoveryRequired(ProjectSessionRecoveryRequiredV1 {
+                sessions: None,
+                candidate_sessions: self.sessions.take(),
+                memory: self.memory.take(),
+                phase,
+            }),
+        );
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for UnattachedSessionRetirementV1 {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = self.restore_ready();
     }
 }
 

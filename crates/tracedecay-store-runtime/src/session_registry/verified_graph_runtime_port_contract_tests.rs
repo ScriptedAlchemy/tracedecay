@@ -763,6 +763,11 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
     assert_eq!(replay_binding, *restored.binding());
     assert_eq!(replay_path, restored.db_path());
     assert_eq!(old_binding.shard_id, replay_binding.shard_id);
+    fixture
+        .registry
+        .settle_project_session_graph_for_serving(&project_id)
+        .await
+        .expect("a refused close keeps the session relation graph serving");
 
     drop((external_old_sessions, restored));
     fixture
@@ -785,6 +790,91 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
             .target_descriptor(&project_id)
             .is_err(),
         "successful retry removes the replay route"
+    );
+}
+
+#[tokio::test]
+async fn detached_session_graph_store_close_refusal_restores_route_and_retry_closes() {
+    let fixture = ContractFixture::new("detached-session-close-retry").await;
+    let session_sync =
+        Arc::new(tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default());
+    fixture
+        .registry
+        .install_session_sync_service(&session_sync)
+        .expect("install session sync lifecycle authority");
+    let project_id = project_id("detached-session-close-retry");
+    let roots = fixture.project_roots(&project_id);
+    for root in &roots {
+        std::fs::create_dir_all(root).expect("worktree root");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+    }
+    let project_database = fixture
+        .registry
+        .project_memory(project_id.clone(), roots.clone())
+        .await
+        .expect("project graph database");
+    drop(await_mounted_graph_operation(&project_database).await);
+    // A closed task admission publishes the session relation graph Detached,
+    // the state a failed graph open leaves behind.
+    fixture.registry.retained_hook_tasks.begin_shutdown();
+    let external_sessions = fixture
+        .registry
+        .project_sessions(project_id.clone(), roots)
+        .await
+        .expect("project sessions database");
+
+    let refusal = fixture
+        .registry
+        .retire_project_session_relation_graph(&project_id)
+        .await
+        .expect_err("an external session lease must refuse the Store close");
+    match refusal {
+        TraceDecayError::Database { operation, message } => {
+            assert_eq!(
+                operation,
+                "reserve unattached project session Store retirement"
+            );
+            assert!(
+                message.contains("ClientLeases"),
+                "unexpected close refusal: {message}"
+            );
+        }
+        other => panic!("unexpected close refusal: {other:?}"),
+    }
+    assert!(
+        fixture
+            .registry
+            .remote_replay_transaction
+            .target_descriptor(&project_id)
+            .is_ok(),
+        "close refusal restores the replay route"
+    );
+    assert!(
+        fixture
+            .registry
+            .mounted_project_sessions(&project_id)
+            .await
+            .is_some(),
+        "close refusal restores the ProjectSessions route"
+    );
+
+    drop(external_sessions);
+    fixture
+        .registry
+        .retire_project_session_relation_graph(&project_id)
+        .await
+        .expect("retry closes the Detached session Store after the external lease drops");
+    assert!(
+        fixture
+            .registry
+            .mounted_project_sessions(&project_id)
+            .await
+            .is_none(),
+        "successful retry removes the ProjectSessions route"
     );
 }
 

@@ -264,6 +264,45 @@ impl DaemonSessionRuntimeRegistryV1 {
         replacement.restore_old_ready()
     }
 
+    /// Rolls an unattached session-store retirement back to serving: the sync
+    /// owner is rebound on a fresh counted lease before the replay target and
+    /// `Ready` republish, exactly like the attached restore. `Ready` while
+    /// sync stayed unbound would publish a falsely healthy project that never
+    /// synchronizes, so a failed restore makes the caller commit the fence as
+    /// `RecoveryRequired` instead of republishing.
+    async fn restore_unattached_project_session_ready(
+        &self,
+        project_id: &ProjectId,
+        retirement: &mut super::UnattachedSessionRetirementV1,
+        session_sync_retired: bool,
+    ) -> Result<()> {
+        let lease = retirement.database()?.issue_lease().map_err(|error| {
+            session_registry_error(
+                "restore unattached project session lease",
+                format!("{error:?}"),
+            )
+        })?;
+        let path = lease.db_path().to_path_buf();
+        if session_sync_retired {
+            self.rebind_project_session_sync(project_id, &lease).await?;
+        }
+        drop(lease);
+        let issuer = retirement.database()?.weak_lease_issuer();
+        let binding = retirement.database()?.registered_binding().clone();
+        let locator = retirement.database()?.registered_verified_locator().clone();
+        self.remote_replay_transaction
+            .register_target(project_id.clone(), issuer, binding, locator, path)
+            .map_err(|error| session_registry_error("restore project replay target", error))?;
+        retirement.restore_ready()
+    }
+
+    fn error_is_unattached_session_graph(error: &TraceDecayError) -> bool {
+        matches!(
+            error.project_route_context(),
+            Some(("project_session_graph_warming", _, _))
+        )
+    }
+
     #[tracing::instrument(
         name = "daemon.session_registry.retire_relation_graph",
         level = "trace",
@@ -273,8 +312,16 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
         project_id: &ProjectId,
     ) -> Result<()> {
-        let Some(mut replacement) = self.reserve_project_session_replacement(project_id).await?
-        else {
+        let replacement = match self.reserve_project_session_replacement(project_id).await {
+            Ok(replacement) => replacement,
+            Err(error) if Self::error_is_unattached_session_graph(&error) => {
+                return self
+                    .retire_unattached_project_session_store(project_id)
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(mut replacement) = replacement else {
             return Ok(());
         };
 
@@ -439,6 +486,114 @@ impl DaemonSessionRuntimeRegistryV1 {
         };
         let vacancy = native.into_vacancy(graph, store)?;
         vacancy.commit_without_sessions()
+    }
+
+    async fn retire_unattached_project_session_store(&self, project_id: &ProjectId) -> Result<()> {
+        let Some(mut retirement) = self
+            .project_owners
+            .take_unattached_session_owner(project_id)?
+        else {
+            return Ok(());
+        };
+        let replay_binding = retirement.database()?.registered_binding().clone();
+        self.remote_replay_transaction
+            .unregister_target(project_id, &replay_binding)
+            .map_err(|error| session_registry_error("quiesce project replay target", error))?;
+        // A missing sync authority is already retired, not a blocked close;
+        // when one exists the project's binding is cleared below and every
+        // rollback must rebind it. Rebinding is idempotent over a binding the
+        // failed retire already restored.
+        let session_sync_retired = self.session_sync_service.get().is_some();
+        let store_closed = match self
+            .close_unattached_project_session_store(project_id, &retirement, session_sync_retired)
+            .await
+        {
+            Ok(store_closed) => store_closed,
+            Err(error) => {
+                let restore = self
+                    .restore_unattached_project_session_ready(
+                        project_id,
+                        &mut retirement,
+                        session_sync_retired,
+                    )
+                    .await;
+                if let Err(restore_error) = restore {
+                    retirement.commit_recovery_required(
+                        super::ProjectSessionRecoveryPhaseV1::ReservationAbandoned,
+                    )?;
+                    return Err(session_registry_error(
+                        "retire unattached project session store",
+                        format!("{error}; restore={restore_error}"),
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        retirement.commit_without_sessions()?;
+        if store_closed {
+            Ok(())
+        } else {
+            Err(session_registry_error(
+                "retire unattached project session store",
+                "project session Store retirement reached a terminal failure".to_owned(),
+            ))
+        }
+    }
+
+    /// Closes the fenced session Store. Every error leaves the owner fenced
+    /// for the caller's single rollback; returns whether every outcome closed.
+    async fn close_unattached_project_session_store(
+        &self,
+        project_id: &ProjectId,
+        retirement: &super::UnattachedSessionRetirementV1,
+        session_sync_retired: bool,
+    ) -> Result<bool> {
+        if session_sync_retired {
+            self.retire_project_session_sync(project_id).await?;
+        }
+        let target = retirement
+            .database()?
+            .reserve_retirement()
+            .map_err(|error| {
+                session_registry_error(
+                    "reserve unattached project session Store retirement",
+                    format!("{error:?}"),
+                )
+            })?
+            .into_store_retirement_target()
+            .map_err(|error| {
+                session_registry_error(
+                    "compose unattached project session Store retirement",
+                    format!("{error:?}"),
+                )
+            })?;
+        let mut store_reservation = match self.registry.reserve_retirement_batch(vec![target]) {
+            tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(
+                reservation,
+            ) => reservation,
+            tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(
+                refusal,
+            ) => {
+                // Dropping the refused target restores the database owner's
+                // client admission before the caller's rollback issues a lease.
+                return Err(session_registry_error(
+                    "reserve unattached project session Store retirement",
+                    format!("{:?}", refusal.blockers()),
+                ));
+            }
+        };
+        let store = store_reservation.commit().map_err(|error| {
+            session_registry_error(
+                "commit unattached project session Store retirement",
+                format!("{error:?}"),
+            )
+        })?;
+        Ok(store.outcomes().iter().all(|outcome| {
+            matches!(
+                outcome,
+                tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementOutcome::Closed { .. }
+            )
+        }))
     }
 
     #[tracing::instrument(

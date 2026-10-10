@@ -381,7 +381,7 @@ impl ProjectOpenFailure {
         }
     }
 
-    fn from_error(error: &TraceDecayError) -> Self {
+    pub(super) fn from_error(error: &TraceDecayError) -> Self {
         // Operator-repairable authority rejections decline implicit repair.
         // Reopening before maintenance changes that state is not useful and
         // only multiplies daemon warm-up tasks.
@@ -677,6 +677,23 @@ impl ProjectOpenTasks {
             ProjectOpenTaskState::Opening
             | ProjectOpenTaskState::Ready
             | ProjectOpenTaskState::Failed(_) => None,
+        }
+    }
+
+    pub(super) fn stalled_failure(&self, route: &ProjectRouteKey) -> Option<ProjectOpenFailure> {
+        let now = Instant::now();
+        let mut registry = self.lock_registry();
+        registry.prune(now);
+        match registry
+            .routes
+            .get(route)
+            .or_else(|| registry.retiring.get(route))?
+            .state
+            .borrow()
+            .clone()
+        {
+            ProjectOpenTaskState::Failed(failure) => Some(failure),
+            ProjectOpenTaskState::Opening | ProjectOpenTaskState::Ready => None,
         }
     }
 

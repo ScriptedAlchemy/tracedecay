@@ -335,10 +335,13 @@ async fn handle_status_command_within(
     .await?;
     reject_truncation_envelope(&daemon_status, "tracedecay_status")?;
     if json {
+        reject_problem_envelope(&daemon_status, "tracedecay_status")?;
+        tracedecay::daemon::reject_stalled_project_open_status(&daemon_status)?;
         println!("{}", serde_json::to_string_pretty(&daemon_status)?);
-        return reject_problem_envelope(&daemon_status, "tracedecay_status");
+        return Ok(());
     }
     reject_problem_envelope(&daemon_status, "tracedecay_status")?;
+    tracedecay::daemon::reject_stalled_project_open_status(&daemon_status)?;
     if let Some(project_open) = daemon_status
         .get("project_open")
         .cloned()
@@ -606,6 +609,35 @@ mod tests {
             ),
             Ok(())
         ));
+    }
+
+    #[test]
+    fn stalled_project_open_snapshot_is_a_typed_backoff_error() {
+        let stalled = json!({
+            "project_open": {
+                "state": "stalled",
+                "reason": "retry_backoff",
+                "retry_after_ms": 1000,
+                "detail": "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases / ProjectSessions",
+            }
+        });
+        let error = tracedecay::daemon::reject_stalled_project_open_status(&stalled)
+            .expect_err("stalled must fail");
+        // The snapshot records retry_backoff, which does not identify its
+        // cause, so the fallback rejects with the honest typed backoff
+        // rather than a fabricated capacity verdict.
+        assert_eq!(
+            error.project_open_failure_kind(),
+            Some(
+                tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff {
+                    retry_after_ms: 1000
+                }
+            )
+        );
+        assert!(
+            tracedecay::daemon::reject_stalled_project_open_status(&json!({ "node_count": 1 }))
+                .is_ok()
+        );
     }
 
     #[test]

@@ -446,6 +446,20 @@ impl DaemonInvocationService {
         self.owner_home.as_deref()
     }
 
+    /// Waits for the exact store's observability drain to drop its counted
+    /// client lease. Capacity reuse cannot close the process-wide drain
+    /// tracker; this settles one path so Store retirement is not blocked by
+    /// `ClientLeases` after the last alias has already shut down.
+    pub async fn settle_store_observability_retirement(
+        &self,
+        database_path: &Path,
+    ) -> Result<(), TraceDecayError> {
+        self.store_observability
+            .settle_registered_store_retirement(database_path)
+            .await
+            .map_err(|error| TraceDecayError::Config { message: error })
+    }
+
     /// Reads both immutable generations through this daemon's scheduler owner.
     pub async fn code_index_revision_pair_layout_inputs(
         &self,
