@@ -1460,6 +1460,7 @@ async fn validate_projection_authority_suffix_pages(
                         reason,
                         ProjectionSkipReason::OutputCollision
                             | ProjectionSkipReason::InvalidContract
+                            | ProjectionSkipReason::SourceRecordRetired
                     )
                 });
             if stored_rejection {
@@ -2063,6 +2064,111 @@ mod tests {
             .await
             .unwrap();
         observation
+    }
+
+    #[tokio::test]
+    async fn projection_audit_accepts_metadata_retired_before_projection() {
+        let directory = TempDir::new().unwrap();
+        let connection = open_registered_test_fixture(
+            &directory.path().join("sessions.db"),
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .unwrap();
+        let observation = seed_authority_observation(&connection, 0).await;
+        let registered = connection.database();
+        let previous = observation.identity().generation();
+        let generation = ObservationSourceGenerationV1::new(2).unwrap();
+        registered
+            .record_observation_source_presence(
+                observation.source(),
+                observation.scope(),
+                &[crate::ObservationSourcePresenceV1 {
+                    observation_id: observation.observation_id().clone(),
+                    generation: previous,
+                    start_offset: observation.identity().position().start(),
+                }],
+            )
+            .await
+            .unwrap();
+        registered
+            .begin_observation_source_rewrite(
+                observation.source(),
+                observation.scope(),
+                previous,
+                generation,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            registered
+                .complete_observation_source_rewrite(
+                    observation.source(),
+                    observation.scope(),
+                    generation,
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        registered
+            .observation_store()
+            .project_observation(observation.observation_id())
+            .await
+            .unwrap();
+        let (_, _, dispositions, _) = validate_projection_authority_suffix(
+            &connection,
+            AuditCheckpoint::default(),
+            &ReleasedRenderingLedger::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(dispositions, 1);
+
+        let foreign_observation = seed_authority_observation(&connection, 1).await;
+        let error = connection
+            .execute(
+                "UPDATE observation_projection_dispositions
+                 SET receipt_id = ?1 WHERE observation_id = ?2",
+                params![
+                    foreign_observation
+                        .receipt()
+                        .receipt()
+                        .receipt_id()
+                        .as_str(),
+                    observation.observation_id().as_str()
+                ],
+            )
+            .await
+            .err()
+            .expect("a foreign receipt must not replace retirement authority");
+        assert!(
+            error
+                .to_string()
+                .contains("projection disposition receipt mismatch")
+        );
+
+        connection
+            .execute(
+                "UPDATE observation_projection_dispositions
+                 SET receipt_id = ?1, reason = 'unknown_reason' WHERE observation_id = ?2",
+                params![
+                    observation.receipt().receipt().receipt_id().as_str(),
+                    observation.observation_id().as_str()
+                ],
+            )
+            .await
+            .unwrap();
+        let error = validate_projection_authority_suffix(
+            &connection,
+            AuditCheckpoint::default(),
+            &ReleasedRenderingLedger::default(),
+        )
+        .await
+        .err()
+        .expect("an unknown disposition must fail the audit");
+        assert!(error.to_string().contains("deterministic skip reason"));
     }
 
     #[allow(clippy::too_many_arguments)]
