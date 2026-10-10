@@ -1097,7 +1097,7 @@ fn json_document_for_a_mid_size_files_result_fits_a_pipe_as_one_compact_line() {
 }
 
 #[test]
-fn json_document_over_the_pipe_budget_keeps_a_complete_handle_envelope() {
+fn json_document_over_the_pipe_budget_keeps_the_full_typed_listing() {
     let files = (0..2000)
         .map(|index| {
             json!({
@@ -1112,7 +1112,7 @@ fn json_document_over_the_pipe_budget_keeps_a_complete_handle_envelope() {
         json!({
             "content": [{
                 "type": "text",
-                "text": "# Truncated Response\ncall tracedecay_retrieve using handle `rh_pipebudget0123456789abcdef` before 1"
+                "text": "## Files\nindexed files: 2000"
             }],
             "isError": false
         }),
@@ -1121,23 +1121,24 @@ fn json_document_over_the_pipe_budget_keeps_a_complete_handle_envelope() {
     .with_structured_result(typed);
     let compact = rendered_tool_output(&result, CliToolOutput::Document).unwrap();
     assert!(
-        compact.len() < 65_536,
-        "pipe-safe --json must stay under 64KiB: {}",
+        !compact.contains('\n'),
+        "--json must stay one compact line: {compact}"
+    );
+    assert!(
+        compact.len() > 65_536,
+        "full --json must keep the typed listing above 64KiB: {}",
         compact.len()
     );
     let parsed: Value = serde_json::from_str(&compact).unwrap();
     assert_eq!(parsed["isError"], false);
-    assert_eq!(parsed["structuredContent"]["truncated"], true);
-    assert_eq!(
-        parsed["structuredContent"]["reason"],
-        "cli_json_stdout_budget"
-    );
     assert_eq!(parsed["structuredContent"]["count"], 2000);
     assert_eq!(
-        parsed["structuredContent"]["handle"],
-        "rh_pipebudget0123456789abcdef"
+        parsed["structuredContent"]["files"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2000
     );
-    assert!(parsed["structuredContent"].get("files").is_none());
 }
 
 /// An answer rendered without its typed result cannot print the `--json`

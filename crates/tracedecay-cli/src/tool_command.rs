@@ -1323,7 +1323,7 @@ impl CliToolOutput {
 /// The write is flushed before this returns so a one-shot process can exit
 /// once the document is on the OS pipe. An unflushed `println!` of a large
 /// `--json` document leaves the tail in userspace while the process waits
-/// on a still-open daemon stream, which is the 65 KiB mid-object cut.
+/// on a still-open daemon stream.
 fn print_tool_output(result: &ToolResult, output: CliToolOutput) -> Result<()> {
     let rendered = rendered_tool_output(result, output)?;
     {
@@ -1360,98 +1360,30 @@ fn is_error_result(result_value: &Value) -> bool {
     result_value.get("isError").and_then(Value::as_bool) == Some(true)
 }
 
-/// Linux pipe capacity. A parent that `wait()`s before reading stdout
-/// deadlocks once the child writes more than this, and captures only the
-/// first 65KiB after SIGTERM. `--json` must stay one complete object under
-/// this bound.
-const PIPE_SAFE_JSON_BYTES: usize = 60 * 1024;
-
 /// The one `tracedecay tool --json` document for every tool: the MCP tool
 /// result's `content`, its `isError`, and `structuredContent` holding the
-/// refusal's typed problem record or the answer's typed result. When the
-/// full typed result would overflow a 64KiB pipe, structuredContent keeps
-/// identity fields and the retrieve handle already stored for the body.
+/// refusal's typed problem record or the answer's typed result. Compact
+/// encoding keeps mid-size listings on one flushed line; a parent that
+/// drains stdout while the process runs receives the full typed result,
+/// including documents larger than a 64KiB pipe.
 fn json_tool_document(result: &ToolResult) -> Result<Value> {
     let mut document = result.value.clone();
     let is_error = is_error_result(&document);
-    {
-        let Some(object) = document.as_object_mut() else {
-            return Err(TraceDecayError::Config {
-                message: "the tool rendered a result that is not a JSON object".to_owned(),
-            });
-        };
-        object.insert("isError".to_owned(), json!(is_error));
-        if !is_error {
-            let structured = result
-                .structured_result()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "the tool rendered its answer without its typed result".to_owned(),
-                })?;
-            object.insert("structuredContent".to_owned(), structured.clone());
-        }
-    }
-    if !is_error {
-        let encoded = serde_json::to_string(&document)?;
-        if encoded.len() > PIPE_SAFE_JSON_BYTES {
-            let structured = document.get("structuredContent").cloned().ok_or_else(|| {
-                TraceDecayError::Config {
-                    message: "the tool rendered its answer without its typed result".to_owned(),
-                }
-            })?;
-            let slim = pipe_safe_structured_content(&document, &structured)?;
-            document
-                .as_object_mut()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "the tool rendered a result that is not a JSON object".to_owned(),
-                })?
-                .insert("structuredContent".to_owned(), slim);
-        }
-    }
-    Ok(document)
-}
-
-fn pipe_safe_structured_content(document: &Value, structured: &Value) -> Result<Value> {
-    let mut slim = json!({
-        "truncated": true,
-        "reason": "cli_json_stdout_budget",
-    });
-    let Some(object) = slim.as_object_mut() else {
+    let Some(object) = document.as_object_mut() else {
         return Err(TraceDecayError::Config {
-            message: "pipe-safe structuredContent is not a JSON object".to_owned(),
+            message: "the tool rendered a result that is not a JSON object".to_owned(),
         });
     };
-    if let Some(typed) = structured.as_object() {
-        for key in ["count", "layout", "freshness", "coverage", "query_route"] {
-            if let Some(value) = typed.get(key) {
-                object.insert(key.to_owned(), value.clone());
-            }
-        }
+    object.insert("isError".to_owned(), json!(is_error));
+    if !is_error {
+        let structured = result
+            .structured_result()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "the tool rendered its answer without its typed result".to_owned(),
+            })?;
+        object.insert("structuredContent".to_owned(), structured.clone());
     }
-    if let Some(handle) = retrieve_handle_from_content(document) {
-        object.insert("handle".to_owned(), json!(handle));
-        object.insert("retrieve_tool".to_owned(), json!("tracedecay_retrieve"));
-    }
-    Ok(slim)
-}
-
-fn retrieve_handle_from_content(result_value: &Value) -> Option<String> {
-    for text in content_text_blocks(result_value) {
-        if let Ok(envelope) = serde_json::from_str::<Value>(text)
-            && let Some(handle) = envelope.get("handle").and_then(Value::as_str)
-            && !handle.is_empty()
-        {
-            return Some(handle.to_owned());
-        }
-        if let Some(handle) = text
-            .split("handle `")
-            .nth(1)
-            .and_then(|rest| rest.split('`').next())
-            && handle.starts_with("rh_")
-        {
-            return Some(handle.to_owned());
-        }
-    }
-    None
+    Ok(document)
 }
 
 /// Joins every payload `content[*].text` block in an MCP tool result,
