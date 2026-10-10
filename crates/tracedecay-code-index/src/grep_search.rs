@@ -431,7 +431,7 @@ mod tests {
             let runtime = runtime.clone();
             std::thread::spawn(move || {
                 let _entered = runtime.enter();
-                crate::parallelism::install(|| {
+                crate::parallelism::install(move || {
                     pool_started_tx.send(()).unwrap();
                     pool_release_rx.recv().unwrap();
                 })

@@ -896,7 +896,7 @@ mod tests {
             let owner = owner.clone();
             std::thread::spawn(move || {
                 let _entered = owner.enter();
-                install(|| {
+                install(move || {
                     started_tx
                         .send(())
                         .expect("test waits for the indexing hold");
