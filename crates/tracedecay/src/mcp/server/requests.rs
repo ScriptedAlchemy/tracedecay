@@ -1010,9 +1010,10 @@ impl McpServer {
         cg: &TraceDecay,
         result: &mut ToolResult,
     ) -> ToolTokenAccounting {
-        // Estimate approximate token count of the graph response
-        // ("after"), before any banners/metrics lines are appended.
-        let response_tokens = response_token_count(result);
+        // Real served-output count, before any banners/metrics lines are appended.
+        let Some(response_tokens) = response_token_count(result) else {
+            return ToolTokenAccounting::default();
+        };
         // "Before" counterfactual: reading every referenced file raw,
         // in full. Counters credit only the net saving per call,
         // before minus what this response actually delivered.

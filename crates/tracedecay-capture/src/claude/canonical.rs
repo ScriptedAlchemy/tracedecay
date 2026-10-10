@@ -523,17 +523,17 @@ fn append_message_facts(
                 });
                 append_task_lifecycle_fact(name, block.get("input"), facts);
             }
-            Some("tool_result") => facts.push(CanonicalObservationFactV1::ToolResult {
-                invocation_id: block
+            Some("tool_result") => facts.push(crate::accounted_tool_result(
+                block
                     .get("tool_use_id")
                     .and_then(Value::as_str)
                     .and_then(provider_observation_id),
-                content: block.get("content").cloned().unwrap_or(Value::Null),
-                success: block
+                block.get("content").cloned().unwrap_or(Value::Null),
+                block
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .map(|is_error| !is_error),
-            }),
+            )),
             Some("thinking") => {
                 let content = block.get("thinking").cloned();
                 if content.is_some() {

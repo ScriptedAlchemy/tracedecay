@@ -256,10 +256,10 @@ fn append_tool_fact(facts: &mut Vec<CanonicalObservationFactV1>, part: &Value) {
         .or_else(|| part.get("output"))
         .or_else(|| part.get("error"))
     {
-        facts.push(CanonicalObservationFactV1::ToolResult {
-            invocation_id: tool_id,
-            content: output.clone(),
-            success: state
+        facts.push(crate::accounted_tool_result(
+            tool_id,
+            output.clone(),
+            state
                 .get("status")
                 .and_then(Value::as_str)
                 .and_then(|status| match status {
@@ -267,7 +267,7 @@ fn append_tool_fact(facts: &mut Vec<CanonicalObservationFactV1>, part: &Value) {
                     "error" => Some(false),
                     _ => None,
                 }),
-        });
+        ));
     }
     // A `task` part records the child session it spawned in
     // `state.metadata.sessionId`; with the host's `callID` that is the spawn

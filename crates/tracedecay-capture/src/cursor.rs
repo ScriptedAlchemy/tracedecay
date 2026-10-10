@@ -238,22 +238,19 @@ fn append_cursor_content_facts(content: &Value, facts: &mut Vec<CanonicalObserva
                 }
             }
             Some("tool_result") => {
-                facts.push(CanonicalObservationFactV1::ToolResult {
-                    invocation_id: item
-                        .get("tool_use_id")
+                facts.push(crate::accounted_tool_result(
+                    item.get("tool_use_id")
                         .or_else(|| item.get("id"))
                         .and_then(Value::as_str)
                         .and_then(|id| canonical_native_observation_id(Some(id))),
-                    content: item
-                        .get("content")
+                    item.get("content")
                         .or_else(|| item.get("result"))
                         .cloned()
                         .unwrap_or(Value::Null),
-                    success: item
-                        .get("is_error")
+                    item.get("is_error")
                         .and_then(Value::as_bool)
                         .map(|error| !error),
-                });
+                ));
             }
             Some("thinking" | "reasoning") => {
                 let content = item

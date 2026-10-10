@@ -3178,11 +3178,13 @@ async fn realistic_user_sessions_dbstat_names_dominant_bytes() {
                             arguments: json!({"command": "rg --json tracedecay crates"}),
                         },
                     ],
-                    vec![CanonicalObservationFactV1::ToolResult {
-                        invocation_id: Some(call),
-                        content: json!({"text": tool_out}),
-                        success: Some(true),
-                    }],
+                    vec![CanonicalObservationFactV1::tool_result(
+                        Some(call),
+                        json!({"text": tool_out}),
+                        Some(true),
+                        None,
+                        None,
+                    )],
                     vec![CanonicalObservationFactV1::Message {
                         role: CanonicalMessageRoleV1::Assistant,
                         content: json!({"text": wrap}),
