@@ -49,6 +49,7 @@ members = [
     "crates/tracedecay-store",
     "crates/tracedecay-store-runtime",
     "crates/tracedecay-tool-catalog",
+    "crates/tracedecay-tokenizer",
     "crates/tracedecay-application",
 ]
 exclude = [

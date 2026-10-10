@@ -15,7 +15,7 @@ doctest = false
 default = []
 # Exact token counting for automation artifact budgeting (tiktoken BPE).
 # Mirrors the root crate's `token-counting` feature; forwarded by the root.
-token-counting = ["dep:tiktoken-rs"]
+token-counting = ["dep:tracedecay-tokenizer"]
 # Test-only transport wiring; mirrors the root crate's `test-transport`.
 # Forwards to the kernel so this crate's test targets can reach the hidden
 # `Database::publish_test_runtime` / `DatabaseAuthority::acquire_test` seams.
@@ -37,7 +37,7 @@ sha2 = "0.11"
 shell-words = "1.1"
 thiserror = "2"
 flate2 = "1"
-tiktoken-rs = { version = "0.12", optional = true }
+tracedecay-tokenizer = { path = "../tracedecay-tokenizer", optional = true }
 tokio = { version = "1", features = ["full"] }
 gix = { version = "=0.87.1", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 toml = "1"
