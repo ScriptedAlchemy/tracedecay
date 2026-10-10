@@ -3942,6 +3942,7 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
         .send(())
         .expect("release publication projection");
 
+    registry.request_complete_generation(fixture.path()).await;
     let ready = wait_until_serving_seat(
         &registry,
         fixture.path(),
@@ -4886,6 +4887,7 @@ async fn first_activation_conflict_retries_once_and_then_seats() {
 
     let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
+    registry.request_complete_generation(fixture.path()).await;
     loop {
         let freshness = registry
             .dashboard_freshness(fixture.path())
@@ -4905,16 +4907,13 @@ async fn first_activation_conflict_retries_once_and_then_seats() {
             .await
             .is_some_and(|latest| {
                 latest.generation().manifest().generation_id == sealed_generation_id
-                    && latest.code_graph_serving_readiness()
-                        == tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
+                    && latest.code_graph_serving_readiness().is_activated()
             });
         if seated
-            && matches!(
-                freshness.code_graph_serving,
-                Some(
-                    tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
-                )
-            )
+            && freshness
+                .code_graph_serving
+                .as_ref()
+                .is_some_and(|state| state.is_activated())
         {
             break;
         }
@@ -5314,6 +5313,7 @@ async fn busy_query_does_not_rearm_dashboard_verification() {
         .expect("resolved scope")
     };
     clear_pending_wake_until_quiet(&registry, &scope).await;
+    let _seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
     let freshness = registry
         .source_freshness_for_root(fixture.path())
         .await
@@ -7952,10 +7952,8 @@ async fn served_texts_containing(
     root: &Path,
     needle: &str,
 ) -> Vec<String> {
-    let mut texts = registry
-        .latest_complete_serving_for_test(root)
+    let mut texts = wait_for_live_complete_generation(registry, root)
         .await
-        .expect("served generation")
         .lexical()
         .iter()
         .filter(|chunk| chunk.sanitized_text.as_str().contains(needle))
@@ -10618,6 +10616,24 @@ async fn resident_memory_graph_refusal_serves_text_and_retries_when_memory_is_gi
     );
 
     wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
+    if let Some(text) = registry.latest_text_serving_for_root(&root).await {
+        match text.code_graph_serving_readiness() {
+            tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready => {}
+            tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Warming {
+                ..
+            } => {
+                text.interactive_graph_store()
+                    .expect("an activated graph still has its store after park")
+                    .await_rewarm_for(
+                        Duration::from_secs(30),
+                        tracedecay_code_index::graph_projection::CodeGraphReadinessRequirement::Catalog,
+                    )
+                    .expect("a graph read reseats the parked catalog");
+            }
+            other => panic!("memory coming back must activate the graph, got {other:?}"),
+        }
+    }
     let freshness = registry
         .dashboard_freshness(fixture.path())
         .await
@@ -10627,10 +10643,7 @@ async fn resident_memory_graph_refusal_serves_text_and_retries_when_memory_is_gi
         Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready)
     );
     assert!(freshness.parked.is_none(), "{freshness:?}");
-    let serving = registry
-        .latest_complete_serving_for_scope(&scope)
-        .await
-        .expect("the same daemon serves the generation");
+    let serving = wait_for_live_complete_generation(&registry, fixture.path()).await;
     assert_eq!(
         serving
             .generation()

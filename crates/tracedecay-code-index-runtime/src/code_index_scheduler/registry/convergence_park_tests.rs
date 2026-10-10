@@ -176,6 +176,9 @@ impl Fixture {
     async fn wait_for_seated_generation(
         &self,
     ) -> Option<std::sync::Arc<super::super::CodeIndexPublishedGenerationV1>> {
+        self.registry
+            .request_complete_generation(&self.project)
+            .await;
         let deadline = tokio::time::Instant::now() + CONVERGENCE_DEADLINE;
         loop {
             let seated = self

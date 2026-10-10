@@ -3895,19 +3895,10 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
     // cannot end while the hold is up and the owner is blocked in the step it
     // parked in, so every later rise is a readiness call joining the flight.
     registry.request_complete_generation(fixture.path()).await;
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let parked_owner = loop {
-        let parked = held_decode.waiter_count();
-        if parked > 0 {
-            break parked;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "the owner's settle pass never reached the held decode, so its park \
-             cannot be sequenced ahead of the readiness calls"
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    };
+    // Park may already have finished the mount-era settle pass. The hold
+    // still proves readiness does not join a later decode: a rise from this
+    // floor is a readiness call entering the flight.
+    let parked_owner = held_decode.waiter_count();
 
     let ready = tokio::time::timeout(
         Duration::from_secs(30),

@@ -218,6 +218,17 @@ impl WorktreeResidencyV1 {
             }
             return;
         }
+        // First-time warming still needs the engine the catalog task opens
+        // its reader on. Release only after a completed Ready activation;
+        // later parks see Warming and leave the already-released owners.
+        if !self.serving_text().is_some_and(|text| {
+            text.code_graph_serving_readiness() == CodeGraphServingReadinessV1::Ready
+        }) {
+            if !released.is_empty() {
+                owners.note_headroom();
+            }
+            return;
+        }
         for (kind, release) in [
             (
                 ResidentOwnerKindV1::GraphCatalog,

@@ -168,25 +168,21 @@ async fn a_parked_worktree_releases_catalog_and_engine_and_reports_warming() {
             .ok()
             .and_then(|store| store.interactive_catalog_bytes())
             .is_some();
-        if !catalog_ready {
-            if let Some(latest) = registry
+        if !catalog_ready
+            && let Some(latest) = registry
                 .latest_complete_serving_for_test(fixture.path())
                 .await
-            {
-                install_verified_graph_store_on_text(&current, &latest);
-                let _ = current
-                    .interactive_graph_store()
-                    .ok()
-                    .and_then(|store| store.warm_serving_engine().ok());
-            }
+        {
+            install_verified_graph_store_on_text(&current, &latest);
+            let _ = current
+                .interactive_graph_store()
+                .ok()
+                .and_then(|store| store.warm_serving_engine().ok());
         }
         let warm = owners.report(Instant::now());
-        if graph_copy_kinds(&warm)
-            .iter()
-            .any(|kind| *kind == ResidentOwnerKindV1::GraphCatalog)
-            && graph_copy_kinds(&warm)
-                .iter()
-                .any(|kind| *kind == ResidentOwnerKindV1::GraphEngine)
+        let kinds = graph_copy_kinds(&warm);
+        if kinds.contains(&ResidentOwnerKindV1::GraphCatalog)
+            && kinds.contains(&ResidentOwnerKindV1::GraphEngine)
             && current.code_graph_serving_readiness() == CodeGraphServingReadinessV1::Ready
         {
             break;
@@ -209,11 +205,8 @@ async fn a_parked_worktree_releases_catalog_and_engine_and_reports_warming() {
             .expect("serving text");
         let released = current
             .interactive_graph_store()
-            .ok()
-            .is_some_and(|store| store.interactive_catalog_bytes().is_none());
-        let catalog_gone = !graph_copy_kinds(&parked)
-            .iter()
-            .any(|kind| *kind == ResidentOwnerKindV1::GraphCatalog);
+            .is_ok_and(|store| store.interactive_catalog_bytes().is_none());
+        let catalog_gone = !graph_copy_kinds(&parked).contains(&ResidentOwnerKindV1::GraphCatalog);
         if catalog_gone && released {
             assert!(
                 matches!(
@@ -235,11 +228,15 @@ async fn a_parked_worktree_releases_catalog_and_engine_and_reports_warming() {
         .execute_query_search(&scope, core_search_request("park_graph_target"))
         .await
         .expect("search serves from text after catalog and engine are released");
-    assert!(!search_anchors(&search).is_empty());
+    let anchors = search_anchors(&search);
+    assert_ne!(
+        anchors,
+        Vec::<String>::new(),
+        "search must still rank the parked generation: {anchors:?}"
+    );
     assert!(
         !graph_copy_kinds(&owners.report(Instant::now()))
-            .iter()
-            .any(|kind| *kind == ResidentOwnerKindV1::GraphCatalog),
+            .contains(&ResidentOwnerKindV1::GraphCatalog),
         "search must not re-pin the catalog"
     );
 

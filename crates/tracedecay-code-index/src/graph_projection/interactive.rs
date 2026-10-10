@@ -367,6 +367,16 @@ impl CodeGraphProjectionStore {
             Err(TryLockError::Poisoned(_)) => Err(catalog_lock_poisoned()),
         }
     }
+
+    /// True after the interactive catalog has completed at least one warm.
+    ///
+    /// Stays true when that catalog is later released for memory, so a
+    /// composition wait can hand over while the next graph read re-warms.
+    /// First-time warming is still false.
+    pub fn interactive_catalog_has_completed_a_warm(&self) -> bool {
+        self.warm_clock.has_warmed(WarmOwner::Catalog)
+            || self.interactive_catalog_is_warm().unwrap_or(false)
+    }
 }
 
 impl CodeGraphInteractiveReader {
