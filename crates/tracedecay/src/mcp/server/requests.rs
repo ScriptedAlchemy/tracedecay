@@ -404,9 +404,15 @@ impl McpServer {
                 .await,
             ),
             McpMethod::ResourcesList => Some(Self::handle_resources_list(id)),
-            McpMethod::ResourcesRead => {
-                Some(self.handle_resources_read(id, request.resource_uri()).await)
-            }
+            McpMethod::ResourcesRead => Some(
+                self.handle_resources_read(
+                    id,
+                    request.resource_uri(),
+                    connection.memory_request_scope(),
+                    cancellation,
+                )
+                .await,
+            ),
             McpMethod::TrivialAck => Some(JsonRpcResponse::success(id, json!({}))),
             McpMethod::Unknown => Some(JsonRpcResponse::error(
                 id,
@@ -656,6 +662,8 @@ impl McpServer {
         &self,
         id: Value,
         uri: Option<&str>,
+        connection_scope: &str,
+        cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> JsonRpcResponse {
         let Some(uri) = uri else {
             return JsonRpcResponse::error(
@@ -670,7 +678,10 @@ impl McpServer {
 
         match uri {
             "tracedecay://status" => self.read_resource_status(id).await,
-            "tracedecay://files" => self.read_resource_files(id).await,
+            "tracedecay://files" => {
+                self.read_resource_files(id, connection_scope, cancellation)
+                    .await
+            }
             "tracedecay://overview" => self.read_resource_overview(id).await,
             "tracedecay://branches" => self.read_resource_branches(id).await,
             "tracedecay://schema" => Self::read_resource_schema(id),
