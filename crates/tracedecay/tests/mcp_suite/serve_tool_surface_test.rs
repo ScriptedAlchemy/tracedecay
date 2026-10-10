@@ -1,5 +1,8 @@
-//! `tracedecay serve` lists a core tool set plus `tracedecay_tool_search`,
-//! loads other catalog tools on demand, and still reaches every catalog tool.
+//! A/B/C tool-list advertisements on a real `tracedecay serve` handshake.
+//!
+//! A (stubs) and B (core + `tracedecay_tool_search`) both remain; C is B's
+//! handshake plus plugin skills. No path is deleted while host-native
+//! deferral is researched.
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
@@ -16,24 +19,31 @@ use crate::serve_harness::{init_project_with_file, json_rpc_response};
 
 const TOOL_SEARCH: &str = "tracedecay_tool_search";
 const LIST_CHANGED: &str = "notifications/tools/list_changed";
-/// Stubs (option A) measured on the same catalog, tokenizer, and real
-/// `tracedecay serve` handshake at 8dcdcecd63: 229 names, 17 full schemas,
-/// 212 stubs, 138_280 compact-JSON bytes, 30_664 o200k tokens.
-const STUB_HANDSHAKE_O200K: u64 = 30_664;
+const ADVERTISEMENT_ENV: &str = "TRACEDECAY_MCP_TOOL_ADVERTISEMENT";
 const SERVE_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn run_serve(home: &Path, project: &Path, requests: &[Value]) -> Output {
-    let mut child = TestChildProcess::new(
-        tracedecay_command_with_home(home)
-            .arg("serve")
-            .arg("--path")
-            .arg(project)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("tracedecay serve should start"),
-    );
+    run_serve_with_env(home, project, &[], requests)
+}
+
+fn run_serve_with_env(
+    home: &Path,
+    project: &Path,
+    extra_env: &[(&str, &str)],
+    requests: &[Value],
+) -> Output {
+    let mut command = tracedecay_command_with_home(home);
+    command
+        .arg("serve")
+        .arg("--path")
+        .arg(project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let mut child = TestChildProcess::new(command.spawn().expect("tracedecay serve should start"));
     {
         let stdin = child.stdin_mut().expect("stdin should be piped");
         for request in requests {
@@ -153,17 +163,44 @@ struct PlainMcpClient {
     stdout: BufReader<ChildStdout>,
 }
 
+fn plugin_skill_tokens() -> Option<u64> {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let discovering = std::fs::read_to_string(
+        crate_root.join("../../plugin/skills/discovering-tracedecay/SKILL.md"),
+    )
+    .ok()?;
+    let routing =
+        std::fs::read_to_string(crate_root.join("../../plugin/skills/routing-tracedecay/SKILL.md"))
+            .ok()?;
+    count_ordinary_tokens(&format!("{discovering}\n{routing}")).ok()
+}
+
+fn is_stub(tool: &Value) -> bool {
+    tool["inputSchema"] == json!({"type": "object", "additionalProperties": true})
+        && tool["description"].as_str().is_some_and(|description| {
+            description.contains("full schema was elided")
+                && description.contains("call it by name")
+        })
+}
+
 impl PlainMcpClient {
     fn start(home: &Path, project: &Path) -> Self {
-        let mut child = tracedecay_command_with_home(home)
+        Self::start_with_env(home, project, &[])
+    }
+
+    fn start_with_env(home: &Path, project: &Path, extra_env: &[(&str, &str)]) -> Self {
+        let mut command = tracedecay_command_with_home(home);
+        command
             .arg("serve")
             .arg("--path")
             .arg(project)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("tracedecay serve should start");
+            .stderr(Stdio::piped());
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().expect("tracedecay serve should start");
         let stdout = BufReader::new(child.stdout.take().expect("stdout should be piped"));
         Self {
             process: TestChildProcess::new(child),
@@ -230,6 +267,31 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
     let project = init_project_with_file(home.path(), "pub fn tool_surface_marker() {}\n").await;
     let _daemon = common::spawn_tracedecay_daemon(home.path());
 
+    let stubs = run_serve_with_env(
+        home.path(),
+        project.path(),
+        &[(ADVERTISEMENT_ENV, "stubs")],
+        &[initialize(), tools_list(2)],
+    );
+    assert!(stubs.status.success(), "{stubs:?}");
+    let a = tools_list_cost(&stubs.stdout, 2);
+    let stub_tools = tools_of(&stubs.stdout, 2);
+    assert!(
+        a.names.contains("tracedecay_impact") && a.names.contains("tracedecay_runtime"),
+        "A must keep every catalog name: {:?}",
+        a.names
+    );
+    assert!(
+        is_stub(tool_named(&stub_tools, "tracedecay_impact")),
+        "A must stub non-core tools: {}",
+        tool_named(&stub_tools, "tracedecay_impact")
+    );
+    assert!(
+        !is_stub(tool_named(&stub_tools, "tracedecay_grep")),
+        "A must keep core schemas: {}",
+        tool_named(&stub_tools, "tracedecay_grep")
+    );
+
     let first = run_serve(home.path(), project.path(), &[initialize(), tools_list(2)]);
     assert!(first.status.success(), "{first:?}");
     let handshake = tools_list_cost(&first.stdout, 2);
@@ -251,23 +313,21 @@ async fn serve_lists_core_tools_and_reaches_every_catalog_tool() {
         "core plus search must stay a tiny list: {:?}",
         handshake.names
     );
-    assert!(
-        handshake.tokens * 2 < STUB_HANDSHAKE_O200K,
-        "B/C handshake ({} tools, {} bytes, {} o200k) must beat stub option A ({} o200k)",
+    let skill_tokens = plugin_skill_tokens();
+    eprintln!(
+        "tools/list handshake cost: A stubs {} tools / {} bytes / {} o200k; \
+         B core+search {} tools / {} bytes / {} o200k; \
+         C plugin skills + core+search handshake {} o200k + {} o200k skill tokens",
+        a.names.len(),
+        a.bytes,
+        a.tokens,
         handshake.names.len(),
         handshake.bytes,
         handshake.tokens,
-        STUB_HANDSHAKE_O200K
-    );
-
-    eprintln!(
-        "tools/list handshake cost: A stubs {} o200k (229 names, 17 full); \
-         B/C core+search {} tools / {} bytes / {} o200k (C handshake equals B; \
-         plugin skills are host context, not tools/list)",
-        STUB_HANDSHAKE_O200K,
-        handshake.names.len(),
-        handshake.bytes,
-        handshake.tokens
+        handshake.tokens,
+        skill_tokens
+            .map(|tokens| tokens.to_string())
+            .unwrap_or_else(|| "unavailable".to_owned())
     );
 
     let output = run_serve(
@@ -419,5 +479,67 @@ async fn plain_mcp_stdio_client_finds_and_calls_a_non_core_tool() {
     assert!(
         call.get("error").is_none() || call["error"]["code"] != json!(-32601),
         "the loaded name must be callable; method-not-found means the host never registered it: {call}"
+    );
+}
+
+/// Option A: a plain MCP stdio client discovers a stub by name, calls it,
+/// receives `list_changed`, and re-lists the full schema.
+#[tokio::test]
+async fn plain_mcp_stdio_client_hydrates_a_stub_after_list_changed() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn plain_mcp_stub_marker() {}\n").await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+    let mut client = PlainMcpClient::start_with_env(
+        home.path(),
+        project.path(),
+        &[(ADVERTISEMENT_ENV, "stubs")],
+    );
+
+    let initialize = client.request(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": { "tools": { "listChanged": true } },
+            "clientInfo": { "name": "plain-mcp-stdio", "version": "1" }
+        }
+    }));
+    assert!(
+        initialize.get("error").is_none(),
+        "plain MCP initialize must succeed: {initialize}"
+    );
+    client.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+
+    let listed = client.request(tools_list(2));
+    let first_tools = listed["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list must carry a tool array: {listed}"));
+    let impact = tool_named(first_tools, "tracedecay_impact");
+    assert!(
+        is_stub(impact),
+        "A must keep stubbed tools on the list: {impact}"
+    );
+
+    client.send(&tool_call(3, "tracedecay_impact", &json!({})));
+    let after_call = client.wait_until(|frames| {
+        frames.iter().any(|frame| frame["id"] == 3)
+            && frames.iter().any(|frame| frame["method"] == LIST_CHANGED)
+    });
+    assert!(
+        after_call
+            .iter()
+            .any(|frame| frame["method"] == LIST_CHANGED),
+        "calling a stub must announce list_changed: {after_call:?}"
+    );
+
+    let relisted = client.request(tools_list(4));
+    let second_tools = relisted["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("second tools/list must carry a tool array: {relisted}"));
+    let hydrated = tool_named(second_tools, "tracedecay_impact");
+    assert!(
+        !is_stub(hydrated) && hydrated["inputSchema"]["properties"].is_object(),
+        "the next tools/list after list_changed must carry the full schema: {hydrated}"
     );
 }

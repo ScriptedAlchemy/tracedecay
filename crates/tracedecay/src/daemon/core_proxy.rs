@@ -106,7 +106,7 @@ pub async fn proxy_stdio_to_daemon(
     replay_line: Option<String>,
 ) -> Result<()> {
     let mut transport = StdioTransport::new();
-    let mut surface = ToolSurface::new();
+    let mut surface = ToolSurface::from_env()?;
     if let Some(line) = replay_line {
         proxy_one_request(socket_path, handshake, &line, &mut surface, &mut transport).await?;
     }
@@ -207,7 +207,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
         &mut eof_rx,
         &mut writer,
         drain_bound,
-        ToolSurface::new(),
+        ToolSurface::from_env()?,
     );
     let result = tokio::try_join!(read_host, proxy);
     drop(eof_tx);
@@ -725,9 +725,9 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
             .is_some_and(json_rpc_error_is_project_open_retryable)
 }
 
-/// Sends one host request through this session's tool surface: a tool search
-/// is answered from the daemon's session catalog, and `tools/list` is narrowed
-/// to the core set plus tools this session already loaded.
+/// Sends one host request through this session's tool surface: search answers
+/// from the daemon catalog, stubs hydrate on call, and `tools/list` follows
+/// the session advertisement.
 async fn send_host_request(
     surface: &mut ToolSurface,
     socket_path: &Path,
@@ -746,6 +746,9 @@ async fn send_host_request(
     let mut responses =
         send_daemon_request_with_project_open_retry(socket_path, handshake, request).await?;
     surface.rewrite(request.parsed.as_ref(), &mut responses);
+    if let Some(changed) = surface.unfreeze_call(request.parsed.as_ref()) {
+        responses.push(changed);
+    }
     Ok(responses)
 }
 
