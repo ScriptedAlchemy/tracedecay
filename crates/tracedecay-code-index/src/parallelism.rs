@@ -229,19 +229,6 @@ impl InstalledCodeIndexWorkerRuntimeV1 {
             .with_yielded_permits(|| self.pool.install(operation))
     }
 
-    /// Run request-bound source-scan work on the interactive pool.
-    ///
-    /// This is not an indexing-pool boundary and does not take or yield
-    /// background CPU units. Foreground grep must keep progressing while
-    /// verification holds those units on the indexing pool.
-    fn install_interactive<R, F>(&self, operation: F) -> R
-    where
-        F: FnOnce() -> R + Send,
-        R: Send,
-    {
-        self.interactive_pool.install(operation)
-    }
-
     fn collect_worker_heaps_when_idle(&self) {
         self.activity.collect_pending.store(true, Ordering::Release);
     }
@@ -811,9 +798,9 @@ where
 
 /// Run request-bound source-scan work on the owner's interactive pool.
 ///
-/// Foreground grep and other live source reads use this instead of
-/// [`install`] so they are not queued behind verification or rebuild work
-/// that already holds the indexing pool and the background CPU FIFO.
+/// Foreground grep uses this instead of [`install`] so it is not queued
+/// behind verification or rebuild work that already holds the indexing pool
+/// and the background CPU FIFO, so its leaves take no background CPU units.
 /// Standalone callers without an installed owner share the automatic pool.
 #[tracing::instrument(
     name = "code_index.workers.install_interactive",
@@ -832,7 +819,7 @@ where
         });
     }
     if let Some(runtime) = current_runtime() {
-        return Ok(runtime.install_interactive(operation));
+        return Ok(runtime.interactive_pool.install(operation));
     }
     let pool = standalone_pool()?;
     Ok(pool.install(operation))
@@ -882,41 +869,6 @@ mod tests {
 
     /// Two owners in one process run concurrently, each under its own plan:
     /// its width, its pool, and the width its pool's leaves report.
-    #[test]
-    fn interactive_install_runs_while_the_indexing_pool_is_held() {
-        let owner = CodeIndexWorkerRuntimeV1::build(
-            CodeIndexWorkerSelectionV1::Exact { workers: 1 },
-            1,
-            64 * 1024 * 1024 * 1024,
-        )
-        .expect("one-worker owner");
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let holder = {
-            let owner = owner.clone();
-            std::thread::spawn(move || {
-                let _entered = owner.enter();
-                install(move || {
-                    started_tx
-                        .send(())
-                        .expect("test waits for the indexing hold");
-                    release_rx.recv().expect("test releases the indexing hold");
-                })
-                .expect("indexing pool");
-            })
-        };
-        started_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("indexing hold started");
-        let observed = {
-            let _entered = owner.enter();
-            install_interactive(rayon::current_num_threads).expect("interactive pool")
-        };
-        release_tx.send(()).expect("indexing hold waits");
-        holder.join().expect("indexing hold");
-        assert_eq!(observed, 1);
-    }
-
     #[test]
     fn two_owners_in_one_process_each_run_under_their_own_plan() {
         let available = 64 * 1024 * 1024 * 1024;

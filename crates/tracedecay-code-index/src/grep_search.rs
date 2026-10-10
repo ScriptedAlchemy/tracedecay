@@ -114,10 +114,6 @@ pub fn search_tree_with_cancel(
         let max_results = query.max_results.max(1);
         // Bound retained source and reads to the existing owner's worker width.
         // Indexed collection preserves walk order before applying the hit cap.
-        // Interactive admission is a separate pool: background verification
-        // may hold the indexing workers and the background CPU FIFO for a
-        // whole digest sweep, and a foreground scan that waited there missed
-        // the 10s source-search deadline on large trees.
         let width = rayon::current_num_threads();
         loop {
             let mut batch = Vec::with_capacity(width);
