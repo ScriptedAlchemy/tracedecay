@@ -1451,6 +1451,40 @@ impl UnattachedSessionRetirementV1 {
         self.armed = false;
         Ok(())
     }
+
+    /// A rollback that cannot reach a truthful `Ready` keeps the retained
+    /// owner fenced as `RecoveryRequired` rather than publishing it while its
+    /// session sync binding was cleared. The unattached owner has no paired
+    /// graph/Store target, so it parks in `candidate_sessions` where
+    /// shutdown's graph-identity drain still drops it in order.
+    fn commit_recovery_required(mut self, phase: ProjectSessionRecoveryPhaseV1) -> Result<()> {
+        let mut entries = self.owners.lock().map_err(|_| {
+            session_registry_error(
+                "commit unattached project session recovery required",
+                "project runtime owner map lock is poisoned".to_owned(),
+            )
+        })?;
+        if !matches!(
+            entries.get(&self.project_id),
+            Some(ProjectRuntimeOwnerStateV1::ReplacingSessions)
+        ) {
+            return Err(session_registry_error(
+                "commit unattached project session recovery required",
+                "unattached session retirement lost its map fence".to_owned(),
+            ));
+        }
+        entries.insert(
+            self.project_id.clone(),
+            ProjectRuntimeOwnerStateV1::RecoveryRequired(ProjectSessionRecoveryRequiredV1 {
+                sessions: None,
+                candidate_sessions: self.sessions.take(),
+                memory: self.memory.take(),
+                phase,
+            }),
+        );
+        self.armed = false;
+        Ok(())
+    }
 }
 
 impl Drop for UnattachedSessionRetirementV1 {

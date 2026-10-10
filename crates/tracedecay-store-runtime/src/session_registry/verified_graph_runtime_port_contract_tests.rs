@@ -737,7 +737,10 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
         .expect_err("external old session facade must refuse Store close");
     match refusal {
         TraceDecayError::Database { operation, message } => {
-            assert_eq!(operation, "reserve project session Store retirement");
+            assert_eq!(
+                operation,
+                "reserve unattached project session Store retirement"
+            );
             assert!(
                 message.contains("ClientLeases"),
                 "unexpected close refusal: {message}"
