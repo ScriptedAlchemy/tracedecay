@@ -21,7 +21,9 @@ pub fn accounted_tool_result(
 
 /// Same as [`accounted_tool_result`], counting `recorded_output` when stored
 /// `content` is `Null`. Codex and Composer keep Null canonical content; the
-/// unused-context meter still scores the text the host recorded.
+/// unused-context meter still scores the text the host recorded. Native
+/// output is not an MCP envelope, so it counts as recorded: a JSON string
+/// counts verbatim and structured values count as their recorded JSON.
 pub fn accounted_tool_result_with_recorded_output(
     invocation_id: Option<ObservationId>,
     content: Value,
@@ -29,7 +31,7 @@ pub fn accounted_tool_result_with_recorded_output(
     recorded_output: Option<&Value>,
 ) -> CanonicalObservationFactV1 {
     let visible = tool_result_visible_text(&content)
-        .or_else(|| recorded_output.and_then(tool_result_visible_text));
+        .or_else(|| recorded_output.and_then(recorded_output_text));
     let token_count = visible
         .as_deref()
         .and_then(|text| count_ordinary_tokens(text).ok());
@@ -38,6 +40,17 @@ pub fn accounted_tool_result_with_recorded_output(
             || recorded_output.is_some_and(tool_result_output_was_cut)
     });
     CanonicalObservationFactV1::tool_result(invocation_id, content, success, token_count, cut)
+}
+
+/// Text a host recorded for a native tool result, counted exactly as served.
+/// Unlike [`tool_result_visible_text`], this never treats the value as an MCP
+/// envelope: a recorded JSON string keeps its wrapper fields in the count.
+fn recorded_output_text(output: &Value) -> Option<String> {
+    match output {
+        Value::Null => None,
+        Value::String(text) => Some(text.clone()),
+        other => Some(other.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -148,6 +161,42 @@ mod tests {
             Some(count_ordinary_tokens("{\"ok\":true}").unwrap())
         );
         assert_eq!(cut, Some(false));
+    }
+
+    #[test]
+    fn counts_native_json_output_verbatim_not_the_envelope_field() {
+        // Codex `payload.output` and Composer `toolFormerData.result` are
+        // native result values, not MCP envelopes: the agent read the JSON
+        // string with its wrapper fields, so the count must keep them.
+        let recorded = json!("{\"output\":\"ok\",\"duration\":12}");
+        let fact = accounted_tool_result_with_recorded_output(
+            None,
+            json!(null),
+            Some(true),
+            Some(&recorded),
+        );
+        let (token_count, cut, _) = result_fields(&fact);
+        assert_eq!(
+            token_count,
+            Some(count_ordinary_tokens("{\"output\":\"ok\",\"duration\":12}").unwrap())
+        );
+        assert_eq!(cut, Some(false));
+    }
+
+    #[test]
+    fn counts_native_structured_output_as_recorded() {
+        let recorded = json!({"output": "ok", "duration": 12});
+        let fact = accounted_tool_result_with_recorded_output(
+            None,
+            json!(null),
+            Some(true),
+            Some(&recorded),
+        );
+        let (token_count, _, _) = result_fields(&fact);
+        assert_eq!(
+            token_count,
+            Some(count_ordinary_tokens(&recorded.to_string()).unwrap())
+        );
     }
 
     #[test]
