@@ -1051,8 +1051,20 @@ async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
         super::super::CodeIndexDemandAdmissionV1::Queued
     ));
     let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
+    let _ = wait_for_live_complete_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    let observation = wait_for_ready_clone_index(&registry, fixture.path()).await;
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    let observation = loop {
+        let observation = wait_for_ready_clone_index(&registry, fixture.path()).await;
+        if observation.resources.changed_symbol_update_micros.is_some() {
+            break observation;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "clone update accounting never recorded a changed-symbol duration: {observation:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
     assert_eq!(observation.coverage.payloads_reused, Some(0));
     assert_eq!(observation.resources.stale_invalidations, Some(1));
     assert!(observation.resources.changed_symbol_update_micros.is_some());
@@ -5297,6 +5309,10 @@ async fn busy_query_does_not_rearm_dashboard_verification() {
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
     settle_text_projection(&registry, fixture.path()).await;
+    // Demand the decode before idle park so the busy-query probe still has a
+    // seated generation. Admission is then held, so a later demand cannot
+    // reseat it.
+    let _seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
     settled_owner_with_idle_admission(&registry, fixture.path()).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let canonical_root =
@@ -5313,7 +5329,6 @@ async fn busy_query_does_not_rearm_dashboard_verification() {
         .expect("resolved scope")
     };
     clear_pending_wake_until_quiet(&registry, &scope).await;
-    let _seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
     let freshness = registry
         .source_freshness_for_root(fixture.path())
         .await
