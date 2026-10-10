@@ -2263,27 +2263,13 @@ pub fn tool_result_output_was_cut(content: &Value) -> bool {
         }
         Value::Array(items) => items.iter().any(tool_result_output_was_cut),
         Value::Object(map) => {
-            object_was_cut(map)
+            map.get("truncated") == Some(&Value::Bool(true))
                 || map.get("content").is_some_and(tool_result_output_was_cut)
                 || map.get("output").is_some_and(tool_result_output_was_cut)
                 || map.get("text").is_some_and(tool_result_output_was_cut)
                 || map.get("preview").is_some_and(tool_result_output_was_cut)
         }
     }
-}
-
-fn object_was_cut(map: &serde_json::Map<String, Value>) -> bool {
-    if map.get("truncated") == Some(&Value::Bool(true)) {
-        return true;
-    }
-    match map.get("cut") {
-        Some(Value::Bool(true)) => return true,
-        Some(Value::Object(cut)) if cut.get("applied") == Some(&Value::Bool(true)) => {
-            return true;
-        }
-        _ => {}
-    }
-    map.contains_key("handle") && map.contains_key("retrieve_tool") && map.contains_key("preview")
 }
 
 fn validate_canonical_label(value: &str) -> Result<(), ObservationContractError> {

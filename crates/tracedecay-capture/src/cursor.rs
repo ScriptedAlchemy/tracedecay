@@ -238,7 +238,7 @@ fn append_cursor_content_facts(content: &Value, facts: &mut Vec<CanonicalObserva
                 }
             }
             Some("tool_result") => {
-                facts.push(crate::accounted_tool_result_from_native(
+                facts.push(crate::accounted_tool_result(
                     item.get("tool_use_id")
                         .or_else(|| item.get("id"))
                         .and_then(Value::as_str)
@@ -250,7 +250,6 @@ fn append_cursor_content_facts(content: &Value, facts: &mut Vec<CanonicalObserva
                     item.get("is_error")
                         .and_then(Value::as_bool)
                         .map(|error| !error),
-                    Some(item),
                 ));
             }
             Some("thinking" | "reasoning") => {

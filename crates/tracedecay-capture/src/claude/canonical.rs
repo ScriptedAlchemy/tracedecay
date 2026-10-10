@@ -523,7 +523,7 @@ fn append_message_facts(
                 });
                 append_task_lifecycle_fact(name, block.get("input"), facts);
             }
-            Some("tool_result") => facts.push(crate::accounted_tool_result_from_native(
+            Some("tool_result") => facts.push(crate::accounted_tool_result(
                 block
                     .get("tool_use_id")
                     .and_then(Value::as_str)
@@ -533,7 +533,6 @@ fn append_message_facts(
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .map(|is_error| !is_error),
-                Some(block),
             )),
             Some("thinking") => {
                 let content = block.get("thinking").cloned();

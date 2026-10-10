@@ -306,11 +306,10 @@ pub fn canonical_snapshot_envelope(
     }
     append_tool_invocation_facts(&mut facts, native)?;
     if let Some(result) = native.get("tool_result").filter(|value| value.is_object()) {
-        facts.push(tracedecay_capture::accounted_tool_result_from_native(
+        facts.push(tracedecay_capture::accounted_tool_result(
             optional_observation_id(result, "invocation_id")?,
             result.get("content").cloned().unwrap_or(Value::Null),
             result.get("success").and_then(Value::as_bool),
-            Some(result),
         ));
     }
     if let Some(usage) = native.get("usage").filter(|value| value.is_object()) {

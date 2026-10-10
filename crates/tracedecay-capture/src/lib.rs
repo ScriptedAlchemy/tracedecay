@@ -25,4 +25,4 @@ pub use timestamp::{
     normalize_timestamp_secs, parse_cursor_human_timestamp, parse_rfc3339_timestamp,
     parse_rfc3339_timestamp_micros, parse_yyyy_mm_dd_utc_start,
 };
-pub use tool_result::{accounted_tool_result, accounted_tool_result_from_native};
+pub use tool_result::accounted_tool_result;

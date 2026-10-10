@@ -39,8 +39,6 @@ pub struct ToolResult {
     /// Set once the shared renderer accounted this result, so the transport
     /// persists those figures instead of appending a second footer.
     token_accounting: Option<response_trailers::ToolTokenAccounting>,
-    /// Whether the served output was trimmed or truncated.
-    cut: Option<bool>,
     /// What the read cost its stores, recorded by
     /// [`response_trailers::append_request_cost`] beside its trailer.
     cost: Option<tracedecay_contracts::RequestCostReceiptV1>,
@@ -59,7 +57,6 @@ impl ToolResult {
             semantic_error: None,
             failure_message: None,
             token_accounting: None,
-            cut: None,
             cost: None,
             structured_result: None,
         }
@@ -130,15 +127,6 @@ impl ToolResult {
     /// The figures the shared renderer accounted, if it did.
     pub fn token_accounting(&self) -> Option<response_trailers::ToolTokenAccounting> {
         self.token_accounting
-    }
-
-    pub fn set_cut(&mut self, cut: bool) {
-        self.cut = Some(cut);
-    }
-
-    /// Whether the served output was trimmed or truncated, when recorded.
-    pub fn cut(&self) -> Option<bool> {
-        self.cut
     }
 }
 

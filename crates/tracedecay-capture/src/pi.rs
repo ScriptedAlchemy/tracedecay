@@ -273,14 +273,13 @@ fn append_message(
                 .map(ObservationId::new)
                 .transpose()
                 .map_err(|_| invalid())?;
-            facts.push(crate::accounted_tool_result_from_native(
+            facts.push(crate::accounted_tool_result(
                 invocation_id,
                 visible_content(message.get("content").unwrap_or(&Value::Null)),
                 message
                     .get("isError")
                     .and_then(Value::as_bool)
                     .map(|is_error| !is_error),
-                Some(message),
             ));
         }
         "bashExecution" => {

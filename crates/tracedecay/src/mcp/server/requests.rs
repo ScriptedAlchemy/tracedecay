@@ -11,7 +11,7 @@ use tracedecay_mcp::server::{
     DispatchSettlement, DispatchToolPolicy, PreparedDispatchControl, dispatch_cancelled_error,
 };
 use tracedecay_mcp::tools::response_trailers::{
-    ToolTokenAccounting, record_token_accounting, response_token_count, response_was_cut,
+    ToolTokenAccounting, record_token_accounting, response_token_count,
 };
 use tracedecay_mcp::{
     ToolResult, mark_semantic_tool_error, semantic_failure_reason, server::resources_list_result,
@@ -1011,7 +1011,6 @@ impl McpServer {
         result: &mut ToolResult,
     ) -> ToolTokenAccounting {
         // Real served-output count, before any banners/metrics lines are appended.
-        result.set_cut(response_was_cut(result));
         let Some(response_tokens) = response_token_count(result) else {
             return ToolTokenAccounting::default();
         };

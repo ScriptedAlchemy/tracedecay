@@ -152,11 +152,6 @@ pub fn response_token_count(result: &ToolResult) -> Option<u64> {
         .ok()
 }
 
-/// Whether the served result was trimmed or truncated.
-pub fn response_was_cut(result: &ToolResult) -> bool {
-    tracedecay_domain::tool_result_output_was_cut(&result.value)
-}
-
 /// Raw-read counterfactual: every touched project file read in full.
 /// Absolute or escaping paths are not project files and cost nothing.
 pub fn raw_file_tokens(project_root: &Path, touched_files: &[String]) -> u64 {
@@ -183,9 +178,7 @@ pub fn raw_file_tokens(project_root: &Path, touched_files: &[String]) -> u64 {
 /// Accounts a rendered result's tokens, records the figures on the result, and
 /// appends the footer when the touched files cost anything to read raw.
 pub fn account_tool_result(project_root: Option<&Path>, result: &mut ToolResult) {
-    result.set_cut(response_was_cut(result));
     let Some(response_tokens) = response_token_count(result) else {
-        attach_served_result_meta(result);
         return;
     };
     let accounting = ToolTokenAccounting {
@@ -214,31 +207,6 @@ pub fn record_token_accounting(result: &mut ToolResult, accounting: ToolTokenAcc
         )}));
     }
     result.set_token_accounting(accounting);
-    attach_served_result_meta(result);
-}
-
-/// Stamp the real served token count and cut marker on the wire `_meta`.
-fn attach_served_result_meta(result: &mut ToolResult) {
-    let count = result
-        .token_accounting()
-        .map(|accounting| accounting.response_tokens);
-    let cut = result.cut();
-    let Some(map) = result.value.as_object_mut() else {
-        return;
-    };
-    let meta = map.entry("_meta").or_insert_with(|| json!({}));
-    if meta.is_null() {
-        *meta = json!({});
-    }
-    let Some(meta) = meta.as_object_mut() else {
-        return;
-    };
-    if let Some(count) = count {
-        meta.insert("token_count".to_owned(), json!(count));
-    }
-    if let Some(cut) = cut {
-        meta.insert("cut".to_owned(), json!(cut));
-    }
 }
 
 #[cfg(test)]
@@ -356,9 +324,6 @@ mod tests {
                 response_tokens: after,
             })
         );
-        assert_eq!(result.cut(), Some(false));
-        assert_eq!(result.value["_meta"]["token_count"], after);
-        assert_eq!(result.value["_meta"]["cut"], false);
     }
 
     #[test]
@@ -386,8 +351,5 @@ mod tests {
                 response_tokens: after,
             })
         );
-        assert_eq!(result.cut(), Some(false));
-        assert_eq!(result.value["_meta"]["token_count"], after);
-        assert_eq!(result.value["_meta"]["cut"], false);
     }
 }

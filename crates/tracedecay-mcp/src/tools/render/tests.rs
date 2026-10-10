@@ -59,7 +59,6 @@ fn truncated_json_envelope_reports_character_counts_for_utf8() {
 
     assert_eq!(parsed["original_chars"], MAX_RESPONSE_CHARS);
     assert_eq!(parsed["truncated"], true);
-    assert_eq!(parsed["cut"], true);
     let preview = parsed["preview"].as_str().unwrap();
     assert_eq!(parsed["preview_chars"], preview.chars().count());
 }

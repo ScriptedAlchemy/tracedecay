@@ -160,13 +160,12 @@ fn normalize_composer_bubble_record(
             });
         }
         if tool.get("result").is_some_and(|result| !result.is_null()) {
-            facts.push(crate::accounted_tool_result_from_native(
+            facts.push(crate::accounted_tool_result(
                 invocation_id,
                 Value::Null,
                 tool.get("status")
                     .and_then(Value::as_str)
                     .and_then(composer_tool_result_success),
-                Some(tool),
             ));
         }
         if let Some(path) = composer_edit_tool_path(tool) {
