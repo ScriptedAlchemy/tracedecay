@@ -1386,12 +1386,15 @@ struct UnattachedSessionRetirementV1 {
 
 impl UnattachedSessionRetirementV1 {
     fn database(&self) -> Result<&RegisteredGlobalDbOwnerV1> {
-        self.sessions.as_ref().map(|sessions| &sessions.database).ok_or_else(|| {
-            session_registry_error(
-                "retire unattached project session store",
-                "unattached session retirement lost its database owner".to_owned(),
-            )
-        })
+        self.sessions
+            .as_ref()
+            .map(|sessions| &sessions.database)
+            .ok_or_else(|| {
+                session_registry_error(
+                    "retire unattached project session store",
+                    "unattached session retirement lost its database owner".to_owned(),
+                )
+            })
     }
 
     fn restore_ready(&mut self) -> Result<()> {

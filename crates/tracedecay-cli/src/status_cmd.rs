@@ -152,7 +152,9 @@ fn schema_convergence_line(finding: &SchemaConvergenceFindingV1) -> String {
     )
 }
 
-fn stalled_project_open_error(status: &ProjectOpenStatusV1) -> tracedecay_domain::errors::TraceDecayError {
+fn stalled_project_open_error(
+    status: &ProjectOpenStatusV1,
+) -> tracedecay_domain::errors::TraceDecayError {
     let detail = status
         .detail
         .clone()
@@ -193,9 +195,7 @@ fn stalled_project_open_error(status: &ProjectOpenStatusV1) -> tracedecay_domain
     }
 }
 
-fn reject_stalled_project_open(
-    daemon_status: &Value,
-) -> tracedecay_domain::errors::Result<()> {
+fn reject_stalled_project_open(daemon_status: &Value) -> tracedecay_domain::errors::Result<()> {
     let Some(project_open) = daemon_status
         .get("project_open")
         .cloned()

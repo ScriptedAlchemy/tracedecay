@@ -556,9 +556,7 @@ impl StoreObservabilityRegistryV1 {
         &self,
         database_path: &Path,
     ) -> Result<StoreObservabilitySettleV1, String> {
-        let mut entries = self
-            .lock_entries()
-            .map_err(str::to_owned)?;
+        let mut entries = self.lock_entries().map_err(str::to_owned)?;
         let Some(entry) = entries
             .iter_mut()
             .find(|entry| entry.database.db_path() == database_path)

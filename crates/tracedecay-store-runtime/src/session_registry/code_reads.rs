@@ -480,11 +480,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         vacancy.commit_without_sessions()
     }
 
-    async fn retire_unattached_project_session_store(
-        &self,
-        project_id: &ProjectId,
-    ) -> Result<()> {
-        let Some(mut retirement) = self.project_owners.take_unattached_session_owner(project_id)?
+    async fn retire_unattached_project_session_store(&self, project_id: &ProjectId) -> Result<()> {
+        let Some(mut retirement) = self
+            .project_owners
+            .take_unattached_session_owner(project_id)?
         else {
             return Ok(());
         };

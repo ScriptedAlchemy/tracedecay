@@ -123,11 +123,9 @@ fn stalled_project_open_error(
             true,
             detail,
         ),
-        ProjectOpenStatusReasonV1::RetryBackoff => TraceDecayError::project_route(
-            super::PROJECT_SERVER_CAPACITY_REASON_CODE,
-            true,
-            detail,
-        ),
+        ProjectOpenStatusReasonV1::RetryBackoff => {
+            TraceDecayError::project_route(super::PROJECT_SERVER_CAPACITY_REASON_CODE, true, detail)
+        }
         ProjectOpenStatusReasonV1::UnrepairableVerdict => TraceDecayError::project_open(
             ProjectOpenFailureKind::AuthorityVerdict {
                 migration_pending: false,
