@@ -152,4 +152,23 @@ mod tests {
         assert_eq!(token_count, None);
         assert_eq!(cut, None);
     }
+
+    #[test]
+    fn unused_context_meter_spot_checks_three_real_counts() {
+        let spots = [
+            "crates/tracedecay-graph-query/src/context/source_read.rs:144\nfn estimate_tokens",
+            "pub fn estimate_tokens(s: &str) -> u32 {\n    s.chars().count().div_ceil(4)\n}",
+            "# Truncated Response\n\npreview of Walk::read",
+        ];
+        for body in spots {
+            let fact = accounted_tool_result(None, json!(body), Some(true));
+            let (token_count, cut, _) = result_fields(&fact);
+            let expected = count_ordinary_tokens(body).unwrap();
+            assert_eq!(token_count, Some(expected), "{body}");
+            assert_eq!(cut, Some(body.contains("# Truncated Response")), "{body}");
+            let wire = serde_json::to_value(&fact).unwrap();
+            assert_eq!(wire["token_count"], expected, "{body}");
+            assert_eq!(wire["cut"], body.contains("# Truncated Response"), "{body}");
+        }
+    }
 }
