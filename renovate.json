@@ -3,6 +3,16 @@
   "extends": [
     "config:recommended"
   ],
+  "customManagers": [
+    {
+      "description": "Bazel's pnpm pin tracks packageManager; the shared branch name keeps both bumps in one PR",
+      "customType": "regex",
+      "managerFilePatterns": ["/^MODULE\\.bazel$/"],
+      "matchStrings": ["pnpm\\.pnpm\\(pnpm_version = \"(?<currentValue>[^\"]+)\"\\)"],
+      "depNameTemplate": "pnpm",
+      "datasourceTemplate": "npm"
+    }
+  ],
   "packageRules": [
     {
       "description": "Cargo lockfiles require the repository's external vendoring workflow",

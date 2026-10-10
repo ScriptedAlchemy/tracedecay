@@ -1,7 +1,7 @@
 seq	phase	decision	evidence	result
 1	scaffold	bzlmod + bazelisk pin 9.2.0 via .bazelversion	.bazelversion + MODULE.bazel	VERIFIED
 2	deps	crate_universe from Cargo.lock replaces .pnpm/crates vendoring	crate.from_cargo cargo_lockfile pin in MODULE.bazel	VERIFIED
-3	deps	npm_translate_lock consumes derived single-doc pnpm-lock.bazel.yaml	scripts/bazel/sync-pnpm-lock.sh strips pnpm 12 lead document	VERIFIED
+3	deps	npm_translate_lock consumes derived single-doc pnpm-lock.bazel.yaml	scripts/bazel/sync-pnpm-lock.sh strips pnpm 12 lead document	SUPERSEDED by 25
 4	targets	gen_builds.py emits BUILD files from cargo metadata not hand edits	scripts/bazel/gen_builds.py + generated crates/*/BUILD.bazel	VERIFIED
 5	features	one rust_library per cargo resolution context	duplicate-rlib E0464 before variants keyed by feature set	VERIFIED
 6	features	variant identity includes transitive member-dep closure signature	trait-split E0277 resolved only after __d<sha1> suffix	VERIFIED
@@ -23,3 +23,4 @@ seq	phase	decision	evidence	result
 22	drift	foreign Cargo target families resolve false on the Linux lane	cfg(target_family = "wasm") drops the dep in nested gates	VERIFIED
 23	drift	obsolete generated BUILD files removed by regeneration	orphaned banner-owned file unlinked, handwritten files keep content	VERIFIED
 24	linker	rust-lld (Cargo default) plus HOST_CPUS; skip non-LTO bitcode	.bazelrc drops fuse-ld=bfd; embed-bitcode=no except dist	VERIFIED
+25	deps	npm_translate_lock consumes pnpm-lock.yaml directly	rules_js 3.5.1 yq reduce keeps the last lockfile document	VERIFIED

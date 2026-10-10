@@ -13,8 +13,26 @@ const allowedTypes = [
   "test",
 ];
 
+// GitHub appends " (#<number>)" to a squash-merged pull request's title. The
+// reference is a link GitHub adds after review, so the length limit measures
+// only the header the author wrote.
+const pullRequestReference = / \(#\d+\)$/;
+
 module.exports = {
   defaultIgnores: false,
+  plugins: [
+    {
+      rules: {
+        "authored-header-max-length": (parsed, _when, maxLength) => {
+          const authored = (parsed.header ?? "").replace(pullRequestReference, "");
+          return [
+            authored.length <= maxLength,
+            `header must not be longer than ${maxLength} characters excluding a trailing pull request reference, current length is ${authored.length}`,
+          ];
+        },
+      },
+    },
+  ],
   ignores: [
     (message) => /^Merge[ \t]/.test(message),
     // Git-generated revert headers quote the reverted subject verbatim, so the
@@ -31,7 +49,7 @@ module.exports = {
     },
   },
   rules: {
-    "header-max-length": [2, "always", 72],
+    "authored-header-max-length": [2, "always", 72],
     "subject-empty": [2, "never"],
     "type-empty": [2, "never"],
     "type-enum": [2, "always", allowedTypes],
