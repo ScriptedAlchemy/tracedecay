@@ -16,7 +16,7 @@ use tracedecay_global_db::{
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{
     Connection, Error as EngineError, Executor, IntoParams, QueryExecutor, Rows, TestConnection,
-    Transaction,
+    Transaction, WriteStatement,
 };
 use tracedecay_store::StoreShardScopeV1;
 
@@ -53,6 +53,13 @@ impl SessionTemporalExec for Connection {
     fn execute_batch(&self, sql: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
         Connection::execute_batch(self, sql)
     }
+
+    fn execute_statements(
+        &self,
+        statements: Vec<WriteStatement>,
+    ) -> impl Future<Output = Result<Vec<u64>, EngineError>> + Send {
+        Executor::execute_statements(self, statements)
+    }
 }
 
 impl SessionTemporalQuery for TestConnection {
@@ -78,6 +85,13 @@ impl SessionTemporalExec for TestConnection {
         P: IntoParams + Send,
     {
         Executor::execute(self, sql, params)
+    }
+
+    fn execute_statements(
+        &self,
+        statements: Vec<WriteStatement>,
+    ) -> impl Future<Output = Result<Vec<u64>, EngineError>> + Send {
+        Executor::execute_statements(self, statements)
     }
 
     fn execute_batch(&self, sql: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
@@ -113,6 +127,13 @@ impl SessionTemporalExec for Transaction {
     fn execute_batch(&self, sql: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
         Transaction::execute_batch(self, sql)
     }
+
+    fn execute_statements(
+        &self,
+        statements: Vec<WriteStatement>,
+    ) -> impl Future<Output = Result<Vec<u64>, EngineError>> + Send {
+        Executor::execute_statements(self, statements)
+    }
 }
 
 impl SessionTemporalQuery for RegisteredGlobalDbWriteTransaction<'_> {
@@ -142,6 +163,13 @@ impl SessionTemporalExec for RegisteredGlobalDbWriteTransaction<'_> {
 
     fn execute_batch(&self, sql: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
         RegisteredGlobalDbWriteTransaction::execute_batch(self, sql)
+    }
+
+    fn execute_statements(
+        &self,
+        statements: Vec<WriteStatement>,
+    ) -> impl Future<Output = Result<Vec<u64>, EngineError>> + Send {
+        RegisteredGlobalDbWriteTransaction::execute_statements(self, statements)
     }
 }
 
@@ -182,6 +210,13 @@ impl SessionTemporalExec for RegisteredGlobalDbWriterConnection<'_> {
 
     fn execute_batch(&self, sql: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
         RegisteredGlobalDbWriterConnection::execute_batch(self, sql)
+    }
+
+    fn execute_statements(
+        &self,
+        statements: Vec<WriteStatement>,
+    ) -> impl Future<Output = Result<Vec<u64>, EngineError>> + Send {
+        RegisteredGlobalDbWriterConnection::execute_statements(self, statements)
     }
 }
 

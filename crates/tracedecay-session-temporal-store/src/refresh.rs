@@ -6,7 +6,7 @@ use tracedecay_domain::{
     SessionSourceIdV1, SessionTemporalCoverageRequestV1, SignedCursorKeyRefV1,
     TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
-use tracedecay_runtime_core::db::engine::{Row, params};
+use tracedecay_runtime_core::db::engine::{Row, WriteStatement, params};
 use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionRefreshBeginOrJoinReceiptV1,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancellationRequestV1,
@@ -274,79 +274,82 @@ async fn begin_session_refresh_in_transaction(
     // The running-operation and attempt reads above share this writer transaction, so
     // they already decided one-running ownership and the operation id; a constraint
     // failure here is a storage fault, never a busy refresh.
+    // The running-operation and attempt reads above share this writer
+    // transaction, so they already decided one-running ownership and the
+    // operation id; a constraint failure here is a storage fault, never a busy
+    // refresh. The four inserts are unconditional, so they ride one fused
+    // writer submission and stop paying a dispatch roundtrip each.
     transaction
-        .execute(
-            "INSERT INTO session_refresh_operations (
-                session_id, operation_id, request_digest, target_frontier_json,
-                state, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?5)",
-            params![
-                request.session_id().as_str(),
-                operation_id.as_str(),
-                request_digest.as_str(),
-                encode_refresh_target(&request)?,
-                accepted_at.0,
-            ],
-        )
-        .await
-        .map_err(|error| storage(BEGIN_REFRESH, error))?;
-    transaction
-        .execute(
-            "INSERT INTO session_temporal_generations (
-                session_id, generation, state, frozen_watermarks_json, created_at
-             ) VALUES (?1, ?2, 'building', ?3, ?4)",
-            params![
-                request.session_id().as_str(),
-                generation_i64(candidate_generation, BEGIN_REFRESH)?,
-                frozen_watermarks_json.as_str(),
-                accepted_at.0,
-            ],
-        )
-        .await
-        .map_err(|error| storage(BEGIN_REFRESH, error))?;
-    // Summary availability is generation-bound: the candidate inherits the
-    // active generation's rows exactly like the summary-publication
-    // route's generation builder, otherwise activating this refresh would
-    // silently drop every published summary from generation-bound reads.
-    transaction
-        .execute(
-            "INSERT INTO session_summary_availability (
-                session_id, generation, summary_id, availability,
-                source_horizon_json, reason, checked_at
-             )
-             SELECT session_id, ?2, summary_id, availability,
-                    source_horizon_json, reason, ?3
-             FROM session_summary_availability
-             WHERE session_id = ?1 AND generation = ?4",
-            params![
-                request.session_id().as_str(),
-                generation_i64(candidate_generation, BEGIN_REFRESH)?,
-                accepted_at.0,
-                generation_i64(active_generation, BEGIN_REFRESH)?,
-            ],
-        )
-        .await
-        .map_err(|error| storage(BEGIN_REFRESH, error))?;
-    transaction
-        .execute(
-            "INSERT INTO session_refresh_bindings (
-                session_id, operation_id, scope_kind, source_frontier, target_frontier,
-                projector_version, config_digest, generation, frozen_watermarks_json,
-                binding_digest, created_at
-             ) VALUES (?1, ?2, 'session_store', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                request.session_id().as_str(),
-                operation_id.as_str(),
-                frontier_i64(request.target_frontier().committed_through(), BEGIN_REFRESH,)?,
-                frontier_i64(request.target_frontier().observed_through(), BEGIN_REFRESH)?,
-                PROJECTOR_VERSION,
-                config_digest(),
-                generation_i64(candidate_generation, BEGIN_REFRESH)?,
-                frozen_watermarks_json,
-                request_digest.clone(),
-                accepted_at.0,
-            ],
-        )
+        .execute_statements(vec![
+            WriteStatement::new(
+                "INSERT INTO session_refresh_operations (
+                    session_id, operation_id, request_digest, target_frontier_json,
+                    state, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?5)",
+                params![
+                    request.session_id().as_str(),
+                    operation_id.as_str(),
+                    request_digest.as_str(),
+                    encode_refresh_target(&request)?,
+                    accepted_at.0,
+                ],
+            )
+            .map_err(|error| storage(BEGIN_REFRESH, error))?,
+            WriteStatement::new(
+                "INSERT INTO session_temporal_generations (
+                    session_id, generation, state, frozen_watermarks_json, created_at
+                 ) VALUES (?1, ?2, 'building', ?3, ?4)",
+                params![
+                    request.session_id().as_str(),
+                    generation_i64(candidate_generation, BEGIN_REFRESH)?,
+                    frozen_watermarks_json.as_str(),
+                    accepted_at.0,
+                ],
+            )
+            .map_err(|error| storage(BEGIN_REFRESH, error))?,
+            // Summary availability is generation-bound: the candidate inherits
+            // the active generation's rows exactly like the
+            // summary-publication route's generation builder, otherwise
+            // activating this refresh would silently drop every published
+            // summary from generation-bound reads.
+            WriteStatement::new(
+                "INSERT INTO session_summary_availability (
+                    session_id, generation, summary_id, availability,
+                    source_horizon_json, reason, checked_at
+                 )
+                 SELECT session_id, ?2, summary_id, availability,
+                        source_horizon_json, reason, ?3
+                 FROM session_summary_availability
+                 WHERE session_id = ?1 AND generation = ?4",
+                params![
+                    request.session_id().as_str(),
+                    generation_i64(candidate_generation, BEGIN_REFRESH)?,
+                    accepted_at.0,
+                    generation_i64(active_generation, BEGIN_REFRESH)?,
+                ],
+            )
+            .map_err(|error| storage(BEGIN_REFRESH, error))?,
+            WriteStatement::new(
+                "INSERT INTO session_refresh_bindings (
+                    session_id, operation_id, scope_kind, source_frontier, target_frontier,
+                    projector_version, config_digest, generation, frozen_watermarks_json,
+                    binding_digest, created_at
+                 ) VALUES (?1, ?2, 'session_store', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    request.session_id().as_str(),
+                    operation_id.as_str(),
+                    frontier_i64(request.target_frontier().committed_through(), BEGIN_REFRESH,)?,
+                    frontier_i64(request.target_frontier().observed_through(), BEGIN_REFRESH)?,
+                    PROJECTOR_VERSION,
+                    config_digest(),
+                    generation_i64(candidate_generation, BEGIN_REFRESH)?,
+                    frozen_watermarks_json,
+                    request_digest.clone(),
+                    accepted_at.0,
+                ],
+            )
+            .map_err(|error| storage(BEGIN_REFRESH, error))?,
+        ])
         .await
         .map_err(|error| storage(BEGIN_REFRESH, error))?;
     Ok(SessionRefreshBeginTxnOutcome::Started {

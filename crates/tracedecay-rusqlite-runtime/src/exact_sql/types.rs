@@ -183,6 +183,7 @@ pub(crate) enum SqlRequest {
     Execute(ExactSqlStatement),
     Query(ExactSqlStatement),
     ExecuteBatch(String),
+    ExecuteMany(Vec<ExactSqlStatement>),
 }
 
 impl SqlRequest {
@@ -192,6 +193,7 @@ impl SqlRequest {
             Self::Execute(_) => ExactSqlWriteIntent::Execute,
             Self::Query(_) => ExactSqlWriteIntent::Query,
             Self::ExecuteBatch(_) => ExactSqlWriteIntent::ExecuteBatch,
+            Self::ExecuteMany(_) => ExactSqlWriteIntent::Execute,
         }
     }
 }
@@ -202,6 +204,7 @@ pub(crate) enum SqlResult {
     Executed(ExactSqlExecuteResult),
     Queried(ExactSqlRows),
     BatchExecuted(ExactSqlBatchResult),
+    ExecutedMany(Vec<ExactSqlExecuteResult>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -347,6 +350,10 @@ pub enum ExactSqlError {
         extended_code: Option<i32>,
         message: String,
     },
+    StatementBatch {
+        index: usize,
+        source: Box<ExactSqlError>,
+    },
 }
 
 impl fmt::Display for ExactSqlError {
@@ -391,6 +398,12 @@ impl fmt::Display for ExactSqlError {
                 operation, message, ..
             } => {
                 write!(formatter, "exact SQL {operation} failed: {message}")
+            }
+            Self::StatementBatch { index, source } => {
+                write!(
+                    formatter,
+                    "exact SQL statement batch item {index} failed: {source}"
+                )
             }
         }
     }

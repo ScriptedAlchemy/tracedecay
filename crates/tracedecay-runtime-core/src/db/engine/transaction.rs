@@ -3,7 +3,7 @@ use std::{path::Path, sync::Arc};
 use tokio::sync::Mutex;
 
 use tracedecay_rusqlite_runtime::exact_sql::{
-    ExactSqlAttachment, ExactSqlHandle, ExactSqlTransaction as RuntimeTransaction,
+    ExactSqlAttachment, ExactSqlError, ExactSqlHandle, ExactSqlTransaction as RuntimeTransaction,
 };
 
 use super::{Error, IntoParams, Result, Rows, WriteStatement, connection::statement};
@@ -73,16 +73,24 @@ impl Transaction {
         tokio::spawn(async move {
             let runtime = runtime.lock().await;
             let runtime = runtime.as_ref().ok_or(Error::TransactionClosed)?;
-            let mut results = Vec::with_capacity(statements.len());
-            for (index, statement) in statements.into_iter().enumerate() {
-                let result = runtime
-                    .execute_async(statement)
+            // One dispatch for the whole group: statements inside a transaction
+            // are already serialized on the same writer, so separate dispatches
+            // only paid the per-statement transport overhead. The writer reports
+            // the exact failing index through ExactSqlError::StatementBatch.
+            let results =
+                runtime
+                    .execute_many_async(statements)
                     .await
-                    .map_err(Error::from)
-                    .map_err(|error| Error::statement_batch(index, error))?;
-                results.push(result.changed_rows as u64);
-            }
-            Ok(results)
+                    .map_err(|error| match error {
+                        ExactSqlError::StatementBatch { index, source } => {
+                            Error::statement_batch(index, Error::from(*source))
+                        }
+                        other => Error::from(other),
+                    })?;
+            Ok(results
+                .into_iter()
+                .map(|result| result.changed_rows as u64)
+                .collect())
         })
         .await
         .map_err(join_error)?

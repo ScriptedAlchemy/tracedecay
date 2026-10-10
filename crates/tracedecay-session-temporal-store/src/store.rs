@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
+#[cfg(any(test, feature = "test-helpers"))]
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_temporal_query::execution::ExecutionControl;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tracedecay_domain::{SessionId, SessionProjectionGenerationV1};
 use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{WriteStatement, params};
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
 use tracing::Instrument as _;
 
@@ -267,6 +267,49 @@ pub(crate) async fn acknowledge_relation_receipt(
     Ok(())
 }
 
+/// Builds the fused acknowledgement group for one validated projection.
+///
+/// The shared-commit caller issues the group as one writer submission under
+/// its own savepoint: [SAVEPOINT, guarded UPDATE, guarded journal DELETE,
+/// RELEASE]. The UPDATE keeps its atomic state-and-watermark guard; the
+/// caller still checks the UPDATE and DELETE row counts after the group
+/// returns and replays the savepoint recovery on any short-circuit, so a
+/// concurrent receipt settle fails the item identically to the serial path.
+pub(crate) fn acknowledge_relation_receipt_statements(
+    projection: &SessionRelationProjection,
+) -> SessionStoreResult<Vec<WriteStatement>> {
+    let applied =
+        projection_watermark(projection).map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    let generation =
+        i64::try_from(projection.generation).map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    Ok(vec![
+        WriteStatement::new("SAVEPOINT relation_projection_ack", ())
+            .map_err(|error| storage(RECEIPT_OPERATION, error))?,
+        WriteStatement::new(
+            "UPDATE session_relation_receipts
+             SET state = 'applied', graph_watermark = ?3, applied_at = ?4
+             WHERE session_id = ?1 AND generation = ?2
+               AND expected_graph_watermark = ?3
+               AND state IN ('pending', 'applied')",
+            params![
+                projection.session_id.as_str(),
+                generation,
+                applied.as_str(),
+                now_micros(RECEIPT_OPERATION)?.0,
+            ],
+        )
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?,
+        WriteStatement::new(
+            "DELETE FROM session_relation_effect_journal
+             WHERE session_id = ?1 AND generation = ?2",
+            params![projection.session_id.as_str(), generation],
+        )
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?,
+        WriteStatement::new("RELEASE relation_projection_ack", ())
+            .map_err(|error| storage(RECEIPT_OPERATION, error))?,
+    ])
+}
+
 /// Reports whether a peer applier already settled this generation's receipt.
 ///
 /// Concurrent post-commit appliers of the same generation race the effect
@@ -303,7 +346,7 @@ pub(crate) async fn relation_receipt_applied(
     Ok(state.as_deref() == Some("applied"))
 }
 
-async fn expected_receipt(
+pub(crate) async fn expected_receipt(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
     generation: SessionProjectionGenerationV1,

@@ -89,6 +89,26 @@ impl Database {
         Ok(changed)
     }
 
+    /// Executes owned parameterized statements atomically through the
+    /// canonical writer broker, as one fused writer submission.
+    #[doc(hidden)]
+    pub async fn execute_write_statements(
+        &self,
+        operation: &str,
+        statements: Vec<crate::db::engine::WriteStatement>,
+    ) -> Result<Vec<u64>> {
+        let transaction = self.begin_write_transaction(operation).await?;
+        let changed = transaction
+            .execute_statements(statements)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to execute brokered statement batch: {error}"),
+                operation: operation.to_owned(),
+            })?;
+        transaction.commit().await?;
+        Ok(changed)
+    }
+
     /// Executes a SQL batch atomically through the canonical writer broker.
     #[doc(hidden)]
     pub async fn execute_write_batch(&self, operation: &str, sql: &str) -> Result<()> {

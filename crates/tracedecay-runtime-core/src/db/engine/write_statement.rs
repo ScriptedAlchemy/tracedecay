@@ -27,7 +27,8 @@ impl WriteStatement {
         self.exact
     }
 
-    pub(crate) fn into_parts(self) -> (String, Vec<Value>) {
+    /// Decomposes the owned statement for sequential fallbacks.
+    pub fn into_parts(self) -> (String, Vec<Value>) {
         (
             self.exact.sql,
             self.exact.params.into_iter().map(Value::from).collect(),

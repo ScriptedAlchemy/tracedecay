@@ -336,6 +336,40 @@ impl ExactSqlHandle {
         }
     }
 
+    /// Executes owned parameterized statements as one writer submission.
+    ///
+    /// One authority verification and one dispatch roundtrip serve the whole
+    /// group; a statement failure aborts the group and reports the failing
+    /// index via [`ExactSqlError::StatementBatch`].
+    pub fn execute_many(
+        &self,
+        statements: Vec<ExactSqlStatement>,
+    ) -> Result<Vec<ExactSqlExecuteResult>, ExactSqlError> {
+        if statements.is_empty() {
+            return Err(ExactSqlError::InvalidStatement);
+        }
+        match self.dispatch_writer(SqlRequest::ExecuteMany(statements))? {
+            SqlResult::ExecutedMany(results) => Ok(results),
+            _ => Err(ExactSqlError::WriterUnavailable),
+        }
+    }
+
+    pub async fn execute_many_async(
+        &self,
+        statements: Vec<ExactSqlStatement>,
+    ) -> Result<Vec<ExactSqlExecuteResult>, ExactSqlError> {
+        if statements.is_empty() {
+            return Err(ExactSqlError::InvalidStatement);
+        }
+        match self
+            .dispatch_writer_async(SqlRequest::ExecuteMany(statements))
+            .await?
+        {
+            SqlResult::ExecutedMany(results) => Ok(results),
+            _ => Err(ExactSqlError::WriterUnavailable),
+        }
+    }
+
     pub async fn execute_async(
         &self,
         statement: ExactSqlStatement,
@@ -842,6 +876,41 @@ impl ExactSqlTransaction {
         }
     }
 
+    /// Executes owned parameterized statements in one writer turn.
+    ///
+    /// The group shares one authority verification and one dispatch roundtrip;
+    /// a statement failure aborts the group and reports the failing index via
+    /// [`ExactSqlError::StatementBatch`], matching sequential execution where
+    /// the caller stops at the first error.
+    pub fn execute_many(
+        &self,
+        statements: Vec<ExactSqlStatement>,
+    ) -> Result<Vec<ExactSqlExecuteResult>, ExactSqlError> {
+        if statements.is_empty() {
+            return Err(ExactSqlError::InvalidStatement);
+        }
+        match self.dispatch(SqlRequest::ExecuteMany(statements))? {
+            SqlResult::ExecutedMany(results) => Ok(results),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
+    pub async fn execute_many_async(
+        &self,
+        statements: Vec<ExactSqlStatement>,
+    ) -> Result<Vec<ExactSqlExecuteResult>, ExactSqlError> {
+        if statements.is_empty() {
+            return Err(ExactSqlError::InvalidStatement);
+        }
+        match self
+            .dispatch_async(SqlRequest::ExecuteMany(statements))
+            .await?
+        {
+            SqlResult::ExecutedMany(results) => Ok(results),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
     /// Executes one batch with continuous authority revalidation.
     ///
     /// This is not a generic unbounded mode; it is accepted only by an
@@ -1053,6 +1122,26 @@ fn execute_request(
             SqlRequest::ExecuteBatch(sql) => {
                 execute_batch(connection, &sql).map(SqlResult::BatchExecuted)
             }
+            SqlRequest::ExecuteMany(statements) => {
+                let mut results = Vec::with_capacity(statements.len());
+                let mut item_result = Ok(SqlResult::ExecutedMany(Vec::new()));
+                for (index, statement) in statements.into_iter().enumerate() {
+                    match execute_statement(connection, statement) {
+                        Ok(result) => results.push(result),
+                        Err(error) => {
+                            item_result = Err(ExactSqlError::StatementBatch {
+                                index,
+                                source: Box::new(error),
+                            });
+                            break;
+                        }
+                    }
+                }
+                if item_result.is_ok() {
+                    item_result = Ok(SqlResult::ExecutedMany(results));
+                }
+                item_result
+            }
         },
     );
     (result, insert_tracker.applied.load(Ordering::Acquire))
@@ -1081,6 +1170,11 @@ fn publish_last_insert_rowid(
     match result.as_mut() {
         Ok(SqlResult::Executed(result)) => result.last_insert_rowid = rowid,
         Ok(SqlResult::BatchExecuted(result)) => result.last_insert_rowid = rowid,
+        Ok(SqlResult::ExecutedMany(results)) => {
+            if let Some(last) = results.last_mut() {
+                last.last_insert_rowid = rowid;
+            }
+        }
         Ok(SqlResult::Validated | SqlResult::Queried(_)) | Err(_) => {}
     }
 }
@@ -1091,6 +1185,15 @@ fn validate_request(request: &SqlRequest) -> Result<(), ExactSqlError> {
         | SqlRequest::Execute(statement)
         | SqlRequest::Query(statement) => statement.validate(),
         SqlRequest::ExecuteBatch(sql) => validate_batch(sql),
+        SqlRequest::ExecuteMany(statements) => {
+            if statements.is_empty() {
+                return Err(ExactSqlError::InvalidStatement);
+            }
+            for statement in statements {
+                statement.validate()?;
+            }
+            Ok(())
+        }
     }
 }
 

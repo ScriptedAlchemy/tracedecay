@@ -739,6 +739,19 @@ impl RegisteredGlobalDbWriterConnection<'_> {
             .await
             .map_err(engine_error)
     }
+
+    pub async fn execute_statements(
+        &self,
+        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+    ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
+        self.database
+            .execute_write_statements(
+                "execute registered global database statement batch",
+                statements,
+            )
+            .await
+            .map_err(engine_error)
+    }
 }
 
 pub struct RegisteredGlobalDbWriteTransaction<'a> {
@@ -773,6 +786,13 @@ impl Executor for RegisteredGlobalDbWriteTransaction<'_> {
 
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         RegisteredGlobalDbWriteTransaction::execute_batch(self, sql).await
+    }
+
+    async fn execute_statements(
+        &self,
+        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+    ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
+        RegisteredGlobalDbWriteTransaction::execute_statements(self, statements).await
     }
 }
 
@@ -864,6 +884,13 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         sql: &str,
     ) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.transaction.execute_batch(sql).await
+    }
+
+    pub async fn execute_statements(
+        &self,
+        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
+    ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
+        self.transaction.execute_statements(statements).await
     }
 
     #[tracing::instrument(name = "global_db.registered.txn.commit", level = "trace", skip_all)]
