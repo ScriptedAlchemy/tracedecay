@@ -1,0 +1,1098 @@
+{
+  "cancellation": {
+    "cancelled_indexed_write_rolled_back_without_rows_or_hits": true,
+    "cross_thread_native_interrupt_cancelled_seconds": 0.04062783299013972,
+    "indexed_query_works_after_cancellation": true,
+    "native_deadline_cancelled_seconds": 0.030774166982155293,
+    "unavailable_python_callback_apis": {
+      "set_authorizer": {
+        "class": "AttributeError",
+        "message": "'Connection' object has no attribute 'set_authorizer'"
+      },
+      "set_progress_handler": {
+        "class": "AttributeError",
+        "message": "'Connection' object has no attribute 'set_progress_handler'"
+      },
+      "set_update_hook": {
+        "class": "AttributeError",
+        "message": "'Connection' object has no attribute 'set_update_hook'"
+      }
+    }
+  },
+  "canonical": {
+    "direct_join_score_limitation": {
+      "plan": [
+        [
+          1,
+          0,
+          0,
+          "QUERY INDEX METHOD fts"
+        ],
+        [
+          2,
+          0,
+          0,
+          "SEARCH a USING COVERING INDEX sqlite_autoindex_retrieval_anchors_1 (anchor_id=?)"
+        ],
+        [
+          20,
+          0,
+          0,
+          "USE SORTER FOR ORDER BY"
+        ]
+      ],
+      "rows": [
+        [
+          1,
+          0.0
+        ],
+        [
+          2,
+          0.0
+        ],
+        [
+          5,
+          0.0
+        ]
+      ]
+    },
+    "fresh_process_reopen": {
+      "four_native_indexes_persisted": true,
+      "integrity_check": [
+        [
+          "ok"
+        ]
+      ]
+    },
+    "higher_positive_native_bm25_is_better_and_content_weight_is_10x": true,
+    "lcm_raw_messages": {
+      "boolean_and": {
+        "ids": [
+          1,
+          2,
+          5
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "index_text:(\"alpha\" AND \"beta\")"
+      },
+      "boolean_not": {
+        "ids": [],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "index_text:(\"alpha\" NOT \"beta\")"
+      },
+      "escaped_backslash": {
+        "ids": [
+          4
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "index_text:(\"slash \\\\delta\")"
+      },
+      "escaped_quotes": {
+        "ids": [
+          4
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "index_text:(\"quote \\\"gamma\\\"\")"
+      },
+      "literal_boolean_operator": {
+        "ids": [
+          5
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "index_text:(\"alpha OR beta\")"
+      },
+      "materialized_top_k": [
+        [
+          2,
+          9.375661849975586
+        ],
+        [
+          1,
+          7.879545211791992
+        ]
+      ],
+      "phrase": {
+        "ids": [
+          1,
+          2
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "index_text:(\"alpha beta\")"
+      },
+      "rollback_and_delete_verified": true,
+      "term": {
+        "ids": [
+          1,
+          2,
+          5
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "index_text:(\"alpha\")"
+      },
+      "unicode": {
+        "ids": [
+          4
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "index_text:(\"caf\u00e9\")"
+      }
+    },
+    "memory_v2_assertion_payloads": {
+      "boolean_and": {
+        "ids": [
+          1,
+          2,
+          5
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"alpha\" AND \"beta\""
+      },
+      "boolean_not": {
+        "ids": [],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"alpha\" NOT \"beta\""
+      },
+      "canonical_immutable_trigger_preserved": true,
+      "escaped_backslash": {
+        "ids": [
+          4
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"slash \\\\delta\""
+      },
+      "escaped_quotes": {
+        "ids": [
+          4
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"quote \\\"gamma\\\"\""
+      },
+      "literal_boolean_operator": {
+        "ids": [
+          5
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"alpha OR beta\""
+      },
+      "materialized_top_k": [
+        [
+          2,
+          0.9375662207603455
+        ],
+        [
+          1,
+          0.7879545092582703
+        ]
+      ],
+      "phrase": {
+        "ids": [
+          1,
+          2
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"alpha beta\""
+      },
+      "rollback_and_delete_verified": true,
+      "term": {
+        "ids": [
+          1,
+          2,
+          5
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"alpha\""
+      },
+      "unicode": {
+        "ids": [
+          4
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"caf\u00e9\""
+      }
+    },
+    "session_occurrences": {
+      "boolean_and": {
+        "ids": [
+          1,
+          2,
+          5
+        ],
+        "plan": [
+          [
+            3,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ],
+          [
+            16,
+            0,
+            0,
+            "SCAN native_hits AS h"
+          ],
+          [
+            17,
+            0,
+            0,
+            "SEARCH a USING COVERING INDEX sqlite_autoindex_retrieval_anchors_1 (anchor_id=?)"
+          ]
+        ],
+        "query": "\"alpha\" AND \"beta\""
+      },
+      "boolean_not": {
+        "ids": [],
+        "plan": [
+          [
+            3,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ],
+          [
+            16,
+            0,
+            0,
+            "SCAN native_hits AS h"
+          ],
+          [
+            17,
+            0,
+            0,
+            "SEARCH a USING COVERING INDEX sqlite_autoindex_retrieval_anchors_1 (anchor_id=?)"
+          ]
+        ],
+        "query": "\"alpha\" NOT \"beta\""
+      },
+      "escaped_backslash": {
+        "ids": [
+          4
+        ],
+        "plan": [
+          [
+            3,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ],
+          [
+            16,
+            0,
+            0,
+            "SCAN native_hits AS h"
+          ],
+          [
+            17,
+            0,
+            0,
+            "SEARCH a USING COVERING INDEX sqlite_autoindex_retrieval_anchors_1 (anchor_id=?)"
+          ]
+        ],
+        "query": "\"slash \\\\delta\""
+      },
+      "escaped_quotes": {
+        "ids": [
+          4
+        ],
+        "plan": [
+          [
+            3,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ],
+          [
+            16,
+            0,
+            0,
+            "SCAN native_hits AS h"
+          ],
+          [
+            17,
+            0,
+            0,
+            "SEARCH a USING COVERING INDEX sqlite_autoindex_retrieval_anchors_1 (anchor_id=?)"
+          ]
+        ],
+        "query": "\"quote \\\"gamma\\\"\""
+      },
+      "literal_boolean_operator": {
+        "ids": [
+          5
+        ],
+        "plan": [
+          [
+            3,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ],
+          [
+            16,
+            0,
+            0,
+            "SCAN native_hits AS h"
+          ],
+          [
+            17,
+            0,
+            0,
+            "SEARCH a USING COVERING INDEX sqlite_autoindex_retrieval_anchors_1 (anchor_id=?)"
+          ]
+        ],
+        "query": "\"alpha OR beta\""
+      },
+      "materialized_top_k": [
+        [
+          2,
+          0.9375662207603455
+        ],
+        [
+          1,
+          0.7879545092582703
+        ]
+      ],
+      "phrase": {
+        "ids": [
+          1,
+          2
+        ],
+        "plan": [
+          [
+            3,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ],
+          [
+            16,
+            0,
+            0,
+            "SCAN native_hits AS h"
+          ],
+          [
+            17,
+            0,
+            0,
+            "SEARCH a USING COVERING INDEX sqlite_autoindex_retrieval_anchors_1 (anchor_id=?)"
+          ]
+        ],
+        "query": "\"alpha beta\""
+      },
+      "rollback_and_delete_verified": true,
+      "term": {
+        "ids": [
+          1,
+          2,
+          5
+        ],
+        "plan": [
+          [
+            3,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ],
+          [
+            16,
+            0,
+            0,
+            "SCAN native_hits AS h"
+          ],
+          [
+            17,
+            0,
+            0,
+            "SEARCH a USING COVERING INDEX sqlite_autoindex_retrieval_anchors_1 (anchor_id=?)"
+          ]
+        ],
+        "query": "\"alpha\""
+      },
+      "unicode": {
+        "ids": [
+          4
+        ],
+        "plan": [
+          [
+            3,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ],
+          [
+            16,
+            0,
+            0,
+            "SCAN native_hits AS h"
+          ],
+          [
+            17,
+            0,
+            0,
+            "SEARCH a USING COVERING INDEX sqlite_autoindex_retrieval_anchors_1 (anchor_id=?)"
+          ]
+        ],
+        "query": "\"caf\u00e9\""
+      }
+    },
+    "session_summary_nodes": {
+      "boolean_and": {
+        "ids": [
+          1,
+          2,
+          5
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"alpha\" AND \"beta\""
+      },
+      "boolean_not": {
+        "ids": [],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"alpha\" NOT \"beta\""
+      },
+      "escaped_backslash": {
+        "ids": [
+          4
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"slash \\\\delta\""
+      },
+      "escaped_quotes": {
+        "ids": [
+          4
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"quote \\\"gamma\\\"\""
+      },
+      "literal_boolean_operator": {
+        "ids": [
+          5
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"alpha OR beta\""
+      },
+      "materialized_top_k": [
+        [
+          2,
+          0.9375662207603455
+        ],
+        [
+          1,
+          0.7879545092582703
+        ]
+      ],
+      "phrase": {
+        "ids": [
+          1,
+          2
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"alpha beta\""
+      },
+      "rollback_and_delete_verified": true,
+      "term": {
+        "ids": [
+          1,
+          2,
+          5
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"alpha\""
+      },
+      "unicode": {
+        "ids": [
+          4
+        ],
+        "plan": [
+          [
+            1,
+            0,
+            0,
+            "QUERY INDEX METHOD fts"
+          ]
+        ],
+        "query": "\"caf\u00e9\""
+      }
+    }
+  },
+  "engine_version": "0.8.0",
+  "exploratory": {
+    "\"a\\\"b\"": {
+      "plan": [
+        [
+          1,
+          0,
+          0,
+          "QUERY INDEX METHOD fts"
+        ],
+        [
+          15,
+          0,
+          0,
+          "USE SORTER FOR ORDER BY"
+        ]
+      ],
+      "rows": []
+    },
+    "\"alp\"*": {
+      "error": "Internal error: FTS parse error: PhrasePrefixRequiresAtLeastTwoTerms { phrase: \"alp\", tokenizer: \"default\" }"
+    },
+    "\"alpha b\"*": [
+      [
+        1
+      ],
+      [
+        2
+      ]
+    ],
+    "\"alpha beta\"": {
+      "plan": [
+        [
+          1,
+          0,
+          0,
+          "QUERY INDEX METHOD fts"
+        ],
+        [
+          15,
+          0,
+          0,
+          "USE SORTER FOR ORDER BY"
+        ]
+      ],
+      "rows": [
+        [
+          1,
+          0.6409958004951477
+        ],
+        [
+          2,
+          0.5403744578361511
+        ]
+      ]
+    },
+    "\"alpha\"": [
+      [
+        1
+      ],
+      [
+        2
+      ],
+      [
+        3
+      ]
+    ],
+    "\"alpha-beta\"": {
+      "plan": [
+        [
+          1,
+          0,
+          0,
+          "QUERY INDEX METHOD fts"
+        ],
+        [
+          15,
+          0,
+          0,
+          "USE SORTER FOR ORDER BY"
+        ]
+      ],
+      "rows": [
+        [
+          1,
+          0.6409958004951477
+        ],
+        [
+          2,
+          0.5403744578361511
+        ]
+      ]
+    },
+    "SELECT id, score FROM (SELECT id,fts_score(content,?1) AS score FROM docs WHERE fts_match(content,?1) LIMIT 1000000) ORDER BY score DESC,id": [
+      [
+        2,
+        0.16994912922382355
+      ],
+      [
+        1,
+        0.14181959629058838
+      ],
+      [
+        3,
+        0.14181959629058838
+      ]
+    ],
+    "SELECT id,fts_score(content,?1) AS score FROM docs WHERE fts_match(content,?1) ORDER BY score DESC,id LIMIT 2": [
+      [
+        1,
+        0.14181959629058838
+      ],
+      [
+        2,
+        0.16994912922382355
+      ]
+    ],
+    "WITH hits AS MATERIALIZED (SELECT id,fts_score(content,?1) AS score FROM docs WHERE fts_match(content,?1)) SELECT id,score FROM hits ORDER BY score DESC,id": [
+      [
+        2,
+        0.16994912922382355
+      ],
+      [
+        1,
+        0.14181959629058838
+      ],
+      [
+        3,
+        0.14181959629058838
+      ]
+    ],
+    "alp*": {
+      "plan": [
+        [
+          1,
+          0,
+          0,
+          "QUERY INDEX METHOD fts"
+        ],
+        [
+          15,
+          0,
+          0,
+          "USE SORTER FOR ORDER BY"
+        ]
+      ],
+      "rows": []
+    },
+    "alpha": {
+      "plan": [
+        [
+          1,
+          0,
+          0,
+          "QUERY INDEX METHOD fts"
+        ],
+        [
+          15,
+          0,
+          0,
+          "USE SORTER FOR ORDER BY"
+        ]
+      ],
+      "rows": [
+        [
+          1,
+          0.14181959629058838
+        ],
+        [
+          2,
+          0.16994912922382355
+        ],
+        [
+          3,
+          0.14181959629058838
+        ]
+      ]
+    },
+    "alpha AND beta": {
+      "plan": [
+        [
+          1,
+          0,
+          0,
+          "QUERY INDEX METHOD fts"
+        ],
+        [
+          15,
+          0,
+          0,
+          "USE SORTER FOR ORDER BY"
+        ]
+      ],
+      "rows": [
+        [
+          1,
+          0.6409958600997925
+        ],
+        [
+          2,
+          0.5907663702964783
+        ]
+      ]
+    },
+    "alpha NOT gamma": {
+      "plan": [
+        [
+          1,
+          0,
+          0,
+          "QUERY INDEX METHOD fts"
+        ],
+        [
+          15,
+          0,
+          0,
+          "USE SORTER FOR ORDER BY"
+        ]
+      ],
+      "rows": [
+        [
+          1,
+          0.14181959629058838
+        ],
+        [
+          2,
+          0.16994912922382355
+        ]
+      ]
+    },
+    "alpha OR gamma": [
+      [
+        1
+      ],
+      [
+        2
+      ],
+      [
+        3
+      ]
+    ],
+    "alpha*": [
+      [
+        1
+      ],
+      [
+        2
+      ],
+      [
+        3
+      ]
+    ],
+    "callbacks": {
+      "interrupt": true,
+      "set_authorizer": false,
+      "set_progress_handler": false,
+      "set_query_timeout": true,
+      "set_update_hook": false
+    },
+    "multi:index_text,role,kind,model,tool_names:index_text:(\"alpha\" AND \"beta\")": {
+      "plan": [
+        [
+          1,
+          0,
+          0,
+          "QUERY INDEX METHOD fts"
+        ],
+        [
+          12,
+          0,
+          0,
+          "USE SORTER FOR ORDER BY"
+        ]
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    "multi:index_text,role,kind,model,tool_names:index_text:alp*": {
+      "plan": [
+        [
+          1,
+          0,
+          0,
+          "QUERY INDEX METHOD fts"
+        ],
+        [
+          12,
+          0,
+          0,
+          "USE SORTER FOR ORDER BY"
+        ]
+      ],
+      "rows": []
+    },
+    "multi:index_text:alpha": {
+      "plan": [
+        [
+          1,
+          0,
+          0,
+          "SCAN multi"
+        ]
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    "order:-score ASC": [
+      [
+        1,
+        0.14181959629058838
+      ],
+      [
+        2,
+        0.16994912922382355
+      ],
+      [
+        3,
+        0.14181959629058838
+      ]
+    ],
+    "order:2 DESC": [
+      [
+        1,
+        0.14181959629058838
+      ],
+      [
+        2,
+        0.16994912922382355
+      ],
+      [
+        3,
+        0.14181959629058838
+      ]
+    ],
+    "order:fts_score(content, ?1) DESC": [
+      [
+        1,
+        0.14181959629058838
+      ],
+      [
+        2,
+        0.16994912922382355
+      ],
+      [
+        3,
+        0.14181959629058838
+      ]
+    ],
+    "order:score DESC": [
+      [
+        1,
+        0.14181959629058838
+      ],
+      [
+        2,
+        0.16994912922382355
+      ],
+      [
+        3,
+        0.14181959629058838
+      ]
+    ]
+  },
+  "lifecycle": {
+    "after_rollback": [
+      [
+        2
+      ]
+    ],
+    "before": [
+      [
+        1
+      ]
+    ],
+    "fresh_after_update": [
+      [
+        1
+      ]
+    ],
+    "own_uncommitted": [
+      [
+        1
+      ]
+    ],
+    "pinned_after_delete": [
+      [
+        1
+      ]
+    ],
+    "pinned_after_update": [
+      [
+        1
+      ]
+    ],
+    "pinned_deleted_sql": [
+      [
+        "afterword"
+      ]
+    ],
+    "pinned_sql_row": [
+      [
+        "beforeword"
+      ]
+    ]
+  },
+  "reentrant_trigger": {
+    "failed_statement_left_no_rows_or_hits": true,
+    "unsupported_same_index_trigger": "statement already has an open writer on this FTS index; a trigger cannot write the FTS-indexed table its firing statement is writing"
+  },
+  "same_index_overlap": {
+    "overlapping_same_index_writers_committed_independent_rows": true
+  },
+  "verification_scope": "Pinned native SDK behavior on exact canonical indexed base-table DDL with minimal referenced identity fixtures; not production Rust adapter integration",
+  "wheel_sha256": "62bf87c6966f6b1d9c8b71ae060779758cbc55ee649567cef4399a15c7a4c65b"
+}

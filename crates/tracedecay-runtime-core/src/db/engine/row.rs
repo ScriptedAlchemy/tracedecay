@@ -48,6 +48,16 @@ impl Rows {
         )
     }
 
+    pub(super) fn from_native(rows: tracedecay_turso_runtime::Rows) -> Self {
+        Self::from_parts(
+            rows.columns,
+            rows.values
+                .into_iter()
+                .map(|values| Row::from_values(values.into_iter().map(Value::from).collect()))
+                .collect(),
+        )
+    }
+
     pub fn column_count(&self) -> i32 {
         i32::try_from(self.columns.len()).unwrap_or(i32::MAX)
     }

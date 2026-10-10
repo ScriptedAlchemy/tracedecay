@@ -1503,6 +1503,181 @@ fn mode_sql_is_shaped_without_optional_or_fallback_predicates() {
 }
 
 #[tokio::test]
+async fn native_candidate_dispatch_preserves_scope_generation_and_keyset() {
+    use tracedecay_runtime_core::db::{engine::NativeTestConnection, native_search::SearchIndex};
+    let dir = tempdir().expect("native candidate directory");
+    let conn =
+        NativeTestConnection::open(&dir.path().join("native-candidates.db")).expect("native file");
+    conn.execute_batch(
+        "CREATE TABLE session_occurrences (
+        session_id TEXT NOT NULL, generation INTEGER NOT NULL, occurrence_id TEXT NOT NULL,
+        retrieval_anchor_id TEXT NOT NULL, knowledge_at INTEGER NOT NULL, message_id TEXT,
+        turn_id TEXT, role TEXT NOT NULL, source_provider TEXT NOT NULL, index_text TEXT NOT NULL,
+        PRIMARY KEY(session_id, occurrence_id));",
+    )
+    .await
+    .expect("canonical candidate fixture columns");
+    conn.execute_batch(SearchIndex::Occurrence.create_sql())
+        .await
+        .expect("actual native index");
+    for (session, generation, id, provider, time, text, anchor) in [
+        (
+            "native-session",
+            1,
+            "occ-a",
+            "claude",
+            10,
+            "alpha beta",
+            "anchor-a".to_owned(),
+        ),
+        (
+            "native-session",
+            1,
+            "occ-b",
+            "claude",
+            10,
+            "alpha beta",
+            "anchor-b".to_owned(),
+        ),
+        (
+            "native-session",
+            1,
+            "only-alpha",
+            "claude",
+            9,
+            "alpha",
+            "anchor-c".to_owned(),
+        ),
+        (
+            "native-session",
+            1,
+            "foreign-provider",
+            "cursor",
+            100,
+            "alpha beta",
+            "anchor-d".to_owned(),
+        ),
+        (
+            "native-session",
+            2,
+            "future-generation",
+            "claude",
+            100,
+            "alpha beta",
+            "anchor-e".to_owned(),
+        ),
+        (
+            "foreign-session",
+            1,
+            "foreign-session",
+            "claude",
+            100,
+            "alpha beta",
+            "anchor-f".to_owned(),
+        ),
+        (
+            "native-session",
+            1,
+            "oversized-anchor",
+            "claude",
+            100,
+            "alpha beta",
+            "x".repeat(20_000),
+        ),
+    ] {
+        conn.execute(
+            "INSERT INTO session_occurrences VALUES (?1,?2,?3,?4,?5,NULL,NULL,'user',?6,?7)",
+            tracedecay_runtime_core::db::engine::params![
+                session, generation, id, anchor, time, provider, text
+            ],
+        )
+        .await
+        .expect("native candidate row");
+    }
+    let read = super::super::sql::TemporalSqlRead::engine_connection(&conn);
+    let snapshot =
+        scoped_snapshot_for_session("native-session", 1, Some("claude"), TemporalModeV1::Current);
+    let clause = tracedecay_temporal_query::candidates::CandidateClause {
+        channel: CandidateChannel::Lexical,
+        value: "alpha beta".to_owned(),
+        exact: false,
+    };
+    let mut cursor = CandidateCursor {
+        clause: 0,
+        knowledge_at: i64::MAX,
+        session_id: String::new(),
+        stable_id: String::new(),
+        strict_lexical_matched: false,
+    };
+    for expected in ["occ-a", "occ-b"] {
+        let mut rows = query_candidate_clause(
+            &read,
+            snapshot.request().retrieval_scope(),
+            snapshot.request(),
+            1,
+            &clause,
+            &cursor,
+            1,
+            &record_request(),
+            None,
+        )
+        .await
+        .expect("production native candidate dispatcher");
+        let row = rows
+            .next()
+            .await
+            .expect("native candidate cursor")
+            .expect("authorized candidate");
+        assert_eq!(row.get::<String>(0).expect("candidate identity"), expected);
+        assert!(rows.next().await.expect("bounded cursor").is_none());
+        cursor.knowledge_at = 10;
+        cursor.stable_id = expected.to_owned();
+    }
+    let mut rows = query_candidate_clause(
+        &read,
+        snapshot.request().retrieval_scope(),
+        snapshot.request(),
+        1,
+        &clause,
+        &cursor,
+        1,
+        &record_request(),
+        None,
+    )
+    .await
+    .expect("native final page");
+    assert!(rows.next().await.expect("final page cursor").is_none());
+    let not_clause = tracedecay_temporal_query::candidates::CandidateClause {
+        channel: CandidateChannel::Lexical,
+        value: "alpha NOT beta".to_owned(),
+        exact: false,
+    };
+    let mut rows = query_candidate_clause(
+        &read,
+        snapshot.request().retrieval_scope(),
+        snapshot.request(),
+        1,
+        &not_clause,
+        &cursor,
+        10,
+        &record_request(),
+        None,
+    )
+    .await
+    .expect("native boolean dispatcher");
+    assert_eq!(
+        rows.next()
+            .await
+            .expect("boolean cursor")
+            .expect("negative-term candidate")
+            .get::<String>(0)
+            .expect("identity"),
+        "only-alpha"
+    );
+    assert!(rows.next().await.expect("boolean EOF").is_none());
+}
+
+#[tokio::test]
 async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
     let dir = tempdir().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -1534,7 +1709,10 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Text("session-plan-inside".to_string()),
         SqlValue::Integer(1),
         SqlValue::Text("claude".to_string()),
-        SqlValue::Text(fts_phrase("needle candidate")),
+        SqlValue::Text(fts_phrase(
+            "needle candidate",
+            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
+        )),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Integer(128),
@@ -1596,7 +1774,10 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
     let summary_params = vec![
         SqlValue::Text("session-plan-inside".to_string()),
         SqlValue::Integer(1),
-        SqlValue::Text(fts_phrase("needle summary")),
+        SqlValue::Text(fts_phrase(
+            "needle summary",
+            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
+        )),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Integer(128),
@@ -1624,7 +1805,10 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
     let root_fts_params = vec![
         SqlValue::Text("user".to_string()),
         SqlValue::Null,
-        SqlValue::Text(fts_phrase("needle candidate")),
+        SqlValue::Text(fts_phrase(
+            "needle candidate",
+            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
+        )),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Text(String::new()),
@@ -1655,7 +1839,10 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Text("user".to_string()),
         SqlValue::Text("claude".to_string()),
         SqlValue::Text("needle candidate".to_string()),
-        SqlValue::Text(fts_phrase("needle candidate")),
+        SqlValue::Text(fts_phrase(
+            "needle candidate",
+            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
+        )),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Text(String::new()),
@@ -1689,7 +1876,10 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
     // scans retained text and never refuses.
     let mut root_exact_tokenless_params = root_exact_params;
     root_exact_tokenless_params[2] = SqlValue::Text(" ".to_string());
-    root_exact_tokenless_params[3] = SqlValue::Text(fts_phrase(" "));
+    root_exact_tokenless_params[3] = SqlValue::Text(fts_phrase(
+        " ",
+        tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
+    ));
     assert_eq!(
         read.text_column(
             ROOT_EXACT_CANDIDATE_QUERY,
@@ -2064,7 +2254,10 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
 
     let root_summary_params = vec![
         SqlValue::Text("user".to_string()),
-        SqlValue::Text(fts_phrase("needle summary")),
+        SqlValue::Text(fts_phrase(
+            "needle summary",
+            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
+        )),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Text(String::new()),
@@ -2110,7 +2303,10 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
     );
     let root_summary_missing_phrase = vec![
         SqlValue::Text("user".to_string()),
-        SqlValue::Text(fts_phrase("absent summary phrase")),
+        SqlValue::Text(fts_phrase(
+            "absent summary phrase",
+            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
+        )),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Text(String::new()),
@@ -2134,7 +2330,10 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         SqlValue::Integer(1),
         SqlValue::Text("span".to_string()),
         SqlValue::Text("claude".to_string()),
-        SqlValue::Text(fts_phrase("derived needle")),
+        SqlValue::Text(fts_phrase(
+            "derived needle",
+            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
+        )),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Integer(10),
@@ -2172,7 +2371,10 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         SqlValue::Integer(1),
         SqlValue::Text("span".to_string()),
         SqlValue::Text("codex".to_string()),
-        SqlValue::Text(fts_phrase("derived needle")),
+        SqlValue::Text(fts_phrase(
+            "derived needle",
+            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
+        )),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Integer(10),
@@ -2188,7 +2390,10 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         SqlValue::Integer(1),
         SqlValue::Text("span".to_string()),
         SqlValue::Text("claude".to_string()),
-        SqlValue::Text(fts_phrase("absent derived phrase")),
+        SqlValue::Text(fts_phrase(
+            "absent derived phrase",
+            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
+        )),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Integer(10),
@@ -2204,7 +2409,10 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         SqlValue::Text("user".to_string()),
         SqlValue::Text("span".to_string()),
         SqlValue::Text("claude".to_string()),
-        SqlValue::Text(fts_phrase("derived needle")),
+        SqlValue::Text(fts_phrase(
+            "derived needle",
+            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
+        )),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Text(String::new()),
@@ -2282,7 +2490,10 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
     );
 
     let mut missing_phrase_params = root_derived_params.clone();
-    missing_phrase_params[3] = SqlValue::Text(fts_phrase("absent derived phrase"));
+    missing_phrase_params[3] = SqlValue::Text(fts_phrase(
+        "absent derived phrase",
+        tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
+    ));
     assert!(
         read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, missing_phrase_params, 0)
             .await
@@ -2530,7 +2741,10 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
                 SqlValue::Text("user".to_string()),
                 SqlValue::Null,
                 SqlValue::Text(literal.to_string()),
-                SqlValue::Text(fts_phrase(literal)),
+                SqlValue::Text(fts_phrase(
+                    literal,
+                    tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
+                )),
                 SqlValue::Integer(i64::MAX),
                 SqlValue::Text(String::new()),
                 SqlValue::Text(String::new()),
@@ -3255,8 +3469,20 @@ async fn record_query_plan_is_keyset_indexed_without_per_candidate_work() {
 
 #[test]
 fn fts_values_are_bound_as_literal_phrases() {
-    assert_eq!(fts_phrase("hello world"), "\"hello world\"");
-    assert_eq!(fts_phrase("say \"hello\""), "\"say \"\"hello\"\"\"");
+    assert_eq!(
+        fts_phrase(
+            "hello world",
+            tracedecay_runtime_core::db::engine::BackendKind::Sqlite
+        ),
+        "\"hello world\""
+    );
+    assert_eq!(
+        fts_phrase(
+            "say \"hello\"",
+            tracedecay_runtime_core::db::engine::BackendKind::Sqlite
+        ),
+        "\"say \"\"hello\"\"\""
+    );
 }
 
 #[test]

@@ -705,6 +705,10 @@ pub struct RegisteredGlobalDbWriterConnection<'a> {
 }
 
 impl RegisteredGlobalDbWriterConnection<'_> {
+    pub fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        self.database.read_connection().backend_kind()
+    }
+
     pub async fn execute<P>(
         &self,
         sql: &str,
@@ -747,6 +751,10 @@ pub struct RegisteredGlobalDbWriteTransaction<'a> {
 }
 
 impl QueryExecutor for RegisteredGlobalDbWriteTransaction<'_> {
+    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        QueryExecutor::backend_kind(&self.transaction)
+    }
+
     async fn query<P>(
         &self,
         sql: &str,

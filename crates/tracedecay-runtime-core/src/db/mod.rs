@@ -10,6 +10,7 @@ mod memory_connection;
 mod memory_v2;
 mod metadata;
 pub mod migrations;
+pub mod native_search;
 mod purpose;
 mod retrieval_anchor_authority;
 pub use retrieval_anchor_authority::append_retrieval_anchor_disposition_on;

@@ -1,0 +1,21 @@
+exec ${PAGER:-/usr/bin/less} "$0" || exit 1
+Executing tests from //crates/tracedecay-rusqlite-runtime:unit_test
+-----------------------------------------------------------------------------
+
+running 1 test
+test reader::tests::concurrent_background_reader_opens_preserve_foreground_capacity ... FAILED
+
+failures:
+
+---- reader::tests::concurrent_background_reader_opens_preserve_foreground_capacity stdout ----
+
+thread 'reader::tests::concurrent_background_reader_opens_preserve_foreground_capacity' (8448327) panicked at crates/tracedecay-rusqlite-runtime/src/reader/tests.rs:1414:5:
+assertion failed: matches!(pool.acquire(&background, &background_probe, Duration::ZERO),
+    Err(ReaderAcquireError::Saturated { .. }))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    reader::tests::concurrent_background_reader_opens_preserve_foreground_capacity
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 335 filtered out; finished in 0.02s

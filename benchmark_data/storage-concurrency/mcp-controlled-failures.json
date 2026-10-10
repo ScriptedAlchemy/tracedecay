@@ -1,0 +1,1284 @@
+{
+  "passed": 384,
+  "failed": 243,
+  "ignored": 0,
+  "filtered": 0,
+  "test_seconds": 553.05,
+  "bazel_exit": 3,
+  "test_exit": 101,
+  "log_sha256": "71d0929117be5b7d29bb57ad7c4657fdb33492d5c4b4d8d92ee68bc53c44a0d2",
+  "command": [
+    "bazel",
+    "--output_user_root=/Users/zackjackson/Documents/Codex/2026-10-09/task/.bazel-cache",
+    "test",
+    "--config=ci",
+    "//crates/tracedecay:mcp_suite",
+    "--test_env=TRACEDECAY_AST_GREP_BIN=/Users/zackjackson/Documents/Codex/2026-10-09/task/test-tools/node_modules/.bin/ast-grep",
+    "--test_arg=--test-threads=4",
+    "--local_test_jobs=1",
+    "--nocache_test_results",
+    "--test_output=all",
+    "--repo_env=DO_NOT_TRACK=1",
+    "--build_event_json_file=/Users/zackjackson/Documents/Codex/2026-10-09/task/triage-mcp-events.json"
+  ],
+  "failures": [
+    {
+      "test": "mcp_handler_test::graph_query_test::relation_page_cost::a_default_callees_page_resolves_dispatch_without_reading_every_callee",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::restart_seat::context_after_restart_waits_for_the_retained_generation_to_seat",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::rust_wrapper_callees_follow_declared_sibling_module_imports",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::search_limit_above_retrieval_budget_serves_full_candidate_set",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::signature_search_and_derives_use_extracted_metadata",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::source_body_returns_full_function_source_for_exact_lookup",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_ast_grep_search_respects_public_path_glob",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_complexity_response_fields",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_distribution_with_path_filter",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_files_json_format_with_grouped_layout",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_files_public_path_filters",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_grep_basename_glob_reaches_nested_generated_file",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_grep_case_sensitivity",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_grep_context_lines",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_grep_enforces_max_results_cap",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_grep_literal_hit_is_enriched_with_symbol",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_grep_missing_pattern_errors",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_grep_no_match_reports_empty",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_grep_prunes_generated_trees_unless_path_glob_selects_one",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_grep_regex_hit",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_grep_respects_gitignore",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_grep_skips_binary_files",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_module_api",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_node_existing",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_node_not_found",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_rank_invalid_direction",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::test_unknown_tool",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::tracedecay_by_qualified_name_returns_every_symbol_sharing_that_name",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::tracedecay_by_qualified_name_returns_the_symbol_at_that_exact_name",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::typed_evidence_trailers::callable_code_reads_carry_their_files_and_the_accounting_footer",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::typed_evidence_trailers::file_dependents_carry_their_read_cost_and_its_wall_time",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::typed_evidence_trailers::plan_context_reads_only_the_anchor_neighborhood",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::typed_evidence_trailers::plan_context_returns_its_plan_sections_and_the_accounting_footer",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::typed_evidence_trailers::search_results_end_with_the_accounting_footer_for_their_files",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::typed_evidence_trailers::typed_callees_carry_their_read_cost_on_the_envelope_and_the_trailer",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::typed_evidence_trailers::typed_callers_carry_their_envelope_files_and_the_accounting_footer",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::typed_evidence_trailers::typed_callers_carry_their_read_cost",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::typescript_module_resolution::typescript_calls_inside_callbacks_and_jsx_bind_their_enclosing_symbol",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::typescript_module_resolution::typescript_module_scope_calls_bind_to_module_init_blocks",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::typescript_module_resolution::typescript_monorepo_callers_and_file_dependents_bind_across_packages",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::typescript_module_resolution::typescript_same_module_exports_and_test_shadowing_bind_callers",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::unknown_and_malformed_inputs_are_typed_refusals_not_outages",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::unknown_file::file_scoped_reads_refuse_a_path_the_graph_never_published",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::graph_query_test::unsealed_graph::graph_reads_refuse_as_unavailable_until_the_graph_seals",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::grep_behavior_test::tracedecay_grep_reports_literal_matches_and_typed_failures",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::health_behavior_test::health_reports_refuse_arguments_outside_their_typed_request",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::health_behavior_test::health_scores_two_isolated_modules_and_distinguishes_scope",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::hermes_skill_bridge_test::hermes_skill_bridge_mcp_reports_missing_install_as_empty_inventory",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/mod.rs:296:31",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::hermes_skill_bridge_test::hermes_skill_bridge_mcp_returns_standard_install_inventory",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/mod.rs:296:31",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::hook_runtime_request_test::hook_runtime_answers_typed_results_and_refuses_what_no_host_sends",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::hook_runtime_request_test::project_transcript_ingest_settles_emitted_hints_in_the_served_profile",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::impact_behavior_test::impact_reports_callers_by_depth_and_refuses_invalid_requests",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::implementations_test::implementations_returns_literal_bodies_for_trait_interface_and_method",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::index_path_settings_test::a_malformed_index_pattern_is_refused_before_it_is_committed",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::index_path_settings_test::index_path_settings_republish_exactly_the_matching_files",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::info_census_cost_test::info_tools_read_the_same_symbols_however_large_the_repository_grows",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::info_file_request_test::file_inspections_refuse_arguments_outside_their_typed_request",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::info_health_request_test::admin_cli_actions_answer_through_the_owner_and_refuse_arguments_outside_the_action",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::info_health_request_test::admin_project_answers_through_its_owners_and_refuses_arguments_outside_its_action",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::info_health_request_test::admin_sync_answers_the_scheduler_admission_and_refuses_arguments",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::info_health_request_test::info_and_runtime_reads_refuse_arguments_outside_their_typed_request",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::inheritance_depth_test::inheritance_depth_cycle_is_unavailable",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::inheritance_depth_test::inheritance_depth_default_limit_keeps_ten_deepest",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::inheritance_depth_test::inheritance_depth_ranks_literal_extends_depths",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::insert_at_test::insert_at_after_unique_anchor_previews_applies_replays_and_refuses_stale_bytes",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::insert_at_test::insert_at_before_anchor_and_line_numbers_write_exact_bytes",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::insert_at_test::insert_at_refuses_unusable_anchors_missing_files_and_escaped_paths",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::largest_test::largest_ranks_by_inclusive_line_span",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::lcm_test::lcm_status_cli_bridge_accepts_json_args",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/mod.rs:878:33",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_contradiction_contract_test::fact_store_contradict_rejects_noncanonical_arguments",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_contradiction_contract_test::fact_store_contradict_reports_the_opposing_fact_above_or_below_threshold",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_fact_probe_test::fact_store_probe_reads_only_the_selected_registered_project",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_fact_probe_test::fact_store_probe_returns_connected_facts_and_typed_refusals",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_fact_store_reason_test::fact_store_reason_refuses_an_unusable_entity_selection",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_fact_store_reason_test::fact_store_reason_returns_facts_that_name_every_entity",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_fact_supersede_test::fact_store_supersede_refusals_leave_the_current_fact_unchanged",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_fact_supersede_test::fact_store_supersede_retires_old_fact_and_keeps_its_payload",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_facts_test::fact_search_ranks_exact_operational_evidence_and_tracks_once",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_facts_test::fact_search_reports_typed_retrieval_telemetry",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_facts_test::fact_store_add_rejection_names_the_admitted_categories",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_facts_test::fact_store_add_rejects_out_of_range_trust",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_facts_test::memory_fact_store_add_search_update_and_remove",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_facts_test::memory_fact_store_project_selector_targets_registered_project",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_facts_test::memory_fact_store_supersede_retires_old_fact_from_default_surfaces",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_facts_test::memory_fact_store_update_redacts_secret_like_content",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_facts_test::memory_recall_updates_retrieval_count",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_facts_test::memory_status_project_selector_reports_registered_project_memory",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_facts_test::memory_status_reports_canonical_similarity_projection_shape",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_facts_test::user_memory_scope_is_profile_level_and_isolated_from_project_memory",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_feedback_test::fact_feedback_on_a_removed_fact_fails_fast",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_feedback_test::fact_feedback_persists_canonical_trust_events_and_status",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_feedback_test::fact_feedback_rejects_missing_action_numeric_ids_and_legacy_aliases",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_behavior_test::dry_run_then_apply_moves_compute_grand_total",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::memory_status_test::memory_status_reports_the_seeded_project_and_keeps_user_memory_separate",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_behavior_test::move_symbol_refuses_unsafe_or_stale_requests",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_aliases_to_source_refuse",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_apply_moves_and_rerun_errors_cleanly",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_clean_move_has_empty_impact",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_dest_collision_refuses",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_dot_prefixed_dest_normalizes",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_dot_prefixed_same_file_refuses",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_dry_run_reports_impact_and_writes_nothing",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_first_in_file_docs_travel",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_leaves_contiguous_module_doc_behind",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_non_utf8_destination_refuses",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_only_prefers_callable_for_bare_names",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_private_dependency_hints",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_qualified_caller_hint",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_resolves_qualified_names_like_bare_names",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::move_symbol_test::test_move_symbol_symlink_escape_refuses",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::multi_str_replace_behavior_test::later_replacement_edits_the_original_span_not_inserted_text",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::multi_str_replace_behavior_test::preview_apply_and_replay_replace_each_original_span",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::multi_str_replace_behavior_test::refused_batches_leave_every_file_byte_unchanged",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::node_behavior_test::tracedecay_node_reports_declared_symbols_and_typed_refusals",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::mutate_graph_test::mutate_graph_commits_prepared_task_replays_it_and_refuses_other_bodies",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::node_behavior_test::tracedecay_node_suggests_the_nearest_symbols_for_an_unknown_id",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::port_order_test::port_order_ports_leaves_first_and_reports_one_scc",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::port_order_test::port_order_rejects_unknown_kinds_and_missing_source_dir",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::port_status_test::port_status_rejects_unknown_kinds_and_missing_source_dir",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::port_status_test::port_status_reports_cross_language_partial_coverage",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::project_context_test::project_context_returns_the_project_the_caller_named",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::project_list_test::project_list_returns_the_registry_page_the_caller_asked_for",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::project_search_behavior_test::project_search_bounds_pages_and_does_not_expand_wildcards",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::rank_behavior_test::rank_orders_relationship_counts_for_calls_and_implements",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::rank_behavior_test::rank_refuses_missing_invalid_and_unpublished_relationships",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::redundancy_test::redundancy_ranks_exact_copies_by_duplicated_body_bytes",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::redundancy_test::redundancy_reports_renames_only_under_the_rename_class_and_refuses_foreign_repositories",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::release_placement_test::release_placement_publishes_the_observed_state_without_deleting_bytes",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::project_search_behavior_test::project_search_refuses_arguments_outside_its_typed_request",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::project_search_behavior_test::project_search_returns_each_public_field_and_omits_the_credential_remote",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::rename_preview_test::rename_preview_refuses_unknown_and_unusable_node_identity",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::rename_preview_test::rename_preview_reports_the_declaration_the_caller_and_text_only_names",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::rename_symbol_test::test_rename_symbol_apply_rewrites_declaration_and_callers",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::rename_symbol_test::test_rename_symbol_blocks_unresolved_cross_module_spelling",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::rename_symbol_test::test_rename_symbol_denies_invalid_and_colliding_names",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::rename_symbol_test::test_rename_symbol_dry_run_default_reports_plan_and_writes_nothing",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::rename_symbol_test::test_rename_symbol_is_not_blocked_by_an_unrelated_redacted_file",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::rename_symbol_test::test_rename_symbol_publication_failure_preserves_preimage",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::replace_symbol_test::replace_symbol_proves_apply_rewrites_only_the_named_function",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::rename_symbol_test::test_rename_symbol_stale_tree_refuses_before_writing",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::replace_symbol_test::replace_symbol_proves_bare_name_prefers_the_callable",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::replace_symbol_test::replace_symbol_proves_missing_symbol_leaves_the_file_unchanged",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::replace_symbol_test::replace_symbol_proves_qualified_name_edits_only_that_file",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::replace_symbol_test::replace_symbol_removes_omitted_docs_and_keeps_a_separated_header",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::retrieve_truncation_test::diff_context_large_response_uses_retrievable_truncation_handle",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::retrieve_truncation_test::context_memory_large_markdown_uses_reversible_lane_preview",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::retrieve_truncation_test::fact_store_large_json_list_response_uses_retrieve_handle",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::retrieve_truncation_test::retrieve_pages_reconstruct_large_and_multibyte_handles_with_bounded_frames",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::retrieve_truncation_test::grep_large_response_uses_retrievable_truncation_handle",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::retrieve_truncation_test::retrieve_tool_returns_full_stored_response",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::search_behavior_test::a_search_cursor_pages_only_the_request_and_operation_that_minted_it",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::schema_test::schema_required_arguments_match_representative_handler_parsers",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::search_behavior_test::search_returns_the_named_symbol_and_refuses_arguments_outside_its_typed_request",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::search_behavior_test::search_names_every_ranked_symbol_including_graph_reached_callees",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::session_refresh_begin_test::session_refresh_begin_starts_then_joins_the_same_profile_operation",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::session_refresh_cancel_test::production_mcp_cancel_refuses_bad_handles_and_keeps_a_finished_receipt",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::session_refresh_status_test::session_refresh_status_reports_the_handle_the_host_holds",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::session_rewrite_test::in_place_edit_of_a_content_addressed_record_supersedes_every_read_path",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::session_rewrite_test::in_place_edit_of_a_native_id_record_supersedes_every_read_path",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::session_search_test::production_codex_hook_ingest_survives_message_search_reopen",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::session_search_test::production_hook_ingest_reads_only_the_pinned_transcript_home",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/mod.rs:296:31",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::shell_dead_code_test::script_calls_keep_only_the_uncalled_shell_function_dead",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::signature_behavior_test::tracedecay_signature_returns_the_declared_signature",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::signature_search_test::signature_search_matches_signature_shape_and_rejects_an_unfiltered_call",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::similar_test::tracedecay_similar_reports_verified_copy_paths_and_typed_denials",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::skill_list_test::skill_list_returns_stored_skills_for_the_requested_state",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::source_edit_reconcile_test::mismatched_inspection_keeps_bytes_and_confirm_committed_keeps_the_postimage",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::source_edit_reconcile_test::reconcile_refuses_uninspected_and_absent_effects",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::source_edit_reconcile_test::unpublished_effect_confirms_rolled_back_and_releases_the_file",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::source_edit_rollback_test::source_edit_rollback_keeps_foreign_bytes_and_replays_the_refusal",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::source_edit_rollback_test::source_edit_rollback_refuses_an_edit_without_retained_preimages",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::source_edit_rollback_test::source_edit_rollback_restores_move_preimages_and_replays_the_receipt",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_apply_without_preview_state_is_refused",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_behind_a_held_writer_lock_reports_the_lock_deadline_detail",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_deletes_a_unique_span_when_the_replacement_is_empty",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_dry_run_previews_the_exact_diff_without_writing",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_empty_old_str_reports_every_match",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_identical_replacement_previews_no_changes",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_missing_old_str_is_a_parameter_error",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_preserves_crlf_bytes_around_the_span",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_refuses_a_path_outside_the_worktree",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_refuses_a_stale_preview_and_keeps_concurrent_bytes",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_refuses_an_ambiguous_span_and_leaves_the_file",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_refuses_project_selectors",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_replay_does_not_apply_the_same_span_twice",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_reports_a_missing_span_and_leaves_the_file",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::str_replace_behavior_test::str_replace_writes_the_unique_span_and_reports_the_completed_edit",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::test_map_test::test_map_reads_each_test_once_across_the_symbols_it_covers",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::test_map_test::test_map_refuses_when_the_test_is_beyond_depth_three",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::test_map_test::test_map_reports_literal_coverage_and_typed_refusals",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::test_risk_behavior_test::tracedecay_test_risk_ranks_the_next_untested_symbol",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::todos_test::todos_reports_observed_marker_behavior",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::type_hierarchy_test::type_hierarchy_reports_literal_trees_and_typed_refusals",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::unmounted_files_test::unmounted_files_names_only_files_no_entry_reaches",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::unmounted_files_test::unmounted_files_refuses_arguments_that_are_not_an_object",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::unsafe_patterns_test::unsafe_patterns_classifies_inline_rust_test_scopes",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::unsafe_patterns_test::unsafe_patterns_reports_literal_sites_for_each_kind",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::unsafe_patterns_test::unsafe_patterns_withholds_an_unclassifiable_file_and_reports_the_rest",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::work_resume_attempts_test::resume_attempts_refuses_a_live_holder_and_reports_the_lost_attempt",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::work_test::generate_proposal_allows_a_ready_task_on_the_configured_route_and_refuses_a_missing_task",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::work_test::work_attempt_consumers_read_the_public_start_attempt_effect",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::workflow_activate_definition_test::activate_definition_publishes_active_revision_three",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::workflow_get_definition_test::workflow_get_definition_returns_the_stored_definition_and_conceals_a_miss",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::workflow_handoff_and_run_refusal_test::workflow_handoff_and_run_refusals_are_typed_states",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::workflow_list_test::listed_definitions_are_the_registered_rows_and_unknown_fields_are_refused",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_handler_test::workflow_register_definition_test::register_definition_returns_the_submitted_definition_and_typed_refusals",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_rendering_test::type_hierarchy_defaults_to_markdown_and_supports_json",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::analytics_test::context_call_writes_memory_match_analytics_without_fact_bodies",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::analytics_test::global_accounting_env_overrides",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/mod.rs:296:31",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::analytics_test::ledger_records_by_default_without_env_opt_in",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/mod.rs:296:31",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::analytics_test::lifetime_counter_matches_ledger_net_savings",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/mod.rs:296:31",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::analytics_test::search_call_writes_mcp_runtime_analytics_event",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/mod.rs:296:31",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::analytics_test::structural_edit_failure_writes_real_failure_reason_to_analytics",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::branch_list_test::branch_list_reports_exact_local_refs_and_typed_rejections",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/mcp_server_test/branch_list_test.rs:93:33",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::hooks_branch_test::daemon_routed_read_reconciles_an_unhinted_source_edit",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::hooks_branch_test::hook_event_workspace_context_routes_followup_graph_reads",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::hooks_branch_test::hook_route_from_unregistered_cwd_fails_closed_without_active_fallback",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::hooks_branch_test::hook_route_through_symlinked_workspace_reaches_target",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::hooks_branch_test::hook_route_to_ambiguously_registered_project_fails_closed",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::hooks_branch_test::hook_route_to_registered_but_unmounted_project_fails_closed",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::hooks_branch_test::linked_worktree_hook_route_reaches_target_across_client_sockets",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::hooks_branch_test::unknown_explicit_identity_does_not_inherit_connection_project",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::multi_root_scope_set_read_test::tracedecay_multi_root_scope_set_read_reports_the_saved_set_and_conceals_absence",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::protocol_test::cancellable_tool_call_fails_connection_on_peer_write_failure",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::protocol_test::cancellable_tool_call_is_answered_after_client_half_close",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::protocol_test::cancellable_tool_call_is_cancelled_on_peer_read_failure",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::protocol_test::cancellable_tool_call_is_dropped_on_full_peer_close",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::protocol_test::test_server_stats_include_response_handle_metrics",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::protocol_test::test_tools_call_plain_text_failure_sets_is_error",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::protocol_test::test_tools_call_search",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::protocol_test::test_tools_call_semantic_failure_sets_is_error",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::protocol_test::test_tools_list",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::retrieve_behavior_test::retrieve_default_and_markdown_slice_characters_not_bytes",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::retrieve_behavior_test::retrieve_pages_fill_the_response_budget_the_client_frame_measures",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::retrieve_behavior_test::retrieve_rejects_arguments_outside_its_typed_request",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::retrieve_behavior_test::retrieve_reports_missing_and_expired_handles",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::retrieve_behavior_test::retrieve_reports_unreadable_records_as_typed_route_problems",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "mcp_server_test::retrieve_behavior_test::retrieve_returns_stored_pages_as_literal_json",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "multi_mcp_coordination_test::concurrent_mcp_clients_converge_through_one_project_scheduler",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/multi_mcp_coordination_test.rs:35:14",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "serve_template_path_test::literal_template_from_unenrolled_cwd_completes_initialize_and_types_the_refusal",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/mod.rs:878:33",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "serve_template_path_test::literal_template_without_daemon_fails_closed_before_mcp_handshake",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/mod.rs:878:33",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "status_behavior_test::project_status_lists_only_its_own_memory_owners_and_the_doctor_lists_every_project",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    },
+    {
+      "test": "status_behavior_test::tracedecay_status_reports_the_sealed_branch_and_keeps_diagnostics_opt_in",
+      "panic_location": "crates/tracedecay/tests/mcp_suite/../common/fixture.rs:535:27",
+      "error": "Bad file descriptor (os error 9)"
+    }
+  ],
+  "host_spawn_boundary_probe": {
+    "low_valid_fd": 3,
+    "low_adddup2_code": 0,
+    "high_valid_fd": 10240,
+    "high_fstat_ok": true,
+    "high_adddup2_code": 9,
+    "interpretation": "OS boundary demonstrated independently; original failed MCP run had no FD sample, so actual failure cause remains unproven"
+  },
+  "bounded_group_fd_observations": [
+    {
+      "pid": 71570,
+      "numeric_fd_count": 855,
+      "max_fd": 856
+    },
+    {
+      "pid": 71570,
+      "numeric_fd_count": 2073,
+      "max_fd": 2120
+    }
+  ],
+  "boundary_controls": [
+    {
+      "selection": "first failed exact case",
+      "threads": 1,
+      "passed": 1,
+      "filtered": 626,
+      "seconds": 2.74
+    },
+    {
+      "selection": "preceding case and first failed exact case",
+      "threads": 1,
+      "passed": 2,
+      "filtered": 625,
+      "seconds": 3.33
+    },
+    {
+      "selection": "mcp_handler_test::graph_query_test::",
+      "threads": 4,
+      "passed": 56,
+      "filtered": 571,
+      "seconds": 96.11
+    }
+  ]
+}

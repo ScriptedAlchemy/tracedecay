@@ -1,0 +1,41 @@
+Verified 2026-10-09.
+Working directory: benchmark_data/storage-concurrency/turso-prototype
+
+Bazel command:
+  BAZELISK_HOME=/Users/zackjackson/Documents/Codex/2026-10-09/task/.bazelisk bazel --output_user_root=/Users/zackjackson/Documents/Codex/2026-10-09/task/.bazel-cache test //:turso_probe --test_env=TURSO_PYTHON=/opt/homebrew/bin/python3.11 --nocache_test_results --test_output=all --repo_env=DO_NOT_TRACK=1
+
+Result: 1 test passed; 0 failed; uncached execution; final test duration 0.6 seconds.
+Runtime: macOS 27.0 arm64, CPython 3.11.15, embedded Turso engine 0.8.0.
+SQLite baseline native sqlite3 version: 3.53.4.
+SQLite dialect version reported by Turso: 3.50.4.
+Actual engine wheel SHA-256:
+  62bf87c6966f6b1d9c8b71ae060779758cbc55ee649567cef4399a15c7a4c65b
+
+The strict test verifies overlapping independent-row transactions and pinned
+snapshots, checkpoint write conflict at UPDATE, rollback/fresh retry, contiguous
+receipts, actual reduced replay/conflict admission, and fresh-process reopen.
+
+The exact production ledger schema still fails installation in Turso WAL/MVCC:
+  Parse error: CREATE INDEX on WITHOUT ROWID tables is not supported
+This is the preserved specifically asserted negative compatibility observation.
+
+New differential lane: SQLite original WITHOUT ROWID schema versus actual native
+Turso MVCC schema with only four WITHOUT ROWID suffixes removed. All original
+constraints and indexes remain. Both engines reject the same 34 invalid writes:
+14 NULL primary-key components, 14 CHECK cases, 4 duplicate primary keys, and
+2 unique effect-index collisions. PRAGMA verifies explicit NOT NULL on all
+columns. Both pass full four-ledger rollback, stale checkpoint CAS rejection,
+no-gap retry with sequences 1/2, representative INSERT OR IGNORE/UPDATE,
+actual-table replay/conflict, additional UPSERT/DELETE, and fresh-process
+reopen with persisted rows and integrity_check=ok. NULL/CHECK probes first delete only the tested table inside the transaction,
+so seeded key collisions cannot mask constraints; rollback restores all tables.
+Reopen releases cursor/connection references and runs Python garbage collection
+before process handoff; close alone did not release the lock in this run.
+The exact Python reference-retention mechanism has not been established.
+
+First attempts exposed a native locked-file error while parent Python references
+remained live; explicit reference release and collection resolved it. No engine
+constraint was dropped or skipped. The final source was tested uncached.
+
+No Rust domain-codec, full policy/adapter/search parity, application-throughput,
+crash/power-loss, or production-readiness claim. Exact final JSON in results.json.

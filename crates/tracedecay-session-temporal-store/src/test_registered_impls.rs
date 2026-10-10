@@ -26,6 +26,10 @@ use crate::handle::{
 use crate::relations::{SessionRelationGraphStore, SessionRelationScope};
 
 impl SessionTemporalQuery for Connection {
+    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        QueryExecutor::backend_kind(self)
+    }
+
     fn query<P>(
         &self,
         sql: &str,
@@ -56,6 +60,10 @@ impl SessionTemporalExec for Connection {
 }
 
 impl SessionTemporalQuery for TestConnection {
+    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        QueryExecutor::backend_kind(self)
+    }
+
     fn query<P>(
         &self,
         sql: &str,
@@ -86,6 +94,10 @@ impl SessionTemporalExec for TestConnection {
 }
 
 impl SessionTemporalQuery for Transaction {
+    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        QueryExecutor::backend_kind(self)
+    }
+
     fn query<P>(
         &self,
         sql: &str,
@@ -116,6 +128,10 @@ impl SessionTemporalExec for Transaction {
 }
 
 impl SessionTemporalQuery for RegisteredGlobalDbWriteTransaction<'_> {
+    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        QueryExecutor::backend_kind(self)
+    }
+
     fn query<P>(
         &self,
         sql: &str,
@@ -156,6 +172,10 @@ impl SessionTemporalWriteTxn for RegisteredGlobalDbWriteTransaction<'_> {
 }
 
 impl SessionTemporalQuery for RegisteredGlobalDbWriterConnection<'_> {
+    fn backend_kind(&self) -> tracedecay_runtime_core::db::engine::BackendKind {
+        QueryExecutor::backend_kind(self)
+    }
+
     fn query<P>(
         &self,
         sql: &str,

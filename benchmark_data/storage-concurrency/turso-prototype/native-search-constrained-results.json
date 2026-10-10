@@ -1,0 +1,61 @@
+{
+  "constrained:SELECT evidence_id FROM members JOIN docs ON docs.id=members.doc_id WHERE fts_match(docs.content,?1) ORDER BY evidence_id": {
+    "plan": [
+      [
+        1,
+        0,
+        0,
+        "SCAN members USING COVERING INDEX sqlite_autoindex_members_1"
+      ],
+      [
+        2,
+        0,
+        0,
+        "SEARCH docs USING INTEGER PRIMARY KEY (rowid=?)"
+      ],
+      [
+        8,
+        0,
+        0,
+        "QUERY INDEX METHOD fts"
+      ]
+    ],
+    "rows": [
+      [
+        1
+      ]
+    ]
+  },
+  "constrained:SELECT evidence_id FROM members WHERE EXISTS(SELECT 1 FROM docs WHERE docs.id=members.doc_id AND fts_match(docs.content,?1)) ORDER BY evidence_id": {
+    "plan": [
+      [
+        1,
+        0,
+        0,
+        "SCAN members USING COVERING INDEX sqlite_autoindex_members_1"
+      ],
+      [
+        6,
+        0,
+        0,
+        "QUERY INDEX METHOD fts"
+      ]
+    ],
+    "rows": [
+      [
+        1
+      ]
+    ]
+  },
+  "constrained:SELECT id FROM docs WHERE id=?2 AND fts_match(content,?1)": {
+    "plan": [
+      [
+        1,
+        0,
+        0,
+        "QUERY INDEX METHOD fts"
+      ]
+    ],
+    "rows": []
+  }
+}

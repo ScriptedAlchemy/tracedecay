@@ -10,13 +10,31 @@ pub struct ReadSnapshot {
     /// that worker. A snapshot handed to several concurrent readers therefore
     /// funnels all of them through it, so a single slow statement stalls the
     /// rest. The measured query path remains the stable boundary.
-    runtime: Arc<ExactSqlReadSnapshot>,
+    runtime: Runtime,
+}
+
+enum Runtime {
+    Sqlite(Arc<ExactSqlReadSnapshot>),
+    Native(Arc<super::native::NativeSnapshot>),
 }
 
 impl ReadSnapshot {
+    pub(super) fn from_native(runtime: Arc<super::native::NativeSnapshot>) -> Self {
+        Self {
+            runtime: Runtime::Native(runtime),
+        }
+    }
+
+    pub fn backend_kind(&self) -> super::BackendKind {
+        match &self.runtime {
+            Runtime::Sqlite(_) => super::BackendKind::Sqlite,
+            Runtime::Native(_) => super::BackendKind::NativeTurso,
+        }
+    }
+
     pub(super) fn from_runtime(runtime: ExactSqlReadSnapshot) -> Self {
         Self {
-            runtime: Arc::new(runtime),
+            runtime: Runtime::Sqlite(Arc::new(runtime)),
         }
     }
 
@@ -24,7 +42,12 @@ impl ReadSnapshot {
     where
         P: IntoParams,
     {
-        let runtime = Arc::clone(&self.runtime);
+        let runtime = match &self.runtime {
+            Runtime::Sqlite(runtime) => Arc::clone(runtime),
+            Runtime::Native(runtime) => {
+                return runtime.query(sql.to_owned(), params.into_params()?).await;
+            }
+        };
         let statement = statement(sql, params)?;
         let rows = tokio::task::spawn_blocking(move || {
             runtime.query(statement).map_err(super::Error::from)

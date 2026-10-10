@@ -1,6 +1,7 @@
 mod connection;
 mod error;
 mod executor;
+mod native;
 mod params;
 mod row;
 mod snapshot;
@@ -21,10 +22,20 @@ pub use snapshot::ReadSnapshot;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use statement::Statement;
 #[cfg(any(test, feature = "test-helpers"))]
-pub use test_support::TestConnection;
+pub use test_support::{NativeTestConnection, TestConnection};
 pub use transaction::{Transaction, TransactionBehavior};
 pub use value::{FromValue, Value, opt_i64, opt_text};
 pub use write_statement::WriteStatement;
 
 #[cfg(test)]
 mod tests;
+
+/// SQL dialect and index capabilities of the attached durable engine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackendKind {
+    Sqlite,
+    NativeTurso,
+}
+
+#[cfg(test)]
+mod native_tests;

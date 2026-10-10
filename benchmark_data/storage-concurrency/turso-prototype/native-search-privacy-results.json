@@ -1,0 +1,1 @@
+{"engine":"Turso 0.8.0","before":[],"setting":"PRAGMA secure_delete=ON","setting_error":null,"after":[],"required_readback":[[1]],"outcome":"required privacy probe failed","aggregate_bazel_result":"0 passed, 1 failed","uncached_seconds":1.2,"default_cutover_authorized":false}

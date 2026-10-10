@@ -1,0 +1,151 @@
+Workspace verification on 2026-10-09
+Machine and dependency versions: MEASUREMENTS.md
+Commands run from the repository root through Bazel 9.3.0.
+Local BAZELISK_HOME/output_user_root settings were outside the repository.
+No timeout budgets, assertions, or ignored tests were changed.
+
+BUILD
+Command: bazel build //... --keep_going --repo_env=DO_NOT_TRACK=1
+Outcome: PASS, exit 0. Found 386 targets.
+Elapsed: 1431.839 s; critical path 492.37 s; 3863 total actions.
+Notes: macOS ld emitted large __eh_frame warnings for test/CLI binaries.
+
+WORKSPACE TESTS
+Initial command: bazel test --config=ci //... --repo_env=DO_NOT_TRACK=1
+The foreground client was interrupted, exit 8, after 121/148 summaries:
+115 PASSED, 5 FAILED, 1 TIMEOUT. No active child remained before continuation.
+Only the 27 unfinished targets were selected for the continuation; that client
+was also interrupted after 12 summaries: 8 PASSED, 4 FAILED.
+A tracked local supervisor then ran only the 15 unfinished targets:
+12 PASSED, 3 FAILED, exit 3; elapsed 703.84 s. Its commands used the same CI
+configuration plus the repository-pinned host ast-grep override below.
+Combined, every original test target has a result: 135 PASSED, 12 FAILED,
+1 TIMEOUT. These are target counts, not individual Rust test counts. Some
+benchmark/helper targets do not execute assertions in an ordinary suite run.
+The full workspace suite is failing; the passing focused storage suites do not
+imply full-suite success. No whole red suite was reclassified after filtered runs.
+
+Failed targets and observed diagnostics:
+- //crates/tracedecay-application:application_suite
+  64 passed, 2 failed: observability persistence/shutdown deadlines.
+- //crates/tracedecay-cli:core_cli_suite
+  181 passed, 4 failed: broken-pipe panic, daemon socket wait, and two SIGTERM
+  shutdown expectations.
+- //crates/tracedecay-cli:host_journeys_suite
+  49 passed, 5 failed: four exact uninstall/tree assertions and doctor behavior.
+  Python populated Library/Caches/com.apple.python in isolated test homes;
+  doctor also refused an OS-temporary project root as a durable authority.
+- //crates/tracedecay-code-index-retention:unit_test
+  113 passed, 1 failed: cancelled pool acquire took 33.272917 ms.
+- //crates/tracedecay-hooks:unit_test
+  114 passed, 1 failed: one slow-disk submission remained Staged instead of
+  Published in the concurrent receipt publication budget test.
+- //crates/tracedecay-lsp:lsp_suite
+  43 passed, 1 failed: restart-budget test's Python starts.txt was missing.
+- //crates/tracedecay-runtime-core:unit_test
+  465 passed, 4 failed: schema/startup-ledger assertions. Controlled original
+  reader-condition execution reproduces all four; details below.
+- //crates/tracedecay:hooks_lsp_suite
+  67 passed, 1 failed: a receipt file remained after the expected spool drain.
+- //crates/tracedecay:mcp_suite
+  Full target failed. Missing required host ast-grep and Git initialization
+  Bad-file-descriptor errors were observed. Filtered ast-grep rerun passed
+  three cases; other failures were not rerun or proven to be baseline failures.
+- //crates/tracedecay:transcript_ingest_suite
+  194 passed, 1 failed: Codex post-compaction effect count was 0, expected 1.
+- //crates/tracedecay:transport_acceptance_suite
+  27 passed, 1 failed: catalog mounted surfaces lacked two ast-grep bindings.
+  The exact failed case passes with the pinned host tool installed.
+- //crates/tracedecay:unit_test
+  788 passed, 2 failed: macOS half-close socket NotConnected and replay startup
+  database-locked error while installing the attached registered global schema.
+Timeout:
+- //crates/tracedecay-code-index-runtime:unit_test
+  Configured medium-suite timeout (300 s). The log showed one FAILED case and
+  several long-running artifact/reader cases, without completed panic details.
+  No timeout was raised; this target remains unresolved.
+
+At this initial verification stage, only the four runtime-core failures below
+were experimentally shown with the original reader condition. The follow-up
+TRIAGE.md records six additional original-condition reproductions, bounded
+controls of the other failures/timeout, and the controlled MCP result.
+The original full-workspace outcomes remain failing; filtered controls do not
+reclassify whole targets or prove every load-sensitive failure pre-existing.
+
+HOST-TOOL RERUNS (NON-VACUOUS)
+Installed @ast-grep/cli@0.44.0 in an isolated host-tool directory, matching CI's
+AST_GREP_VERSION. No repository manifests or global installation changed.
+Let $task_tools refer to that host-tool directory (not a repository requirement).
+Command:
+  bazel test --config=ci //crates/tracedecay:mcp_suite \
+    --test_env=TRACEDECAY_AST_GREP_BIN=$task_tools/node_modules/.bin/ast-grep \
+    --test_arg=mcp_handler_test::ast_grep_rewrite_behavior_test \
+    --nocache_test_results --repo_env=DO_NOT_TRACK=1
+Outcome: PASS, exit 0; 3 passed, 624 filtered out; 7.08 s Bazel elapsed.
+Command:
+  bazel test --config=ci //crates/tracedecay:transport_acceptance_suite \
+    --test_env=TRACEDECAY_AST_GREP_BIN=$task_tools/node_modules/.bin/ast-grep \
+    --test_arg=v2_surface_mount_conformance::every_catalog_binding_is_mounted_on_its_declared_surface \
+    --test_arg=--exact --nocache_test_results --repo_env=DO_NOT_TRACK=1
+Outcome: PASS, exit 0; 1 passed, 27 filtered out; 4.73 s Bazel elapsed.
+
+ORIGINAL READER-CONDITION CONTROL
+Temporarily restored only the original admission condition `leased <
+lease_ceiling`, ran the full runtime-core unit target uncached, then restored
+`leased.saturating_add(state.opening(lane)) < lease_ceiling` in a finally block.
+Command:
+  bazel test --config=ci //crates/tracedecay-runtime-core:unit_test \
+    --nocache_test_results --repo_env=DO_NOT_TRACK=1
+Outcome: FAIL, exit 3; 465 passed, 4 failed; 67.93 s Bazel elapsed.
+The same four schema failures as the changed-code workspace run:
+1. db::migrations::tests::fts::code_symbol_fts_triggers_are_not_recreated
+   Empty-file schema creation refused with ResetRequired: schema v0 is not v39.
+2. db::migrations::tests::interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry
+   Retry refused with the same v0/v39 ResetRequired.
+3. db::migrations::tests::final_shape::runtime_writer_ledger_is_part_of_the_final_shape
+   Expected a structurally tampered final store to be refused; it was not.
+4. shard_runtime::registry::tests::production_routes::remote_node_initialization_installs_only_the_final_registered_schema
+   Expected 12 remote tables; actual 16 includes the four writer-ledger tables.
+Unchanged PersistentWriter startup installs the common ledger before ReaderPool
+creation. The baseline and final writer startup, migrations, and these tests
+are byte-identical. This control is distinct from baseline-regression.txt,
+which demonstrates that the new reader test fails on the old admission logic.
+
+REMAINING WORKSPACE CHECKS
+Command: bazel build --config=ci //:rustfmt_check --repo_env=DO_NOT_TRACK=1
+Outcome: PASS, exit 0; 6.13 s.
+Command: bazel run //scripts:bazel/gen_builds.py --repo_env=DO_NOT_TRACK=1 -- --check
+Outcome: PASS, exit 0; 38.18 s. No generated files changed.
+Command: bazel build --config=ci --config=clippy //... --repo_env=DO_NOT_TRACK=1
+Outcome: PASS, exit 0; 386 targets, 318.982 s, critical path 64.03 s.
+Clippy used -Dwarnings; 325 actions executed (3532 action-cache hits).
+
+FOCUSED STORAGE SCOPE
+See README.md for exact production-build, unit/integration, benchmark, strict
+Clippy, and crate-format commands. All 336 runtime unit tests and 143 integration
+tests pass (2 deliberate opt-in entry points ignored in ordinary execution).
+Three benchmark processes cover nine measured shapes with no failures/busy
+errors. The explicit crash test invokes the otherwise ignored child entry point.
+The separate SHA-pinned Turso module passes its strict overlap/conflict/retry/
+reopen and exact negative production-DDL probes; see its verification.txt.
+
+NOT VERIFIED
+No release capacity benchmark, full FTS/application workload benchmark, Turso
+production adapter or caller/data migration, crash/power-loss Turso durability,
+Windows/Linux prototype execution, or power-loss SQLite durability was run.
+Workspace failures and the timeout above remain unresolved.
+
+FOLLOW-UP VERIFICATION (no production changes after c081b413c6)
+See TRIAGE.md for 19 initial exact controls, six original-condition repetitions,
+two index timeout controls, four MCP Git/import controls, and three MCP boundary
+controls. Ten persistent failed cases have original-condition reproductions.
+Twelve of eighteen other original failed cases passed alone; this does not
+reclassify their whole targets. Complete MCP control: 384PASS/243FAIL/627executed,
+553.05s; all243 failures are subprocess EBADF9. First failed exact case passes,
+its preceding pair passes, and all56 graph-query cases pass as a smaller group.
+Original full-target accumulated failure cause remains unproven; source/host
+spawn-limit evidence and a complete failure inventory are preserved in TRIAGE.
+Standalone pinned native Turso test passed uncached (1PASS,0.6s), including the
+new differential actual-four-ledger ROWID adaptation versus SQLite original
+layout,34isolated invalid writes,rollback/CAS/retry/replay/mutations/reopen.
+No production adapter or caller/API migration is implied by that result.

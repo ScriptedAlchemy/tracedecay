@@ -5,7 +5,7 @@ use tracedecay_privacy::{
     MEMORY_FACT_SANITIZER_VERSION_V1, MemoryFactSanitizationV1, sanitize_memory_fact_payload,
 };
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{BackendKind, QueryExecutor, params};
 use tracedecay_store::{
     FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_PRIVACY_PURGE_PAYLOADS,
     ProjectMemoryPrivacyPurgeCursorV1, ProjectMemoryPrivacyPurgeReceiptV1,
@@ -204,10 +204,12 @@ async fn purge_candidates(
         return Ok(0);
     }
 
-    transaction
-        .execute_batch("PRAGMA secure_delete = ON;")
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    if transaction.backend_kind() == BackendKind::Sqlite {
+        transaction
+            .execute_batch("PRAGMA secure_delete = ON;")
+            .await
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    }
     for candidate in &flagged {
         record_purge_receipt(transaction, owner, candidate).await?;
         let changed = transaction

@@ -9,6 +9,7 @@ use crate::memory::encoding::{
 };
 
 use tracedecay_domain::{FactAssertionId, FactId, FactOwnerV1, UtcMicros};
+use tracedecay_runtime_core::db::{engine::BackendKind, native_search};
 use tracedecay_store::{
     FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_SEARCH_SCORE_MILLIONTHS,
     ProjectMemoryFactV1,
@@ -202,12 +203,13 @@ fn project_memory_holographic_midpoint(similarity: f64) -> f64 {
     f64::midpoint(similarity, 1.0).clamp(0.0, 1.0)
 }
 
-pub(super) fn project_memory_normalize_fts5_ranks(
+pub(super) fn project_memory_normalize_fts_ranks(
     ranked: Vec<(FactId, f64)>,
+    backend: BackendKind,
 ) -> BTreeMap<FactId, f64> {
     let max_relevance = ranked
         .iter()
-        .map(|(_, rank)| project_memory_fts5_rank_relevance(*rank))
+        .map(|(_, rank)| native_search::relevance(backend, *rank))
         .fold(0.0_f64, f64::max);
     if max_relevance <= f64::EPSILON {
         return ranked
@@ -220,7 +222,7 @@ pub(super) fn project_memory_normalize_fts5_ranks(
         .map(|(fact_id, rank)| {
             (
                 fact_id,
-                (project_memory_fts5_rank_relevance(rank) / max_relevance).clamp(0.0, 1.0),
+                (native_search::relevance(backend, rank) / max_relevance).clamp(0.0, 1.0),
             )
         })
         .collect()
@@ -267,14 +269,6 @@ pub(super) fn project_memory_temporal_decay(updated_at: UtcMicros, now: UtcMicro
     let age_micros = now.0.saturating_sub(updated_at.0).max(0) as f64;
     let age_days = age_micros / 86_400_000_000.0;
     0.5_f64.powf(age_days / 365.0).clamp(0.10, 1.0)
-}
-
-fn project_memory_fts5_rank_relevance(rank: f64) -> f64 {
-    if rank.is_finite() {
-        (-rank).max(0.0)
-    } else {
-        0.0
-    }
 }
 
 pub(super) fn project_memory_holographic_error(error: HolographicEncodingError) -> FactStoreError {
