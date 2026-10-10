@@ -2171,7 +2171,7 @@ fn rust_tuple_struct(source: &str, symbol: &SymbolRow) -> bool {
     else {
         return false;
     };
-    let rest = after_name.trim_start();
+    let rest = skip_rust_trivia(after_name);
     let rest = if let Some(generics) = rest.strip_prefix('<') {
         let mut depth = 1usize;
         let mut index = 0;
@@ -2189,7 +2189,28 @@ fn rust_tuple_struct(source: &str, symbol: &SymbolRow) -> bool {
     } else {
         rest
     };
-    rest.trim_start().starts_with('(')
+    skip_rust_trivia(rest).starts_with('(')
+}
+
+/// Whitespace plus `//` and `/* */` comments; comments may sit between a
+/// struct's name, its generic parameters, and its body.
+fn skip_rust_trivia(mut rest: &str) -> &str {
+    loop {
+        rest = rest.trim_start();
+        if let Some(body) = rest.strip_prefix("/*") {
+            let Some(end) = body.find("*/") else {
+                return rest;
+            };
+            rest = &body[end + 2..];
+        } else if let Some(body) = rest.strip_prefix("//") {
+            let Some(end) = body.find('\n') else {
+                return rest;
+            };
+            rest = &body[end..];
+        } else {
+            return rest;
+        }
+    }
 }
 
 /// Whether the source at a Rust call site invokes a value call

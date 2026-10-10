@@ -1501,7 +1501,7 @@ fn rust_tuple_struct_constructor_keeps_the_generic_call_ambiguous() {
     let generation = published_rust_workspace(&[(
         "file.tuple.lib",
         "crates/app/src/lib.rs",
-        "pub struct helper<T>(pub T);\n\nfn helper<T>() {}\n\nfn caller() { helper::<u8>(0); }\n",
+        "pub struct helper<T> /* documented inline */ (pub T);\n\nfn helper<T>() {}\n\nfn caller() { helper::<u8>(0); }\n",
     )]);
     let function = generation
         .symbols()
