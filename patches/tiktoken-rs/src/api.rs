@@ -36,7 +36,7 @@ pub fn get_text_completion_max_tokens(model: &str, prompt: &str) -> Result<usize
         .ok_or_else(|| anyhow!("Unknown context size for model {}", model))?;
     let tokenizer =
         get_tokenizer(model).ok_or_else(|| anyhow!("No tokenizer found for model {}", model))?;
-    let bpe = bpe_singleton(tokenizer);
+    let bpe = bpe_singleton(tokenizer)?;
     let prompt_tokens = bpe.count_with_special_tokens(prompt);
     Ok(context_size.saturating_sub(prompt_tokens))
 }
@@ -116,7 +116,7 @@ pub fn num_tokens_from_messages(
             tokenizer
         )
     }
-    let bpe = bpe_singleton(tokenizer);
+    let bpe = bpe_singleton(tokenizer)?;
 
     // Token overhead constants adapted from the OpenAI cookbook:
     // https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
@@ -125,18 +125,14 @@ pub fn num_tokens_from_messages(
     // tokens_per_name: extra tokens when a `name` field is present (1 for current models)
     //
     // The gpt-3.5-turbo-0301 branch (4, -1) was removed from the cookbook in later revisions;
-    // we retain it for backward compatibility with that specific snapshot.
+    // it is unreachable here because that model's cl100k vocabulary is not shipped.
     //
     // FUNCTION_CALL_OVERHEAD: 1 extra token per function/tool call (heuristic)
     // REPLY_PRIMING: 3 tokens added once at the end (per cookbook: <|start|>assistant<|message|>)
     const FUNCTION_CALL_OVERHEAD: i32 = 1;
     const REPLY_PRIMING: i32 = 3;
 
-    let (tokens_per_message, tokens_per_name) = if model == "gpt-3.5-turbo-0301" {
-        (4, -1)
-    } else {
-        (3, 1)
-    };
+    let (tokens_per_message, tokens_per_name) = (3, 1);
 
     let mut num_tokens: i32 = 0;
     for message in messages {
@@ -191,7 +187,7 @@ pub fn num_tokens_from_messages(
 /// ```
 /// use tiktoken_rs::{get_chat_completion_max_tokens, ChatCompletionRequestMessage};
 ///
-/// let model = "gpt-3.5-turbo";
+/// let model = "gpt-4o";
 /// let messages = vec![
 ///     ChatCompletionRequestMessage {
 ///         content: Some("You are a helpful assistant that only speaks French.".to_string()),
@@ -226,15 +222,14 @@ pub fn get_chat_completion_max_tokens(
     Ok(context_size.saturating_sub(prompt_tokens))
 }
 
-fn bpe_singleton(tokenizer: Tokenizer) -> &'static CoreBPE {
+fn bpe_singleton(tokenizer: Tokenizer) -> Result<&'static CoreBPE> {
     match tokenizer {
-        Tokenizer::O200kHarmony => o200k_harmony_singleton(),
-        Tokenizer::O200kBase => o200k_base_singleton(),
+        Tokenizer::O200kHarmony => Ok(o200k_harmony_singleton()),
+        Tokenizer::O200kBase => Ok(o200k_base_singleton()),
         Tokenizer::Cl100kBase => cl100k_base_singleton(),
-        Tokenizer::R50kBase => r50k_base_singleton(),
+        Tokenizer::R50kBase | Tokenizer::Gpt2 => r50k_base_singleton(),
         Tokenizer::P50kBase => p50k_base_singleton(),
         Tokenizer::P50kEdit => p50k_edit_singleton(),
-        Tokenizer::Gpt2 => r50k_base_singleton(),
     }
 }
 
@@ -290,7 +285,7 @@ pub fn get_bpe_from_model(model: &str) -> Result<&'static CoreBPE> {
 /// let tokens = bpe.encode_with_special_tokens("hello world");
 /// ```
 pub fn bpe_for_tokenizer(tokenizer: Tokenizer) -> Result<&'static CoreBPE> {
-    Ok(bpe_singleton(tokenizer))
+    bpe_singleton(tokenizer)
 }
 
 /// Use [`bpe_for_tokenizer`] instead.
@@ -305,8 +300,76 @@ mod tests {
 
     #[test]
     fn test_bpe_for_tokenizer() {
-        let bpe = bpe_for_tokenizer(Tokenizer::Cl100kBase).unwrap();
-        assert_eq!(bpe.decode(&[15339]).unwrap(), "hello");
+        let bpe = bpe_for_tokenizer(Tokenizer::O200kBase).unwrap();
+        assert_eq!(bpe.decode(&[15339]).unwrap(), " awesome");
+    }
+
+    #[test]
+    fn test_bpe_for_tokenizer_unshipped_vocabularies_error() {
+        for tokenizer in [
+            Tokenizer::Cl100kBase,
+            Tokenizer::R50kBase,
+            Tokenizer::P50kBase,
+            Tokenizer::P50kEdit,
+            Tokenizer::Gpt2,
+        ] {
+            let err = bpe_for_tokenizer(tokenizer)
+                .err()
+                .unwrap_or_else(|| panic!("{tokenizer:?} must fail, not panic"));
+            assert!(
+                err.to_string().contains("not shipped"),
+                "{tokenizer:?} returned unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bpe_for_model_unshipped_vocabularies_error() {
+        for model in [
+            "gpt-4",
+            "gpt-3.5-turbo",
+            "text-davinci-003",
+            "davinci",
+            "gpt2",
+        ] {
+            let err = bpe_for_model(model)
+                .err()
+                .unwrap_or_else(|| panic!("{model} must fail, not panic"));
+            assert!(
+                err.to_string().contains("not shipped"),
+                "{model} returned unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unshipped_singletons_return_errors() {
+        for (name, singleton) in [
+            (
+                "cl100k_base",
+                cl100k_base_singleton as fn() -> Result<&'static CoreBPE>,
+            ),
+            (
+                "r50k_base",
+                r50k_base_singleton as fn() -> Result<&'static CoreBPE>,
+            ),
+            (
+                "p50k_base",
+                p50k_base_singleton as fn() -> Result<&'static CoreBPE>,
+            ),
+            (
+                "p50k_edit",
+                p50k_edit_singleton as fn() -> Result<&'static CoreBPE>,
+            ),
+        ] {
+            let err = singleton()
+                .err()
+                .unwrap_or_else(|| panic!("{name} singleton must fail, not panic"));
+            assert!(
+                err.to_string().contains("not shipped"),
+                "{name} singleton returned unexpected error: {err}"
+            );
+        }
     }
 
     #[test]
@@ -349,18 +412,20 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let num_tokens = num_tokens_from_messages("gpt-3.5-turbo-0301", &messages).unwrap();
-        assert_eq!(num_tokens, 127);
-
-        let num_tokens = num_tokens_from_messages("gpt-4-0314", &messages).unwrap();
-        assert_eq!(num_tokens, 129);
+        // cl100k vocabularies are not shipped; legacy chat models fail with a
+        // typed error instead of panicking in the singleton initializer.
+        for model in ["gpt-3.5-turbo-0301", "gpt-4-0314", "gpt-3.5-turbo-0125"] {
+            let err = num_tokens_from_messages(model, &messages)
+                .err()
+                .unwrap_or_else(|| panic!("{model} must fail, not panic"));
+            assert!(
+                err.to_string().contains("not shipped"),
+                "{model} returned unexpected error: {err}"
+            );
+        }
 
         let num_tokens = num_tokens_from_messages("gpt-4o-2024-05-13", &messages).unwrap();
         assert_eq!(num_tokens, 124);
-
-        // Newer gpt-3.5 snapshots use (3, 1) like gpt-4, not (4, -1) like gpt-3.5-turbo-0301
-        let num_tokens = num_tokens_from_messages("gpt-3.5-turbo-0125", &messages).unwrap();
-        assert_eq!(num_tokens, 129);
     }
 
     #[test]
@@ -403,8 +468,8 @@ mod tests {
             },
         ];
         // Validated against OpenAI API response (issue #40)
-        let num_tokens = num_tokens_from_messages("gpt-4-0613", &messages).unwrap();
-        assert_eq!(num_tokens, 78);
+        let num_tokens = num_tokens_from_messages("gpt-4o", &messages).unwrap();
+        assert_eq!(num_tokens, 76);
     }
 
     #[test]
@@ -505,8 +570,8 @@ mod tests {
 
     #[test]
     fn test_bpe_singleton_matches_fresh_bpe() {
-        let singleton = bpe_singleton(Tokenizer::Cl100kBase);
-        let fresh = bpe_for_tokenizer(Tokenizer::Cl100kBase).unwrap();
+        let singleton = bpe_singleton(Tokenizer::O200kBase).unwrap();
+        let fresh = bpe_for_tokenizer(Tokenizer::O200kBase).unwrap();
         let text = "The quick brown fox jumps over the lazy dog";
         assert_eq!(
             singleton.encode_with_special_tokens(text),
@@ -516,7 +581,7 @@ mod tests {
 
     #[test]
     fn test_get_chat_completion_max_tokens() {
-        let model = "gpt-3.5-turbo";
+        let model = "gpt-4o";
         let messages = vec![
             ChatCompletionRequestMessage {
                 content: Some("You are a helpful assistant that only speaks French.".to_string()),
@@ -543,10 +608,37 @@ mod tests {
 
     #[test]
     fn test_text_completion_max_tokens() {
-        let model = "gpt-3.5-turbo";
+        let model = "gpt-4o";
         let prompt = "Translate the following English text to French: '";
         let max_tokens = get_text_completion_max_tokens(model, prompt).unwrap();
         assert!(max_tokens > 0);
+    }
+
+    #[test]
+    fn test_text_completion_max_tokens_unshipped_vocabulary_errors() {
+        // text-davinci-003 resolves to P50kBase; the unshipped vocabulary must
+        // surface as a typed error, not a panic in the singleton initializer.
+        let err = get_text_completion_max_tokens("text-davinci-003", "prompt")
+            .expect_err("p50k model must fail, not panic");
+        assert!(
+            err.to_string().contains("not shipped"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_chat_completion_max_tokens_unshipped_vocabulary_errors() {
+        let messages = vec![ChatCompletionRequestMessage {
+            role: "user".to_string(),
+            content: Some("Hello".to_string()),
+            ..Default::default()
+        }];
+        let err = get_chat_completion_max_tokens("gpt-4", &messages)
+            .expect_err("cl100k model must fail, not panic");
+        assert!(
+            err.to_string().contains("not shipped"),
+            "unexpected error: {err}"
+        );
     }
 }
 

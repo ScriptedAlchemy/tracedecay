@@ -120,9 +120,9 @@ impl CoreBPE {
     /// # Examples
     ///
     /// ```
-    /// use tiktoken_rs::cl100k_base;
+    /// use tiktoken_rs::o200k_base;
     ///
-    /// let bpe = cl100k_base().unwrap();
+    /// let bpe = o200k_base().unwrap();
     /// let tokens: Vec<usize> = bpe.encode_ordinary_as("hello world");
     /// ```
     pub fn encode_ordinary_as<T: FromRank>(&self, text: &str) -> Vec<T> {
@@ -138,9 +138,9 @@ impl CoreBPE {
     /// # Examples
     ///
     /// ```
-    /// use tiktoken_rs::cl100k_base;
+    /// use tiktoken_rs::o200k_base;
     ///
-    /// let bpe = cl100k_base().unwrap();
+    /// let bpe = o200k_base().unwrap();
     /// let tokens: Vec<u64> = bpe.encode_with_special_tokens_as("hello <|endoftext|>");
     /// ```
     pub fn encode_with_special_tokens_as<T: FromRank>(&self, text: &str) -> Vec<T> {
@@ -231,8 +231,8 @@ impl CoreBPE {
     /// # Examples
     ///
     /// ```
-    ///     use tiktoken_rs::cl100k_base;
-    ///     let bpe = cl100k_base().unwrap();
+    ///     use tiktoken_rs::o200k_base;
+    ///     let bpe = o200k_base().unwrap();
     ///     let tokenized: Result<Vec<_>, _> = bpe
     ///         .split_by_token("This is a test         with a lot of spaces", true);
     ///     let tokenized = tokenized.unwrap();
