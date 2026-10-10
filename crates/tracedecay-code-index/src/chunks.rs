@@ -2127,6 +2127,25 @@ fn reference_name_suffix_start(candidate: &str, reference_name: &str) -> Option<
     (prefix.is_empty() || prefix.ends_with('.') || prefix.ends_with("::")).then_some(prefix.len())
 }
 
+/// Whether the source at a Rust call site plainly invokes a value
+/// (`foo(`, `foo!`, `foo .`) rather than a path (`Foo::member`,
+/// `Factory::<u32>::new`). `::<` is ambiguous text — a generic function
+/// call and a tuple-struct constructor spell it the same — so it reports
+/// false and keeps both candidates.
+fn rust_callsite_names_value(source: &str, offsets: &[u64], reference: &UnresolvedRef) -> bool {
+    let Some(rest) = offsets
+        .get(reference.line as usize)
+        .copied()
+        .and_then(|line_start| {
+            usize::try_from(line_start.checked_add(u64::from(reference.column))?).ok()
+        })
+        .and_then(|start| source.get(start + reference.reference_name.len()..))
+    else {
+        return false;
+    };
+    !rest.trim_start().starts_with("::")
+}
+
 fn reference_evidence_span(
     source: &str,
     offsets: &[u64],
@@ -2344,7 +2363,7 @@ fn resolve_file_references(
             .copied()
             .flatten()
             .map(|from| from.span);
-        let compatible = candidates
+        let mut compatible = candidates
             .map(|candidates| {
                 candidates
                     .iter()
@@ -2370,6 +2389,19 @@ fn resolve_file_references(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        // `foo()` names a value and `Foo::member` names a type; Rust keeps
+        // the two in different namespaces, so a same-named struct and
+        // function are both kind-compatible. A value-call site drops the
+        // struct candidate; a path site (`::` or `::<`) stays an honest
+        // ambiguity rather than guessing the namespace.
+        if language == "rust"
+            && reference.reference_kind == EdgeKind::Calls
+            && !reference.reference_name.contains("::")
+            && compatible.len() > 1
+            && rust_callsite_names_value(source, offsets, reference)
+        {
+            compatible.retain(|target| target.kind != NodeKind::Struct.as_str());
+        }
         match compatible.as_slice() {
             // Rust admits one definition per name and scope, so same-named
             // same-kind definitions are `#[cfg]` variants of one identity; the

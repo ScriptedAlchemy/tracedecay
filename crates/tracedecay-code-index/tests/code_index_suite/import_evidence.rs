@@ -1440,6 +1440,38 @@ fn resolved_callers<'a>(
 }
 
 #[test]
+fn rust_value_call_binds_the_function_not_the_same_named_struct() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.namespaces.lib",
+            "crates/app/src/lib.rs",
+            "pub struct helper;\n\nfn helper() {}\n\nfn caller() { helper(); }\n",
+        ),
+        (
+            "file.namespaces.other",
+            "crates/app/src/other.rs",
+            "pub fn unrelated() {}\n",
+        ),
+    ]);
+    let function = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.qualified_name == "crates/app/src/lib.rs::helper" && symbol.kind == "function"
+        })
+        .expect("missing fn helper")
+        .occurrence
+        .clone();
+    assert_eq!(
+        resolved_callers(&generation, &function),
+        ["crates/app/src/lib.rs::caller"],
+        "a `helper()` site invokes the function namespace; the same-named \
+         tuple struct must not render the call ambiguous"
+    );
+}
+
+#[test]
 fn rust_calls_bind_through_a_use_declared_in_the_calling_block() {
     let generation = published_rust_workspace(&[
         (

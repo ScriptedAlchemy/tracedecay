@@ -194,6 +194,37 @@ fn is_rust_item_kind(kind: &str) -> bool {
         )
 }
 
+/// The type path a call names once every `::<...>` turbofish argument list
+/// is removed: `Factory::<u32>::Widget` names `Factory::Widget`, and no
+/// symbol is ever called `Factory::<u32>`.
+fn strip_turbofish(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut out = String::with_capacity(path.len());
+    let mut depth = 0usize;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            _ if depth == 0 && bytes[index..].starts_with(b"::<") => {
+                depth = 1;
+                index += 3;
+            }
+            _ if depth > 0 => {
+                match bytes[index] {
+                    b'<' => depth += 1,
+                    b'>' => depth -= 1,
+                    _ => {}
+                }
+                index += 1;
+            }
+            byte => {
+                out.push(byte as char);
+                index += 1;
+            }
+        }
+    }
+    out
+}
+
 impl<'s> ExtractionState<'s> {
     fn new(file_path: &str, source: &'s str) -> Self {
         let timestamp = crate::common::unix_timestamp_secs();
@@ -1936,6 +1967,9 @@ impl RustExtractor {
                                     child.start_position(),
                                 ),
                             };
+                            // `Factory::<u32>::new` names `Factory::new`; no
+                            // symbol carries turbofish arguments in its name.
+                            let callee_name = strip_turbofish(&callee_name);
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
                                 reference_name: callee_name.clone(),
@@ -1951,21 +1985,20 @@ impl RustExtractor {
                             // names the class; associated-function construction
                             // must name the owner or callers of the struct stay
                             // empty-complete while rg still finds Type::open.
-                            if let Some((owner, member)) = callee_name.rsplit_once("::")
-                                && !owner.is_empty()
-                                && owner != "Self"
-                                && !member.is_empty()
-                            {
-                                state.unresolved_refs.push(UnresolvedRef {
-                                    from_node_id: fn_node_id.to_string(),
-                                    reference_name: owner.to_owned(),
-                                    reference_kind: EdgeKind::Calls,
-                                    line: position.row as u32,
-                                    column: position.column as u32,
-                                    file_path: state.file_path.clone(),
-                                    unmodeled_import: None,
-                                    argument_count: Self::argument_count(child),
-                                });
+                            if let Some((owner, member)) = callee_name.rsplit_once("::") {
+                                let owner = strip_turbofish(owner);
+                                if !owner.is_empty() && owner != "Self" && !member.is_empty() {
+                                    state.unresolved_refs.push(UnresolvedRef {
+                                        from_node_id: fn_node_id.to_string(),
+                                        reference_name: owner,
+                                        reference_kind: EdgeKind::Calls,
+                                        line: position.row as u32,
+                                        column: position.column as u32,
+                                        file_path: state.file_path.clone(),
+                                        unmodeled_import: None,
+                                        argument_count: Self::argument_count(child),
+                                    });
+                                }
                             }
                             // The simple name of a dotted call is not itself a call.
                             // `items.push()` must not bind a same-file `fn push`.

@@ -946,17 +946,39 @@ fn project_join(dir: &str, declared: &str) -> String {
 /// `babel src -d .` / `babel src --out-dir dist` as a shell command, not as
 /// another command's arguments (`echo babel src -d dist`).
 fn babel_src_to_out(script: &str) -> Option<(String, String)> {
-    // Quotes, escapes, substitutions, and comments are not interpreted.
-    // Reject them so `echo '…; babel src -d dist ;'` cannot invent a mapping.
+    // Quoted spans cannot hide a separator or a command, so blank them
+    // instead of dropping the script: `babel src -d dist && echo "done"`
+    // still maps while `echo 'x; babel src -d dist'` does not. Escapes,
+    // substitutions, and comments are not interpreted — reject them.
+    let script = blank_quoted_spans(script);
     if script
         .bytes()
-        .any(|byte| matches!(byte, b'\'' | b'"' | b'`' | b'\\' | b'$' | b'#'))
+        .any(|byte| matches!(byte, b'`' | b'\\' | b'$' | b'#'))
     {
         return None;
     }
-    shell_simple_commands(script)
+    shell_simple_commands(&script)
         .into_iter()
         .find_map(babel_command_src_to_out)
+}
+
+/// `script` with every `'…'` and `"…"` span replaced by spaces, so shell
+/// separators and command words inside quotes never reach the scanner.
+fn blank_quoted_spans(script: &str) -> String {
+    let mut out = String::with_capacity(script.len());
+    let mut quote = None;
+    for byte in script.bytes() {
+        match quote {
+            Some(delimiter) if byte == delimiter => quote = None,
+            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+            _ => {
+                out.push(byte as char);
+                continue;
+            }
+        }
+        out.push(' ');
+    }
+    out
 }
 
 /// Simple commands after `;`, `&&`, `||`, `|`, and `&`. Quotes are not
@@ -1020,10 +1042,15 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
     }
     if tokens.get(index).is_some_and(|token| is_runner_word(token)) {
         index += 1;
-        while tokens
-            .get(index)
-            .is_some_and(|token| token.starts_with('-'))
-        {
+        while let Some(flag) = tokens.get(index).copied() {
+            if !flag.starts_with('-') {
+                break;
+            }
+            // `npx --help` / `--version` print the runner's own text; no
+            // compiler runs and no mapping is declared.
+            if matches!(flag, "--help" | "-h" | "--version" | "-V") {
+                return None;
+            }
             index += 1;
         }
     }
@@ -1031,21 +1058,39 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
     if !is_babel_command_word(command_word) {
         return None;
     }
-    // Only the literal `babel <src> -d|--out-dir <out>` form. Extra flags
-    // (`--presets env`) would steal the source directory if scanned loosely.
-    let rest = tokens.get(index + 1..)?;
-    let [source, flag, output] = rest else {
-        return None;
-    };
-    if !matches!(*flag, "-d" | "--out-dir")
-        || source.starts_with('-')
-        || output.starts_with('-')
-        || source.is_empty()
-        || output.is_empty()
-    {
-        return None;
+    // `babel <src> -d|--out-dir <out> [--flags]`: every flag consumes the
+    // following token as its value only when it does not start with `-`;
+    // exactly one positional (the source) may appear. A flag that would
+    // swallow the source fails closed instead of inventing a mapping.
+    let mut source = None;
+    let mut output = None;
+    let mut index = index + 1;
+    while index < tokens.len() {
+        match tokens[index] {
+            "-d" | "--out-dir" => {
+                index += 1;
+                output = tokens.get(index).copied();
+            }
+            flag if flag.starts_with('-') => {
+                index += 1;
+                if tokens
+                    .get(index)
+                    .is_some_and(|value| !value.starts_with('-'))
+                {
+                    index += 1;
+                }
+            }
+            token if source.is_none() => source = Some(token),
+            _ => return None,
+        }
+        index += 1;
     }
-    Some(((*source).to_owned(), (*output).to_owned()))
+    match (source, output) {
+        (Some(source), Some(output)) if !output.is_empty() && !output.starts_with('-') => {
+            Some((source.to_owned(), output.to_owned()))
+        }
+        _ => None,
+    }
 }
 
 fn package_script_mappings(
@@ -1236,7 +1281,20 @@ mod tests {
             babel_src_to_out("echo 'placeholder; babel src -d dist ;'"),
             None
         );
-        assert_eq!(babel_src_to_out("babel --presets env src -d dist"), None);
+        assert_eq!(
+            babel_src_to_out("babel --presets env src -d dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("babel src -d dist --copy-files"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("babel src -d dist && echo \"done\""),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(babel_src_to_out("npx --help babel src -d dist"), None);
+        assert_eq!(babel_src_to_out("babel src lib -d dist"), None);
         assert_eq!(
             babel_src_to_out("NODE_ENV=production ./node_modules/.bin/babel src --out-dir dist"),
             Some(("src".to_owned(), "dist".to_owned()))

@@ -725,6 +725,31 @@ fn assemble() {
 }
 
 #[test]
+fn test_rust_turbofish_associated_call_names_the_bare_owner() {
+    let source = r#"
+struct Factory;
+impl Factory {
+    fn new<T: Default>() -> Factory { Factory }
+}
+fn assemble() {
+    let p = Factory::<u32>::new();
+    let _ = p;
+}
+"#;
+    let result = RustExtractor.extract_artifact("factory.rs", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let names = call_names(&result, "assemble");
+    assert!(
+        names.contains(&"Factory".to_owned()),
+        "Factory::<u32>::new must name the bare owner type, not `Factory::<u32>`: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name.contains('<')),
+        "no ref may carry turbofish arguments: {names:?}"
+    );
+}
+
+#[test]
 fn test_rust_method_initializers_do_not_fabricate_receiver_types() {
     let source = r#"
 struct Literal;
@@ -1635,7 +1660,7 @@ fn run() {
                 "static",
                 "REGISTRY",
                 0,
-                vec!["LazyLock::new", "build_registry"]
+                vec!["LazyLock", "LazyLock::new", "build_registry"]
             ),
             ("const", "LIMIT", 1, vec!["compute_limit"]),
             ("function", "run", 3, vec!["work"]),
@@ -1705,7 +1730,8 @@ fn rust_call_argument_counts_follow_nested_expression_boundaries() {
         [
             ("target", Some(3), 1, 4),
             ("pair", Some(2), 2, 8),
-            ("Vec::<(u8, u8)>::new", Some(0), 4, 8),
+            ("Vec", Some(0), 4, 8),
+            ("Vec::new", Some(0), 4, 8),
             ("target", Some(0), 6, 4),
         ]
     );
