@@ -341,10 +341,14 @@ async fn assert_initialized_route_is_rmcp<R, W>(
     assert!(ping.get("result").is_some(), "{ping}");
 
     write_line(&mut writer, &cancellation(2)).await;
+    write_line(&mut writer, &ping_request(4)).await;
+    let ping = read_value(&mut reader, "cancellation control did not precede ping").await;
+    assert_eq!(ping["id"], json!(4));
     writer
         .shutdown()
         .await
         .expect("shutdown initialized client");
+    drop(gate);
     let cancellation = read_value(
         &mut reader,
         "cancelled RMCP route did not emit its terminal response",
@@ -355,7 +359,6 @@ async fn assert_initialized_route_is_rmcp<R, W>(
         2,
         "response-gate cancellation before request registration",
     );
-    drop(gate);
     drop(writer);
     drop(reader);
     if let Some(lifecycle) = lifecycle {
@@ -1430,12 +1433,18 @@ async fn serve_proxy_cancels_running_and_queued_requests_without_host_disconnect
         .expect("running cancellation");
     wait_for_count(
         &executor.cancellation_observed,
-        2,
-        "proxy withheld running or queued cancellation",
+        1,
+        "proxy withheld running cancellation",
     )
     .await;
-    assert_eq!(executor.started.load(Ordering::SeqCst), 2);
-    assert_eq!(executor.completed.load(Ordering::SeqCst), 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), host_output.recv())
+            .await
+            .is_err(),
+        "cancellation must not acknowledge a worker that still owns its resources"
+    );
+    assert_eq!(executor.started.load(Ordering::SeqCst), 1);
+    assert_eq!(executor.completed.load(Ordering::SeqCst), 0);
     assert!(
         !proxy.is_finished(),
         "the cancelled worker and host session must remain owned"

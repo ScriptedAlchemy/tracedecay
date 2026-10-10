@@ -27,12 +27,16 @@ pub enum DispatchSettlement {
 #[derive(Debug)]
 pub(super) struct DispatchExecutionSettlement {
     state: AtomicU8,
+    completed: AtomicBool,
+    completion: tokio::sync::Notify,
 }
 
 impl DispatchExecutionSettlement {
-    fn not_started() -> Self {
+    fn not_started(completed: bool) -> Self {
         Self {
             state: AtomicU8::new(SETTLEMENT_NOT_STARTED),
+            completed: AtomicBool::new(completed),
+            completion: tokio::sync::Notify::new(),
         }
     }
 
@@ -42,6 +46,8 @@ impl DispatchExecutionSettlement {
 
     fn mark_joined(&self) {
         self.state.store(SETTLEMENT_JOINED, Ordering::Release);
+        self.completed.store(true, Ordering::Release);
+        self.completion.notify_waiters();
     }
 
     fn snapshot(&self) -> DispatchSettlement {
@@ -50,6 +56,14 @@ impl DispatchExecutionSettlement {
             SETTLEMENT_JOINED => DispatchSettlement::Joined,
             _ => DispatchSettlement::NotStarted,
         }
+    }
+}
+
+struct DispatchSettlementLease(Arc<DispatchExecutionSettlement>);
+
+impl Drop for DispatchSettlementLease {
+    fn drop(&mut self) {
+        self.0.mark_joined();
     }
 }
 
@@ -95,7 +109,7 @@ pub struct RetainedDispatchOutcome<T> {
 
 impl<T> RetainedDispatchOutcome<T> {
     fn failed(error: TraceDecayError) -> Self {
-        let settlement = Arc::new(DispatchExecutionSettlement::not_started());
+        let settlement = Arc::new(DispatchExecutionSettlement::not_started(true));
         Self {
             result: Err(DispatchFailure::new(error)),
             settlement,
@@ -104,6 +118,19 @@ impl<T> RetainedDispatchOutcome<T> {
 
     pub fn settlement(&self) -> DispatchSettlement {
         self.settlement.snapshot()
+    }
+
+    /// Wait for retained request resources before acknowledging transport cancellation.
+    pub async fn wait_for_settlement(&self) {
+        loop {
+            let completed = self.settlement.completion.notified();
+            tokio::pin!(completed);
+            completed.as_mut().enable();
+            if self.settlement.completed.load(Ordering::Acquire) {
+                return;
+            }
+            completed.await;
+        }
     }
 }
 
@@ -219,8 +246,9 @@ impl RetainedDispatchRegistry {
             return Err(dispatch_shutdown_error());
         }
 
-        let settlement = Arc::new(DispatchExecutionSettlement::not_started());
+        let settlement = Arc::new(DispatchExecutionSettlement::not_started(false));
         let worker_settlement = Arc::clone(&settlement);
+        let settlement_lease = DispatchSettlementLease(Arc::clone(&settlement));
         let (sender, receiver) = tokio::sync::oneshot::channel();
         #[cfg(any(test, feature = "test-transport"))]
         self.retained_spawn_count.fetch_add(1, Ordering::AcqRel);
@@ -228,7 +256,7 @@ impl RetainedDispatchRegistry {
             let _capacity_lease = capacity_lease;
             worker_settlement.mark_settling();
             let output = future.await;
-            worker_settlement.mark_joined();
+            drop(settlement_lease);
             let _ = sender.send(output);
             worker_settlement
         });

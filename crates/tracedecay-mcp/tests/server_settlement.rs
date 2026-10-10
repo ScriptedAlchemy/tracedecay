@@ -64,6 +64,7 @@ async fn cancellation_returns_before_a_read_worker_settles_but_shutdown_joins_it
     assert_eq!(
         cancelled
             .result
+            .as_ref()
             .expect_err("cancellation must win")
             .error()
             .project_route_context()
@@ -72,7 +73,18 @@ async fn cancellation_returns_before_a_read_worker_settles_but_shutdown_joins_it
     );
     assert!(!worker_finished.load(Ordering::Acquire));
 
+    let settled = cancelled.wait_for_settlement();
+    tokio::pin!(settled);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut settled)
+            .await
+            .is_err(),
+        "transport settlement must retain the admitted worker"
+    );
     worker_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), settled)
+        .await
+        .expect("worker completion releases the transport waiter");
     authority.shutdown().await;
     assert!(worker_finished.load(Ordering::Acquire));
 }

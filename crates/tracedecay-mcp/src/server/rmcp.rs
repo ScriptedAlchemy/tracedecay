@@ -515,17 +515,31 @@ where
     where
         T: rmcp::transport::Transport<RoleServer> + Send + 'static,
     {
-        rmcp::service::serve_server(
-            self,
-            GuardedHandshakeTransport {
-                inner: transport,
-                handshake_settled: false,
-                pending_ping_answer: None,
-            },
-        )
-        .await
-        .map_err(Box::new)
+        serve_guarded_rmcp_connection(self, transport).await
     }
+}
+
+pub(crate) async fn serve_guarded_rmcp_connection<S, T>(
+    service: S,
+    transport: T,
+) -> std::result::Result<
+    rmcp::service::RunningService<RoleServer, S>,
+    Box<rmcp::service::ServerInitializeError>,
+>
+where
+    S: rmcp::Service<RoleServer>,
+    T: rmcp::transport::Transport<RoleServer> + Send + 'static,
+{
+    rmcp::service::serve_server(
+        service,
+        GuardedHandshakeTransport {
+            inner: transport,
+            handshake_settled: false,
+            pending_ping_answer: None,
+        },
+    )
+    .await
+    .map_err(Box::new)
 }
 
 /// Whether a daemon connection's first request opens an `rmcp` session: an
