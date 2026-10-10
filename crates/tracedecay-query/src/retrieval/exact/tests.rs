@@ -310,7 +310,7 @@ fn exact_pair(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
-        source_role: Default::default(),
+        source_role: RetrievalSourceRoleV1::default(),
         retriever: RetrieverKind::ExactLiteral,
         retriever_revision: id("retriever.exact.v1"),
         score_domain: id(crate::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1),
@@ -335,7 +335,7 @@ fn exact_pair(
         },
         matched_literals: vec![literal],
         admission_proof: proof,
-        source_role: Default::default(),
+        source_role: RetrievalSourceRoleV1::default(),
     };
     (candidate, evidence)
 }

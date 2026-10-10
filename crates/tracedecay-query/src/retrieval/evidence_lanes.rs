@@ -19,9 +19,10 @@ use tracedecay_domain::{
     CursorPayloadDigest, EphemeralSanitizedQueryViewV1, EvidenceRole, FileOccurrenceId,
     FixedPointScore, FreshnessCompatibilityV1, GenerationDiagnosticV1, LogicalEvidenceId,
     ManifestDigest, ProviderId, RetrievalAnchorId, RetrievalBudgetUsage, RetrievalFailure,
-    RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, ScoreDomainId, SourceFreshness, SourceInstanceKey, SourceNamespace,
-    SourceOccurrenceId, TemporalLaneEvidenceV1, canonical_sha256,
+    RetrievalRequest, RetrievalSourceRoleV1, RetrieverBatch, RetrieverContinuation,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
+    SourceInstanceKey, SourceNamespace, SourceOccurrenceId, TemporalLaneEvidenceV1,
+    canonical_sha256,
 };
 use tracedecay_temporal_query::TemporalCandidateExport;
 use tracedecay_temporal_query::execution::ExecutionControl;
@@ -488,7 +489,7 @@ fn diagnostic_provider_outcome(
             logical_copy_cluster_id: None,
             logical_copy_evidence_anchor: None,
             evidence_role: EvidenceRole::Primary,
-            source_role: Default::default(),
+            source_role: RetrievalSourceRoleV1::default(),
             retriever: RetrieverKind::Diagnostic,
             retriever_revision: retriever_revision.clone(),
             score_domain: score_domain.clone(),

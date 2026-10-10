@@ -7,9 +7,9 @@ use std::fmt;
 use tracedecay_domain::{
     CompactCandidate, CompactContextOmissionV1, ComponentRevision, ContextOmissionReasonV1,
     CursorPayloadDigest, EvidenceRole, FixedPointScore, FreshnessCompatibilityV1,
-    LogicalEvidenceId, ManifestDigest, RetrievalAnchorId, RetrievalRequest, RetrieverBatch,
-    RetrieverContinuation, RetrieverKind, ScoreDomainId, SessionId, SessionOrThreadId,
-    SourceFreshness, SourceInstanceKey, SourceNamespace, SourceOccurrenceId,
+    LogicalEvidenceId, ManifestDigest, RetrievalAnchorId, RetrievalRequest, RetrievalSourceRoleV1,
+    RetrieverBatch, RetrieverContinuation, RetrieverKind, ScoreDomainId, SessionId,
+    SessionOrThreadId, SourceFreshness, SourceInstanceKey, SourceNamespace, SourceOccurrenceId,
     TemporalCandidateChannelV1, TemporalCandidateContributionV1, TemporalLaneEvidenceV1,
     canonical_sha256,
 };
@@ -161,7 +161,7 @@ impl TemporalCandidateExport {
                     logical_copy_cluster_id: None,
                     logical_copy_evidence_anchor: None,
                     evidence_role: temporal_evidence_role(ranked.evidence_role.as_deref()),
-                    source_role: Default::default(),
+                    source_role: RetrievalSourceRoleV1::default(),
                     retriever: RetrieverKind::Temporal,
                     retriever_revision: retriever_revision.clone(),
                     score_domain: score_domain.clone(),

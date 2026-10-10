@@ -9,10 +9,10 @@ use tracedecay_domain::{
     ExactAdmissionRuleRevision, ExactFieldV1, ExactTechnicalTermKindV1, FileOccurrenceId,
     FixedPointScore, FreshnessCompatibilityV1, FusionProfile, ManifestDigest, PrincipalId,
     RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget, RetrievalBudgetUsage,
-    RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1, ScoreDomainId,
-    SingleRootScopeV1, SourceFreshness, SourceOccurrenceId, SourceSpan, SymbolOccurrenceId,
-    TemporalModeV1, UtcMicros, VectorWatermark,
+    RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    RetrievalSourceRoleV1, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, SourceFreshness,
+    SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{ExactLaneEvidence, ExactLiteralV1};
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
@@ -110,7 +110,7 @@ fn candidate(kind: RetrieverKind, raw_score: u64) -> CompactCandidate {
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
-        source_role: Default::default(),
+        source_role: RetrievalSourceRoleV1::default(),
         retriever: kind,
         retriever_revision: id(&format!(
             "retriever.{}.canonical-equivalence.v1",
@@ -159,7 +159,7 @@ fn exact_evidence() -> ExactLaneEvidence {
             canonical_bytes: b"run_query".to_vec(),
         }],
         admission_proof: exact_proof(),
-        source_role: Default::default(),
+        source_role: RetrievalSourceRoleV1::default(),
     }
 }
 
@@ -174,7 +174,7 @@ fn lexical_evidence() -> LexicalLaneEvidence {
         spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
-        source_role: Default::default(),
+        source_role: RetrievalSourceRoleV1::default(),
     }
 }
 

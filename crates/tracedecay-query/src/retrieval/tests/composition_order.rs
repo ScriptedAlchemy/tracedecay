@@ -1,6 +1,7 @@
 use tracedecay_domain::{
     EvidenceRole, ExactClass, FreshnessCompatibilityV1, FusedCandidate, OccurrenceProvenance,
-    RankingDecision, RankingDecisionKind, RetrievalAnchorId, SourceFreshness, UtcMicros,
+    RankingDecision, RankingDecisionKind, RetrievalAnchorId, RetrievalSourceRoleV1,
+    SourceFreshness, UtcMicros,
 };
 
 use super::{composition_lanes, corpus_lanes, id, mixed_caps, no_caps, profile};
@@ -281,7 +282,7 @@ fn generation_scoped_hit(
             },
         }],
         exact_class: ExactClass::Approximate,
-        source_role: Default::default(),
+        source_role: RetrievalSourceRoleV1::default(),
         utility_micros: 4_000_000,
         contributions: Vec::new(),
         freshness: Vec::new(),

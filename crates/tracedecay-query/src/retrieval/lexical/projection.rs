@@ -8,9 +8,9 @@ use tracedecay_domain::{
     CodeSearchChunkId, CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole,
     ExactAdmissionProof, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
     FileOccurrenceId, FixedPointScore, LanguageDescriptorRevision, LogicalEvidenceId,
-    ManifestDigest, ProjectId, RepositoryId, RetrievalAnchorId, RetrieverKind, ScoreDomainId,
-    SourceFreshness, SourceOccurrenceId, SourceSpan, WorktreeId, exact_search_canonical,
-    split_subtokens, technical_tokens, validate_code_logical_path,
+    ManifestDigest, ProjectId, RepositoryId, RetrievalAnchorId, RetrievalSourceRoleV1,
+    RetrieverKind, ScoreDomainId, SourceFreshness, SourceOccurrenceId, SourceSpan, WorktreeId,
+    exact_search_canonical, split_subtokens, technical_tokens, validate_code_logical_path,
 };
 
 use super::{
@@ -822,7 +822,7 @@ fn lexical_lane_candidate(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
-        source_role: Default::default(),
+        source_role: RetrievalSourceRoleV1::default(),
         retriever,
         retriever_revision,
         score_domain,

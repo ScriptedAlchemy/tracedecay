@@ -273,7 +273,8 @@ fn increment_all<K: Ord + Clone>(counts: &mut BTreeMap<K, u32>, keys: &BTreeSet<
 mod cap_key_tests {
     use super::*;
     use tracedecay_domain::{
-        FreshnessCompatibilityV1, RetrievalAnchorId, SourceFreshness, UtcMicros,
+        FreshnessCompatibilityV1, RetrievalAnchorId, RetrievalSourceRoleV1, SourceFreshness,
+        UtcMicros,
     };
 
     use tracedecay_domain::test_fixtures::id;
@@ -316,7 +317,7 @@ mod cap_key_tests {
                 occurrence("c", "file.other"),
             ],
             exact_class: ExactClass::Approximate,
-            source_role: Default::default(),
+            source_role: RetrievalSourceRoleV1::default(),
             utility_micros: 0,
             contributions: Vec::new(),
             freshness: Vec::new(),
