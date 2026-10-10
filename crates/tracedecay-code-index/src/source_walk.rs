@@ -117,11 +117,23 @@ pub fn source_walk(
             if segment == ".git" || segment == ".tracedecay" {
                 return false;
             }
+            let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+            // The ignore crate does not prune unmatched directories when a
+            // whitelist override is set, so an exact `path_glob` still listed
+            // every sibling tree. Refuse directories the glob cannot reach
+            // before policy or nested-git checks touch them.
+            if is_dir
+                && generated_dir_scope.as_ref().is_some_and(|scope| {
+                    !scope.literal_prefix.as_os_str().is_empty()
+                        && !scope.allows(&filter_root, entry.path())
+                })
+            {
+                return false;
+            }
             let Ok(relative) = entry.path().strip_prefix(&filter_root) else {
                 return false;
             };
             let relative = forward_slash_path(relative);
-            let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
             // An entry the glob names, or a directory it must pass through,
             // is judged without the generated-directory defaults: the scope
             // is the operator asking for that noise. Every other exclusion
@@ -192,28 +204,42 @@ fn build_overrides(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use tempfile::TempDir;
     use tracedecay_domain::IndexPathPolicyV1;
 
     use super::source_walk;
 
+    fn is_file(entry: &ignore::DirEntry) -> bool {
+        entry.file_type().is_some_and(|kind| kind.is_file())
+    }
+
     fn walked_files(root: &std::path::Path, path_policy: &IndexPathPolicyV1) -> Vec<PathBuf> {
-        let mut files = source_walk(root, None, path_policy)
+        walked_relatives(root, None, path_policy, is_file)
+    }
+
+    fn walked_relatives(
+        root: &std::path::Path,
+        path_glob: Option<&str>,
+        path_policy: &IndexPathPolicyV1,
+        keep: impl Fn(&ignore::DirEntry) -> bool,
+    ) -> Vec<PathBuf> {
+        let mut paths = source_walk(root, path_glob, path_policy)
             .expect("source walk")
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-            .map(|entry| {
+            .filter(keep)
+            .filter_map(|entry| {
                 entry
                     .path()
                     .strip_prefix(root)
-                    .expect("project-relative path")
-                    .to_path_buf()
+                    .ok()
+                    .filter(|relative| !relative.as_os_str().is_empty())
+                    .map(Path::to_path_buf)
             })
             .collect::<Vec<_>>();
-        files.sort();
-        files
+        paths.sort();
+        paths
     }
 
     #[test]
@@ -344,6 +370,61 @@ mod tests {
             walk("dist/**/*.js", &with_operator_rule),
             vec![PathBuf::from("dist/bundle.js")],
             "the same scope cannot lift an operator's exclusion beneath the generated directory"
+        );
+    }
+
+    #[test]
+    fn exact_path_glob_does_not_list_sibling_directories() {
+        let root = TempDir::new().expect("project root");
+        for path in [
+            "keep/hit.rs",
+            "noise/a.rs",
+            "noise/nested/b.rs",
+            "other/c.rs",
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().expect("parent")).expect("fixture directory");
+            fs::write(path, "TOKEN\n").expect("fixture file");
+        }
+        let policy = IndexPathPolicyV1::new(Vec::new(), Vec::new()).expect("empty policy");
+        let listed = walked_relatives(root.path(), Some("keep/hit.rs"), &policy, |_| true);
+
+        assert_eq!(
+            walked_relatives(root.path(), Some("keep/hit.rs"), &policy, is_file),
+            vec![PathBuf::from("keep/hit.rs")]
+        );
+        assert!(
+            listed.iter().all(|path| path.starts_with("keep")),
+            "an exact path_glob must not list sibling trees the glob cannot reach: {listed:?}"
+        );
+        assert!(
+            !listed
+                .iter()
+                .any(|path| path.starts_with("noise") || path.starts_with("other")),
+            "sibling directories must be pruned before they are listed: {listed:?}"
+        );
+    }
+
+    #[test]
+    fn single_segment_glob_does_not_descend_into_nested_directories() {
+        let root = TempDir::new().expect("project root");
+        for path in ["src/lib.rs", "src/nested/deep.rs", "other/skip.rs"] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().expect("parent")).expect("fixture directory");
+            fs::write(path, "TOKEN\n").expect("fixture file");
+        }
+        let policy = IndexPathPolicyV1::new(Vec::new(), Vec::new()).expect("empty policy");
+        let listed = walked_relatives(root.path(), Some("src/*.rs"), &policy, |_| true);
+
+        assert_eq!(
+            walked_relatives(root.path(), Some("src/*.rs"), &policy, is_file),
+            vec![PathBuf::from("src/lib.rs")]
+        );
+        assert!(
+            !listed
+                .iter()
+                .any(|path| path.starts_with("src/nested") || path.starts_with("other")),
+            "src/*.rs must not list nested or sibling trees: {listed:?}"
         );
     }
 
