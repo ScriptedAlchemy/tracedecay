@@ -58,6 +58,7 @@ use tracedecay_session_memory::session::SessionRefreshServicePort;
 
 mod connection;
 mod construction;
+mod files_resource;
 mod graph_tool_owner;
 mod hook_dispatch;
 mod hook_writes;
@@ -67,7 +68,6 @@ mod project_open_access;
 mod requests;
 mod rmcp;
 mod routing;
-mod files_resource;
 mod status_resource;
 
 pub(crate) use connection::ProductionMcpConnectionContext;

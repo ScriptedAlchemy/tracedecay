@@ -64,23 +64,24 @@ impl McpServer {
         }
 
         let cg = self.reopen_if_branch_drifted().await;
-        let freshness_payload =
-            if let Some(reader) = self.dashboard_code_index_freshness_reader.as_ref() {
-                match reader(cg.project_root().to_path_buf()).await {
-                    Ok(worktree) => Some(
-                        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1::from_scheduler_read(
-                            worktree,
-                        ),
+        let freshness_payload = if let Some(reader) =
+            self.dashboard_code_index_freshness_reader.as_ref()
+        {
+            match reader(cg.project_root().to_path_buf()).await {
+                Ok(worktree) => Some(
+                    tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1::from_scheduler_read(
+                        worktree,
                     ),
-                    Err(failure) => Some(
-                        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1::from_read_failure(
-                            failure,
-                        ),
+                ),
+                Err(failure) => Some(
+                    tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1::from_read_failure(
+                        failure,
                     ),
-                }
-            } else {
-                None
-            };
+                ),
+            }
+        } else {
+            None
+        };
         let worktree_omitted_sources = freshness_payload.as_ref().and_then(|payload| {
             payload
                 .worktrees

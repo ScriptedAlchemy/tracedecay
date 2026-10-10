@@ -154,12 +154,7 @@ async fn verified_file_paths(server: &McpServer) -> Vec<String> {
         .as_array()
         .expect("files tool census")
         .iter()
-        .map(|file| {
-            file["path"]
-                .as_str()
-                .expect("indexed file path")
-                .to_owned()
-        })
+        .map(|file| file["path"].as_str().expect("indexed file path").to_owned())
         .collect()
 }
 
