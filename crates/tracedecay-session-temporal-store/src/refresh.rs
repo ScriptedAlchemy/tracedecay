@@ -472,12 +472,28 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         let session_id = request.session_id().clone();
         let coverage_request = request.coverage_request().clone();
         let refresh_key = request.refresh_key().cloned();
-        let transaction = self
-            .begin_write_transaction()
-            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+        // The pending-reset probe only reads: run it on a snapshot so the
+        // common no-reset path never opens a write transaction on the
+        // serialized writer lane.
+        let reset_snapshot = self
+            .read_snapshot()
             .await
             .map_err(|error| storage(BEGIN_REFRESH, error))?;
-        if session_reset_is_pending(&transaction, &session_id).await? {
+        let reset_pending = session_reset_is_pending(&reset_snapshot, &session_id).await?;
+        drop(reset_snapshot);
+        if reset_pending {
+            let transaction = self
+                .begin_write_transaction()
+                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+                .await
+                .map_err(|error| storage(BEGIN_REFRESH, error))?;
+            if !session_reset_is_pending(&transaction, &session_id).await? {
+                transaction
+                    .rollback()
+                    .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
+                    .await
+                    .map_err(|error| storage(BEGIN_REFRESH, error))?;
+            } else {
             // The begin deletes the base rows a folded first batch would
             // project from, so planning here can only produce a batch the
             // committing replay refuses. Commit the begin instead; durable
@@ -509,12 +525,18 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 SessionRefreshBeginTxnOutcome::Started { .. } => SessionRefreshBeginPlanV1::Begun,
                 SessionRefreshBeginTxnOutcome::Joined { .. } => SessionRefreshBeginPlanV1::Joined,
             });
+            }
         }
         // The begin mints a random cursor key when no active key exists, and
         // a rolled-back mint leaves the commit replay reading a different key.
         // Provisioning the shared key first makes both replays deterministic;
         // with an active key already committed this transaction writes
         // nothing and its commit appends no WAL frames.
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
         ensure_active_session_cursor_key_in_transaction(&transaction).await?;
         transaction
             .commit()
@@ -942,30 +964,24 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             checkpoint_relation_rebuild_control(&execution_control)?;
             return Ok(receipt);
         }
-        drop(snapshot);
-
-        let preflight = self
-            .begin_write_transaction()
-            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-            .await
-            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        // Check the binding on the read snapshot so a stale running
+        // operation fails before any rebuild work runs. The finish
+        // transaction re-validates the same rows before committing, so the
+        // snapshot check buys the same early exit without spending a
+        // serialized writer commit on a read-only preflight.
         let binding = require_running_binding(
-            &preflight,
+            &snapshot,
             request.session_id(),
             request.operation_id(),
             COMPLETE_REFRESH,
         )
         .await?;
+        drop(snapshot);
         if request.frontier().committed_through() != binding.target_frontier {
             return Err(SessionStoreError::InvalidStateTransition {
                 context: "refresh completion target coverage",
             });
         }
-        preflight
-            .commit()
-            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
-            .await
-            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
 
         let relation_projection = rebuild_candidate_session_relations(
             self.inner(),
@@ -975,6 +991,44 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             COMPLETE_REFRESH,
         )
         .await?;
+
+        // The content validators only read: run them on a fresh post-rebuild
+        // snapshot so their occurrence and receipt scans ride the reader pool
+        // instead of holding the serialized writer lane. The write
+        // transaction below still re-validates receipt, binding, and frontier
+        // atomically and its guarded UPDATEs refuse any row a concurrent
+        // operation settled between this snapshot and the commit.
+        let validation_snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        let progress = require_exact_terminal_progress(
+            &validation_snapshot,
+            request.session_id(),
+            request.operation_id(),
+            request.frontier(),
+            request.coverage(),
+        )
+        .await?;
+        validate_final_projection_receipt(
+            &validation_snapshot,
+            request.session_id(),
+            binding.generation,
+            &binding.watermarks,
+            &relation_projection,
+            &execution_control,
+        )
+        .await?;
+        validate_candidate_frontier(
+            &validation_snapshot,
+            request.session_id().as_str(),
+            generation_i64(binding.generation, COMPLETE_REFRESH)?,
+            binding.target_frontier,
+            &relation_projection,
+            &execution_control,
+        )
+        .await?;
+        drop(validation_snapshot);
 
         let transaction = self
             .begin_write_transaction()
@@ -1000,14 +1054,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             COMPLETE_REFRESH,
         )
         .await?;
-        let progress = require_exact_terminal_progress(
-            &transaction,
-            request.session_id(),
-            request.operation_id(),
-            request.frontier(),
-            request.coverage(),
-        )
-        .await?;
         let mut request = request;
         if request.source_coverage().is_none()
             && let Some(source_coverage) = progress.source_coverage().cloned()
@@ -1019,24 +1065,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 context: "refresh completion target coverage",
             });
         }
-        validate_final_projection_receipt(
-            &transaction,
-            request.session_id(),
-            binding.generation,
-            &binding.watermarks,
-            &relation_projection,
-            &execution_control,
-        )
-        .await?;
-        validate_candidate_frontier(
-            &transaction,
-            request.session_id().as_str(),
-            generation_i64(binding.generation, COMPLETE_REFRESH)?,
-            binding.target_frontier,
-            &relation_projection,
-            &execution_control,
-        )
-        .await?;
         acknowledge_relation_receipt(&transaction, &relation_projection).await?;
         let terminal_at = terminal_timestamp(&progress, COMPLETE_REFRESH)?;
         activate_bound_generation(&transaction, request.session_id(), &binding, terminal_at)

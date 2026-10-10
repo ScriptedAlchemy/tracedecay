@@ -189,6 +189,155 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         }))
     }
 
+    /// Applies every listed session's active-generation relation projection
+    /// through one reader snapshot and one acknowledgement transaction
+    /// instead of each session paying its own snapshot, journal query, and
+    /// receipt transaction. Sessions are independent: a failure leaves the
+    /// unfinished receipts pending for the next pass exactly as the
+    /// per-session apply does.
+    #[tracing::instrument(
+        name = "session_temporal.persist.relation_projection_batch",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn apply_active_session_relation_projection_batch(
+        &self,
+        session_ids: &[SessionId],
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> SessionStoreResult<usize> {
+        if session_ids.is_empty() {
+            return Ok(0);
+        }
+        let (scope, _relation_store) = self
+            .session_relation_store()
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let mut projections = Vec::with_capacity(session_ids.len());
+        for session_id in session_ids {
+            let generation = active_generation(&snapshot, session_id).await?;
+            let mut rows = snapshot
+                .query(
+                    "SELECT projection_json FROM session_relation_effect_journal
+                     WHERE session_id = ?1 AND generation = ?2",
+                    params![
+                        session_id.as_str(),
+                        generation_i64(generation, RECONSTRUCT_OPERATION)?
+                    ],
+                )
+                .await
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let projection = if let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+            {
+                let encoded: String = row
+                    .get(0)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+                serde_json::from_str::<SessionRelationProjection>(&encoded)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+            } else {
+                seed_session_relation_projection(
+                    self.inner(),
+                    &snapshot,
+                    session_id,
+                    Arc::clone(&cancellation),
+                )
+                .await?
+            };
+            drop(rows);
+            if projection.scope != scope
+                || projection.session_id != *session_id
+                || projection.generation != generation.value()
+            {
+                return Err(SessionStoreError::ReceiptIdentityMismatch {
+                    context: "active relation projection identity",
+                });
+            }
+            enforce_projection_bounds(&projection, DEFAULT_MAX_ENTITIES, DEFAULT_MAX_RELATIONS)?;
+            super::relations::validate_projection(&projection)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            projections.push(projection);
+        }
+        drop(snapshot);
+        let outcomes = self
+            .apply_session_relation_projection_items(&projections, cancellation)
+            .await?;
+        let applied = outcomes
+            .into_iter()
+            .try_fold(0_usize, |count, outcome| outcome.map(|_| count + 1))?;
+        Ok(applied)
+    }
+
+    /// Applies each pre-validated projection through one shared receipt-check
+    /// snapshot and one acknowledgement transaction, returning every item's
+    /// own outcome so callers keep per-candidate failure semantics. A failed
+    /// write or acknowledgement leaves that receipt pending for the next
+    /// recovery pass exactly as the serial apply does.
+    async fn apply_session_relation_projection_items(
+        &self,
+        projections: &[SessionRelationProjection],
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> SessionStoreResult<Vec<SessionStoreResult<()>>> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let mut outcomes = Vec::with_capacity(projections.len());
+        let mut acknowledge = Vec::new();
+        for (index, projection) in projections.iter().enumerate() {
+            let outcome = match require_not_cancelled(&cancellation) {
+                Err(error) => Err(error),
+                Ok(()) => super::relation_receipts::write_relation_projection_on_snapshot(
+                    self.inner(),
+                    &snapshot,
+                    projection,
+                    Arc::clone(&cancellation),
+                )
+                .await
+                .map(|_| ()),
+            };
+            if outcome.is_ok() {
+                acknowledge.push(index);
+            }
+            outcomes.push(outcome);
+        }
+        drop(snapshot);
+        if acknowledge.is_empty() {
+            return Ok(outcomes);
+        }
+        let transaction = {
+            use tracing::Instrument as _;
+            self.begin_write_transaction()
+                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+                .await
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        };
+        for index in acknowledge {
+            if let Err(error) =
+                super::relation_receipts::acknowledge_relation_receipt(
+                    &transaction,
+                    &projections[index],
+                )
+                .await
+            {
+                outcomes[index] = Err(error);
+            }
+        }
+        {
+            use tracing::Instrument as _;
+            transaction
+                .commit()
+                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                .await
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        }
+        Ok(outcomes)
+    }
+
     #[tracing::instrument(
         name = "session_temporal.persist.recover_relations",
         level = "trace",
@@ -285,6 +434,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         pending.truncate(limit);
         let mut recovered = 0_usize;
         let mut processed = 0_usize;
+        let mut ready: Vec<(usize, SessionRelationProjection)> = Vec::new();
         for candidate in &pending {
             require_not_cancelled(&cancellation)?;
             processed = processed.saturating_add(1);
@@ -340,22 +490,37 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                     .await?;
                 continue;
             }
-            match super::relation_receipts::apply_relation_projection(
-                self.inner(),
-                &projection,
+            ready.push((processed - 1, projection));
+        }
+        // One batched apply writes every candidate's projection under a
+        // shared receipt snapshot and acknowledges them in a single commit,
+        // instead of each candidate paying its own snapshot, replace
+        // transaction, and acknowledgement transaction. Per-candidate results
+        // keep the same settle semantics as the serial apply.
+        let outcomes = self
+            .apply_session_relation_projection_items(
+                &ready
+                    .iter()
+                    .map(|(_, projection)| projection.clone())
+                    .collect::<Vec<_>>(),
                 Arc::clone(&cancellation),
             )
-            .await
-            {
-                Ok(_) => recovered = recovered.saturating_add(1),
+            .await?;
+        for ((candidate_index, _), outcome) in ready.into_iter().zip(outcomes) {
+            match outcome {
+                Ok(()) => recovered = recovered.saturating_add(1),
                 Err(SessionStoreError::Cancelled) => return Err(SessionStoreError::Cancelled),
                 Err(SessionStoreError::DeadlineExceeded) => {
                     return Err(SessionStoreError::DeadlineExceeded);
                 }
                 Err(error) => {
                     let (failure_code, permanent) = relation_apply_failure_disposition(&error);
-                    self.settle_relation_recovery_failure(candidate, failure_code, permanent)
-                        .await?;
+                    self.settle_relation_recovery_failure(
+                        &pending[candidate_index],
+                        failure_code,
+                        permanent,
+                    )
+                    .await?;
                 }
             }
         }

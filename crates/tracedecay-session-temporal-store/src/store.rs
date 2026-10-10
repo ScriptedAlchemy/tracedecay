@@ -35,6 +35,7 @@ pub struct SessionTemporalStore<'a, D: SessionTemporalRegisteredDb> {
     db: &'a D,
 }
 
+
 #[derive(Clone, Debug)]
 struct ExecutionControlGraphCancellation(ExecutionControl);
 
@@ -175,17 +176,25 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> SessionTemporalStore<'a, D> {
         let mut cursor = crate::SessionTemporalRefreshDiscoveryCursor::default();
         while !pending.is_empty() {
             let (requests, next_cursor, has_more) = SessionTemporalAccess::new(self.db)
-                .pending_session_temporal_refresh_page_result(128, 0, &cursor)
+                .pending_session_temporal_refresh_page_result(256, 0, &cursor)
                 .await?
                 .into_parts();
-            for request in requests {
-                let session_id = request.session_id().clone();
-                if pending.remove(&session_id) {
-                    self.begin_or_join_session_refresh(request).await?;
-                    self.complete_running_session_refresh_for_test(&session_id)
-                        .await?;
-                }
-            }
+            let matched: Vec<_> = requests
+                .into_iter()
+                .filter(|request| pending.remove(request.session_id()))
+                .collect();
+            // Refresh pipelines are independent per session: run a small
+            // number of them concurrently so the caller-side statement
+            // dispatch of one session overlaps the writer-lane work of
+            // another. The lane itself still serializes every transaction.
+            use futures_util::{StreamExt as _, TryStreamExt as _};
+            futures_util::stream::iter(matched)
+                .map(Ok::<_, SessionStoreError>)
+                .try_for_each_concurrent(8, |request| async move {
+                    self.materialize_session_refresh_request_for_test(request)
+                        .await
+                })
+                .await?;
             if !has_more && !pending.is_empty() {
                 return Err(SessionStoreError::InvalidStateTransition {
                     context: "test temporal fixture pending refresh",
@@ -193,6 +202,68 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> SessionTemporalStore<'a, D> {
             }
             cursor = next_cursor;
         }
+        Ok(())
+    }
+
+    /// Materializes and completes one session's pending refresh the same way
+    /// the production scheduler does: plan the begin, project its first
+    /// batch, fold both into one begin commit, then run the completion path.
+    #[cfg(any(test, feature = "test-helpers"))]
+    async fn materialize_session_refresh_request_for_test(
+        &self,
+        request: tracedecay_store::SessionRefreshBeginOrJoinRequestV1,
+    ) -> SessionStoreResult<()> {
+        let session_id = request.session_id().clone();
+        if let crate::SessionRefreshBeginPlanV1::Prepared(recovery) =
+            self.plan_session_refresh_begin(request.clone()).await?
+        {
+            let accepted_at = recovery.accepted_at();
+            if let Some((progress, batch)) = self
+                .materialize_session_temporal_refresh_batch_for_test(&recovery)
+                .await?
+            {
+                let outcome = self
+                    .commit_session_refresh_begin_batch(
+                        request,
+                        accepted_at,
+                        progress,
+                        batch,
+                        ExecutionControl::default(),
+                    )
+                    .await?;
+                if let crate::SessionRefreshBeginBatchOutcomeV1::Persisted { progress, .. } =
+                    outcome
+                {
+                    // The fused commit already wrote this batch's projection
+                    // receipt, so progress.is_complete() here is exactly the
+                    // state the recovery reader would return ReadyToComplete
+                    // for — build the completion request from memory instead
+                    // of paying a recovery snapshot plus its reload queries.
+                    if progress.frontier().is_complete() && progress.committed_batches() > 0 {
+                        let mut completion = SessionRefreshCompletionRequestV1::new(
+                            recovery.operation_id().clone(),
+                            recovery.session_id().clone(),
+                            progress.frontier(),
+                            *progress.coverage(),
+                        )?;
+                        if let Some(source_coverage) =
+                            progress.source_coverage().cloned().or_else(|| {
+                                recovery
+                                    .source_coverage(progress.frontier().committed_through())
+                                    .ok()
+                            })
+                        {
+                            completion = completion.with_source_coverage(source_coverage);
+                        }
+                        self.complete_session_refresh(completion, ExecutionControl::default())
+                            .await?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        self.complete_running_session_refresh_for_test(&session_id)
+            .await?;
         Ok(())
     }
 

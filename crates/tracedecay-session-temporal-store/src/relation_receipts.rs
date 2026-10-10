@@ -156,19 +156,28 @@ pub(crate) async fn write_relation_projection(
     projection: &SessionRelationProjection,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> SessionStoreResult<GraphWatermark> {
-    let (expected, _) = {
-        let snapshot = database
-            .read_snapshot()
-            .await
-            .map_err(|error| storage(RECEIPT_OPERATION, error))?;
-        expected_receipt(
-            &snapshot,
-            &projection.session_id,
-            SessionProjectionGenerationV1::new(projection.generation)
-                .map_err(|error| storage(RECEIPT_OPERATION, error))?,
-        )
-        .await?
-    };
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    write_relation_projection_on_snapshot(database, &snapshot, projection, cancellation).await
+}
+
+/// [`write_relation_projection`] against a caller-owned snapshot so batch
+/// appliers share one read lease for every receipt check.
+pub(crate) async fn write_relation_projection_on_snapshot(
+    database: &impl SessionTemporalRegisteredDb,
+    snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+    projection: &SessionRelationProjection,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<GraphWatermark> {
+    let (expected, _) = expected_receipt(
+        snapshot,
+        &projection.session_id,
+        SessionProjectionGenerationV1::new(projection.generation)
+            .map_err(|error| storage(RECEIPT_OPERATION, error))?,
+    )
+    .await?;
     let actual =
         projection_watermark(projection).map_err(|error| storage(RECEIPT_OPERATION, error))?;
     if actual != expected {
