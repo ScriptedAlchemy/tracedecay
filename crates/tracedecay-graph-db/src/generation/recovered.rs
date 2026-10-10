@@ -1,11 +1,13 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvError, RecvTimeoutError, TryRecvError, sync_channel};
+use std::time::Duration;
 
 use grafeo_common::types::{ArcStr, NodeId};
 use grafeo_core::graph::GraphStore;
 use grafeo_engine::GrafeoDB;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_store::runtime::MAX_GRAPH_REPLAY_SOURCE_BYTES_V1;
@@ -53,10 +55,11 @@ const PROOF_MAX_WORKERS: usize = 8;
 /// order while the calling thread hashes completed chunks strictly in order,
 /// so the digest bytes are identical to the serial stream. Cancellation is
 /// polled on the calling thread at least once per row plus every hashed
-/// 64 KiB, exactly as before. In-flight chunk buffers are bounded (one
-/// `workers`-sized batch), so verification memory stays a small constant over
-/// the one-decoded-row posture of the serial path. Generations at or below
-/// one chunk keep the strictly serial single-pass stream.
+/// 64 KiB, exactly as before. In-flight chunk buffers are bounded (at most
+/// `PROOF_MAX_WORKERS` encoded chunks outstanding), so verification memory
+/// stays a small constant over the one-decoded-row posture of the serial
+/// path. Generations at or below one chunk keep the strictly serial
+/// single-pass stream.
 ///
 /// Each row costs exactly one storage load: entities decode straight from
 /// their enumerated node, and relation endpoints memoize their identity refs
@@ -113,12 +116,12 @@ pub(crate) fn recovered_generation_digest_chunked(
     let namespace_projection = physical_namespace_projection_map(identity)?;
 
     // Publication already runs under `parallelism::install`, so this proof
-    // is almost always on a Rayon worker. `digest_rows_parallel` encodes
-    // through `par_iter` joins, so that worker runs chunk work itself
-    // instead of parking on a channel receive while its tasks sit queued on
-    // the same pool. Forcing the serial stream here made the production
-    // caller hash every row on one thread (measured 2.57s serial vs a
-    // parallel encode path that already exists).
+    // is almost always on a Rayon worker. `digest_rows_parallel` drains its
+    // chunk channels cooperatively, so that worker runs queued encode work
+    // between polls instead of parking on a channel receive while its tasks
+    // sit queued on the same pool. Forcing the serial stream here made the
+    // production caller hash every row on one thread (measured 2.57s serial
+    // vs a parallel encode path that already exists).
     if entities.len().saturating_add(relations.len()) <= chunk_rows {
         digest_rows_serial(
             store.as_ref(),
@@ -273,16 +276,23 @@ impl EncodedProofChunk {
 /// Bounded parallel proof: workers decode and canonicalize sorted chunks,
 /// the calling thread hashes completed chunks strictly in chunk order.
 ///
-/// Chunks encode in batches of `workers` through `par_iter` joins, so the
-/// calling thread runs encode work itself instead of blocking a pool worker
-/// on a channel receive while its tasks sit queued on that same pool — a
-/// one-worker pool (or a pool whose workers are all digest callers) would
-/// otherwise wait on tasks that can never start. At most `workers` encoded
-/// chunk buffers exist at once, and batches are hashed oldest-first, so
+/// Chunks encode as tasks on the persistent Rayon pool, never on threads
+/// created per chunk, while this thread hashes the oldest chunk in order.
+/// Each result opens one slot for the next sorted chunk, so at most
+/// `PROOF_MAX_WORKERS` chunk buffers exist, and the drain is ordered, so
 /// frames enter the digest in exactly the serial order and the first error
 /// to surface is the earliest failing chunk, the same row a serial
 /// enumeration would have failed on. `check` runs only on the calling
-/// thread (it is not required to be `Sync`) at least once per hashed row.
+/// thread (it is not required to be `Sync`) at least once per hashed row,
+/// so a spent deadline or a failed check stops the proof while later
+/// chunks are still encoding; the shared abort flag then stops in-flight
+/// encodes between rows instead of letting them finish stale work.
+///
+/// The drain never parks the calling thread on a channel receive: a caller
+/// that is itself a Rayon worker — the publication lane almost always is —
+/// runs queued tasks (including these encodes) between polls, so a pool
+/// with no free workers still makes progress instead of deadlocking on
+/// tasks queued behind its own blocked receive.
 #[tracing::instrument(
     name = "graph_db.generation.recover.digest_parallel",
     level = "trace",
@@ -308,46 +318,108 @@ fn digest_rows_parallel(
         .min(PROOF_MAX_WORKERS)
         .min(chunks.len())
         .max(1);
-    for batch in chunks.chunks(workers) {
-        let encoded: Vec<Result<EncodedProofChunk, GraphDbError>> = batch
-            .par_iter()
-            .map(|chunk| {
-                catch_unwind(AssertUnwindSafe(|| {
-                    encode_proof_chunk(store.as_ref(), *chunk, namespace_projection)
-                }))
-                .unwrap_or_else(|_| {
-                    Err(GraphDbError::unavailable(
-                        "recovered generation verification worker panicked",
-                    ))
-                })
-            })
-            .collect();
-        for encoded in encoded {
-            let encoded = encoded?;
-            let mut start = 0usize;
-            for &end in &encoded.frame_ends {
-                check()?;
-                writer.add_row_frame(&[&encoded.buffer[start..end]])?;
-                start = end;
+    let in_flight = workers;
+    let abort = AtomicBool::new(false);
+    rayon::in_place_scope(|scope| {
+        let mut pending = VecDeque::with_capacity(in_flight);
+        let mut next_chunk = 0usize;
+        let result = (|| -> Result<(), GraphDbError> {
+            loop {
+                while pending.len() < in_flight && next_chunk < chunks.len() {
+                    let chunk = chunks[next_chunk];
+                    let store = Arc::clone(&store);
+                    let abort = &abort;
+                    let namespace_projection = &*namespace_projection;
+                    let (sender, receiver) = sync_channel(1);
+                    scope.spawn(move |_| {
+                        let encoded = catch_unwind(AssertUnwindSafe(|| {
+                            encode_proof_chunk(store.as_ref(), chunk, namespace_projection, abort)
+                        }));
+                        // The consumer stops listening only after it failed;
+                        // its error is the one reported.
+                        let _ = sender.send(encoded);
+                    });
+                    pending.push_back(receiver);
+                    next_chunk += 1;
+                }
+                let Some(receiver) = pending.pop_front() else {
+                    return Ok(());
+                };
+                let encoded = recv_while_working(&receiver)
+                    .ok()
+                    .and_then(Result::ok)
+                    .ok_or_else(|| {
+                        GraphDbError::unavailable(
+                            "recovered generation verification worker panicked",
+                        )
+                    })??;
+                let mut start = 0usize;
+                for &end in &encoded.frame_ends {
+                    check()?;
+                    writer.add_row_frame(&[&encoded.buffer[start..end]])?;
+                    start = end;
+                }
+            }
+        })();
+        if result.is_err() {
+            // Outstanding tasks see the flag between rows and stop; the scope
+            // waits for them before returning.
+            abort.store(true, Ordering::Release);
+        }
+        result
+    })
+}
+
+/// How long the calling thread parks on a receive once its local work deque
+/// is empty. Sends wake the park early, so the bound only caps the retry
+/// interval after a spurious empty poll.
+const WORKER_RECV_PARK: Duration = Duration::from_millis(1);
+
+/// Receives a worker result without parking the calling thread when it is a
+/// Rayon worker whose own queued tasks include the pending encodes: between
+/// polls it runs local work, which is what lets a one-worker pool (or a
+/// pool whose workers are all digest callers) complete a proof instead of
+/// deadlocking on a receive that its own queued tasks would have to answer.
+/// Once `rayon::yield_local` reports no local work — the caller is not a
+/// Rayon worker, or its tasks are already running elsewhere — the thread
+/// parks on the channel as usual.
+fn recv_while_working<T>(receiver: &Receiver<T>) -> Result<T, RecvError> {
+    loop {
+        match receiver.try_recv() {
+            Ok(value) => return Ok(value),
+            Err(TryRecvError::Disconnected) => return Err(RecvError),
+            Err(TryRecvError::Empty) => {
+                if rayon::yield_local().is_none() {
+                    match receiver.recv_timeout(WORKER_RECV_PARK) {
+                        Ok(value) => return Ok(value),
+                        Err(RecvTimeoutError::Disconnected) => return Err(RecvError),
+                        Err(RecvTimeoutError::Timeout) => {}
+                    }
+                }
             }
         }
     }
-    Ok(())
 }
 
 fn encode_proof_chunk(
     store: &dyn GraphStore,
     chunk: ProofChunk<'_>,
     namespace_projection: &BTreeMap<GraphNamespace, GraphProjectionIdentity>,
+    abort: &AtomicBool,
 ) -> Result<EncodedProofChunk, GraphDbError> {
-    // Encode joins have no second observer to cancel: the caller is doing
-    // the encode itself and polls `check` between hashed frames.
-    let never_cancelled = || Ok(());
-    let mut canonical = CheckedVecWriter::new(&never_cancelled, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
+    let worker_check = || {
+        if abort.load(Ordering::Acquire) {
+            Err(GraphDbError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    let mut canonical = CheckedVecWriter::new(&worker_check, MAX_GRAPH_REPLAY_SOURCE_BYTES_V1)?;
     match chunk {
         ProofChunk::Entities(rows) => {
             let mut encoded = EncodedProofChunk::with_rows(rows.len());
             for (sorted_identity, node) in rows {
+                worker_check()?;
                 let entity = decode_sorted_entity(store, sorted_identity, *node)?;
                 let bytes = canonical.encode(&entity, "recovered generation entity")?;
                 encoded.push_frame("entity", bytes)?;
@@ -359,6 +431,7 @@ fn encode_proof_chunk(
             let mut endpoints = EndpointIdentityCache::default();
             let mut endpoint_refs = HashMap::new();
             for (sorted_identity, locator) in rows {
+                worker_check()?;
                 let relation = decode_sorted_relation(
                     store,
                     sorted_identity,
