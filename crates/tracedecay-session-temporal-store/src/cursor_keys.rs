@@ -62,6 +62,36 @@ pub struct SessionTemporalCursorKeyProvider {
     authenticators: Vec<(SignedCursorKeyRefV1, InMemoryCursorAuthenticator)>,
 }
 
+/// Reports whether exactly one active cursor key is already committed, so
+/// callers that only need its existence can probe on a read snapshot instead
+/// of opening a writer-lane transaction for a key they will not mint.
+pub(super) async fn session_cursor_key_is_active(
+    connection: &impl crate::handle::SessionTemporalQuery,
+) -> SessionStoreResult<bool> {
+    let mut rows = connection
+        .query(
+            "SELECT COUNT(*) FROM session_query_cursor_keys WHERE retired_at IS NULL",
+            (),
+        )
+        .await
+        .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
+    let count = rows
+        .next()
+        .await
+        .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?
+        .map(|row| row.get::<i64>(0))
+        .transpose()
+        .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?
+        .unwrap_or(0);
+    match count {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(SessionStoreError::InvalidStateTransition {
+            context: "active session cursor key count",
+        }),
+    }
+}
+
 pub(super) async fn ensure_active_session_cursor_key_in_transaction(
     transaction: &impl crate::handle::SessionTemporalExec,
 ) -> SessionStoreResult<SignedCursorKeyRefV1> {

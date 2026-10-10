@@ -538,18 +538,27 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         // a rolled-back mint leaves the commit replay reading a different key.
         // Provisioning the shared key first makes both replays deterministic;
         // with an active key already committed this transaction writes
-        // nothing and its commit appends no WAL frames.
-        let transaction = self
-            .begin_write_transaction()
-            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+        // nothing, so the common path probes on a snapshot like the reset
+        // check above and only enters the writer lane to mint.
+        let key_snapshot = self
+            .read_snapshot()
             .await
             .map_err(|error| storage(BEGIN_REFRESH, error))?;
-        ensure_active_session_cursor_key_in_transaction(&transaction).await?;
-        transaction
-            .commit()
-            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
-            .await
-            .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        let key_active = super::cursor_keys::session_cursor_key_is_active(&key_snapshot).await?;
+        drop(key_snapshot);
+        if !key_active {
+            let transaction = self
+                .begin_write_transaction()
+                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+                .await
+                .map_err(|error| storage(BEGIN_REFRESH, error))?;
+            ensure_active_session_cursor_key_in_transaction(&transaction).await?;
+            transaction
+                .commit()
+                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                .await
+                .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        }
         let transaction = self
             .begin_write_transaction()
             .instrument(tracing::trace_span!("session_temporal.txn.begin"))
