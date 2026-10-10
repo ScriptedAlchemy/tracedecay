@@ -13,8 +13,8 @@ use tempfile::TempDir;
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_code_index_retention::code_index_generations::acquire_code_generation_store_lock;
 use tracedecay_contracts::code_index_freshness::{
-    CodeIndexBuildBlockedReasonV1, CodeIndexFreshnessCoverageV1, CodeIndexReadinessTargetV1,
-    CodeIndexReadinessV1, CodeIndexReadinessWaitReadV1,
+    CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexFreshnessCoverageV1,
+    CodeIndexReadinessTargetV1, CodeIndexReadinessV1, CodeIndexReadinessWaitReadV1,
     CodeIndexSourceOmissionReasonV1 as StatusOmissionReasonV1, CodeIndexStalenessStateV1,
 };
 use tracedecay_contracts::{
@@ -4917,7 +4917,7 @@ async fn first_activation_conflict_retries_once_and_then_seats() {
             && freshness
                 .code_graph_serving
                 .as_ref()
-                .is_some_and(|state| state.is_activated())
+                .is_some_and(CodeGraphServingReadinessV1::is_activated)
         {
             break;
         }
