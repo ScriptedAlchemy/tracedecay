@@ -1415,7 +1415,7 @@ mod tests {
             logical_copy_cluster_id: None,
             logical_copy_evidence_anchor: None,
             evidence_role: EvidenceRole::Primary,
-            source_role: Default::default(),
+            source_role: RetrievalSourceRoleV1::default(),
             retriever,
             retriever_revision: id("retriever.fixture.v1"),
             score_domain: id("score.fixture.v1"),
@@ -1538,7 +1538,7 @@ mod tests {
                 logical_evidence_id: id("evidence.fused"),
                 occurrences: vec![],
                 exact_class: ExactClass::Approximate,
-                source_role: Default::default(),
+                source_role: RetrievalSourceRoleV1::default(),
                 utility_micros: 1,
                 contributions: vec![CandidateContribution {
                     retriever: RetrieverKind::Temporal,

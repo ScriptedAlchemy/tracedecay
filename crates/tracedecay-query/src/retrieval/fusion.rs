@@ -1414,7 +1414,7 @@ fn current_utc_micros() -> Result<UtcMicros, RetrievalError> {
 #[cfg(test)]
 mod attach_same_source_decisions_tests {
     use super::*;
-    use tracedecay_domain::{EvidenceRole, FreshnessCompatibilityV1};
+    use tracedecay_domain::{EvidenceRole, FreshnessCompatibilityV1, RetrievalSourceRoleV1};
 
     use tracedecay_domain::test_fixtures::id;
 
@@ -1458,7 +1458,7 @@ mod attach_same_source_decisions_tests {
             logical_evidence_id: id::<LogicalEvidenceId>("logical.fixture"),
             occurrences,
             exact_class: ExactClass::Approximate,
-            source_role: Default::default(),
+            source_role: RetrievalSourceRoleV1::default(),
             utility_micros: 0,
             contributions: Vec::new(),
             freshness: Vec::new(),

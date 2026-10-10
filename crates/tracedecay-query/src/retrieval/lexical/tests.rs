@@ -310,7 +310,7 @@ fn lexical_pair(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
-        source_role: Default::default(),
+        source_role: RetrievalSourceRoleV1::default(),
         retriever: RetrieverKind::Lexical,
         retriever_revision: id("retriever.lexical.v1"),
         score_domain: request.score_domain.clone(),
@@ -347,7 +347,7 @@ fn lexical_pair(
         spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
-        source_role: Default::default(),
+        source_role: RetrievalSourceRoleV1::default(),
     };
     (candidate, evidence)
 }

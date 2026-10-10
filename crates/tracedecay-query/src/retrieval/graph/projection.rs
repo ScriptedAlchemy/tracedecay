@@ -9,9 +9,9 @@ use tracedecay_code_index::graph_projection::{
 };
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore,
-    FreshnessCompatibilityV1, LogicalEvidenceId, RetrievalAnchorId, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
-    SourceOccurrenceId, UtcMicros, canonical_sha256,
+    FreshnessCompatibilityV1, LogicalEvidenceId, RetrievalAnchorId, RetrievalSourceRoleV1,
+    RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId,
+    SourceFreshness, SourceOccurrenceId, UtcMicros, canonical_sha256,
 };
 
 use super::{GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1};
@@ -149,7 +149,7 @@ fn project_graph_batch(
             logical_copy_cluster_id: None,
             logical_copy_evidence_anchor: None,
             evidence_role: EvidenceRole::Primary,
-            source_role: Default::default(),
+            source_role: RetrievalSourceRoleV1::default(),
             retriever: RetrieverKind::Graph,
             retriever_revision: retriever_revision.clone(),
             score_domain: score_domain.clone(),
