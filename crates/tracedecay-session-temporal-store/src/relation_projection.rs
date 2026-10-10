@@ -322,31 +322,42 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         // acknowledge rolls back only that item's partial mutation; the
         // per-session apply used to roll its whole transaction back, and a
         // shared commit must not turn that rollback into a committed
-        // applied-without-journal receipt.
+        // applied-without-journal receipt. Savepoint control itself is
+        // transaction-critical: when SAVEPOINT or RELEASE/ROLLBACK TO fails,
+        // the whole transaction rolls back rather than letting any partially
+        // mutated acknowledgement reach the shared commit.
+        use tracing::Instrument as _;
         for index in acknowledge {
-            let outcome = async {
+            if let Err(error) = transaction
+                .execute_batch("SAVEPOINT relation_projection_ack")
+                .await
+            {
                 transaction
-                    .execute_batch("SAVEPOINT relation_projection_ack")
+                    .rollback()
+                    .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
                     .await
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-                let result = super::relation_receipts::acknowledge_relation_receipt(
-                    &transaction,
-                    &projections[index],
-                )
-                .await;
-                let savepoint = if result.is_ok() {
-                    "RELEASE relation_projection_ack"
-                } else {
-                    "ROLLBACK TO relation_projection_ack; RELEASE relation_projection_ack"
-                };
-                transaction
-                    .execute_batch(savepoint)
-                    .await
-                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-                result
+                    .map_err(|rollback| storage(RECONSTRUCT_OPERATION, rollback))?;
+                return Err(storage(RECONSTRUCT_OPERATION, error));
             }
+            let result = super::relation_receipts::acknowledge_relation_receipt(
+                &transaction,
+                &projections[index],
+            )
             .await;
-            if let Err(error) = outcome {
+            let savepoint = if result.is_ok() {
+                "RELEASE relation_projection_ack"
+            } else {
+                "ROLLBACK TO relation_projection_ack; RELEASE relation_projection_ack"
+            };
+            if let Err(error) = transaction.execute_batch(savepoint).await {
+                transaction
+                    .rollback()
+                    .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
+                    .await
+                    .map_err(|rollback| storage(RECONSTRUCT_OPERATION, rollback))?;
+                return Err(storage(RECONSTRUCT_OPERATION, error));
+            }
+            if let Err(error) = result {
                 outcomes[index] = Err(error);
             }
         }

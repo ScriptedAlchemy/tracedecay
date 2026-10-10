@@ -1030,14 +1030,14 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         // The content validators only read: run them on a fresh post-rebuild
         // snapshot so their occurrence and receipt scans ride the reader pool
         // instead of holding the serialized writer lane. The write
-        // transaction below still re-validates receipt, binding, and frontier
-        // atomically and its guarded UPDATEs refuse any row a concurrent
-        // operation settled between this snapshot and the commit.
+        // transaction below re-runs the terminal-progress and frontier
+        // validators atomically with the commit, so the invariants proven on
+        // this snapshot still hold when the guarded writes land.
         let validation_snapshot = self
             .read_snapshot()
             .await
             .map_err(|error| storage(COMPLETE_REFRESH, error))?;
-        let progress = require_exact_terminal_progress(
+        require_exact_terminal_progress(
             &validation_snapshot,
             request.session_id(),
             request.operation_id(),
@@ -1087,6 +1087,26 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             request.session_id(),
             request.operation_id(),
             COMPLETE_REFRESH,
+        )
+        .await?;
+        // A snapshot alone cannot prove the validated progress and frontier
+        // are still current at commit time, so the terminal validators re-run
+        // inside the transaction that writes the finish.
+        let progress = require_exact_terminal_progress(
+            &transaction,
+            request.session_id(),
+            request.operation_id(),
+            request.frontier(),
+            request.coverage(),
+        )
+        .await?;
+        validate_candidate_frontier(
+            &transaction,
+            request.session_id().as_str(),
+            generation_i64(binding.generation, COMPLETE_REFRESH)?,
+            binding.target_frontier,
+            &relation_projection,
+            &execution_control,
         )
         .await?;
         let mut request = request;
