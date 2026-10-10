@@ -993,7 +993,10 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
     }
     // Only the literal `babel <src> -d|--out-dir <out>` form. Extra flags
     // (`--presets env`) would steal the source directory if scanned loosely.
-    let [source, flag, output] = tokens.get(index + 1..)?;
+    let rest = tokens.get(index + 1..)?;
+    let [source, flag, output] = rest else {
+        return None;
+    };
     if !matches!(*flag, "-d" | "--out-dir")
         || source.starts_with('-')
         || output.starts_with('-')
