@@ -284,40 +284,32 @@ pub(super) async fn execute_git_read(
         let project_id = selected_scope.project_id.clone();
         let repository_id = selected_scope.repository_id.clone();
         let worktree_id = selected_scope.worktree_id.clone();
-        let snapshot = match tokio::task::spawn_blocking(move || {
-            capture_exact_snapshot(
+        let snapshot_cancel = request_cancellation.clone();
+        let snapshot_deadline = deadline.clone();
+        let mut worker = tokio::task::spawn_blocking(move || {
+            capture_exact_snapshot_until(
                 &root,
                 project_id,
                 repository_id,
                 worktree_id,
                 input_created_at,
+                &|| snapshot_cancel.is_cancelled() || snapshot_deadline.is_elapsed_at(now_micros()),
             )
-        })
+        });
+        let snapshot = match settle_blocking_git_worker(
+            &mut worker,
+            &request_cancellation,
+            &deadline,
+            &cancellation,
+        )
         .await
         {
             Ok(Ok(snapshot)) => snapshot,
             Ok(Err(error)) => {
                 return application_problem(wire_request_id, map_git_port_problem(error));
             }
-            Err(_) => {
-                return DaemonInvocationResponse::problem(
-                    wire_request_id,
-                    DaemonInvocationProblem::Unavailable,
-                );
-            }
+            Err(problem) => return application_problem(wire_request_id, problem),
         };
-        if cancellation.is_cancelled() {
-            return application_problem(
-                wire_request_id,
-                ApplicationProblem::cancelled_before_admission(),
-            );
-        }
-        if deadline.is_elapsed_at(now_micros()) {
-            return application_problem(
-                wire_request_id,
-                ApplicationProblem::timed_out_before_admission(),
-            );
-        }
         let snapshot_digest = match GitIndexPreviewV1::repository_snapshot_digest(&snapshot) {
             Ok(digest) => digest,
             Err(_) => {
@@ -340,20 +332,25 @@ pub(super) async fn execute_git_read(
         project_root,
         selected_scope.clone(),
     );
-    let outcome = tokio::task::spawn_blocking(move || {
+    let mut worker = tokio::task::spawn_blocking(move || {
         tracedecay_application::git_reads::execute_git_read(
             Some(&authority),
             &selected_scope,
             &read_request,
             &bounds,
         )
-    })
+    });
+    let outcome = match settle_blocking_git_worker(
+        &mut worker,
+        &request_cancellation,
+        &deadline,
+        &cancellation,
+    )
     .await
-    .unwrap_or(
-        tracedecay_application::git_reads::GitReadOutcomeV1::Unavailable {
-            reason: tracedecay_application::git_reads::GitReadUnavailableReasonV1::ReadFailed,
-        },
-    );
+    {
+        Ok(outcome) => outcome,
+        Err(problem) => return application_problem(wire_request_id, problem),
+    };
     let terminal = match owner.current_read_authority(&request.request) {
         Ok(authority) => authority,
         Err(error) => return application_problem(wire_request_id, map_git_port_problem(error)),
@@ -1015,6 +1012,48 @@ fn invalid_git_request() -> ApplicationProblem {
         "git_index.invalid_request",
         "The Git index request is invalid",
     )
+}
+
+async fn settle_blocking_git_worker<T>(
+    worker: &mut tokio::task::JoinHandle<T>,
+    request_cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
+    deadline: &Deadline,
+    cancellation: &CancellationContext,
+) -> Result<T, ApplicationProblem> {
+    let joined = tokio::select! {
+        biased;
+        joined = &mut *worker => joined,
+        () = request_cancellation.cancelled() => {
+            let _ = worker.await;
+            return Err(ApplicationProblem::cancelled_before_admission());
+        }
+        () = sleep_until_deadline(deadline) => {
+            let _ = worker.await;
+            return Err(ApplicationProblem::timed_out_before_admission());
+        }
+    };
+    joined
+        .map_err(|_| {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "git_index.unavailable".to_owned(),
+                message: "The Git index transaction owner is not ready".to_owned(),
+            })
+        })
+        .and_then(|value| {
+            if request_cancellation.is_cancelled() || cancellation.is_cancelled() {
+                Err(ApplicationProblem::cancelled_before_admission())
+            } else if deadline.is_elapsed_at(now_micros()) {
+                Err(ApplicationProblem::timed_out_before_admission())
+            } else {
+                Ok(value)
+            }
+        })
+}
+
+async fn sleep_until_deadline(deadline: &Deadline) {
+    if let Some(remaining) = tracedecay_daemon_protocol::deadline_remaining(deadline) {
+        tokio::time::sleep(remaining).await;
+    }
 }
 
 fn map_git_error(error: GitIndexTransactionApplicationError) -> ApplicationProblem {

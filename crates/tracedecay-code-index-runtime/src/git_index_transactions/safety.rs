@@ -1,6 +1,7 @@
 //! Exact native Git safety evidence and executable-policy classification.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::process::Stdio;
 
 use tracedecay_domain::{GitFileModeV1, GitHeadStateV1, ManifestDigest, canonical_sha256};
@@ -18,14 +19,24 @@ impl FixedGitIndexRunner {
         skip_all
     )]
     pub fn tracked_worktree_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
-        let head_paths = match self.head_state()? {
-            GitHeadStateV1::Unborn { .. } => Vec::new(),
-            GitHeadStateV1::Attached { .. } | GitHeadStateV1::Detached { .. } => {
-                self.run_git("ls-tree", &["ls-tree", "-r", "-z", "--name-only", "HEAD"])?
-                    .stdout
-            }
-        };
-        let mut paths = nul_paths(&head_paths);
+        self.tracked_worktree_digest_until(&|| false)
+    }
+
+    /// Bind worktree identity without reading every clean HEAD blob.
+    ///
+    /// The path domain is still HEAD ∪ index ∪ non-ignored untracked names, so
+    /// staging an already-bound path does not change the digest. Clean HEAD
+    /// paths reuse the tree object id; only dirty, added, or untracked paths
+    /// read worktree bytes. `cancelled` is checked between paths so a hunks
+    /// deadline can drop the real index lock instead of finishing a full walk.
+    pub fn tracked_worktree_digest_until(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<ManifestDigest, NativeGitIndexError> {
+        check_cancelled(cancelled)?;
+        let (has_head, head_entries) = self.head_tree_entries()?;
+        check_cancelled(cancelled)?;
+        let mut paths = head_entries.keys().cloned().collect::<BTreeSet<_>>();
         let index = self.run_git("ls-files", &["ls-files", "--stage", "-z"])?;
         for entry in index
             .stdout
@@ -39,43 +50,77 @@ impl FixedGitIndexRunner {
         // publication. Including it in the same manifest before and after
         // staging binds its bytes without making the digest index-relative.
         paths.extend(self.other_paths(false)?);
+        check_cancelled(cancelled)?;
+        let dirty = self.dirty_worktree_paths(has_head)?;
 
         let mut manifest = Vec::new();
         for path in paths {
-            let path =
+            check_cancelled(cancelled)?;
+            let path_text =
                 std::str::from_utf8(&path).map_err(|_| NativeGitIndexError::MalformedOutput {
                     operation: "ls-tree",
                 })?;
-            let absolute = self.repository_root.join(path);
-            let entry = match std::fs::symlink_metadata(&absolute) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    let target = std::fs::read_link(&absolute)
-                        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-                    (
-                        "symlink",
-                        target.to_string_lossy().into_owned().into_bytes(),
-                    )
+            let entry = if !dirty.contains(&path)
+                && let Some(head) = head_entries.get(&path)
+            {
+                if head.kind == "unsupported" {
+                    ("unsupported", Vec::new())
+                } else {
+                    (head.kind, head.oid.clone())
                 }
-                Ok(metadata) if metadata.is_file() => (
-                    if worktree_mode(&absolute)
-                        .is_some_and(|mode| mode.as_str() == GitFileModeV1::EXECUTABLE)
-                    {
-                        "executable"
-                    } else {
-                        "file"
-                    },
-                    std::fs::read(&absolute)
-                        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?,
-                ),
-                Ok(_) => ("unsupported", Vec::new()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    ("absent", Vec::new())
-                }
-                Err(error) => return Err(NativeGitIndexError::Io(error.to_string())),
+            } else {
+                worktree_manifest_bytes(&self.repository_root.join(path_text))?
             };
-            manifest.push((path.to_owned(), entry.0, entry.1));
+            manifest.push((path_text.to_owned(), entry.0, entry.1));
         }
         canonical_sha256(&manifest).map_err(Into::into)
+    }
+
+    fn head_tree_entries(
+        &self,
+    ) -> Result<(bool, BTreeMap<Vec<u8>, HeadTreeEntry>), NativeGitIndexError> {
+        match self.head_state()? {
+            GitHeadStateV1::Unborn { .. } => Ok((false, BTreeMap::new())),
+            GitHeadStateV1::Attached { .. } | GitHeadStateV1::Detached { .. } => {
+                let output = self.run_git("ls-tree", &["ls-tree", "-r", "-z", "HEAD"])?;
+                let mut entries = BTreeMap::new();
+                for raw in output
+                    .stdout
+                    .split(|byte| *byte == 0)
+                    .filter(|entry| !entry.is_empty())
+                {
+                    let (path, entry) = parse_ls_tree_entry(raw)?;
+                    entries.insert(path, entry);
+                }
+                Ok((true, entries))
+            }
+        }
+    }
+
+    fn dirty_worktree_paths(
+        &self,
+        has_head: bool,
+    ) -> Result<BTreeSet<Vec<u8>>, NativeGitIndexError> {
+        if !has_head {
+            return Ok(BTreeSet::new());
+        }
+        Ok(nul_paths(
+            &self
+                .run_git(
+                    "diff",
+                    &[
+                        "diff",
+                        "-z",
+                        "--name-only",
+                        "--no-renames",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--no-color",
+                        "HEAD",
+                    ],
+                )?
+                .stdout,
+        ))
     }
 
     pub fn untracked_name_digest(&self) -> Result<Option<ManifestDigest>, NativeGitIndexError> {
@@ -320,6 +365,82 @@ impl FixedGitIndexRunner {
     }
 }
 
+struct HeadTreeEntry {
+    kind: &'static str,
+    oid: Vec<u8>,
+}
+
+fn check_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), NativeGitIndexError> {
+    if cancelled() {
+        Err(NativeGitIndexError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn worktree_manifest_bytes(
+    absolute: &Path,
+) -> Result<(&'static str, Vec<u8>), NativeGitIndexError> {
+    match std::fs::symlink_metadata(absolute) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let target = std::fs::read_link(absolute)
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+            Ok((
+                "symlink",
+                target.to_string_lossy().into_owned().into_bytes(),
+            ))
+        }
+        Ok(metadata) if metadata.is_file() => Ok((
+            if worktree_mode(absolute)
+                .is_some_and(|mode| mode.as_str() == GitFileModeV1::EXECUTABLE)
+            {
+                "executable"
+            } else {
+                "file"
+            },
+            std::fs::read(absolute).map_err(|error| NativeGitIndexError::Io(error.to_string()))?,
+        )),
+        Ok(_) => Ok(("unsupported", Vec::new())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(("absent", Vec::new())),
+        Err(error) => Err(NativeGitIndexError::Io(error.to_string())),
+    }
+}
+
+fn parse_ls_tree_entry(entry: &[u8]) -> Result<(Vec<u8>, HeadTreeEntry), NativeGitIndexError> {
+    let delimiter = entry.iter().position(|byte| *byte == b'\t').ok_or(
+        NativeGitIndexError::MalformedOutput {
+            operation: "ls-tree",
+        },
+    )?;
+    let (metadata, path_with_delimiter) = entry.split_at(delimiter);
+    let Some(path) = path_with_delimiter.get(1..).filter(|path| !path.is_empty()) else {
+        return Err(NativeGitIndexError::MalformedOutput {
+            operation: "ls-tree",
+        });
+    };
+    let mut fields = metadata.split(|byte| *byte == b' ');
+    let mode = fields.next().unwrap_or_default();
+    let _object_type = fields.next();
+    let Some(oid) = fields.next().filter(|oid| !oid.is_empty()) else {
+        return Err(NativeGitIndexError::MalformedOutput {
+            operation: "ls-tree",
+        });
+    };
+    let kind = match mode {
+        b"100644" => "file",
+        b"100755" => "executable",
+        b"120000" => "symlink",
+        _ => "unsupported",
+    };
+    Ok((
+        path.to_vec(),
+        HeadTreeEntry {
+            kind,
+            oid: oid.to_vec(),
+        },
+    ))
+}
+
 /// The subsection of a named-driver configuration key, or `None` when the key
 /// names no driver. Git subsection names may themselves contain `.`, so the
 /// name is whatever the fixed prefix and suffix leave behind.
@@ -373,7 +494,23 @@ fn index_entry_path(entry: &[u8]) -> Result<&[u8], NativeGitIndexError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NativeGitIndexError, index_entry_path};
+    use super::{NativeGitIndexError, index_entry_path, parse_ls_tree_entry};
+
+    #[test]
+    fn ls_tree_entry_binds_mode_oid_and_path() {
+        let (path, entry) =
+            parse_ls_tree_entry(b"100644 blob deadbeefcafebabe\tcrates/app.rs").expect("entry");
+        assert_eq!(path, b"crates/app.rs");
+        assert_eq!(entry.kind, "file");
+        assert_eq!(entry.oid, b"deadbeefcafebabe");
+        let (path, entry) = parse_ls_tree_entry(b"100755 blob abc\tbin/tool").expect("executable");
+        assert_eq!(path, b"bin/tool");
+        assert_eq!(entry.kind, "executable");
+        let (path, entry) = parse_ls_tree_entry(b"160000 commit def\tvendor/lib").expect("gitlink");
+        assert_eq!(path, b"vendor/lib");
+        assert_eq!(entry.kind, "unsupported");
+        assert!(parse_ls_tree_entry(b"100644 blob deadbeef").is_err());
+    }
 
     #[test]
     fn index_entry_path_rejects_missing_or_empty_path_bytes() {

@@ -624,3 +624,94 @@ fn untracked_and_ignored_name_digests_bind_namespace_collisions() {
         runner.ignored_name_digest().expect("second ignored names")
     );
 }
+
+fn committed_file(name: &str, contents: &[u8]) -> (tempfile::TempDir, FixedGitIndexRunner) {
+    let directory = tempdir().expect("temporary repository");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init starts")
+            .success()
+    );
+    fs::write(directory.path().join(name), contents).expect("tracked file");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["add", "--", name])
+            .status()
+            .expect("git add starts")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args([
+                "-c",
+                "user.name=TraceDecay",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ])
+            .status()
+            .expect("git commit starts")
+            .success()
+    );
+    let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
+    (directory, runner)
+}
+
+#[test]
+fn tracked_worktree_digest_honors_cancellation_before_filesystem_walk() {
+    let (_directory, runner) = committed_file("tracked.txt", b"before\n");
+    assert!(
+        matches!(
+            runner.tracked_worktree_digest_until(&|| true),
+            Err(NativeGitIndexError::Cancelled)
+        ),
+        "a cancelled digest must fail closed instead of minting identity"
+    );
+    runner
+        .acquire_index_lock()
+        .expect("cancellation must not leave the real index lock held");
+}
+
+#[cfg(unix)]
+#[test]
+fn tracked_worktree_digest_does_not_read_clean_head_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (directory, runner) = committed_file("secret.txt", b"must-not-read\n");
+    let path = directory.path().join("secret.txt");
+    let original = fs::metadata(&path).expect("metadata").permissions();
+    let mut locked = original.clone();
+    locked.set_mode(0o000);
+    fs::set_permissions(&path, locked).expect("deny worktree reads");
+    let digest = runner.tracked_worktree_digest();
+    fs::set_permissions(&path, original).expect("restore worktree reads");
+    digest.expect("clean HEAD identity must not read worktree bytes");
+}
+
+#[cfg(unix)]
+#[test]
+fn tracked_worktree_digest_still_reads_dirty_worktree_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (directory, runner) = committed_file("secret.txt", b"before\n");
+    let path = directory.path().join("secret.txt");
+    fs::write(&path, b"after\n").expect("dirty worktree");
+    let original = fs::metadata(&path).expect("metadata").permissions();
+    let mut locked = original.clone();
+    locked.set_mode(0o000);
+    fs::set_permissions(&path, locked).expect("deny dirty reads");
+    let digest = runner.tracked_worktree_digest();
+    fs::set_permissions(&path, original).expect("restore dirty reads");
+    assert!(
+        matches!(digest, Err(NativeGitIndexError::Io(_))),
+        "a dirty path must still bind worktree bytes and fail closed when unreadable"
+    );
+}

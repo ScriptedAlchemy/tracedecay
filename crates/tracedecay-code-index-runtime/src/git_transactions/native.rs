@@ -127,6 +127,24 @@ impl NativeGitIndexPreviewAssembler {
         runner: &FixedGitIndexRunner,
         lock: &NativeIndexLock,
     ) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
+        self.capture_snapshot_until(template, runner, lock, &|| false)
+    }
+
+    fn capture_snapshot_until(
+        &self,
+        template: &RepositoryStateSnapshotV1,
+        runner: &FixedGitIndexRunner,
+        lock: &NativeIndexLock,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
+        let checkpoint = || {
+            if cancelled() {
+                Err(map_native_error(NativeGitIndexError::Cancelled))
+            } else {
+                Ok(())
+            }
+        };
+        checkpoint()?;
         if template.project_id != self.project_id
             || template.repository_id != self.repository_id
             || template.worktree_id.as_ref() != Some(&self.worktree_id)
@@ -140,6 +158,7 @@ impl NativeGitIndexPreviewAssembler {
             .read_authority()
             .status()
             .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
+        checkpoint()?;
         let index_bytes = runner.index_bytes().map_err(map_native_error)?;
         let index_checksum = canonical_sha256(&index_bytes)
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
@@ -152,8 +171,12 @@ impl NativeGitIndexPreviewAssembler {
             .iter()
             .filter(|entry| matches!(entry, GitStatusEntryV1::Tracked(_)))
             .collect::<Vec<_>>();
-        let tracked_digest = runner.tracked_worktree_digest().map_err(map_native_error)?;
+        let tracked_digest = runner
+            .tracked_worktree_digest_until(cancelled)
+            .map_err(map_native_error)?;
+        checkpoint()?;
         let untracked_name_digest = runner.untracked_name_digest().map_err(map_native_error)?;
+        checkpoint()?;
         let ignored_collision_digest = runner.ignored_name_digest().map_err(map_native_error)?;
 
         let index_state = if status.coverage.records(GitDegradationV1::SplitIndex) {
@@ -187,8 +210,11 @@ impl NativeGitIndexPreviewAssembler {
             _ => RepositoryWorkingTreeStateV1::Unreadable,
         };
 
+        checkpoint()?;
         let configuration_digest = runner.configuration_digest().map_err(map_native_error)?;
+        checkpoint()?;
         let attributes_digest = runner.attributes_digest().map_err(map_native_error)?;
+        checkpoint()?;
         let head = runner.head_state().map_err(map_native_error)?;
         RepositoryStateSnapshotV1::new(
             self.project_id.clone(),
@@ -1237,6 +1263,7 @@ fn map_native_error(error: NativeGitIndexError) -> GitIndexTransactionPortError 
         NativeGitIndexError::IndexLocked | NativeGitIndexError::PartialHunkSelectionUnsupported => {
             GitIndexTransactionPortError::Unsupported
         }
+        NativeGitIndexError::Cancelled => GitIndexTransactionPortError::NativeFailure,
         NativeGitIndexError::PatchDoesNotMatchHunk
         | NativeGitIndexError::CandidateTreeMismatch
         | NativeGitIndexError::StaleRepositoryState => GitIndexTransactionPortError::StalePreview,
@@ -1272,6 +1299,28 @@ pub fn capture_exact_snapshot(
     worktree_id: WorktreeId,
     captured_at: UtcMicros,
 ) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
+    capture_exact_snapshot_until(
+        repository_root,
+        project_id,
+        repository_id,
+        worktree_id,
+        captured_at,
+        &|| false,
+    )
+}
+
+#[tracing::instrument(name = "daemon.git.tx.snapshot_until", level = "trace", skip_all)]
+pub fn capture_exact_snapshot_until(
+    repository_root: &std::path::Path,
+    project_id: ProjectId,
+    repository_id: RepositoryId,
+    worktree_id: WorktreeId,
+    captured_at: UtcMicros,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
+    if cancelled() {
+        return Err(map_native_error(NativeGitIndexError::Cancelled));
+    }
     // Same canonical root the daemon owner mounts; alias paths must not mint a
     // divergent snapshot that later fails exact preview CAS.
     let repository_root = super::canonicalize_repository_root(repository_root)
@@ -1283,11 +1332,20 @@ pub fn capture_exact_snapshot(
         worktree_id,
     );
     let runner = FixedGitIndexRunner::new(&repository_root).map_err(map_native_error)?;
+    if cancelled() {
+        return Err(map_native_error(NativeGitIndexError::Cancelled));
+    }
     let status = assembler
         .read_authority()
         .status()
         .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
+    if cancelled() {
+        return Err(map_native_error(NativeGitIndexError::Cancelled));
+    }
     let lock = runner.acquire_index_lock().map_err(map_native_error)?;
+    if cancelled() {
+        return Err(map_native_error(NativeGitIndexError::Cancelled));
+    }
     let tree = runner
         .index_tree_under_lock(&lock)
         .map_err(map_native_error)?;
@@ -1322,7 +1380,7 @@ pub fn capture_exact_snapshot(
         tracedecay_domain::GitCoverageV1::complete(),
     )
     .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
-    assembler.capture_snapshot(&placeholder, &runner, &lock)
+    assembler.capture_snapshot_until(&placeholder, &runner, &lock, cancelled)
 }
 
 #[cfg(any(test, feature = "test-transport"))]
@@ -1393,6 +1451,28 @@ mod tests {
             .expect("Git output is UTF-8")
             .trim()
             .to_owned()
+    }
+
+    #[test]
+    fn cancelled_snapshot_releases_the_index_lock() {
+        let (directory, _assembler, runner) = repository_fixture();
+        assert!(
+            matches!(
+                capture_exact_snapshot_until(
+                    directory.path(),
+                    ProjectId::new("project.fixture").expect("project id"),
+                    RepositoryId::new("repository.fixture").expect("repository id"),
+                    WorktreeId::new("worktree.fixture").expect("worktree id"),
+                    UtcMicros(1),
+                    &|| true,
+                ),
+                Err(GitIndexTransactionPortError::NativeFailure)
+            ),
+            "cancellation must fail closed instead of minting a snapshot"
+        );
+        runner
+            .acquire_index_lock()
+            .expect("cancelled snapshot must drop the real index lock");
     }
 
     fn repository_fixture() -> (TempDir, NativeGitIndexPreviewAssembler, FixedGitIndexRunner) {

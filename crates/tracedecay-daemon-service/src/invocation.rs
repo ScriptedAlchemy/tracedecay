@@ -91,7 +91,7 @@ use tracedecay_code_index_runtime::code_index_branch_diff::{
 };
 use tracedecay_code_index_runtime::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
-    capture_exact_snapshot,
+    capture_exact_snapshot_until,
 };
 use tracedecay_configuration::{
     ConfigurationMutationGrantAuthority, ConfigurationMutationGrantAuthorityError,

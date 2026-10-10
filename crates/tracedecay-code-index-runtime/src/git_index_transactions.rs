@@ -43,6 +43,8 @@ pub enum NativeGitIndexError {
     RepositoryUnavailable(String),
     #[error("Git index is locked")]
     IndexLocked,
+    #[error("native Git snapshot was cancelled")]
+    Cancelled,
     #[error("native Git output was malformed for {operation}")]
     MalformedOutput { operation: &'static str },
     #[error("native Git {operation} failed with status {status}")]

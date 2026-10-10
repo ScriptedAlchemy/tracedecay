@@ -43,6 +43,7 @@ pub use journal::{DurableGitIndexJournal, GitIndexJournalError};
 pub use native::capture_exact_snapshot_for_test;
 pub use native::{
     DaemonProjectGitIndexPreviewAssembler, FixedDaemonGitIndexExecutor, capture_exact_snapshot,
+    capture_exact_snapshot_until,
 };
 pub use owner::{
     DaemonGitAuthorityStateV1, DaemonGitIndexTransactionServiceRegistry, DaemonGitInvocationOwner,
