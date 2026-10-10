@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
@@ -238,11 +238,13 @@ pub struct StoreObservabilityRegistryV1 {
     /// Each holds its store's lease until the drain settles, so shutdown
     /// joins them before the stores close.
     retirement_drains: TaskTracker,
-    /// Exact store paths whose drain task still holds a counted client.
-    /// `finish_retirement(Settled)` removes the registry entry before that
-    /// task drops `core`; capacity reuse must not treat the path as absent
-    /// until this set releases it.
-    draining_paths: Arc<StdMutex<BTreeSet<PathBuf>>>,
+    /// Exact store paths whose drain still holds a counted client, counted
+    /// per drain: same-path drains overlap legitimately, and each releases
+    /// only its own hold when its `core` drops, so the path only disappears
+    /// after the last live drain released its client. `finish_retirement`
+    /// removes the registry entry before that drop; capacity reuse must not
+    /// treat the path as absent until this map releases it.
+    draining_paths: Arc<StdMutex<BTreeMap<PathBuf, usize>>>,
     /// Wakes capacity retirement after a store entry leaves `Stopping`.
     settled: Arc<Notify>,
 }
@@ -424,6 +426,28 @@ impl StoreObservabilityRegistryV1 {
         Ok(true)
     }
 
+    /// Adds one drain's hold on `path`; each live drain releases only its own
+    /// hold so overlapping same-path drains cannot drop the shared marker
+    /// early.
+    fn hold_draining_path(&self, path: &Path) {
+        if let Ok(mut paths) = self.draining_paths.lock() {
+            *paths.entry(path.to_path_buf()).or_insert(0) += 1;
+        }
+    }
+
+    /// Releases one drain's hold on `path`; the marker stays while other
+    /// same-path drains still hold their counted store client.
+    fn release_draining_path(&self, path: &Path) {
+        if let Ok(mut paths) = self.draining_paths.lock() {
+            match paths.get_mut(path) {
+                Some(holds) if *holds > 1 => *holds -= 1,
+                _ => {
+                    paths.remove(path);
+                }
+            }
+        }
+    }
+
     /// Runs the core drain in the background and settles the retirement with
     /// the drain's confirmed outcome.
     fn spawn_retirement_drain(
@@ -433,9 +457,7 @@ impl StoreObservabilityRegistryV1 {
         writer_only: bool,
     ) {
         let path = core.database.db_path().to_path_buf();
-        if let Ok(mut paths) = self.draining_paths.lock() {
-            paths.insert(path.clone());
-        }
+        self.hold_draining_path(&path);
         let registry = self.clone();
         self.retirement_drains.spawn_on(
             async move {
@@ -460,9 +482,7 @@ impl StoreObservabilityRegistryV1 {
                 // reuse waits on `draining_paths` so the counted store client
                 // is gone before session Store retirement.
                 drop(core);
-                if let Ok(mut paths) = registry.draining_paths.lock() {
-                    paths.remove(&path);
-                }
+                registry.release_draining_path(&path);
                 registry.settled.notify_waiters();
             },
             runtime,
@@ -525,8 +545,7 @@ impl StoreObservabilityRegistryV1 {
     fn drain_holds(&self, database_path: &Path) -> bool {
         self.draining_paths
             .lock()
-            .map(|paths| paths.contains(database_path))
-            .unwrap_or(true)
+            .map_or(true, |paths| paths.contains_key(database_path))
     }
 
     /// Finishes a capacity-retired store's observability drain, including the
@@ -535,7 +554,7 @@ impl StoreObservabilityRegistryV1 {
     /// Daemon shutdown joins every background drain by closing the tracker.
     /// A single-project capacity reuse cannot close that tracker: other
     /// projects still publish. This waits for the exact store path to leave
-    /// the registry so its counted ProjectSessions lease is dropped before
+    /// the registry so its counted `ProjectSessions` lease is dropped before
     /// Store retirement.
     #[tracing::instrument(
         name = "daemon.service.project_runtime.observability_settle_store",
@@ -755,8 +774,17 @@ impl RegisteredObservabilityProducerV1 {
         if !registry.begin_retirement(&core, StoreObservabilityDrainV1::InFlight)? {
             return Ok(());
         }
+        // The inline drain holds the counted store client until this `Arc`
+        // drops after the terminal state lands, exactly like a spawned drain:
+        // the same path hold keeps a concurrent capacity settle from retiring
+        // the store underneath it.
+        let path = core.database.db_path().to_path_buf();
+        registry.hold_draining_path(&path);
         let (result, settled) = core.shutdown().await;
         let retirement = registry.finish_retirement(&core, settled);
+        drop(core);
+        registry.release_draining_path(&path);
+        registry.settled.notify_waiters();
         match result {
             Ok(()) => retirement,
             Err(error) => {
