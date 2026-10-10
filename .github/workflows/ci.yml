@@ -444,9 +444,8 @@ jobs:
         id: bazel
         with:
           cache-key: ci-linux-test-v2
-          # Bridge: the orphan 6.9 GiB workspace-test entry still holds warm
-          # rustc outputs until root-b populates v2; never save that prefix.
-          extra-restore-keys: ci-linux-workspace-test,ci-linux-test
+          # Prefer v2; keep legacy prefixes as restore fallbacks if still present.
+          extra-restore-keys: ci-linux-test,ci-linux-workspace-test
           test-tools: "true"
 
       # Root suites exercise latency-sensitive daemon journeys. Finish their
