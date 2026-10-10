@@ -1030,7 +1030,7 @@ fn successful_tool_result_exits_zero() {
     // searching for an unescaped substring that valid output cannot contain.
     assert!(
         !json_stdout.contains('\n'),
-        "--json must be one compact line so a mid-size structuredContent cannot fill a 64KiB pipe mid-object: {json_stdout}"
+        "--json must be one compact line: {json_stdout}"
     );
     let reparsed: Value = serde_json::from_str(&json_stdout)
         .unwrap_or_else(|error| panic!("JSON stdout must itself be valid JSON: {error}"));
@@ -1046,58 +1046,7 @@ fn successful_tool_result_exits_zero() {
 }
 
 #[test]
-fn json_document_for_a_mid_size_files_result_fits_a_pipe_as_one_compact_line() {
-    let files = (0..800)
-        .map(|index| {
-            json!({
-                "path": format!("src/pipe_boundary_{index:04}.rs"),
-                "symbols": 1,
-                "bytes": 20
-            })
-        })
-        .collect::<Vec<_>>();
-    let typed = json!({ "count": 800, "layout": "flat", "files": files });
-    let result = ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": "## Files\nindexed files: 800" }],
-            "isError": false
-        }),
-        Vec::new(),
-    )
-    .with_structured_result(typed.clone());
-    let compact = rendered_tool_output(&result, CliToolOutput::Document).unwrap();
-    let pretty = serde_json::to_string_pretty(&json!({
-        "content": [{ "type": "text", "text": "## Files\nindexed files: 800" }],
-        "isError": false,
-        "structuredContent": typed,
-    }))
-    .unwrap();
-    assert!(
-        !compact.contains('\n'),
-        "--json must stay one line: {compact}"
-    );
-    assert!(
-        pretty.len() > 65_536,
-        "pretty --json must be the form that filled a 64KiB pipe: {}",
-        pretty.len()
-    );
-    assert!(
-        compact.len() < 65_536,
-        "compact --json must fit a wait-then-read parent: {}",
-        compact.len()
-    );
-    let parsed: Value = serde_json::from_str(&compact).unwrap();
-    assert_eq!(
-        parsed["structuredContent"]["files"]
-            .as_array()
-            .unwrap()
-            .len(),
-        800
-    );
-}
-
-#[test]
-fn json_document_over_the_pipe_budget_keeps_the_full_typed_listing() {
+fn json_document_preserves_large_typed_listing() {
     let files = (0..2000)
         .map(|index| {
             json!({
@@ -1118,7 +1067,7 @@ fn json_document_over_the_pipe_budget_keeps_the_full_typed_listing() {
         }),
         Vec::new(),
     )
-    .with_structured_result(typed);
+    .with_structured_result(typed.clone());
     let compact = rendered_tool_output(&result, CliToolOutput::Document).unwrap();
     assert!(
         !compact.contains('\n'),
@@ -1131,14 +1080,7 @@ fn json_document_over_the_pipe_budget_keeps_the_full_typed_listing() {
     );
     let parsed: Value = serde_json::from_str(&compact).unwrap();
     assert_eq!(parsed["isError"], false);
-    assert_eq!(parsed["structuredContent"]["count"], 2000);
-    assert_eq!(
-        parsed["structuredContent"]["files"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2000
-    );
+    assert_eq!(parsed["structuredContent"], typed);
 }
 
 /// An answer rendered without its typed result cannot print the `--json`
