@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+* **search:** keep name-whitelisted lexical routes (preferred-symbol and name-filtered phrase/proximity reads) scoring undocumented symbols instead of dropping every match
 * **search:** keep own-symbol definition priority from #3356 and recover remaining labeled direct retrieval needs by treating a short alias as a definition when every term is a name subtoken, scoring name fields on longer natural-language queries only when rustdoc also matches, and weighting that rustdoc above a one-token signature parameter ([#3353](https://github.com/ScriptedAlchemy/tracedecay/issues/3353))
 * **http:** preserve the original timeout when resuming interrupted socket waits
 * **callers:** require tuple-constructor evidence before treating a Rust struct as a callee, including imported and qualified calls

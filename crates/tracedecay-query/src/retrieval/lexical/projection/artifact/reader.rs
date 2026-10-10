@@ -2128,6 +2128,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 &phrase_frequencies,
                 &stats,
                 frequencies,
+                &request.field_filters,
             );
             let ranking =
                 admitted_score_micros(&score, &request.field_filters)?.ok_or_else(|| {
@@ -2446,8 +2447,15 @@ impl<'a> ArtifactQueryV1<'a> {
                         proximity_tfs,
                         trimmed_normalized_len: preface.trimmed_normalized_len,
                     };
-                    let score =
-                        self.score_draft(&draft, prepared, fuzzy, phrase_frequencies, stats, false);
+                    let score = self.score_draft(
+                        &draft,
+                        prepared,
+                        fuzzy,
+                        phrase_frequencies,
+                        stats,
+                        false,
+                        filters,
+                    );
                     let Some(upper) = admitted_score_micros(&score, filters)? else {
                         continue;
                     };
@@ -2494,6 +2502,7 @@ impl<'a> ArtifactQueryV1<'a> {
                             phrase_frequencies,
                             stats,
                             &draft.frequencies,
+                            filters,
                         );
                         admitted_score_micros(&score, filters)?.ok_or_else(|| {
                             RetrievalPortError::Contract(
@@ -2530,6 +2539,7 @@ impl<'a> ArtifactQueryV1<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn score_draft(
         &self,
         draft: &LexicalDraftV1,
@@ -2538,11 +2548,13 @@ impl<'a> ArtifactQueryV1<'a> {
         phrase_frequencies: &BTreeMap<String, usize>,
         stats: &LexicalStatsCacheV1,
         echo_penalty: bool,
+        field_filters: &[LexicalFieldFilterV1],
     ) -> LexicalRowScoreV1 {
         score_lexical_row(
             &draft.field_lengths,
             &[],
             prepared,
+            field_filters,
             fuzzy,
             phrase_frequencies,
             |field, term| term_frequency(&draft.frequencies, field, term),
@@ -2950,6 +2962,7 @@ impl<'a> ArtifactQueryV1<'a> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn score_row(
         &self,
         row: &ArtifactRowV1,
@@ -2958,6 +2971,7 @@ impl<'a> ArtifactQueryV1<'a> {
         phrase_frequencies: &BTreeMap<String, usize>,
         stats: &LexicalStatsCacheV1,
         frequencies: &LexicalTermFrequenciesV1,
+        field_filters: &[LexicalFieldFilterV1],
     ) -> LexicalRowScoreV1 {
         crate::observe::measure_frequent("query.lane.lexical.score_row", || {
             // Phrase and proximity scoring asks one (field, term) count at a
@@ -2982,6 +2996,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 row.field_lengths(),
                 &row.exact_terms,
                 prepared,
+                field_filters,
                 fuzzy,
                 phrase_frequencies,
                 |field, term| term_frequency(frequencies, field, term),
