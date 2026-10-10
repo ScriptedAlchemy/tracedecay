@@ -1038,7 +1038,7 @@ async fn cancellation_at_completion_precommit_rolls_back_and_the_retry_completes
     // completion's checkpoint count so cancellation fires on the pre-commit
     // checkpoint after activation and the terminal receipt. The measured
     // count includes identity-index cancellation polls during relation load.
-    const COMPLETION_PRECOMMIT_WORK_LIMIT: usize = 89;
+    const COMPLETION_PRECOMMIT_WORK_LIMIT: usize = 82;
 
     let (_successful_tmp, successful_runtime, successful_request, _) =
         ready_single_observation_completion("session.projector.completion-meter").await;

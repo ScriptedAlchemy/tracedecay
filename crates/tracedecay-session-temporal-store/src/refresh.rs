@@ -1039,38 +1039,19 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         )
         .await?;
 
-        // The content validators only read: run them on a fresh post-rebuild
-        // snapshot so their occurrence and receipt scans ride the reader pool
-        // instead of holding the serialized writer lane. The write
-        // transaction below re-runs the terminal-progress and frontier
-        // validators atomically with the commit, so the invariants proven on
-        // this snapshot still hold when the guarded writes land.
+        // The final-receipt scan only reads, so it rides the reader pool
+        // instead of the serialized writer lane. The write transaction below
+        // re-proves terminal progress and the candidate frontier, which pin
+        // the batches this receipt covers, atomically with the commit.
         let validation_snapshot = self
             .read_snapshot()
             .await
             .map_err(|error| storage(COMPLETE_REFRESH, error))?;
-        require_exact_terminal_progress(
-            &validation_snapshot,
-            request.session_id(),
-            request.operation_id(),
-            request.frontier(),
-            request.coverage(),
-        )
-        .await?;
         validate_final_projection_receipt(
             &validation_snapshot,
             request.session_id(),
             binding.generation,
             &binding.watermarks,
-            &relation_projection,
-            &execution_control,
-        )
-        .await?;
-        validate_candidate_frontier(
-            &validation_snapshot,
-            request.session_id().as_str(),
-            generation_i64(binding.generation, COMPLETE_REFRESH)?,
-            binding.target_frontier,
             &relation_projection,
             &execution_control,
         )
@@ -1101,9 +1082,9 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             COMPLETE_REFRESH,
         )
         .await?;
-        // A snapshot alone cannot prove the validated progress and frontier
-        // are still current at commit time, so the terminal validators re-run
-        // inside the transaction that writes the finish.
+        // Terminal progress and the candidate frontier must hold at commit
+        // time, so they are proven inside the transaction that writes the
+        // finish rather than on the snapshot above.
         let progress = require_exact_terminal_progress(
             &transaction,
             request.session_id(),
