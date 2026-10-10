@@ -73,6 +73,32 @@ fn caller_names(evidence: &Value) -> Vec<String> {
     names
 }
 
+#[tokio::test]
+async fn callers_return_rust_associated_owner_type_sites() {
+    let fixture = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("src/lib.rs"),
+            "pub struct Factory<T>(core::marker::PhantomData<T>);\n\
+             impl<T> Factory<T> { pub fn new() -> Self { Self(core::marker::PhantomData) } }\n\
+             pub fn make() { Factory::<fn() -> u8>::new(); }\n",
+        )
+        .unwrap();
+    })
+    .await;
+    let evidence = callers_of(&fixture, "src/lib.rs::Factory").await;
+    assert!(
+        caller_names(&evidence).contains(&"make".to_owned()),
+        "{evidence:#}"
+    );
+    assert_eq!(caller_files(&evidence), ["src/lib.rs"]);
+    assert_eq!(
+        evidence["coverage"]["completeness"], "complete",
+        "{evidence:#}"
+    );
+    shutdown_graph_fixture(fixture).await;
+}
+
 /// A TypeScript class imported only as a type still has callers: the methods
 /// that name it. An empty complete page here is the rspack `Compiler` bug.
 #[tokio::test]

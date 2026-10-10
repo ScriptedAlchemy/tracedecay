@@ -718,9 +718,16 @@ fn assemble() {
         names.contains(&"p.run".to_owned()) && names.contains(&"Factory::new".to_owned()),
         "receiver-dotted and associated-function forms remain: {names:?}"
     );
-    assert!(
-        names.contains(&"Factory".to_owned()),
-        "Factory::new must also name the owner type so callers of the struct stay non-empty: {names:?}"
+    let owners = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| {
+            reference.reference_kind == EdgeKind::TypeOf && reference.reference_name == "Factory"
+        })
+        .count();
+    assert_eq!(
+        owners, 3,
+        "each associated invocation retains its owner type"
     );
 }
 
@@ -738,14 +745,101 @@ fn assemble() {
 "#;
     let result = RustExtractor.extract_artifact("factory.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let names = call_names(&result, "assemble");
-    assert!(
-        names.contains(&"Factory".to_owned()),
-        "Factory::<u32>::new must name the bare owner type, not `Factory::<u32>`: {names:?}"
+    assert_eq!(call_names(&result, "assemble"), ["Factory::new"]);
+    let owner = result
+        .unresolved_refs
+        .iter()
+        .find(|reference| {
+            reference.reference_name == "Factory" && reference.reference_kind == EdgeKind::TypeOf
+        })
+        .expect("associated owner type evidence");
+    assert_eq!(owner.reference_kind, EdgeKind::TypeOf);
+    assert_eq!(owner.argument_count, None);
+}
+
+#[test]
+fn rust_tuple_constructor_arity_uses_field_types_past_const_generic_operators() {
+    let source = concat!(
+        "struct Tuple<const CHECK: bool = { 1 > 0 }>(pub u8, /* field */ fn() -> u8);\n",
+        "struct Named { value: u8 }\n",
+        "struct Unit;\n",
     );
+    let artifact = RustExtractor.extract_artifact("tuple.rs", source);
     assert!(
-        !names.iter().any(|name| name.contains('<')),
-        "no ref may carry turbofish arguments: {names:?}"
+        artifact.result.errors.is_empty(),
+        "{:?}",
+        artifact.result.errors
+    );
+    let arities = artifact
+        .callable_arities
+        .iter()
+        .map(|entry| {
+            let node = artifact
+                .result
+                .nodes
+                .iter()
+                .find(|node| node.id == entry.node_id)
+                .expect("constructor symbol");
+            (
+                node.name.as_str(),
+                entry.arity.parameters,
+                entry.arity.variadic,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(arities, [("Tuple", 2, false)]);
+}
+
+#[test]
+fn rust_generic_call_paths_keep_operator_and_unicode_token_identity() {
+    let source = r#"struct Factory<T>(core::marker::PhantomData<T>);
+impl<T> Factory<T> {
+    fn new() -> Self { Self(core::marker::PhantomData) }
+}
+struct Flag<const CHECK: bool>;
+impl<const CHECK: bool> Flag<CHECK> {
+    fn new() -> Self { Self }
+}
+fn café() {}
+fn assemble() {
+    let _ = Factory::<fn() -> u8>::new();
+    let _ = Flag::<{ 1 > 0 }>::new();
+    café();
+}
+"#;
+    let result = RustExtractor.extract_artifact("factory.rs", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let caller = result
+        .nodes
+        .iter()
+        .find(|node| node.name == "assemble")
+        .unwrap();
+    let calls = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| {
+            reference.from_node_id == caller.id
+                && matches!(reference.reference_kind, EdgeKind::Calls | EdgeKind::TypeOf)
+        })
+        .map(|reference| {
+            let line = source.lines().nth(reference.line as usize).unwrap();
+            let token = line.get(reference.column as usize..).unwrap();
+            (
+                reference.reference_name.as_str(),
+                reference.argument_count,
+                token,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        [
+            ("Factory", None, "Factory::<fn() -> u8>::new();"),
+            ("Factory::new", Some(0), "new();"),
+            ("Flag", None, "Flag::<{ 1 > 0 }>::new();"),
+            ("Flag::new", Some(0), "new();"),
+            ("café", Some(0), "café();"),
+        ]
     );
 }
 
@@ -1660,7 +1754,7 @@ fn run() {
                 "static",
                 "REGISTRY",
                 0,
-                vec!["LazyLock", "LazyLock::new", "build_registry"]
+                vec!["LazyLock::new", "build_registry"]
             ),
             ("const", "LIMIT", 1, vec!["compute_limit"]),
             ("function", "run", 3, vec!["work"]),
@@ -1730,8 +1824,7 @@ fn rust_call_argument_counts_follow_nested_expression_boundaries() {
         [
             ("target", Some(3), 1, 4),
             ("pair", Some(2), 2, 8),
-            ("Vec", Some(0), 4, 8),
-            ("Vec::new", Some(0), 4, 8),
+            ("Vec::new", Some(0), 4, 25),
             ("target", Some(0), 6, 4),
         ]
     );

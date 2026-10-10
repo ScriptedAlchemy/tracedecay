@@ -10,8 +10,9 @@ use tracedecay_domain::{
 
 use crate::chunks::{
     CROSS_FILE_REFERENCE_BLOCKLIST, cross_file_reference_name_is_blocklisted, is_typescript_family,
-    relation_target_kind_is_compatible, rust_qualified_name_is_ufcs_trait_impl,
-    rust_type_path_alias_for_trait_impl_method, typescript_member_call_path,
+    nominal_rust_impl_owner, relation_target_kind_is_compatible,
+    rust_qualified_name_is_ufcs_trait_impl, rust_type_path_alias_for_trait_impl_method,
+    rust_ufcs_impl_type_name, typescript_member_call_path,
 };
 use crate::lineage::LineageSymbolRecordV1;
 use crate::production::go_satisfaction::go_satisfaction;
@@ -2153,34 +2154,6 @@ fn rust_inherent_method_owner<'a>(
     let owner =
         rust_ufcs_impl_type_name(target_owner).or_else(|| nominal_rust_impl_owner(target_owner))?;
     (owner.rsplit("::").next() == Some(type_name)).then_some(owner)
-}
-
-fn rust_ufcs_impl_type_name(owner: &str) -> Option<&str> {
-    let body = owner.strip_prefix('<')?.strip_suffix('>')?;
-    let mut depth = 0_i32;
-    for (index, character) in body.char_indices() {
-        match character {
-            '<' => depth += 1,
-            '>' => depth -= 1,
-            _ if depth == 0 && body[index..].starts_with(" as ") => {
-                let type_name = body[..index].trim();
-                return (!type_name.is_empty()).then_some(type_name);
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn nominal_rust_impl_owner(owner: &str) -> Option<&str> {
-    if rust_ufcs_impl_type_name(owner).is_some() {
-        return None;
-    }
-    match owner.find('<') {
-        Some(generic_start) if owner.ends_with('>') => Some(&owner[..generic_start]),
-        Some(_) => None,
-        None => Some(owner),
-    }
 }
 
 /// Map an extracted Rust symbol back to the path used by a `crate::...`

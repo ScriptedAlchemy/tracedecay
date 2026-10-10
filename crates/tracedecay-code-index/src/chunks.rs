@@ -2057,6 +2057,34 @@ fn rust_path_head_is_declared(reference_name: &str, root_modules: &HashSet<&str>
     })
 }
 
+pub(crate) fn rust_ufcs_impl_type_name(owner: &str) -> Option<&str> {
+    let body = owner.strip_prefix('<')?.strip_suffix('>')?;
+    let mut depth = 0_i32;
+    for (index, character) in body.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ if depth == 0 && body[index..].starts_with(" as ") => {
+                let type_name = body[..index].trim();
+                return (!type_name.is_empty()).then_some(type_name);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+pub(crate) fn nominal_rust_impl_owner(owner: &str) -> Option<&str> {
+    if rust_ufcs_impl_type_name(owner).is_some() {
+        return None;
+    }
+    match owner.find('<') {
+        Some(generic_start) if owner.ends_with('>') => Some(&owner[..generic_start]),
+        Some(_) => None,
+        None => Some(owner),
+    }
+}
+
 /// Map a Rust UFCS trait-impl method path `<Type as Trait>::method` to the
 /// type-path form `Type::method` that call sites write (`WalkEventIter::from`,
 /// `Builder::default`). Keeps the intentional `<Type as Trait>` definition
@@ -2127,115 +2155,14 @@ fn reference_name_suffix_start(candidate: &str, reference_name: &str) -> Option<
     (prefix.is_empty() || prefix.ends_with('.') || prefix.ends_with("::")).then_some(prefix.len())
 }
 
-/// The path a call names once every `::<...>` turbofish argument list is
-/// removed; mirrors `strip_turbofish` in the Rust extractor, which emits
-/// reference names this comparison must agree with.
-fn strip_turbofish(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    let mut depth = 0usize;
-    let mut index = 0;
-    while index < path.len() {
-        if depth == 0 && path[index..].starts_with("::<") {
-            depth = 1;
-            index += 3;
-            continue;
-        }
-        if depth > 0 {
-            match path.as_bytes()[index] {
-                b'<' => depth += 1,
-                b'>' => depth -= 1,
-                _ => {}
-            }
-            index += 1;
-            continue;
-        }
-        let Some(ch) = path[index..].chars().next() else {
-            break;
-        };
-        out.push(ch);
-        index += ch.len_utf8();
-    }
-    out
-}
-
-/// Whether a Rust `struct` symbol declares a tuple body — `Name(...)`, the
-/// only struct shape a call expression can construct. After the name an
-/// optional balanced `<...>` parameter list is skipped (bounds can spell
-/// `Fn(u8)` parentheses that are not a body), then `(` declares the tuple
-/// body while `{`, `;`, or a `where` clause do not.
-fn rust_tuple_struct(source: &str, symbol: &SymbolRow) -> bool {
-    let Some(after_name) = symbol_name_span(source, symbol)
-        .and_then(|name| usize::try_from(name.end_byte).ok())
-        .zip(usize::try_from(symbol.span.end_byte).ok())
-        .and_then(|(start, end)| source.get(start..end))
-    else {
-        return false;
-    };
-    let rest = skip_rust_trivia(after_name);
-    let rest = if let Some(generics) = rest.strip_prefix('<') {
-        let mut depth = 1usize;
-        let mut index = 0;
-        let bytes = generics.as_bytes();
-        while index < bytes.len() && depth > 0 {
-            match bytes[index] {
-                b'<' => depth += 1,
-                // `->` in a bound (`Fn() -> u8`) is not the list's close.
-                b'>' if index == 0 || bytes[index - 1] != b'-' => depth -= 1,
-                _ => {}
-            }
-            index += 1;
-        }
-        &generics[index..]
-    } else {
-        rest
-    };
-    skip_rust_trivia(rest).starts_with('(')
-}
-
-/// Whitespace plus `//` and `/* */` comments; comments may sit between a
-/// struct's name, its generic parameters, and its body.
-fn skip_rust_trivia(mut rest: &str) -> &str {
-    loop {
-        rest = rest.trim_start();
-        if let Some(body) = rest.strip_prefix("/*") {
-            // Rust block comments nest; only the close that balances the
-            // opener ends the comment.
-            let mut depth = 1usize;
-            let mut index = 0;
-            let bytes = body.as_bytes();
-            while index + 1 < bytes.len() && depth > 0 {
-                match &bytes[index..index + 2] {
-                    b"/*" => {
-                        depth += 1;
-                        index += 2;
-                    }
-                    b"*/" => {
-                        depth -= 1;
-                        index += 2;
-                    }
-                    _ => index += 1,
-                }
-            }
-            if depth > 0 {
-                return rest;
-            }
-            rest = &body[index..];
-        } else if let Some(body) = rest.strip_prefix("//") {
-            let Some(end) = body.find('\n') else {
-                return rest;
-            };
-            rest = &body[end..];
-        } else {
-            return rest;
-        }
-    }
-}
-
 /// Whether the source at a Rust call site invokes a value call
 /// (`foo(`, `foo!`, `foo::<T>(`) rather than a type path (`Foo::member`):
 /// `::` opens a path only when a name follows; `::<` is a turbofish
 /// argument list on a call.
 fn rust_callsite_names_value(source: &str, offsets: &[u64], reference: &UnresolvedRef) -> bool {
+    if reference.argument_count.is_none() {
+        return false;
+    }
     let Some(rest) = offsets
         .get(reference.line as usize)
         .copied()
@@ -2266,51 +2193,26 @@ fn reference_evidence_span(
     // Typed receiver references name `Type::method`, while the source spells
     // `receiver.method`. Both forms must identify the parser-observed method
     // token so a sealed edge can discharge the same site's limitation.
-    let rust_call =
-        reference.reference_kind == EdgeKind::Calls && reference.file_path.ends_with(".rs");
-    // Reference names carry no turbofish arguments; compare on the
-    // same-normalized site so `Factory::<u32>::new` evidences `Factory::new`.
-    let normalized_site;
-    let source_at_site = if rust_call {
-        normalized_site = strip_turbofish(raw_source_at_site);
-        normalized_site.as_str()
-    } else {
-        raw_source_at_site
-    };
-    let reference_name = if rust_call
-        && (reference.reference_name.contains('.')
-            || !source_at_site.starts_with(&reference.reference_name))
-    {
-        reference.reference_name.rsplit(['.', ':']).next()?
-    } else {
-        &reference.reference_name
-    };
-    if rust_call && source_at_site.starts_with(reference_name) {
-        // The site token may be longer than the normalized name
-        // (`Factory::<u32>::new`); evidence covers the whole callee token
-        // through its argument list opener, which sits outside any
-        // turbofish (`helper::<fn(u8)>()` stops after the `>`).
-        let mut depth = 0usize;
-        let end = raw_source_at_site
-            .bytes()
-            .position(|byte| match byte {
-                b'<' => {
-                    depth += 1;
-                    false
-                }
-                b'>' => {
-                    depth = depth.saturating_sub(1);
-                    false
-                }
-                b'(' | b'!' | b'[' => depth == 0,
-                _ => false,
-            })
-            .unwrap_or(reference_name.len())
-            .max(reference_name.len());
-        return Some(SourceSpan {
-            start_byte: u64::try_from(site_start).ok()?,
-            end_byte: u64::try_from(site_start.checked_add(end)?).ok()?,
-        });
+    let rust_call = matches!(reference.reference_kind, EdgeKind::Calls | EdgeKind::TypeOf)
+        && reference.file_path.ends_with(".rs");
+    let source_at_site = raw_source_at_site;
+    if rust_call {
+        let token = if source_at_site.starts_with(&reference.reference_name) {
+            reference.reference_name.as_str()
+        } else if source_at_site
+            .strip_prefix("Self")
+            .is_some_and(|tail| tail.starts_with([':', '<', '(', ' ', '\t', '\r', '\n', '/']))
+        {
+            "Self"
+        } else {
+            reference.reference_name.rsplit(['.', ':']).next()?
+        };
+        if source_at_site.starts_with(token) {
+            return Some(SourceSpan {
+                start_byte: u64::try_from(site_start).ok()?,
+                end_byte: u64::try_from(site_start.checked_add(token.len())?).ok()?,
+            });
+        }
     }
     references_by_site
         .get(&(
@@ -2385,6 +2287,19 @@ fn resolve_file_references(
             .entry(relative_name.to_owned())
             .or_default()
             .push(symbol);
+        // Generic impl declarations retain their written type parameters;
+        // invocation paths name the nominal owner instead.
+        if language == "rust"
+            && symbol.kind == NodeKind::Method.as_str()
+            && let Some((owner, method)) = relative_name.rsplit_once("::")
+            && let Some(nominal) = nominal_rust_impl_owner(owner)
+            && nominal != owner
+        {
+            by_file_relative_name
+                .entry(format!("{nominal}::{method}"))
+                .or_default()
+                .push(symbol);
+        }
         // Dual-index `<Type as Trait>::method` under `Type::method` so
         // type-path calls bind without renaming the definition. Collected
         // first so an inherent `Type::method` already in the map keeps the
@@ -2541,7 +2456,7 @@ fn resolve_file_references(
             && rust_callsite_names_value(source, offsets, reference)
         {
             compatible.retain(|target| {
-                target.kind != NodeKind::Struct.as_str() || rust_tuple_struct(source, target)
+                target.kind != NodeKind::Struct.as_str() || target.arity.is_some()
             });
         }
         match compatible.as_slice() {

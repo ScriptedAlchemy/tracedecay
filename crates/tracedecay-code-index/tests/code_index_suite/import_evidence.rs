@@ -401,8 +401,18 @@ fn rust_constructor_and_typed_receiver_calls_bind_through_the_crate_path() {
         RelationEdgeKindV1::Calls,
     );
     assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
-    let builder = symbol_occurrence(&generation, "crates/widgets/src/builder.rs::Builder");
-    assert_resolved_edge(&generation, &caller, &builder, RelationEdgeKindV1::Calls);
+    let builder = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.qualified_name == "crates/widgets/src/builder.rs::Builder"
+                && symbol.kind == "struct"
+        })
+        .expect("Builder struct definition")
+        .occurrence
+        .clone();
+    assert_resolved_edge(&generation, &caller, &builder, RelationEdgeKindV1::TypeOf);
 }
 
 /// `GrafeoDB::open` in grafeo-cli must be a caller of the struct, not only of
@@ -426,7 +436,59 @@ fn rust_associated_open_is_a_caller_of_the_struct() {
     let database = symbol_occurrence(&generation, "crates/engine/src/lib.rs::GrafeoDB");
     let open = symbol_occurrence(&generation, "crates/engine/src/lib.rs::GrafeoDB::open");
     assert_resolved_edge(&generation, &caller, &open, RelationEdgeKindV1::Calls);
-    assert_resolved_edge(&generation, &caller, &database, RelationEdgeKindV1::Calls);
+    assert_resolved_edge(&generation, &caller, &database, RelationEdgeKindV1::TypeOf);
+}
+
+#[test]
+fn rust_generic_associated_calls_seal_exact_owner_and_member_tokens() {
+    let source = concat!(
+        "pub struct Factory<T>(core::marker::PhantomData<T>);\n",
+        "impl<T> Factory<T> { pub fn new() -> Self { Self(core::marker::PhantomData) } }\n",
+        "pub struct Flag<const CHECK: bool>;\n",
+        "impl<const CHECK: bool> Flag<CHECK> { pub fn new() -> Self { Self } }\n",
+        "pub fn café() {}\n",
+        "pub fn assemble() {\n",
+        "    Factory::<fn() -> u8>::new();\n",
+        "    Flag::<{ 1 > 0 }>::new();\n",
+        "    café();\n",
+        "}\n",
+    );
+    let generation =
+        published_rust_workspace(&[("file.generic.calls", "crates/app/src/lib.rs", source)]);
+    let caller = symbol_occurrence(&generation, "crates/app/src/lib.rs::assemble");
+    let observed = generation
+        .edges()
+        .iter()
+        .filter(|edge| {
+            edge.from_occurrence == caller
+                && matches!(
+                    edge.kind,
+                    RelationEdgeKindV1::Calls | RelationEdgeKindV1::TypeOf
+                )
+                && edge.authority == EdgeAuthorityV1::SyntaxExact
+        })
+        .map(|edge| {
+            let target = generation
+                .symbols()
+                .symbols
+                .iter()
+                .find(|symbol| symbol.occurrence == edge.to_occurrence)
+                .expect("edge target");
+            let token = &source
+                [edge.evidence_span.start_byte as usize..edge.evidence_span.end_byte as usize];
+            (target.qualified_name.as_str(), token)
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        observed,
+        BTreeSet::from([
+            ("crates/app/src/lib.rs::Factory", "Factory"),
+            ("crates/app/src/lib.rs::Factory<T>::new", "new"),
+            ("crates/app/src/lib.rs::Flag", "Flag"),
+            ("crates/app/src/lib.rs::Flag<CHECK>::new", "new"),
+            ("crates/app/src/lib.rs::café", "café"),
+        ])
+    );
 }
 
 #[test]
