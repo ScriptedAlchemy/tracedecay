@@ -284,7 +284,7 @@ async fn ensure_template(tmp_root: &Path, versions: StoreSchemaVersions) -> io::
         Ok(file)
     })
     .await
-    .map_err(|error| io::Error::other(error))??;
+    .map_err(io::Error::other)??;
 
     // Another process may have finished the build while we waited.
     if shared.join("READY").is_file() {
