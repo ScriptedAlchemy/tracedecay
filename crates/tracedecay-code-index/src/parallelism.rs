@@ -180,6 +180,7 @@ struct InstalledCodeIndexWorkerRuntimeV1 {
     interactive_pool: rayon::ThreadPool,
     background_cpu: Arc<ProcessBackgroundCpuV1>,
     activity: PoolActivityV1,
+    interactive_activity: PoolActivityV1,
 }
 
 /// Fan-outs running on the pool now, and whether its workers have freed
@@ -206,6 +207,19 @@ impl Drop for RunningFanOutV1<'_> {
     }
 }
 
+/// Queue an allocator collection on `pool` when it is idle and has a
+/// collection pending. The collection is queued behind whatever the workers
+/// run next, so this never waits on a busy pool.
+fn collect_idle_pool_heaps(pool: &rayon::ThreadPool, activity: &PoolActivityV1) -> bool {
+    if activity.running.load(Ordering::Acquire) != 0
+        || !activity.collect_pending.swap(false, Ordering::AcqRel)
+    {
+        return false;
+    }
+    pool.spawn_broadcast(|_| collect_calling_thread_allocator_v1());
+    true
+}
+
 impl InstalledCodeIndexWorkerRuntimeV1 {
     fn installed_plan(&self) -> InstalledCodeIndexWorkerPlanV1 {
         InstalledCodeIndexWorkerPlanV1 {
@@ -229,26 +243,36 @@ impl InstalledCodeIndexWorkerRuntimeV1 {
             .with_yielded_permits(|| self.pool.install(operation))
     }
 
-    fn collect_worker_heaps_when_idle(&self) {
-        self.activity.collect_pending.store(true, Ordering::Release);
+    /// Run a foreground source scan on the interactive pool. Its leaves take
+    /// no background CPU units; the fan-out is tracked on the pool's own
+    /// activity so its workers collect their heaps once it goes idle.
+    fn install_interactive<R, F>(&self, operation: F) -> R
+    where
+        F: FnOnce() -> R + Send,
+        R: Send,
+    {
+        let _running = RunningFanOutV1::new(&self.interactive_activity);
+        self.interactive_pool.install(operation)
     }
 
-    /// Each worker returns its allocator pages once the pool has gone idle
-    /// after a fan-out. Workers allocate a build's rows and scratch; other
-    /// threads free most of it after the build, and those frees reach the
-    /// kernel only when the owning worker collects its heap. Measured on a
-    /// 36-worker daemon settled after a cold index: 233 MB of anonymous RSS
-    /// held that way, 6.5 MB per worker. The collection is queued behind
-    /// whatever the workers run next, so this never waits on a busy pool.
+    fn collect_worker_heaps_when_idle(&self) {
+        self.activity.collect_pending.store(true, Ordering::Release);
+        self.interactive_activity
+            .collect_pending
+            .store(true, Ordering::Release);
+    }
+
+    /// Each pool's workers return their allocator pages once it has gone idle
+    /// after a fan-out. Workers allocate a build's rows and scratch (source
+    /// buffers on the interactive pool); other threads free most of it after
+    /// the build, and those frees reach the kernel only when the owning worker
+    /// collects its heap. Measured on a 36-worker daemon settled after a cold
+    /// index: 233 MB of anonymous RSS held that way, 6.5 MB per worker.
     fn collect_idle_worker_heaps(&self) -> bool {
-        if self.activity.running.load(Ordering::Acquire) != 0
-            || !self.activity.collect_pending.swap(false, Ordering::AcqRel)
-        {
-            return false;
-        }
-        self.pool
-            .spawn_broadcast(|_| collect_calling_thread_allocator_v1());
-        true
+        let indexing = collect_idle_pool_heaps(&self.pool, &self.activity);
+        let interactive =
+            collect_idle_pool_heaps(&self.interactive_pool, &self.interactive_activity);
+        indexing || interactive
     }
 
     /// Run one admitted work unit of `requested_units` on the calling thread.
@@ -277,6 +301,8 @@ static WORKER_RUNTIME: OnceLock<CodeIndexWorkerRuntimeV1> = OnceLock::new();
 static WORKER_RUNTIME_INSTALL: Mutex<()> = Mutex::new(());
 static STANDALONE_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 static STANDALONE_POOL_INSTALL: Mutex<()> = Mutex::new(());
+static STANDALONE_INTERACTIVE_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+static STANDALONE_INTERACTIVE_POOL_INSTALL: Mutex<()> = Mutex::new(());
 
 /// One owner's worker runtime: its plan, pool, and background CPU authority.
 ///
@@ -353,6 +379,7 @@ impl CodeIndexWorkerRuntimeV1 {
                 NonZeroUsize::new(plan.effective_workers).unwrap_or(NonZeroUsize::MIN),
             )),
             activity: PoolActivityV1::default(),
+            interactive_activity: PoolActivityV1::default(),
         });
         owner.set(Arc::downgrade(&runtime)).map_err(|_| {
             CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
@@ -609,17 +636,18 @@ pub fn install_worker_plan(
     Ok(installed)
 }
 
-/// Run `operation` once on every thread of the process's installed indexing
-/// pool and wait for all of them, so per-thread state (the thread's allocator
-/// heap) is released on the thread that owns it before the caller measures.
-/// A process without an installed plan has no pool and runs nothing.
+/// Run `operation` once on every thread of the process's installed pools and
+/// wait for all of them, so per-thread state (the thread's allocator heap) is
+/// released on the thread that owns it before the caller measures. A process
+/// without an installed plan has no pools and runs nothing.
 pub fn run_on_every_installed_worker(operation: fn()) {
     if let Some(runtime) = WORKER_RUNTIME.get() {
         runtime.0.pool.broadcast(|_| operation());
+        runtime.0.interactive_pool.broadcast(|_| operation());
     }
 }
 
-/// Have the installed pool's workers collect their heaps again once it is
+/// Have the installed pools' workers collect their heaps again once they are
 /// idle. A fan-out's rows outlive it: the build that ran it and the serving
 /// swap that retires the generation it replaced free them on other threads
 /// after the fan-out's own collection, and those pages reach the kernel only
@@ -630,8 +658,8 @@ pub fn collect_installed_worker_heaps_when_idle() {
     }
 }
 
-/// Queue an allocator collection on every worker of the installed pool when
-/// it is idle and has a collection pending: a fan-out finished, or
+/// Queue an allocator collection on every worker of the installed pools when
+/// one is idle and has a collection pending: a fan-out finished, or
 /// [`collect_installed_worker_heaps_when_idle`] asked. Returns whether a
 /// collection was queued.
 pub fn collect_idle_installed_worker_heaps() -> bool {
@@ -801,7 +829,8 @@ where
 /// Foreground grep uses this instead of [`install`] so it is not queued
 /// behind verification or rebuild work that already holds the indexing pool
 /// and the background CPU FIFO, so its leaves take no background CPU units.
-/// Standalone callers without an installed owner share the automatic pool.
+/// Standalone callers without an installed owner get their own process-wide
+/// pool rather than queueing behind the standalone indexing pool.
 #[tracing::instrument(
     name = "code_index.workers.install_interactive",
     level = "trace",
@@ -819,41 +848,68 @@ where
         });
     }
     if let Some(runtime) = current_runtime() {
-        return Ok(runtime.interactive_pool.install(operation));
+        return Ok(runtime.install_interactive(operation));
     }
-    let pool = standalone_pool()?;
+    let pool = standalone_interactive_pool()?;
     Ok(pool.install(operation))
 }
 
 #[tracing::instrument(name = "code_index.workers.standalone_pool", level = "trace", skip_all)]
 fn standalone_pool() -> Result<&'static rayon::ThreadPool, CodeIndexParallelismErrorV1> {
-    if let Some(pool) = STANDALONE_POOL.get() {
+    standalone_pool_in(
+        &STANDALONE_POOL,
+        &STANDALONE_POOL_INSTALL,
+        "tracedecay-index-standalone",
+    )
+}
+
+/// Standalone foreground scans get their own process-wide pool so a live
+/// source read is not admitted behind whatever standalone indexing work is
+/// already running.
+#[tracing::instrument(
+    name = "code_index.workers.standalone_interactive_pool",
+    level = "trace",
+    skip_all
+)]
+fn standalone_interactive_pool() -> Result<&'static rayon::ThreadPool, CodeIndexParallelismErrorV1>
+{
+    standalone_pool_in(
+        &STANDALONE_INTERACTIVE_POOL,
+        &STANDALONE_INTERACTIVE_POOL_INSTALL,
+        "tracedecay-source-scan-standalone",
+    )
+}
+
+fn standalone_pool_in(
+    slot: &'static OnceLock<rayon::ThreadPool>,
+    installation: &'static Mutex<()>,
+    thread_name: &'static str,
+) -> Result<&'static rayon::ThreadPool, CodeIndexParallelismErrorV1> {
+    if let Some(pool) = slot.get() {
         return Ok(pool);
     }
     let _installation =
-        STANDALONE_POOL_INSTALL
+        installation
             .lock()
             .map_err(|_| CodeIndexParallelismErrorV1::PoolBuild {
                 message: "standalone code-index worker pool installation lock is poisoned"
                     .to_owned(),
             })?;
-    if let Some(pool) = STANDALONE_POOL.get() {
+    if let Some(pool) = slot.get() {
         return Ok(pool);
     }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(indexing_worker_target(detected_cores()))
-        .thread_name(|index| format!("tracedecay-index-standalone-{index}"))
+        .thread_name(move |index| format!("{thread_name}-{index}"))
         .build()
         .map_err(|error| CodeIndexParallelismErrorV1::PoolBuild {
             message: error.to_string(),
         })?;
-    STANDALONE_POOL
-        .set(pool)
+    slot.set(pool)
         .map_err(|_| CodeIndexParallelismErrorV1::PoolBuild {
             message: "standalone code-index worker pool installation raced".to_owned(),
         })?;
-    STANDALONE_POOL
-        .get()
+    slot.get()
         .ok_or_else(|| CodeIndexParallelismErrorV1::PoolBuild {
             message: "standalone code-index worker pool installation did not settle".to_owned(),
         })
@@ -902,19 +958,38 @@ mod tests {
         assert_eq!(observed, [(1, (1, 1)), (2, (2, 2))]);
     }
 
-    static COLLECTED_ON_WORKERS: AtomicUsize = AtomicUsize::new(0);
+    static COLLECTED_ON_INDEXING_WORKERS: AtomicUsize = AtomicUsize::new(0);
+    static COLLECTED_ON_INTERACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
     fn count_worker_collect() {
-        if rayon::current_thread_index().is_some() {
-            COLLECTED_ON_WORKERS.fetch_add(1, Ordering::SeqCst);
+        if rayon::current_thread_index().is_none() {
+            return;
         }
+        match std::thread::current().name() {
+            Some(name) if name.starts_with("tracedecay-source-scan") => {
+                COLLECTED_ON_INTERACTIVE_WORKERS.fetch_add(1, Ordering::SeqCst);
+            }
+            _ => {
+                COLLECTED_ON_INDEXING_WORKERS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn wait_for_collects(counter: &AtomicUsize, expected: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while counter.load(Ordering::SeqCst) < expected && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), expected);
     }
 
     fn release_nothing() {}
 
-    /// Workers return their allocator heaps once per idle period: not while a
-    /// fan-out runs, once on every worker after it ends, and not again until
-    /// another fan-out ran or a release of what one built asked for it.
+    /// A pool's workers return their allocator heaps once per idle period:
+    /// not while a fan-out on it runs, once on every one of its workers after
+    /// it ends, and not again until another fan-out ran or a release of what
+    /// one built asked for it. Each pool collects under its own activity, so
+    /// work on one pool neither blocks nor fakes a collection on the other.
     #[test]
     fn an_idle_pool_collects_every_worker_heap_once_after_a_fan_out() {
         install_process_allocator_release_v1(ProcessAllocatorReleaseV1 {
@@ -945,27 +1020,36 @@ mod tests {
             assert!(!runtime.collect_idle_worker_heaps());
             finish.send(()).expect("fan-out waits for the test");
         });
-        assert_eq!(COLLECTED_ON_WORKERS.load(Ordering::SeqCst), 0);
+        assert_eq!(COLLECTED_ON_INDEXING_WORKERS.load(Ordering::SeqCst), 0);
 
         assert!(runtime.collect_idle_worker_heaps());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while COLLECTED_ON_WORKERS.load(Ordering::SeqCst) < 2
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        assert_eq!(COLLECTED_ON_WORKERS.load(Ordering::SeqCst), 2);
+        wait_for_collects(&COLLECTED_ON_INDEXING_WORKERS, 2);
+        assert_eq!(COLLECTED_ON_INTERACTIVE_WORKERS.load(Ordering::SeqCst), 0);
+        assert!(!runtime.collect_idle_worker_heaps());
+
+        let (started, started_rx) = std::sync::mpsc::channel();
+        let (finish, finish_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                runtime.install_interactive(move || {
+                    started.send(()).expect("test waits for the fan-out");
+                    finish_rx.recv().expect("test ends the fan-out");
+                });
+            });
+            started_rx.recv().expect("fan-out started");
+            assert!(!runtime.collect_idle_worker_heaps());
+            finish.send(()).expect("fan-out waits for the test");
+        });
+
+        assert!(runtime.collect_idle_worker_heaps());
+        wait_for_collects(&COLLECTED_ON_INTERACTIVE_WORKERS, 2);
+        assert_eq!(COLLECTED_ON_INDEXING_WORKERS.load(Ordering::SeqCst), 2);
         assert!(!runtime.collect_idle_worker_heaps());
 
         runtime.collect_worker_heaps_when_idle();
         assert!(runtime.collect_idle_worker_heaps());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while COLLECTED_ON_WORKERS.load(Ordering::SeqCst) < 4
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        assert_eq!(COLLECTED_ON_WORKERS.load(Ordering::SeqCst), 4);
+        wait_for_collects(&COLLECTED_ON_INDEXING_WORKERS, 4);
+        wait_for_collects(&COLLECTED_ON_INTERACTIVE_WORKERS, 4);
         assert!(!runtime.collect_idle_worker_heaps());
     }
 
@@ -991,6 +1075,74 @@ mod tests {
             on_worker,
             "direct-seal encode only parallelizes when the caller is already a rayon worker"
         );
+    }
+
+    /// Without an entered or installed owner, a foreground scan gets its own
+    /// process-wide pool: while every standalone indexing worker is parked
+    /// the scan's units still run instead of queueing behind them.
+    #[test]
+    fn standalone_interactive_install_runs_while_the_standalone_indexing_pool_is_held() {
+        let width = standalone_pool()
+            .expect("standalone indexing pool")
+            .current_num_threads();
+        assert!(
+            !std::ptr::eq(
+                standalone_pool().expect("standalone indexing pool"),
+                standalone_interactive_pool().expect("standalone interactive pool")
+            ),
+            "standalone interactive scans need a pool that is not the standalone indexing pool"
+        );
+        let released = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (held, held_rx) = std::sync::mpsc::channel();
+        for _ in 0..width {
+            let held = held.clone();
+            let released = Arc::clone(&released);
+            standalone_pool()
+                .expect("standalone indexing pool")
+                .spawn(move || {
+                    held.send(()).expect("test counts the held workers");
+                    let (lock, wake) = &*released;
+                    let mut done = lock.lock().expect("release lock");
+                    while !*done {
+                        done = wake.wait(done).expect("release wait");
+                    }
+                });
+        }
+        for _ in 0..width {
+            held_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("every standalone indexing worker held");
+        }
+
+        let (settled, settled_rx) = std::sync::mpsc::channel();
+        let scanner = std::thread::spawn(move || {
+            settled
+                .send(install_interactive(|| {
+                    rayon::scope(|scope| {
+                        for _ in 0..width {
+                            scope.spawn(|_| {
+                                assert!(
+                                    std::thread::current().name().is_some_and(
+                                        |name| name.starts_with("tracedecay-source-scan")
+                                    ),
+                                    "interactive units run on source-scan workers"
+                                );
+                            });
+                        }
+                    });
+                }))
+                .expect("test waits for the scan");
+        });
+        let outcome = settled_rx.recv_timeout(std::time::Duration::from_secs(5));
+        {
+            let (lock, wake) = &*released;
+            *lock.lock().expect("release lock") = true;
+            wake.notify_all();
+        }
+        scanner.join().expect("scanner");
+        outcome
+            .expect("interactive scan must settle while the standalone indexing pool is held")
+            .expect("interactive install");
     }
 
     #[test]
