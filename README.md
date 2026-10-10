@@ -60,9 +60,9 @@ operating model](docs/V2-OPERATING-MODEL.md).
 ```bash
 cd /path/to/your/project
 tracedecay daemon install-service
-tracedecay init
+tracedecay init                     # enroll and request indexing
 tracedecay install
-tracedecay status
+tracedecay status --json            # inspect readiness and coverage
 ```
 
 The daemon comes first. `tracedecay init` is brokered through the
@@ -73,8 +73,16 @@ before it writes anything:
 Error: project route error (code_index_scheduler_unavailable): project initialization requires the daemon-owned code-index scheduler; start the daemon and retry
 ```
 
-`tracedecay status` likewise reads the daemon and never starts it. See [the
-user guide](docs/USER-GUIDE.md) for the daemon lifecycle commands.
+`init` returns after enrollment and the indexing request are accepted; the first
+code generation is published in the background. Check `tracedecay status --json`
+for the requested generation's freshness and coverage before using it.
+`converging` or `unavailable` means the index is still not ready; exit 0 alone
+is not a readiness signal.
+
+On headless Linux without a systemd user bus, run `tracedecay daemon run` in
+one terminal and keep it running while using the commands above in another.
+`tracedecay status` reads the daemon and never starts it. See the
+[user guide](docs/USER-GUIDE.md#daemon-service) for lifecycle commands.
 
 `tracedecay install` auto-detects supported agents. To target one host:
 
@@ -105,7 +113,7 @@ the installed cache is loaded.
 
 ```bash
 tracedecay daemon install-service   # install + start the daemon (required before init)
-tracedecay init [path]              # enroll a project and publish its first generation
+tracedecay init [path]              # enroll and request the first index
 tracedecay sync [path]              # explicit administrative refresh
 tracedecay status [path]            # graph stats, freshness, savings, cost
 tracedecay tool                     # list every MCP tool
@@ -114,7 +122,7 @@ tracedecay tool files               # indexed files
 tracedecay tool affected --args -   # impacted tests/files ({"files":[...]})
 tracedecay serve                    # MCP server
 tracedecay doctor                   # read-only installation health check
-tracedecay dashboard [--open]       # local dashboard
+tracedecay dashboard [--path PATH] [--open]  # dashboard for one project
 tracedecay monitor                  # live MCP savings/cost TUI
 tracedecay update                   # refresh binary, plugins, daemon
 tracedecay upgrade                  # self-upgrade current channel
@@ -161,10 +169,16 @@ selection, provenance, and recovery behavior.
 ## Dashboard
 
 ```bash
-tracedecay dashboard
-tracedecay dashboard --port 8080
-tracedecay dashboard --port 0 --open
+tracedecay dashboard --path /path/to/enrolled/repo
+tracedecay dashboard --path /path/to/enrolled/repo --port 8080
+tracedecay dashboard --path /path/to/enrolled/repo --port 0 --open
 ```
+
+The dashboard serves the project selected by `--path`, or the current project
+when that flag is omitted. Pass `--path` when launching from your home directory.
+Its project graph API reports that bound scope; a search query does not select
+a different enrolled repository. Start a dashboard for that repository to query
+its graph.
 
 The dashboard includes graph exploration, project memory, LCM session search, token savings, and cost views. See [docs/dashboard.md](docs/dashboard.md).
 
