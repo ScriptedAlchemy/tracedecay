@@ -202,7 +202,10 @@ async fn projectless_response(
 fn projectless_tool_is_discoverable(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "tracedecay_project_list" | "tracedecay_project_search" | "tracedecay_project_context"
+        "tracedecay_project_list"
+            | "tracedecay_project_search"
+            | "tracedecay_project_context"
+            | tracedecay_mcp::TOOL_SEARCH_TOOL_NAME
     ) || tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
         || user_setting_configuration_operation(tool_name).is_some()
 }
@@ -399,6 +402,12 @@ async fn dispatch_admitted_projectless_call(
             store_administration,
         ))
         .await;
+    }
+    if tool_name == tracedecay_mcp::TOOL_SEARCH_TOOL_NAME {
+        return match tracedecay_mcp::tools::catalog_discovery::execute_tool_search(&arguments) {
+            Ok(result) => JsonRpcResponse::success(id, result.value),
+            Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+        };
     }
     // `projectless_tool_is_discoverable` admitted the name above, so any
     // remaining tool is a retained profile operation.

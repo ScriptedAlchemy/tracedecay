@@ -17,7 +17,7 @@ fn bootstrap_tools_list_payload(node_count: Option<u64>, budget: u8) -> Result<s
         default_catalog_discovery_authority().map_err(|error| TraceDecayError::Config {
             message: format!("MCP bootstrap catalog authority is unavailable: {error}"),
         })?;
-    catalog_discovery_tools_list_payload(
+    advertised_catalog_discovery_tools_list_payload(
         node_count,
         budget,
         &profile_id,

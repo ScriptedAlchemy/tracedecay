@@ -21,7 +21,7 @@ pub(super) fn def_grep(input_schema: Value) -> ToolDefinition {
     // reflex (grep/rg). Keeping it in the always-loaded set means the model
     // never has to ToolSearch for it before reaching for Bash grep, which is
     // the main leak we're plugging. Paired with tracedecay_callers below, this
-    // brings the always-loaded set to 7 (the agreed cap).
+    // brings the always-loaded core to 7 plus tracedecay_tool_search.
     def_always_load(
         "tracedecay_grep",
         "Grep Content",

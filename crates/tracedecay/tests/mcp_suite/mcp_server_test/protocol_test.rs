@@ -150,6 +150,17 @@ async fn test_tools_list() {
         vec![
             jsonrpc_request(json!(20), "tools/list", json!({})),
             jsonrpc_request(
+                json!(22),
+                "tools/call",
+                json!({
+                    "name": "tracedecay_tool_search",
+                    "arguments": {
+                        "names": ["tracedecay_retrieve"],
+                        "format": "json"
+                    }
+                }),
+            ),
+            jsonrpc_request(
                 json!(21),
                 "tools/call",
                 json!({
@@ -167,14 +178,33 @@ async fn test_tools_list() {
     .await;
 
     let listed = response_with_id(&responses, json!(20));
-    let retrieve = listed["result"]["tools"]
+    let listed_names: Vec<&str> = listed["result"]["tools"]
         .as_array()
         .unwrap_or_else(|| panic!("tools/list result: {listed}"))
         .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(
+        listed_names.contains(&"tracedecay_tool_search"),
+        "default handshake must advertise tool search: {listed_names:?}"
+    );
+    assert!(
+        !listed_names.contains(&"tracedecay_retrieve"),
+        "deferred retrieve must stay off the default handshake: {listed_names:?}"
+    );
+
+    let loaded = response_with_id(&responses, json!(22));
+    let loaded_text = successful_tool_text(&loaded, "tracedecay_tool_search");
+    let loaded_catalog: Value =
+        serde_json::from_str(loaded_text).expect("tool search JSON catalog");
+    let retrieve = loaded_catalog["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tool search result: {loaded_catalog}"))
+        .iter()
         .find(|tool| tool["name"] == "tracedecay_retrieve")
-        .unwrap_or_else(|| panic!("tracedecay_retrieve must be listed: {listed}"));
+        .unwrap_or_else(|| panic!("tracedecay_retrieve must be reachable via tool search: {loaded_catalog}"));
     assert_eq!(
-        retrieve["inputSchema"],
+        retrieve["input_schema"],
         json!({
             "type": "object",
             "properties": {

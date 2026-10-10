@@ -207,9 +207,9 @@ pub fn assert_unenrolled_cwd_serve_session(output: &Output, cwd: &Path) {
         tools["result"]["tools"].as_array().is_some_and(|tools| {
             tools
                 .iter()
-                .any(|tool| tool["name"] == "tracedecay_runtime")
+                .any(|tool| tool["name"] == "tracedecay_tool_search")
         }),
-        "tools/list must advertise the catalog, including the tool called next, \
+        "tools/list must advertise the default core, including tool search, \
          before a project exists: {tools}"
     );
 
