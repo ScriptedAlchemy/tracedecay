@@ -122,6 +122,11 @@ struct TsConfigV1 {
 /// mapping (`babel src -d .`, tsconfig `rootDir`/`outDir`) may rewrite a
 /// missing relative specifier.
 struct BuildMappingV1 {
+    /// The manifest/tsconfig directory that declared the mapping. A package
+    /// directory that does not contain it (a nested or sibling package) is a
+    /// claim boundary: its own build decides which source emitted its files,
+    /// so this mapping never rewrites them.
+    dir: String,
     /// Project-relative source tree (`src`, `packages/pkg/src`).
     source_root: String,
     /// Project-relative output tree; empty means the package/tsconfig dir.
@@ -224,7 +229,7 @@ impl TypeScriptModuleIndexV1 {
                 }
             }
         }
-        build_mappings.sort_by(|left, right| right.output_root.len().cmp(&left.output_root.len()));
+        build_mappings.sort_by_key(|left| std::cmp::Reverse(left.output_root.len()));
         Self {
             sources,
             packages,
@@ -639,6 +644,15 @@ impl TypeScriptModuleIndexV1 {
     /// an undeclared `./foo` or `./dist/foo` stays unresolved.
     fn probe_declared_build_source(&self, published: &str) -> Option<usize> {
         for mapping in &self.build_mappings {
+            // A published file inside a package the mapping's directory does
+            // not sit in belongs to that package's own build: neither a root
+            // `src -d .` reaching into a nested package nor a `src -d ..`
+            // reaching into a sibling may rewrite it.
+            if self.packages.iter().any(|package| {
+                path_within(&package.dir, published) && !path_within(&package.dir, &mapping.dir)
+            }) {
+                continue;
+            }
             let Some(source) = mapping.source_path(published) else {
                 continue;
             };
@@ -826,6 +840,16 @@ pub(super) enum ModuleTargetV1 {
     Unresolved,
 }
 
+/// `child` lies under `parent` at a directory boundary; the project root
+/// `""` contains every path.
+fn path_within(parent: &str, child: &str) -> bool {
+    parent.is_empty()
+        || child == parent
+        || (child.len() > parent.len()
+            && child.starts_with(parent)
+            && child.as_bytes()[parent.len()] == b'/')
+}
+
 /// `(parent directory, file name)` of a project-relative path; the root's
 /// parent is `""`.
 pub(super) fn split_parent(path: &str) -> (&str, &str) {
@@ -981,11 +1005,27 @@ fn is_babel_command_word(token: &str) -> bool {
     token == "babel" || token.ends_with("/babel")
 }
 
+/// Package-runner prefixes that exec a binary without making it the command
+/// word (`npx babel`, `yarn babel`); runner flags such as `npx -y` sit
+/// between them.
+fn is_runner_word(token: &str) -> bool {
+    matches!(token, "npx" | "yarn" | "pnpm" | "bun" | "bunx")
+}
+
 fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     let mut index = 0;
     while index < tokens.len() && is_env_assignment(tokens[index]) {
         index += 1;
+    }
+    if tokens.get(index).is_some_and(|token| is_runner_word(token)) {
+        index += 1;
+        while tokens
+            .get(index)
+            .is_some_and(|token| token.starts_with('-'))
+        {
+            index += 1;
+        }
     }
     let command_word = tokens.get(index)?;
     if !is_babel_command_word(command_word) {
@@ -993,7 +1033,9 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
     }
     // Only the literal `babel <src> -d|--out-dir <out>` form. Extra flags
     // (`--presets env`) would steal the source directory if scanned loosely.
-    let [source, flag, output] = tokens.get(index + 1..)?;
+    let [source, flag, output] = tokens.get(index + 1..)? else {
+        return None;
+    };
     if !matches!(*flag, "-d" | "--out-dir")
         || source.starts_with('-')
         || output.starts_with('-')
@@ -1017,6 +1059,7 @@ fn package_script_mappings(
         .filter_map(Value::as_str)
         .filter_map(babel_src_to_out)
         .map(|(source, output)| BuildMappingV1 {
+            dir: dir.to_owned(),
             source_root: project_join(dir, &source),
             output_root: project_join(dir, &output),
         })
@@ -1028,9 +1071,18 @@ fn tsconfig_build_mapping(
     symbols: &[Arc<LineageSymbolRecordV1>],
 ) -> Option<BuildMappingV1> {
     let options = pair_value(symbols, "compilerOptions")?;
+    // A config that never emits JavaScript cannot declare a published tree:
+    // `noEmit` type-checks only and `emitDeclarationOnly` writes just `.d.ts`.
+    if ["noEmit", "emitDeclarationOnly"]
+        .iter()
+        .any(|key| options.get(key).and_then(Value::as_bool) == Some(true))
+    {
+        return None;
+    }
     let root_dir = options.get("rootDir")?.as_str()?;
     let out_dir = options.get("outDir")?.as_str()?;
     Some(BuildMappingV1 {
+        dir: dir.to_owned(),
         source_root: project_join(dir, root_dir),
         output_root: project_join(dir, out_dir),
     })
@@ -1188,16 +1240,31 @@ mod tests {
             babel_src_to_out("NODE_ENV=production ./node_modules/.bin/babel src --out-dir dist"),
             Some(("src".to_owned(), "dist".to_owned()))
         );
+        assert_eq!(
+            babel_src_to_out("npx babel src -d dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("npx -y babel src --out-dir dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("yarn babel src -d dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(babel_src_to_out("echo npx babel src -d dist"), None);
     }
 
     #[test]
     fn declared_mapping_rewrites_published_root_and_out_dir() {
         let root = BuildMappingV1 {
+            dir: String::new(),
             source_root: "src".to_owned(),
             output_root: String::new(),
         };
         assert_eq!(root.source_path("webpack"), Some("src/webpack".to_owned()));
         let dist = BuildMappingV1 {
+            dir: String::new(),
             source_root: "src".to_owned(),
             output_root: "dist".to_owned(),
         };

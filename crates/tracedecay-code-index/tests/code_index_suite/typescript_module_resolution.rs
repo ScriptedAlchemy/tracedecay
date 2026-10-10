@@ -597,6 +597,152 @@ fn tsconfig_out_dir_require_binds_root_dir_source() {
     );
 }
 
+/// A `noEmit` tsconfig type-checks only; its `outDir` is not a published
+/// JavaScript tree, so `./dist/foo` stays unresolved.
+#[test]
+fn no_emit_tsconfig_does_not_declare_mapping() {
+    let root = tempfile::tempdir().expect("no-emit fixture");
+    std::fs::create_dir_all(root.path().join("src")).expect("src");
+    std::fs::write(
+        root.path().join("tsconfig.json"),
+        "{\n  \"compilerOptions\": { \"rootDir\": \"src\", \"outDir\": \"dist\", \"noEmit\": true }\n}\n",
+    )
+    .expect("no-emit tsconfig");
+    std::fs::write(
+        root.path().join("src/foo.ts"),
+        "export function foo() { return 1; }\n",
+    )
+    .expect("source");
+    std::fs::write(
+        root.path().join("app.ts"),
+        "import { foo } from './dist/foo';\nfoo();\n",
+    )
+    .expect("importer");
+
+    let generation = crate::cross_file_import_calls::publish_fixture_tree(root.path(), "no-emit");
+    let target = symbol(&generation, "src/foo.ts::foo");
+    assert!(
+        resolved_callers(&generation, &target).is_empty(),
+        "noEmit outDir must not invent src/foo.ts"
+    );
+}
+
+/// A compiler invoked through a package runner still declares the mapping:
+/// `npx babel src -d dist` binds `./dist/foo` to `src/foo.ts`.
+#[test]
+fn runner_invoked_babel_declares_mapping() {
+    let root = tempfile::tempdir().expect("runner-babel fixture");
+    std::fs::create_dir_all(root.path().join("src")).expect("src");
+    std::fs::write(
+        root.path().join("package.json"),
+        "{\n  \"name\": \"app\",\n  \"scripts\": { \"compile\": \"npx babel src -d dist\" }\n}\n",
+    )
+    .expect("runner babel script");
+    std::fs::write(
+        root.path().join("src/foo.ts"),
+        "export function foo() { return 1; }\n",
+    )
+    .expect("source");
+    std::fs::write(
+        root.path().join("app.ts"),
+        "import { foo } from './dist/foo';\nfoo();\n",
+    )
+    .expect("importer");
+
+    let generation =
+        crate::cross_file_import_calls::publish_fixture_tree(root.path(), "runner-babel");
+    let target = symbol(&generation, "src/foo.ts::foo");
+    let callers = resolved_callers(&generation, &target);
+    assert!(
+        callers.keys().any(|name| name.contains("app.ts")),
+        "npx babel src -d dist must bind ./dist/foo to src/foo.ts: {callers:?}"
+    );
+}
+
+/// A nested package is a claim boundary: the root `babel src -d .` mapping
+/// does not rewrite a missing file inside `packages/widget`, even when the
+/// `src/` mirror of that path exists.
+#[test]
+fn nested_package_missing_file_is_not_claimed_by_root_mapping() {
+    let root = tempfile::tempdir().expect("nested-package fixture");
+    std::fs::create_dir_all(root.path().join("src/packages/widget")).expect("src mirror");
+    std::fs::create_dir_all(root.path().join("packages/widget")).expect("nested package");
+    std::fs::write(
+        root.path().join("package.json"),
+        "{\n  \"name\": \"app\",\n  \"scripts\": { \"compile\": \"babel src -d .\" }\n}\n",
+    )
+    .expect("root babel script");
+    std::fs::write(
+        root.path().join("packages/widget/package.json"),
+        "{\n  \"name\": \"@app/widget\"\n}\n",
+    )
+    .expect("nested package manifest");
+    std::fs::write(
+        root.path().join("src/packages/widget/foo.ts"),
+        "export function foo() { return 1; }\n",
+    )
+    .expect("mirrored source");
+    std::fs::write(
+        root.path().join("packages/widget/user.ts"),
+        "import { foo } from './foo';\nfoo();\n",
+    )
+    .expect("nested importer");
+
+    let generation =
+        crate::cross_file_import_calls::publish_fixture_tree(root.path(), "nested-package");
+    let unresolved = generation
+        .unresolved_import_calls()
+        .into_iter()
+        .map(|reference| reference.reference_name)
+        .collect::<Vec<_>>();
+    assert!(
+        unresolved.iter().any(|name| name == "foo"),
+        "nested package ./foo must stay unresolved: {unresolved:?}"
+    );
+    let target = symbol(&generation, "src/packages/widget/foo.ts::foo");
+    assert!(
+        resolved_callers(&generation, &target).is_empty(),
+        "root mapping must not claim a nested package's missing file"
+    );
+}
+
+/// A `babel src -d ..` build emits into the parent directory, but it still
+/// must not claim a sibling package's missing files.
+#[test]
+fn sibling_package_missing_file_is_not_claimed_by_parent_dir_mapping() {
+    let root = tempfile::tempdir().expect("sibling-package fixture");
+    std::fs::create_dir_all(root.path().join("packages/widget/src/other")).expect("src mirror");
+    std::fs::create_dir_all(root.path().join("packages/other")).expect("sibling package");
+    std::fs::write(
+        root.path().join("packages/widget/package.json"),
+        "{\n  \"name\": \"@app/widget\",\n  \"scripts\": { \"compile\": \"babel src -d ..\" }\n}\n",
+    )
+    .expect("widget babel script");
+    std::fs::write(
+        root.path().join("packages/other/package.json"),
+        "{\n  \"name\": \"@app/other\"\n}\n",
+    )
+    .expect("sibling package manifest");
+    std::fs::write(
+        root.path().join("packages/widget/src/other/foo.ts"),
+        "export function foo() { return 1; }\n",
+    )
+    .expect("mirrored source");
+    std::fs::write(
+        root.path().join("packages/other/user.ts"),
+        "import { foo } from './foo';\nfoo();\n",
+    )
+    .expect("sibling importer");
+
+    let generation =
+        crate::cross_file_import_calls::publish_fixture_tree(root.path(), "sibling-package");
+    let target = symbol(&generation, "packages/widget/src/other/foo.ts::foo");
+    assert!(
+        resolved_callers(&generation, &target).is_empty(),
+        "sibling package missing file must stay unresolved, not bind widget's src mirror"
+    );
+}
+
 /// `exports.Name = Local` forwards a local binding as a named CommonJS
 /// export, so a destructured require followed by `new` binds the
 /// constructor's caller.
