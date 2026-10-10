@@ -297,7 +297,7 @@ pub(super) async fn execute_git_read(
                 repository_id,
                 worktree_id,
                 input_created_at,
-                &snapshot_bounds,
+                Some(&snapshot_bounds),
             )
         });
         let snapshot = match settle_blocking_git_worker(

@@ -1280,22 +1280,8 @@ pub fn capture_exact_snapshot(
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
     captured_at: UtcMicros,
-    bounds: &tracedecay_runtime_core::git::GitCommandBounds,
+    request_bounds: Option<&tracedecay_runtime_core::git::GitCommandBounds>,
 ) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
-    let runner_bounds = bounds.clone();
-    let cancelled = || {
-        if runner_bounds
-            .cancel
-            .as_ref()
-            .is_some_and(tracedecay_runtime_core::cancellation::CancellationToken::is_cancelled)
-            || std::time::Instant::now() >= runner_bounds.deadline
-        {
-            Err(map_native_error(NativeGitIndexError::Cancelled))
-        } else {
-            Ok(())
-        }
-    };
-    cancelled()?;
     // Same canonical root the daemon owner mounts; alias paths must not mint a
     // divergent snapshot that later fails exact preview CAS.
     let repository_root = super::canonicalize_repository_root(repository_root)
@@ -1306,17 +1292,18 @@ pub fn capture_exact_snapshot(
         repository_id,
         worktree_id,
     );
-    let runner = FixedGitIndexRunner::new(&repository_root)
-        .map_err(map_native_error)?
-        .with_command_bounds(bounds.clone());
-    cancelled()?;
+    let mut runner = FixedGitIndexRunner::new(&repository_root).map_err(map_native_error)?;
+    if let Some(bounds) = request_bounds {
+        runner = runner.with_command_bounds(bounds.clone());
+    }
+    let checkpoint = || runner.check_cancelled().map_err(map_native_error);
+    checkpoint()?;
     let status = assembler
         .read_authority()
         .status()
         .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
-    cancelled()?;
+    checkpoint()?;
     let lock = runner.acquire_index_lock().map_err(map_native_error)?;
-    cancelled()?;
     let tree = runner
         .index_tree_under_lock(&lock)
         .map_err(map_native_error)?;
@@ -1369,7 +1356,7 @@ pub fn capture_exact_snapshot_for_test(
         repository_id,
         worktree_id,
         captured_at,
-        &tracedecay_runtime_core::git::GitCommandBounds::default(),
+        None,
     )
     .map_err(test_snapshot_error)
 }
@@ -1448,11 +1435,11 @@ mod tests {
             RepositoryId::new("repository.fixture").expect("repository id"),
             WorktreeId::new("worktree.fixture").expect("worktree id"),
             UtcMicros(1),
-            &tracedecay_runtime_core::git::GitCommandBounds {
+            Some(&tracedecay_runtime_core::git::GitCommandBounds {
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
                 cancel: Some(cancel),
                 ..tracedecay_runtime_core::git::GitCommandBounds::default()
-            },
+            }),
         );
         let _ = watcher.join();
         assert!(
@@ -1466,6 +1453,50 @@ mod tests {
         runner
             .acquire_index_lock()
             .expect("cancelled snapshot must drop the real index lock");
+    }
+
+    #[test]
+    fn unbounded_snapshot_captures_a_listing_beyond_the_default_read_limit() {
+        let (directory, _assembler, _runner) = repository_fixture();
+        let blob = git_value(directory.path(), &["rev-parse", "HEAD:packet.txt"]);
+        let segment = "d".repeat(240);
+        let mut index_info = String::new();
+        for entry in 0..18_000 {
+            std::fmt::Write::write_fmt(
+                &mut index_info,
+                format_args!("100644 {blob}\t{segment}/{segment}/{segment}/{segment}/{entry}\n"),
+            )
+            .expect("format index entry");
+        }
+        let mut update = Command::new("git")
+            .current_dir(directory.path())
+            .args(["update-index", "--index-info"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("git update-index starts");
+        std::io::Write::write_all(
+            &mut update.stdin.take().expect("update-index stdin"),
+            index_info.as_bytes(),
+        )
+        .expect("write index info");
+        assert!(update.wait().expect("update-index exits").success());
+        git(
+            directory.path(),
+            &["commit", "--quiet", "-m", "wide listing"],
+        );
+
+        let snapshot = capture_exact_snapshot(
+            directory.path(),
+            ProjectId::new("project.fixture").expect("project id"),
+            RepositoryId::new("repository.fixture").expect("repository id"),
+            WorktreeId::new("worktree.fixture").expect("worktree id"),
+            UtcMicros(1),
+            None,
+        );
+        assert!(
+            snapshot.is_ok(),
+            "a snapshot without a request budget must not inherit read-request limits: {snapshot:?}"
+        );
     }
 
     fn repository_fixture() -> (TempDir, NativeGitIndexPreviewAssembler, FixedGitIndexRunner) {
