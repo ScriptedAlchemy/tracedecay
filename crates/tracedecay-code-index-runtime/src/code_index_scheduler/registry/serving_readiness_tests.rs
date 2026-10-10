@@ -10,7 +10,9 @@ use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1;
 use tracedecay_domain::ProjectId;
 
-use super::super::graph_activation::install_injected_activation_gate;
+use super::super::graph_activation::{
+    RESIDENT_MEMORY_GRAPH_REFUSAL_REASON, install_injected_activation_gate,
+};
 use super::super::tests::move_git_metadata;
 use super::{
     CodeIndexCadenceOutcomeV1, CodeIndexSchedulerRegistryV1, dashboard_generation_is_ready,
@@ -41,9 +43,6 @@ fn dashboard_ready_requires_text_and_graph_lane_owners() {
     );
     for graph in [
         CodeGraphServingReadinessV1::Pending,
-        CodeGraphServingReadinessV1::Refused {
-            reason: "fixture refusal".to_owned(),
-        },
         CodeGraphServingReadinessV1::Unavailable {
             reason: "fixture unavailable".to_owned(),
         },
@@ -53,6 +52,30 @@ fn dashboard_ready_requires_text_and_graph_lane_owners() {
             "freshness must not report ready while graph lane coverage is incomplete: {graph:?}"
         );
     }
+    assert!(
+        dashboard_generation_is_ready(
+            None,
+            true,
+            true,
+            &Some(CodeGraphServingReadinessV1::Refused {
+                reason:
+                    tracedecay_contracts::code_index_freshness::GRAPH_PUBLICATION_DEADLINE_REASON
+                        .to_owned(),
+            }),
+        ),
+        "a terminal graph refusal is a finished verdict for this generation, not active warming"
+    );
+    assert!(
+        !dashboard_generation_is_ready(
+            None,
+            true,
+            true,
+            &Some(CodeGraphServingReadinessV1::Refused {
+                reason: RESIDENT_MEMORY_GRAPH_REFUSAL_REASON.to_owned(),
+            }),
+        ),
+        "a resident-memory refusal stays parked so it can retry"
+    );
 }
 
 /// The graph-rebuild receipt (transport acceptance, both ~90s attempts): lane
