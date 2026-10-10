@@ -936,9 +936,10 @@ enum LaunchdJobActivity {
     Running,
     Stopped,
     Stopping,
-    /// Native launchd spawn window: `xpcproxy` is the job process before
-    /// exec of the daemon. Treat it as pending startup so ownership stays
-    /// exact and the existing readiness wait can finish.
+    /// launchd is bringing the job up but the daemon has not exec'd yet:
+    /// `xpcproxy` while launchd execs it, `spawn scheduled` while a respawn
+    /// waits out the throttle interval. launchd will run it without further
+    /// action, so readiness waits keep polling and quiescence must boot it out.
     Starting,
 }
 
@@ -989,7 +990,9 @@ fn launchd_owned_service_activity(
                 Some("running") => return Ok(Some(LaunchdJobActivity::Running)),
                 Some("waiting" | "not running") => return Ok(Some(LaunchdJobActivity::Stopped)),
                 Some("SIGTERMed") => return Ok(Some(LaunchdJobActivity::Stopping)),
-                Some("xpcproxy") => return Ok(Some(LaunchdJobActivity::Starting)),
+                Some("xpcproxy" | "spawn scheduled") => {
+                    return Ok(Some(LaunchdJobActivity::Starting));
+                }
                 _ => {}
             }
         }

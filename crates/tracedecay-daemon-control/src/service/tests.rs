@@ -3271,3 +3271,92 @@ fn launchd_termination_is_not_quiescence_while_the_socket_serves() {
         DaemonServiceState::StoppingEnabled
     );
 }
+
+/// launchd reports `xpcproxy` while it execs the job and `spawn scheduled`
+/// while a spawn is queued; both are startup of the owned job, not an
+/// unrecognized state (#3370).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn launchd_spawning_job_is_pending_startup_of_the_owned_job() {
+    let root = TempDir::new().unwrap();
+    let profile = ProfileRoot::under_home(root.path().join("home"));
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let launchctl = fake_service_program(&bin, "launchctl", "#!/bin/sh\nexit 0\n");
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    for state in ["xpcproxy", "spawn scheduled"] {
+        for (disabled, expected) in [
+            (false, DaemonServiceState::RunningEnabled),
+            (true, DaemonServiceState::RunningDisabled),
+        ] {
+            write_executable_script(&launchctl, format!(
+                "#!/bin/sh\nif [ \"$1\" = print ]; then\n  printf 'path = %s\\nstate = {state}\\n' '{}'\nelif [ \"$1\" = print-disabled ]; then\n  echo '\"com.tracedecay.daemon\" => {disabled}'\nfi\n",
+                plist.display()
+            )).unwrap();
+            assert_eq!(runner.service_state().unwrap(), expected, "{state}");
+        }
+        write_executable_script(
+            &launchctl,
+            format!("#!/bin/sh\necho 'path = /foreign/daemon.plist'\necho 'state = {state}'\n"),
+        )
+        .unwrap();
+        assert!(matches!(
+            runner.service_state(),
+            Err(tracedecay_domain::errors::TraceDecayError::ServiceUnitNotOwned { .. })
+        ));
+    }
+}
+
+/// Post-update restores wait on authenticated readiness; a job launchd is
+/// still spawning must keep that wait pending instead of failing it (#3370).
+#[cfg(target_os = "linux")]
+#[test]
+fn readiness_wait_rides_through_launchd_xpcproxy_startup() {
+    let dir = TempDir::new().expect("temp dir");
+    let profile = fixture_profile(dir.path());
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("fake bin dir");
+    let id = fake_service_program(&bin, "id", "#!/bin/sh\necho 501\n");
+    let plist = super::unit_file::launchd_user_service_path(&profile).unwrap();
+    let spawned = dir.path().join("spawned");
+    let launchctl = fake_service_program(
+        &bin,
+        "launchctl",
+        &format!(
+            "#!/bin/sh\n[ \"$1\" = print ] || exit 0\nif [ -f '{spawned}' ]; then state=running; else : > '{spawned}'; state=xpcproxy; fi\nprintf 'path = %s\\nstate = %s\\n' '{plist}' \"$state\"\n",
+            spawned = spawned.display(),
+            plist = plist.display(),
+        ),
+    );
+    let runner = ServiceRunner::launchd(&launchctl, &id, &profile).unwrap();
+    let service_path = super::service_unit_path(&profile).expect("service unit path");
+    std::fs::create_dir_all(service_path.parent().expect("service parent")).expect("service dir");
+    let socket_path = dir.path().join("daemon.sock");
+    std::fs::write(
+        &service_path,
+        format!(
+            "[Service]\nExecStart=/old/tracedecay daemon run --socket {}\n",
+            socket_path.display()
+        ),
+    )
+    .expect("existing service unit");
+    let authority = seed_socket_authority(&socket_path);
+    let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
+    let (_served, _) = serve_identity_probes(
+        listener,
+        vec![TEST_BUILD_VERSION],
+        authority.auth_token().to_owned(),
+    );
+
+    super::wait_for_installed_service_state_with(
+        &profile,
+        &runner,
+        DaemonServiceState::RunningEnabled,
+        TEST_BUILD_VERSION,
+        std::time::Duration::from_secs(10),
+    )
+    .expect("an xpcproxy startup must await readiness, not fail it");
+    assert!(spawned.exists(), "the wait must have observed xpcproxy");
+}
