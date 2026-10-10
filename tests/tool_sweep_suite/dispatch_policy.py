@@ -27,9 +27,14 @@ EFFECT_CLASSES = frozenset(
         "source_edit",
         "git_index_stage",
         "git_index_unstage",
-        "git_index_commit",
         "configuration_write",
         "administrative",
+        "spawns_process",
+        "binds_server",
+        "schedules_work",
+        "maintains_owner_state",
+        "maintains_profile_state",
+        "records_host_evidence",
     }
 )
 READ_EFFECTS = frozenset({"read", "preview"})

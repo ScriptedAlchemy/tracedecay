@@ -1,0 +1,14 @@
+[package]
+name = "tracedecay-tokenizer"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Shared compressed vocabulary for TraceDecay token counting"
+
+[dependencies]
+base64 = "0.22"
+flate2 = "1"
+rustc-hash = "2"
+thiserror = "2"
+tiktoken-rs = "0.12"
