@@ -803,7 +803,6 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         self.assertEqual(placement, {
             "task_id": "task.fixture",
             "run_id": "run.fixture",
-            "format": "json",
         })
         self.assertEqual(
             duplicate["second_attempt"]["attempt_id"], "attempt.fixture.second"
