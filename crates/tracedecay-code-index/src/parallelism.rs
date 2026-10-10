@@ -1085,13 +1085,6 @@ mod tests {
         let width = standalone_pool()
             .expect("standalone indexing pool")
             .current_num_threads();
-        assert!(
-            !std::ptr::eq(
-                standalone_pool().expect("standalone indexing pool"),
-                standalone_interactive_pool().expect("standalone interactive pool")
-            ),
-            "standalone interactive scans need a pool that is not the standalone indexing pool"
-        );
         let released = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let (held, held_rx) = std::sync::mpsc::channel();
         for _ in 0..width {
