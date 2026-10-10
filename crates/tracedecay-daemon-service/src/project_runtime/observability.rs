@@ -549,6 +549,10 @@ impl StoreObservabilityRegistryV1 {
         let deadline =
             tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
         loop {
+            // Register before checking: a completed drain broadcasts without retaining a permit.
+            let notified = self.settled.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             match self.drive_registered_store_retirement(database_path)? {
                 StoreObservabilitySettleV1::Absent if !self.drain_holds(database_path) => {
                     return Ok(());
@@ -566,7 +570,6 @@ impl StoreObservabilityRegistryV1 {
                     ));
                 }
                 StoreObservabilitySettleV1::Waiting | StoreObservabilitySettleV1::Absent => {
-                    let notified = self.settled.notified();
                     if tokio::time::timeout_at(deadline, notified).await.is_err() {
                         return Err(format!(
                             "observability retirement for {} exceeded the drain deadline",

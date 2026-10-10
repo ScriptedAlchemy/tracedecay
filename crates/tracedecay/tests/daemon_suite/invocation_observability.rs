@@ -1559,7 +1559,7 @@ async fn assert_blocked_writer_retirement(
         .expect("foreign owner drains independently");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn capacity_reuse_settles_observability_before_store_retirement() {
     let (_project, project_id, database, _runtime) = runtime("observability-capacity-settle").await;
     let registry = StoreObservabilityRegistryV1::default();
@@ -1578,10 +1578,12 @@ async fn capacity_reuse_settles_observability_before_store_retirement() {
         .expect("mount observability owner");
     let path = database.db_path().to_path_buf();
     drop(mounted);
-    registry
-        .settle_registered_store_retirement(&path)
-        .await
-        .expect("capacity reuse waits for the dropped alias drain");
+    let (first, second) = tokio::join!(
+        registry.settle_registered_store_retirement(&path),
+        registry.settle_registered_store_retirement(&path),
+    );
+    first.expect("capacity reuse waits for the dropped alias drain");
+    second.expect("concurrent capacity reuse observes the same completed drain");
     let remount_identity = ObservabilityProducerIdentityV1 {
         process_boot_id: "capacity-settle-remount".to_owned(),
         ..identity
