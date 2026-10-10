@@ -58,7 +58,9 @@ fn draining_after_exit_is_bounded_when_a_descendant_holds_stdout() {
 #[test]
 fn stdin_drain_after_exit_is_bounded_when_a_descendant_holds_input() {
     let mut command = Command::new("sh");
-    command.args(["-c", "sleep 2 <&0 >/dev/null 2>&1 & exit 0"]);
+    // POSIX shells point a background job's stdin at /dev/null before its own
+    // redirections run, so the pipe is handed over through fd 3.
+    command.args(["-c", "exec 3<&0; sleep 2 <&3 3<&- >/dev/null 2>&1 & exit 0"]);
     let bounds = GitCommandBounds {
         deadline: Instant::now() + Duration::from_millis(300),
         ..GitCommandBounds::default()
