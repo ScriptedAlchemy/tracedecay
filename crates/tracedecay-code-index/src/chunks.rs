@@ -2198,10 +2198,28 @@ fn skip_rust_trivia(mut rest: &str) -> &str {
     loop {
         rest = rest.trim_start();
         if let Some(body) = rest.strip_prefix("/*") {
-            let Some(end) = body.find("*/") else {
+            // Rust block comments nest; only the close that balances the
+            // opener ends the comment.
+            let mut depth = 1usize;
+            let mut index = 0;
+            let bytes = body.as_bytes();
+            while index + 1 < bytes.len() && depth > 0 {
+                match &bytes[index..index + 2] {
+                    b"/*" => {
+                        depth += 1;
+                        index += 2;
+                    }
+                    b"*/" => {
+                        depth -= 1;
+                        index += 2;
+                    }
+                    _ => index += 1,
+                }
+            }
+            if depth > 0 {
                 return rest;
-            };
-            rest = &body[end + 2..];
+            }
+            rest = &body[index..];
         } else if let Some(body) = rest.strip_prefix("//") {
             let Some(end) = body.find('\n') else {
                 return rest;
