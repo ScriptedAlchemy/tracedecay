@@ -54,6 +54,10 @@ const BM25_B_MILLIS: u64 = 750;
 const FUZZY_SCORE_MILLIS: u64 = 500;
 const PHRASE_SCORE_MILLIS: u64 = 2_000;
 const ECHO_SCORE_MILLIS: u64 = 750;
+/// Natural-language rustdoc must outrank a short signature that repeats one
+/// query word as a parameter name (`value: &Value`), or documented APIs lose
+/// the per-file diversity slot to an undocumented helper.
+const DOCUMENTATION_NL_SCORE_MILLIS: u64 = 3_000;
 
 /// Generation and source metadata bound to one immutable lexical projection.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -818,6 +822,7 @@ fn lexical_lane_candidate(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: Default::default(),
         retriever,
         retriever_revision,
         score_domain,
@@ -995,7 +1000,20 @@ fn score_lexical_row(
     let mut spelling_variants = BTreeSet::new();
     let mut matched_kinds = BTreeSet::new();
     let mut typo_recovery_applied = false;
+    // Identifier and alias queries keep name-field weights. Longer
+    // natural-language questions keep them only when rustdoc also matches,
+    // so test helpers that share a name token (`canonical`, `grant`) cannot
+    // consume the per-file diversity cap. Signature stays: error-contract
+    // needs match `#[error]` text there.
+    let score_name_fields = prepared.whole_terms.len() == 1
+        || (field_lengths.contains_key(&LexicalFieldV1::Documentation)
+            && prepared.whole_terms.iter().any(|(_, normalized)| {
+                term_frequency(LexicalFieldV1::Documentation, normalized) > 0
+            }));
     for field in field_lengths.keys().copied() {
+        if !score_name_fields && is_identifier_name_field(field) {
+            continue;
+        }
         if field != LexicalFieldV1::Subtoken {
             for (query_term, normalized) in &prepared.whole_terms {
                 let exact_tf = term_frequency(field, normalized);
@@ -1044,6 +1062,9 @@ fn score_lexical_row(
     }
     for (phrase, normalized) in &prepared.phrases {
         for field in field_lengths.keys().copied() {
+            if !score_name_fields && is_identifier_name_field(field) {
+                continue;
+            }
             let tf = phrase_tf(field, normalized);
             if tf == 0 {
                 continue;
@@ -1064,6 +1085,9 @@ fn score_lexical_row(
     }
     for proximity in &prepared.proximities {
         for field in field_lengths.keys().copied() {
+            if !score_name_fields && is_identifier_name_field(field) {
+                continue;
+            }
             let tf = proximity_tf(field, proximity);
             if tf == 0 {
                 continue;
@@ -1071,6 +1095,11 @@ fn score_lexical_row(
             let score = bm25(field, tf, 1).saturating_mul(PHRASE_SCORE_MILLIS) / 1_000;
             add_score(&mut field_scores, field, score);
             matched_proximities.insert(proximity.original.clone());
+        }
+    }
+    if prepared.whole_terms.len() != 1 {
+        if let Some(score) = field_scores.get_mut(&LexicalFieldV1::Documentation) {
+            *score = score.saturating_mul(DOCUMENTATION_NL_SCORE_MILLIS) / 1_000;
         }
     }
     let echo_penalty_applied = echo_penalty;
@@ -1090,6 +1119,13 @@ fn score_lexical_row(
         typo_recovery_applied,
         echo_penalty_applied,
     }
+}
+
+fn is_identifier_name_field(field: LexicalFieldV1) -> bool {
+    matches!(
+        field,
+        LexicalFieldV1::SymbolName | LexicalFieldV1::QualifiedName
+    )
 }
 
 fn field_weight_millis(field: LexicalFieldV1) -> u64 {

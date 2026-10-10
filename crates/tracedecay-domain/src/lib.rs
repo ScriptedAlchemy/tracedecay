@@ -361,10 +361,11 @@ pub use retrieval::{
     QueryFallbackSubpayload, QueryMac, RankedCandidate, RankingDecision, RankingDecisionKind,
     RankingRevision, RetrievalBudget, RetrievalBudgetUsage, RetrievalContractError,
     RetrievalCursor, RetrievalCursorKeyId, RetrievalError, RetrievalFailure, RetrievalRequest,
-    RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverContinuation, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1, ScoreDomainId, SessionOrThreadId,
-    SingleRootScopeV1, SourceFreshness, SourceInstanceKey, SourceNamespace, SourceOccurrenceId,
-    TemporalCandidateChannelV1, TemporalCandidateContributionV1, TemporalLaneEvidenceV1,
+    RetrievalScope, RetrievalSnapshot, RetrievalSourceRoleV1, RetrieverBatch,
+    RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    ScoreDomainCalibrationV1, ScoreDomainId, SessionOrThreadId, SingleRootScopeV1, SourceFreshness,
+    SourceInstanceKey, SourceNamespace, SourceOccurrenceId, TemporalCandidateChannelV1,
+    TemporalCandidateContributionV1, TemporalLaneEvidenceV1,
 };
 pub use session::{
     ByteRangeV1, ClosedUtcIntervalV1, CompactContextBundleV1, CompactContextConflictV1,

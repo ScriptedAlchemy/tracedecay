@@ -316,6 +316,7 @@ mod cap_key_tests {
                 occurrence("c", "file.other"),
             ],
             exact_class: ExactClass::Approximate,
+            source_role: Default::default(),
             utility_micros: 0,
             contributions: Vec::new(),
             freshness: Vec::new(),

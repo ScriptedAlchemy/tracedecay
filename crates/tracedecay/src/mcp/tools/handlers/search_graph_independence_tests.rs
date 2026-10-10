@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use tracedecay_domain::{
     AuthorizationRevision, ExactClass, FusedCandidate, FusionProfileId, LogicalEvidenceId,
     PrincipalId, PublicRetrieverStatus, QueryFallbackSubpayload, RankedCandidate,
-    RetrievalAnchorId, RetrieverKind,
+    RetrievalAnchorId, RetrievalSourceRoleV1, RetrieverKind,
 };
 
 use super::dispatch_test_support::{
@@ -56,6 +56,7 @@ fn lexical_candidate() -> RankedCandidate {
                 .expect("lexical candidate logical evidence"),
             occurrences: Vec::new(),
             exact_class: ExactClass::Approximate,
+            source_role: RetrievalSourceRoleV1::default(),
             utility_micros: 1,
             contributions: Vec::new(),
             freshness: Vec::new(),

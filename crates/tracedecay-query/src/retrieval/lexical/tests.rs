@@ -13,9 +13,9 @@ use tracedecay_domain::{
     CompactCandidate, EphemeralSanitizedQueryViewV1, EvidenceRole, ExactAdmissionProof,
     ExactAdmissionRuleRevision, ExactFieldV1, FixedPointScore, FreshnessCompatibilityV1,
     PrincipalId, QueryNormalizationRevision, RetrievalBudget, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
-    SanitizerRevision, SingleRootScopeV1, SourceFreshness, TemporalModeV1, UtcMicros,
-    VectorWatermark, split_subtokens, technical_tokens,
+    RetrievalSnapshot, RetrievalSourceRoleV1, RetrieverBatch, RetrieverCoverage, RetrieverKind,
+    RetrieverOutcome, SanitizerRevision, SingleRootScopeV1, SourceFreshness, TemporalModeV1,
+    UtcMicros, VectorWatermark, split_subtokens, technical_tokens,
 };
 
 use super::{
@@ -310,6 +310,7 @@ fn lexical_pair(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: Default::default(),
         retriever: RetrieverKind::Lexical,
         retriever_revision: id("retriever.lexical.v1"),
         score_domain: request.score_domain.clone(),
@@ -346,6 +347,7 @@ fn lexical_pair(
         spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
+        source_role: Default::default(),
     };
     (candidate, evidence)
 }
@@ -555,6 +557,79 @@ fn lexical_lane_applies_exclude_field_filters() {
     result_order(&result, &["occ.a", "occ.b", "occ.c"]);
     assert_eq!(result.candidates[0].raw_score, FixedPointScore(900_000));
     assert_eq!(result.coverage.excluded, 0);
+}
+
+#[test]
+fn lexical_lane_ranks_production_definitions_ahead_of_stronger_test_references() {
+    let request = lexical_request(1);
+    let (production, mut production_evidence) = lexical_pair(
+        &request,
+        "occ.z",
+        &[(LexicalFieldV1::SymbolName, 100_000)],
+        &["reserve"],
+        &[],
+    );
+    production_evidence.source_role = RetrievalSourceRoleV1::ProductionDefinition;
+    let (test_hit, mut test_evidence) = lexical_pair(
+        &request,
+        "occ.a",
+        &[(LexicalFieldV1::SymbolName, 2_000_000)],
+        &["reserve"],
+        &[],
+    );
+    test_evidence.source_role = RetrievalSourceRoleV1::TestReference;
+    let lane = LexicalLane::new(FakeLexicalPort::complete(vec![
+        (test_hit, test_evidence),
+        (production, production_evidence),
+    ]));
+
+    let result = complete_batch(lane.retrieve_lexical(&request).expect("lexical retrieval"));
+
+    result_order(&result, &["occ.z"]);
+    assert_eq!(result.candidates[0].raw_score, FixedPointScore(100_000));
+    assert_eq!(
+        result.candidates[0].source_role,
+        RetrievalSourceRoleV1::ProductionDefinition
+    );
+    assert_eq!(
+        result.evidence_by_occurrence[&id("occ.z")].source_role,
+        RetrievalSourceRoleV1::ProductionDefinition
+    );
+    assert_eq!(result.coverage.capped, 1);
+}
+
+#[test]
+fn lexical_lane_lets_measured_scores_rank_production_other_against_tests() {
+    let request = lexical_request(1);
+    let (production, mut production_evidence) = lexical_pair(
+        &request,
+        "occ.z",
+        &[(LexicalFieldV1::BodyText, 100_000)],
+        &["reserve"],
+        &[],
+    );
+    production_evidence.source_role = RetrievalSourceRoleV1::ProductionOther;
+    let (test_hit, mut test_evidence) = lexical_pair(
+        &request,
+        "occ.a",
+        &[(LexicalFieldV1::BodyText, 2_000_000)],
+        &["reserve"],
+        &[],
+    );
+    test_evidence.source_role = RetrievalSourceRoleV1::TestReference;
+    let lane = LexicalLane::new(FakeLexicalPort::complete(vec![
+        (test_hit, test_evidence),
+        (production, production_evidence),
+    ]));
+
+    let result = complete_batch(lane.retrieve_lexical(&request).expect("lexical retrieval"));
+
+    result_order(&result, &["occ.a"]);
+    assert_eq!(result.candidates[0].raw_score, FixedPointScore(2_000_000));
+    assert_eq!(
+        result.evidence_by_occurrence[&id("occ.a")].source_role,
+        RetrievalSourceRoleV1::TestReference
+    );
 }
 
 #[test]

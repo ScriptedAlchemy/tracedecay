@@ -32,9 +32,9 @@ use tracedecay_code_index::clones::{
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
-    CompactCandidate, ExactFieldV1, LanguageDescriptorRevision, ManifestDigest, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SourceOccurrenceId, SourceSpan,
-    SymbolOccurrenceId, canonical_sha256,
+    CompactCandidate, ExactFieldV1, ExactTechnicalTermKindV1, LanguageDescriptorRevision,
+    ManifestDigest, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, canonical_sha256, split_subtokens,
 };
 use tracedecay_private_fs::{RewriteWitness, open_private_file};
 
@@ -88,6 +88,9 @@ use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
     MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1, admit_candidate_sources,
     candidate_admission_outcome, field_admitted,
+};
+use crate::retrieval::source_tier::{
+    classify_source_role, exact_definition_match, is_definition_field,
 };
 
 impl LexicalFieldTextV1 for ArtifactRowV1 {
@@ -2147,6 +2150,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 None,
             )?;
             candidate.ordinal_rank = ordinal as u32;
+            let definition_match = lexical_definition_match(&row, &prepared, &fuzzy);
             let evidence = LexicalLaneEvidence {
                 binding: lexical_lane_binding(&row, &candidate, score.matched_kinds),
                 field_scores_micros: score.field_scores,
@@ -2157,6 +2161,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 spelling_variants: score.spelling_variants,
                 typo_recovery_applied: score.typo_recovery_applied,
                 echo_penalty_applied: score.echo_penalty_applied,
+                source_role: classify_source_role(&row.logical_path, definition_match),
             };
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
@@ -2183,8 +2188,9 @@ impl<'a> ArtifactQueryV1<'a> {
         retrieval_checkpoint(request.control)?;
         let documents = self.exact_documents(request)?;
         // Same bounded selection as the lexical lane: keys mirror the exact
-        // lane's canonical order (admitted literal count, then occurrence),
-        // and only the selected winners are rehydrated into evidence.
+        // lane's canonical order (production-definition rank, then admitted
+        // literal count, then occurrence), and only the selected winners are
+        // rehydrated into evidence.
         // Central admission runs BEFORE heap eligibility: a document whose
         // matched literals are all denied is excluded, never selected, so a
         // denied best match can never displace an admitted candidate or
@@ -2204,6 +2210,14 @@ impl<'a> ArtifactQueryV1<'a> {
                     document,
                     row.id.as_str().to_owned(),
                     row.anchor.file_occurrence_id,
+                    classify_source_role(
+                        &row.logical_path,
+                        exact_definition_match(
+                            row.anchor.grain,
+                            row.symbol_simple_name.as_deref(),
+                            exact_matched_symbol_names(&matches, request),
+                        ),
+                    ),
                     matches,
                 ));
             }
@@ -2213,7 +2227,9 @@ impl<'a> ArtifactQueryV1<'a> {
         let mut eligible = 0u64;
         let mut ranked = BinaryHeap::new();
         let mut proofs = LiteralProofCacheV1::new(request.literals.len());
-        for (visited, (document, row_id, file, matches)) in matched_rows.into_iter().enumerate() {
+        for (visited, (document, row_id, file, source_role, matches)) in
+            matched_rows.into_iter().enumerate()
+        {
             if visited.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
                 retrieval_checkpoint(request.control)?;
             }
@@ -2232,8 +2248,18 @@ impl<'a> ArtifactQueryV1<'a> {
                 &mut ranked,
                 cap,
                 Keyed {
-                    key: (Reverse(matched_literals.len()), row_id, document),
-                    value: (admitted_ordinal, matched_literals, matched_kinds),
+                    key: (
+                        source_role.admission_rank(),
+                        Reverse(matched_literals.len()),
+                        row_id,
+                        document,
+                    ),
+                    value: (
+                        admitted_ordinal,
+                        matched_literals,
+                        matched_kinds,
+                        source_role,
+                    ),
                 },
             );
         }
@@ -2241,7 +2267,7 @@ impl<'a> ArtifactQueryV1<'a> {
         let selected = ranked.into_sorted_vec();
         let truncated = eligible - selected.len() as u64;
         // Winners re-read in document order so each row block inflates once.
-        let mut winner_documents = selected.iter().map(|entry| entry.key.2).collect::<Vec<_>>();
+        let mut winner_documents = selected.iter().map(|entry| entry.key.3).collect::<Vec<_>>();
         winner_documents.sort_unstable();
         let mut winner_rows = BTreeMap::new();
         for document in winner_documents {
@@ -2254,8 +2280,8 @@ impl<'a> ArtifactQueryV1<'a> {
                 retrieval_checkpoint(request.control)?;
             }
             let Keyed {
-                key: (_, _, document),
-                value: (admitted_ordinal, matched_literals, matched_kinds),
+                key: (_, _, _, document),
+                value: (admitted_ordinal, matched_literals, matched_kinds, source_role),
             } = entry;
             let proof = proofs.admitted_proof(admitted_ordinal)?;
             let matched_literals = matched_literals
@@ -2279,6 +2305,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 binding: lexical_lane_binding(&row, &candidate, matched_kinds),
                 matched_literals,
                 admission_proof: proof,
+                source_role,
             };
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
@@ -2442,7 +2469,13 @@ impl<'a> ArtifactQueryV1<'a> {
                     }
                     // Echo only lowers the score. A candidate whose upper bound
                     // loses to the current worst winner never needs text hydration.
-                    let best_key = (Reverse(upper), draft.chunk_id.clone(), document);
+                    // Name/signature matches may be production definitions; those
+                    // outrank every test hit, so their path is read before the
+                    // bound can reject them. Other hits share one measured-score
+                    // tier and do not inflate just to classify a test path.
+                    let role_rank =
+                        lexical_admission_rank(self, document, &draft, prepared, fuzzy)?;
+                    let best_key = (role_rank, Reverse(upper), draft.chunk_id.clone(), document);
                     if ranked.len() == cap
                         && ranked.peek().is_some_and(|worst| best_key >= worst.key)
                     {
@@ -2474,7 +2507,7 @@ impl<'a> ArtifactQueryV1<'a> {
                         &mut ranked,
                         cap,
                         Keyed {
-                            key: (Reverse(rank), draft.chunk_id.clone(), document),
+                            key: (role_rank, Reverse(rank), draft.chunk_id.clone(), document),
                             value: SelectedLexicalV1 {
                                 draft,
                                 document,
@@ -3107,7 +3140,78 @@ struct SelectedLexicalV1 {
     rank: u64,
 }
 
-type LexicalWinnerHeap = BinaryHeap<Keyed<(Reverse<u64>, String, u32), SelectedLexicalV1>>;
+type LexicalWinnerHeap = BinaryHeap<Keyed<(u8, Reverse<u64>, String, u32), SelectedLexicalV1>>;
+
+fn draft_definition_match(draft: &LexicalDraftV1) -> bool {
+    draft
+        .frequencies
+        .0
+        .iter()
+        .any(|(field, _, frequency)| *frequency > 0 && is_definition_field(*field))
+        || draft
+            .phrase_tfs
+            .iter()
+            .any(|(field, _, count)| *count > 0 && is_definition_field(*field))
+        || draft
+            .proximity_tfs
+            .iter()
+            .any(|(field, _, count)| *count > 0 && is_definition_field(*field))
+}
+
+fn lexical_admission_rank(
+    query: &ArtifactQueryV1<'_>,
+    document: u32,
+    draft: &LexicalDraftV1,
+    prepared: &PreparedLexicalQueryV1<'_>,
+    fuzzy: &FuzzyExpansionsV1,
+) -> Result<u8, RetrievalPortError> {
+    if !draft_definition_match(draft) {
+        return Ok(tracedecay_domain::RetrievalSourceRoleV1::ProductionOther.admission_rank());
+    }
+    let row = query.row(document)?;
+    let definition_match = lexical_definition_match(&row, prepared, fuzzy);
+    Ok(classify_source_role(&row.logical_path, definition_match).admission_rank())
+}
+
+// A signature's parameter and return types reference other symbols. Definition
+// priority requires the query or its admitted spelling variant to name this
+// row. A short alias still names the row when every term is a subtoken of the
+// declared identifier (`cache grant` → `VerifiedCacheGrantSnapshotV1`).
+fn lexical_definition_match(
+    row: &ArtifactRowV1,
+    prepared: &PreparedLexicalQueryV1<'_>,
+    fuzzy: &FuzzyExpansionsV1,
+) -> bool {
+    let Some(name) = row.symbol_simple_name.as_deref() else {
+        return false;
+    };
+    let normalized_name = normalize_lexical(name);
+    if exact_definition_match(
+        row.anchor.grain,
+        Some(&normalized_name),
+        prepared
+            .whole_terms
+            .iter()
+            .chain(&prepared.phrases)
+            .map(|(_, normalized)| normalized.as_str())
+            .chain(fuzzy.by_query.values().flatten().map(String::as_str)),
+    ) {
+        return true;
+    }
+    let terms = prepared
+        .whole_terms
+        .iter()
+        .map(|(_, normalized)| normalized.as_str())
+        .collect::<Vec<_>>();
+    if !(2..=3).contains(&terms.len()) {
+        return false;
+    }
+    let name_tokens = split_subtokens(name);
+    !name_tokens.is_empty()
+        && terms
+            .iter()
+            .all(|term| name_tokens.iter().any(|token| token == term))
+}
 
 /// Heap entry ordered by `key` alone. Payload is excluded from equality so a
 /// worst-first `BinaryHeap` ranks capped winners without comparing row
@@ -3205,6 +3309,25 @@ fn exact_matches_artifact(row: &ArtifactRowV1, request: &ExactLaneRequest) -> Ve
         },
         request,
     )
+}
+
+fn exact_matched_symbol_names<'a>(
+    matches: &'a [ExactRowMatchV1],
+    request: &'a ExactLaneRequest<'_>,
+) -> impl Iterator<Item = &'a str> {
+    matches.iter().filter_map(|matched| {
+        if !matches!(
+            matched.kind,
+            Some(ExactTechnicalTermKindV1::WholeSymbol)
+                | Some(ExactTechnicalTermKindV1::QualifiedName)
+        ) {
+            return None;
+        }
+        request
+            .literals
+            .get(matched.literal)
+            .and_then(|literal| std::str::from_utf8(&literal.canonical_bytes).ok())
+    })
 }
 
 /// In-fuzzy terms plus a character-length index. Buckets keep load order so

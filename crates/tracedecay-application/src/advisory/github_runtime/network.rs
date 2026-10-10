@@ -1308,11 +1308,12 @@ pub struct GitHubCiReadOnlyClientV1 {
 #[cfg(test)]
 pub(crate) fn ci_fixture_client(address: std::net::SocketAddr) -> GitHubCiReadOnlyClientV1 {
     GitHubCiReadOnlyClientV1 {
-        agent: ureq::Agent::config_builder()
-            .https_only(false)
-            .http_status_as_error(false)
-            .build()
-            .into(),
+        agent: http_agent(
+            ureq::Agent::config_builder()
+                .https_only(false)
+                .http_status_as_error(false)
+                .build(),
+        ),
         target: GitHubCiRepositoryTargetV1 {
             owner: "ScriptedAlchemy".to_owned(),
             repository: "tracedecay".to_owned(),

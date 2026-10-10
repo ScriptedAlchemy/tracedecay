@@ -4123,11 +4123,12 @@ async fn production_composition_dashboard_persists_project_settings_over_http() 
             (status, payload)
         }
 
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_global(Some(std::time::Duration::from_secs(4)))
-            .build()
-            .into();
+        let agent = tracedecay_application::http_agent::http_agent(
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .timeout_global(Some(std::time::Duration::from_secs(4)))
+                .build(),
+        );
         let settings_url = format!("{base_url}/api/settings");
         let project_settings_url = format!("{settings_url}/project");
 

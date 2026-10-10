@@ -488,6 +488,7 @@ fn diagnostic_provider_outcome(
             logical_copy_cluster_id: None,
             logical_copy_evidence_anchor: None,
             evidence_role: EvidenceRole::Primary,
+            source_role: Default::default(),
             retriever: RetrieverKind::Diagnostic,
             retriever_revision: retriever_revision.clone(),
             score_domain: score_domain.clone(),

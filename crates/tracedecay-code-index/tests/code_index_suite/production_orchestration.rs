@@ -3118,62 +3118,62 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:ab12b9eca3975dd7324ff093905fda1bfe7ee2a92dc9646e817b8052e9602faf";
+    "sha256:0ba68ca337a4760c0221c1212eec669965f43abdd244f0b21be7f705f7449918";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
-        "sha256:3b7947038f6d94ea076ac2cc89403bc3fe58cae074552c7096dc4d99eacebe5a",
-        1_737,
+        "sha256:9b175e6aa1ddf6db4138181c0dd1cd522f37381898a58d46e26b1165b613727b",
+        1_758,
     ),
     (
-        "sha256:5a85600a39a6eda3a6a214c1461f5f87821cd5d7f86849217d98d127197357e9",
-        1_298,
+        "sha256:6c08cbbdb70f1525840cfa56105776d2a40a3266063d1c236bc39326debd7411",
+        1_299,
     ),
     (
-        "sha256:72ba1636f87140dea312d95e797b5257ee1834eeca3c86a62b1bd1ba48548fed",
-        1_075,
-    ),
-    (
-        "sha256:6c4b0954e7a09347cfc05055e6e1262dad9c161363919c4bc1ccc1b5780285ac",
-        1_080,
-    ),
-    (
-        "sha256:afddc8a153ac4f3ddade5e08efbf637183c349ac313ddfd1d8925f91c3b4407c",
-        1_081,
-    ),
-    (
-        "sha256:12a4e7c1d46a3ebf5eff4b465848cb18dcc4f60af58b0a4f78c75ae5e40f7920",
-        1_077,
-    ),
-    (
-        "sha256:c5884e4b070d0cb02d586de98055e952ea87fbe1ee92b2dd93e2f6d4e50821f9",
-        1_075,
-    ),
-    (
-        "sha256:26ff63f50b1b661f25b5a76fe005af23e32526c28c1c0f8fcc5030eef118d367",
+        "sha256:a816a13067d1a67f8e586e1124d24a668fbd8f91efab1b870e8ad3a4bc0a7429",
         1_078,
     ),
     (
-        "sha256:f3703fac6c245334d2da8ce79f91588026ed45f1932f204b1f068bd9cef26ce5",
+        "sha256:a675b6ca3bc6589ce763361ab9a89d26b919c13a4b4d1b74f18066fd8b44d710",
+        1_079,
+    ),
+    (
+        "sha256:4f0fca93b58223c5c8a6f4730ba587b8fe8ea38c7138936029cf15ba9984d138",
+        1_079,
+    ),
+    (
+        "sha256:9550ad83470e480d446e707d8bbc5a5097c5b11eacffe01190354235c279942e",
         1_075,
     ),
     (
-        "sha256:7cbe00299daee294c3562cc24d10ec0b1b4a24e3b5bb4140711bd5822e952cd7",
+        "sha256:ec436e840d50c4a8d132ade521b020a55ff6c7159a7ece8019237b1e5386ccb0",
+        1_078,
+    ),
+    (
+        "sha256:7f3477103cfeed2582bc2bbad44b3c581ff6fbd68c6bf962869485915f0b33bd",
+        1_080,
+    ),
+    (
+        "sha256:7419618fb4744be808a03079a7ca6f3e5250a59d356949a894f000214278eef9",
+        1_078,
+    ),
+    (
+        "sha256:5feaff499e2ec9fd2c1d39f41e45c789890fa58ff104619390875488dd40cdb1",
         1_354,
     ),
     (
-        "sha256:808085bc4aeb5167f643382c4c493d1853848941967d2efeb08646e2f009c912",
-        122,
+        "sha256:165f48c378905b4ce90684ece5cab75ed183f64fb6dc297685e2971efc2c3cf8",
+        121,
     ),
     (
-        "sha256:87f1e94d43dae3fa0256e39ab475dd6ad75f46163066459678f3b7cc0501d502",
-        466,
+        "sha256:c533708b147f5e43f09a12ee3127bbd64e534941e5cf073cf67ab3f4822fdb42",
+        465,
     ),
     (
-        "sha256:15737484014bb520305aaa3d57015146f73217a473f84c7c992ca9e4753b6a07",
+        "sha256:cfac493dd3ca30c60f7279e72b8d5db400dc22e47b405927954db971576dddf1",
         1_858,
     ),
     (
-        "sha256:43cb26ecd5d8a87a7907b2cad1f77466b080a8d5cd504d5ef5869fcc51d5fe3f",
+        "sha256:d9a3da7c730fc4958e219d5e7921b645f7e6731c6ce9d22dc9f3f622fe768ea1",
         3_984,
     ),
     (

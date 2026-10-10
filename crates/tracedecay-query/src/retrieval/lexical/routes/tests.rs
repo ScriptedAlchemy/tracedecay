@@ -7,9 +7,9 @@ use std::collections::BTreeMap;
 use tracedecay_contracts::retrieval::{LexicalAnchorDropReasonV1, LexicalAnchorDropV1};
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, EvidenceRole, ExactTechnicalTermKindV1, FixedPointScore,
-    FreshnessCompatibilityV1, RetrievalBudget, RetrievalFailure, RetrieverBatch,
-    RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome, SourceFreshness,
-    UtcMicros,
+    FreshnessCompatibilityV1, RetrievalBudget, RetrievalFailure, RetrievalSourceRoleV1,
+    RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    SourceFreshness, UtcMicros,
 };
 
 use super::{
@@ -380,6 +380,7 @@ fn pair(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: Default::default(),
         retriever: RetrieverKind::Lexical,
         retriever_revision: id("retriever.lexical.v1"),
         score_domain: id(crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1),
@@ -413,6 +414,7 @@ fn pair(
         spelling_variants: Vec::new(),
         typo_recovery_applied: false,
         echo_penalty_applied: false,
+        source_role: Default::default(),
     };
     (candidate, evidence)
 }
@@ -1279,4 +1281,127 @@ fn route_plan_follows_the_shape_gate_unless_the_caller_decides() {
             decided_by: LexicalRouteDeciderV1::Caller,
         }
     );
+}
+
+#[test]
+fn merged_candidates_keep_the_strongest_source_role_across_routes() {
+    // occ.a reads as a non-definition production hit under the strict query
+    // and as a production definition under the identifier split; occ.b reads
+    // the other way. Both merged occurrences keep the definition tier.
+    let (candidate_a, mut evidence_a) = pair(
+        "occ.a",
+        &[(LexicalFieldV1::BodyText, 100_000)],
+        &["ensure_daemon"],
+    );
+    evidence_a.source_role = RetrievalSourceRoleV1::ProductionOther;
+    let (candidate_b, mut evidence_b) = pair(
+        "occ.b",
+        &[(LexicalFieldV1::SymbolName, 120_000)],
+        &["ensure_daemon"],
+    );
+    evidence_b.source_role = RetrievalSourceRoleV1::ProductionDefinition;
+    let query_batch = lane_batch(vec![(candidate_a, evidence_a), (candidate_b, evidence_b)]);
+    let (split_a, mut split_evidence_a) = pair(
+        "occ.a",
+        &[(LexicalFieldV1::SymbolName, 50_000)],
+        &["ensure", "daemon"],
+    );
+    split_evidence_a.source_role = RetrievalSourceRoleV1::ProductionDefinition;
+    let (split_b, mut split_evidence_b) = pair(
+        "occ.b",
+        &[(LexicalFieldV1::BodyText, 60_000)],
+        &["ensure", "daemon"],
+    );
+    split_evidence_b.source_role = RetrievalSourceRoleV1::ProductionOther;
+    let split_kind = LexicalRouteKindV1::IdentifierSplit {
+        strict_query: "ensure_daemon".to_owned(),
+        terms: vec!["ensure".to_owned(), "daemon".to_owned()],
+    };
+    let (outcome, _) = merge_lexical_routes(
+        &generation(),
+        &budget(4),
+        &budget(8),
+        vec![
+            route(LexicalRouteKindV1::Query, query_batch),
+            route(
+                split_kind,
+                lane_batch(vec![
+                    (split_a, split_evidence_a),
+                    (split_b, split_evidence_b),
+                ]),
+            ),
+        ],
+    )
+    .expect("merge");
+    let RetrieverOutcome::Complete(batch) = outcome else {
+        panic!("every route completed, so the merged lane is complete");
+    };
+    for occurrence in ["occ.a", "occ.b"] {
+        let candidate = batch
+            .candidates
+            .iter()
+            .find(|candidate| candidate.source_occurrence_id.as_str() == occurrence)
+            .expect("merged occurrence");
+        assert_eq!(
+            candidate.source_role,
+            RetrievalSourceRoleV1::ProductionDefinition,
+            "{occurrence} keeps the definition tier one route proved"
+        );
+        assert_eq!(
+            batch.evidence_by_occurrence[&id(occurrence)].source_role,
+            RetrievalSourceRoleV1::ProductionDefinition,
+        );
+    }
+}
+
+#[test]
+fn merged_cap_keeps_the_production_definition_ahead_of_stronger_test_hits() {
+    // A strict-route test hit with a far higher measured score cannot consume
+    // the one merged seat ahead of a production definition an additive route
+    // admitted.
+    let (test_hit, mut test_evidence) = pair(
+        "occ.test",
+        &[(LexicalFieldV1::BodyText, 300_000)],
+        &["ensure_daemon"],
+    );
+    test_evidence.source_role = RetrievalSourceRoleV1::TestReference;
+    let (definition, mut definition_evidence) = pair(
+        "occ.definition",
+        &[(LexicalFieldV1::SymbolName, 50_000)],
+        &["ensure", "daemon"],
+    );
+    definition_evidence.source_role = RetrievalSourceRoleV1::ProductionDefinition;
+    let split_kind = LexicalRouteKindV1::IdentifierSplit {
+        strict_query: "ensure_daemon".to_owned(),
+        terms: vec!["ensure".to_owned(), "daemon".to_owned()],
+    };
+    let (outcome, _) = merge_lexical_routes(
+        &generation(),
+        &budget(1),
+        &budget(8),
+        vec![
+            route(
+                LexicalRouteKindV1::Query,
+                lane_batch(vec![(test_hit, test_evidence)]),
+            ),
+            route(
+                split_kind,
+                lane_batch(vec![(definition, definition_evidence)]),
+            ),
+        ],
+    )
+    .expect("merge");
+    let RetrieverOutcome::Complete(batch) = outcome else {
+        panic!("every route completed, so the merged lane is complete");
+    };
+    assert_eq!(
+        order(&batch),
+        ["occ.definition"],
+        "the merged cap keeps the production definition"
+    );
+    assert_eq!(
+        batch.candidates[0].source_role,
+        RetrievalSourceRoleV1::ProductionDefinition
+    );
+    assert_eq!(batch.coverage.capped, 1);
 }

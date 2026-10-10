@@ -342,6 +342,10 @@ pub struct LexicalLaneEvidence {
     pub spelling_variants: Vec<LexicalSpellingVariantV1>,
     pub typo_recovery_applied: bool,
     pub echo_penalty_applied: bool,
+    /// Source-role evidence for the same-symbol definition/reference order.
+    /// Absent historical evidence deserializes as a non-definition hit.
+    #[serde(default)]
+    pub source_role: tracedecay_domain::RetrievalSourceRoleV1,
 }
 
 impl LaneBoundEvidence for LexicalLaneEvidence {
@@ -593,13 +597,16 @@ where
             }
             admitted.push((candidate.clone(), filtered, raw_score));
         }
-        // Canonical deterministic order: recomputed fixed-point score
+        // Canonical deterministic order: production definitions ahead of
+        // every other source role, then recomputed fixed-point score
         // (descending), then stable occurrence identity, then the evidence
         // anchor. Port emission order can never select a different prefix.
         admitted.sort_by(|left, right| {
-            right
-                .2
-                .cmp(&left.2)
+            left.1
+                .source_role
+                .admission_rank()
+                .cmp(&right.1.source_role.admission_rank())
+                .then_with(|| right.2.cmp(&left.2))
                 .then_with(|| {
                     left.0
                         .source_occurrence_id
@@ -622,6 +629,7 @@ where
                 retrieval_checkpoint(request.control)?;
             }
             candidate.ordinal_rank = ordinal as u32;
+            candidate.source_role = evidence.source_role;
             candidate.raw_score = raw_score;
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);

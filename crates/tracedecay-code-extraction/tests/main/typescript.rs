@@ -1302,3 +1302,110 @@ class Circle {\n\
         ]
     );
 }
+
+/// A class method's typed parameter is a Uses site of that type. Missing it
+/// is why callers of a type-imported class stayed empty.
+#[test]
+fn test_ts_typed_parameter_is_a_uses_site() {
+    let source = r#"
+import type { Compiler } from './Compiler';
+export default class JsonpTemplatePlugin {
+    apply(compiler: Compiler) {
+        compiler.run();
+    }
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("JsonpTemplatePlugin.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let uses: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| {
+            reference.reference_kind == EdgeKind::Uses && reference.reference_name == "Compiler"
+        })
+        .collect();
+    assert_eq!(
+        uses.len(),
+        1,
+        "apply(compiler: Compiler) must be a Uses ref: {:?}",
+        result.unresolved_refs
+    );
+}
+
+/// A class that constructs another instance of itself (`new RsdoctorRspackPlugin`
+/// inside `registerChildCompiler`) is still a caller of that class.
+#[test]
+fn test_ts_new_expression_inside_owning_class_is_a_calls_site() {
+    let source = r#"
+export class RsdoctorRspackPlugin {
+  registerChildCompiler() {
+    const childPlugin = new RsdoctorRspackPlugin({});
+    return childPlugin;
+  }
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("packages/core/src/rspack-plugin/plugin.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        calls_from(&result, "registerChildCompiler"),
+        ["RsdoctorRspackPlugin"],
+        "same-class constructor sites must be Calls refs, got {:?}",
+        result.unresolved_refs
+    );
+}
+
+/// `new Foo()` is a call site of `Foo`. Missing it is why callers of a class
+/// stayed empty while the disk still had constructor invocations.
+#[test]
+fn test_ts_new_expression_is_a_calls_site() {
+    let source = r#"
+export class URLImportPlugin {}
+
+export function build() {
+    return new URLImportPlugin();
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("factory.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        calls_from(&result, "build"),
+        ["URLImportPlugin"],
+        "constructor sites must be Calls refs, got {:?}",
+        result.unresolved_refs
+    );
+}
+
+/// CommonJS factory files construct plugins at module scope, not inside a
+/// named function. The module-scope owner must still keep the `new`.
+#[test]
+fn test_js_module_scope_new_expression_is_a_calls_site() {
+    let source = r#"
+const URLImportPlugin = require("../../webpack");
+module.exports = (siteId) => {
+  return new URLImportPlugin({ manifestName: `website-${siteId}` });
+};
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("manual/webpack/webpackConfigFactory.js", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let news = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| {
+            reference.reference_kind == EdgeKind::Calls
+                && reference.reference_name == "URLImportPlugin"
+        })
+        .count();
+    assert_eq!(
+        news, 1,
+        "module-scope new URLImportPlugin must be a Calls ref: {:?}",
+        result.unresolved_refs
+    );
+}

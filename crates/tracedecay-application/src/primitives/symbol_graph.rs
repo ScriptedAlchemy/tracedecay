@@ -40,6 +40,15 @@ use crate::primitives::production::code_graph_read_failure;
 const MAX_COMPATIBILITY_RESULTS: usize = 500;
 const MAX_IMPLEMENTATION_RESULTS: usize = 200;
 const MAX_IMPLEMENTATION_RELATIONS: usize = 500_000;
+/// Inbound kinds `callers` shares with `references`: call sites, usages,
+/// type references, and annotations. Walking `Calls` alone dropped
+/// type-import/`new` rows and then claimed a complete empty page.
+const CALLER_AND_REFERENCE_KINDS: [RelationEdgeKindV1; 4] = [
+    RelationEdgeKindV1::Calls,
+    RelationEdgeKindV1::Uses,
+    RelationEdgeKindV1::TypeOf,
+    RelationEdgeKindV1::Annotates,
+];
 
 pub type SymbolGraphCursorFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, PrimitiveFailure>> + Send + 'a>>;
@@ -1165,7 +1174,7 @@ fn relation_traversal(
         let batches = if incoming {
             graph.callers(
                 &frontier,
-                &[RelationEdgeKindV1::Calls],
+                &CALLER_AND_REFERENCE_KINDS,
                 MAX_COMPATIBILITY_RESULTS.saturating_mul(16),
                 Arc::clone(&cancellation),
             )

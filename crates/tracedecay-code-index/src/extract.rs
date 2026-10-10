@@ -767,12 +767,14 @@ mod tests {
         // through inline-module and glob `use` declarations; v17 gives
         // `const`/`static` initializers their calls; v18 binds calls inside
         // macro arguments and in-file `self::`/`super::`/`crate::` paths; v19
-        // spells `Self::f` calls by the enclosing type. The revision is
-        // part of the batch identity, so the pinned digest moves with it.
-        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v19");
+        // spells `Self::f` calls by the enclosing type; v20 retains associated
+        // owner uses and parser-positioned generic call paths; v21 rejects
+        // non-callable struct targets. The revision is part of the batch
+        // identity, so the pinned digest moves with it.
+        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v21");
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:a7b83b20e50fa6b58097b0c9026926bce329361f9dd60747eb7af05011d3d778"
+            "sha256:f843db0c24eb1f9d3333e45372e4748d4f5d98cdf731bde62c774c616d9ef951"
         );
     }
 

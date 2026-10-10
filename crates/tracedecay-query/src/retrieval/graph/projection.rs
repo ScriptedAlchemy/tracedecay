@@ -149,6 +149,7 @@ fn project_graph_batch(
             logical_copy_cluster_id: None,
             logical_copy_evidence_anchor: None,
             evidence_role: EvidenceRole::Primary,
+            source_role: Default::default(),
             retriever: RetrieverKind::Graph,
             retriever_revision: retriever_revision.clone(),
             score_domain: score_domain.clone(),

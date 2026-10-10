@@ -10,8 +10,9 @@ use tracedecay_domain::{
 
 use crate::chunks::{
     CROSS_FILE_REFERENCE_BLOCKLIST, cross_file_reference_name_is_blocklisted, is_typescript_family,
-    relation_target_kind_is_compatible, rust_qualified_name_is_ufcs_trait_impl,
-    rust_type_path_alias_for_trait_impl_method, typescript_member_call_path,
+    nominal_rust_impl_owner, relation_target_kind_is_compatible,
+    rust_qualified_name_is_ufcs_trait_impl, rust_type_path_alias_for_trait_impl_method,
+    rust_ufcs_impl_type_name, typescript_member_call_path,
 };
 use crate::lineage::LineageSymbolRecordV1;
 use crate::production::go_satisfaction::go_satisfaction;
@@ -792,6 +793,26 @@ enum ReferenceResolutionV1 {
     Ambiguous,
 }
 
+fn cross_file_target_kind_is_compatible<T: ResolutionFileV1>(
+    files: &[T],
+    index: usize,
+    kind: RelationEdgeKindV1,
+    symbol: &LineageSymbolRecordV1,
+) -> bool {
+    relation_target_kind_is_compatible(kind, &symbol.kind)
+        && (files[index].language() != "rust"
+            || kind != RelationEdgeKindV1::Calls
+            || symbol.kind != "struct"
+            // Canonical artifacts sort arities by occurrence. Only tuple
+            // structs have a parser-observed callable parameter list.
+            || files[index]
+                .as_ref()
+                .artifacts
+                .callable_arities
+                .binary_search_by(|row| row.occurrence.cmp(&symbol.occurrence))
+                .is_ok())
+}
+
 fn resolve_cross_file_reference<T>(
     files: &[T],
     by_simple_name: &dyn SymbolsByNameV1,
@@ -882,7 +903,12 @@ where
         && has_rust_glob
         && candidates.iter().any(|(candidate_index, symbol)| {
             *candidate_index == index
-                && relation_target_kind_is_compatible(reference.kind, &symbol.kind)
+                && cross_file_target_kind_is_compatible(
+                    files,
+                    *candidate_index,
+                    reference.kind,
+                    symbol,
+                )
         })
     {
         return None;
@@ -912,7 +938,12 @@ where
                 symbol,
             };
             files[*candidate_index].language() == file.extraction.language.as_str()
-                && relation_target_kind_is_compatible(reference.kind, &symbol.kind)
+                && cross_file_target_kind_is_compatible(
+                    files,
+                    *candidate_index,
+                    reference.kind,
+                    symbol,
+                )
                 && match import {
                     None => {
                         let direct = match crate_qualified {
@@ -2153,34 +2184,6 @@ fn rust_inherent_method_owner<'a>(
     let owner =
         rust_ufcs_impl_type_name(target_owner).or_else(|| nominal_rust_impl_owner(target_owner))?;
     (owner.rsplit("::").next() == Some(type_name)).then_some(owner)
-}
-
-fn rust_ufcs_impl_type_name(owner: &str) -> Option<&str> {
-    let body = owner.strip_prefix('<')?.strip_suffix('>')?;
-    let mut depth = 0_i32;
-    for (index, character) in body.char_indices() {
-        match character {
-            '<' => depth += 1,
-            '>' => depth -= 1,
-            _ if depth == 0 && body[index..].starts_with(" as ") => {
-                let type_name = body[..index].trim();
-                return (!type_name.is_empty()).then_some(type_name);
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn nominal_rust_impl_owner(owner: &str) -> Option<&str> {
-    if rust_ufcs_impl_type_name(owner).is_some() {
-        return None;
-    }
-    match owner.find('<') {
-        Some(generic_start) if owner.ends_with('>') => Some(&owner[..generic_start]),
-        Some(_) => None,
-        None => Some(owner),
-    }
 }
 
 /// Map an extracted Rust symbol back to the path used by a `crate::...`

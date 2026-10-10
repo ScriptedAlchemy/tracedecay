@@ -163,6 +163,7 @@ fn graph_pair(
         logical_copy_cluster_id: None,
         logical_copy_evidence_anchor: None,
         evidence_role: EvidenceRole::Primary,
+        source_role: Default::default(),
         retriever: RetrieverKind::Graph,
         retriever_revision: id("retriever.graph.v1"),
         score_domain: id(crate::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1),
