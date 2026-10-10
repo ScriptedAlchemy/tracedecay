@@ -23,7 +23,8 @@ use super::super::{
 
 use super::{
     ALPHA_LIB_V1, CodeIndexSchedulerRegistryV1, GitFixture, SERVING_SEAT_FAILURE_CEILING,
-    core_search_request, git, install_verified_graph_store_on_text, mounted_core_query_worktree_at,
+    core_search_request, git, install_verified_graph_store_on_text,
+    install_warming_graph_store_on_text, mounted_core_query_worktree_at,
     mounted_core_query_worktree_in, mounted_text_query_worktree_at, test_project_id,
     wait_for_generation_change, wait_for_live_complete_generation,
     wait_for_queryable_text_generation, wait_for_settled_owner, wait_for_worker_phase,
@@ -239,6 +240,125 @@ async fn a_parked_worktree_releases_catalog_and_engine_and_reports_warming() {
             .contains(&ResidentOwnerKindV1::GraphCatalog),
         "search must not re-pin the catalog"
     );
+
+    registry.shutdown().await;
+}
+
+/// Park during the first catalog warm must not leave catalog/engine resident
+/// after that warm settles. The background scan does not post a cadence
+/// wake, so park-release retries from the settle signal (#3328).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_worktree_releases_graph_owners_after_the_first_catalog_warm() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn park_first_warm_target() -> u32 { 3 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, _scope) = mounted_text_query_worktree_at(
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
+        fixture.path(),
+        store.path().to_path_buf(),
+    )
+    .await;
+    let root = canonical_existing_identity(fixture.path()).expect("canonical root");
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    install_warming_graph_store_on_text(&text, &seated);
+    drop(seated);
+
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        let current = registry
+            .latest_text_serving_for_root(&root)
+            .await
+            .expect("serving text");
+        if !matches!(
+            current.code_graph_serving_readiness(),
+            CodeGraphServingReadinessV1::Warming { .. }
+        ) && let Some(latest) = registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+        {
+            install_warming_graph_store_on_text(&current, &latest);
+        }
+        let current = registry
+            .latest_text_serving_for_root(&root)
+            .await
+            .expect("serving text");
+        let kinds = graph_copy_kinds(&owners.report(Instant::now()));
+        if matches!(
+            current.code_graph_serving_readiness(),
+            CodeGraphServingReadinessV1::Warming { .. }
+        ) && kinds.contains(&ResidentOwnerKindV1::GraphEngine)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "first catalog warm must be resident before park: {:?}",
+            owners.report(Instant::now())
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+    registry
+        .release_decode_when_parked_for_test(fixture.path())
+        .await;
+    let warming = registry
+        .latest_text_serving_for_root(&root)
+        .await
+        .expect("serving text");
+    assert!(
+        graph_copy_kinds(&owners.report(Instant::now()))
+            .contains(&ResidentOwnerKindV1::GraphEngine),
+        "the first catalog warm still needs the engine it opened a reader on"
+    );
+    assert!(
+        matches!(
+            warming.code_graph_serving_readiness(),
+            CodeGraphServingReadinessV1::Warming { .. }
+        ),
+        "park during the first warm must not treat the catalog as ready"
+    );
+
+    let graph_store = warming
+        .interactive_graph_store()
+        .expect("warming graph store");
+    graph_store
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("finish the first catalog warm");
+    warming.note_catalog_warm_settled();
+
+    loop {
+        let current = registry
+            .latest_text_serving_for_root(&root)
+            .await
+            .expect("serving text");
+        let parked = owners.report(Instant::now());
+        let catalog_gone = !graph_copy_kinds(&parked).contains(&ResidentOwnerKindV1::GraphCatalog);
+        let engine_gone = !graph_copy_kinds(&parked).contains(&ResidentOwnerKindV1::GraphEngine);
+        let released = current
+            .interactive_graph_store()
+            .is_ok_and(|store| store.interactive_catalog_bytes().is_none());
+        if catalog_gone && engine_gone && released {
+            assert!(
+                matches!(
+                    current.code_graph_serving_readiness(),
+                    CodeGraphServingReadinessV1::Warming { .. }
+                ),
+                "after the first warm, park-release reports warming until a read reseats"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the first catalog warm must retry park-release without a cadence wake: {parked:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
     registry.shutdown().await;
 }

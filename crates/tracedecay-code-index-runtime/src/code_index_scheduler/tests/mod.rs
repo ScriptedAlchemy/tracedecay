@@ -760,6 +760,60 @@ fn install_verified_graph_store_on_text(
     .expect("install interactive graph serving");
 }
 
+/// Install a verified graph whose catalog is marked warming, not ready.
+///
+/// Matches the production first-activation window: the engine is pinned so
+/// park-release has owners to keep, and the catalog scan has not finished.
+fn install_warming_graph_store_on_text(
+    text: &super::LatestCodeTextGenerationV1,
+    latest: &super::LatestCompleteCodeIndexV1,
+) {
+    let generation = latest.generation.manifest().generation_id.clone();
+    let cancellation =
+        tracedecay_contracts::CancellationSignal::active("cancel.callable-graph-projection")
+            .expect("graph cancellation");
+    let publisher =
+        tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore::memory(
+            &cancellation,
+        )
+        .expect("graph publisher");
+    publisher
+        .publish_indexed_with_cancellation(
+            &generation,
+            latest.generation.edges(),
+            latest.generation.chunks().chunks(),
+            &latest.generation.snapshot().files,
+            latest.generation.symbols(),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("publish indexed graph");
+    let graph_store = Arc::new(
+        publisher
+            .verified_store(&generation)
+            .expect("verified graph"),
+    );
+    graph_store
+        .mark_interactive_catalog_warming()
+        .expect("mark first catalog warm");
+    graph_store
+        .warm_serving_engine()
+        .expect("pin the serving engine the first catalog warm reads");
+    let graph_reader = graph_store
+        .evidence_reader_with_cancellation(
+            &generation,
+            Some(latest.generation.snapshot().repository.clone()),
+            latest.source_freshness().expect("source freshness"),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("graph reader");
+    text.install_graph_serving(
+        graph_reader,
+        Some(graph_store),
+        super::CodeGraphServingAuthorityV1::Memory,
+    )
+    .expect("install warming graph serving");
+}
+
 pub(super) fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
     let id = |value: &str| value.to_owned();
     let profile = FusionProfile {

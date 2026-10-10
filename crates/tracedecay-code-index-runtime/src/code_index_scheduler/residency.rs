@@ -159,7 +159,7 @@ impl WorktreeResidencyV1 {
     /// next graph read reseats them. Do not clear `complete_generation_requested`: a demand that
     /// arrives during the take must still wake a successor pass to
     /// re-decode.
-    pub(super) fn release_decode_when_parked(self: &Arc<Self>, owners: &ResidentOwnersV1) {
+    pub(super) fn release_decode_when_parked(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
         if self.busy() {
             return;
         }
@@ -224,10 +224,17 @@ impl WorktreeResidencyV1 {
         if !self.serving_text().is_some_and(|text| {
             text.code_graph_serving_readiness() == CodeGraphServingReadinessV1::Ready
         }) {
-            if !released.is_empty() {
-                owners.note_headroom();
+            self.arm_park_release_after_first_catalog_warm(owners);
+            // The first warm may have settled between the check and the arm.
+            // Re-check before returning so that permit is not the only retry.
+            if !self.serving_text().is_some_and(|text| {
+                text.code_graph_serving_readiness() == CodeGraphServingReadinessV1::Ready
+            }) {
+                if !released.is_empty() {
+                    owners.note_headroom();
+                }
+                return;
             }
-            return;
         }
         for (kind, release) in [
             (
@@ -257,6 +264,27 @@ impl WorktreeResidencyV1 {
             return;
         }
         owners.note_headroom();
+    }
+
+    /// The first catalog warm finishes on a blocking task and does not wake
+    /// the parked worker. Arm one waiter that retries this release when that
+    /// warm settles; generation/owner checks stay in [`Self::release_decode_when_parked`].
+    fn arm_park_release_after_first_catalog_warm(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
+        let Some(text) = self.serving_text() else {
+            return;
+        };
+        if !text.arm_park_release_after_catalog_warm() {
+            return;
+        }
+        let residency = Arc::clone(self);
+        let owners = Arc::downgrade(owners);
+        let settled = text.catalog_warm_notify();
+        tokio::spawn(async move {
+            settled.notified().await;
+            if let Some(owners) = owners.upgrade() {
+                residency.release_decode_when_parked(&owners);
+            }
+        });
     }
 
     /// Renew the lease: a read needed the whole decoded generation.
