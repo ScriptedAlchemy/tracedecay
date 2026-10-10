@@ -563,6 +563,14 @@ fn sqlite_host_path_shortens_verbatim_disk_paths_only() {
     let sidecars_too_long = PathBuf::from(format!(r"\\?\C:\{}", "d".repeat(253)));
     assert_eq!(sqlite_host_path(&sidecars_too_long), sidecars_too_long);
 
+    // An empty `\\` component collapses to a plain separator either way,
+    // so dunce accepts the conversion; the literal spelling is preserved.
+    let empty_component = Path::new(r"\\?\C:\data\\store.db");
+    assert_eq!(
+        sqlite_host_path(empty_component),
+        Path::new(r"C:\data\\store.db")
+    );
+
     // The classic limit is measured in UTF-16 code units, not UTF-8 bytes:
     // 150 multibyte chars are 300 bytes but 150 units, so they may strip.
     let wide_fits = PathBuf::from(format!("\\\\?\\C:\\{}", "é".repeat(150)));
@@ -571,28 +579,18 @@ fn sqlite_host_path_shortens_verbatim_disk_paths_only() {
         PathBuf::from(format!("C:\\{}", "é".repeat(150)))
     );
 
-    // Components SQLite canonicalizes identically either way (trailing
-    // dots/spaces, `.`/`..`, empty `\\` — `GetFullPathNameW` collapses them
-    // even under `\\?\`) strip too: the prefix buys no identity and would
-    // only re-trigger the UNC shared-lock path on the resolved name.
-    for (raw, expected) in [
-        (r"\\?\C:\data\store.", r"C:\data\store."),
-        (r"\\?\C:\data\store ", r"C:\data\store "),
-        (r"\\?\C:\data\.\store.db", r"C:\data\.\store.db"),
-        (r"\\?\C:\data\..\store.db", r"C:\data\..\store.db"),
-        (r"\\?\C:\data\\store.db", r"C:\data\\store.db"),
-    ] {
-        assert_eq!(
-            sqlite_host_path(Path::new(raw)),
-            Path::new(expected),
-            "{raw}"
-        );
-    }
-
-    // Components whose identity genuinely depends on verbatim parsing keep
-    // the prefix: reserved DOS-device stems open the literal file only
-    // under `\\?\`, and `/`-components parse as subdirectories without it.
+    // Components whose identity would change under Win32 name parsing keep
+    // the prefix: trailing dots/spaces are stripped, dot components resolve,
+    // `/` is a separator, and reserved DOS-device stems get special
+    // treatment. `dunce::simplified` refuses all of these and the refusal
+    // is honored — refused verbatim paths stay verbatim. (An empty `\\`
+    // component collapses to a plain separator either way, so dunce accepts
+    // that one — covered above.)
     for raw in [
+        r"\\?\C:\data\store.",
+        r"\\?\C:\data\store ",
+        r"\\?\C:\data\.\store.db",
+        r"\\?\C:\data\..\store.db",
         r"\\?\C:\data/store.db",
         r"\\?\C:\data\CON.db",
         r"\\?\C:\data\con.db",
@@ -625,15 +623,16 @@ fn sqlite_host_path_keeps_literal_windows_prefix_names() {
 }
 
 /// Two real directories can coexist whose names differ only by a trailing
-/// dot — but SQLite canonicalizes every database name through
-/// `GetFullPathNameW`, which collapses `store.` to `store` even under
-/// `\\?\`. Verified on this platform: both verbatim spellings open the
-/// same database, so the prefix cannot keep the dotted object distinct and
-/// `sqlite_host_path` strips it rather than re-triggering UNC shared-lock
-/// handling on the name SQLite actually opens.
+/// dot, and stripping `\\?\` from the dotted spelling would change which
+/// name the OS sees — so `dunce::simplified` refuses and the verbatim
+/// path is passed through untouched. SQLite itself still canonicalizes
+/// the name and aliases `store.` to `store`: a separate SQLite
+/// limitation, not a reason to normalize further here. What the
+/// production boundary must guarantee is that a refused verbatim
+/// spelling keeps its prefix and still opens.
 #[cfg(windows)]
 #[test]
-fn dot_suffixed_directory_resolves_to_sqlite_canonical_identity() {
+fn dot_suffixed_directory_retains_verbatim_and_opens() {
     use super::sqlite_host_path;
 
     let temp = tempfile::tempdir().unwrap();
@@ -651,13 +650,9 @@ fn dot_suffixed_directory_resolves_to_sqlite_canonical_identity() {
     std::fs::create_dir(&plain).unwrap();
     assert!(dotted.is_dir() && plain.is_dir());
 
-    // The dotted component survives name conversion verbatim — SQLite owns
-    // the canonicalization that collapses it.
+    // The refused verbatim spelling is passed through untouched.
     let dotted_db = dotted.join("db.sqlite");
-    assert_eq!(
-        sqlite_host_path(&dotted_db),
-        PathBuf::from(dotted_db.to_str().unwrap().strip_prefix(r"\\?\").unwrap()),
-    );
+    assert_eq!(sqlite_host_path(&dotted_db), dotted_db);
 
     // Seed the `store` database (production open is READ_WRITE-only).
     let db = Connection::open(plain.join("db.sqlite")).expect("create database");
@@ -667,10 +662,11 @@ fn dot_suffixed_directory_resolves_to_sqlite_canonical_identity() {
     .unwrap();
     drop(db);
 
-    // The verbatim dotted open resolves to `store`'s database through
-    // SQLite's own canonicalization — proven by the sentinel row, not the
-    // mapped string. A separate `store.` database is unreachable through
-    // SQLite either way.
+    // The verbatim open succeeds through the production boundary. SQLite
+    // resolves the name to `store`'s database (its own canonicalization
+    // aliases the dotted directory — a SQLite limitation, not this
+    // conversion's identity claim) — proven by the sentinel row; a
+    // separate `store.` database is unreachable through SQLite either way.
     let reader = open(&dotted_db, ConnectionMode::Writer).expect("open via dotted verbatim path");
     let value: String = reader
         .query_row("SELECT v FROM sentinel", [], |row| row.get(0))
