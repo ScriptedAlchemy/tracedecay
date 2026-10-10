@@ -443,12 +443,13 @@ fn verify_dashboard_fixture(
     if payload["host"] != "127.0.0.1" || !launch_url.starts_with(&format!("{origin}/?token=")) {
         return Err("dashboard did not bind the fixture loopback listener".into());
     }
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .timeout_global(Some(Duration::from_secs(4)))
-        .build()
-        .into();
+    let agent = tracedecay_application::http_agent::http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .timeout_global(Some(Duration::from_secs(4)))
+            .build(),
+    );
     let anonymous = agent
         .get(&format!("{origin}/api/projects"))
         .call()

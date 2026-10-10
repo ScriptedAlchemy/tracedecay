@@ -260,11 +260,12 @@ mod tests {
                 .unwrap();
         });
         let client = GitHubReadOnlyClientV1 {
-            agent: ureq::Agent::config_builder()
-                .https_only(false)
-                .http_status_as_error(false)
-                .build()
-                .into(),
+            agent: crate::http_agent::http_agent(
+                ureq::Agent::config_builder()
+                    .https_only(false)
+                    .http_status_as_error(false)
+                    .build(),
+            ),
             target: GitHubRepositoryTargetV1 {
                 owner: "ScriptedAlchemy".to_owned(),
                 repository: "stack-compare-unavailable".to_owned(),
@@ -386,11 +387,12 @@ mod tests {
             );
         });
         let client = GitHubReadOnlyClientV1 {
-            agent: ureq::Agent::config_builder()
-                .https_only(false)
-                .http_status_as_error(false)
-                .build()
-                .into(),
+            agent: crate::http_agent::http_agent(
+                ureq::Agent::config_builder()
+                    .https_only(false)
+                    .http_status_as_error(false)
+                    .build(),
+            ),
             target: GitHubRepositoryTargetV1 {
                 owner: "ScriptedAlchemy".to_owned(),
                 repository: "stack-anchor-http".to_owned(),

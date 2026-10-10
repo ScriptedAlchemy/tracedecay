@@ -84,10 +84,11 @@ impl DashboardProcess {
     }
 
     fn wait_until_serving(&self) {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(30)))
-            .build()
-            .into();
+        let agent = tracedecay_application::http_agent::http_agent(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(30)))
+                .build(),
+        );
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             if agent.get(&format!("{}/", self.base_url)).call().is_ok() {
@@ -110,11 +111,12 @@ impl DashboardProcess {
         // The public dashboard request contract carries only evidence input.
         // Its cancellation signal is daemon-owned per HTTP request and cannot
         // be supplied here without inventing a test-only control surface.
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(120)))
-            .build()
-            .into();
+        let agent = tracedecay_application::http_agent::http_agent(
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .timeout_global(Some(Duration::from_secs(120)))
+                .build(),
+        );
         let url = format!("{}/api/work/retrieve-evidence", self.base_url);
         let mut response = agent
             .post(&url)
@@ -135,11 +137,12 @@ impl DashboardProcess {
     }
 
     pub(super) fn read_proximity(&self, observed_at: UtcMicros) -> (u16, Value) {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(120)))
-            .build()
-            .into();
+        let agent = tracedecay_application::http_agent::http_agent(
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .timeout_global(Some(Duration::from_secs(120)))
+                .build(),
+        );
         let url = format!("{}/api/feedback/proximity", self.base_url);
         let mut response = agent
             .post(&url)
