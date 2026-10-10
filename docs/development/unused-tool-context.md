@@ -41,7 +41,7 @@ lines are reduced to `quote:<chars>c`). Those sanitized rows are safe to cite.
 | `bytes` | UTF-8 bytes of the result text after removing the MCP envelope |
 | `used bytes` / `unused bytes` | Bytes of used lines / all other lines |
 | `unused %` | `unused bytes / bytes` |
-| `tokens` | Stored `token_count` on the result fact or top-level result object. `null` when that count is missing. Never `chars/4`, tiktoken, or an MCP trailer. |
+| `tokens` | Stored `token_count` on the tool_result fact. `null` when missing. Tool-body `token_count` is ignored because `source_read` writes chars/4 there. Never tiktoken or an MCP trailer. |
 | `used tokens` / `unused tokens` | The stored total when every line is used or every line is unused. Mixed lines are `null` (splitting would be an estimate). |
 | `unused tokens %` | `unused tokens / tokens`, or `null` when either side is unmeasured |
 
@@ -80,9 +80,9 @@ The rules are conservative: a line counts as used only on direct evidence.
    share a novelty-filtered anchor is a `rerequest`, not use. Re-request after
    a cut is counted only when the original result records `cut` (boolean or
    `{applied: bool}`). Unknown cut state is `null`, never a guessed 0.
-6. Tokens: only a stored `token_count`. A failed or absent count is `null`.
-   Used/unused tokens are filled only when every line is used or every line
-   is unused. MCP `tracedecay_metrics` trailers are chars/4 and are ignored.
+6. Tokens: only a stored `token_count` on the tool_result fact. A failed or
+   absent count is `null`. Tool-body `token_count` is ignored. Used/unused
+   tokens are filled only when every line is used or every line is unused.
 
 These rules undercount use. An agent that acts on a fact without naming a
 path, symbol, or line (for example "no callers, so it is safe") is scored as

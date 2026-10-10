@@ -162,10 +162,25 @@ class MatchingRules(unittest.TestCase):
 
     def test_chars_div_four_and_metrics_trailer_are_not_tokens(self) -> None:
         self.assertFalse(hasattr(measure, "estimate_tokens"))
+        self.assertFalse(hasattr(measure.CallReport, "total_chars"))
         self.assertIsNone(measure.stored_token_count({"after": 9}))
         self.assertIsNone(measure.stored_token_count({"token_count": "12"}))
         self.assertEqual(measure.stored_token_count({"token_count": 12}), 12)
         self.assertIsNone(measure.stored_token_count({"token_count": -1}))
+
+    def test_tool_body_token_count_is_ignored(self) -> None:
+        row = {
+            "timestamp": 1,
+            "role": "tool",
+            "content": json.dumps({"token_count": 99, "results": []}),
+            "message_id": "m",
+            "content_range": {"truncated": False},
+            "metadata_json": json.dumps(
+                {"facts": [{"kind": "tool_result", "invocation_id": "c1", "name": "tracedecay_search"}]}
+            ),
+        }
+        results = [event for event in measure.events_from_messages([row]) if isinstance(event, Result)]
+        self.assertEqual([event.tokens for event in results], [None])
 
     def test_rerequest_after_cut_is_null_when_cut_is_unknown(self) -> None:
         events = [
@@ -204,6 +219,7 @@ class MatchingRules(unittest.TestCase):
         self.assertIsNone(row["total_tokens"])
         table = measure.render([row], {"sessions_with_calls": 1})
         self.assertIn("| null | null | null | null |", table)
+        self.assertNotIn("total_chars", json.dumps(row))
         self.assertNotIn("chars / 4", table)
 
     def test_non_tracedecay_calls_and_unpaired_calls(self) -> None:

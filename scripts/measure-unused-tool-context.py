@@ -40,10 +40,10 @@ docs/development/unused-tool-context.md):
   share a novelty-filtered anchor is counted separately and is not use.
 * Re-request after a cut: counted only when the original result records an
   explicit cut. If cut state is unknown, the count is null, never 0.
-* Tokens: only a stored non-negative `token_count` on the result fact (or
-  top-level result object). Mixed used/unused lines leave used/unused tokens
-  null because splitting would be an estimate. MCP `tracedecay_metrics`
-  trailers are chars/4 and are ignored.
+* Tokens: only a stored non-negative `token_count` on the tool_result fact.
+  Tool-body `token_count` is ignored (source_read writes chars/4 there).
+  Mixed used/unused lines leave used/unused tokens null. MCP
+  `tracedecay_metrics` trailers are ignored.
 * Error results (`isError`) are counted separately and excluded from bytes.
 
 Columns: `bytes` are UTF-8 bytes of the result text (MCP envelope
@@ -89,16 +89,14 @@ def path_key(path: str) -> str:
     return "/".join(path.strip("/").split("/")[-3:])
 
 
-def stored_token_count(*sources: object) -> int | None:
-    """Return a stored real token count, or None. Never estimates."""
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-        value = source.get("token_count")
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            continue
-        return value
-    return None
+def stored_token_count(fact: object) -> int | None:
+    """Return the tool_result fact's stored token_count, or None. Never estimates."""
+    if not isinstance(fact, dict):
+        return None
+    value = fact.get("token_count")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def stored_cut(*sources: object) -> bool | None:
@@ -230,8 +228,6 @@ class CallReport:
     session: str
     total_bytes: int = 0
     used_bytes: int = 0
-    total_chars: int = 0
-    used_chars: int = 0
     lines: int = 0
     used_lines: int = 0
     is_error: bool = False
@@ -303,10 +299,8 @@ def split_evidence(events: list[Event], result_index: int, tool: str) -> tuple[s
 def score_lines(report: CallReport, text: str, before: str, later: str) -> None:
     for line in text.split("\n"):
         size = len(line.encode()) + 1
-        chars = len(line) + 1
         report.lines += 1
         report.total_bytes += size
-        report.total_chars += chars
         for kind, pattern in anchors(line):
             if pattern.search(before):
                 continue
@@ -314,7 +308,6 @@ def score_lines(report: CallReport, text: str, before: str, later: str) -> None:
             if hit:
                 report.used_lines += 1
                 report.used_bytes += size
-                report.used_chars += chars
                 report.matches.append((kind, sanitize_match(kind, hit.group(0))))
                 break
 
@@ -493,7 +486,7 @@ def events_from_messages(messages: list[dict], fetch=None) -> list[Event]:
                     call_id,
                     text,
                     is_error or fact.get("success") is False,
-                    stored_token_count(fact, payload),
+                    stored_token_count(fact),
                     stored_cut(fact, payload),
                 )
             )
@@ -538,7 +531,7 @@ def aggregate(reports: list[CallReport]) -> list[dict]:
         row["rerequest_calls"] += report.rerequest_calls
         row["calls_without_tokens"] += report.total_tokens is None
         row["calls_without_cut"] += report.rerequest_after_cut is None
-        for key in ("total_bytes", "used_bytes", "total_chars", "used_chars", "lines", "used_lines"):
+        for key in ("total_bytes", "used_bytes", "lines", "used_lines"):
             row[key] += getattr(report, key)
         measured = tokens[report.tool]
         seen = token_seen[report.tool]
