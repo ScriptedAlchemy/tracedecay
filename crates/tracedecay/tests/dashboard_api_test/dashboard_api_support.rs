@@ -14,6 +14,7 @@ pub(crate) use crate::runtime::DashboardTestRuntimeV1;
 pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;
 pub(crate) use tracedecay::dashboard;
+use tracedecay_domain::forward_slash_path;
 pub(crate) use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactEventId, FactId, ProjectId,
 };
@@ -386,12 +387,10 @@ fn collect_whole_word_paths(root: &Path, dir: &Path, query: &str, out: &mut Vec<
             continue;
         };
         if contains_whole_word(&contents, query) {
-            out.push(
+            out.push(forward_slash_path(
                 path.strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .into_owned(),
-            );
+                    .expect("fixture search file remains under its root"),
+            ));
         }
     }
 }
