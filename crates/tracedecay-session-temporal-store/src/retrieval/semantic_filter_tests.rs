@@ -170,11 +170,13 @@ fn tool_results_do_not_leak_into_direct_user_filter() {
             model: None,
             timestamp: Some(42),
         },
-        CanonicalObservationFactV1::ToolResult {
-            invocation_id: None,
-            content: json!({"text": "tool payload"}),
-            success: Some(true),
-        },
+        CanonicalObservationFactV1::tool_result(
+            None,
+            json!({"text": "tool payload"}),
+            Some(true),
+            None,
+            None,
+        ),
     ]);
     let direct = TemporalCandidateFilterV1 {
         message_type: TemporalMessageTypeFilterV1::DirectUser,

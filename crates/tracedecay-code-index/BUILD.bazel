@@ -43,7 +43,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-code-index__+eval-helpers_-default_-full_-lang-markdown_-lite_-medium__d76c60fcb17",
+    name = "tracedecay-code-index__+eval-helpers_-default_-full_-lang-markdown_-lite_-medium__d366fc1c983",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_index",
@@ -52,7 +52,7 @@ rust_library(
         + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"],
     version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__bare__de7622026f6", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db__+eval-helpers__d73c9d40925", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__dab09523ec8"],
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__bare__de7622026f6", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db__+eval-helpers__d73c9d40925", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__da16b160c16"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
     rustc_flags = perf_rustc_flags(2),
@@ -60,7 +60,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-code-index__-default_-full_-medium__de727892f4b",
+    name = "tracedecay-code-index__-default_-full_-medium__d70ff4c0a6b",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_index",
@@ -77,7 +77,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-code-index__-default_-medium__d91fe4c90ea",
+    name = "tracedecay-code-index__-default_-medium__d735560d1f6",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_index",
@@ -94,7 +94,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-code-index__bare__d6190a87bb3",
+    name = "tracedecay-code-index__bare__dc85fdb5795",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_index",
@@ -111,7 +111,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-code-index__bare__dd63ecb454d",
+    name = "tracedecay-code-index__bare__de42955ef02",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_index",

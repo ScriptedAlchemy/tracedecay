@@ -41,6 +41,11 @@ pub fn o200k_base() -> Result<&'static CoreBPE, &'static TokenizerError> {
         .as_ref()
 }
 
+/// Ordinary `o200k_base` token count of `text`. Never estimates.
+pub fn count_ordinary_tokens(text: &str) -> Result<u64, &'static TokenizerError> {
+    Ok(o200k_base()?.encode_ordinary(text).len() as u64)
+}
+
 fn parse_vocabulary(text: &str) -> Result<FxHashMap<Vec<u8>, Rank>, TokenizerError> {
     let mut encoder = FxHashMap::default();
     let mut ranks = FxHashSet::default();
@@ -105,6 +110,12 @@ mod tests {
             );
         }
         assert!(std::ptr::eq(actual, o200k_base().unwrap()));
+        for text in ["", "Hello, world!", "fn main() {}"] {
+            assert_eq!(
+                count_ordinary_tokens(text).unwrap(),
+                actual.encode_ordinary(text).len() as u64
+            );
+        }
     }
 
     #[test]

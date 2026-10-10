@@ -1934,6 +1934,12 @@ pub enum CanonicalObservationFactV1 {
         content: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         success: Option<bool>,
+        /// Real served-output count. Missing means the count was never recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_count: Option<u64>,
+        /// Whether the served output was trimmed or truncated. Missing means unknown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cut: Option<bool>,
     },
     ProviderUsage {
         model: ProviderUsageModelV1,
@@ -2183,6 +2189,118 @@ impl CanonicalObservationFactV1 {
         }
         Ok(())
     }
+
+    /// One tool-result fact with the served token count and cut marker.
+    pub fn tool_result(
+        invocation_id: Option<ObservationId>,
+        content: Value,
+        success: Option<bool>,
+        token_count: Option<u64>,
+        cut: Option<bool>,
+    ) -> Self {
+        Self::ToolResult {
+            invocation_id,
+            content,
+            success,
+            token_count,
+            cut,
+        }
+    }
+}
+
+/// Visible text the unused-context meter scores for one stored tool result.
+///
+/// `Null` means the host stored no output. Provider and MCP envelopes unwrap
+/// to their text blocks; any other text, JSON included, counts exactly as
+/// served, because re-serializing it would change what the agent read.
+pub fn tool_result_visible_text(content: &Value) -> Option<String> {
+    match content {
+        Value::Null => None,
+        Value::String(text) => Some(
+            serde_json::from_str::<Value>(text)
+                .ok()
+                .as_ref()
+                .and_then(envelope_text)
+                .unwrap_or_else(|| text.clone()),
+        ),
+        other => Some(envelope_text(other).unwrap_or_else(|| other.to_string())),
+    }
+}
+
+/// Text of an `output`/`content`/`text` envelope field or a list of text blocks.
+fn envelope_text(value: &Value) -> Option<String> {
+    let inner = match value {
+        Value::Object(map) => ["output", "content", "text"]
+            .into_iter()
+            .find_map(|key| map.get(key))?,
+        other => other,
+    };
+    match inner {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(items) => {
+            let texts: Vec<&str> = items
+                .iter()
+                .filter_map(|item| item.get("text").and_then(Value::as_str))
+                .collect();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+        }
+        _ => None,
+    }
+}
+
+/// Evidence that served tool output was or was not trimmed or truncated.
+///
+/// `Some(true)` means an explicit truncation marker was found: the
+/// `# Truncated Response` header, a `truncated: true` field, or a host
+/// warning such as Codex's `truncated output` notice. `Some(false)` means an
+/// explicit `truncated: false` field declared the output complete. `None`
+/// means there is no evidence for either state; opaque output must not be
+/// certified uncut.
+pub fn tool_result_output_cut_state(content: &Value) -> Option<bool> {
+    match content {
+        Value::Null | Value::Bool(_) | Value::Number(_) => None,
+        Value::String(text) => {
+            let trimmed = text.trim_start();
+            if trimmed.starts_with("# Truncated Response") {
+                return Some(true);
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(text) {
+                return tool_result_output_cut_state(&value);
+            }
+            native_truncation_marker(trimmed).then_some(true)
+        }
+        Value::Array(items) => items
+            .iter()
+            .map(tool_result_output_cut_state)
+            .fold(None, combine_cut_state),
+        Value::Object(map) => {
+            let declared = map.get("truncated").and_then(Value::as_bool);
+            ["content", "output", "text", "preview", "metadata"]
+                .into_iter()
+                .filter_map(|key| map.get(key))
+                .map(tool_result_output_cut_state)
+                .fold(declared, combine_cut_state)
+        }
+    }
+}
+
+/// The strongest of two cut states: truncation evidence wins over an explicit
+/// complete marker, and either wins over unknown.
+fn combine_cut_state(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        _ => None,
+    }
+}
+
+/// Native notices begin the result or follow its execution header; source
+/// excerpts can contain the same words without being truncated.
+fn native_truncation_marker(text: &str) -> bool {
+    let notice = "Warning: truncated output (original token count:";
+    text.starts_with(notice)
+        || ((text.starts_with("Wall time:") || text.starts_with("Chunk ID:"))
+            && text.contains(&format!("\nOutput:\n{notice}")))
 }
 
 fn validate_canonical_label(value: &str) -> Result<(), ObservationContractError> {

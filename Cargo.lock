@@ -6621,6 +6621,7 @@ dependencies = [
  "thiserror",
  "tracedecay-domain",
  "tracedecay-store",
+ "tracedecay-tokenizer",
  "tracing",
 ]
 
@@ -7106,6 +7107,7 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
+ "tracedecay-tokenizer",
  "tracedecay-tool-catalog",
  "tracing",
 ]
@@ -7286,6 +7288,7 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-store-runtime",
  "tracedecay-temporal-query",
+ "tracedecay-tokenizer",
  "tracedecay-tool-catalog",
  "tracing",
  "tree-sitter",

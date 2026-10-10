@@ -44,19 +44,24 @@ async fn call(fixture: &GraphQueryFixture, tool: &str, arguments: Value) -> Vec<
 }
 
 /// Checks the last block is the token-accounting footer pricing `raw_tokens`
-/// of touched files against the body it closes (chars / 4), and that no
-/// stale-graph trailer rides a current seat. Returns the body blocks.
+/// of touched files against the body it closes (real o200k_base count), and
+/// that no stale-graph trailer rides a current seat. Returns the body blocks.
 fn body_before_footer(texts: &[String], raw_tokens: u64) -> Vec<String> {
     let (footer, body) = texts
         .split_last()
         .unwrap_or_else(|| panic!("no content blocks: {texts:?}"));
-    let body_chars: usize = body.iter().map(String::len).sum();
+    let after = tracedecay_mcp::tools::response_trailers::response_token_count(
+        &tracedecay_mcp::ToolResult::new(
+            json!({
+                "content": body.iter().map(|text| json!({"type": "text", "text": text})).collect::<Vec<_>>()
+            }),
+            Vec::new(),
+        ),
+    )
+    .expect("tokenizer");
     assert_eq!(
         footer,
-        &format!(
-            "\ntracedecay_metrics: before={raw_tokens} after={}",
-            body_chars / 4
-        ),
+        &format!("\ntracedecay_metrics: before={raw_tokens} after={after}"),
         "{texts:?}"
     );
     assert!(

@@ -792,6 +792,20 @@ pub fn with_background_cpu_permit<R>(operation: impl FnOnce() -> R) -> R {
     with_background_cpu_permits(1, operation)
 }
 
+/// Request-bound leaf work relinquishes its queued demand on cancellation.
+pub fn with_background_cpu_permit_cancellable<R>(
+    is_cancelled: impl Fn() -> bool,
+    operation: impl FnOnce() -> R,
+) -> Option<R> {
+    match current_runtime() {
+        Some(runtime) => runtime
+            .background_cpu
+            .with_permit_cancellable(is_cancelled, operation),
+        None if is_cancelled() => None,
+        None => Some(operation()),
+    }
+}
+
 /// Run `operation` on the configured indexing pool.
 ///
 /// CPU admission happens inside each active parallel work unit through
