@@ -399,21 +399,19 @@ fn hydrate_context_from_search_matches(
                 code_window,
             }) => {
                 attested_lines = Some((*start_line, *end_line));
-                if include_code {
-                    if let Some(code_window) = code_window {
-                        let source = sanitized_by_path
-                            .entry(search_match.file.clone())
-                            .or_insert_with(|| sanitized_match_source(ctx, &search_match.file))
-                            .as_deref();
-                        if let Some((window_start, window_end, code)) = source.and_then(|source| {
-                            artifact_window_site(
-                                source,
-                                &code_window.source_span,
-                                &code_window.sanitized_text,
-                            )
-                        }) {
-                            served_code = Some((window_start, window_end, code));
-                        }
+                if include_code && let Some(code_window) = code_window {
+                    let source = sanitized_by_path
+                        .entry(search_match.file.clone())
+                        .or_insert_with(|| sanitized_match_source(ctx, &search_match.file))
+                        .as_deref();
+                    if let Some((window_start, window_end, code)) = source.and_then(|source| {
+                        artifact_window_site(
+                            source,
+                            &code_window.source_span,
+                            &code_window.sanitized_text,
+                        )
+                    }) {
+                        served_code = Some((window_start, window_end, code));
                     }
                 }
             }
@@ -465,16 +463,17 @@ fn hydrate_context_from_search_matches(
                 unavailable_fields,
             });
         }
-        if include_code && code_blocks.len() < max_code_blocks {
-            if let Some((start_line, end_line, code)) = served_code {
-                code_blocks.push(ContextCodeBlockV1 {
-                    node_id,
-                    file: search_match.file.clone(),
-                    start_line: user_line(start_line),
-                    end_line: user_line(end_line),
-                    code,
-                });
-            }
+        if include_code
+            && code_blocks.len() < max_code_blocks
+            && let Some((start_line, end_line, code)) = served_code
+        {
+            code_blocks.push(ContextCodeBlockV1 {
+                node_id,
+                file: search_match.file.clone(),
+                start_line: user_line(start_line),
+                end_line: user_line(end_line),
+                code,
+            });
         }
     }
     SearchMatchHydration {

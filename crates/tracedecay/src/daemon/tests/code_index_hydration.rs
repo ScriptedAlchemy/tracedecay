@@ -541,14 +541,12 @@ fn production_symbol_candidate_binds_the_attributed_chunk_window() {
         code_index_search_display_binding(generation, &display_paths, &request, &candidate)
             .expect("frozen symbol hydration");
     let site = display.site.expect("lineage site");
-    match site {
-        tracedecay_query::code_search::CodeIndexSearchSiteV1::SymbolLines {
-            code_window, ..
-        } => {
-            let window = code_window.expect("symbol chunk window bound");
-            assert_eq!(window.source_span, chunk.anchor.source_span);
-            assert_eq!(window.sanitized_text, chunk.sanitized_text);
-        }
-        other => panic!("symbol anchor must carry a lineage site, got {other:?}"),
-    }
+    let tracedecay_query::code_search::CodeIndexSearchSiteV1::SymbolLines { code_window, .. } =
+        site
+    else {
+        panic!("symbol anchor must carry a lineage site, got {site:?}");
+    };
+    let window = code_window.expect("symbol chunk window bound");
+    assert_eq!(window.source_span, chunk.anchor.source_span);
+    assert_eq!(window.sanitized_text, chunk.sanitized_text);
 }

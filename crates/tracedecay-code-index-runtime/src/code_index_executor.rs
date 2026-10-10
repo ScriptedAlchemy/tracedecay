@@ -465,7 +465,7 @@ pub fn code_index_search_display_binding(
                         display.site = Some(code_search::CodeIndexSearchSiteV1::ArtifactWindow {
                             source_span: chunk.anchor.source_span,
                             sanitized_text: chunk.sanitized_text.clone(),
-                        })
+                        });
                     }
                 }
                 display
