@@ -152,6 +152,40 @@ fn background_marked_catalog_refuses_without_scanning_on_the_request_path() {
     assert_eq!(store.interactive_catalog_scan_builds(), 0);
 }
 
+/// A marked background warm whose runner never starts — a memory release
+/// can take the engine it opens its reader on — leaves `Warming` with no
+/// owner, which reported warming forever. The next wait must restart the
+/// runnerless warm and serve reads from the catalog it builds.
+#[test]
+fn a_runnerless_marked_warm_restarts_on_the_next_wait() {
+    let store = store_for(production_manifest());
+    store
+        .mark_interactive_catalog_warming()
+        .expect("mark background catalog warm");
+    assert!(
+        !store
+            .interactive_catalog_is_warm()
+            .expect("read warm state"),
+        "a marked warm with no runner leaves no resident catalog"
+    );
+    store
+        .await_rewarm_for(
+            Duration::from_secs(60),
+            crate::graph_projection::CodeGraphReadinessRequirement::Catalog,
+        )
+        .expect("the stranded warm re-runs on the next wait");
+    assert!(
+        store
+            .interactive_catalog_is_warm()
+            .expect("read warm state"),
+        "the restarted warm leaves a resident catalog"
+    );
+    let hits = reader(&store)
+        .resolve_qualified_name("beta::run", None, 8, request())
+        .expect("the restarted catalog serves name reads");
+    assert_eq!(occurrences(&hits), vec!["sym.beta.run".to_owned()]);
+}
+
 #[test]
 fn warmed_symbol_catalog_serves_a_budget_that_cannot_scan_the_projection() {
     let warm_store = store_for(production_manifest());

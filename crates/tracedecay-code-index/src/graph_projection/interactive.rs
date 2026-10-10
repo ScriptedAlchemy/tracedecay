@@ -111,7 +111,10 @@ pub(super) enum CatalogResidency {
     Released,
     /// Warming again after a completed warm.
     Rewarming,
-    /// Cold, failed, or on its first warm: the reader answers that state.
+    /// A warm was marked in background but no build owns it: its runner
+    /// never started or never finished, so a read must restart it.
+    OrphanedWarm,
+    /// Cold, failed, or building on a live owner: the reader answers that state.
     Unreleased,
 }
 
@@ -149,6 +152,7 @@ impl InteractiveCatalogCache {
         match &*state {
             InteractiveCatalogState::Ready(_) => CatalogResidency::Resident,
             InteractiveCatalogState::Released => CatalogResidency::Released,
+            InteractiveCatalogState::Warming { owner: None } => CatalogResidency::OrphanedWarm,
             InteractiveCatalogState::Warming { .. }
                 if self.clock.has_warmed(WarmOwner::Catalog) =>
             {
@@ -1610,13 +1614,14 @@ impl CodeGraphInteractiveReader {
                     }
                     return Ok(Arc::clone(catalog));
                 }
-                InteractiveCatalogState::Warming { .. } => {
+                InteractiveCatalogState::Warming { owner: Some(_) } => {
                     return Err(CodeGraphProjectionError::Unavailable(
                         CATALOG_WARMING.to_owned(),
                     ));
                 }
                 InteractiveCatalogState::Failed(error) => return Err(error.clone()),
-                InteractiveCatalogState::Released => {}
+                InteractiveCatalogState::Warming { owner: None }
+                | InteractiveCatalogState::Released => {}
                 InteractiveCatalogState::Cold => {
                     drop(state);
                     return self.build_cold_catalog(cancellation);
@@ -1647,20 +1652,30 @@ impl CodeGraphInteractiveReader {
         }
     }
 
-    /// Start rebuilding a released catalog on a thread of its own and answer
-    /// the typed warming state. The rebuild answers to no request's
+    /// Start rebuilding a released catalog — or a background-marked warm
+    /// whose runner never took the build — on a thread of its own and
+    /// answer the typed warming state. The rebuild answers to no request's
     /// cancellation, so a short read cannot abandon it half-scanned.
     pub(super) fn rewarm_released_catalog(&self) -> CodeGraphProjectionError {
-        let released = CodeGraphProjectionError::Unavailable(CATALOG_RELEASED.to_owned());
-        {
+        let mut was_released = false;
+        let answered = {
             let Ok(mut state) = self.catalog.state.write() else {
                 return catalog_lock_poisoned();
             };
-            if !matches!(&*state, InteractiveCatalogState::Released) {
-                return CodeGraphProjectionError::Unavailable(CATALOG_WARMING.to_owned());
+            match &*state {
+                InteractiveCatalogState::Released => was_released = true,
+                InteractiveCatalogState::Warming { owner: None } => {}
+                _ => {
+                    return CodeGraphProjectionError::Unavailable(CATALOG_WARMING.to_owned());
+                }
             }
             *state = InteractiveCatalogState::Warming { owner: None };
-        }
+            if was_released {
+                CodeGraphProjectionError::Unavailable(CATALOG_RELEASED.to_owned())
+            } else {
+                CodeGraphProjectionError::Unavailable(CATALOG_WARMING.to_owned())
+            }
+        };
         self.catalog.clock.begin(WarmOwner::Catalog);
         let background = Self {
             cancellation: Arc::new(NeverCancelled),
@@ -1674,10 +1689,14 @@ impl CodeGraphInteractiveReader {
                 let _ = background.warm_catalog(None, Arc::new(NeverCancelled));
             });
         match spawned {
-            Ok(_) => released,
+            Ok(_) => answered,
             Err(error) => {
                 if let Ok(mut state) = self.catalog.state.write() {
-                    *state = InteractiveCatalogState::Released;
+                    *state = if was_released {
+                        InteractiveCatalogState::Released
+                    } else {
+                        InteractiveCatalogState::Warming { owner: None }
+                    };
                 }
                 self.catalog.clock.settle(WarmOwner::Catalog, false);
                 CodeGraphProjectionError::Unavailable(format!(

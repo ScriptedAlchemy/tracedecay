@@ -2254,11 +2254,11 @@ impl LatestCodeTextGenerationV1 {
             return;
         };
         let inherited = outgoing.take_graph_predecessor();
+        // An activated outgoing still serves: a released engine or catalog
+        // reports `warming` but a read re-warms it, while a cold store passes
+        // the hold down to the graph it was itself holding.
         let serves_warm_graph = outgoing.interactive_graph_store().is_ok()
-            && matches!(
-                outgoing.code_graph_serving_readiness(),
-                CodeGraphServingReadinessV1::Ready
-            );
+            && outgoing.code_graph_serving_readiness().is_activated();
         let held = if serves_warm_graph {
             Some(outgoing.clone())
         } else {

@@ -662,8 +662,12 @@ impl CodeGraphProjectionStore {
         let catalog = match (self.interactive_catalog.residency(), engine) {
             (CatalogResidency::Resident | CatalogResidency::Unreleased, None) => return None,
             (CatalogResidency::Resident | CatalogResidency::Unreleased, Some(_)) => Duration::ZERO,
-            // The engine re-warm starts a released catalog's once it is back.
-            (CatalogResidency::Released, None) => {
+            // The engine re-warm starts a released catalog's once it is
+            // back, and the same restart covers a background-marked warm
+            // whose runner never took the build (a release took the engine
+            // it opened its reader on): the read waiting here is what
+            // would otherwise find `warming` forever.
+            (CatalogResidency::Released | CatalogResidency::OrphanedWarm, None) => {
                 self.interactive_reader_with_cancellation(
                     &self.generation,
                     Arc::new(NeverCancelled),
@@ -672,9 +676,12 @@ impl CodeGraphProjectionStore {
                 .rewarm_released_catalog();
                 self.warm_clock.remaining(WarmOwner::Catalog)
             }
-            (CatalogResidency::Released | CatalogResidency::Rewarming, _) => {
-                self.warm_clock.remaining(WarmOwner::Catalog)
-            }
+            (
+                CatalogResidency::Released
+                | CatalogResidency::OrphanedWarm
+                | CatalogResidency::Rewarming,
+                _,
+            ) => self.warm_clock.remaining(WarmOwner::Catalog),
         };
         let engine = engine.unwrap_or_default();
         Some(CodeGraphRewarmPendingV1 {

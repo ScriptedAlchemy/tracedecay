@@ -495,6 +495,96 @@ async fn a_resident_release_keeps_the_predecessor_while_its_graph_is_pending() {
     registry.shutdown().await;
 }
 
+/// Issue #3328: a parked release leaves the outgoing graph `warming` while
+/// its catalog and engine are away — a read re-warms them, so the outgoing
+/// is still the graph `hold_outgoing_graph` must keep for the successor,
+/// not pass down to a colder predecessor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_for_memory_predecessor_is_still_the_held_graph() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let registry = CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners));
+    let root = fixture.path();
+    registry
+        .mount_worktree(test_project_id(), root, store.path().to_path_buf())
+        .await
+        .expect("mount worktree");
+    assert!(registry.request_complete_generation(root).await);
+    let first_seat = wait_for_live_complete_generation(&registry, root).await;
+    let first = first_seat
+        .generation
+        .manifest()
+        .generation_id
+        .as_str()
+        .to_owned();
+    let worktree_id = first_seat
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+    let first_text = wait_for_queryable_text_generation(&registry, root).await;
+    install_verified_graph_store_on_text(&first_text, &first_seat);
+    drop(first_seat);
+
+    // The parked release reports the outgoing `warming`: its catalog and
+    // engine are away until a read re-warms them, and it is still the only
+    // servable graph the successor can hold.
+    let graph_store = first_text
+        .interactive_graph_store()
+        .expect("interactive graph store");
+    graph_store.release_interactive_catalog();
+    graph_store
+        .release_serving_engine()
+        .expect("release the serving engine");
+    assert!(matches!(
+        first_text.code_graph_serving_readiness(),
+        CodeGraphServingReadinessV1::Warming { .. }
+    ));
+
+    super::super::graph_activation::set_injected_activation_failures(&worktree_id, usize::MAX);
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn changed_after_the_released_graph() {}\n",
+    );
+    assert!(matches!(
+        registry.notify_path(root, root.join("src/lib.rs")).await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    let first_id = first.clone();
+    let registry_ref = &registry;
+    let second_text =
+        wait_until_serving_seat(registry_ref, root, SERVING_SEAT_FAILURE_CEILING, || {
+            let first_id = first_id.clone();
+            async move {
+                registry_ref
+                    .latest_text_serving_for_root(root)
+                    .await
+                    .filter(|text| text.metadata().manifest().generation_id.as_str() != first_id)
+            }
+        })
+        .await;
+    let held = || {
+        second_text
+            .held_graph_predecessor()
+            .map(|held| held.metadata().manifest().generation_id.as_str().to_owned())
+    };
+    assert_eq!(
+        held(),
+        Some(first.clone()),
+        "a released-for-memory outgoing still serves and must be held"
+    );
+    assert!(
+        second_text
+            .graph_predecessor(true)
+            .is_some_and(|served| served.metadata().manifest().generation_id.as_str() == first),
+        "the retained predecessor still serves stale graph reads"
+    );
+
+    registry.shutdown().await;
+}
+
 /// Eight enrolled worktrees is the daemon project-server cap. After they
 /// park, none of them may keep a whole decoded generation just because
 /// enrollment seated one.
