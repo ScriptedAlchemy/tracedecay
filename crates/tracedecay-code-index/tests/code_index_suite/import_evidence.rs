@@ -1502,6 +1502,55 @@ fn resolved_callers<'a>(
 }
 
 #[test]
+fn rust_struct_calls_require_tuple_constructor_evidence() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.struct-kind.lib",
+            "crates/app/src/lib.rs",
+            "mod types;\nmod caller;\npub struct LocalUnit;\npub struct LocalNamed { pub value: u8 }\npub struct LocalTuple(pub u8);\nfn local() { LocalUnit(); LocalNamed(); LocalTuple(0); }\n",
+        ),
+        (
+            "file.struct-kind.types",
+            "crates/app/src/types.rs",
+            "pub struct Unit;\npub struct Named { pub value: u8 }\npub struct Tuple(pub u8);\n",
+        ),
+        (
+            "file.struct-kind.caller",
+            "crates/app/src/caller.rs",
+            "use crate::types::{Unit, Named, Tuple};\nfn imported() { Unit(); Named(); Tuple(0); }\nfn qualified() { crate::types::Unit(); crate::types::Named(); crate::types::Tuple(0); }\n",
+        ),
+    ]);
+    for name in [
+        "crates/app/src/lib.rs::LocalUnit",
+        "crates/app/src/lib.rs::LocalNamed",
+        "crates/app/src/types.rs::Unit",
+        "crates/app/src/types.rs::Named",
+    ] {
+        assert!(
+            resolved_callers(&generation, &symbol_occurrence(&generation, name)).is_empty(),
+            "a unit or named-field struct has no callable constructor: {name}"
+        );
+    }
+    assert_eq!(
+        resolved_callers(
+            &generation,
+            &symbol_occurrence(&generation, "crates/app/src/lib.rs::LocalTuple")
+        ),
+        ["crates/app/src/lib.rs::local"]
+    );
+    assert_eq!(
+        resolved_callers(
+            &generation,
+            &symbol_occurrence(&generation, "crates/app/src/types.rs::Tuple")
+        ),
+        [
+            "crates/app/src/caller.rs::imported",
+            "crates/app/src/caller.rs::qualified"
+        ]
+    );
+}
+
+#[test]
 fn rust_value_call_binds_the_function_not_the_same_named_struct() {
     let generation = published_rust_workspace(&[
         (
@@ -1529,7 +1578,7 @@ fn rust_value_call_binds_the_function_not_the_same_named_struct() {
         resolved_callers(&generation, &function),
         ["crates/app/src/lib.rs::caller"],
         "a `helper()` site invokes the function namespace; the same-named \
-         tuple struct must not render the call ambiguous"
+         unit struct must not render the call ambiguous"
     );
 }
 

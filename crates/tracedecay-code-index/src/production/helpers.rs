@@ -793,6 +793,26 @@ enum ReferenceResolutionV1 {
     Ambiguous,
 }
 
+fn cross_file_target_kind_is_compatible<T: ResolutionFileV1>(
+    files: &[T],
+    index: usize,
+    kind: RelationEdgeKindV1,
+    symbol: &LineageSymbolRecordV1,
+) -> bool {
+    relation_target_kind_is_compatible(kind, &symbol.kind)
+        && (files[index].language() != "rust"
+            || kind != RelationEdgeKindV1::Calls
+            || symbol.kind != "struct"
+            // Canonical artifacts sort arities by occurrence. Only tuple
+            // structs have a parser-observed callable parameter list.
+            || files[index]
+                .as_ref()
+                .artifacts
+                .callable_arities
+                .binary_search_by(|row| row.occurrence.cmp(&symbol.occurrence))
+                .is_ok())
+}
+
 fn resolve_cross_file_reference<T>(
     files: &[T],
     by_simple_name: &dyn SymbolsByNameV1,
@@ -883,7 +903,12 @@ where
         && has_rust_glob
         && candidates.iter().any(|(candidate_index, symbol)| {
             *candidate_index == index
-                && relation_target_kind_is_compatible(reference.kind, &symbol.kind)
+                && cross_file_target_kind_is_compatible(
+                    files,
+                    *candidate_index,
+                    reference.kind,
+                    symbol,
+                )
         })
     {
         return None;
@@ -913,7 +938,12 @@ where
                 symbol,
             };
             files[*candidate_index].language() == file.extraction.language.as_str()
-                && relation_target_kind_is_compatible(reference.kind, &symbol.kind)
+                && cross_file_target_kind_is_compatible(
+                    files,
+                    *candidate_index,
+                    reference.kind,
+                    symbol,
+                )
                 && match import {
                     None => {
                         let direct = match crate_qualified {

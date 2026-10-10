@@ -770,7 +770,7 @@ mod tests {
         // spells `Self::f` calls by the enclosing type; v20 retains associated
         // owner uses and parser-positioned generic call paths. The revision is
         // part of the batch identity, so the pinned digest moves with it.
-        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v20");
+        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v21");
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
             "sha256:6a6b0dd0c0353831a1a72b7b8c7854d7927a789535b8829a1ca59aa1051b414e"

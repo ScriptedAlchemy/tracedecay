@@ -2155,32 +2155,6 @@ fn reference_name_suffix_start(candidate: &str, reference_name: &str) -> Option<
     (prefix.is_empty() || prefix.ends_with('.') || prefix.ends_with("::")).then_some(prefix.len())
 }
 
-/// Whether the source at a Rust call site invokes a value call
-/// (`foo(`, `foo!`, `foo::<T>(`) rather than a type path (`Foo::member`):
-/// `::` opens a path only when a name follows; `::<` is a turbofish
-/// argument list on a call.
-fn rust_callsite_names_value(source: &str, offsets: &[u64], reference: &UnresolvedRef) -> bool {
-    if reference.argument_count.is_none() {
-        return false;
-    }
-    let Some(rest) = offsets
-        .get(reference.line as usize)
-        .copied()
-        .and_then(|line_start| {
-            usize::try_from(line_start.checked_add(u64::from(reference.column))?).ok()
-        })
-        .and_then(|start| source.get(start + reference.reference_name.len()..))
-    else {
-        return false;
-    };
-    let rest = rest.trim_start();
-    rest.strip_prefix("::").is_none_or(|tail| {
-        !tail
-            .trim_start()
-            .starts_with(|ch: char| ch.is_alphanumeric() || ch == '_')
-    })
-}
-
 fn reference_evidence_span(
     source: &str,
     offsets: &[u64],
@@ -2416,13 +2390,17 @@ fn resolve_file_references(
             .copied()
             .flatten()
             .map(|from| from.span);
-        let mut compatible = candidates
+        let compatible = candidates
             .map(|candidates| {
                 candidates
                     .iter()
                     .copied()
                     .filter(|target| {
                         reference_target_kind_is_compatible(reference.reference_kind, &target.kind)
+                            && (language != "rust"
+                                || reference.reference_kind != EdgeKind::Calls
+                                || target.kind != NodeKind::Struct.as_str()
+                                || target.arity.is_some())
                             && (language != "java"
                                 || reference
                                     .argument_count
@@ -2442,23 +2420,6 @@ fn resolve_file_references(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        // `foo()` names a value and `Foo::member` names a type; Rust keeps
-        // the two in different namespaces, so a same-named struct and
-        // function are both kind-compatible. A value-call site drops the
-        // struct candidates a call cannot construct (named-field and unit
-        // structs); a tuple struct ctor spells `Name(` or `Name::<T>(` like
-        // a function call and stays an honest ambiguity, as does every
-        // `::` path form.
-        if language == "rust"
-            && reference.reference_kind == EdgeKind::Calls
-            && !reference.reference_name.contains("::")
-            && compatible.len() > 1
-            && rust_callsite_names_value(source, offsets, reference)
-        {
-            compatible.retain(|target| {
-                target.kind != NodeKind::Struct.as_str() || target.arity.is_some()
-            });
-        }
         match compatible.as_slice() {
             // Rust admits one definition per name and scope, so same-named
             // same-kind definitions are `#[cfg]` variants of one identity; the
@@ -2764,8 +2725,8 @@ pub(crate) fn relation_target_kind_is_compatible(
                 | NodeKind::SealedClass
                 | NodeKind::CaseClass
                 | NodeKind::DataClass
-                // `Type::open` / `Type::new` names the struct the same way
-                // `new Foo()` names the class.
+                // Rust tuple constructors target the struct; Rust resolution
+                // also requires the parser's callable arity evidence.
                 | NodeKind::Struct
         ),
         RelationEdgeKindV1::TypeOf => matches!(

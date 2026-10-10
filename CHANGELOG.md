@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+* **callers:** require tuple-constructor evidence before treating a Rust struct as a callee, including imported and qualified calls
 * **search:** rank production symbol definitions above stronger test-file hits ([#3332](https://github.com/ScriptedAlchemy/tracedecay/issues/3332))
 * **mcp:** carry request cancellation into the verified files resource ([#3339](https://github.com/ScriptedAlchemy/tracedecay/issues/3339))
 * **callers:** keep import and `new` sites instead of an empty complete page, scope `require` rows to module top level, and bind `exports.Name` / `module.exports.Name` assignments ([#3301](https://github.com/ScriptedAlchemy/tracedecay/issues/3301))
