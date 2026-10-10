@@ -35,10 +35,11 @@ lines are reduced to `quote:<chars>c`). Those sanitized rows are safe to cite.
 | `sessions` | Sessions that contain at least one scored call of the tool |
 | `calls` | Calls paired with a stored result, including error results |
 | `errors` | Calls whose result is an error (`isError`); they add no bytes |
+| `no text` | Calls whose stored result has Null content (Codex and Cursor Composer redact host output). They add no bytes or tokens. |
 | `calls 0 used` | Non-error calls where no result line was used |
 | `rerequests` | Later same-tool calls that asked for an already-returned path/symbol/quote. Not counted as use. |
-| `after cut` | Those rerequests whose original result recorded an explicit cut. `null` when cut state is unknown, never an estimated 0. |
-| `bytes` | Exact UTF-8 bytes of the result text after removing the MCP envelope, including each line's real newline. Not `len(line)+1`. |
+| `after cut` | Those rerequests whose original result's fact recorded `cut: true`. `null` when cut state is unknown, never an estimated 0. |
+| `bytes` | Exact UTF-8 bytes of the result text, including each line's real newline. Not `len(line)+1`. |
 | `used bytes` / `unused bytes` | Bytes of used lines / all other lines |
 | `unused %` | `unused bytes / bytes` |
 | `tokens` | Stored `token_count` on the tool_result fact. `null` when missing. Tool-body `token_count` is ignored because `source_read` writes chars/4 there. Never tiktoken or an MCP trailer. |
@@ -56,16 +57,22 @@ That share is the number to cite; do not fill the missing token columns.
 
 The rules are conservative: a line counts as used only on direct evidence.
 
-1. A result is walked as physical lines, keeping each line's actual
+1. A result's text is the `content` of its own tool_result fact, unwrapped
+   by the rule ingest uses for `token_count` (`tool_result_visible_text`):
+   an `output`/`content`/`text` envelope or a list of text blocks joined
+   with `\n`; any other text exactly as served. The row rendering is never
+   used: it shows only a record's first result and is sliced. Null content
+   is `no text`, never the 4-byte word `null`.
+2. A result is walked as physical lines, keeping each line's actual
    separator (`\n`, `\r\n`, or none). Empty text is 0 bytes. A line is used
    when one of its anchors occurs in agent-authored content recorded after
    the result. Blank and structural lines are unused.
-2. Agent-authored content is the assistant's visible text and the argument
+3. Agent-authored content is the assistant's visible text and the argument
    values of every later tool call (Read, Edit, Grep, Bash, tracedecay tools,
    and so on). Hidden reasoning, user messages, and tool results are not
    evidence. JSON keys in tool arguments are not evidence, so a schema field
    such as `node_id` cannot match.
-3. A line has three kinds of anchor:
+4. A line has three kinds of anchor:
    - **path**: a token with at least one `/` and a file extension. It matches
      on its last three path components, so `crates/a/src/lib.rs` matches a
      later read of `/repo/crates/a/src/lib.rs`.
@@ -77,14 +84,14 @@ The rules are conservative: a line counts as used only on direct evidence.
    - **quote**: the whole line, whitespace-normalized, when it is 24 or more
      characters. It matches verbatim, for example inside an Edit
      `old_string`.
-4. Novelty: an anchor that already occurs in agent-authored content before the
+5. Novelty: an anchor that already occurs in agent-authored content before the
    result arrived, including the call's own arguments, is dropped. Echoing the
    query back never counts as use.
-5. Re-request: a later call of the same `tracedecay_*` tool whose arguments
+6. Re-request: a later call of the same `tracedecay_*` tool whose arguments
    share a novelty-filtered anchor is a `rerequest`, not use. Re-request after
-   a cut is counted only when the original result records `cut` (boolean or
-   `{applied: bool}`). Unknown cut state is `null`, never a guessed 0.
-6. Tokens: only a stored `token_count` on the tool_result fact. A failed or
+   a cut is counted only when the original result's fact records `cut`.
+   Unknown cut state is `null`, never a guessed 0.
+7. Tokens: only a stored `token_count` on the tool_result fact. A failed or
    absent count is `null`. Tool-body `token_count` is ignored. Used/unused
    tokens are filled only when every line is used or every line is unused.
 
@@ -102,35 +109,19 @@ before trusting a ratio: a provider that loads no sessions or stores calls
 without results contributes no rows. Calls made through a shell command
 (`tracedecay tool ...` inside `exec` or `Bash`) are not scored.
 
+Two provider gaps limit coverage today:
+
+- Codex stores `function_call_output` results with Null content, so those
+  calls land in `no text`.
+- Current Codex rollouts record MCP calls as `event_msg.item_completed`
+  `McpToolCall` items. Capture does not project those items, so the calls
+  do not appear at all.
+
+Token columns stay `null` until stored `tool_result` facts carry a real
+`token_count` (#3397, draft #3400). Do not estimate.
+
 ## Tests
 
 ```sh
 python3 scripts/test-measure-unused-tool-context.py
 ```
-
-## Corpus classes
-
-#3372 ratios must come from naturally captured agent sessions discovered
-through `sessions_for` and loaded through `lcm_load_session`. Constructed
-or imported CLI-call transcripts test the scorer and the production tools;
-they are not issue-completion evidence.
-
-`docs/development/unused-tool-context-cli-experiment.md` (raw JSON beside
-it) is one such experiment: live `tracedecay tool` calls recorded as
-Cursor transcripts and imported. Do not cite its unused % on #3372 or
-#3373.
-
-Token columns stay `null` until stored `tool_result` facts carry a real
-`token_count` (#3397 / draft #3400). Do not estimate. After that lands,
-re-run the meter on naturally captured sessions and post the new raw
-output.
-
-The tests score synthetic transcripts and pin each rule: a read of a returned
-path is used, an unreferenced result is unused, query echoes and earlier
-mentions are not use, later tool output is not use, a later same-tool call
-that repeats a returned path is a rerequest rather than use, a rerequest
-after a recorded cut is counted and an unknown cut is null, missing token
-counts are null, mixed-use results do not split tokens, JSON keys and
-partial words do not match, parallel results in one row keep their own
-content, error results add no bytes, and byte totals match the returned
-text for empty, terminated, unterminated, and multibyte results.
