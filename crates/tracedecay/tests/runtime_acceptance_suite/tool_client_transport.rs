@@ -523,6 +523,77 @@ fn generic_tool_retrieves_oversized_typed_result() {
     );
 }
 
+fn hold_stream_after_files(
+    mut stream: UnixStream,
+    request: DaemonInvocationRequest,
+    scope: ResolvedScope,
+    files: FilesResultV1,
+) {
+    stream
+        .write_all(&files_response(&request, scope, files))
+        .expect("write files result");
+    stream.flush().expect("flush files result");
+    // The production daemon stays in its retained-connection read loop after
+    // a graph-tool response. Close only when the CLI drops the stream.
+    let mut extra = String::new();
+    let _ = BufReader::new(stream).read_line(&mut extra);
+}
+
+fn assert_complete_json_document(result: &ChildResult) -> Value {
+    assert!(
+        !result.killed_by_harness,
+        "CLI --json hung after writing files: elapsed={:?} stdout_len={} stderr={}",
+        result.elapsed,
+        result.output.stdout.len(),
+        String::from_utf8_lossy(&result.output.stderr)
+    );
+    assert!(
+        result.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.output.stderr)
+    );
+    serde_json::from_slice(&result.output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "--json must be one complete parseable document ({error}); bytes={} head={}",
+            result.output.stdout.len(),
+            String::from_utf8_lossy(&result.output.stdout[..result.output.stdout.len().min(200)])
+        )
+    })
+}
+
+#[test]
+fn generic_tool_json_preserves_large_result_while_daemon_waits() {
+    let (_home, _project, _socket_dir, home, project, socket) = fixture();
+    let files = oversized_files();
+    let expected = files.count;
+    let (_requests, server) = spawn_scripted_daemon(
+        socket.clone(),
+        &home,
+        &project,
+        1,
+        move |stream, request, scope| {
+            hold_stream_after_files(stream, request, scope, files.clone());
+        },
+    );
+    let result = run_command_with_timeout(
+        tool_command(&home, &project, &socket, "large"),
+        CHILD_TIMEOUT,
+    );
+    server.join().expect("join scripted daemon");
+    let envelope = assert_complete_json_document(&result);
+    assert_eq!(envelope["isError"], false, "{envelope}");
+    assert_eq!(envelope["structuredContent"]["count"], expected);
+    let files = envelope["structuredContent"]["files"]
+        .as_array()
+        .unwrap_or_else(|| panic!("held-stream --json must keep the full listing: {envelope}"));
+    assert_eq!(files.len(), expected);
+    assert!(
+        result.output.stdout.len() > 65_536,
+        "held-stream --json must keep the full listing above 64KiB: {}",
+        result.output.stdout.len()
+    );
+}
+
 #[test]
 fn generic_read_only_tool_times_out_without_late_success() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();

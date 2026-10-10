@@ -1025,9 +1025,13 @@ fn successful_tool_result_exits_zero() {
         CliToolOutput::Document,
     )
     .unwrap();
-    // Pretty serialization escapes the nested `content[0].text` JSON string.
+    // Compact `--json` escapes the nested `content[0].text` JSON string.
     // Parse the complete document back and compare it structurally instead of
     // searching for an unescaped substring that valid output cannot contain.
+    assert!(
+        !json_stdout.contains('\n'),
+        "--json must be one compact line: {json_stdout}"
+    );
     let reparsed: Value = serde_json::from_str(&json_stdout)
         .unwrap_or_else(|error| panic!("JSON stdout must itself be valid JSON: {error}"));
     assert_eq!(
@@ -1039,6 +1043,44 @@ fn successful_tool_result_exits_zero() {
         }),
         "JSON stdout is the tool result with the typed answer: {json_stdout}"
     );
+}
+
+#[test]
+fn json_document_preserves_large_typed_listing() {
+    let files = (0..2000)
+        .map(|index| {
+            json!({
+                "path": format!("src/pipe_overflow_{index:04}.rs"),
+                "symbols": 1,
+                "bytes": 20
+            })
+        })
+        .collect::<Vec<_>>();
+    let typed = json!({ "count": 2000, "layout": "flat", "files": files });
+    let result = ToolResult::new(
+        json!({
+            "content": [{
+                "type": "text",
+                "text": "## Files\nindexed files: 2000"
+            }],
+            "isError": false
+        }),
+        Vec::new(),
+    )
+    .with_structured_result(typed.clone());
+    let compact = rendered_tool_output(&result, CliToolOutput::Document).unwrap();
+    assert!(
+        !compact.contains('\n'),
+        "--json must stay one compact line: {compact}"
+    );
+    assert!(
+        compact.len() > 65_536,
+        "full --json must keep the typed listing above 64KiB: {}",
+        compact.len()
+    );
+    let parsed: Value = serde_json::from_str(&compact).unwrap();
+    assert_eq!(parsed["isError"], false);
+    assert_eq!(parsed["structuredContent"], typed);
 }
 
 /// An answer rendered without its typed result cannot print the `--json`

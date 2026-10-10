@@ -45,9 +45,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracedecay_runtime_core::config::ProfileRoot;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::time::Instant;
 
+use tracedecay::daemon::invocation_client_for_current_client;
 use tracedecay::mcp::tools::{registered_project_not_found, registered_project_selector_id};
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
@@ -573,8 +574,7 @@ fn dispatch_cli_application_surface_inner(
             Err(error) => {
                 if let Ok(handshake) =
                     crate::commands::client_handshake(profile, project.as_deref())
-                    && let Ok(client) =
-                        tracedecay::daemon::invocation_client_for_current_client(profile, handshake)
+                    && let Ok(client) = invocation_client_for_current_client(profile, handshake)
                 {
                     observe_surface_argument_rejection(
                         Some(&client),
@@ -595,7 +595,7 @@ fn dispatch_cli_application_surface_inner(
             false,
             false,
         )?;
-        let client = tracedecay::daemon::invocation_client_for_current_client(profile, handshake)?;
+        let client = invocation_client_for_current_client(profile, handshake)?;
         // A cold daemon answers the mounting refusal while the project open
         // still warms in the background. The compatibility tool path rides
         // that state out through its project-open retry loop; the typed
@@ -688,10 +688,7 @@ async fn dispatch_cli_retained(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let client = tracedecay::daemon::invocation_client_for_current_client(
-        profile,
-        dispatch.handshake(profile)?,
-    )?;
+    let client = invocation_client_for_current_client(profile, dispatch.handshake(profile)?)?;
     // The mounting refusal precedes admission; re-send it until the deadline.
     let execution = loop {
         let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
@@ -752,7 +749,7 @@ async fn dispatch_cli_source_edit(
         false,
         false,
     )?;
-    let client = tracedecay::daemon::invocation_client_for_current_client(profile, handshake)?;
+    let client = invocation_client_for_current_client(profile, handshake)?;
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
     // deadline like every other surface.
@@ -897,7 +894,7 @@ async fn invoke_cli_graph_tool(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let client = tracedecay::daemon::invocation_client_for_current_client(profile, handshake)?;
+    let client = invocation_client_for_current_client(profile, handshake)?;
     // A cold daemon refuses with the mounting problem while the project open
     // warms; that refusal precedes admission, so it is re-sent until the CLI
     // deadline like every other surface.
@@ -959,10 +956,7 @@ async fn dispatch_cli_profile_registry(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let client = tracedecay::daemon::invocation_client_for_current_client(
-        profile,
-        dispatch.handshake(profile)?,
-    )?;
+    let client = invocation_client_for_current_client(profile, dispatch.handshake(profile)?)?;
     let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
     let outcome = tracedecay::mcp::tools::execute_graph_tool_surface(
         tracedecay_tool_catalog::BindingSurface::Cli,
@@ -1313,8 +1307,15 @@ impl CliToolOutput {
 
 /// Prints one completed tool call; the beside-result blocks go to stderr
 /// unless the document on stdout already carries them.
+///
+/// Flush the full document before returning; callers must drain output
+/// pipes while waiting for the process to exit.
 fn print_tool_output(result: &ToolResult, output: CliToolOutput) -> Result<()> {
-    println!("{}", rendered_tool_output(result, output)?);
+    let rendered = rendered_tool_output(result, output)?;
+    {
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "{rendered}").and_then(|()| stdout.flush())?;
+    }
     if output != CliToolOutput::Document {
         print_beside_result_blocks(&result.value);
     }
@@ -1331,9 +1332,7 @@ fn print_beside_result_blocks(result_value: &Value) {
 /// is decided separately from `isError`.
 fn rendered_tool_output(result: &ToolResult, output: CliToolOutput) -> Result<String> {
     match (output, result.structured_result()) {
-        (CliToolOutput::Document, _) => {
-            Ok(serde_json::to_string_pretty(&json_tool_document(result)?)?)
-        }
+        (CliToolOutput::Document, _) => Ok(serde_json::to_string(&json_tool_document(result)?)?),
         (CliToolOutput::TypedResult, Some(structured)) if !is_error_result(&result.value) => {
             Ok(structured.to_string())
         }
@@ -1349,7 +1348,10 @@ fn is_error_result(result_value: &Value) -> bool {
 
 /// The one `tracedecay tool --json` document for every tool: the MCP tool
 /// result's `content`, its `isError`, and `structuredContent` holding the
-/// refusal's typed problem record or the answer's whole typed result.
+/// refusal's typed problem record or the answer's typed result. Compact
+/// encoding keeps mid-size listings on one flushed line; a parent that
+/// drains stdout while the process runs receives the full typed result,
+/// including documents larger than a 64KiB pipe.
 fn json_tool_document(result: &ToolResult) -> Result<Value> {
     let mut document = result.value.clone();
     let is_error = is_error_result(&document);
@@ -1358,7 +1360,7 @@ fn json_tool_document(result: &ToolResult) -> Result<Value> {
             message: "the tool rendered a result that is not a JSON object".to_owned(),
         });
     };
-    object.insert("isError".to_owned(), serde_json::json!(is_error));
+    object.insert("isError".to_owned(), json!(is_error));
     if !is_error {
         let structured = result
             .structured_result()
