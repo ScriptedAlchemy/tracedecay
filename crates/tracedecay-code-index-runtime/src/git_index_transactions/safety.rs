@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::{Command, Output};
 
 use tracedecay_domain::{GitFileModeV1, GitHeadStateV1, ManifestDigest, canonical_sha256};
 use tracedecay_runtime_core::git_discovery::{
@@ -65,7 +64,7 @@ impl FixedGitIndexRunner {
                     (head.kind, head.oid.clone())
                 }
             } else {
-                worktree_manifest_bytes(&self.repository_root.join(path_text))?
+                self.worktree_manifest_bytes(&self.repository_root.join(path_text))?
             };
             manifest.push((path_text.to_owned(), entry.0, entry.1));
         }
@@ -374,23 +373,6 @@ impl FixedGitIndexRunner {
                     && identity.common_dir == self.common_dir
         )
     }
-
-    fn run_bounded_git_stdin(
-        &self,
-        command: Command,
-        operation: &'static str,
-        input: &[u8],
-    ) -> Result<Output, NativeGitIndexError> {
-        let output = self.run_bounded_stdin(command, input)?;
-        if output.status.success() {
-            Ok(output)
-        } else {
-            Err(NativeGitIndexError::GitFailed {
-                operation,
-                status: output.status.to_string(),
-            })
-        }
-    }
 }
 
 struct HeadTreeEntry {
@@ -398,31 +380,39 @@ struct HeadTreeEntry {
     oid: Vec<u8>,
 }
 
-fn worktree_manifest_bytes(
-    absolute: &Path,
-) -> Result<(&'static str, Vec<u8>), NativeGitIndexError> {
-    match std::fs::symlink_metadata(absolute) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            let target = std::fs::read_link(absolute)
-                .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-            Ok((
-                "symlink",
-                target.to_string_lossy().into_owned().into_bytes(),
-            ))
+impl FixedGitIndexRunner {
+    fn worktree_manifest_bytes(
+        &self,
+        absolute: &Path,
+    ) -> Result<(&'static str, Vec<u8>), NativeGitIndexError> {
+        match std::fs::symlink_metadata(absolute) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = std::fs::read_link(absolute)
+                    .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+                Ok((
+                    "symlink",
+                    target.to_string_lossy().into_owned().into_bytes(),
+                ))
+            }
+            Ok(metadata) if metadata.is_file() => Ok((
+                if worktree_mode(absolute)
+                    .is_some_and(|mode| mode.as_str() == GitFileModeV1::EXECUTABLE)
+                {
+                    "executable"
+                } else {
+                    "file"
+                },
+                self.read_file_chunks(
+                    std::fs::File::open(absolute)
+                        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?,
+                )?,
+            )),
+            Ok(_) => Ok(("unsupported", Vec::new())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(("absent", Vec::new()))
+            }
+            Err(error) => Err(NativeGitIndexError::Io(error.to_string())),
         }
-        Ok(metadata) if metadata.is_file() => Ok((
-            if worktree_mode(absolute)
-                .is_some_and(|mode| mode.as_str() == GitFileModeV1::EXECUTABLE)
-            {
-                "executable"
-            } else {
-                "file"
-            },
-            std::fs::read(absolute).map_err(|error| NativeGitIndexError::Io(error.to_string()))?,
-        )),
-        Ok(_) => Ok(("unsupported", Vec::new())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(("absent", Vec::new())),
-        Err(error) => Err(NativeGitIndexError::Io(error.to_string())),
     }
 }
 

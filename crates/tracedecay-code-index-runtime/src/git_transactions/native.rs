@@ -843,7 +843,7 @@ fn unsupported_selected_paths(
             return Some(unreadable);
         }
     }
-    let filtered_paths = match check_attr_filter_paths(runner.repository_root(), paths) {
+    let filtered_paths = match check_attr_filter_paths(runner, paths) {
         Ok(filtered_paths) => filtered_paths,
         Err(()) => return Some(unreadable),
     };
@@ -854,13 +854,13 @@ fn unsupported_selected_paths(
 }
 
 fn check_attr_filter_paths(
-    repository_root: &Path,
+    runner: &FixedGitIndexRunner,
     paths: &[String],
 ) -> Result<BTreeSet<String>, ()> {
     if paths.is_empty() {
         return Ok(BTreeSet::new());
     }
-    let mut command = read_git_command(repository_root);
+    let mut command = runner.command().map_err(|_| ())?;
     command.args([
         "check-attr",
         "-z",
@@ -871,7 +871,7 @@ fn check_attr_filter_paths(
         "--",
     ]);
     command.args(paths);
-    let output = command.output().map_err(|_| ())?;
+    let output = runner.run_bounded(command).map_err(|_| ())?;
     if !output.status.success() {
         return Err(());
     }

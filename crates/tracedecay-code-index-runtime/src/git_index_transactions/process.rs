@@ -1,8 +1,12 @@
 use std::env;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(test)]
+use std::io::Write;
 use std::path::Path;
-use std::process::{Child, Command, Output};
+use std::process::Command;
+#[cfg(test)]
+use std::process::{Child, Output};
 
 use tracedecay_domain::{GitFileModeV1, GitOidV1, GitOperationStateV1};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
@@ -44,6 +48,7 @@ pub fn git_command(repository_root: &Path) -> Result<Command, NativeGitIndexErro
     Ok(command)
 }
 
+#[cfg(test)]
 pub fn run_command_with_stdin(
     mut command: Command,
     operation: &'static str,
@@ -124,6 +129,7 @@ pub fn run_command_with_stdin(
     }
 }
 
+#[cfg(test)]
 fn missing_child_pipe(child: &mut Child, pipe: &str) -> NativeGitIndexError {
     let cleanup = terminate_and_reap(child);
     NativeGitIndexError::Io(format!(
@@ -131,6 +137,7 @@ fn missing_child_pipe(child: &mut Child, pipe: &str) -> NativeGitIndexError {
     ))
 }
 
+#[cfg(test)]
 fn terminate_and_reap(child: &mut Child) -> String {
     let kill = child.kill().map_or_else(
         |error| format!("termination failed: {error}"),
