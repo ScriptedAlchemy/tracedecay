@@ -13,10 +13,10 @@
 //! `export … from` chains through barrels, including same-module
 //! `export { a as b }` clauses and `export default <name>` that forward a
 //! declaration or a local import (`export *` never forwards `default`),
-//! CommonJS `require`/`module.exports`, published-root paths the owning
-//! `package.json` declares (`files`, root `main`/`exports`) whose source
-//! still lives under `src/`, and member calls through module namespaces
-//! (`import * as ns`, `export * as ns`).
+//! CommonJS `require`/`module.exports`, published paths whose source tree is
+//! declared by `babel src -d <out>` in `package.json` scripts or by a
+//! tsconfig `rootDir`/`outDir` pair, and member calls through module
+//! namespaces (`import * as ns`, `export * as ns`).
 //!
 //! A specifier that matches no alias and no workspace package is an external
 //! dependency and binds nothing. A specifier that names a project module but
@@ -115,6 +115,41 @@ struct TsConfigV1 {
     base_url: Option<String>,
 }
 
+/// One declared compile mapping from a published tree to its indexed source.
+///
+/// `package.json` `files` / `main` / `exports` name published paths; they do
+/// not say those paths were emitted from `src/`. Only an explicit compiler
+/// mapping (`babel src -d .`, tsconfig `rootDir`/`outDir`) may rewrite a
+/// missing relative specifier.
+struct BuildMappingV1 {
+    /// Project-relative source tree (`src`, `packages/pkg/src`).
+    source_root: String,
+    /// Project-relative output tree; empty means the package/tsconfig dir.
+    output_root: String,
+}
+
+impl BuildMappingV1 {
+    fn source_path(&self, published: &str) -> Option<String> {
+        let remainder = if self.output_root.is_empty() {
+            published.to_owned()
+        } else if published == self.output_root {
+            String::new()
+        } else {
+            published
+                .strip_prefix(&self.output_root)?
+                .strip_prefix('/')?
+                .to_owned()
+        };
+        if remainder.is_empty() {
+            Some(self.source_root.clone())
+        } else if self.source_root.is_empty() {
+            Some(remainder)
+        } else {
+            Some(format!("{}/{}", self.source_root, remainder))
+        }
+    }
+}
+
 struct NodePackageV1 {
     dir: String,
     /// Project-relative entry specifiers for the bare package name, in the
@@ -122,8 +157,6 @@ struct NodePackageV1 {
     entries: Vec<String>,
     /// `exports` subpaths (`./utils`, `./*`) to their target templates.
     subpath_exports: Vec<(String, Vec<String>)>,
-    /// Manifest `files` entries: the paths this package publishes.
-    published_files: Vec<String>,
 }
 
 /// Module facts for one sealed file set.
@@ -136,6 +169,9 @@ pub(super) struct TypeScriptModuleIndexV1 {
     /// tsconfig directory to the merged rules of every `tsconfig*.json` and
     /// `jsconfig.json` beside it.
     tsconfigs: BTreeMap<String, TsConfigV1>,
+    /// Declared published-to-source rewrites from package scripts and
+    /// tsconfig `rootDir`/`outDir`. Longer output roots win.
+    build_mappings: Vec<BuildMappingV1>,
 }
 
 impl TypeScriptModuleIndexV1 {
@@ -147,6 +183,7 @@ impl TypeScriptModuleIndexV1 {
         let mut packages = Vec::new();
         let mut by_package_name: HashMap<String, Option<usize>> = HashMap::new();
         let mut tsconfigs: BTreeMap<String, TsConfigV1> = BTreeMap::new();
+        let mut build_mappings = Vec::new();
         for (index, file) in files.iter().enumerate() {
             let path = file.logical_path();
             let language = file.language();
@@ -167,10 +204,18 @@ impl TypeScriptModuleIndexV1 {
                         .or_insert(Some(packages.len()));
                 }
                 packages.push(package);
+                build_mappings.extend(package_script_mappings(
+                    dir,
+                    &file.as_ref().artifacts.symbols,
+                ));
             } else if (name.starts_with("tsconfig") && name.ends_with(".json"))
                 || name == "jsconfig.json"
             {
                 let config = tsconfig(dir, &file.as_ref().artifacts.symbols);
+                if let Some(mapping) = tsconfig_build_mapping(dir, &file.as_ref().artifacts.symbols)
+                {
+                    build_mappings.push(mapping);
+                }
                 let merged = tsconfigs.entry(dir.to_owned()).or_default();
                 merged.extends.extend(config.extends);
                 merged.aliases.extend(config.aliases);
@@ -179,11 +224,13 @@ impl TypeScriptModuleIndexV1 {
                 }
             }
         }
+        build_mappings.sort_by(|left, right| right.output_root.len().cmp(&left.output_root.len()));
         Self {
             sources,
             packages,
             by_package_name,
             tsconfigs,
+            build_mappings,
         }
     }
 
@@ -201,7 +248,7 @@ impl TypeScriptModuleIndexV1 {
             let published = join_normalized(from_dir, specifier);
             return self
                 .probe(&published)
-                .or_else(|| self.probe_declared_published_from_src(&published))
+                .or_else(|| self.probe_declared_build_source(&published))
                 .map_or(ModuleTargetV1::Unresolved, ModuleTargetV1::File);
         }
         let mut names_project_code = false;
@@ -587,52 +634,21 @@ impl TypeScriptModuleIndexV1 {
         }
     }
 
-    /// A relative require of a published path binds the indexed `src/`
-    /// source only when the owning `package.json` declares that path:
-    /// `files`, a root-level `main`/`exports` entry, or a known build-output
-    /// directory (`dist/foo` → `src/foo`). An undeclared `./foo` next to
-    /// `src/foo.ts` stays unresolved.
-    fn probe_declared_published_from_src(&self, published: &str) -> Option<usize> {
-        let package = self.owning_package(published)?;
-        let relative = if package.dir.is_empty() {
-            published.to_owned()
-        } else {
-            published
-                .strip_prefix(package.dir.as_str())?
-                .trim_start_matches('/')
-                .to_owned()
-        };
-        if relative.is_empty() || relative == "src" || relative.starts_with("src/") {
-            return None;
+    /// Rewrite a missing published path through a declared compiler mapping.
+    /// `require("../../webpack")` after `babel src -d .` binds `src/webpack`;
+    /// an undeclared `./foo` or `./dist/foo` stays unresolved.
+    fn probe_declared_build_source(&self, published: &str) -> Option<usize> {
+        for mapping in &self.build_mappings {
+            let Some(source) = mapping.source_path(published) else {
+                continue;
+            };
+            if source != published
+                && let Some(found) = self.probe(&source)
+            {
+                return Some(found);
+            }
         }
-        if let Some((head, rest)) = relative.split_once('/')
-            && OUTPUT_DIRS.contains(&head)
-        {
-            return self.probe(&join_normalized(
-                &join_normalized(&package.dir, "src"),
-                rest,
-            ));
-        }
-        if !declares_published_path(package, &relative) {
-            return None;
-        }
-        self.probe(&join_normalized(
-            &join_normalized(&package.dir, "src"),
-            &relative,
-        ))
-    }
-
-    /// The package whose directory owns `published`, preferring the longest
-    /// prefix so a workspace package beats the repository root.
-    fn owning_package(&self, published: &str) -> Option<&NodePackageV1> {
-        self.packages
-            .iter()
-            .filter(|package| {
-                package.dir.is_empty()
-                    || published == package.dir
-                    || published.starts_with(&format!("{}/", package.dir))
-            })
-            .max_by_key(|package| package.dir.len())
+        None
     }
 
     /// Node/TypeScript file probing over the indexed set: the path itself, the
@@ -884,55 +900,89 @@ fn node_package(
             entries.push(entry);
         }
     }
-    let mut published_files = Vec::new();
-    if let Some(value) = pair_value(symbols, "files") {
-        string_leaves(&value, &mut published_files);
-    }
     (
         name,
         NodePackageV1 {
             dir: dir.to_owned(),
             entries,
             subpath_exports,
-            published_files,
         },
     )
 }
 
-/// Whether `relative` is a path this package publishes at its root.
-fn declares_published_path(package: &NodePackageV1, relative: &str) -> bool {
-    package
-        .published_files
-        .iter()
-        .chain(package.entries.iter().filter(|entry| {
-            let head = entry
-                .trim_start_matches("./")
-                .split('/')
-                .next()
-                .unwrap_or("");
-            head != "src" && !OUTPUT_DIRS.contains(&head)
-        }))
-        .any(|declared| published_path_matches(declared, relative))
-}
-
-fn published_path_matches(declared: &str, relative: &str) -> bool {
+fn project_join(dir: &str, declared: &str) -> String {
     let declared = declared.trim_start_matches("./");
-    if declared.is_empty() {
-        return false;
+    if declared.is_empty() || declared == "." {
+        dir.to_owned()
+    } else {
+        join_normalized(dir, declared)
     }
-    let declared_stem = strip_js_like_extension(declared);
-    let relative_stem = strip_js_like_extension(relative);
-    relative == declared
-        || relative_stem == declared_stem
-        || relative.starts_with(&format!("{declared}/"))
-        || relative_stem.starts_with(&format!("{declared_stem}/"))
 }
 
-fn strip_js_like_extension(path: &str) -> &str {
-    path.strip_suffix(".js")
-        .or_else(|| path.strip_suffix(".mjs"))
-        .or_else(|| path.strip_suffix(".cjs"))
-        .unwrap_or(path)
+/// `babel src -d .` / `babel src --out-dir dist` inside a package script.
+fn babel_src_to_out(script: &str) -> Option<(String, String)> {
+    let tokens: Vec<&str> = script
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|'))
+        .filter(|token| !token.is_empty())
+        .collect();
+    let mut index = 0;
+    while index < tokens.len() {
+        if tokens[index] != "babel" && !tokens[index].ends_with("/babel") {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let mut source = None;
+        let mut output = None;
+        while index < tokens.len() && tokens[index] != "babel" && !tokens[index].ends_with("/babel")
+        {
+            match tokens[index] {
+                "-d" | "--out-dir" => {
+                    index += 1;
+                    output = tokens.get(index).copied();
+                }
+                token if token.starts_with('-') => {}
+                token if source.is_none() => source = Some(token),
+                _ => {}
+            }
+            index += 1;
+        }
+        if let (Some(source), Some(output)) = (source, output) {
+            return Some((source.to_owned(), output.to_owned()));
+        }
+    }
+    None
+}
+
+fn package_script_mappings(
+    dir: &str,
+    symbols: &[Arc<LineageSymbolRecordV1>],
+) -> Vec<BuildMappingV1> {
+    let Some(Value::Object(scripts)) = pair_value(symbols, "scripts") else {
+        return Vec::new();
+    };
+    scripts
+        .values()
+        .filter_map(Value::as_str)
+        .filter_map(babel_src_to_out)
+        .map(|(source, output)| BuildMappingV1 {
+            source_root: project_join(dir, &source),
+            output_root: project_join(dir, &output),
+        })
+        .collect()
+}
+
+fn tsconfig_build_mapping(
+    dir: &str,
+    symbols: &[Arc<LineageSymbolRecordV1>],
+) -> Option<BuildMappingV1> {
+    let options = pair_value(symbols, "compilerOptions")?;
+    let root_dir = options.get("rootDir")?.as_str()?;
+    let out_dir = options.get("outDir")?.as_str()?;
+    Some(BuildMappingV1 {
+        source_root: project_join(dir, root_dir),
+        output_root: project_join(dir, out_dir),
+    })
 }
 
 fn tsconfig(dir: &str, symbols: &[Arc<LineageSymbolRecordV1>]) -> TsConfigV1 {
@@ -1019,7 +1069,7 @@ pub(super) fn unique_local_import<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{AliasRuleV1, join_normalized, published_path_matches, split_parent};
+    use super::{AliasRuleV1, BuildMappingV1, babel_src_to_out, join_normalized, split_parent};
 
     #[test]
     fn join_normalized_folds_dots_and_clamps_at_the_root() {
@@ -1058,12 +1108,33 @@ mod tests {
     }
 
     #[test]
-    fn published_path_matches_declared_files_and_extensionless_js() {
-        assert!(published_path_matches("webpack", "webpack"));
-        assert!(published_path_matches("webpack", "webpack/index"));
-        assert!(published_path_matches("index.js", "index"));
-        assert!(published_path_matches("./corsImport.js", "corsImport"));
-        assert!(!published_path_matches("webpack", "foo"));
-        assert!(!published_path_matches("index.js", "foo"));
+    fn babel_src_to_out_reads_compile_and_chained_scripts() {
+        assert_eq!(
+            babel_src_to_out("babel src -d ."),
+            Some(("src".to_owned(), ".".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("rm -rf webpack index.js; babel src -d .; echo done"),
+            Some(("src".to_owned(), ".".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("babel src --out-dir dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(babel_src_to_out("BABEL_ENV=production yarn compile"), None);
+    }
+
+    fn declared_mapping_rewrites_published_root_and_out_dir() {
+        let root = BuildMappingV1 {
+            source_root: "src".to_owned(),
+            output_root: String::new(),
+        };
+        assert_eq!(root.source_path("webpack"), Some("src/webpack".to_owned()));
+        let dist = BuildMappingV1 {
+            source_root: "src".to_owned(),
+            output_root: "dist".to_owned(),
+        };
+        assert_eq!(dist.source_path("dist/foo"), Some("src/foo".to_owned()));
+        assert_eq!(dist.source_path("foo"), None);
     }
 }

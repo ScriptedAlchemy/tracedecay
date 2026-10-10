@@ -415,8 +415,8 @@ fn sealed_replay_recomputes_identical_typescript_edges() {
     );
 }
 
-/// webpack-external-import compiles `src/` to the package root. A factory
-/// that `require`s a path listed in `files` and `new`s the class must still
+/// webpack-external-import compiles with `babel src -d .`. A factory
+/// that `require`s the published path and `new`s the class must still
 /// bind while only the source tree is indexed.
 #[test]
 fn published_root_require_binds_src_constructor() {
@@ -425,9 +425,10 @@ fn published_root_require_binds_src_constructor() {
     std::fs::create_dir_all(root.path().join("manual/webpack")).expect("manual/webpack");
     std::fs::write(
         root.path().join("package.json"),
-        "{\n  \"name\": \"webpack-external-import\",\n  \"files\": [\"webpack\", \"index.js\"]\n}\n",
+        "{\n  \"name\": \"webpack-external-import\",\n  \"files\": [\"webpack\", \"index.js\"],\n  \
+         \"scripts\": { \"compile\": \"babel src -d .\" }\n}\n",
     )
-    .expect("package manifest");
+    .expect("declared babel mapping");
     std::fs::write(
         root.path().join("src/webpack/index.js"),
         "class URLImportPlugin {\n  constructor(opts) { this.opts = opts; }\n}\n\
@@ -498,6 +499,69 @@ fn undeclared_missing_relative_stays_unresolved() {
     assert_eq!(
         inbound, 0,
         "undeclared ./foo must not invent an edge to src/foo.ts"
+    );
+}
+
+/// `./dist/foo` is not `src/foo` without a `rootDir`/`outDir` (or babel)
+/// mapping, even when `src/foo.ts` exists.
+#[test]
+fn undeclared_dist_stays_unresolved() {
+    let root = tempfile::tempdir().expect("undeclared-dist fixture");
+    std::fs::create_dir_all(root.path().join("src")).expect("src");
+    std::fs::write(
+        root.path().join("package.json"),
+        "{\n  \"name\": \"app\",\n  \"files\": [\"dist\"]\n}\n",
+    )
+    .expect("package manifest");
+    std::fs::write(
+        root.path().join("src/foo.ts"),
+        "export function foo() { return 1; }\n",
+    )
+    .expect("source");
+    std::fs::write(
+        root.path().join("app.ts"),
+        "import { foo } from './dist/foo';\nfoo();\n",
+    )
+    .expect("importer");
+
+    let generation =
+        crate::cross_file_import_calls::publish_fixture_tree(root.path(), "undeclared-dist");
+    let target = symbol(&generation, "src/foo.ts::foo");
+    assert!(
+        resolved_callers(&generation, &target).is_empty(),
+        "undeclared ./dist/foo must not invent src/foo.ts"
+    );
+}
+
+/// An explicit tsconfig `rootDir`/`outDir` pair is a compiler mapping:
+/// `import from "./dist/foo"` binds `src/foo.ts`.
+#[test]
+fn tsconfig_out_dir_require_binds_root_dir_source() {
+    let root = tempfile::tempdir().expect("tsconfig-mapping fixture");
+    std::fs::create_dir_all(root.path().join("src")).expect("src");
+    std::fs::write(
+        root.path().join("tsconfig.json"),
+        "{\n  \"compilerOptions\": { \"rootDir\": \"src\", \"outDir\": \"dist\" }\n}\n",
+    )
+    .expect("tsconfig");
+    std::fs::write(
+        root.path().join("src/foo.ts"),
+        "export function foo() { return 1; }\n",
+    )
+    .expect("source");
+    std::fs::write(
+        root.path().join("app.ts"),
+        "import { foo } from './dist/foo';\nfoo();\n",
+    )
+    .expect("importer");
+
+    let generation =
+        crate::cross_file_import_calls::publish_fixture_tree(root.path(), "tsconfig-out-dir");
+    let target = symbol(&generation, "src/foo.ts::foo");
+    let callers = resolved_callers(&generation, &target);
+    assert!(
+        callers.keys().any(|name| name.contains("app.ts")),
+        "declared outDir must bind ./dist/foo to src/foo.ts: {callers:?}"
     );
 }
 

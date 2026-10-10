@@ -156,7 +156,8 @@ async fn callers_return_commonjs_constructor_sites() {
         fs::create_dir_all(project.join("manual/webpack")).unwrap();
         fs::write(
             project.join("package.json"),
-            "{\n  \"name\": \"webpack-external-import\",\n  \"files\": [\"webpack\", \"index.js\"]\n}\n",
+            "{\n  \"name\": \"webpack-external-import\",\n  \"files\": [\"webpack\", \"index.js\"],\n  \
+             \"scripts\": { \"compile\": \"babel src -d .\" }\n}\n",
         )
         .unwrap();
         fs::write(
