@@ -471,7 +471,7 @@ fn stalled_snapshot_on_successful_status_is_a_typed_doctor_failure() {
             "state": "stalled",
             "reason": "retry_backoff",
             "retry_after_ms": 1000,
-            "detail": "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases / ProjectSessions",
+            "detail": "observability drain for 'project.capacity' is still settling",
         }
     });
     let mut counters = DoctorCounters::new();
@@ -489,7 +489,7 @@ fn stalled_snapshot_on_successful_status_is_a_typed_doctor_failure() {
     };
     assert_eq!(
         (reason, counters.issues, counters.warnings, pending_reset),
-        ("project_server_capacity_reached", 1, 0, false)
+        ("project_route_open_backoff", 1, 0, false)
     );
 }
 

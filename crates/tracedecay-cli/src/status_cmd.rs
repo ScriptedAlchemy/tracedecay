@@ -612,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn stalled_project_open_snapshot_is_a_typed_capacity_error() {
+    fn stalled_project_open_snapshot_is_a_typed_backoff_error() {
         let stalled = json!({
             "project_open": {
                 "state": "stalled",
@@ -623,11 +623,16 @@ mod tests {
         });
         let error = tracedecay::daemon::reject_stalled_project_open_status(&stalled)
             .expect_err("stalled must fail");
+        // The snapshot records retry_backoff, which does not identify its
+        // cause, so the fallback rejects with the honest typed backoff
+        // rather than a fabricated capacity verdict.
         assert_eq!(
-            error
-                .project_route_context()
-                .map(|(reason, retryable, _)| (reason, retryable)),
-            Some(("project_server_capacity_reached", true))
+            error.project_open_failure_kind(),
+            Some(
+                tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff {
+                    retry_after_ms: 1000
+                }
+            )
         );
         assert!(
             tracedecay::daemon::reject_stalled_project_open_status(&json!({ "node_count": 1 }))

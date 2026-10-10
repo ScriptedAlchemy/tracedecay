@@ -15,6 +15,7 @@ use tracedecay_contracts::{ApplicationOutcome, ResolvedSetting};
 use tracedecay_domain::configuration::{
     ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
 };
+use tracedecay_domain::errors::ProjectOpenFailureKind;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
@@ -822,6 +823,13 @@ fn classify_daemon_status_error(
     {
         dc.fail(&format!("Project open stalled: {detail}"));
         return DoctorDaemonFindingsV1::unread("project_server_capacity_reached");
+    }
+    // A stalled snapshot whose recorded cause was not a real project-route
+    // refusal arrives as the honest typed backoff, so the finding names that
+    // backoff kind instead of reporting the daemon unavailable.
+    if let Some(ProjectOpenFailureKind::BackedOff { .. }) = error.project_open_failure_kind() {
+        dc.fail(&format!("Project open stalled: {error}"));
+        return DoctorDaemonFindingsV1::unread("project_route_open_backoff");
     }
     report_daemon_diagnostics_unavailable(
         dc,

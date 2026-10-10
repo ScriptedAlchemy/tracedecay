@@ -381,7 +381,7 @@ impl ProjectOpenFailure {
         }
     }
 
-    fn from_error(error: &TraceDecayError) -> Self {
+    pub(super) fn from_error(error: &TraceDecayError) -> Self {
         // Operator-repairable authority rejections decline implicit repair.
         // Reopening before maintenance changes that state is not useful and
         // only multiplies daemon warm-up tasks.

@@ -6,11 +6,9 @@ use std::path::{Path, PathBuf};
 use tokio::time::{Duration, timeout};
 
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
-use tracedecay_contracts::project_open::{
-    ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
-};
+use tracedecay_contracts::project_open::{ProjectOpenStatusStateV1, ProjectOpenStatusV1};
 use tracedecay_daemon_service::shutdown::DaemonActivity;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
@@ -735,7 +733,9 @@ mod doctor_runtime_route_tests {
         CoreDoctorStatusV1, cold_doctor_runtime_value, core_status_request_id,
         doctor_runtime_coverage, doctor_runtime_request, serve_core_doctor_runtime_request,
     };
-    use crate::daemon::{AuthenticatedFirstRequest, DaemonHandshake, StoreAdministration};
+    use crate::daemon::{
+        AuthenticatedFirstRequest, DaemonHandshake, ProjectOpenFailure, StoreAdministration,
+    };
     use crate::mcp::McpServer;
     use crate::mcp::server::McpServerConstructionContext;
     use tracedecay_contracts::project_open::{
@@ -1143,11 +1143,21 @@ mod doctor_runtime_route_tests {
         .expect("serve stalled status as a typed error");
 
         assert!(outcome.is_none());
+        // `retry_backoff` is a coarse bucket: with no recorded failure the
+        // honest fallback is the typed backoff, not a fabricated capacity
+        // verdict.
         assert!(
             transport
                 .output
+                .contains(r#""kind":"project_route_open_backoff""#),
+            "stalled status must be a typed backoff error: {}",
+            transport.output
+        );
+        assert!(
+            !transport
+                .output
                 .contains(r#""reason_code":"project_server_capacity_reached""#),
-            "stalled status must be a typed capacity error: {}",
+            "a retry_backoff stall must not fabricate a capacity verdict: {}",
             transport.output
         );
         assert!(
@@ -1196,14 +1206,20 @@ mod doctor_runtime_route_tests {
         )
         .expect("enter daemon database scope");
         let first_request = AuthenticatedFirstRequest::new(doctor_report_request_line());
+        let detail = "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases { count: 1 } / ProjectSessions";
         let project_open = ProjectOpenStatusV1 {
             state: ProjectOpenStatusStateV1::Stalled,
             reason: ProjectOpenStatusReasonV1::RetryBackoff,
             retry_after_ms: Some(1_000),
-            detail: Some(
-                "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases { count: 1 } / ProjectSessions".to_owned(),
-            ),
+            detail: Some(detail.to_owned()),
         };
+        let stalled_failure = ProjectOpenFailure::from_error(
+            &tracedecay_domain::errors::TraceDecayError::project_route(
+                super::super::PROJECT_SERVER_CAPACITY_REASON_CODE,
+                true,
+                detail.to_owned(),
+            ),
+        );
 
         let outcome = serve_core_doctor_runtime_request(
             &mut transport,
@@ -1211,7 +1227,7 @@ mod doctor_runtime_route_tests {
             &store_administration,
             CoreDoctorStatusV1 {
                 project_open: Some(project_open),
-                stalled_failure: None,
+                stalled_failure: Some(stalled_failure),
                 git_watcher_health: None,
             },
             setup_activity,

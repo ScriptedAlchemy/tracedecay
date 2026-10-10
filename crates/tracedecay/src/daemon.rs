@@ -78,6 +78,10 @@ pub const PROJECT_SERVER_CAPACITY_REASON_CODE: &str = "project_server_capacity_r
 
 /// Typed error for a stalled `project_open` snapshot. Status, Doctor, and
 /// the CLI all use this so a stalled open is never a successful empty report.
+/// `RetryBackoff` covers capacity, code-runtime-budget, and observability
+/// stalls alike, so it maps to the honest typed backoff that keeps the
+/// recorded detail, never to a fabricated capacity verdict. Callers that
+/// hold the exact `ProjectOpenFailure` replay it instead of this fallback.
 pub fn stalled_project_open_error(status: &ProjectOpenStatusV1) -> TraceDecayError {
     let detail = status
         .detail
@@ -87,16 +91,14 @@ pub fn stalled_project_open_error(status: &ProjectOpenStatusV1) -> TraceDecayErr
         ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery => {
             TraceDecayError::project_route(REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, true, detail)
         }
-        ProjectOpenStatusReasonV1::RetryBackoff => {
-            TraceDecayError::project_route(PROJECT_SERVER_CAPACITY_REASON_CODE, true, detail)
-        }
         ProjectOpenStatusReasonV1::UnrepairableVerdict => TraceDecayError::project_open(
             ProjectOpenFailureKind::AuthorityVerdict {
                 migration_pending: false,
             },
             detail,
         ),
-        ProjectOpenStatusReasonV1::Unavailable
+        ProjectOpenStatusReasonV1::RetryBackoff
+        | ProjectOpenStatusReasonV1::Unavailable
         | ProjectOpenStatusReasonV1::Converging
         | ProjectOpenStatusReasonV1::Ready => TraceDecayError::project_open(
             ProjectOpenFailureKind::BackedOff {
