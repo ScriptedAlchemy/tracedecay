@@ -1938,7 +1938,7 @@ impl RustExtractor {
                             };
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
+                                reference_name: callee_name.clone(),
                                 reference_kind: EdgeKind::Calls,
                                 line: position.row as u32,
                                 column: position.column as u32,
@@ -1946,6 +1946,27 @@ impl RustExtractor {
                                 unmodeled_import: None,
                                 argument_count: Self::argument_count(child),
                             });
+                            // `GrafeoDB::open` is a caller of the type, not
+                            // only of `open`. Same-file `new Foo()` already
+                            // names the class; associated-function construction
+                            // must name the owner or callers of the struct stay
+                            // empty-complete while rg still finds Type::open.
+                            if let Some((owner, member)) = callee_name.rsplit_once("::")
+                                && !owner.is_empty()
+                                && owner != "Self"
+                                && !member.is_empty()
+                            {
+                                state.unresolved_refs.push(UnresolvedRef {
+                                    from_node_id: fn_node_id.to_string(),
+                                    reference_name: owner.to_owned(),
+                                    reference_kind: EdgeKind::Calls,
+                                    line: position.row as u32,
+                                    column: position.column as u32,
+                                    file_path: state.file_path.clone(),
+                                    unmodeled_import: None,
+                                    argument_count: Self::argument_count(child),
+                                });
+                            }
                             // The simple name of a dotted call is not itself a call.
                             // `items.push()` must not bind a same-file `fn push`.
                             // Only a stated receiver type names the method

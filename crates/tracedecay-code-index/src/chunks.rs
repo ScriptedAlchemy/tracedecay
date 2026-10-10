@@ -2675,6 +2675,9 @@ pub(crate) fn relation_target_kind_is_compatible(
                 | NodeKind::SealedClass
                 | NodeKind::CaseClass
                 | NodeKind::DataClass
+                // `Type::open` / `Type::new` names the struct the same way
+                // `new Foo()` names the class.
+                | NodeKind::Struct
         ),
         RelationEdgeKindV1::TypeOf => matches!(
             target_kind,

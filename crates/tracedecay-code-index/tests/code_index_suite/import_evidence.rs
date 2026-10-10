@@ -401,6 +401,32 @@ fn rust_constructor_and_typed_receiver_calls_bind_through_the_crate_path() {
         RelationEdgeKindV1::Calls,
     );
     assert_resolved_edge(&generation, &caller, &build, RelationEdgeKindV1::Calls);
+    let builder = symbol_occurrence(&generation, "crates/widgets/src/builder.rs::Builder");
+    assert_resolved_edge(&generation, &caller, &builder, RelationEdgeKindV1::Calls);
+}
+
+/// `GrafeoDB::open` in grafeo-cli must be a caller of the struct, not only of
+/// the associated function. Otherwise callers of `GrafeoDB` is empty-complete
+/// while rg still finds the construction sites.
+#[test]
+fn rust_associated_open_is_a_caller_of_the_struct() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.grafeo.lib",
+            "crates/engine/src/lib.rs",
+            "pub struct GrafeoDB;\nimpl GrafeoDB {\n    pub fn open(_path: &str) -> GrafeoDB { GrafeoDB }\n}\n",
+        ),
+        (
+            "file.grafeo.cli",
+            "crates/cli/src/data.rs",
+            "pub fn load(path: &str) -> engine::GrafeoDB {\n    engine::GrafeoDB::open(path)\n}\n",
+        ),
+    ]);
+    let caller = symbol_occurrence(&generation, "crates/cli/src/data.rs::load");
+    let database = symbol_occurrence(&generation, "crates/engine/src/lib.rs::GrafeoDB");
+    let open = symbol_occurrence(&generation, "crates/engine/src/lib.rs::GrafeoDB::open");
+    assert_resolved_edge(&generation, &caller, &open, RelationEdgeKindV1::Calls);
+    assert_resolved_edge(&generation, &caller, &database, RelationEdgeKindV1::Calls);
 }
 
 #[test]

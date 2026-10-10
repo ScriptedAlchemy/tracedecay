@@ -718,6 +718,10 @@ fn assemble() {
         names.contains(&"p.run".to_owned()) && names.contains(&"Factory::new".to_owned()),
         "receiver-dotted and associated-function forms remain: {names:?}"
     );
+    assert!(
+        names.contains(&"Factory".to_owned()),
+        "Factory::new must also name the owner type so callers of the struct stay non-empty: {names:?}"
+    );
 }
 
 #[test]

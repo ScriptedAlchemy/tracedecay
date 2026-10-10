@@ -922,6 +922,14 @@ fn project_join(dir: &str, declared: &str) -> String {
 /// `babel src -d .` / `babel src --out-dir dist` as a shell command, not as
 /// another command's arguments (`echo babel src -d dist`).
 fn babel_src_to_out(script: &str) -> Option<(String, String)> {
+    // Quotes, escapes, substitutions, and comments are not interpreted.
+    // Reject them so `echo '…; babel src -d dist ;'` cannot invent a mapping.
+    if script
+        .bytes()
+        .any(|byte| matches!(byte, b'\'' | b'"' | b'`' | b'\\' | b'$' | b'#'))
+    {
+        return None;
+    }
     shell_simple_commands(script)
         .into_iter()
         .find_map(babel_command_src_to_out)
@@ -983,25 +991,18 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
     if !is_babel_command_word(command_word) {
         return None;
     }
-    index += 1;
-    let mut source = None;
-    let mut output = None;
-    while index < tokens.len() {
-        match tokens[index] {
-            "-d" | "--out-dir" => {
-                index += 1;
-                output = tokens.get(index).copied();
-            }
-            token if token.starts_with('-') => {}
-            token if source.is_none() => source = Some(token),
-            _ => {}
-        }
-        index += 1;
+    // Only the literal `babel <src> -d|--out-dir <out>` form. Extra flags
+    // (`--presets env`) would steal the source directory if scanned loosely.
+    let [source, flag, output] = tokens.get(index + 1..)?;
+    if !matches!(*flag, "-d" | "--out-dir")
+        || source.starts_with('-')
+        || output.starts_with('-')
+        || source.is_empty()
+        || output.is_empty()
+    {
+        return None;
     }
-    match (source, output) {
-        (Some(source), Some(output)) => Some((source.to_owned(), output.to_owned())),
-        _ => None,
-    }
+    Some(((*source).to_owned(), (*output).to_owned()))
 }
 
 fn package_script_mappings(
@@ -1178,6 +1179,11 @@ mod tests {
             babel_src_to_out("echo babel src -d dist && echo still not a compiler"),
             None
         );
+        assert_eq!(
+            babel_src_to_out("echo 'placeholder; babel src -d dist ;'"),
+            None
+        );
+        assert_eq!(babel_src_to_out("babel --presets env src -d dist"), None);
         assert_eq!(
             babel_src_to_out("NODE_ENV=production ./node_modules/.bin/babel src --out-dir dist"),
             Some(("src".to_owned(), "dist".to_owned()))

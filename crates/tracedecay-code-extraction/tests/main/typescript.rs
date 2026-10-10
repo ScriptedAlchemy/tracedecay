@@ -1334,6 +1334,30 @@ export default class JsonpTemplatePlugin {
     );
 }
 
+/// A class that constructs another instance of itself (`new RsdoctorRspackPlugin`
+/// inside `registerChildCompiler`) is still a caller of that class.
+#[test]
+fn test_ts_new_expression_inside_owning_class_is_a_calls_site() {
+    let source = r#"
+export class RsdoctorRspackPlugin {
+  registerChildCompiler() {
+    const childPlugin = new RsdoctorRspackPlugin({});
+    return childPlugin;
+  }
+}
+"#;
+    let result = TypeScriptExtractor
+        .extract_artifact("packages/core/src/rspack-plugin/plugin.ts", source)
+        .result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        calls_from(&result, "registerChildCompiler"),
+        ["RsdoctorRspackPlugin"],
+        "same-class constructor sites must be Calls refs, got {:?}",
+        result.unresolved_refs
+    );
+}
+
 /// `new Foo()` is a call site of `Foo`. Missing it is why callers of a class
 /// stayed empty while the disk still had constructor invocations.
 #[test]
