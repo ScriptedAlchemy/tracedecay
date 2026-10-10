@@ -1,3 +1,4 @@
+use rmcp::model::ProtocolVersion;
 use serde_json::{Value, json};
 
 /// Every JSON-RPC method surface the MCP server understands. This is the
@@ -40,7 +41,7 @@ pub fn classify_mcp_method(method: &str) -> McpMethod {
 /// composition root.
 pub fn initialize_result(version: &str, instructions: &str) -> Value {
     json!({
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": ProtocolVersion::LATEST,
         "capabilities": {
             "tools": {
                 "listChanged": true

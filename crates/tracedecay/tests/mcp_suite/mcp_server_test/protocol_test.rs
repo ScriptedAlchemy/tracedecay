@@ -13,6 +13,23 @@ use tracedecay_mcp::response_handles::{
 use tracedecay_runtime_core::path_safety::{canonical_existing_identity, canonical_root_identity};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
+#[tokio::test]
+async fn test_initialize_negotiates_legacy_and_unknown_client_versions() {
+    for (requested, expected) in [("2024-11-05", "2024-11-05"), ("2099-01-01", "2025-11-25")] {
+        let (server, _dir) = setup_server().await;
+        let mut initialize: Value =
+            serde_json::from_str(&spec_initialize_request(json!(1))).unwrap();
+        initialize["params"]["protocolVersion"] = json!(requested);
+        let responses = run_server_with_messages(server, vec![initialize.to_string()]).await;
+        assert_eq!(responses.len(), 1, "{requested}: {responses:?}");
+        let response = parse_response(&responses[0]);
+        assert_eq!(
+            response["result"]["protocolVersion"], expected,
+            "{requested}: {response}"
+        );
+    }
+}
+
 /// Logging is deprecated by MCP SEP-2577 and the server emits no log
 /// notifications, so the advertised capabilities are exactly tools and
 /// resources: `initialize` must not invite `logging/setLevel`.
@@ -1401,6 +1418,7 @@ async fn test_resources_read_branches_reports_provenance_scopes() {
         r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0","gc_protected":false},"feature/one":{"db_file":"tracedecay.db","parent":"main","created_at":"0","last_synced_at":"7","gc_protected":false}}}"#,
     )
     .unwrap();
+    assert_eq!(cg.active_branch(), Some("main"));
     let server = Box::pin(McpServer::new(cg, None)).await;
     let responses = run_server_with_messages(
         server,
@@ -1431,7 +1449,7 @@ async fn test_resources_read_branches_reports_provenance_scopes() {
                     "name": "main",
                     "parent": null,
                     "last_synced_at": "0",
-                    "is_current": false,
+                    "is_current": true,
                     "is_default": true
                 }
             ]

@@ -534,6 +534,16 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
         .set_nonblocking(true)
         .expect("nonblocking fake daemon listener");
 
+    let mut serve = tracedecay_command_with_home(home.path());
+    serve
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
     let fake_daemon = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -589,16 +599,7 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
         }
     });
 
-    let mut child = tracedecay_command_with_home(home.path())
-        .arg("serve")
-        .arg("--path")
-        .arg(project.path())
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tracedecay serve should run");
+    let mut child = serve.spawn().expect("tracedecay serve should run");
     {
         let stdin = child.stdin.as_mut().expect("stdin should be piped");
         writeln!(
@@ -618,10 +619,7 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
     let output = child
         .wait_with_output()
         .expect("tracedecay serve should exit after stdin closes");
-    let handshake = fake_daemon
-        .join()
-        .expect("fake daemon thread should exit")
-        .expect("serve should connect to the daemon before project resolution");
+    let handshake = fake_daemon.join().expect("fake daemon thread should exit");
 
     assert!(
         output.status.success(),
@@ -629,6 +627,13 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let handshake = handshake.unwrap_or_else(|| {
+        panic!(
+            "serve did not connect before project resolution\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
     let response: Value = serde_json::from_slice(&output.stdout).expect("initialize response json");
     assert_eq!(
         response["result"]["serverInfo"]["name"],

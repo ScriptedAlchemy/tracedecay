@@ -10,8 +10,8 @@
 //! Default serve ([`ToolAdvertisement::Search`]) lists [`CORE_TOOL_NAMES`] plus
 //! [`TOOL_SEARCH_NAME`]. Search ranks an exact name first, loads matches into
 //! the session list, announces `notifications/tools/list_changed`, and returns
-//! the full schemas in its result text so a host that ignores `list_changed`
-//! can still call them. [`ToolAdvertisement::ClaudeNativeFull`] is selected
+//! the full schemas in its result text. Hosts that do not refresh their tool
+//! list can run the matching operation through `tracedecay tool`. [`ToolAdvertisement::ClaudeNativeFull`] is selected
 //! only by `--claude-code-tool-search` or
 //! [`CLAUDE_CODE_TOOL_SEARCH_ENV`]; it serves the full catalog and sets
 //! `_meta["anthropic/alwaysLoad"]` on the core tools so Claude Code's native
@@ -253,8 +253,8 @@ impl ToolSurface {
     ///
     /// Searching the session's own listing keeps the answer to tools this
     /// session can call: a projectless session never loads project-bound tools.
-    /// The result text includes each match's full schema so a host that ignores
-    /// `list_changed` can still bind the tool.
+    /// The result text includes each match's full schema for clients that
+    /// register discovered tools; other hosts can use the CLI.
     pub(super) fn answer_search(
         &mut self,
         id: &Value,
@@ -346,7 +346,9 @@ impl ToolSurface {
             }
         };
         let text = format!(
-            "Matching TraceDecay tools (now in tools/list):\n{listed}\n\nFull schemas:\n{schemas}"
+            "Matching TraceDecay tools (now in tools/list):\n{listed}\n\nFull schemas:\n{schemas}\n\n\
+             If your host does not refresh tools/list, run `tracedecay tool <name> \
+             --args '<json>'` with the same arguments."
         );
         let mut lines = vec![tool_result(id, &text, false)];
         if newly_loaded {

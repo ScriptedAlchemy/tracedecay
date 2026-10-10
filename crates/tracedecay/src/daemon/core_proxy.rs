@@ -763,7 +763,13 @@ async fn send_host_request(
         // A cancel that landed during the fetch must not still mutate the
         // session list or answer the cancelled search id.
         if cancellation.borrow().is_some() {
-            return Ok(Vec::new());
+            let response = JsonRpcResponse::error_with_data(
+                id,
+                ErrorCode::RequestCancelled,
+                "MCP request cancelled".to_owned(),
+                Some(serde_json::json!({ "reason_code": "request_cancelled" })),
+            );
+            return Ok(vec![format!("{}\n", serde_json::to_string(&response)?)]);
         }
         return Ok(surface.answer_search(&id, &query, &listing));
     }

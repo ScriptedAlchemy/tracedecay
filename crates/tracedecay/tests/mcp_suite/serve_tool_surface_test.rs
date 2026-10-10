@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay_tokenizer::count_ordinary_tokens;
+use tracedecay_tokenizer::o200k_base;
 
 use crate::common::{self, TestChildProcess, tracedecay_command_with_home};
 use crate::serve_harness::{init_project_with_file, json_rpc_response};
@@ -111,7 +111,7 @@ fn catalog_names_from_search_text(text: &str) -> BTreeSet<String> {
 }
 
 /// Compact-JSON size of one `tools/list` result, counted with the shipped
-/// `o200k_base` tokenizer (`tracedecay_tokenizer::count_ordinary_tokens`).
+/// `o200k_base` tokenizer (`tracedecay_tokenizer::o200k_base`).
 struct ToolsListCost {
     names: BTreeSet<String>,
     bytes: usize,
@@ -119,8 +119,10 @@ struct ToolsListCost {
 }
 
 fn count_o200k(label: &str, text: &str) -> u64 {
-    count_ordinary_tokens(text)
+    o200k_base()
         .unwrap_or_else(|error| panic!("o200k_base must count {label}: {error}"))
+        .encode_ordinary(text)
+        .len() as u64
 }
 
 fn tools_list_cost(stdout: &[u8], id: i64) -> ToolsListCost {
@@ -551,5 +553,39 @@ async fn plain_mcp_stdio_client_finds_and_calls_a_non_core_tool() {
     assert!(
         call.get("error").is_none() || call["error"]["code"] != json!(-32601),
         "the loaded name must be callable; method-not-found means the host never registered it: {call}"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_tool_search_settles_without_loading_tools() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn cancel_search_marker() {}\n").await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+    let output = run_serve(
+        home.path(),
+        project.path(),
+        &[
+            initialize(),
+            tools_list(2),
+            tool_call(3, TOOL_SEARCH, &json!({ "query": "tracedecay_impact" })),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": { "requestId": 3 }
+            }),
+            tools_list(4),
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let response = json_rpc_response(&output.stdout, 3);
+    assert_eq!(response["error"]["code"], json!(-32800), "{response}");
+    assert!(!listed_names(&output.stdout, 4).contains("tracedecay_impact"));
+    let frames = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        !frames.iter().any(|frame| frame["method"] == LIST_CHANGED),
+        "{frames:?}"
     );
 }
