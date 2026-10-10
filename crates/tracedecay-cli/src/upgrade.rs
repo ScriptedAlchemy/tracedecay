@@ -818,7 +818,12 @@ fn run_versioned_upgrade(
     is_beta: bool,
 ) -> Result<UpgradeOutcome> {
     eprintln!("Checking GitHub releases...");
-    let latest = cloud::fetch_latest_channel_version(is_beta).map_err(release_lookup_failed)?;
+    let latest = cloud::fetch_latest_channel_version(
+        cloud::GITHUB_API_URL,
+        is_beta,
+        cloud::github_authorization().as_deref(),
+    )
+    .map_err(release_lookup_failed)?;
     let latest = match classify_upgrade(current, &latest) {
         UpgradeStatus::AlreadyCurrent => {
             eprintln!("\x1b[32m✔\x1b[0m Already up to date (v{current}).");
@@ -1216,8 +1221,12 @@ fn switch_channel_for(
 
     eprintln!("Switching from {current_channel} to {target_channel}...");
 
-    let latest =
-        cloud::fetch_latest_channel_version(target_is_beta).map_err(release_lookup_failed)?;
+    let latest = cloud::fetch_latest_channel_version(
+        cloud::GITHUB_API_URL,
+        target_is_beta,
+        cloud::github_authorization().as_deref(),
+    )
+    .map_err(release_lookup_failed)?;
 
     eprintln!("  Target: v{latest}");
 

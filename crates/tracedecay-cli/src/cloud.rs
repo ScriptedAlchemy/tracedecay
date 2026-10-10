@@ -306,13 +306,12 @@ pub fn fetch_latest_version() -> Result<String, ReleaseLookupError> {
 ///
 /// This is the explicit upgrade/channel-switch lookup and uses
 /// [`RELEASE_LOOKUP_TIMEOUT`], not the one-second advisory budget.
-pub fn fetch_latest_channel_version(is_beta: bool) -> Result<String, ReleaseLookupError> {
-    latest_release_version(
-        GITHUB_API_URL,
-        is_beta,
-        github_authorization().as_deref(),
-        RELEASE_LOOKUP_TIMEOUT,
-    )
+pub fn fetch_latest_channel_version(
+    api_base: &str,
+    is_beta: bool,
+    authorization: Option<&str>,
+) -> Result<String, ReleaseLookupError> {
+    latest_release_version(api_base, is_beta, authorization, RELEASE_LOOKUP_TIMEOUT)
 }
 
 #[tracing::instrument(name = "cloud.latest_release_version", level = "trace", skip_all)]
@@ -536,27 +535,18 @@ mod tests {
         )
     }
 
-    /// A 1.5s delayed release answer is past the one-second advisory budget
-    /// that `fetch_latest_channel_version` used on master, and inside the
-    /// explicit upgrade deadline.
+    /// The lookup `tracedecay upgrade` and channel switches call must wait
+    /// for a GitHub answer slower than the one-second advisory budget.
     #[test]
     fn explicit_upgrade_lookup_succeeds_when_github_answers_after_one_second() {
-        let delay = Duration::from_millis(1500);
-        let (base, _heads) = stub_after(delay, Some(installable_beta_listing()));
-        let started = Instant::now();
-
-        let version = super::latest_release_version(&base, true, None, RELEASE_LOOKUP_TIMEOUT)
-            .expect("explicit upgrade lookup must wait past the one-second advisory budget");
-
-        assert_eq!(version, "0.9.9-beta.1");
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed >= delay,
-            "lookup returned before the delayed answer: {elapsed:?}"
+        let (base, _heads) = stub_after(
+            Duration::from_millis(1500),
+            Some(installable_beta_listing()),
         );
-        assert!(
-            elapsed < RELEASE_LOOKUP_TIMEOUT,
-            "lookup exceeded the explicit upgrade deadline: {elapsed:?}"
+
+        assert_eq!(
+            fetch_latest_channel_version(&base, true, None),
+            Ok("0.9.9-beta.1".to_string())
         );
     }
 
