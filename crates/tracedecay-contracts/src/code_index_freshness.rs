@@ -209,6 +209,14 @@ pub enum CodeGraphServingReadinessV1 {
     Ready,
 }
 
+/// Typed reason a sealed generation reports once native graph publication
+/// spent its background budget. The build is a pure function of that
+/// generation, so the verdict stands until a new generation seals. Resident-
+/// memory refusals use a different reason and stay parked so they can retry.
+pub const GRAPH_PUBLICATION_DEADLINE_REASON: &str = "the sealed code graph publication \
+     exceeded its background budget; this generation serves exact and lexical without a \
+     native graph until the next generation seals";
+
 impl CodeGraphServingReadinessV1 {
     /// The generation's graph activated: it is ready, or warming back to
     /// ready on the next graph read.
@@ -219,16 +227,17 @@ impl CodeGraphServingReadinessV1 {
 
     /// Activation reached a lasting verdict for this sealed generation.
     ///
-    /// `Ready` and `Warming` can serve. `Refused` cannot, but the attempt is
-    /// finished: the build is a pure function of the sealed generation, so
-    /// waiting cannot change the answer. `Pending` and `Unavailable` are not
-    /// verdicts; freshness must not treat them as terminal.
+    /// `Ready` and `Warming` can serve. A spent publication-budget `Refused`
+    /// cannot, but waiting cannot change that answer. Resident-memory
+    /// `Refused` is not a verdict: memory can come back. `Pending` and
+    /// `Unavailable` are incomplete coverage.
     #[must_use]
-    pub const fn is_terminal_verdict(&self) -> bool {
-        matches!(
-            self,
-            Self::Ready | Self::Warming { .. } | Self::Refused { .. }
-        )
+    pub fn is_terminal_verdict(&self) -> bool {
+        match self {
+            Self::Ready | Self::Warming { .. } => true,
+            Self::Refused { reason } => reason == GRAPH_PUBLICATION_DEADLINE_REASON,
+            Self::Pending | Self::Unavailable { .. } => false,
+        }
     }
 }
 
@@ -1027,9 +1036,17 @@ mod tests {
         );
         assert!(
             CodeGraphServingReadinessV1::Refused {
-                reason: "budget".to_owned()
+                reason: GRAPH_PUBLICATION_DEADLINE_REASON.to_owned()
             }
             .is_terminal_verdict()
+        );
+        assert!(
+            !CodeGraphServingReadinessV1::Refused {
+                reason: "code graph activation was refused by the resident-memory policy"
+                    .to_owned()
+            }
+            .is_terminal_verdict(),
+            "a resident-memory refusal stays parked so it can retry"
         );
         assert!(!CodeGraphServingReadinessV1::Pending.is_terminal_verdict());
         assert!(
@@ -1040,7 +1057,7 @@ mod tests {
         );
         assert!(
             !CodeGraphServingReadinessV1::Refused {
-                reason: "budget".to_owned()
+                reason: GRAPH_PUBLICATION_DEADLINE_REASON.to_owned()
             }
             .is_activated()
         );

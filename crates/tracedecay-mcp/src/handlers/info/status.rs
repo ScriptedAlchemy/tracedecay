@@ -8,6 +8,7 @@ use tracedecay_application::tracedecay::BranchDiagnostics;
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_MOUNT_FAILED, CodeGraphServingReadinessV1, CodeIndexReadinessWaitOutcomeV1,
     CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+    GRAPH_PUBLICATION_DEADLINE_REASON,
 };
 use tracedecay_contracts::doctor::ResidentMemoryHolderReadV1;
 use tracedecay_contracts::retrieval::{
@@ -693,6 +694,7 @@ fn code_index_freshness_projection(
         )
     } else if let Some(CodeGraphServingReadinessV1::Refused { reason }) =
         freshness.code_graph_serving.as_ref()
+        && reason == GRAPH_PUBLICATION_DEADLINE_REASON
         && !freshness.rebuild_in_flight
         && freshness.latest_generation_id.is_some()
     {
@@ -1020,7 +1022,7 @@ mod tests {
     use tracedecay_contracts::code_index_freshness::{
         CodeIndexFreshnessCoverageV1, CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReadFailureV1,
         CodeIndexOmittedSourceV1, CodeIndexOmittedSourcesV1, CodeIndexSourceOmissionReasonV1,
-        CodeIndexStalenessStateV1,
+        CodeIndexStalenessStateV1, GRAPH_PUBLICATION_DEADLINE_REASON,
     };
     use tracedecay_contracts::retrieval::{StatusCodeIndexFreshnessV1, StatusRetrievalServingV1};
     use tracedecay_contracts::storage::{
@@ -1480,7 +1482,7 @@ mod tests {
             coverage: CodeIndexFreshnessCoverageV1::PartialOmittedSources,
             code_graph_serving: Some(
                 tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Refused {
-                    reason: "the sealed code graph publication exceeded its background budget; this generation serves exact and lexical without a native graph until the next generation seals".to_owned(),
+                    reason: GRAPH_PUBLICATION_DEADLINE_REASON.to_owned(),
                 },
             ),
             ..Default::default()
