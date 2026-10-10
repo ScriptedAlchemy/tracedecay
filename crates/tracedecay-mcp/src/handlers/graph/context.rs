@@ -348,10 +348,53 @@ fn artifact_window_site(
     Some((start_line, end_line, sanitized_text.as_str().to_owned()))
 }
 
+/// The `start_line..=end_line` window of `source` (inclusive, end clamped
+/// to the file's last line) or `None` when `start_line` lies past the
+/// file's end.
+fn line_window(source: &str, start_line: u32, end_line: u32) -> Option<&str> {
+    let mut window_start = None;
+    let mut window_end = None;
+    let mut offset = 0_usize;
+    for (line, text) in source.split_inclusive('\n').enumerate() {
+        if line == start_line as usize {
+            window_start = Some(offset);
+        }
+        if line == end_line as usize {
+            window_end = Some(offset + text.len());
+            break;
+        }
+        offset += text.len();
+    }
+    let start = window_start?;
+    source.get(start..window_end.unwrap_or(source.len()))
+}
+
+/// The code a lineage site serves: the non-whitespace extent of its
+/// line window, verified to still mint the extraction-attested
+/// `content_digest` over `source` (the file's sanitized bytes, as
+/// extraction hashed them). A file that drifted since indexing — or a
+/// declaration that shares a line with other tokens — has no attested
+/// window and serves nothing instead of unrelated text at stale lines.
+fn symbol_lines_code(
+    source: &str,
+    start_line: u32,
+    end_line: u32,
+    content_digest: &tracedecay_domain::ContentDigest,
+) -> Option<String> {
+    let declaration = line_window(source, start_line, end_line)?.trim();
+    if declaration.is_empty()
+        || tracedecay_domain::ContentDigest::of_bytes(declaration.as_bytes()) != *content_digest
+    {
+        return None;
+    }
+    Some(declaration.to_owned())
+}
+
 /// Symbols and code from search matches when the graph catalog cannot
 /// resolve them. Locations and code come only from the site the serving
-/// lane attested for each match — extraction lineage lines, or an artifact
-/// window byte-verified against the current file — never from a text scan
+/// lane attested for each match — extraction lineage lines verified
+/// against the lineage content digest, or an artifact window
+/// byte-verified against the current file — never from a text scan
 /// that could name a comment, import, or call site. A site that cannot be
 /// resolved reports typed unavailable fields instead of invented
 /// coordinates, and a file hit names no symbol location at all.
@@ -364,7 +407,6 @@ fn hydrate_context_from_search_matches(
 ) -> SearchMatchHydration {
     let mut symbols = Vec::new();
     let mut code_blocks = Vec::new();
-    let mut raw_by_path = HashMap::<String, Option<String>>::new();
     let mut sanitized_by_path = HashMap::<String, Option<String>>::new();
     let mut touched_files = Vec::new();
     let mut code_sites = 0_usize;
@@ -377,31 +419,26 @@ fn hydrate_context_from_search_matches(
             code_sites += 1;
         }
         // Location and code resolve separately: lineage lines stand even
-        // when the source cannot be re-read, while an artifact window
-        // attests both only when its bytes still verify.
+        // when the source cannot be re-read, while an artifact window or
+        // lineage digest attests code only when its bytes still verify.
         let mut attested_lines = None;
         let mut served_code = None;
         match site {
             Some(tracedecay_query::code_search::CodeIndexSearchSiteV1::SymbolLines {
                 start_line,
                 end_line,
+                content_digest,
             }) => {
                 attested_lines = Some((*start_line, *end_line));
                 if include_code {
-                    let source = raw_by_path
+                    let source = sanitized_by_path
                         .entry(search_match.file.clone())
-                        .or_insert_with(|| {
-                            tracedecay_runtime_core::sync::read_source_file(
-                                &ctx.project_root().join(&search_match.file),
-                            )
-                            .ok()
-                        })
+                        .or_insert_with(|| sanitized_match_source(ctx, &search_match.file))
                         .as_deref();
-                    if let Some(source) = source {
-                        let code = extract_lines(source, *start_line, *end_line);
-                        if !code.is_empty() {
-                            served_code = Some((*start_line, *end_line, code));
-                        }
+                    if let Some(code) = source.and_then(|source| {
+                        symbol_lines_code(source, *start_line, *end_line, content_digest)
+                    }) {
+                        served_code = Some((*start_line, *end_line, code));
                     }
                 }
             }
@@ -1022,5 +1059,36 @@ mod tests {
             end_byte: 3,
         };
         assert_eq!(artifact_window_site(source, &empty, &text), None);
+    }
+
+    #[test]
+    fn symbol_lines_code_serves_the_digest_verified_window() {
+        let declared = "fn widget() -> u32 {\n    7\n}";
+        let source = format!("{declared}\n");
+        let digest = tracedecay_domain::ContentDigest::of_bytes(declared.as_bytes());
+
+        assert_eq!(
+            symbol_lines_code(&source, 0, 2, &digest).as_deref(),
+            Some(declared)
+        );
+    }
+
+    #[test]
+    fn symbol_lines_code_refuses_drifted_or_shared_lines() {
+        let digest = tracedecay_domain::ContentDigest::of_bytes(b"fn widget() {}");
+
+        // A comment occupying the attested line is not the declaration.
+        assert_eq!(
+            symbol_lines_code("// drifted comment\nfn widget() {}\n", 0, 0, &digest),
+            None
+        );
+        // Two declarations on one line share the window's non-whitespace
+        // extent; neither verifies as its own attested bytes.
+        assert_eq!(
+            symbol_lines_code("fn first() {} fn widget() {}\n", 0, 0, &digest),
+            None
+        );
+        // An unattested past-the-end window serves nothing.
+        assert_eq!(symbol_lines_code("fn widget() {}\n", 7, 9, &digest), None);
     }
 }

@@ -86,17 +86,22 @@ fn lexical_file_candidate() -> RankedCandidate {
 }
 
 fn completed_lexical_search() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
-    completed_lexical_search_with("src/lib.rs", lexical_symbol_lines(0, 0))
+    completed_lexical_search_with(
+        "src/lib.rs",
+        lexical_symbol_lines(0, 0, "pub fn LexicalWidget() {}"),
+    )
 }
 
 fn lexical_symbol_lines(
     start_line: u32,
     end_line: u32,
+    attested: &str,
 ) -> Option<tracedecay_query::code_search::CodeIndexSearchSiteV1> {
     Some(
         tracedecay_query::code_search::CodeIndexSearchSiteV1::SymbolLines {
             start_line,
             end_line,
+            content_digest: tracedecay_domain::ContentDigest::of_bytes(attested.as_bytes()),
         },
     )
 }
@@ -546,7 +551,16 @@ async fn tracedecay_context_hydrates_search_matches_when_catalog_is_warming() {
     .expect("registered warming catalog fixture");
 
     let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(|_| {
-        Box::pin(async { completed_lexical_search_with("src/lib.rs", lexical_symbol_lines(0, 3)) })
+        Box::pin(async {
+            completed_lexical_search_with(
+                "src/lib.rs",
+                lexical_symbol_lines(
+                    0,
+                    3,
+                    "pub fn LexicalWidget() {\n    let ready = true;\n    let _ = ready;\n}",
+                ),
+            )
+        })
     });
     let mut options = lexical_search_options(&cg);
     options.code_index_search_executor = Some(executor);
@@ -737,6 +751,69 @@ async fn tracedecay_context_reports_code_unavailable_when_attested_source_is_mis
 }
 
 #[tokio::test]
+async fn tracedecay_context_marks_code_unavailable_when_symbol_lines_drift() {
+    let dir = TempDir::new().expect("drifted source isolation");
+    let profile = SelectorProfile::new(dir.path());
+    let project = dir.path().join("context-drifted-source");
+    fs::create_dir_all(project.join("src")).expect("create fixture sources");
+    // The file drifted since the published extraction: a comment now
+    // occupies the attested line. The lineage extent still stands as the
+    // symbol's location, but the live window no longer mints the
+    // extraction digest, so the code stage reports typed unavailability
+    // instead of serving the comment as the declaration.
+    fs::write(
+        project.join("src/lib.rs"),
+        "// inserted before the declaration\npub fn LexicalWidget() {}\n",
+    )
+    .expect("write drifted fixture");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.context-drifted-source",
+    )
+    .await
+    .expect("registered drifted source fixture");
+
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(|_| {
+        Box::pin(async {
+            completed_lexical_search_with(
+                "src/lib.rs",
+                lexical_symbol_lines(0, 0, "pub fn LexicalWidget() {}"),
+            )
+        })
+    });
+    let mut options = lexical_search_options(&cg);
+    options.code_index_search_executor = Some(executor);
+    options.verified_graph_query_port = None;
+    let result = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "explain LexicalWidget",
+            "include_code": true,
+            "include_memory": false,
+            "format": "json",
+        }),
+        options,
+    )
+    .await
+    .expect("drifted source must report typed unavailability");
+    let payload: Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("drifted source JSON text"),
+    )
+    .expect("drifted source JSON payload");
+
+    assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"][0]["start_line"], 1);
+    assert_eq!(payload["symbols"][0]["end_line"], 1);
+    assert_eq!(payload["code"].as_array().map(Vec::len), Some(0));
+    assert_eq!(payload["retrieval"]["code"]["state"], "unavailable");
+    cg.close();
+}
+
+#[tokio::test]
 async fn tracedecay_context_excludes_file_hits_from_symbols_but_serves_their_window() {
     let dir = TempDir::new().expect("file hit isolation");
     let profile = SelectorProfile::new(dir.path());
@@ -775,7 +852,7 @@ async fn tracedecay_context_excludes_file_hits_from_symbols_but_serves_their_win
                         qualified_name: "crate::LexicalWidget".to_owned(),
                         kind: "function".to_owned(),
                         path: "src/lib.rs".to_owned(),
-                        site: lexical_symbol_lines(0, 0),
+                        site: lexical_symbol_lines(0, 0, "fn caller() { LexicalWidget(); }"),
                     },
                 ),
                 (

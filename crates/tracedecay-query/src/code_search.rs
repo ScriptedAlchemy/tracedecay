@@ -395,8 +395,16 @@ impl CodeIndexSearchCoverageV1 {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum CodeIndexSearchSiteV1 {
     /// Inclusive 0-based line extent of the named symbol from the
-    /// published generation's extraction-attested lineage record.
-    SymbolLines { start_line: u32, end_line: u32 },
+    /// published generation's extraction-attested lineage record, with the
+    /// content digest extraction minted over the declaration's sanitized
+    /// bytes. Serving verifies the live window still hashes to
+    /// `content_digest` before returning code, so a drifted file yields
+    /// typed unavailability rather than unrelated text at the old lines.
+    SymbolLines {
+        start_line: u32,
+        end_line: u32,
+        content_digest: tracedecay_domain::ContentDigest,
+    },
     /// Byte range over the file's sanitized source plus the bytes that
     /// range admitted at extraction. Serving verifies the current file
     /// still carries exactly those bytes at exactly that range before

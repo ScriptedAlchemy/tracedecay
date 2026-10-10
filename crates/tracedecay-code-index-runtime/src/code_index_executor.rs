@@ -649,6 +649,7 @@ fn code_index_symbol_display(
         .map(|end_line| code_search::CodeIndexSearchSiteV1::SymbolLines {
             start_line: symbol.start_line,
             end_line,
+            content_digest: symbol.content_digest.clone(),
         });
     Ok(code_search::CodeIndexSearchDisplayV1 {
         name: symbol
