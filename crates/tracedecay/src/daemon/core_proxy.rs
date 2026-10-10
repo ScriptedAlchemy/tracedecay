@@ -345,14 +345,9 @@ async fn proxy_host_input_to_daemon(
         );
 
         let (cancellation_tx, mut cancellation_rx) = tokio::sync::watch::channel(None);
-        pending.retain(|next| {
-            if request.is_matching_cancellation(next) {
-                cancellation_tx.send_replace(Some(next.clone()));
-                false
-            } else {
-                true
-            }
-        });
+        for queued in std::mem::take(&mut pending) {
+            route_host_line(&request, queued, &cancellation_tx, &mut pending);
+        }
         let result = {
             let daemon_request = send_daemon_request_with_project_open_retry(
                 socket_path,
@@ -370,11 +365,7 @@ async fn proxy_host_input_to_daemon(
             loop {
                 if *eof.borrow() {
                     while let Ok(next) = input.try_recv() {
-                        if request.is_matching_cancellation(&next) {
-                            cancellation_tx.send_replace(Some(next));
-                        } else {
-                            pending.push_back(next);
-                        }
+                        route_host_line(&request, next, &cancellation_tx, &mut pending);
                     }
                     break drain_daemon_request_after_disconnect(
                         &mut daemon_request,
@@ -399,17 +390,28 @@ async fn proxy_host_input_to_daemon(
                             )
                             .await;
                         };
-                        if request.is_matching_cancellation(&next) {
-                            cancellation_tx.send_replace(Some(next));
-                        } else {
-                            pending.push_back(next);
-                        }
+                        route_host_line(&request, next, &cancellation_tx, &mut pending);
                     }
                 }
             }
         };
         let metadata = write_proxy_request_result(&request, result, writer).await?;
         apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
+    }
+}
+
+/// A host cancellation of the in-flight request goes to that request's daemon
+/// connection; every other line waits its turn.
+fn route_host_line(
+    request: &DaemonProxyRequest<'_>,
+    line: String,
+    cancellation: &tokio::sync::watch::Sender<Option<String>>,
+    pending: &mut VecDeque<String>,
+) {
+    if request.is_matching_cancellation(&line) {
+        cancellation.send_replace(Some(line));
+    } else {
+        pending.push_back(line);
     }
 }
 
@@ -839,28 +841,9 @@ async fn send_daemon_request_with_liveness_poll(
                 None => read.await,
             }
         };
-        tokio::pin!(read);
-        let response_line = loop {
-            tokio::select! {
-                response = &mut read => break response?,
-                changed = cancellation.changed(), if cancellation_open => {
-                    if changed.is_err() {
-                        cancellation_open = false;
-                        continue;
-                    }
-                    let notification = cancellation.borrow_and_update().clone();
-                    if let Some(notification) = notification {
-                        // Cancellation belongs to this request's RMCP connection.
-                        // Keep the response read alive while forwarding it.
-                        writer.write_all(notification.as_bytes()).await?;
-                        if !notification.ends_with('\n') {
-                            writer.write_all(b"\n").await?;
-                        }
-                        writer.flush().await?;
-                    }
-                }
-            }
-        };
+        let response_line =
+            read_forwarding_cancellation(read, cancellation, &mut cancellation_open, &mut writer)
+                .await?;
         let Some(response_line) = response_line else {
             break;
         };
@@ -902,6 +885,39 @@ async fn send_daemon_request_with_liveness_poll(
         });
     }
     Ok(responses)
+}
+
+/// Cancellation belongs to the running request's RMCP connection, so it is
+/// written there while the response read stays alive.
+async fn read_forwarding_cancellation<W>(
+    read: impl Future<Output = Result<Option<String>>>,
+    cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
+    cancellation_open: &mut bool,
+    writer: &mut W,
+) -> Result<Option<String>>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    tokio::pin!(read);
+    loop {
+        tokio::select! {
+            response = &mut read => return response,
+            changed = cancellation.changed(), if *cancellation_open => {
+                if changed.is_err() {
+                    *cancellation_open = false;
+                    continue;
+                }
+                let notification = cancellation.borrow_and_update().clone();
+                if let Some(notification) = notification {
+                    writer.write_all(notification.as_bytes()).await?;
+                    if !notification.ends_with('\n') {
+                        writer.write_all(b"\n").await?;
+                    }
+                    writer.flush().await?;
+                }
+            }
+        }
+    }
 }
 
 /// Extracts the daemon's advertised version from a proxied `initialize`
