@@ -1070,8 +1070,22 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
                 index += 1;
                 output = tokens.get(index).copied();
             }
-            "--presets" | "--plugins" | "--extensions" | "-x" | "--ignore" | "--only"
-            | "--config-file" | "--env-name" | "--root-mode" => {
+            "--presets"
+            | "--plugins"
+            | "--extensions"
+            | "-x"
+            | "--ignore"
+            | "--only"
+            | "--config-file"
+            | "--env-name"
+            | "--root-mode"
+            | "--source-map-target"
+            | "--source-file-name"
+            | "--source-root"
+            | "--out-file-extension"
+            | "--root"
+            | "--compact"
+            | "--filename" => {
                 index += 1;
                 if !tokens
                     .get(index)
@@ -1080,8 +1094,18 @@ fn babel_command_src_to_out(command: &str) -> Option<(String, String)> {
                     return None;
                 }
             }
-            "--copy-files" | "--copy-ignored" | "--no-copy-ignored" | "--no-babelrc"
-            | "--verbose" | "--quiet" => {}
+            "--copy-files"
+            | "--copy-ignored"
+            | "--no-copy-ignored"
+            | "--no-babelrc"
+            | "--verbose"
+            | "--quiet"
+            | "--source-maps"
+            | "--watch"
+            | "--delete-dir-on-start"
+            | "--skip-initial-build"
+            | "--minified"
+            | "--no-code" => {}
             flag if flag.starts_with('-') => return None,
             token if source.is_none() => source = Some(token),
             _ => return None,
@@ -1325,6 +1349,10 @@ mod tests {
         );
         assert_eq!(
             babel_src_to_out("echo 'ignored; babel fake -d wrong' && babel src -d dist"),
+            Some(("src".to_owned(), "dist".to_owned()))
+        );
+        assert_eq!(
+            babel_src_to_out("babel src -d dist --source-maps --source-root ."),
             Some(("src".to_owned(), "dist".to_owned()))
         );
     }
