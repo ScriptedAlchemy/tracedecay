@@ -2376,6 +2376,55 @@ async fn a_refresh_refused_beside_the_serving_graph_publishes_under_status_polli
         "refresh beside the serving graph",
     )
     .await;
+    let port = project_code_graph_projection_read_port(
+        mount.registry.clone(),
+        fixture.path().to_path_buf(),
+        mount.scope.clone(),
+    );
+    let context = graph_request_context(mount.scope.clone(), "refresh-under-status-polling");
+    let (port, context) = (&port, &context);
+    let resolve = |name: &'static str| async move {
+        let observed_at = now_micros();
+        let read = port
+            .open(
+                CodeGraphReadRequest::from_context(context, observed_at).with_deadline(
+                    Deadline::new(UtcMicros(observed_at.0 + 30_000_000))
+                        .expect("graph read deadline"),
+                ),
+            )
+            .await?;
+        let symbols = read
+            .reader(context, observed_at)?
+            .resolve_simple_name(name, None, 2, request_graph_cancellation(context))
+            .map_err(tracedecay_graph_query::map_projection_error)?;
+        Ok::<_, tracedecay_graph_query::CodeGraphReadError>((
+            read.generation().clone(),
+            read.freshness(),
+            symbols,
+        ))
+    };
+    let first_read_deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match resolve("alpha").await {
+            Ok((generation, freshness, symbols)) => {
+                assert_eq!(generation, mount.generation_id);
+                assert_eq!(freshness, CodeGraphReadFreshnessV1::Current);
+                assert_eq!(symbols.len(), 1);
+                break;
+            }
+            Err(
+                error @ (tracedecay_graph_query::CodeGraphReadError::Unavailable { .. }
+                | tracedecay_graph_query::CodeGraphReadError::Rewarming { .. }),
+            ) => {
+                assert!(
+                    std::time::Instant::now() < first_read_deadline,
+                    "the first graph read did not warm: {error:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("the first graph read failed: {error:?}"),
+        }
+    }
     let first = mount.generation_id.as_str().to_owned();
     let before = serving_graph_owners(&owners.report(std::time::Instant::now()), &first);
     assert!(
@@ -2442,13 +2491,14 @@ async fn a_refresh_refused_beside_the_serving_graph_publishes_under_status_polli
     ));
 
     let deadline = std::time::Instant::now() + Duration::from_mins(2);
-    let (second, statistics) = loop {
-        let freshness = mount
-            .registry
-            .dashboard_freshness(fixture.path())
-            .await
-            .expect("mounted worktree");
-        if let GenerationCensusSnapshot::Observed {
+    let (second, statistics) =
+        loop {
+            let freshness = mount
+                .registry
+                .dashboard_freshness(fixture.path())
+                .await
+                .expect("mounted worktree");
+            if let GenerationCensusSnapshot::Observed {
             generation_id,
             freshness: GenerationCensusServingFreshness::Current,
             statistics,
@@ -2458,19 +2508,25 @@ async fn a_refresh_refused_beside_the_serving_graph_publishes_under_status_polli
                 == Some(
                     tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
                 )
-            && freshness.code_graph_serving
-                == Some(
-                    tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
-                )
         {
-            break (generation_id, statistics);
+            match resolve("beta").await {
+                Ok((served_generation, served_freshness, symbols)) => {
+                    assert_eq!(served_generation.as_str(), generation_id);
+                    assert_eq!(served_freshness, CodeGraphReadFreshnessV1::Current);
+                    assert_eq!(symbols.len(), 1, "the successor graph serves beta");
+                    break (generation_id, statistics);
+                }
+                Err(tracedecay_graph_query::CodeGraphReadError::Unavailable { .. }
+                    | tracedecay_graph_query::CodeGraphReadError::Rewarming { .. }) => {}
+                Err(error) => panic!("the successor graph read failed: {error:?}"),
+            }
         }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "the refresh never reached current with its graph serving: {freshness:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "the refresh never reached current with its graph serving: {freshness:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
     poller.abort();
     model.abort();
 

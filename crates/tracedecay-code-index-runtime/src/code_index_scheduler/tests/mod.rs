@@ -1828,9 +1828,9 @@ async fn wait_for_live_complete_generation(
     // A parked worker may have already given the seat back. Demand it
     // without opening git so this wait cannot starve on an empty slot,
     // and so park will not drop the seat while the test still holds it.
-    registry.request_complete_generation(path).await;
-    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || {
-        registry.latest_complete_serving_for_test(path)
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || async {
+        registry.request_complete_generation(path).await;
+        registry.latest_complete_serving_for_test(path).await
     })
     .await
 }
