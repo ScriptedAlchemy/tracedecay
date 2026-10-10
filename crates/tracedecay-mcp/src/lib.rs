@@ -109,8 +109,7 @@ pub use tools::{
     short_tool_name,
 };
 pub use tracedecay_mcp_catalog::{
-    MAX_RESPONSE_CHARS, McpCatalogError, TOOL_LIST_ADVERTISEMENT_ENV, TOOL_SEARCH_TOOL_NAME,
-    ToolDefinition, ToolListAdvertisement, ToolRegistryMode, advertise_tool_list_payload,
+    MAX_RESPONSE_CHARS, McpCatalogError, ToolDefinition, ToolRegistryMode,
     apply_context_warming_budget, ast_grep_available, ast_grep_diagnostics_json,
     cli_tool_definition, context_description, context_warming_description, explore_call_budget,
     format_capable_tool_names, get_maximal_tool_definitions,
@@ -118,8 +117,6 @@ pub use tracedecay_mcp_catalog::{
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget, mcp_input_schema,
     project_catalog_discovery_scope, registered_project_reader_tool_names,
     retain_host_available_tool_definitions, tool_defaults_to_markdown,
-    tool_definition_is_always_loaded, tool_definition_is_default_advertised,
-    tool_list_advertisement_from_env, tool_list_approx_tokens,
 };
 pub use workflow::{
     LibtestReport, MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile,

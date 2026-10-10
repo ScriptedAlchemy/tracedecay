@@ -44,7 +44,6 @@ pub enum McpToolDispatchGroup {
     Git,
     Work,
     Workflow,
-    CatalogDiscovery,
 }
 
 /// Whether a tool's authority depends on the live checked-out branch.
@@ -76,11 +75,9 @@ pub fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
             | McpToolDispatchGroup::MultiRoot
             | McpToolDispatchGroup::ApplicationSurface,
         ) => BranchSensitivity::Sensitive,
-        Some(
-            McpToolDispatchGroup::Work
-                | McpToolDispatchGroup::Workflow
-                | McpToolDispatchGroup::CatalogDiscovery,
-        ) => BranchSensitivity::Independent,
+        Some(McpToolDispatchGroup::Work | McpToolDispatchGroup::Workflow) => {
+            BranchSensitivity::Independent
+        }
         None => {
             if RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {
                 BranchSensitivity::Independent
@@ -349,8 +346,6 @@ macro_rules! binding_groups {
 const BINDING_GROUPS: &[BindingGroup] = binding_groups![
     [Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_admin_branch_add"],
-    [Some(McpToolDispatchGroup::CatalogDiscovery), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_tool_search"],
     [Some(McpToolDispatchGroup::MultiRoot), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_multi_root_scope_set_read", "tracedecay_multi_root_scope_set_compare_and_swap",
         "tracedecay_multi_root_execute"],
@@ -1250,7 +1245,6 @@ mod tests {
         ("tracedecay_lcm_describe", BranchSensitivity::Independent),
         ("tracedecay_lcm_expand", BranchSensitivity::Independent),
         ("tracedecay_lcm_expand_query", BranchSensitivity::Independent),
-        ("tracedecay_tool_search", BranchSensitivity::Independent),
         // ApplicationSurface Independent: configuration, scout lifecycle,
         // session identity, store status, observatory, host-integration
         // apply. MCP render uses `cg.project_root()` only; owners do not

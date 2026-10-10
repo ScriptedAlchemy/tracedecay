@@ -18,7 +18,6 @@ use tracedecay_tool_catalog::{
 };
 
 use crate::McpCatalogError;
-use crate::TOOL_SEARCH_TOOL_NAME;
 use crate::ToolDefinition;
 use crate::registered_project_reader_tool_names;
 
@@ -90,42 +89,6 @@ fn def_rw(name: &str, title: &str, description: &str, input_schema: Value) -> To
         annotations: Some(read_write(title)),
         meta: None,
     }
-}
-
-/// Discover deferred MCP tools and load their schemas on demand.
-fn def_tool_search() -> ToolDefinition {
-    def_always_load(
-        TOOL_SEARCH_TOOL_NAME,
-        "Search Tools",
-        "Find TraceDecay MCP tools by relevance and load deferred schemas. \
-         The default tools/list advertises only the always-loaded core; call this \
-         to discover or load any other reachable tool. An empty query lists every \
-         callable tool name. Pass `names` to load full input schemas. tools/call \
-         still accepts every cataloged name even when it is absent from tools/list.",
-        object_schema(json!({
-            "query": {
-                "type": "string",
-                "description": "Relevance query over tool names and descriptions. Omit or leave empty to list every reachable tool."
-            },
-            "names": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Exact tool names whose full definitions should be loaded."
-            },
-            "include_schema": {
-                "type": "boolean",
-                "default": false,
-                "description": "When true, each match includes the full input schema. Defaults to false for a name catalog, and to true when `names` is set."
-            },
-            "limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 500,
-                "default": 50,
-                "description": "Maximum matches returned for a relevance query. An empty catalog listing is not truncated by this limit."
-            }
-        })),
-    )
 }
 
 /// Build a `ToolDefinition` with `readOnlyHint` AND `anthropic/alwaysLoad`.
@@ -423,7 +386,6 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         canonical_application_request_schema(application_registry, operation)
     };
     let mut definitions = vec![
-        def_tool_search(),
         def_search(request_schema("search")?),
         def_grep(request_schema("grep")?),
         def_ast_grep_search(request_schema("ast_grep_search")?),
@@ -780,7 +742,6 @@ const FORMAT_CAPABLE_NON_APPLICATION_TOOL_NAMES: &[&str] = &[
     // misc
     "tracedecay_dashboard",
     "tracedecay_retrieve",
-    "tracedecay_tool_search",
     "tracedecay_analytics",
 ];
 

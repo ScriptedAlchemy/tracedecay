@@ -633,7 +633,7 @@ impl McpServer {
         };
         let match_result = {
             let _span = tracing::trace_span!("mcp.server.tools_list.compose").entered();
-            tracedecay_mcp::tools::catalog_discovery::advertised_catalog_discovery_tools_list_payload(
+            tracedecay_mcp::tools::catalog_discovery::catalog_discovery_tools_list_payload(
                 None,
                 budget,
                 &profile_id,

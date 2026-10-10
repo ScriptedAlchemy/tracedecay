@@ -491,14 +491,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
         // Classify before moving `args` so large payloads are not cloned into every
         // group probe. Application-surface tools still run before catalog checks.
         let dispatch_group = classify_mcp_tool_dispatch_group(tool_name);
-        if dispatch_group == Some(McpToolDispatchGroup::CatalogDiscovery) {
-            ensure_mcp_dispatch_available(tool_name)?;
-            return tracedecay_mcp::tools::catalog_discovery::execute_tool_search(&args).map_err(
-                |error| TraceDecayError::Config {
-                    message: error.to_string(),
-                },
-            );
-        }
         if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
             // Application-surface tools return before the root guard below.
             // Reject unavailable effects before parsing, routing, or invoking

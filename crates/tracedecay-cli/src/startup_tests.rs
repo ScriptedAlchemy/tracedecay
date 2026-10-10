@@ -524,6 +524,7 @@ fn agent_install_health_check_is_selective() {
     assert!(should_skip_agent_install_check(&Commands::Serve {
         path: None,
         timings: false,
+        all_tools: false,
     }));
     assert!(should_skip_agent_install_check(&Commands::Install {
         agent: Some("cursor".to_string()),

@@ -29,17 +29,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-mod advertisement;
 mod catalog_error;
 mod definitions;
 mod project_access;
 
-pub use advertisement::{
-    TOOL_LIST_ADVERTISEMENT_ENV, TOOL_SEARCH_TOOL_NAME, ToolListAdvertisement,
-    advertise_tool_list_payload, tool_definition_is_always_loaded,
-    tool_definition_is_default_advertised, tool_list_advertisement_from_env,
-    tool_list_approx_tokens,
-};
 pub use catalog_error::McpCatalogError;
 pub use definitions::ast_grep::{ast_grep_available, ast_grep_diagnostics_json};
 pub use definitions::{

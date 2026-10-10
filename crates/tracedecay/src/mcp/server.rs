@@ -93,9 +93,7 @@ pub(crate) use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
 /// healthy server.
 pub(crate) const SERVER_INSTRUCTIONS: &str = concat!(
     "TraceDecay provides code-graph, session, memory, workflow, diagnostics, \
-    and project tools. tools/list advertises the always-loaded core plus \
-    tracedecay_tool_search; call that search tool to discover or load any other \
-    reachable tool by relevance, or call a known tool name directly. \
+    and project tools. Choose the tool whose description matches the task. \
     Tool annotations distinguish read-only operations from tools that mutate \
     local project state. The same tools are available from the shell: ",
     tracedecay_agent_hosts::cli_fallback_args_invocation_lit!(),

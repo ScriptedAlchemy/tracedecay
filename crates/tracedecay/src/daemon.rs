@@ -43,8 +43,7 @@ pub(crate) use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
 use tracedecay_mcp::tools::catalog_discovery::{
-    advertised_catalog_discovery_tools_list_payload, catalog_discovery_tools_list_payload,
-    default_catalog_discovery_authority,
+    catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
 };
 use tracedecay_mcp::transport::ReplayTransport;
 use tracedecay_mcp::{
@@ -431,6 +430,8 @@ pub(crate) mod session_runtime_tests;
 #[cfg(test)]
 pub(crate) mod store_runtime_tests;
 
+mod tool_surface;
+pub use tool_surface::ToolListScope;
 mod wire_io;
 #[cfg(test)]
 mod work_evidence_retrieval_tests;

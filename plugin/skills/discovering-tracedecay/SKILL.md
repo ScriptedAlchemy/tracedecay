@@ -5,11 +5,11 @@ description: Find the supported TraceDecay operation for a code-intelligence, me
 
 # Discovering TraceDecay
 
-Use live tool descriptions, `tracedecay_tool_search`, and
-`tracedecay tool <name> --help` for available operations and arguments. The
-default MCP handshake advertises the always-loaded core; load a deferred schema
-with `tracedecay_tool_search` when needed. This is capability discovery, not a
-prerequisite for ordinary reads, local edits, or clarification.
+Use live tool descriptions and `tracedecay tool <name> --help` for available
+operations and arguments. When the MCP tool list holds only a core set, call
+`tracedecay_tool_search` with keywords or a tool name to load the tool you
+need. This is capability discovery, not a prerequisite for ordinary reads,
+local edits, or clarification.
 
 Choose by the missing evidence: exploration locates code; tracing follows call
 relationships; impact connects changes to dependents and tests; review evaluates

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant};
 
+use super::tool_surface::{ToolListScope, ToolSurface};
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
     PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, PROJECT_WARMING_RETRY_HINT,
@@ -85,9 +86,18 @@ pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
+    scope: ToolListScope,
 ) -> Result<()> {
     let mut transport = StdioTransport::new();
-    proxy_transport_to_daemon(socket_path, handshake, replay_line, &mut transport).await
+    proxy_transport_to_daemon_with_drain_bound(
+        socket_path,
+        handshake,
+        replay_line,
+        &mut transport,
+        None,
+        scope,
+    )
+    .await
 }
 
 #[cfg(not(unix))]
@@ -96,13 +106,15 @@ pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
+    scope: ToolListScope,
 ) -> Result<()> {
     let mut transport = StdioTransport::new();
+    let mut surface = ToolSurface::new(scope);
     if let Some(line) = replay_line {
-        proxy_one_request(socket_path, handshake, &line, &mut transport).await?;
+        proxy_one_request(socket_path, handshake, &line, &mut surface, &mut transport).await?;
     }
     while let Some(line) = transport.read_line().await? {
-        proxy_one_request(socket_path, handshake, &line, &mut transport).await?;
+        proxy_one_request(socket_path, handshake, &line, &mut surface, &mut transport).await?;
     }
     Ok(())
 }
@@ -150,8 +162,15 @@ pub async fn proxy_transport_to_daemon(
     replay_line: Option<String>,
     transport: &mut impl McpDuplexTransport,
 ) -> Result<()> {
-    proxy_transport_to_daemon_with_drain_bound(socket_path, handshake, replay_line, transport, None)
-        .await
+    proxy_transport_to_daemon_with_drain_bound(
+        socket_path,
+        handshake,
+        replay_line,
+        transport,
+        None,
+        ToolListScope::Core,
+    )
+    .await
 }
 
 /// `drain_bound` overrides the per-request bound derived by
@@ -164,6 +183,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
     replay_line: Option<String>,
     transport: &mut impl McpDuplexTransport,
     drain_bound: Option<Duration>,
+    scope: ToolListScope,
 ) -> Result<()> {
     let (mut reader, mut writer) = transport.split();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -198,6 +218,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
         &mut eof_rx,
         &mut writer,
         drain_bound,
+        ToolSurface::new(scope),
     );
     let result = tokio::try_join!(read_host, proxy);
     drop(eof_tx);
@@ -301,6 +322,7 @@ async fn drain_daemon_request_after_disconnect(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(name = "daemon.engine.proxy.host_input", level = "trace", skip_all)]
 async fn proxy_host_input_to_daemon(
     socket_path: &Path,
@@ -310,6 +332,7 @@ async fn proxy_host_input_to_daemon(
     eof: &mut tokio::sync::watch::Receiver<bool>,
     writer: &mut impl McpTransportWriter,
     drain_bound: Option<Duration>,
+    mut surface: ToolSurface,
 ) -> Result<()> {
     let mut routed_handshake = handshake.clone();
     let mut pending = VecDeque::new();
@@ -362,11 +385,8 @@ async fn proxy_host_input_to_daemon(
         );
 
         let result = {
-            let daemon_request = send_daemon_request_with_project_open_retry(
-                socket_path,
-                &routed_handshake,
-                &request,
-            );
+            let daemon_request =
+                send_host_request(&mut surface, socket_path, &routed_handshake, &request);
             tokio::pin!(daemon_request);
             // The catalog-backed drain ceiling is only meaningful after the
             // owning client is gone. Computing it eagerly would stall every
@@ -716,14 +736,28 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
             .is_some_and(json_rpc_error_is_project_open_retryable)
 }
 
-#[cfg(not(unix))]
-async fn send_daemon_request_line_with_project_open_retry(
+/// Sends one host request through this session's tool surface: a tool search
+/// is answered here from the daemon's session catalog, and a `tools/list` or
+/// `initialize` answer is narrowed to the session's advertised tools.
+async fn send_host_request(
+    surface: &mut ToolSurface,
     socket_path: &Path,
     handshake: &DaemonHandshake,
-    line: &str,
+    request: &DaemonProxyRequest<'_>,
 ) -> Result<Vec<String>> {
-    let request = DaemonProxyRequest::new(line);
-    send_daemon_request_with_project_open_retry(socket_path, handshake, &request).await
+    if let Some((id, query)) = surface.search_request(request.parsed.as_ref()) {
+        let catalog_line =
+            serde_json::json!({ "jsonrpc": "2.0", "id": "tool-search", "method": "tools/list" })
+                .to_string();
+        let catalog = DaemonProxyRequest::new(&catalog_line);
+        let listing =
+            send_daemon_request_with_project_open_retry(socket_path, handshake, &catalog).await?;
+        return Ok(surface.answer_search(&id, &query, &listing));
+    }
+    let mut responses =
+        send_daemon_request_with_project_open_retry(socket_path, handshake, request).await?;
+    surface.rewrite(request.parsed.as_ref(), &mut responses);
+    Ok(responses)
 }
 
 #[tracing::instrument(name = "daemon.engine.proxy.request_retry", level = "trace", skip_all)]
@@ -973,14 +1007,14 @@ async fn proxy_one_request(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     line: &str,
+    surface: &mut ToolSurface,
     transport: &mut impl McpTransport,
 ) -> Result<()> {
     if line.trim().is_empty() {
         return Ok(());
     }
-    for response in
-        send_daemon_request_line_with_project_open_retry(socket_path, handshake, line).await?
-    {
+    let request = DaemonProxyRequest::new(line);
+    for response in send_host_request(surface, socket_path, handshake, &request).await? {
         transport.write_line(&response).await?;
         if !response.ends_with('\n') {
             transport.write_line("\n").await?;

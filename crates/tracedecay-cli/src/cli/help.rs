@@ -315,13 +315,16 @@ pub(crate) const SERVE_LONG_ABOUT: &str = "\
 Runs the MCP server on stdin/stdout for a single client. This is the command \
 agent hosts execute from their MCP configuration, you rarely run it by hand \
 except to debug the protocol. For ad-hoc tool calls from a shell, use \
-`tracedecay tool` instead; both dispatch the same tool registry.";
+`tracedecay tool` instead; both dispatch the same tool registry. `tools/list` \
+starts with a core tool set plus `tracedecay_tool_search`, which loads any \
+other tool on demand; every tool also answers a direct `tools/call` by name.";
 
 pub(crate) const SERVE_AFTER_HELP: &str = "\
 Examples:
   tracedecay serve                               Stdio MCP server for the cwd project
   tracedecay serve --path /path/to/repo          Pin the project explicitly
   tracedecay serve --timings                     Annotate responses with handler time
+  tracedecay serve --all-tools                   List every tool instead of the core set
 
 Related: tracedecay tool (same tools from the shell), tracedecay install
 (writes this command into agent MCP config), tracedecay daemon.";

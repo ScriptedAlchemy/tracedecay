@@ -382,8 +382,7 @@ pub(super) async fn concrete_dispatch_group_accepts(
         McpToolDispatchGroup::ApplicationSurface
         | McpToolDispatchGroup::Git
         | McpToolDispatchGroup::Work
-        | McpToolDispatchGroup::Workflow
-        | McpToolDispatchGroup::CatalogDiscovery => false,
+        | McpToolDispatchGroup::Workflow => false,
         McpToolDispatchGroup::MultiRoot => {
             owned(handle_multi_root(tool_name, invalid_args, None, None, None, None).await)
         }

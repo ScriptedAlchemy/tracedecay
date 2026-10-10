@@ -1,8 +1,4 @@
 use super::*;
-use crate::{
-    TOOL_SEARCH_TOOL_NAME, advertise_tool_list_payload, tool_definition_is_always_loaded,
-    tool_list_approx_tokens, ToolListAdvertisement,
-};
 use tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1;
 use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
 
@@ -259,65 +255,6 @@ fn lcm_history_reads_accept_an_as_of_cutoff() {
     assert!(
         legacy.to_string().contains("unknown field `as_of_micros`"),
         "{legacy}"
-    );
-}
-
-#[test]
-fn default_advertisement_is_the_always_loaded_core_plus_search() {
-    let definitions = get_maximal_tool_definitions().expect("tool definitions");
-    let search = definitions
-        .iter()
-        .find(|definition| definition.name == TOOL_SEARCH_TOOL_NAME)
-        .expect("tool search is cataloged");
-    assert!(
-        tool_definition_is_always_loaded(search),
-        "tool search must stay in the default handshake"
-    );
-
-    let always_loaded: Vec<&str> = definitions
-        .iter()
-        .filter(|definition| tool_definition_is_always_loaded(definition))
-        .map(|definition| definition.name.as_str())
-        .collect();
-    for required in [
-        "tracedecay_search",
-        "tracedecay_grep",
-        "tracedecay_context",
-        "tracedecay_status",
-        "tracedecay_active_project",
-        "tracedecay_storage_status",
-        "tracedecay_callers",
-        TOOL_SEARCH_TOOL_NAME,
-    ] {
-        assert!(
-            always_loaded.contains(&required),
-            "{required} must stay in the always-loaded core: {always_loaded:?}"
-        );
-    }
-    assert!(
-        always_loaded.len() < definitions.len(),
-        "always-loaded core ({}) must be smaller than the catalog ({})",
-        always_loaded.len(),
-        definitions.len()
-    );
-
-    let full = serde_json::json!({ "tools": definitions });
-    let advertised = advertise_tool_list_payload(full.clone(), ToolListAdvertisement::Default)
-        .expect("default advertisement");
-    let advertised_names: Vec<&str> = advertised["tools"]
-        .as_array()
-        .expect("tools")
-        .iter()
-        .filter_map(|tool| tool["name"].as_str())
-        .collect();
-    assert_eq!(advertised_names, always_loaded);
-    let full_tokens = tool_list_approx_tokens(&full).expect("full tokens");
-    let default_tokens = tool_list_approx_tokens(&advertised).expect("default tokens");
-    assert!(
-        default_tokens * 4 < full_tokens,
-        "default handshake ({default_tokens} tokens, {} tools) must be far cheaper than the full catalog ({full_tokens} tokens, {} tools)",
-        advertised_names.len(),
-        definitions.len()
     );
 }
 

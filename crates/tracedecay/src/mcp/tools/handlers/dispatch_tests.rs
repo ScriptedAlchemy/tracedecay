@@ -331,12 +331,6 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
                 "{} has no canonical Workflow operation entry",
                 definition.name
             ),
-            McpToolDispatchGroup::CatalogDiscovery => assert_eq!(
-                definition.name,
-                tracedecay_mcp::TOOL_SEARCH_TOOL_NAME,
-                "{} is not the catalog discovery tool",
-                definition.name
-            ),
             group @ McpToolDispatchGroup::Git => {
                 assert_eq!(
                     dispatch_group_for_tool(&definition.name),

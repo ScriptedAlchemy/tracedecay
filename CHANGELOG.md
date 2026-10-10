@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* **mcp:** default `tools/list` advertises the always-loaded core plus `tracedecay_tool_search`; every other cataloged tool stays reachable by exact `tools/call` or on-demand search. `TRACEDECAY_MCP_TOOL_LIST=full` restores the unfiltered handshake ([#3374](https://github.com/ScriptedAlchemy/tracedecay/issues/3374))
+* **mcp:** `tracedecay serve` lists a 17-tool core set plus `tracedecay_tool_search` instead of the full catalog; the search loads matching tools into the session's `tools/list` and announces them with `notifications/tools/list_changed`, and every tool still answers `tools/call` by name. `serve --all-tools` keeps the full list, and the Claude Code plugin uses it because Claude Code defers tool schemas itself ([#3374](https://github.com/ScriptedAlchemy/tracedecay/issues/3374))
 
 ### Performance Improvements
 

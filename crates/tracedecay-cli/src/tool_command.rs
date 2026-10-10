@@ -446,20 +446,6 @@ fn run_inner(
             )
             .await;
         }
-        if def.name == tracedecay_mcp::TOOL_SEARCH_TOOL_NAME {
-            let result = tracedecay_mcp::tools::catalog_discovery::execute_tool_search(&tool_args)
-                .map_err(|error| TraceDecayError::Config {
-                    message: error.to_string(),
-                })?;
-            print!(
-                "{}",
-                rendered_tool_output(
-                    &result,
-                    CliToolOutput::new(raw_json, requested_output_format(&tool_args))
-                )?
-            );
-            return Ok(());
-        }
         if let Some(tool) = FamilyTool::from_tool_name(&def.name) {
             let project_path =
                 DaemonToolDispatch::project_scoped(profile, explicit_project, &def.name)
