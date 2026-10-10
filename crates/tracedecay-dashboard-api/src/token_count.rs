@@ -7,7 +7,7 @@
 //!    on `o200k_base`; legacy GPT-4 / GPT-3.5 / embeddings and other vendors
 //!    (Claude/Gemini have no public tokenizer) use the same vocabulary as a
 //!    labeled approximation. Shipping only gzip-compressed `o200k_base`
-//!    (path-patched tiktoken-rs) keeps legacy vocabularies out of `.rodata`.
+//!    keeps legacy vocabularies out of `.rodata`.
 //! 2. **estimated**, the legacy `(len+3)/4` chars/4 heuristic, used when
 //!    the `token-counting` feature is compiled out (or a count failed).
 //!
@@ -35,7 +35,7 @@ use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Value as DbValue, params_from_iter};
 
 #[cfg(feature = "token-counting")]
-use tiktoken_rs::o200k_base_singleton;
+use tracedecay_tokenizer::o200k_base;
 
 /// Per-message content-token columns, derived once and reused by every savings
 /// aggregate. Billing usage never enters this content-sizing projection.
@@ -96,7 +96,9 @@ pub fn counting_available() -> bool {
 /// exactness is reported separately by [`encoder_for_model`].
 #[cfg(feature = "token-counting")]
 pub fn count_text_tokens(text: &str) -> Option<i64> {
-    let bpe = o200k_base_singleton();
+    let bpe = o200k_base()
+        .inspect_err(|error| tracing::error!(%error, "tokenizer initialization failed"))
+        .ok()?;
     i64::try_from(bpe.encode_ordinary(text).len()).ok()
 }
 

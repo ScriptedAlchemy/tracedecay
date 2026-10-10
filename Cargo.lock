@@ -5037,12 +5037,13 @@ dependencies = [
 [[package]]
 name = "tiktoken-rs"
 version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2aeff724640cfe13037336ddf35befdffd2909cbdb65cf041cc8a4cf8c584cfa"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bstr",
  "fancy-regex 0.19.2",
- "flate2",
  "regex",
  "rustc-hash 2.1.3",
 ]
@@ -5482,7 +5483,6 @@ dependencies = [
  "shell-words",
  "tempfile",
  "thiserror",
- "tiktoken-rs",
  "tokio",
  "toml",
  "toml_edit",
@@ -5507,6 +5507,7 @@ dependencies = [
  "tracedecay-session-memory",
  "tracedecay-sessions",
  "tracedecay-store",
+ "tracedecay-tokenizer",
  "tracedecay-tool-catalog",
  "tracing",
  "ureq",
@@ -6006,7 +6007,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "tiktoken-rs",
  "tokio",
  "tokio-stream",
  "tower",
@@ -6027,6 +6027,7 @@ dependencies = [
  "tracedecay-session-memory",
  "tracedecay-sessions",
  "tracedecay-store",
+ "tracedecay-tokenizer",
  "tracedecay-tool-catalog",
  "tracing",
 ]
@@ -6770,6 +6771,17 @@ dependencies = [
  "tracedecay-domain",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "tracedecay-tokenizer"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "rustc-hash 2.1.3",
+ "thiserror",
+ "tiktoken-rs",
 ]
 
 [[package]]

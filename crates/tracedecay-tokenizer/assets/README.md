@@ -1,0 +1,1 @@
+The gzip asset contains the unmodified o200k_base vocabulary from tiktoken-rs 0.12.1, originally published by OpenAI tiktoken. Its MIT license is in LICENSE. Encoding and the vocabulary pattern remain provided by tiktoken-rs; only the embedded representation is compressed.

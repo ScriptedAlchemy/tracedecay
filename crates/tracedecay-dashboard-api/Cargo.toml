@@ -19,7 +19,7 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-tiktoken-rs = { version = "0.12", optional = true }
+tracedecay-tokenizer = { path = "../tracedecay-tokenizer", optional = true }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower = "0.5"
@@ -46,8 +46,8 @@ tracedecay-application = { path = "../tracedecay-application" }
 [features]
 default = []
 # Mirrors the root crate's features; the root forwards its own selections here.
-# Exact BPE counting lives in this crate (`tiktoken-rs`); no agent-hosts forward.
-token-counting = ["dep:tiktoken-rs"]
+# Exact BPE counting lives in this crate (the shared tokenizer); no agent-hosts forward.
+token-counting = ["dep:tracedecay-tokenizer"]
 test-transport = [
     "tracedecay-automation-runtime/test-transport",
 ]

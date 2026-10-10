@@ -49,13 +49,13 @@ members = [
     "crates/tracedecay-store",
     "crates/tracedecay-store-runtime",
     "crates/tracedecay-tool-catalog",
+    "crates/tracedecay-tokenizer",
     "crates/tracedecay-application",
 ]
 exclude = [
     ".worktrees",
     ".codex-worktrees",
     "patches/tokensave-medium-treesitters",
-    "patches/tiktoken-rs",
 ]
 resolver = "3"
 
@@ -230,8 +230,6 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # Kotlin uses arborium-kotlin across all tiers; the medium bundle must not
 # link tree-sitter-kotlin-sg's duplicate parse table.
 tokensave-medium-treesitters = { path = "patches/tokensave-medium-treesitters" }
-# Ship only gzip-compressed o200k_base; omit legacy vocab embeds.
-tiktoken-rs = { path = "patches/tiktoken-rs" }
 
 # Dev opt-level 0 for workspace glue crates (every tracedecay-* crate that is
 # not a profile.perf kernel below). A `cargo build -p tracedecay-cli --timings`

@@ -14,8 +14,6 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-#[cfg(feature = "token-counting")]
-use tiktoken_rs::o200k_base_singleton;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
     ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
@@ -29,6 +27,8 @@ use tracedecay_contracts::{IdempotencyKey, ResolvedScope};
 use tracedecay_domain::{ActorId, ManifestDigest, RetrievalAnchorId, UtcMicros};
 use tracedecay_hooks::{HookEventEnvelopeV2, HookScopedFeedbackV1};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
+#[cfg(feature = "token-counting")]
+use tracedecay_tokenizer::o200k_base;
 
 pub mod address_registry;
 pub mod model;
@@ -873,7 +873,10 @@ fn safe_suggestion_text(value: &str) -> bool {
 #[cfg(feature = "token-counting")]
 pub(super) fn serialized_token_count(value: &impl Serialize) -> Option<usize> {
     let json = serde_json::to_string(value).ok()?;
-    Some(o200k_base_singleton().encode_ordinary(&json).len())
+    let bpe = o200k_base()
+        .inspect_err(|error| tracing::error!(%error, "tokenizer initialization failed"))
+        .ok()?;
+    Some(bpe.encode_ordinary(&json).len())
 }
 
 #[cfg(not(feature = "token-counting"))]
@@ -894,7 +897,9 @@ pub(super) fn serialized_token_count(_value: &impl Serialize) -> Option<usize> {
 pub(super) fn warm_token_counter() {
     #[cfg(feature = "token-counting")]
     {
-        let _ = o200k_base_singleton();
+        if let Err(error) = o200k_base() {
+            tracing::error!(%error, "tokenizer initialization failed");
+        }
     }
 }
 
