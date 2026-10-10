@@ -20,6 +20,7 @@ import {
   READ_ONLY_SCOPE_STATUS,
   UNSCOPED_CACHE_KEY,
   activationFor,
+  launchBindingCaption,
   readOnlyScopeRefusal,
   reconciledLabel,
   requestScopeKey,
@@ -29,6 +30,7 @@ import {
   scopedUrl,
   useScope,
   type DashboardScope,
+  type LaunchBindingListing,
   type ProjectActivation,
   type RegistryReading,
 } from './store.ts';
@@ -47,6 +49,41 @@ function all(): DashboardScope {
 function measured(isActive: boolean | null, label: string | null = null): RegistryReading {
   return { state: 'measured', label, isActive };
 }
+
+describe('launchBindingCaption', () => {
+  function listing(over: Partial<LaunchBindingListing> = {}): LaunchBindingListing {
+    return {
+      status: 'ok',
+      active_project_id: 'proj_federati',
+      active_project_root: '/repos/federati',
+      projects: [{ project_id: 'proj_federati', label: 'federati' }],
+      ...over,
+    };
+  }
+
+  it('names the launch project so all-projects search is not silent', () => {
+    expect(launchBindingCaption(listing())).toBe(
+      'Bound to federati · code search covers this project only',
+    );
+  });
+
+  it('falls back to the launch root when the page has no label', () => {
+    expect(launchBindingCaption(listing({ projects: [] }))).toBe(
+      'Bound to /repos/federati · code search covers this project only',
+    );
+  });
+
+  it('tells the operator to pass --path when nothing is bound', () => {
+    expect(launchBindingCaption(listing({ active_project_id: null }))).toBe(
+      'No launch project bound · pass --path',
+    );
+  });
+
+  it('stays quiet until the registry answers', () => {
+    expect(launchBindingCaption(undefined)).toBeNull();
+    expect(launchBindingCaption(listing({ status: 'missing_registry' }))).toBeNull();
+  });
+});
 
 describe('scopeWritable', () => {
   it('reports the all-projects aggregate as writable against the active project', () => {

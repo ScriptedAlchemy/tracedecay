@@ -64,13 +64,20 @@ export function SymbolMatches({
       {(envelope) => {
         const data = envelope.payload;
         const rows = data.results ?? [];
-        if (rows.length === 0)
+        if (rows.length === 0) {
+          const bound = envelope.scope.project_id;
           return (
             <CenteredState
-              title={`No symbol matches ${submitted}`}
+              title={
+                bound
+                  ? `No symbol matches ${submitted} in ${bound}`
+                  : `No symbol matches ${submitted}`
+              }
               kind="complete_zero_findings"
+              detail="this dashboard searched only its launch project"
             />
           );
+        }
         const capped = data.total != null && data.total > rows.length;
         const degreeCeiling = rows.reduce((max, node) => Math.max(max, node.degree ?? 0), 0);
         return (
