@@ -1713,6 +1713,7 @@ pub fn service_status(
     };
     let (socket_state, process) =
         probe::observe_daemon_process(profile, &transport_path, expected_version);
+    let serving = daemon_is_serving(socket_state, &process);
     let service = service_unit_path(profile).map_or_else(
         |e| format!("unavailable: {e}"),
         |path| path.display().to_string(),
@@ -1735,13 +1736,20 @@ pub fn service_status(
         .and_then(ServiceRunner::service_detail_hint)
         .map(|hint| format!("service-detail: {hint}\n"))
         .unwrap_or_default();
-    let logs = if matches!(service_observation, Ok(Ok(DaemonServiceState::Missing))) {
-        "no managed service; consult the foreground process output".to_owned()
-    } else {
-        runner.map_or_else(
+    let logs = match &service_observation {
+        Ok(Err(ServiceStateError::ManagerUnreachable(_))) if serving => {
+            "foreground daemon output (systemd user journal is unreachable)".to_owned()
+        }
+        Ok(Err(ServiceStateError::ManagerUnreachable(_))) => {
+            "no systemd user session; run `tracedecay daemon run` and read its output".to_owned()
+        }
+        Ok(Ok(DaemonServiceState::Missing)) => {
+            "no managed service; consult the foreground process output".to_owned()
+        }
+        _ => runner.map_or_else(
             |e| format!("unavailable: {e}"),
             |runner| runner.log_hint(profile),
-        )
+        ),
     };
     let transport_kind = if cfg!(unix) { "socket" } else { "endpoint" };
     let transport = daemon_transport_display(&transport_path);
@@ -1749,6 +1757,13 @@ pub fn service_status(
         "state: {state}\nservice: {service}\nservice manager: {service_manager}\n{transport_kind}: {transport} ({socket_state})\nprotocol: {process:?}\n{detail}logs: {logs}\n",
     );
     DaemonServiceStatus { process, display }
+}
+
+fn daemon_is_serving(socket: DaemonSocketState, process: &DaemonProcessProofV1) -> bool {
+    matches!(
+        (socket, process),
+        (DaemonSocketState::Connectable, DaemonProcessProofV1::Ready)
+    )
 }
 
 /// The daemon's own state, from the one socket probe status already made.

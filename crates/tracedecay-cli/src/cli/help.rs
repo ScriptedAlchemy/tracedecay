@@ -326,8 +326,8 @@ connect to over a local authenticated transport, so repeated calls skip per-proc
 Usually installed as a user service; check `daemon status` first when tool \
 calls hang or version-mismatch errors appear. Without a systemd user bus on \
 headless Linux, keep `daemon run` running in one terminal and use commands \
-in another. Status reports diagnostic state; exit 0 does not mean the daemon \
-is accepting connections.";
+in another. Status exits 0 only when the daemon is serving; stopped or \
+unreachable is a non-zero exit.";
 
 pub(crate) const DAEMON_AFTER_HELP: &str = "\
 Examples:
@@ -336,7 +336,7 @@ Examples:
   tracedecay daemon start                        Start the installed service
   tracedecay daemon stop                         Stop the installed service
   tracedecay daemon restart                      Restart after a version mismatch
-  tracedecay daemon run --socket \"$XDG_RUNTIME_DIR/tracedecay/td.sock\"    Foreground run (debugging)
+  tracedecay daemon run                          Foreground daemon (no systemd user session)
   tracedecay daemon run --profile-root <path>    Foreground run for one profile
 
 Related: tracedecay doctor (detects daemon problems), tracedecay serve.";

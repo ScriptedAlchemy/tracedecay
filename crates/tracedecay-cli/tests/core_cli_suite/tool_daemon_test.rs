@@ -3883,6 +3883,45 @@ fn daemon_status_headline_is_the_daemon_when_the_service_manager_is_unreachable(
     assert!(lines.contains(&"protocol: Ready"), "{stdout}");
 }
 
+/// Headless Linux without a user bus names the foreground fallback instead of
+/// `journalctl --user`, and still exits 1 for a stopped daemon.
+#[cfg(target_os = "linux")]
+#[test]
+fn daemon_status_names_foreground_fallback_when_user_manager_is_unreachable() {
+    let home = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let fake_bin = home_path.join("fake-bin");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    write_executable_script(
+        &fake_bin.join("systemctl"),
+        "#!/bin/sh\necho 'Failed to connect to bus: No medium found' >&2\nexit 1\n",
+    )
+    .unwrap();
+
+    let output = tracedecay_command_with_home(&home_path)
+        .args(["daemon", "status"])
+        .env("PATH", hermetic_path(&[&fake_bin]))
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stopped daemon status must exit 1\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.lines().next() == Some("state: stopped"), "{stdout}");
+    assert!(
+        stdout.contains("tracedecay daemon run"),
+        "stopped status must name the foreground fallback, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("journalctl --user"),
+        "unreachable user journal must not be the log hint, got:\n{stdout}"
+    );
+}
+
 /// A JSON request the daemon refuses because no project is in reach still
 /// prints the typed problem on stdout, and the process exits non-zero, on
 /// the owner-answered `search` and the daemon-owned multi-root read alike.

@@ -1175,6 +1175,32 @@ fn unreachable_systemd_user_manager_is_an_error_not_a_stopped_unit() {
     assert!(message.contains("Failed to connect to bus"), "{message}");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn install_names_foreground_daemon_when_user_manager_is_unreachable() {
+    let dir = TempDir::new().expect("temp dir");
+    let systemctl = dir.path().join("systemctl");
+    write_executable_script(
+        &systemctl,
+        "#!/bin/sh\necho 'Failed to connect to bus: No medium found' >&2\nexit 1\n",
+    )
+    .expect("fake systemctl");
+    let profile = fixture_profile(dir.path());
+    let runner = ServiceRunner::systemd(&systemctl, &profile).expect("fixture systemd runner");
+    let service_path = dir.path().join("tracedecay.service");
+    let socket = dir.path().join("daemon.sock");
+
+    let error = runner
+        .install(&service_path, true, &socket, TEST_BUILD_VERSION)
+        .expect_err("install cannot talk to an unreachable user manager");
+    let message = error.to_string();
+    assert!(message.contains("Failed to connect to bus"), "{message}");
+    assert!(
+        message.contains("tracedecay daemon run"),
+        "unreachable user-bus install must name the foreground fallback, got: {message}"
+    );
+}
+
 /// The home's default profile keeps the established unit; any other data
 /// directory owns a unit named after a digest of that directory.
 #[test]
