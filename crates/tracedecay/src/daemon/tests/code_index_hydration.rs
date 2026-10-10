@@ -472,11 +472,14 @@ fn production_symbol_candidate_binds_the_attributed_chunk_window() {
             logical_evidence_id: LogicalEvidenceId::new(anchor.as_str().to_owned())
                 .expect("logical evidence"),
             occurrences: vec![OccurrenceProvenance {
+                // Lexical-lane format: the matched chunk rides the
+                // provenance as code-chunk:<generation>:<chunk_id>.
                 source_occurrence_id: SourceOccurrenceId::new(format!(
-                    "code-symbol:{}",
-                    symbol_occurrence.as_str()
+                    "code-chunk:{}:{}",
+                    generation.manifest().generation_id.as_str(),
+                    chunk.id.as_str()
                 ))
-                .expect("symbol source occurrence"),
+                .expect("chunk source occurrence"),
                 file_occurrence_id: Some(chunk.anchor.file_occurrence_id.clone()),
                 retriever_evidence_anchor: RetrievalAnchorId::new(format!(
                     "code-symbol:{}",

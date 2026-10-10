@@ -390,19 +390,41 @@ pub fn code_index_search_display_binding(
             .find(|symbol| symbol.occurrence.as_str() == occurrence)
             .ok_or(HydrationUnavailableV1::Invalid)?;
         let mut display = code_index_symbol_display(symbol, display_paths)?;
-        // The symbol's first attributed chunk is the byte interval
-        // extraction admitted for it — the same window the chunk lane
-        // verifies. None when the manifest holds no chunk for the
-        // occurrence: the location stands, code reports unavailable.
+        // Bind the chunk the candidate's validated provenance names —
+        // a multi-chunk symbol must serve the window the lane matched,
+        // not an arbitrary manifest entry. Occurrences without a
+        // provenance chunk (graph-lane symbol hits) fall back to the
+        // occurrence's earliest byte window, the declaration head.
+        // None when the manifest holds no chunk for the occurrence:
+        // the location stands, code reports unavailable.
         if let Some(code_search::CodeIndexSearchSiteV1::SymbolLines { code_window, .. }) =
             display.site.as_mut()
         {
-            *code_window = generation
-                .chunks()
-                .chunks()
+            let source_prefix = format!(
+                "code-chunk:{}:",
+                generation.manifest().generation_id.as_str()
+            );
+            *code_window = candidate
+                .candidate
+                .occurrences
                 .iter()
-                .find(|chunk| {
-                    chunk.anchor.symbol_occurrence_id.as_ref() == Some(&symbol.occurrence)
+                .filter_map(|p| occurrence_chunk_id(p, &source_prefix))
+                .find_map(|chunk_id| {
+                    generation.chunks().chunks().iter().find(|chunk| {
+                        chunk.id.as_str() == chunk_id
+                            && chunk.anchor.symbol_occurrence_id.as_ref()
+                                == Some(&symbol.occurrence)
+                    })
+                })
+                .or_else(|| {
+                    generation
+                        .chunks()
+                        .chunks()
+                        .iter()
+                        .filter(|chunk| {
+                            chunk.anchor.symbol_occurrence_id.as_ref() == Some(&symbol.occurrence)
+                        })
+                        .min_by_key(|chunk| chunk.anchor.source_span.start_byte)
                 })
                 .map(|chunk| code_search::CodeIndexSearchWindowV1 {
                     source_span: chunk.anchor.source_span,
