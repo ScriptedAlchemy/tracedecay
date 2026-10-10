@@ -456,6 +456,18 @@ async fn search_ranks_the_production_definition_ahead_of_the_test_reference() {
         )
         .expect("write production definition");
         fs::write(
+            project.join("src/caller.rs"),
+            concat!(
+                "pub fn tick() -> i32 {\n",
+                "    ensure_daemon_running();\n",
+                "    ensure_daemon_running();\n",
+                "    ensure_daemon_running();\n",
+                "    0\n",
+                "}\n",
+            ),
+        )
+        .expect("write production body reference");
+        fs::write(
             project.join("tests/ensure_daemon.rs"),
             concat!(
                 "#[test]\nfn ensure_daemon_running() {\n",
@@ -501,7 +513,12 @@ async fn search_ranks_the_production_definition_ahead_of_the_test_reference() {
     assert_eq!(
         paths.first().copied(),
         Some("src/lib.rs"),
-        "production definition must outrank the test reference: {page}"
+        "production definition must outrank the test reference and production body reference: {page}"
+    );
+    assert_eq!(
+        page["results"][0]["display"]["name"],
+        "ensure_daemon_running",
+        "first hit must be the definition, not a caller: {page}"
     );
     assert!(
         paths.contains(&"tests/ensure_daemon.rs"),

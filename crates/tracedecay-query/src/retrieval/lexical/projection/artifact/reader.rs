@@ -32,7 +32,8 @@ use tracedecay_code_index::clones::{
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
-    CompactCandidate, ExactFieldV1, LanguageDescriptorRevision, ManifestDigest, RetrieverBatch,
+    CompactCandidate, ExactFieldV1, ExactTechnicalTermKindV1, LanguageDescriptorRevision,
+    ManifestDigest, RetrieverBatch,
     RetrieverCoverage, RetrieverKind, RetrieverOutcome, SourceOccurrenceId, SourceSpan,
     SymbolOccurrenceId, canonical_sha256,
 };
@@ -90,7 +91,7 @@ use crate::retrieval::lexical::{
     candidate_admission_outcome, field_admitted,
 };
 use crate::retrieval::source_tier::{
-    classify_source_role, exact_definition_grain, is_definition_field,
+    classify_source_role, exact_definition_match, is_definition_field,
 };
 
 impl LexicalFieldTextV1 for ArtifactRowV1 {
@@ -2215,8 +2216,11 @@ impl<'a> ArtifactQueryV1<'a> {
                     row.anchor.file_occurrence_id,
                     classify_source_role(
                         &row.logical_path,
-                        exact_definition_grain(row.anchor.grain)
-                            && row.symbol_simple_name.is_some(),
+                        exact_definition_match(
+                            row.anchor.grain,
+                            row.symbol_simple_name.as_deref(),
+                            exact_matched_symbol_names(&matches, request),
+                        ),
                     ),
                     matches,
                 ));
@@ -3264,6 +3268,25 @@ fn exact_matches_artifact(row: &ArtifactRowV1, request: &ExactLaneRequest) -> Ve
         },
         request,
     )
+}
+
+fn exact_matched_symbol_names<'a>(
+    matches: &'a [ExactRowMatchV1],
+    request: &'a ExactLaneRequest<'_>,
+) -> impl Iterator<Item = &'a str> {
+    matches.iter().filter_map(|matched| {
+        if !matches!(
+            matched.kind,
+            Some(ExactTechnicalTermKindV1::WholeSymbol)
+                | Some(ExactTechnicalTermKindV1::QualifiedName)
+        ) {
+            return None;
+        }
+        request
+            .literals
+            .get(matched.literal)
+            .and_then(|literal| std::str::from_utf8(&literal.canonical_bytes).ok())
+    })
 }
 
 /// In-fuzzy terms plus a character-length index. Buckets keep load order so

@@ -713,6 +713,37 @@ fn exact_lane_ranks_production_definitions_ahead_of_stronger_test_references() {
 }
 
 #[test]
+fn exact_lane_keeps_the_definition_ahead_of_production_body_references() {
+    let authority = FixtureAuthority::new();
+    let request = exact_request(&authority, "reserve_stock --force", 1);
+    let (definition, mut definition_evidence) = exact_pair(&authority, &request, "occ.z", 0);
+    definition_evidence.source_role = RetrievalSourceRoleV1::ProductionDefinition;
+    let (body_ref, mut body_evidence) = exact_pair(&authority, &request, "occ.a", 0);
+    body_evidence.source_role = RetrievalSourceRoleV1::ProductionOther;
+    body_evidence.matched_literals = request.literals.clone();
+    let (test_hit, mut test_evidence) = exact_pair(&authority, &request, "occ.b", 0);
+    test_evidence.source_role = RetrievalSourceRoleV1::TestReference;
+    test_evidence.matched_literals = request.literals.clone();
+    let lane = ExactLane::new(
+        FixtureAuthority::new(),
+        FakeExactPort::complete(vec![
+            (test_hit, test_evidence),
+            (body_ref, body_evidence),
+            (definition, definition_evidence),
+        ]),
+    );
+
+    let result = complete_batch(lane.retrieve_exact(&request).expect("exact retrieval"));
+
+    result_order(&result, &["occ.z"]);
+    assert_eq!(
+        result.candidates[0].source_role,
+        RetrievalSourceRoleV1::ProductionDefinition
+    );
+    assert_eq!(result.coverage.capped, 2);
+}
+
+#[test]
 fn exact_lane_lets_measured_scores_rank_production_other_against_tests() {
     let authority = FixtureAuthority::new();
     let request = exact_request(&authority, "reserve_stock --force", 1);

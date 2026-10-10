@@ -33,11 +33,41 @@ pub(crate) fn exact_definition_grain(grain: CodeSearchChunkGrainV1) -> bool {
     )
 }
 
+/// True when an exact hit names this row's own symbol, not a body reference
+/// to another symbol. Exact signature chunks never answer — the body carries
+/// those occurrences — so a defining body's `WholeSymbol`/`QualifiedName`
+/// match is the definition evidence.
+pub(crate) fn exact_definition_match(
+    grain: CodeSearchChunkGrainV1,
+    symbol_simple_name: Option<&str>,
+    matched_symbol_names: impl IntoIterator<Item = impl AsRef<str>>,
+) -> bool {
+    let Some(name) = symbol_simple_name.filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    if !exact_definition_grain(grain) {
+        return false;
+    }
+    matched_symbol_names
+        .into_iter()
+        .any(|matched| identifier_names_symbol(name, matched.as_ref()))
+}
+
+fn identifier_names_symbol(symbol: &str, matched: &str) -> bool {
+    matched == symbol
+        || matched
+            .rsplit([':', '.'])
+            .find(|part| !part.is_empty())
+            .is_some_and(|tail| tail == symbol)
+}
+
 #[cfg(test)]
 mod tests {
     use tracedecay_domain::RetrievalSourceRoleV1;
 
-    use super::{classify_source_role, exact_definition_grain, is_definition_field};
+    use super::{
+        classify_source_role, exact_definition_grain, exact_definition_match, is_definition_field,
+    };
     use crate::retrieval::lexical::LexicalFieldV1;
     use tracedecay_domain::CodeSearchChunkGrainV1;
 
@@ -67,5 +97,25 @@ mod tests {
             CodeSearchChunkGrainV1::SymbolSignature
         ));
         assert!(!exact_definition_grain(CodeSearchChunkGrainV1::FileWindow));
+        assert!(exact_definition_match(
+            CodeSearchChunkGrainV1::SymbolBody,
+            Some("ensureDaemonRunning"),
+            ["ensureDaemonRunning"],
+        ));
+        assert!(exact_definition_match(
+            CodeSearchChunkGrainV1::SymbolBody,
+            Some("ensureDaemonRunning"),
+            ["Client.ensureDaemonRunning"],
+        ));
+        assert!(!exact_definition_match(
+            CodeSearchChunkGrainV1::SymbolBody,
+            Some("unrelated"),
+            ["ensureDaemonRunning"],
+        ));
+        assert!(!exact_definition_match(
+            CodeSearchChunkGrainV1::FileWindow,
+            Some("ensureDaemonRunning"),
+            ["ensureDaemonRunning"],
+        ));
     }
 }
