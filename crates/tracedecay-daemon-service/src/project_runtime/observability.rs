@@ -1,6 +1,5 @@
-use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 use tokio::sync::Notify;
@@ -238,13 +237,6 @@ pub struct StoreObservabilityRegistryV1 {
     /// Each holds its store's lease until the drain settles, so shutdown
     /// joins them before the stores close.
     retirement_drains: TaskTracker,
-    /// Exact store paths whose drain still holds a counted client, counted
-    /// per drain: same-path drains overlap legitimately, and each releases
-    /// only its own hold when its `core` drops, so the path only disappears
-    /// after the last live drain released its client. `finish_retirement`
-    /// removes the registry entry before that drop; capacity reuse must not
-    /// treat the path as absent until this map releases it.
-    draining_paths: Arc<StdMutex<BTreeMap<PathBuf, usize>>>,
     /// Wakes capacity retirement after a store entry leaves `Stopping`.
     settled: Arc<Notify>,
 }
@@ -426,28 +418,6 @@ impl StoreObservabilityRegistryV1 {
         Ok(true)
     }
 
-    /// Adds one drain's hold on `path`; each live drain releases only its own
-    /// hold so overlapping same-path drains cannot drop the shared marker
-    /// early.
-    fn hold_draining_path(&self, path: &Path) {
-        if let Ok(mut paths) = self.draining_paths.lock() {
-            *paths.entry(path.to_path_buf()).or_insert(0) += 1;
-        }
-    }
-
-    /// Releases one drain's hold on `path`; the marker stays while other
-    /// same-path drains still hold their counted store client.
-    fn release_draining_path(&self, path: &Path) {
-        if let Ok(mut paths) = self.draining_paths.lock() {
-            match paths.get_mut(path) {
-                Some(holds) if *holds > 1 => *holds -= 1,
-                _ => {
-                    paths.remove(path);
-                }
-            }
-        }
-    }
-
     /// Runs the core drain in the background and settles the retirement with
     /// the drain's confirmed outcome.
     fn spawn_retirement_drain(
@@ -456,8 +426,6 @@ impl StoreObservabilityRegistryV1 {
         core: Arc<StoreObservabilityCoreV1>,
         writer_only: bool,
     ) {
-        let path = core.database.db_path().to_path_buf();
-        self.hold_draining_path(&path);
         let registry = self.clone();
         self.retirement_drains.spawn_on(
             async move {
@@ -475,15 +443,9 @@ impl StoreObservabilityRegistryV1 {
                 if let Err(error) = &result {
                     tracing::warn!(%error, "background observability owner drain was incomplete");
                 }
-                if let Err(error) = registry.finish_retirement(&core, settled) {
+                if let Err(error) = registry.finish_retirement(core, settled) {
                     tracing::warn!(%error, "background observability retirement was incomplete");
                 }
-                // The registry entry can leave before this Arc drops. Capacity
-                // reuse waits on `draining_paths` so the counted store client
-                // is gone before session Store retirement.
-                drop(core);
-                registry.release_draining_path(&path);
-                registry.settled.notify_waiters();
             },
             runtime,
         );
@@ -503,9 +465,13 @@ impl StoreObservabilityRegistryV1 {
     /// Joined owners retain their exact store while a later mount may retry
     /// writer settlement. Only its confirmed fence removes the owner; an
     /// unconfirmed worker or ancillary shutdown remains failed closed.
+    ///
+    /// Takes the retiring caller's core handle and drops it before the entry
+    /// change is visible, so an absent entry proves the store's counted
+    /// client is released.
     fn finish_retirement(
         &self,
-        core: &Arc<StoreObservabilityCoreV1>,
+        core: Arc<StoreObservabilityCoreV1>,
         completion: StoreObservabilityCompletionV1,
     ) -> Result<(), ApplicationContractError> {
         let mut entries =
@@ -518,7 +484,7 @@ impl StoreObservabilityRegistryV1 {
                 && matches!(
                     &entry.state,
                     StoreObservabilityStateV1::Stopping { core: incumbent, .. }
-                        if Arc::ptr_eq(incumbent, core)
+                        if Arc::ptr_eq(incumbent, &core)
                 )
         }) else {
             return Err(ApplicationContractError::Inconsistent {
@@ -528,24 +494,22 @@ impl StoreObservabilityRegistryV1 {
         match completion {
             StoreObservabilityCompletionV1::Settled => {
                 entries.remove(index);
+                drop(core);
             }
             StoreObservabilityCompletionV1::AwaitingWriter => {
                 entries[index].state = StoreObservabilityStateV1::Stopping {
-                    core: Arc::clone(core),
+                    core,
                     drain: StoreObservabilityDrainV1::AwaitingWriter,
                 };
             }
             StoreObservabilityCompletionV1::Failed => {
                 entries[index].state = StoreObservabilityStateV1::Failed;
+                drop(core);
             }
         }
+        drop(entries);
+        self.settled.notify_waiters();
         Ok(())
-    }
-
-    fn drain_holds(&self, database_path: &Path) -> bool {
-        self.draining_paths
-            .lock()
-            .map_or(true, |paths| paths.contains_key(database_path))
     }
 
     /// Finishes a capacity-retired store's observability drain, including the
@@ -573,7 +537,7 @@ impl StoreObservabilityRegistryV1 {
             tokio::pin!(notified);
             notified.as_mut().enable();
             match self.drive_registered_store_retirement(database_path)? {
-                StoreObservabilitySettleV1::Absent if !self.drain_holds(database_path) => {
+                StoreObservabilitySettleV1::Absent => {
                     return Ok(());
                 }
                 StoreObservabilitySettleV1::Active => {
@@ -588,7 +552,7 @@ impl StoreObservabilityRegistryV1 {
                         database_path.display()
                     ));
                 }
-                StoreObservabilitySettleV1::Waiting | StoreObservabilitySettleV1::Absent => {
+                StoreObservabilitySettleV1::Waiting => {
                     if tokio::time::timeout_at(deadline, notified).await.is_err() {
                         return Err(format!(
                             "observability retirement for {} exceeded the drain deadline",
@@ -774,17 +738,8 @@ impl RegisteredObservabilityProducerV1 {
         if !registry.begin_retirement(&core, StoreObservabilityDrainV1::InFlight)? {
             return Ok(());
         }
-        // The inline drain holds the counted store client until this `Arc`
-        // drops after the terminal state lands, exactly like a spawned drain:
-        // the same path hold keeps a concurrent capacity settle from retiring
-        // the store underneath it.
-        let path = core.database.db_path().to_path_buf();
-        registry.hold_draining_path(&path);
         let (result, settled) = core.shutdown().await;
-        let retirement = registry.finish_retirement(&core, settled);
-        drop(core);
-        registry.release_draining_path(&path);
-        registry.settled.notify_waiters();
+        let retirement = registry.finish_retirement(core, settled);
         match result {
             Ok(()) => retirement,
             Err(error) => {
