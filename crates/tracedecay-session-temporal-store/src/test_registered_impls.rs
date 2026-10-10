@@ -211,13 +211,6 @@ impl SessionTemporalExec for RegisteredGlobalDbWriterConnection<'_> {
     fn execute_batch(&self, sql: &str) -> impl Future<Output = Result<(), EngineError>> + Send {
         RegisteredGlobalDbWriterConnection::execute_batch(self, sql)
     }
-
-    fn execute_statements(
-        &self,
-        statements: Vec<WriteStatement>,
-    ) -> impl Future<Output = Result<Vec<u64>, EngineError>> + Send {
-        RegisteredGlobalDbWriterConnection::execute_statements(self, statements)
-    }
 }
 
 impl SessionTemporalRegisteredDb for RegisteredGlobalDb {

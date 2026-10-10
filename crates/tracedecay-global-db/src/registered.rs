@@ -739,19 +739,6 @@ impl RegisteredGlobalDbWriterConnection<'_> {
             .await
             .map_err(engine_error)
     }
-
-    pub async fn execute_statements(
-        &self,
-        statements: Vec<tracedecay_runtime_core::db::engine::WriteStatement>,
-    ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
-        self.database
-            .execute_write_statements(
-                "execute registered global database statement batch",
-                statements,
-            )
-            .await
-            .map_err(engine_error)
-    }
 }
 
 pub struct RegisteredGlobalDbWriteTransaction<'a> {
