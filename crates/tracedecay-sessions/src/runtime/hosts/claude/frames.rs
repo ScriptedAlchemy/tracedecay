@@ -103,6 +103,9 @@ pub struct ClaudeSourceFrameScan {
 /// stable `privacy.structural-id.v1.*` digests. The observation source ID is
 /// already an opaque path digest and remains unchanged.
 pub fn identify_claude_source(path: &Path) -> Option<ClaudeSourceScanIdentity> {
+    if !super::is_claude_session_transcript(path) {
+        return None;
+    }
     let session_id = protect_sensitive_structural_id(&claude_source_id(path)?).ok()?;
     Some(ClaudeSourceScanIdentity {
         provider: PROVIDER,

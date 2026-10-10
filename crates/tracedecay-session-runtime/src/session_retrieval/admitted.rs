@@ -279,6 +279,16 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                         },
                     }
                 }
+                SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
+                    // Same remap describe/expand already apply: a pending
+                    // historical generation is the worker's state, not an
+                    // absent temporal store.
+                    if let Some(converging) = self.converging_projection_unavailable(&unavailable) {
+                        SessionRetrievalServiceOutcome::Unavailable(converging)
+                    } else {
+                        SessionRetrievalServiceOutcome::Unavailable(unavailable)
+                    }
+                }
                 outcome => outcome,
             }
         })

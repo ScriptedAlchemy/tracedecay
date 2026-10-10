@@ -5,6 +5,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Row, Statement, params};
 use serde_json::Value;
 use tracedecay_capture::opencode as opencode_capture;
+use tracedecay_domain::canonical_text::canonical_framed_sha256_bytes;
 use tracedecay_domain::{
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
@@ -28,7 +29,7 @@ use crate::runtime::snapshot_observation::{
 };
 use crate::runtime::source::{
     HostProviderCoverage, TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
-    content_hash64, persist_host_provider_coverage,
+    persist_host_provider_coverage,
 };
 
 const PROVIDER: &str = "opencode";
@@ -144,11 +145,20 @@ impl SnapshotAdmissionRecord for OpenCodeRecord {
         &self.payload
     }
 
+    /// Each record's generation derives from its own payload bytes, so an
+    /// in-place edit or a late-arriving part produces a fresh generation that
+    /// uncovers its position while the cursor keeps chaining per source.
     fn source_generation(
         &self,
         _batch_generation: ObservationSourceGenerationV1,
     ) -> TranscriptIngestResult<ObservationSourceGenerationV1> {
-        ObservationSourceGenerationV1::new(content_hash64(&self.native_record_id).max(1))
+        let digest = canonical_framed_sha256_bytes(
+            b"tracedecay.opencode.record-generation.v1",
+            &[&self.payload[..]],
+        );
+        let mut generation = [0_u8; 8];
+        generation.copy_from_slice(&digest[..8]);
+        ObservationSourceGenerationV1::new(u64::from_le_bytes(generation).max(1))
             .map_err(TranscriptIngestError::from)
     }
 

@@ -1608,6 +1608,129 @@ async fn empty_answer_is_stale_until_historical_catch_up_is_current() {
     );
 }
 
+fn admitted_session_query(session_id: &str, provider: Option<&str>) -> SessionTemporalQuery {
+    SessionTemporalQuery::new(
+        SessionId::new(session_id).expect("session identity"),
+        provider.map(str::to_owned),
+        "",
+        None,
+        TemporalModeV1::Current,
+        tracedecay_domain::RetrievalGrainV1::Occurrence,
+        1,
+        DiversityLimits::unbounded(),
+        ContextBudget {
+            max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+            max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+            estimator_version: "words-v1".to_owned(),
+        },
+    )
+    .expect("temporal query")
+    .with_execution_limits(admitted_execution_limits(1))
+}
+
+/// #3393: one provider's retrying cursor must not hide Claude as a bare
+/// `TemporalStoreUnavailable`. Cursor is already projected; the live Claude
+/// session is catalogued but has no active generation; the worker is
+/// `HistoricalRetry { cursor_conflict }`. `lcm_load_session` uses
+/// `retrieve_admitted`; that path must surface the worker status
+/// (`historically_converging_unavailable`), not `without_worker`.
+#[tokio::test]
+async fn historical_retry_does_not_hide_claude_as_bare_temporal_unavailable() {
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-retrieval-historical-retry-claude",
+    )
+    .await;
+    let fixture_root = real_page_root("root.page");
+    seed_real_page_fixture_in_session(
+        harness.registered.as_ref(),
+        &fixture_root,
+        0,
+        "cursor".to_owned(),
+        "session.cursor.projected".to_owned(),
+        true,
+    )
+    .await;
+    assert!(
+        harness
+            .registered
+            .as_ref()
+            .upsert_session(&SessionRecord {
+                provider: "claude".to_owned(),
+                session_id: "session.claude.unprojected".to_owned(),
+                project_key: fixture_root.project_key().to_owned(),
+                project_path: "/fixture/claude".to_owned(),
+                title: Some("live Claude session".to_owned()),
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await,
+        "catalogue the live Claude session without a temporal generation"
+    );
+
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service = DaemonSessionRetrievalService::new_admitted_profile(
+        harness.registered.clone(),
+        root.identity().clone(),
+        Some(std::sync::Arc::new(FixedRefreshServing(
+            SessionProjectionServingState::Stale {
+                reason: SessionProjectionStaleReason::HistoricalRetry {
+                    reason_code: "cursor_conflict".to_owned(),
+                },
+            },
+        ))),
+    )
+    .expect("registered retrieval service");
+    let context = admitted_lookup_context(scope);
+
+    let cursor = service
+        .retrieve_admitted(
+            &context,
+            admitted_session_query("session.cursor.projected", Some("cursor")),
+        )
+        .await;
+    assert!(
+        matches!(
+            cursor,
+            SessionRetrievalServiceOutcome::Complete { .. }
+                | SessionRetrievalServiceOutcome::Partial { .. }
+        ),
+        "a retrying foreign cursor must not block a projected provider: {cursor:?}"
+    );
+
+    let claude = service
+        .retrieve_admitted(
+            &context,
+            admitted_session_query("session.claude.unprojected", Some("claude")),
+        )
+        .await;
+    match claude {
+        SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
+            assert_eq!(
+                unavailable.reason,
+                SessionRetrievalUnavailableReason::HistoricalRetry,
+                "lcm_load_session must report the worker's HistoricalRetry, not {unavailable:?}"
+            );
+            assert!(
+                unavailable.worker.is_some(),
+                "the worker status is the convergence answer: {unavailable:?}"
+            );
+        }
+        other => panic!(
+            "an unprojected Claude session during HistoricalRetry must report the worker, got {other:?}"
+        ),
+    }
+}
+
 /// yielding a continuation while records remain.
 #[tokio::test]
 async fn small_lookup_reads_a_session_larger_than_the_response_budget() {

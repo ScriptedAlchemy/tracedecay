@@ -5,6 +5,7 @@ use tracedecay_domain::{
     ObservationScopeV1, ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1,
     ProviderUsageModelV1, ProviderUsageScopeV1,
 };
+use tracedecay_lcm::LcmLoadSessionRequest;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -13,6 +14,7 @@ use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::hosts::claude::ClaudeSource;
 use tracedecay_sessions::runtime::hosts::claude_observation::ingest_source_with_observations_with_admission;
 use tracedecay_sessions::runtime::shared::TranscriptIngestStats;
+use tracedecay_sessions::runtime::source::TranscriptDiscoveryBounds;
 
 use crate::restart_atomicity::{
     claude_observation_cursor, durable_table_count, ingest_global_sources_for_provider,
@@ -67,6 +69,70 @@ pub(super) fn write_claude_transcript(
     );
     std::fs::write(&path, contents).unwrap();
     path
+}
+
+/// Real Claude Code session transcript with a unique canary phrase and
+/// record uuids. Production sessions never reuse `u1`/`u2` across files.
+fn write_claude_canary_transcript(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+    canary: &str,
+    user_uuid: &str,
+    assistant_uuid: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".claude/projects/-some-slug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{session}.jsonl"));
+    let cwd = project.to_string_lossy();
+    let contents = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "type": "user",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": user_uuid,
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "message": {"role": "user", "content": format!("Investigate {canary}")}
+        }),
+        serde_json::json!({
+            "type": "assistant",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": assistant_uuid,
+            "timestamp": "2026-01-01T00:00:05.000Z",
+            "message": {
+                "id": format!("msg_{session}"),
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [{"type": "text", "text": format!("{canary} is projected.")}]
+            }
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+/// Workflow journal Claude Code writes under a session's
+/// `subagents/workflows/<run>/`. Not a session transcript; workflow ingest
+/// already excludes it. Historical Claude discovery must not treat it as one.
+fn write_claude_workflow_journal(home: &std::path::Path, parent_session: &str, run_id: &str) {
+    let dir = home
+        .join(".claude/projects/-some-slug")
+        .join(parent_session)
+        .join("subagents")
+        .join("workflows")
+        .join(run_id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("journal.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type": "started", "agentId": "agent-1"}),
+            serde_json::json!({"type": "result", "agentId": "agent-1"}),
+        ),
+    )
+    .unwrap();
 }
 
 /// Runs one user-scoped Claude source through the production observation
@@ -1333,6 +1399,108 @@ async fn claude_atomic_replacement_retires_superseded_messages_and_settles() {
             ),
             (0, 0, 0),
             "idle repoll {repoll} of the replaced transcript must read nothing"
+        );
+    }
+}
+
+/// Production journal on #3393: Claude catch-up fails
+/// `projection_storage_retry_scheduled` for `source=journal.jsonl` while
+/// session transcripts sit beside it. A fresh profile plus three real Claude
+/// Code sessions and their workflow journals must still project those
+/// sessions into search and `lcm_load_session`.
+#[tokio::test]
+async fn workflow_journal_must_not_block_claude_session_projection() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    init_git_repo(&project);
+    mark_test_project(&project);
+
+    let sessions = [
+        (
+            "sess-alpha-canary",
+            "alpha-canary-billing-ledger",
+            "u-alpha-user",
+            "u-alpha-asst",
+        ),
+        (
+            "sess-bravo-canary",
+            "bravo-canary-auth-refresh",
+            "u-bravo-user",
+            "u-bravo-asst",
+        ),
+        (
+            "sess-charlie-canary",
+            "charlie-canary-graph-rebind",
+            "u-charlie-user",
+            "u-charlie-asst",
+        ),
+    ];
+    // Fill the Claude source window with workflow journals that sort before
+    // the session files. Historical discovery currently treats every jsonl as
+    // a transcript, so one pass never reaches the real sessions.
+    for index in 0..64 {
+        write_claude_workflow_journal(&home, &format!("aaa-wf-{index:02}"), "wf_journal");
+    }
+    for (session, canary, user_uuid, assistant_uuid) in sessions {
+        write_claude_canary_transcript(&home, &project, session, canary, user_uuid, assistant_uuid);
+        write_claude_workflow_journal(&home, session, &format!("wf_{session}"));
+    }
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+    let discovered: Vec<_> = source
+        .discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
+        .paths
+        .into_iter()
+        .filter_map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })
+        .collect();
+    assert!(
+        discovered.iter().all(|name| name != "journal.jsonl"),
+        "workflow journals are not Claude session transcripts: {discovered:?}"
+    );
+    // One production Claude catch-up pass, the same window the worker runs
+    // before AwaitRelease. A second pass would rotate past the journals and
+    // hide the stall.
+    let ingest = try_ingest_claude_source(&db, &source, &project).await;
+
+    let stuck = format!(
+        "discovered={discovered:?} ingest={ingest:?} messages={}",
+        db.session_message_count().await.unwrap()
+    );
+
+    for (session, canary, _, assistant_uuid) in sessions {
+        let hits = db.search_session_messages("claude", None, canary, 10).await;
+        assert!(
+            hits.iter().any(|hit| {
+                hit.session.session_id == session && hit.message.text.contains(canary)
+            }),
+            "sessions search must return {canary} from {session}; {stuck} hits={hits:?}"
+        );
+
+        let page = db
+            .runtime()
+            .lcm_load_session_for_test(LcmLoadSessionRequest {
+                provider: "claude".into(),
+                session_id: session.into(),
+                after_store_id: None,
+                limit: 10,
+                roles: Vec::new(),
+                start_time: None,
+                end_time: None,
+                content_slice: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("lcm_load_session({session}) failed: {error}; {stuck}"));
+        assert!(
+            page.messages
+                .iter()
+                .any(|message| message.message_id == assistant_uuid
+                    && message.content.contains(canary)),
+            "lcm_load_session({session}) must return {canary}; {stuck} page={page:?}"
         );
     }
 }

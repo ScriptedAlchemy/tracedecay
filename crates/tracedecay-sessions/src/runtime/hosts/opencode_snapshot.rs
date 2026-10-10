@@ -1,14 +1,17 @@
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::ObservationSourceGenerationV1;
+use tracedecay_domain::canonical_text::canonical_framed_sha256_bytes;
 
 use super::opencode::scan_error;
 use crate::runtime::host_scan::HostScanBudget;
 use crate::runtime::source::{HostCoverageReason, TranscriptIngestError, TranscriptIngestResult};
 
 const PROVIDER: &str = "opencode";
-/// A verified snapshot establishes the physical source identity before admission.
-/// Content changes are identified by each record's existing payload digest.
+/// A verified snapshot establishes the physical source identity before
+/// admission. `generation` folds each family member's write state, so an
+/// in-place row edit still produces a new batch generation — arming the
+/// rewrite sweep — without reading a single row at open.
 pub(super) struct OpenCodeDatabase {
     pub(super) reader: tracedecay_rusqlite_runtime::VerifiedReader,
     pub(super) generation: ObservationSourceGenerationV1,
@@ -38,6 +41,7 @@ fn inspect_database(
     path: &Path,
     mut budget: HostScanBudget,
 ) -> TranscriptIngestResult<(OpenedOpenCodeDatabase, HostScanBudget)> {
+    let mut member_state = Vec::with_capacity(3);
     for (index, member) in [
         path.to_path_buf(),
         sqlite_sidecar(path, "-wal"),
@@ -59,7 +63,16 @@ fn inspect_database(
                     ),
                 ));
             }
-            Ok(metadata) if metadata.is_file() => {}
+            Ok(metadata) if metadata.is_file() => {
+                let modified = metadata
+                    .modified()
+                    .map_err(|error| scan_error("stat OpenCode database", &member, error))?;
+                let nanos = match modified.duration_since(std::time::UNIX_EPOCH) {
+                    Ok(since) => since.as_nanos() as i64,
+                    Err(earlier) => -(earlier.duration().as_nanos() as i64),
+                };
+                member_state.push((nanos, metadata.len()));
+            }
             Ok(_) if index == 0 => {
                 return Ok((
                     OpenedOpenCodeDatabase::Refused(HostCoverageReason::DatabaseNotAFile),
@@ -94,8 +107,26 @@ fn inspect_database(
         }
     };
     let identity = reader.file_identity();
+    let identity_bytes = identity.to_le_bytes();
+    let mut digest = canonical_framed_sha256_bytes(
+        b"tracedecay.opencode.database-generation.seed.v1",
+        &[&identity_bytes[..]],
+    );
+    for (modified_nanos, length) in &member_state {
+        digest = canonical_framed_sha256_bytes(
+            b"tracedecay.opencode.database-generation.fold.v1",
+            &[
+                &digest[..],
+                &modified_nanos.to_le_bytes()[..],
+                &length.to_le_bytes()[..],
+            ],
+        );
+    }
+    let mut content_generation = [0_u8; 8];
+    content_generation.copy_from_slice(&digest[..8]);
     let generation =
-        ObservationSourceGenerationV1::new(identity).map_err(TranscriptIngestError::from)?;
+        ObservationSourceGenerationV1::new(u64::from_le_bytes(content_generation).max(1))
+            .map_err(TranscriptIngestError::from)?;
     Ok((
         OpenedOpenCodeDatabase::Ready(Box::new(OpenCodeDatabase {
             reader,
