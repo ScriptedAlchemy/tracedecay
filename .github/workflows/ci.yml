@@ -296,12 +296,9 @@ jobs:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
-  # Root suites and the full-daemon memory journey keep the global
-  # HOST_CPUS reservation. Workspace shards reserve one CPU per test so
-  # suites can overlap jobs=4 rustc (run 37978596669: workspace-a 36m /
-  # workspace-b 41m build). local_test_jobs=1 re-serialized suites and
-  # pushed those shards back to ~74m on run 38016717191. Workspace shards
-  # use a separate disk-cache prefix so their feature variants are saved.
+  # Root suites and the full-daemon memory journey reserve HOST_CPUS.
+  # Workspace suites reserve one CPU each so they can overlap compiler work.
+  # Their separate cache prefix retains the workspace feature variants.
   # root-b and workspace-b catch unlisted targets in their groups.
   linux-test:
     name: Test Linux (${{ matrix.shard }})
@@ -453,8 +450,8 @@ jobs:
             bazel-testlogs/**/test.log
             bazel-testlogs/**/test.xml
 
-      # Matrix shards share github.job; root-b and workspace-b write distinct
-      # prefixes so they do not race one 10 GiB key.
+      # Matrix shards share github.job; separate prefixes prevent the two
+      # cache writers from racing the same save key.
       - name: Save compiled Bazel actions
         if: always() && !cancelled() && github.ref == 'refs/heads/master' && matrix.save_cache == 'true' && steps.bazel.outputs.disk-cache-key != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
