@@ -768,8 +768,10 @@ async fn send_host_request(
     cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
 ) -> Result<Vec<String>> {
     if let Some((id, query)) = surface.search_request(request.parsed.as_ref()) {
+        // The catalog lookup borrows the search's own id so a host
+        // cancellation forwarded verbatim matches this daemon request.
         let catalog_line =
-            serde_json::json!({ "jsonrpc": "2.0", "id": "tool-search", "method": "tools/list" })
+            serde_json::json!({ "jsonrpc": "2.0", "id": id.clone(), "method": "tools/list" })
                 .to_string();
         let catalog = DaemonProxyRequest::new(&catalog_line);
         let listing = send_daemon_request_with_project_open_retry(
@@ -779,6 +781,11 @@ async fn send_host_request(
             cancellation,
         )
         .await?;
+        // A cancel that landed during the fetch must not still mutate the
+        // session list or answer the cancelled search id.
+        if cancellation.borrow().is_some() {
+            return Ok(Vec::new());
+        }
         return Ok(surface.answer_search(&id, &query, &listing));
     }
     let mut responses =
