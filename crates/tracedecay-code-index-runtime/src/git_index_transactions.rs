@@ -27,7 +27,7 @@ use tracedecay_runtime_core::path_safety::plain_host_path;
 
 pub const GIT_INDEX_ADAPTER_REVISION: &str = "tracedecay.git-index-adapter.v1";
 const SNAPSHOT_GIT_STDOUT_LIMIT: usize = 64 * 1024 * 1024;
-const WRITE_GIT_DEADLINE: Duration = Duration::from_secs(60 * 60);
+const WRITE_GIT_DEADLINE: Duration = Duration::from_hours(1);
 
 mod patch;
 mod process;
