@@ -28,7 +28,7 @@ use crate::runtime::snapshot_observation::{
 };
 use crate::runtime::source::{
     HostProviderCoverage, TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
-    content_hash64, persist_host_provider_coverage,
+    persist_host_provider_coverage,
 };
 
 const PROVIDER: &str = "opencode";
@@ -142,14 +142,6 @@ impl SnapshotAdmissionRecord for OpenCodeRecord {
 
     fn payload(&self) -> &[u8] {
         &self.payload
-    }
-
-    fn source_generation(
-        &self,
-        _batch_generation: ObservationSourceGenerationV1,
-    ) -> TranscriptIngestResult<ObservationSourceGenerationV1> {
-        ObservationSourceGenerationV1::new(content_hash64(&self.native_record_id).max(1))
-            .map_err(TranscriptIngestError::from)
     }
 
     fn capture_request(

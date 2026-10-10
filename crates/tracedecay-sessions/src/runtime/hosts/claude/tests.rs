@@ -1,6 +1,6 @@
 use super::*;
 use crate::runtime::shared::StoredCursor;
-use crate::runtime::source::JsonlPrefixRecovery;
+use crate::runtime::source::{JsonlPrefixRecovery, TranscriptDiscoveryBounds};
 use serde_json::json;
 use tracedecay_capture::claude as canonical;
 use tracedecay_runtime_core::git_discovery::{
@@ -603,4 +603,30 @@ fn claude_unknown_membership_retries_without_advancing_cursor() {
     assert!(excluded.is_empty());
     assert_eq!(retried.frames.len(), 1);
     assert_eq!(UNKNOWN_PATH_ATTEMPTS.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn workflow_journals_are_not_claude_session_transcripts() {
+    let root = tempfile::tempdir().unwrap();
+    let projects = root.path().join(".claude/projects/-slug");
+    let session = projects.join("sess-real.jsonl");
+    let journal = projects
+        .join("sess-real")
+        .join("subagents")
+        .join("workflows")
+        .join("wf_1")
+        .join("journal.jsonl");
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    std::fs::write(&session, "{\"type\":\"user\"}\n").unwrap();
+    std::fs::write(&journal, "{\"type\":\"started\",\"agentId\":\"a1\"}\n").unwrap();
+
+    assert!(super::is_claude_session_transcript(&session));
+    assert!(!super::is_claude_session_transcript(&journal));
+    assert!(identify_claude_source(&session).is_some());
+    assert!(identify_claude_source(&journal).is_none());
+
+    let discovered = ClaudeSource::with_home(root.path())
+        .discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
+        .paths;
+    assert_eq!(discovered, vec![session]);
 }

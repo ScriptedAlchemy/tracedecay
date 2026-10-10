@@ -29,7 +29,8 @@ use crate::observation::{
 };
 use crate::runtime::hosts::claude::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource,
-    ClaudeSourceFrame, identify_claude_source, try_scan_claude_source_frames_with_resume,
+    ClaudeSourceFrame, identify_claude_source, is_claude_session_transcript,
+    try_scan_claude_source_frames_with_resume,
 };
 use crate::runtime::observation::jsonl_observation_admission::is_deterministic_content_refusal;
 use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
@@ -630,11 +631,19 @@ where
             move || identify_claude_source(&path)
         })
         .await?
-    }
-    .ok_or_else(|| TranscriptIngestError::InvalidSourceIdentity {
-        provider: "claude",
-        path: path.to_path_buf(),
-    })?;
+    };
+    let Some(identity) = identity else {
+        if !is_claude_session_transcript(path) {
+            return Ok(SourcePreparation::Finished(
+                ClaudeObservationIngestStats::default(),
+            ));
+        }
+        return Err(TranscriptIngestError::InvalidSourceIdentity {
+            provider: "claude",
+            path: path.to_path_buf(),
+        }
+        .into());
+    };
     let source = ObservationSourceIdentityV1::for_source(
         SessionId::new(identity.session_id.clone())?,
         SessionId::new(identity.source_id.clone())?,
