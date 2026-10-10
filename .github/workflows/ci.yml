@@ -298,14 +298,12 @@ jobs:
 
   # Root suites and the full-daemon memory journey reserve HOST_CPUS.
   # Workspace suites reserve one CPU each so they can overlap jobs=4 rustc.
-  # Three package groups keep a cold composition-crate recompile from owning
-  # one runner (two-way still saw ~80m / 46m critical path on 38034996917).
-  # One shared disk-cache prefix only: a 6.9 GiB workspace-only save evicted
-  # ci-linux-test from the repo's 10 GiB Actions cache budget, so every
-  # Linux test leg restored zero hits (38040644518). The v2 suffix starts a
-  # fresh family that is not crowded out by that orphan entry. root-b alone
-  # saves.
-  # root-b and workspace-c catch unlisted targets in their groups.
+  # Warm v2 cache (run 38071732620) still left workspace-a at 65m because
+  # cli + code-index share one critical path; split that group into
+  # workspace-a (light a–capture) and workspace-code (cli + code-*). One
+  # shared ci-linux-test-v2 prefix; root-b alone saves (a 6.9 GiB second
+  # family previously evicted the budget). root-b and workspace-c catch
+  # unlisted targets in their groups.
   linux-test:
     name: Test Linux (${{ matrix.shard }})
     needs: [scope-gate, gates]
@@ -335,18 +333,21 @@ jobs:
               -//crates/tracedecay:dashboard_api_test
               -//crates/tracedecay:daemon_suite
               -//crates/tracedecay:storage_suite
-          # Three alphabetical package groups. New crates land in workspace-c
-          # via the catch-all until listed here for balance.
+          # Four package groups. New crates land in workspace-c via the
+          # catch-all until listed here for balance.
           - shard: workspace-a
             test_resources: --default_test_resources=cpu=1
             targets: >-
-              --
               //crates/tracedecay-agent-hosts/...
               //crates/tracedecay-api/...
               //crates/tracedecay-application/...
               //crates/tracedecay-automation/...
               //crates/tracedecay-automation-runtime/...
               //crates/tracedecay-capture/...
+          - shard: workspace-code
+            test_resources: --default_test_resources=cpu=1
+            targets: >-
+              --
               //crates/tracedecay-cli/...
               //crates/tracedecay-code-extraction/...
               //crates/tracedecay-code-index/...
