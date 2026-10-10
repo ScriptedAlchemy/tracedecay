@@ -107,6 +107,18 @@ without results contributes no rows. Calls made through a shell command
 python3 scripts/test-measure-unused-tool-context.py
 ```
 
+## Published run
+
+`docs/development/unused-tool-context-run.json` is the raw meter output from the
+#3372 corpus (table + examples in
+`docs/development/unused-tool-context-run.md`). That environment had no operator
+session store. 73 Cursor desktop transcripts on this repo contained
+`0` `tracedecay_*` calls. The scored rows are live `tracedecay tool` calls
+against four enrolled repos, imported through `tracedecay sessions import`.
+**token_count_coverage was 0%** — stored `tool_result` facts do not carry
+`token_count`, so token columns stay `null`. Re-request after a cut is `null`
+because those results do not record `cut`.
+
 The tests score synthetic transcripts and pin each rule: a read of a returned
 path is used, an unreferenced result is unused, query echoes and earlier
 mentions are not use, later tool output is not use, a later same-tool call

@@ -1,0 +1,1087 @@
+{
+  "coverage": {
+    "calls_with_token_count": 0,
+    "calls_without_result": 0,
+    "calls_without_token_count": 386,
+    "providers": {
+      "cursor": {
+        "discovered": 8,
+        "loaded": 8,
+        "with_tracedecay_calls": 8
+      }
+    },
+    "repos": [
+      "orders",
+      "orders-broken",
+      "policy",
+      "hooks"
+    ],
+    "scored_calls": 432,
+    "scored_non_error_calls": 386,
+    "sessions_with_calls": 8,
+    "token_count_coverage": 0.0
+  },
+  "examples": [
+    {
+      "after_cut": null,
+      "bytes": 655,
+      "lines": 1,
+      "matches": [
+        [
+          "path",
+          "src/inventory.rs"
+        ]
+      ],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_context",
+      "used_bytes": 655,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 973,
+      "lines": 1,
+      "matches": [
+        [
+          "path",
+          "src/inventory.rs"
+        ]
+      ],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_context",
+      "used_bytes": 973,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 598,
+      "lines": 1,
+      "matches": [
+        [
+          "path",
+          "src/inventory.rs"
+        ]
+      ],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_context",
+      "used_bytes": 598,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 578,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_files",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 492,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_files",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 531,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_files",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 4438,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_git_hunks",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 179,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_grep",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 179,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_grep",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 2354,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_grep",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 2353,
+      "lines": 1,
+      "matches": [
+        [
+          "path",
+          "src/orders.rs"
+        ]
+      ],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_grep",
+      "used_bytes": 2353,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 810,
+      "lines": 1,
+      "matches": [
+        [
+          "path",
+          "src/orders.rs"
+        ]
+      ],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_grep",
+      "used_bytes": 810,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 656,
+      "lines": 1,
+      "matches": [
+        [
+          "path",
+          "src/inventory.rs"
+        ]
+      ],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_grep",
+      "used_bytes": 656,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 223,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_search",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 223,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_search",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 223,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_search",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 1405,
+      "lines": 1,
+      "matches": [
+        [
+          "symbol",
+          "exact_message"
+        ]
+      ],
+      "rerequests": 1,
+      "session": "unused-context-orders",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_search",
+      "used_bytes": 1405,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 1984,
+      "lines": 1,
+      "matches": [
+        [
+          "symbol",
+          "exact_message"
+        ]
+      ],
+      "rerequests": 1,
+      "session": "unused-context-orders",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_search",
+      "used_bytes": 1984,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 2554,
+      "lines": 1,
+      "matches": [
+        [
+          "symbol",
+          "exact_message"
+        ]
+      ],
+      "rerequests": 0,
+      "session": "unused-context-orders",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_search",
+      "used_bytes": 2554,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 506,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-broken",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_context",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 505,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-broken",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_context",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 586,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-broken",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_context",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 4445,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-broken",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_git_hunks",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 827,
+      "lines": 1,
+      "matches": [
+        [
+          "symbol",
+          "work_loop"
+        ]
+      ],
+      "rerequests": 0,
+      "session": "unused-context-policy",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_files",
+      "used_bytes": 827,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 633,
+      "lines": 1,
+      "matches": [
+        [
+          "symbol",
+          "work_loop"
+        ]
+      ],
+      "rerequests": 0,
+      "session": "unused-context-policy",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_files",
+      "used_bytes": 633,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 779,
+      "lines": 1,
+      "matches": [
+        [
+          "symbol",
+          "work_loop"
+        ]
+      ],
+      "rerequests": 0,
+      "session": "unused-context-policy",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_files",
+      "used_bytes": 779,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 4438,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-policy",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_git_hunks",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 3189,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_callers",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 3189,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_callers",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 4665,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_callers",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 158,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_circular",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 277,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_coupling",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 3590,
+      "lines": 1,
+      "matches": [
+        [
+          "symbol",
+          "working_tree"
+        ]
+      ],
+      "rerequests": 0,
+      "session": "unused-context-orders-wave2",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_git_diff",
+      "used_bytes": 3590,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 4142,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_git_history",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 3345,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_git_status",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 2549,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_hotspots",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 9933,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_module_api",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 2585,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_source_body",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 2662,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_source_body",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 2632,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_source_body",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 164,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-broken-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_circular",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 191,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-broken-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_coupling",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 3596,
+      "lines": 1,
+      "matches": [
+        [
+          "symbol",
+          "working_tree"
+        ]
+      ],
+      "rerequests": 0,
+      "session": "unused-context-orders-broken-wave2",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_git_diff",
+      "used_bytes": 3596,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 4162,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-broken-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_git_history",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 3351,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-broken-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_git_status",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 1566,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-broken-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_hotspots",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 2309,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-orders-broken-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_module_api",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 158,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-policy-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_circular",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 460,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-policy-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_coupling",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 3590,
+      "lines": 1,
+      "matches": [
+        [
+          "symbol",
+          "working_tree"
+        ]
+      ],
+      "rerequests": 0,
+      "session": "unused-context-policy-wave2",
+      "state": "used",
+      "tokens": null,
+      "tool": "tracedecay_git_diff",
+      "used_bytes": 3590,
+      "used_lines": 1
+    },
+    {
+      "after_cut": null,
+      "bytes": 4142,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-policy-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_git_history",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 3345,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-policy-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_git_status",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 1425,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-policy-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_hotspots",
+      "used_bytes": 0,
+      "used_lines": 0
+    },
+    {
+      "after_cut": null,
+      "bytes": 16345,
+      "lines": 1,
+      "matches": [],
+      "rerequests": 0,
+      "session": "unused-context-policy-wave2",
+      "state": "ignored",
+      "tokens": null,
+      "tool": "tracedecay_module_api",
+      "used_bytes": 0,
+      "used_lines": 0
+    }
+  ],
+  "provenance": {
+    "desktop_tracedecay_calls": 0,
+    "desktop_transcripts_scanned": 73,
+    "kind": "live_enrolled_repos_plus_desktop_scan",
+    "note": "This environment has no operator ~/.tracedecay store. 73 Cursor desktop cloud-agent transcripts on ScriptedAlchemy/tracedecay were scanned and contained 0 tracedecay_* MCP calls. Scored rows are live `tracedecay tool` calls recorded as Cursor transcripts, imported through `tracedecay sessions import`, then measured by the production meter.",
+    "recorded_calls": {
+      "unused-context-hooks": 50,
+      "unused-context-hooks-wave2": 71,
+      "unused-context-orders": 50,
+      "unused-context-orders-broken": 46,
+      "unused-context-orders-broken-wave2": 56,
+      "unused-context-orders-wave2": 71,
+      "unused-context-policy": 50,
+      "unused-context-policy-wave2": 71
+    },
+    "repos": [
+      "orders",
+      "orders-broken",
+      "policy",
+      "hooks"
+    ],
+    "waves": 2
+  },
+  "rows": [
+    {
+      "calls": 148,
+      "calls_without_cut": 148,
+      "calls_without_tokens": 148,
+      "calls_zero_used": 116,
+      "lines": 148,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 1,
+      "sessions": 8,
+      "tool": "tracedecay_grep",
+      "total_bytes": 349391,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 74290,
+      "used_lines": 32,
+      "used_tokens": null
+    },
+    {
+      "calls": 108,
+      "calls_without_cut": 108,
+      "calls_without_tokens": 108,
+      "calls_zero_used": 83,
+      "lines": 108,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 4,
+      "sessions": 8,
+      "tool": "tracedecay_search",
+      "total_bytes": 140642,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 46757,
+      "used_lines": 25,
+      "used_tokens": null
+    },
+    {
+      "calls": 35,
+      "calls_without_cut": 19,
+      "calls_without_tokens": 19,
+      "calls_zero_used": 19,
+      "error_calls": 16,
+      "lines": 19,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 0,
+      "sessions": 8,
+      "tool": "tracedecay_callers",
+      "total_bytes": 113882,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 0,
+      "used_lines": 0,
+      "used_tokens": null
+    },
+    {
+      "calls": 19,
+      "calls_without_cut": 19,
+      "calls_without_tokens": 19,
+      "calls_zero_used": 19,
+      "lines": 19,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 0,
+      "sessions": 4,
+      "tool": "tracedecay_source_body",
+      "total_bytes": 49542,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 0,
+      "used_lines": 0,
+      "used_tokens": null
+    },
+    {
+      "calls": 4,
+      "calls_without_cut": 4,
+      "calls_without_tokens": 4,
+      "calls_zero_used": 4,
+      "lines": 4,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 0,
+      "sessions": 4,
+      "tool": "tracedecay_module_api",
+      "total_bytes": 46072,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 0,
+      "used_lines": 0,
+      "used_tokens": null
+    },
+    {
+      "calls": 28,
+      "calls_without_cut": 28,
+      "calls_without_tokens": 28,
+      "calls_zero_used": 20,
+      "lines": 28,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 0,
+      "sessions": 8,
+      "tool": "tracedecay_context",
+      "total_bytes": 43566,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 13884,
+      "used_lines": 8,
+      "used_tokens": null
+    },
+    {
+      "calls": 8,
+      "calls_without_cut": 8,
+      "calls_without_tokens": 8,
+      "calls_zero_used": 8,
+      "lines": 8,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 0,
+      "sessions": 8,
+      "tool": "tracedecay_git_hunks",
+      "total_bytes": 35550,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 0,
+      "used_lines": 0,
+      "used_tokens": null
+    },
+    {
+      "calls": 28,
+      "calls_without_cut": 28,
+      "calls_without_tokens": 28,
+      "calls_zero_used": 20,
+      "lines": 28,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 0,
+      "sessions": 8,
+      "tool": "tracedecay_files",
+      "total_bytes": 21612,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 7516,
+      "used_lines": 8,
+      "used_tokens": null
+    },
+    {
+      "calls": 4,
+      "calls_without_cut": 4,
+      "calls_without_tokens": 4,
+      "calls_zero_used": 4,
+      "lines": 4,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 0,
+      "sessions": 4,
+      "tool": "tracedecay_git_history",
+      "total_bytes": 16585,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 0,
+      "used_lines": 0,
+      "used_tokens": null
+    },
+    {
+      "calls": 4,
+      "calls_without_cut": 4,
+      "calls_without_tokens": 4,
+      "calls_zero_used": 0,
+      "lines": 4,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 0,
+      "sessions": 4,
+      "tool": "tracedecay_git_diff",
+      "total_bytes": 14365,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 14365,
+      "used_lines": 4,
+      "used_tokens": null
+    },
+    {
+      "calls": 4,
+      "calls_without_cut": 4,
+      "calls_without_tokens": 4,
+      "calls_zero_used": 4,
+      "lines": 4,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 0,
+      "sessions": 4,
+      "tool": "tracedecay_git_status",
+      "total_bytes": 13385,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 0,
+      "used_lines": 0,
+      "used_tokens": null
+    },
+    {
+      "calls": 4,
+      "calls_without_cut": 4,
+      "calls_without_tokens": 4,
+      "calls_zero_used": 4,
+      "lines": 4,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 0,
+      "sessions": 4,
+      "tool": "tracedecay_hotspots",
+      "total_bytes": 6951,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 0,
+      "used_lines": 0,
+      "used_tokens": null
+    },
+    {
+      "calls": 4,
+      "calls_without_cut": 4,
+      "calls_without_tokens": 4,
+      "calls_zero_used": 4,
+      "lines": 4,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 0,
+      "sessions": 4,
+      "tool": "tracedecay_coupling",
+      "total_bytes": 1599,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 0,
+      "used_lines": 0,
+      "used_tokens": null
+    },
+    {
+      "calls": 4,
+      "calls_without_cut": 4,
+      "calls_without_tokens": 4,
+      "calls_zero_used": 4,
+      "lines": 4,
+      "rerequest_after_cut": null,
+      "rerequest_calls": 0,
+      "sessions": 4,
+      "tool": "tracedecay_circular",
+      "total_bytes": 906,
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_bytes": 0,
+      "used_lines": 0,
+      "used_tokens": null
+    },
+    {
+      "calls": 14,
+      "error_calls": 14,
+      "rerequest_after_cut": null,
+      "sessions": 4,
+      "tool": "tracedecay_source_read",
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_tokens": null
+    },
+    {
+      "calls": 16,
+      "error_calls": 16,
+      "rerequest_after_cut": null,
+      "sessions": 4,
+      "tool": "tracedecay_impact",
+      "total_tokens": null,
+      "unused_tokens": null,
+      "used_tokens": null
+    }
+  ]
+}
