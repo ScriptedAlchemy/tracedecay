@@ -60,9 +60,6 @@ impl LineRange {
     }
 }
 
-pub fn estimate_tokens(s: &str) -> u32 {
-    s.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
-}
 pub fn render_lines(source: &str, range: LineRange) -> String {
     let start = range.start.saturating_sub(1) as usize;
     let end_inclusive = range.end as usize;

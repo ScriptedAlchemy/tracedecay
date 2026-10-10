@@ -1934,6 +1934,12 @@ pub enum CanonicalObservationFactV1 {
         content: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         success: Option<bool>,
+        /// Real served-output count. Missing means the count was never recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_count: Option<u64>,
+        /// Whether the served output was trimmed or truncated. Missing means unknown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cut: Option<bool>,
     },
     ProviderUsage {
         model: ProviderUsageModelV1,
@@ -2183,6 +2189,113 @@ impl CanonicalObservationFactV1 {
         }
         Ok(())
     }
+
+    /// One tool-result fact with the served token count and cut marker.
+    pub fn tool_result(
+        invocation_id: Option<ObservationId>,
+        content: Value,
+        success: Option<bool>,
+        token_count: Option<u64>,
+        cut: Option<bool>,
+    ) -> Self {
+        Self::ToolResult {
+            invocation_id,
+            content,
+            success,
+            token_count,
+            cut,
+        }
+    }
+}
+
+/// Visible text the unused-context meter scores for one stored tool result.
+///
+/// `Null` means the host stored no output. JSON MCP envelopes unwrap to their
+/// text blocks so the count matches the bytes the agent actually read.
+pub fn tool_result_visible_text(content: &Value) -> Option<String> {
+    if matches!(content, Value::Null) {
+        return None;
+    }
+    Some(unwrap_tool_result_text(content))
+}
+
+fn unwrap_tool_result_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => {
+            if let Ok(parsed) = serde_json::from_str::<Value>(text)
+                && (parsed.is_object() || parsed.is_array())
+            {
+                return unwrap_tool_result_text(&parsed);
+            }
+            text.clone()
+        }
+        Value::Array(items) => {
+            let texts: Vec<&str> = items
+                .iter()
+                .filter_map(|item| {
+                    if item.get("type").and_then(Value::as_str) == Some("text")
+                        || item.get("text").is_some()
+                    {
+                        item.get("text").and_then(Value::as_str)
+                    } else {
+                        item.as_str()
+                    }
+                })
+                .collect();
+            if texts.is_empty() {
+                content.to_string()
+            } else {
+                texts.join("\n")
+            }
+        }
+        Value::Object(map) => {
+            for key in ["output", "content", "text"] {
+                if let Some(inner) = map.get(key) {
+                    return unwrap_tool_result_text(inner);
+                }
+            }
+            content.to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Whether served tool output was trimmed or truncated.
+pub fn tool_result_output_was_cut(content: &Value) -> bool {
+    match content {
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+        Value::String(text) => {
+            let trimmed = text.trim_start();
+            if trimmed.starts_with("# Truncated Response") {
+                return true;
+            }
+            serde_json::from_str::<Value>(text)
+                .ok()
+                .is_some_and(|value| tool_result_output_was_cut(&value))
+        }
+        Value::Array(items) => items.iter().any(tool_result_output_was_cut),
+        Value::Object(map) => {
+            object_was_cut(map)
+                || map.get("content").is_some_and(tool_result_output_was_cut)
+                || map.get("output").is_some_and(tool_result_output_was_cut)
+                || map.get("text").is_some_and(tool_result_output_was_cut)
+                || map.get("preview").is_some_and(tool_result_output_was_cut)
+        }
+    }
+}
+
+fn object_was_cut(map: &serde_json::Map<String, Value>) -> bool {
+    if map.get("truncated") == Some(&Value::Bool(true)) {
+        return true;
+    }
+    match map.get("cut") {
+        Some(Value::Bool(true)) => return true,
+        Some(Value::Object(cut)) if cut.get("applied") == Some(&Value::Bool(true)) => {
+            return true;
+        }
+        _ => {}
+    }
+    map.contains_key("handle") && map.contains_key("retrieve_tool") && map.contains_key("preview")
 }
 
 fn validate_canonical_label(value: &str) -> Result<(), ObservationContractError> {

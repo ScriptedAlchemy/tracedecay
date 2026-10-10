@@ -20,5 +20,6 @@ sha2 = "0.11"
 thiserror = "2"
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-store = { path = "../tracedecay-store" }
+tracedecay-tokenizer = { path = "../tracedecay-tokenizer" }
 
 tracing = "0.1"

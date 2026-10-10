@@ -17,6 +17,7 @@ use tracedecay_domain::{
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId, classify_observation_collision, cline_native_source_successor_id,
     cline_task_native_observation_id, prove_cline_native_source_transition,
+    tool_result_output_was_cut, tool_result_visible_text,
 };
 
 fn source(session_id: &str) -> ObservationSourceIdentityV1 {
@@ -1385,4 +1386,66 @@ fn cline_native_transition_rejects_invalid_ui_offsets_and_ordering_domains() {
         prove_cline_native_source_transition(&wrong_old, &wrong_new).is_none(),
         "payload ordering must match the native snapshot identity"
     );
+}
+
+#[test]
+fn tool_result_fact_records_token_count_and_cut() {
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        ProviderId::new("fixture-provider").unwrap(),
+        "message",
+        ObservationId::new("message.tool-result").unwrap(),
+        CanonicalObservationRelationsV1::new(SessionId::new("session.fixture").unwrap()),
+        vec![CanonicalObservationFactV1::tool_result(
+            Some(ObservationId::new("call-1").unwrap()),
+            json!("served body"),
+            Some(true),
+            Some(7),
+            Some(true),
+        )],
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::SnapshotOrder,
+            ObservationSourceRangeV1::new(1, 2).unwrap(),
+        ),
+    )
+    .unwrap();
+
+    let wire = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(wire["facts"][0]["kind"], "tool_result");
+    assert_eq!(wire["facts"][0]["token_count"], 7);
+    assert_eq!(wire["facts"][0]["cut"], true);
+    let decoded: CanonicalObservationEnvelopeV1 = serde_json::from_value(wire).unwrap();
+    decoded.validate().unwrap();
+    assert_eq!(decoded, envelope);
+
+    let legacy = json!({
+        "kind": "tool_result",
+        "content": "old",
+        "success": true
+    });
+    let fact: CanonicalObservationFactV1 = serde_json::from_value(legacy).unwrap();
+    match fact {
+        CanonicalObservationFactV1::ToolResult {
+            token_count, cut, ..
+        } => {
+            assert_eq!(token_count, None);
+            assert_eq!(cut, None);
+        }
+        other => panic!("expected tool_result, got {other:?}"),
+    }
+}
+
+#[test]
+fn tool_result_visible_text_unwraps_mcp_envelopes() {
+    assert_eq!(
+        tool_result_visible_text(&json!({"content": [{"type": "text", "text": "hello"}]}))
+            .as_deref(),
+        Some("hello")
+    );
+    assert!(tool_result_output_was_cut(
+        &json!({"truncated": true, "preview": "x"})
+    ));
+    assert!(tool_result_output_was_cut(&json!(
+        "# Truncated Response\n\npreview"
+    )));
+    assert!(!tool_result_output_was_cut(&json!("plain result")));
 }

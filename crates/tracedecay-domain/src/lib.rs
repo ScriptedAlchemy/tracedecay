@@ -284,7 +284,7 @@ pub use observation::{
     ProviderUsageScopeV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     classify_observation_collision, cline_native_source_successor_id,
     cline_task_native_observation_id, is_canonical_payload_revision_replay,
-    prove_cline_native_source_transition,
+    prove_cline_native_source_transition, tool_result_output_was_cut, tool_result_visible_text,
 };
 pub use remote::{
     CredentialRevocationReceiptV1, CredentialRotationReceiptV1, CurrentRemoteAuthorityStateV1,

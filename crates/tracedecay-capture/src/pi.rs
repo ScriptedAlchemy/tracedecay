@@ -273,14 +273,15 @@ fn append_message(
                 .map(ObservationId::new)
                 .transpose()
                 .map_err(|_| invalid())?;
-            facts.push(CanonicalObservationFactV1::ToolResult {
+            facts.push(crate::accounted_tool_result_from_native(
                 invocation_id,
-                content: visible_content(message.get("content").unwrap_or(&Value::Null)),
-                success: message
+                visible_content(message.get("content").unwrap_or(&Value::Null)),
+                message
                     .get("isError")
                     .and_then(Value::as_bool)
                     .map(|is_error| !is_error),
-            });
+                Some(message),
+            ));
         }
         "bashExecution" => {
             facts.push(CanonicalObservationFactV1::ToolInvocation {
@@ -288,14 +289,14 @@ fn append_message(
                 name: "bash".to_owned(),
                 arguments: serde_json::json!({ "command": message.get("command") }),
             });
-            facts.push(CanonicalObservationFactV1::ToolResult {
-                invocation_id: None,
-                content: message.get("output").cloned().unwrap_or(Value::Null),
-                success: message
+            facts.push(crate::accounted_tool_result(
+                None,
+                message.get("output").cloned().unwrap_or(Value::Null),
+                message
                     .get("exitCode")
                     .and_then(Value::as_i64)
                     .map(|code| code == 0),
-            });
+            ));
         }
         // The prompt and tool loadout replay; not conversation content.
         other => facts.push(unsupported(&format!("message.{other}"))),

@@ -306,11 +306,12 @@ pub fn canonical_snapshot_envelope(
     }
     append_tool_invocation_facts(&mut facts, native)?;
     if let Some(result) = native.get("tool_result").filter(|value| value.is_object()) {
-        facts.push(CanonicalObservationFactV1::ToolResult {
-            invocation_id: optional_observation_id(result, "invocation_id")?,
-            content: result.get("content").cloned().unwrap_or(Value::Null),
-            success: result.get("success").and_then(Value::as_bool),
-        });
+        facts.push(tracedecay_capture::accounted_tool_result_from_native(
+            optional_observation_id(result, "invocation_id")?,
+            result.get("content").cloned().unwrap_or(Value::Null),
+            result.get("success").and_then(Value::as_bool),
+            Some(result),
+        ));
     }
     if let Some(usage) = native.get("usage").filter(|value| value.is_object()) {
         facts.push(CanonicalObservationFactV1::UncorrelatedUsage {

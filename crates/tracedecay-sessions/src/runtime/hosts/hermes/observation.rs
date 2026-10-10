@@ -272,11 +272,11 @@ pub fn normalize_native_observation(
         });
     }
     if role == CanonicalMessageRoleV1::Tool {
-        facts.push(CanonicalObservationFactV1::ToolResult {
-            invocation_id: None,
-            content: native.content.clone().map_or(Value::Null, Value::String),
-            success: None,
-        });
+        facts.push(tracedecay_capture::accounted_tool_result(
+            None,
+            native.content.clone().map_or(Value::Null, Value::String),
+            None,
+        ));
     }
     append_tool_invocations(&mut facts, native.tool_calls.as_ref())?;
 

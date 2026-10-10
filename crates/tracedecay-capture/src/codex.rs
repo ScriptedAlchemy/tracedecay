@@ -887,16 +887,15 @@ fn append_codex_response_item_facts(
             }
         }
         "function_call_output" | "custom_tool_call_output" => {
-            facts.push(CanonicalObservationFactV1::ToolResult {
-                invocation_id: canonical_native_observation_id(
-                    payload.get("call_id").and_then(Value::as_str),
-                ),
-                content: Value::Null,
-                success: payload
+            facts.push(crate::accounted_tool_result_from_native(
+                canonical_native_observation_id(payload.get("call_id").and_then(Value::as_str)),
+                Value::Null,
+                payload
                     .get("status")
                     .and_then(Value::as_str)
                     .map(|status| matches!(status, "completed" | "success" | "succeeded")),
-            });
+                Some(payload),
+            ));
         }
         "reasoning" => {
             let summary = payload.get("summary").filter(|summary| !summary.is_null());

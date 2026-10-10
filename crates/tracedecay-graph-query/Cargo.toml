@@ -18,6 +18,7 @@ tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory" }
+tracedecay-tokenizer = { path = "../tracedecay-tokenizer" }
 tracing = "0.1"
 
 [features]

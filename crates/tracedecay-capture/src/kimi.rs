@@ -365,11 +365,12 @@ fn append_tool_result(
         .map(ObservationId::new)
         .transpose()
         .map_err(|_| invalid())?;
-    facts.push(CanonicalObservationFactV1::ToolResult {
+    facts.push(crate::accounted_tool_result_from_native(
         invocation_id,
         content,
-        success: None,
-    });
+        None,
+        Some(native),
+    ));
     Ok(())
 }
 

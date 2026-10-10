@@ -114,6 +114,7 @@ pub fn truncated_json_envelope_with_handle(
         end = preview.len();
         let mut envelope = serde_json::json!({
             "truncated": true,
+            "cut": true,
             "original_chars": original_chars,
             "preview_chars": preview.chars().count(),
             "preview": preview,

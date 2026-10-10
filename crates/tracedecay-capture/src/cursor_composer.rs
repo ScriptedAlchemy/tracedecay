@@ -160,14 +160,14 @@ fn normalize_composer_bubble_record(
             });
         }
         if tool.get("result").is_some_and(|result| !result.is_null()) {
-            facts.push(CanonicalObservationFactV1::ToolResult {
+            facts.push(crate::accounted_tool_result_from_native(
                 invocation_id,
-                content: Value::Null,
-                success: tool
-                    .get("status")
+                Value::Null,
+                tool.get("status")
                     .and_then(Value::as_str)
                     .and_then(composer_tool_result_success),
-            });
+                Some(tool),
+            ));
         }
         if let Some(path) = composer_edit_tool_path(tool) {
             let mut content = serde_json::Map::new();

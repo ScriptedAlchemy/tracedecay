@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::read_modes::{
-    self, LineRange, ReadMode, render_lines, render_map, render_signatures, render_symbol_context,
+    LineRange, ReadMode, render_lines, render_map, render_signatures, render_symbol_context,
 };
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -64,6 +64,7 @@ pub async fn read_source(
     let args_hash = read_cache::args_hash(&json!({
         "lines": raw_lines,
         "last_sync_at": last_sync_at,
+        "token_count_encoding": "o200k_base",
     }))?;
 
     let cache_connection = database.read_connection();
@@ -141,7 +142,14 @@ pub async fn read_source(
         line_range,
         include_symbols,
     )?;
-    let token_count = read_modes::estimate_tokens(&body);
+    let token_count = u32::try_from(tracedecay_tokenizer::count_ordinary_tokens(&body).map_err(
+        |error| TraceDecayError::Config {
+            message: format!("cannot count source-read tokens: {error}"),
+        },
+    )?)
+    .map_err(|_| TraceDecayError::Config {
+        message: "source-read token count exceeds u32".to_owned(),
+    })?;
     let digest = read_cache::digest_bytes(body.as_bytes());
     if !read_only {
         read_cache::put(

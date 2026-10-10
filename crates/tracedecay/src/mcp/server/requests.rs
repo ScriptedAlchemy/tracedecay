@@ -11,7 +11,7 @@ use tracedecay_mcp::server::{
     DispatchSettlement, DispatchToolPolicy, PreparedDispatchControl, dispatch_cancelled_error,
 };
 use tracedecay_mcp::tools::response_trailers::{
-    ToolTokenAccounting, record_token_accounting, response_token_count,
+    ToolTokenAccounting, record_token_accounting, response_token_count, response_was_cut,
 };
 use tracedecay_mcp::{
     ToolResult, mark_semantic_tool_error, semantic_failure_reason, server::resources_list_result,
@@ -1010,9 +1010,11 @@ impl McpServer {
         cg: &TraceDecay,
         result: &mut ToolResult,
     ) -> ToolTokenAccounting {
-        // Estimate approximate token count of the graph response
-        // ("after"), before any banners/metrics lines are appended.
-        let response_tokens = response_token_count(result);
+        // Real served-output count, before any banners/metrics lines are appended.
+        result.set_cut(response_was_cut(result));
+        let Some(response_tokens) = response_token_count(result) else {
+            return ToolTokenAccounting::default();
+        };
         // "Before" counterfactual: reading every referenced file raw,
         // in full. Counters credit only the net saving per call,
         // before minus what this response actually delivered.
