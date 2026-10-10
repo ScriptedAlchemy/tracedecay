@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.79](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.78...v1.0.0-beta.79) (2026-10-10)
+
+
+### Bug Fixes
+
+* **callers:** keep import and new sites instead of empty complete ([#3315](https://github.com/ScriptedAlchemy/tracedecay/issues/3315)) ([2daa526](https://github.com/ScriptedAlchemy/tracedecay/commit/2daa526befdabfc3574e3bc6f047a60c7e0ec85b))
+* **ci:** restore denied search and hermetic graph truth ([#3330](https://github.com/ScriptedAlchemy/tracedecay/issues/3330)) ([c918cb6](https://github.com/ScriptedAlchemy/tracedecay/commit/c918cb67801356bb3cb206af34436235bf967096))
+* **cli:** flush complete tool JSON without truncation ([#3334](https://github.com/ScriptedAlchemy/tracedecay/issues/3334)) ([116df04](https://github.com/ScriptedAlchemy/tracedecay/commit/116df04102139b7b2d8de5820d7b2b800e177a77))
+* **cli:** init returns a typed not-ready receipt ([#3310](https://github.com/ScriptedAlchemy/tracedecay/issues/3310)) ([80457b5](https://github.com/ScriptedAlchemy/tracedecay/commit/80457b5240be9ce933b3bf98578747af6b50fc9a))
+* **dashboard:** report indexed-symbol denominator on search miss ([#3321](https://github.com/ScriptedAlchemy/tracedecay/issues/3321)) ([39cb343](https://github.com/ScriptedAlchemy/tracedecay/commit/39cb343c77ca7e6f03137d8623de7fc53889e091))
+* **mcp:** admit verified files on tracedecay://files ([#3331](https://github.com/ScriptedAlchemy/tracedecay/issues/3331)) ([31008ff](https://github.com/ScriptedAlchemy/tracedecay/commit/31008ff4582c8074c2499e2600b4a2fe87ca64a6))
+* **test:** use advertised inputs in tool sweep journeys ([#3326](https://github.com/ScriptedAlchemy/tracedecay/issues/3326)) ([8f868cb](https://github.com/ScriptedAlchemy/tracedecay/commit/8f868cb08889db0e699963bcd9997e77e2adc126))
+
+
+### Performance Improvements
+
+* **ci:** overlap workspace tests and warm their disk cache ([#3323](https://github.com/ScriptedAlchemy/tracedecay/issues/3323)) ([6c72cd2](https://github.com/ScriptedAlchemy/tracedecay/commit/6c72cd221c361b2e36b3db73d45bbde5827d02ea))
+* **index:** assign audit source ownership once per package ([#3322](https://github.com/ScriptedAlchemy/tracedecay/issues/3322)) ([fb5f5c3](https://github.com/ScriptedAlchemy/tracedecay/commit/fb5f5c3c1d6e95bae051e2b42497ff6d28dea157))
+
 ## [Unreleased]
 
 ### Bug Fixes
