@@ -227,6 +227,14 @@ class MatchingRules(unittest.TestCase):
         self.assertEqual(coverage["calls_without_token_count"], 1)
         self.assertEqual(coverage["token_count_coverage"], 0.5)
 
+    def test_all_row_keeps_tokens_when_only_unscored_tools_lack_them(self) -> None:
+        measured = measure.analyze([Call("c1", SEARCH, "{}"), Result("c1", RESULT, tokens=40, cut=False)])[0][0]
+        errored = measure.analyze([Call("c2", "tracedecay_source_read", "{}"), Result("c2", "unknown node", True)])[0][0]
+        unstored = measure.analyze([Call("c3", "tracedecay_grep", "{}"), Result("c3", None, tokens=60)])[0][0]
+        rows = measure.aggregate([measured, errored, unstored])
+        total = measure.sum_rows(rows, 1)
+        self.assertEqual((total["total_tokens"], total["unused_tokens"], total["rerequest_after_cut"]), (40, 40, 0))
+
     def test_token_coverage_is_null_when_no_scored_calls(self) -> None:
         self.assertEqual(
             measure.token_count_coverage([]),

@@ -645,6 +645,10 @@ def sum_rows(rows: list[dict], sessions: int) -> dict:
     seen = {key: False for key in optional}
     for row in rows:
         total.update({key: value for key, value in row.items() if isinstance(value, int) and key not in optional and key != "sessions"})
+        # A tool with only error or no-text calls measured nothing, so its
+        # null tokens are not a missing count.
+        if row.get("calls", 0) == row.get("error_calls", 0) + row.get("calls_without_text", 0):
+            continue
         for key in optional:
             optional[key], seen[key] = add_optional(optional[key], row.get(key), seen[key])
     return dict(total, **optional, tool="**all**", sessions=sessions)
