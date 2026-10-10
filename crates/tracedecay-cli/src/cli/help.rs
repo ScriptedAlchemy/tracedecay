@@ -543,6 +543,8 @@ Examples:
   tracedecay sessions refresh begin --profile --session-id session.id --provider claude --source 4 --target 9
   tracedecay sessions refresh status --profile --session-id session.id --provider claude --source 4 --target 9 --handle opaque.handle
   tracedecay sessions refresh cancel --project-path /path/to/repo --session-id session.id --provider cursor --source 4 --target 9 --handle opaque.handle --json
+  tracedecay sessions unused-context --json        Per-tool used vs ignored returned context
+  tracedecay sessions unused-context --examples 3 --session-limit 200
 
 `--handle` is the opaque daemon-local capability returned by begin; an internal \
 operation id is not a refresh capability. begin is idempotent and joins a \

@@ -111,6 +111,23 @@ pub(crate) async fn handle_sessions_action(
         } => {
             handle_sessions_unfinished(profile, limit, json, project_id, project_path).await?;
         }
+        SessionsAction::UnusedContext {
+            examples,
+            session_limit,
+            json,
+            project_id,
+            project_path,
+        } => {
+            handle_sessions_unused_context(
+                profile,
+                examples,
+                session_limit,
+                json,
+                project_id,
+                project_path,
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -287,6 +304,119 @@ async fn handle_sessions_unfinished(
         }
     }
     Ok(())
+}
+
+#[tracing::instrument(name = "cli.sessions.unused_context", level = "trace", skip_all)]
+async fn handle_sessions_unused_context(
+    profile: &ProfileRoot,
+    examples: usize,
+    session_limit: usize,
+    json: bool,
+    project_id: Option<String>,
+    project_path: Option<String>,
+) -> tracedecay_domain::errors::Result<()> {
+    let project_path = resolve_cli_project_root(profile, None, project_id, project_path).await?;
+    let report = match crate::commands::admin_cli_result(
+        profile,
+        Some(&project_path),
+        AdminCliSurfaceRequestV1::SessionsUnusedContext {
+            example_limit: examples,
+            session_limit,
+        },
+    )
+    .await?
+    {
+        AdminCliResultV1::SessionsUnusedContext(report) => report,
+        _ => {
+            return Err(crate::commands::admin_cli_result_mismatch(
+                "sessions_unused_context",
+            ));
+        }
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| {
+                tracedecay_domain::errors::TraceDecayError::Config {
+                    message: e.to_string(),
+                }
+            })?
+        );
+    } else {
+        print!("{}", UnusedContextReport::render(&report));
+    }
+    Ok(())
+}
+
+struct UnusedContextReport;
+
+impl UnusedContextReport {
+    fn render(report: &tracedecay_contracts::retrieval::AdminCliUnusedContextReportV1) -> String {
+        let mut out = String::new();
+        let unused_pct = report
+            .unused_ratio
+            .map(|ratio| format!("{:.1}%", ratio * 100.0))
+            .unwrap_or_else(|| "n/a".to_owned());
+        let _ = writeln!(
+            out,
+            "meter: {} (MCP trailer heuristic, not provider billing)",
+            report.meter
+        );
+        let _ = writeln!(
+            out,
+            "sessions: {}  messages: {}  tool_results: {}",
+            report.sessions_scanned, report.messages_scanned, report.tool_results_scanned
+        );
+        let _ = writeln!(
+            out,
+            "overall: {} used / {} returned tokens  ({} unused)",
+            report.used_tokens, report.returned_tokens, unused_pct
+        );
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "{:<16} {:>10} {:>10} {:>10} {:>8}",
+            "tool", "returned", "used", "unused", "unused%"
+        );
+        for tool in &report.tools {
+            let pct = tool
+                .unused_ratio
+                .map(|ratio| format!("{:.1}%", ratio * 100.0))
+                .unwrap_or_else(|| "n/a".to_owned());
+            let _ = writeln!(
+                out,
+                "{:<16} {:>10} {:>10} {:>10} {:>8}",
+                tool.tool, tool.returned_tokens, tool.used_tokens, tool.unused_tokens, pct
+            );
+        }
+        if !report.examples.is_empty() {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "spot-checks:");
+            for example in &report.examples {
+                let state = if example.used { "used" } else { "ignored" };
+                let usage = if example.usage.is_empty() {
+                    "-".to_owned()
+                } else {
+                    example
+                        .usage
+                        .iter()
+                        .map(|kind| format!("{kind:?}").to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                let path = example.path.as_deref().unwrap_or("-");
+                let _ = writeln!(
+                    out,
+                    "  [{state}] {} {} {} {path} ({usage}) {}",
+                    example.tool, example.provider, example.session_id, example.preview
+                );
+                if let Some(evidence) = &example.evidence {
+                    let _ = writeln!(out, "           evidence: {evidence}");
+                }
+            }
+        }
+        out
+    }
 }
 
 /// One session-sync action answered by the project's owner.

@@ -326,6 +326,178 @@ fn sessions_unfinished_lists_workflow_state_evidence() {
 }
 
 #[test]
+fn sessions_unused_context_reports_used_and_ignored_tool_units() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    write_git_fixture(&project_root);
+    init_project_fixture(home.path(), &project_root);
+    let project_id = default_profile_project_id(&project_root);
+
+    create_runtime().block_on(async {
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            profile_root(home.path()),
+            &project_root,
+            ProjectId::new(project_id).expect("valid fixture project id"),
+        )
+        .await
+        .expect("registered project runtime");
+        assert!(
+            runtime
+                .upsert_session_for_test(
+                    HostAdmissionScope::Project,
+                    &global_session("cursor", "unused-context-1", "proj_cli"),
+                )
+                .await
+                .expect("session fixture write")
+        );
+        let search = json!({
+            "results": [
+                {"display": {"name": "load_session", "qualified_name": "lcm::load_session", "path": "crates/tracedecay-lcm/src/query/session.rs"}},
+                {"display": {"name": "dispatch", "qualified_name": "cli::dispatch", "path": "crates/tracedecay-cli/src/main.rs"}}
+            ]
+        });
+        let grep = json!({
+            "results": [
+                {"file": "crates/tracedecay-lcm/src/query/session.rs", "line": 9, "text": "pub async fn load_session(conn: &impl QueryExecutor)"},
+                {"file": "crates/other/src/lib.rs", "line": 1, "text": "fn never_quoted_helper_name() {}"}
+            ],
+            "match_count": 2
+        });
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &MessageRecordBuilder::new(
+                    "cursor",
+                    "invoke-search",
+                    "unused-context-1",
+                    "assistant",
+                    1,
+                    "{}",
+                    "tool_call",
+                )
+                .with_tool_names(Some("tracedecay_search"))
+                .build(),
+            )
+            .await
+            .expect("search invocation");
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &MessageRecordBuilder::new(
+                    "cursor",
+                    "result-search",
+                    "unused-context-1",
+                    "tool",
+                    2,
+                    &search.to_string(),
+                    "tool_result",
+                )
+                .build(),
+            )
+            .await
+            .expect("search result");
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &MessageRecordBuilder::new(
+                    "cursor",
+                    "invoke-grep",
+                    "unused-context-1",
+                    "assistant",
+                    3,
+                    "{}",
+                    "tool_call",
+                )
+                .with_tool_names(Some("tracedecay_grep"))
+                .build(),
+            )
+            .await
+            .expect("grep invocation");
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &MessageRecordBuilder::new(
+                    "cursor",
+                    "result-grep",
+                    "unused-context-1",
+                    "tool",
+                    4,
+                    &grep.to_string(),
+                    "tool_result",
+                )
+                .build(),
+            )
+            .await
+            .expect("grep result");
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &MessageRecordBuilder::new(
+                    "cursor",
+                    "open-used-search-hit",
+                    "unused-context-1",
+                    "assistant",
+                    5,
+                    r#"{"path":"crates/tracedecay-lcm/src/query/session.rs"}"#,
+                    "tool_call",
+                )
+                .with_tool_names(Some("read_file"))
+                .build(),
+            )
+            .await
+            .expect("later open");
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &MessageRecordBuilder::new(
+                    "cursor",
+                    "quote-used-grep",
+                    "unused-context-1",
+                    "assistant",
+                    6,
+                    "I will reuse pub async fn load_session(conn: &impl QueryExecutor) as the walker.",
+                    "message",
+                )
+                .build(),
+            )
+            .await
+            .expect("later quote");
+        runtime
+            .checkpoint_session_database_for_test(HostAdmissionScope::Project)
+            .await
+            .expect("session fixture checkpoint");
+        drop(runtime);
+    });
+
+    let mut command = tracedecay_command(home.path(), &project_root);
+    command.args(["sessions", "unused-context", "--json", "--examples", "3"]);
+    let output = run_with_timeout(command, cli_timeout());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "sessions unused-context should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("json report");
+    assert_eq!(report["meter"], "chars_div_4");
+    assert!(report["sessions_scanned"].as_u64().unwrap() >= 1);
+    assert!(report["tool_results_scanned"].as_u64().unwrap() >= 2);
+    let tools = report["tools"].as_array().expect("tools");
+    let search = tools
+        .iter()
+        .find(|row| row["tool"] == "search")
+        .expect("search row");
+    assert!(search["used_tokens"].as_u64().unwrap() > 0);
+    assert!(search["unused_tokens"].as_u64().unwrap() > 0);
+    let grep = tools
+        .iter()
+        .find(|row| row["tool"] == "grep")
+        .expect("grep row");
+    assert!(grep["used_tokens"].as_u64().unwrap() > 0);
+}
+
+#[test]
 fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();

@@ -311,6 +311,20 @@ async fn dispatch_admin_cli(
             let database = context.registered_project_session_db().await?;
             AdminCliResultV1::SessionsUnfinished(sessions_unfinished(&database, limit).await?)
         }
+        AdminCliSurfaceRequestV1::SessionsUnusedContext {
+            example_limit,
+            session_limit,
+        } => {
+            let database = context.registered_project_session_db().await?;
+            AdminCliResultV1::SessionsUnusedContext(
+                crate::handlers::unused_context::sessions_unused_context(
+                    &database,
+                    example_limit,
+                    session_limit,
+                )
+                .await?,
+            )
+        }
         AdminCliSurfaceRequestV1::AnalyticsSync { scope } => {
             let project = context.scoped_project(scope)?;
             AdminCliResultV1::AnalyticsSync(serde_json::from_value(
