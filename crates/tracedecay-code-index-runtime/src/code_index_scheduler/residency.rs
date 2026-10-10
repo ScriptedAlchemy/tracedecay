@@ -574,15 +574,21 @@ struct OutgoingGraphOwnerV1(Arc<WorktreeResidencyV1>);
 
 impl ResidentOwnerV1 for OutgoingGraphOwnerV1 {
     fn sample(&self) -> Option<ResidentOwnerSampleV1> {
+        // The predecessor hold is resident state on its own: keep sampling
+        // while it is held, even after the store's catalog and engine bytes
+        // have been released, so release() stays reachable and can settle
+        // the hold once the successor's activation finishes.
         let held = self.0.serving_text()?.held_graph_predecessor()?;
-        let store = held.interactive_graph_store().ok()?;
-        let catalog = store.interactive_catalog_bytes();
-        let bytes = match store.serving_engine_bytes() {
-            Ok(None) if catalog.is_none() => return None,
-            Ok(engine) => ResidentOwnerBytesV1::Measured(
-                engine.unwrap_or(0).saturating_add(catalog.unwrap_or(0)),
-            ),
-            Err(_) => ResidentOwnerBytesV1::Unmeasured,
+        let bytes = match held.interactive_graph_store().ok() {
+            Some(store) => match store.serving_engine_bytes() {
+                Ok(engine) => ResidentOwnerBytesV1::Measured(
+                    engine
+                        .unwrap_or(0)
+                        .saturating_add(store.interactive_catalog_bytes().unwrap_or(0)),
+                ),
+                Err(_) => ResidentOwnerBytesV1::Unmeasured,
+            },
+            None => ResidentOwnerBytesV1::Measured(0),
         };
         Some(ResidentOwnerSampleV1 {
             holding: ResidentHoldingV1::Generation(
@@ -599,22 +605,32 @@ impl ResidentOwnerV1 for OutgoingGraphOwnerV1 {
         let Some(text) = self.0.serving_text() else {
             return ResidentOwnerReleaseV1::Empty;
         };
+        // While this generation's own graph is still pending or warming, the
+        // held predecessor is the only servable graph: `graph_predecessor`
+        // answers stale reads from it until activation settles. Once it has
+        // settled — ready, refused, or unavailable — the hold is spare and
+        // settles on every release path, busy or not.
+        let settled = !matches!(
+            text.code_graph_serving_readiness(),
+            CodeGraphServingReadinessV1::Pending | CodeGraphServingReadinessV1::Warming { .. }
+        );
         let Some(store) = text
             .held_graph_predecessor()
             .and_then(|held| held.interactive_graph_store().ok())
         else {
-            // No resident bytes left; the hold itself still settles below.
-            if !matches!(
-                text.code_graph_serving_readiness(),
-                CodeGraphServingReadinessV1::Pending | CodeGraphServingReadinessV1::Warming { .. }
-            ) {
+            if settled {
                 text.release_graph_predecessor();
             }
             return ResidentOwnerReleaseV1::Empty;
         };
         let catalog = match store.release_interactive_catalog() {
             CodeGraphCatalogReleaseV1::Released { bytes } => bytes,
-            CodeGraphCatalogReleaseV1::Busy => return ResidentOwnerReleaseV1::Busy,
+            CodeGraphCatalogReleaseV1::Busy => {
+                if settled {
+                    text.release_graph_predecessor();
+                }
+                return ResidentOwnerReleaseV1::Busy;
+            }
             CodeGraphCatalogReleaseV1::NotReady => 0,
         };
         let engine = match store.release_serving_engine() {
@@ -628,6 +644,9 @@ impl ResidentOwnerV1 for OutgoingGraphOwnerV1 {
                         "the outgoing graph engine could not be released; it stays resident"
                     );
                 }
+                if settled {
+                    text.release_graph_predecessor();
+                }
                 return if catalog > 0 {
                     ResidentOwnerReleaseV1::Released {
                         bytes: ResidentOwnerBytesV1::Measured(catalog),
@@ -637,14 +656,7 @@ impl ResidentOwnerV1 for OutgoingGraphOwnerV1 {
                 };
             }
         };
-        // While this generation's own graph is still pending or warming, the
-        // held predecessor is the only servable graph: `graph_predecessor`
-        // answers stale reads from it until activation settles. Its store
-        // bytes were reclaimed above; only the servable hold stays.
-        if !matches!(
-            text.code_graph_serving_readiness(),
-            CodeGraphServingReadinessV1::Pending | CodeGraphServingReadinessV1::Warming { .. }
-        ) {
+        if settled {
             text.release_graph_predecessor();
         }
         ResidentOwnerReleaseV1::Released {
