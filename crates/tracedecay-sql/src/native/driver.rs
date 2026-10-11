@@ -785,17 +785,15 @@ impl Connection {
     }
 
     pub fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
-        crate::stmt_profile::begin();
-        let prepared = self.core.prepare(sql, false);
-        crate::stmt_profile::end(&format!("prepare {sql}"), Default::default());
-        Ok(Statement::new(self, prepared?, false))
+        Ok(Statement::new(self, self.core.prepare(sql, false)?, false))
     }
 
     pub fn prepare_cached(&self, sql: &str) -> Result<CachedStatement<'_>> {
-        crate::stmt_profile::begin();
-        let prepared = self.core.prepare(sql, true);
-        crate::stmt_profile::end(&format!("prepare {sql}"), Default::default());
-        Ok(CachedStatement(Statement::new(self, prepared?, true)))
+        Ok(CachedStatement(Statement::new(
+            self,
+            self.core.prepare(sql, true)?,
+            true,
+        )))
     }
 
     pub fn transaction(&mut self) -> Result<Transaction<'_>> {
@@ -1315,22 +1313,10 @@ impl<'c> Statement<'c> {
     pub fn execute<P: Params>(&mut self, params: P) -> Result<usize> {
         let connection = self.connection;
         let core = &connection.core;
-        crate::stmt_profile::begin();
         let prepared = self.start(params)?;
-        let vm_before = engine_counters(prepared).vm_steps;
         while core.step(prepared)? {}
         let changes = prepared.statement.n_change();
-        let vm_steps = engine_counters(prepared).vm_steps - vm_before;
         prepared.reset()?;
-        crate::stmt_profile::end(
-            prepared.sql(),
-            crate::stmt_profile::Entry {
-                executions: 1,
-                vm_steps,
-                changes: u64::try_from(changes).unwrap_or(0),
-                ..Default::default()
-            },
-        );
         Ok(usize::try_from(changes).unwrap_or(0))
     }
 
@@ -1443,17 +1429,7 @@ impl<'s> Rows<'s> {
         if self.done {
             return Ok(None);
         }
-        crate::stmt_profile::begin();
-        let vm_before = engine_counters(self.prepared).vm_steps;
-        let stepped = self.core.step(self.prepared);
-        crate::stmt_profile::end(
-            self.prepared.sql(),
-            crate::stmt_profile::Entry {
-                vm_steps: engine_counters(self.prepared).vm_steps - vm_before,
-                ..Default::default()
-            },
-        );
-        match stepped {
+        match self.core.step(self.prepared) {
             Ok(true) => {
                 let row = self.prepared.statement.row().ok_or_else(|| {
                     super::Error::InvalidOperation("native row missing after row step".to_owned())
@@ -1479,17 +1455,9 @@ impl<'s> Rows<'s> {
 
 impl Drop for Rows<'_> {
     fn drop(&mut self) {
-        crate::stmt_profile::begin();
         if let Err(error) = self.prepared.reset() {
             tracing::warn!(%error, "native statement reset failed");
         }
-        crate::stmt_profile::end(
-            self.prepared.sql(),
-            crate::stmt_profile::Entry {
-                executions: 1,
-                ..Default::default()
-            },
-        );
     }
 }
 

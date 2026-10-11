@@ -555,10 +555,6 @@ impl Prepared {
         self.ran = false;
         Ok(())
     }
-
-    pub(crate) fn sql(&self) -> &str {
-        &self.sql
-    }
 }
 
 /// A compiled non-DDL statement waiting in the cache for its SQL text.
@@ -764,21 +760,6 @@ impl Connection {
                 values.len()
             )));
         }
-        if crate::stmt_profile::enabled() {
-            let bytes: usize = values
-                .iter()
-                .map(|value| match value {
-                    turso_core::Value::Null => 0,
-                    turso_core::Value::Numeric(_) => 8,
-                    _ => value
-                        .to_blob()
-                        .map(<[u8]>::len)
-                        .or_else(|| value.to_text().map(str::len))
-                        .unwrap_or(0),
-                })
-                .sum();
-            crate::stmt_profile::note_bytes(bytes as u64);
-        }
         for (index, value) in values.into_iter().enumerate() {
             let position = NonZeroUsize::new(index + 1)
                 .ok_or_else(|| Error::InvalidOperation("parameter index overflow".to_owned()))?;
@@ -884,7 +865,6 @@ impl Connection {
         for (command, input) in statements {
             let ddl = policy::is_ddl(&command);
             let write = policy::is_write(&command);
-            crate::stmt_profile::begin();
             let mut statement = self.compile(command, input)?;
             self.guard.start(true)?;
             while self
@@ -892,15 +872,6 @@ impl Connection {
                 .map_err(|error| self.end_interrupted_write(&mut statement, write, error))?
             {
             }
-            crate::stmt_profile::end(
-                input,
-                crate::stmt_profile::Entry {
-                    executions: 1,
-                    vm_steps: statement.stmt_status(turso_core::StatementStatusCounter::VmStep),
-                    changes: u64::try_from(statement.n_change()).unwrap_or(0),
-                    ..Default::default()
-                },
-            );
             if ddl {
                 self.clear_cache();
             }
@@ -911,36 +882,15 @@ impl Connection {
     /// Runs driver-issued SQL (transaction control, the format stamp) without
     /// the capability verdict.
     pub(crate) fn execute_unchecked(&self, sql: &str) -> Result<()> {
-        crate::stmt_profile::begin();
         let mut statement = self.compile(parse_single(sql)?, sql)?;
         self.guard.start(true)?;
         while self.drive(&mut statement)? {}
-        crate::stmt_profile::end(
-            sql,
-            crate::stmt_profile::Entry {
-                executions: 1,
-                ..Default::default()
-            },
-        );
         Ok(())
     }
 
     /// Runs driver-issued SQL with every guard off: COMMIT and rollback must
     /// not be interrupted once they start.
     fn execute_suspended(&self, sql: &str) -> std::result::Result<(), Settlement> {
-        crate::stmt_profile::begin();
-        let result = self.execute_suspended_inner(sql);
-        crate::stmt_profile::end(
-            sql,
-            crate::stmt_profile::Entry {
-                executions: 1,
-                ..Default::default()
-            },
-        );
-        result
-    }
-
-    fn execute_suspended_inner(&self, sql: &str) -> std::result::Result<(), Settlement> {
         let mut statement = self
             .compile(parse_single(sql).map_err(Settlement::Refused)?, sql)
             .map_err(Settlement::Refused)?;

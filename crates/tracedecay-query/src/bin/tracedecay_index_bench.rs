@@ -132,27 +132,8 @@ fn main() -> ExitCode {
         }
     };
 
-    let profile_out = std::env::var_os("TD_STMT_PROFILE");
-    if profile_out.is_some() {
-        tracedecay_sql::stmt_profile::install(thread_instructions);
-    }
     match run(&options) {
         Ok(summary) => {
-            if let Some(path) = profile_out {
-                let mut text = String::new();
-                for (sql, entry) in tracedecay_sql::stmt_profile::report() {
-                    text.push_str(&format!(
-                        "{}\t{}\t{}\t{}\t{}\t{}\n",
-                        entry.instructions,
-                        entry.executions,
-                        entry.vm_steps,
-                        entry.changes,
-                        entry.bind_bytes,
-                        sql
-                    ));
-                }
-                std::fs::write(path, text).expect("write statement profile");
-            }
             println!("{summary}");
             ExitCode::SUCCESS
         }
@@ -161,51 +142,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// User-space instructions retired by the calling thread, from a per-thread
-/// `perf_event_open` counter (measurement only, #3491 PERF5).
-fn thread_instructions() -> u64 {
-    use std::io::Read as _;
-    use std::os::fd::FromRawFd as _;
-
-    thread_local! {
-        static COUNTER: std::cell::RefCell<std::fs::File> = std::cell::RefCell::new({
-            // perf_event_attr, PERF_ATTR_SIZE_VER0: type HARDWARE, size 64,
-            // config INSTRUCTIONS, exclude_kernel | exclude_hv.
-            let mut attr = [0u8; 64];
-            attr[4..8].copy_from_slice(&64u32.to_ne_bytes());
-            attr[8..16].copy_from_slice(&1u64.to_ne_bytes());
-            attr[40..48].copy_from_slice(&((1u64 << 5) | (1u64 << 6)).to_ne_bytes());
-            let fd: i64;
-            // SAFETY: perf_event_open(attr, pid 0, cpu -1, group -1, flags 0)
-            // reads the 64-byte attribute and returns a new descriptor.
-            unsafe {
-                std::arch::asm!(
-                    "syscall",
-                    inlateout("rax") 298i64 => fd,
-                    in("rdi") attr.as_ptr(),
-                    in("rsi") 0i64,
-                    in("rdx") -1i64,
-                    in("r10") -1i64,
-                    in("r8") 0i64,
-                    lateout("rcx") _,
-                    lateout("r11") _,
-                );
-            }
-            assert!(fd >= 0, "perf_event_open failed: {fd}");
-            // SAFETY: the descriptor was just created and is owned here.
-            unsafe { std::fs::File::from_raw_fd(fd as i32) }
-        });
-    }
-    COUNTER.with(|counter| {
-        let mut bytes = [0u8; 8];
-        counter
-            .borrow_mut()
-            .read_exact(&mut bytes)
-            .expect("read instruction counter");
-        u64::from_ne_bytes(bytes)
-    })
 }
 
 const USAGE: &str = "\
