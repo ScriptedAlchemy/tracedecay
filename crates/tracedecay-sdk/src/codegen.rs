@@ -1,7 +1,3 @@
-//! Canonical SDK generator behind `src/bin/generate.rs`, which writes the
-//! checked-in Rust operation descriptors and TypeScript SDK sources. It is the
-//! single authority for both surfaces.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::Write as _;
@@ -15,7 +11,7 @@ use tracedecay_contracts::retained_surfaces::{
 };
 use tracedecay_contracts::{APPLICATION_REQUEST_ID_HEADER, sdk_executable_binding_registry};
 use tracedecay_tool_catalog::{
-    CancellationContract, CancellationPoint, DeadlineBehavior, EffectClass,
+    BindingSurface, CancellationContract, CancellationPoint, DeadlineBehavior, EffectClass,
     ExecutableUnavailableDispositionV1, IdempotencyContract, ReceiptContract,
     ReconciliationContract, SdkExecutableBindingAvailabilityV1, SdkExecutableBindingRegistryV1,
     SdkExecutableBindingV1, SdkTransportBindingV1, TerminalState,
@@ -82,6 +78,8 @@ struct UnavailableOperation {
 /// Repository-relative path of the checked-in Rust operation descriptors.
 const RUST_OPERATIONS_PATH: &str = "crates/tracedecay-sdk/src/operations.rs";
 
+const DASHBOARD_APPLICATION_PATH: &str = "dashboard/src/contracts/application.ts";
+
 /// Write the checked-in Rust descriptors and the TypeScript SDK sources under
 /// `<root>`.
 pub fn write_sdk_sources(root: &Path) -> Result<(), Box<dyn Error>> {
@@ -95,8 +93,14 @@ pub fn write_sdk_sources(root: &Path) -> Result<(), Box<dyn Error>> {
     let types = render_types();
     let typescript_operations = render_operations(&operations, &unavailable)?;
     let index = render_index();
+    let dashboard_application =
+        render_dashboard_application(&operations, &canonical_dashboard_bindings()?)?;
 
     write(&root.join(RUST_OPERATIONS_PATH), &rust_operations)?;
+    write(
+        &root.join(DASHBOARD_APPLICATION_PATH),
+        &dashboard_application,
+    )?;
     write(&destination.join("types.ts"), &types)?;
     write(&destination.join("operations.ts"), &typescript_operations)?;
     write(&destination.join("index.ts"), &index)?;
@@ -1032,9 +1036,78 @@ fn render_rust_operations(
 }
 
 fn render_types() -> String {
-    format!(
-        "{HEADER}{}",
-        r##"export type UnknownValue = string & {};
+    format!("{HEADER}{TYPES_SOURCE}")
+}
+
+fn render_dashboard_application(
+    operations: &[Operation],
+    dashboard_bindings: &BTreeMap<String, Vec<String>>,
+) -> Result<String, Box<dyn Error>> {
+    let mut out = format!("{HEADER}{TYPES_SOURCE}");
+    out.push_str(
+        "\nexport interface ApplicationHttpBinding { readonly bindingIds: readonly [string, ...string[]]; readonly resultSchema: { readonly schemaId: string; readonly revision: number }; readonly terminalStates: readonly string[]; readonly cancellation: CanonicalCancellation; readonly receipt: \"operation\" | \"durable_effect\"; readonly reconciliation: \"not_required\" | \"required\" }\n\
+         export const APPLICATION_HTTP_BINDINGS = {\n",
+    );
+    for operation in operations {
+        if !matches!(operation.transport, OperationTransport::Http { .. }) {
+            continue;
+        }
+        let mut binding_ids = vec![operation.binding.clone()];
+        binding_ids.extend(
+            dashboard_bindings
+                .get(&operation.binding)
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
+        emit!(
+            out,
+            "  {}: {{ bindingIds: {}, resultSchema: {{ schemaId: {}, revision: {} }}, terminalStates: {}, cancellation: {}, receipt: {}, reconciliation: {} }},",
+            quote(&operation.operation_id),
+            serde_json::to_string(&binding_ids)?,
+            quote(&operation.result_schema.id),
+            operation.result_schema.revision,
+            serde_json::to_string(&operation.terminal_states)?,
+            serde_json::to_string(&operation.cancellation)?,
+            serde_json::to_string(&operation.receipt)?,
+            serde_json::to_string(&operation.reconciliation)?,
+        );
+    }
+    out.push_str(
+        "} as const satisfies Readonly<Record<string, ApplicationHttpBinding>>;\n\
+         export type ApplicationHttpOperationId = keyof typeof APPLICATION_HTTP_BINDINGS;\n\
+         export function decodeApplicationHttpSuccess<T>(operationId: ApplicationHttpOperationId, value: unknown, decode: Decoder<T>): HttpSuccessEnvelope<T> { const binding: ApplicationHttpBinding = APPLICATION_HTTP_BINDINGS[operationId]; const answered = typeof value === \"object\" && value !== null ? (value as { binding_id?: unknown }).binding_id : undefined; const bindingId = binding.bindingIds.find((candidate) => candidate === answered) ?? binding.bindingIds[0]; return decodeHttpSuccessEnvelope(value, bindingId, binding.resultSchema.schemaId, binding.resultSchema.revision, binding.terminalStates, binding.cancellation, binding.receipt, binding.reconciliation, decode); }\n",
+    );
+    Ok(out)
+}
+
+fn canonical_dashboard_bindings() -> Result<BTreeMap<String, Vec<String>>, Box<dyn Error>> {
+    let snapshot = tracedecay_contracts::catalog_composition::application_catalog_snapshot()?;
+    let mut by_http_binding = BTreeMap::new();
+    for capability in snapshot.capabilities() {
+        let surface_bindings = capability
+            .binding_ids()
+            .iter()
+            .filter_map(|binding_id| snapshot.binding(binding_id))
+            .collect::<Vec<_>>();
+        let dashboard = surface_bindings
+            .iter()
+            .filter(|binding| binding.surface() == BindingSurface::Dashboard)
+            .map(|binding| binding.binding_id().as_str().to_owned())
+            .collect::<Vec<_>>();
+        if dashboard.is_empty() {
+            continue;
+        }
+        for binding in surface_bindings {
+            if binding.surface() == BindingSurface::Http {
+                by_http_binding.insert(binding.binding_id().as_str().to_owned(), dashboard.clone());
+            }
+        }
+    }
+    Ok(by_http_binding)
+}
+
+const TYPES_SOURCE: &str = r##"export type UnknownValue = string & {};
 export type RetryDirective = "never" | "same_request" | "after_delay" | "after_revalidate" | "after_reconcile" | UnknownValue;
 export type LegalAction = "correct_request" | "reauthorize" | "refresh" | "retry" | "reconcile" | "reset" | "contact_administrator" | UnknownValue;
 export type OperationTermination = "completed" | "cancelled" | "timed_out" | "failed" | "unavailable" | "partial" | "effect_unknown" | UnknownValue;
@@ -1096,16 +1169,309 @@ function unsignedInteger(value: unknown, field: string): number { const result =
 const UTF8_ENCODER = new TextEncoder();
 // Mirrors the application identifier contract: non-empty, trimmed, bounded in UTF-8 bytes, and free of control characters.
 function identifier(value: unknown, field: string, maximumBytes: number): string { const result = string(value, field); if (result.length === 0 || result.trim() !== result || UTF8_ENCODER.encode(result).byteLength > maximumBytes || /\p{Cc}/u.test(result)) throw new TypeError(`malformed canonical envelope: ${field} is not a bounded identifier`); return result; }
-function receipt(value: unknown, legalTerminations: readonly string[], cancellationContract: CanonicalCancellation): OperationReceipt { const result = record(value, "outcome.value.execution"); number(result.started_at, "execution.started_at"); number(result.ended_at, "execution.ended_at"); if (!("effective_deadline" in result) || !("cancellation" in result)) throw new TypeError("malformed canonical envelope: receipt fields are required"); const budget = record(result.budget, "execution.budget"); number(budget.units_consumed, "budget.units_consumed"); number(budget.bytes_consumed, "budget.bytes_consumed"); number(budget.elapsed_micros, "budget.elapsed_micros"); const termination = string(result.termination, "execution.termination"); if (!legalTerminations.includes(termination)) throw new TypeError(`malformed canonical envelope: termination ${termination} is not legal for this operation`); if (result.cancellation !== null) { const contract = record(cancellationContract, "operation.cancellation"); const mode = string(contract.mode, "operation.cancellation.mode"); if (mode === "not_cancellable") throw new TypeError("malformed canonical envelope: non-cancellable operation returned cancellation evidence"); const observation = record(result.cancellation, "execution.cancellation"); const stage = string(observation.stage, "execution.cancellation.stage"); const points = array(contract.points, "operation.cancellation.points"); if (!points.includes(stage)) throw new TypeError(`malformed canonical envelope: cancellation stage ${stage} is not legal for this operation`); } return result as unknown as OperationReceipt; }
+function receipt(value: unknown, legalTerminations: readonly string[], cancellationContract: CanonicalCancellation): OperationReceipt { const result = record(value, "outcome.value.execution"); number(result.started_at, "execution.started_at"); number(result.ended_at, "execution.ended_at"); if (!("effective_deadline" in result) || !("cancellation" in result)) throw new TypeError("malformed canonical envelope: receipt fields are required"); const budget = record(result.budget, "execution.budget"); number(budget.units_consumed, "budget.units_consumed"); number(budget.bytes_consumed, "budget.bytes_consumed"); number(budget.elapsed_micros, "budget.elapsed_micros"); const termination = string(result.termination, "execution.termination"); if (!legalTerminations.includes(termination)) throw new TypeError(`malformed canonical envelope: termination ${termination} is not legal for this operation`); if ((termination === "cancelled" || termination === "timed_out") && result.cancellation === null) throw new TypeError("malformed canonical envelope: terminal cancellation observation is required"); if (result.cancellation !== null) { const contract = record(cancellationContract, "operation.cancellation"); const mode = string(contract.mode, "operation.cancellation.mode"); const observation = record(result.cancellation, "execution.cancellation"); const stage = string(observation.stage, "execution.cancellation.stage"); safeInteger(observation.observed_at, "execution.cancellation.observed_at"); if (!["before_admission", "before_read", "during_read", "before_effect", "effect_in_flight", "reconciling", "after_commit"].includes(stage)) throw new TypeError(`malformed canonical envelope: unknown cancellation stage ${stage}`); if (mode === "not_cancellable") { if (termination !== "timed_out") throw new TypeError("malformed canonical envelope: non-cancellable operation returned cancellation evidence"); } else { const points = array(contract.points, "operation.cancellation.points"); if (!points.includes(stage)) throw new TypeError(`malformed canonical envelope: cancellation stage ${stage} is not legal for this operation`); } } return result as unknown as OperationReceipt; }
 // Page cursors are opaque bounded application identifiers (OpaqueCursor: 4 096 bytes) bound to the request that minted them.
 function pageCursor(value: unknown): PageCursor { const result = record(value, "page.cursor"); const kind = string(result.kind, "page.cursor.kind"); if (kind === "opaque") identifier(result.cursor, "page.cursor.cursor", 4_096); else throw new TypeError(`malformed canonical envelope: unsupported page cursor kind ${kind}`); return result as PageCursor; }
 // Sort contracts are catalog identifiers (MAX_CATALOG_IDENTIFIER_BYTES: 192); a page never returns more than its total.
 function page(value: unknown): PageState { const result = record(value, "outcome.value.page"); identifier(result.sort_contract_id, "page.sort_contract_id", 192); const revision = unsignedInteger(result.sort_revision, "page.sort_revision"); if (revision < 1) throw new TypeError("malformed canonical envelope: page sort_revision must be positive"); const total = result.total === null ? null : unsignedInteger(result.total, "page.total"); const returned = unsignedInteger(result.returned, "page.returned"); if (total !== null && returned > total) throw new TypeError("malformed canonical envelope: page returned exceeds total"); if (result.cursor !== null) pageCursor(result.cursor); if (result.expires_at !== null) safeInteger(result.expires_at, "page.expires_at"); return result as PageState; }
 function outcome<T>(kind: string, value: unknown, legalTerminations: readonly string[], cancellationContract: CanonicalCancellation, receiptContract: "operation" | "durable_effect", reconciliationContract: "not_required" | "required", decode: Decoder<T>): EvidencePacket<T> | PreviewResult<T> | EffectResult<T> { const result = record(value, "outcome.value"); if (!("payload" in result)) throw new TypeError("malformed canonical envelope: outcome.value.payload is required"); const lifecycleShapeIsLegal = (receiptContract === "durable_effect" && reconciliationContract === "required" && kind === "effect") || (receiptContract === "operation" && reconciliationContract === "not_required" && (kind === "evidence" || kind === "preview")); if (!lifecycleShapeIsLegal) throw new TypeError(`malformed canonical envelope: outcome ${kind} is outside the operation receipt contract`); receipt(result.execution, legalTerminations, cancellationContract); if (kind === "evidence") { record(result.temporal, "temporal"); record(result.authority, "authority"); array(result.evidence_authorities, "evidence_authorities"); record(result.coverage, "coverage"); array(result.omissions, "omissions"); array(result.scores, "scores"); array(result.contributions, "contributions"); page(result.page); } else if (kind === "preview") { string(result.preview_id, "preview_id"); string(result.preview_digest, "preview_digest"); string(result.effect_class, "effect_class"); record(result.authority, "authority"); string(result.expected_state, "expected_state"); } else if (kind === "effect") { string(result.effect_id, "effect_id"); string(result.effect_class, "effect_class"); string(result.idempotency_key, "idempotency_key"); record(result.authority, "authority"); string(result.expected_state, "expected_state"); string(result.reconciliation, "reconciliation"); record(result.receipt, "receipt"); } else throw new TypeError(`malformed canonical envelope: unsupported outcome ${kind}`); return { ...result, payload: result.payload === null ? null : decode(result.payload) } as unknown as EvidencePacket<T> | PreviewResult<T> | EffectResult<T>; }
 export function decodeHttpSuccessEnvelope<T>(value: unknown, binding: string, schema: string, revision: number, legalTerminations: readonly string[], cancellationContract: CanonicalCancellation, receiptContract: "operation" | "durable_effect", reconciliationContract: "not_required" | "required", decode: Decoder<T>): HttpSuccessEnvelope<T> { const envelope = record(value, "success envelope"); if (string(envelope.binding_id, "binding_id") !== binding) throw new TypeError("malformed canonical envelope: binding mismatch"); const contract = record(envelope.contract, "contract"); if (string(contract.schema_id, "contract.schema_id") !== schema || number(contract.schema_revision, "contract.schema_revision") !== revision) throw new TypeError("malformed canonical envelope: result contract mismatch"); string(envelope.request_id, "request_id"); record(envelope.scope, "scope"); const outer = record(envelope.outcome, "outcome"); const kind = string(outer.outcome, "outcome.outcome"); return { ...envelope, outcome: { ...outer, outcome: kind, value: outcome(kind, outer.value, legalTerminations, cancellationContract, receiptContract, reconciliationContract, decode) } } as unknown as HttpSuccessEnvelope<T>; }
-"##
-    )
+const MAX_REQUEST_ID_BYTES = 512;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+function isSafeUnsignedInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value);
+}
+
+function isBoundedOpaqueString(value: unknown, maximumBytes: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.trim() === value &&
+    UTF8_ENCODER.encode(value).byteLength <= maximumBytes &&
+    !/\p{Cc}/u.test(value)
+  );
+}
+
+function isContract(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isBoundedOpaqueString(value.schema_id, 512) &&
+    isSafeUnsignedInteger(value.schema_revision) &&
+    value.schema_revision > 0
+  );
+}
+
+function isDiagnostic(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.code === "string" &&
+    typeof value.message === "string"
+  );
+}
+
+function isProblemDetail(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  switch (value.kind) {
+    case "parked":
+      return (
+        typeof value.cause === "string" &&
+        typeof value.remedy === "string" &&
+        typeof value.retries_on_wake === "boolean"
+      );
+    case "stale_refresh_frontier":
+      return (
+        isSafeUnsignedInteger(value.requested) &&
+        isSafeUnsignedInteger(value.committed) &&
+        isSafeUnsignedInteger(value.active)
+      );
+    case "stale_precondition":
+      return (
+        typeof value.field === "string" &&
+        isSafeUnsignedInteger(value.requested) &&
+        isSafeUnsignedInteger(value.current)
+      );
+    case "lock_deadline":
+      return typeof value.resource === "string" && isSafeUnsignedInteger(value.deadline_ms);
+    case "diagnostics_unsupported":
+      return (
+        (value.file === null || typeof value.file === "string") &&
+        Array.isArray(value.searched) &&
+        value.searched.every(
+          (candidate) =>
+            isRecord(candidate) &&
+            typeof candidate.path === "string" &&
+            typeof candidate.present === "boolean",
+        )
+      );
+    case "diagnostics_pending":
+      return (
+        typeof value.producer === "string" &&
+        (value.generation === null || typeof value.generation === "string")
+      );
+    case "code_graph_rewarming":
+      return isSafeUnsignedInteger(value.retry_after_millis);
+    case "reset_required":
+      return (
+        typeof value.authority === "string" &&
+        (value.found_version === null || isSafeInteger(value.found_version)) &&
+        (value.required_version === null || isSafeInteger(value.required_version)) &&
+        typeof value.reason === "string" &&
+        typeof value.remedy === "string"
+      );
+    default:
+      return false;
+  }
+}
+
+export function isHttpProblemEnvelope(value: unknown): value is HttpProblemEnvelope {
+  if (
+    !isRecord(value) ||
+    (value.binding_id !== undefined && typeof value.binding_id !== "string") ||
+    !isContract(value.contract) ||
+    !isBoundedOpaqueString(value.request_id, MAX_REQUEST_ID_BYTES) ||
+    !isRecord(value.problem)
+  ) {
+    return false;
+  }
+  const problem = value.problem;
+  const kinds = [
+    "invalid_request", "not_found_or_not_authorized", "conflict", "partial_effect",
+    "stale", "unsupported", "unavailable", "execution_failed", "reset_required",
+    "saturated", "cancelled", "timed_out",
+  ];
+  const cancellationStages = [
+    "before_admission", "before_read", "during_read", "before_effect", "effect_in_flight",
+  ];
+  const unavailableClasses = [
+    "authority", "backend_unavailable", "backend_disconnected", "backend_retryable",
+  ];
+  const executionFailureClasses = ["denied", "malformed_output", "permanent"];
+  const legalActions = Array.isArray(problem.legal_actions)
+    ? problem.legal_actions
+    : null;
+  const detailKinds = ["stale", "unsupported", "unavailable", "reset_required", "saturated"];
+  const diagnosticKinds = [
+    "invalid_request", "conflict", "partial_effect", "stale", "unsupported",
+    "unavailable", "execution_failed", "reset_required", "saturated",
+  ];
+  const expectedRetryScope =
+    problem.retry === "never"
+      ? null
+      : problem.retry === "same_request" || problem.retry === "after_delay"
+        ? "same_request"
+        : problem.retry === "after_revalidate"
+          ? "fresh_request"
+          : problem.retry === "after_reconcile"
+            ? "same_operation"
+            : undefined;
+  const validShape =
+    problem.revision === 1 &&
+    typeof problem.kind === "string" && kinds.includes(problem.kind) &&
+    typeof problem.code === "string" &&
+    typeof problem.message === "string" &&
+    (problem.diagnostic === null || isDiagnostic(problem.diagnostic)) &&
+    "detail" in problem &&
+    (problem.detail === null || isProblemDetail(problem.detail)) &&
+    "committed_receipt" in problem &&
+    typeof problem.owning_layer === "string" &&
+    typeof problem.terminality === "string" &&
+    typeof problem.retryable === "boolean" &&
+    typeof problem.retry === "string" &&
+    (problem.retry_scope === null || typeof problem.retry_scope === "string") &&
+    (problem.retry_after_millis === null ||
+      isSafeUnsignedInteger(problem.retry_after_millis)) &&
+    "cancellation_stage" in problem &&
+    (problem.cancellation_stage === null ||
+      (typeof problem.cancellation_stage === "string" &&
+        cancellationStages.includes(problem.cancellation_stage))) &&
+    "unavailable_classification" in problem &&
+    (problem.unavailable_classification === null ||
+      (typeof problem.unavailable_classification === "string" &&
+        unavailableClasses.includes(problem.unavailable_classification))) &&
+    "execution_failure_classification" in problem &&
+    (problem.execution_failure_classification === null ||
+      (typeof problem.execution_failure_classification === "string" &&
+        executionFailureClasses.includes(problem.execution_failure_classification))) &&
+    problem.request_id === value.request_id &&
+    isBoundedOpaqueString(problem.trace_id, MAX_REQUEST_ID_BYTES) &&
+    Array.isArray(problem.details) &&
+    problem.details.every(isDiagnostic) &&
+    legalActions !== null &&
+    legalActions.every((action) => typeof action === "string") &&
+    "coverage" in problem;
+  if (!validShape || legalActions === null) {
+    return false;
+  }
+  const admittedStage =
+    problem.cancellation_stage !== null &&
+    problem.cancellation_stage !== "before_admission";
+  const admittedUnavailable =
+    problem.unavailable_classification !== null &&
+    problem.unavailable_classification !== "authority";
+  const expectedAdmitted =
+    problem.kind === "partial_effect" ||
+    problem.kind === "reset_required" ||
+    problem.kind === "execution_failed" ||
+    admittedStage ||
+    admittedUnavailable;
+  if (
+    problem.terminality !==
+      (expectedAdmitted ? "admitted_terminal" : "pre_admission") ||
+    (problem.kind === "unavailable") !==
+      (problem.unavailable_classification !== null) ||
+    (problem.kind === "execution_failed") !==
+      (problem.execution_failure_classification !== null) ||
+    (problem.kind === "cancelled" || problem.kind === "timed_out") !==
+      (problem.cancellation_stage !== null) ||
+    (problem.diagnostic !== null) !==
+      (typeof problem.kind === "string" && diagnosticKinds.includes(problem.kind)) ||
+    (problem.detail !== null &&
+      !(typeof problem.kind === "string" && detailKinds.includes(problem.kind))) ||
+    problem.retryable !== (problem.retry !== "never") ||
+    expectedRetryScope === undefined ||
+    problem.retry_scope !== expectedRetryScope ||
+    (problem.retry === "after_delay") !==
+      (problem.retry_after_millis !== null)
+  ) {
+    return false;
+  }
+  if (problem.kind === "partial_effect") {
+    return (
+      problem.terminality === "admitted_terminal" &&
+      problem.retryable === false &&
+      problem.retry === "never" &&
+      isCommittedEffectReceipt(problem.committed_receipt, value.request_id) &&
+      legalActions.length === 1 &&
+      legalActions[0] === "reconcile"
+    );
+  }
+  if (problem.kind === "reset_required") {
+    return (
+      problem.terminality === "admitted_terminal" &&
+      problem.retryable === false &&
+      problem.retry === "never" &&
+      problem.committed_receipt === null &&
+      legalActions.length === 1 &&
+      legalActions[0] === "reset"
+    );
+  }
+  if (
+    problem.kind === "unavailable" &&
+    problem.unavailable_classification !== "authority"
+  ) {
+    return (
+      problem.terminality === "admitted_terminal" &&
+      problem.retryable === true &&
+      problem.retry === "after_revalidate" &&
+      problem.committed_receipt === null &&
+      legalActions.length === 1 &&
+      legalActions[0] === "retry"
+    );
+  }
+  if (problem.kind === "execution_failed") {
+    return (
+      problem.terminality === "admitted_terminal" &&
+      problem.retryable === false &&
+      problem.retry === "never" &&
+      problem.committed_receipt === null &&
+      legalActions.length === 1 &&
+      legalActions[0] === "contact_administrator"
+    );
+  }
+  return problem.committed_receipt === null;
+}
+
+function isCommittedEffectReceipt(value: unknown, requestId: string): boolean {
+  return (
+    isRecord(value) &&
+    value.request_id === requestId &&
+    value.outcome === "partial" &&
+    typeof value.operation === "string" &&
+    typeof value.effect_class === "string" &&
+    typeof value.idempotency_key === "string" &&
+    typeof value.input_digest === "string" &&
+    (typeof value.committed_state === "string" ||
+      typeof value.external_proof === "string")
+  );
+}
+
+export function applicationProblemStatusMatches(status: number, kind: string): boolean {
+  switch (kind) {
+    case "invalid_request":
+      return status === 400;
+    case "not_found_or_not_authorized":
+      return status === 404;
+    case "conflict":
+    case "partial_effect":
+    case "stale":
+      return status === 409;
+    case "unsupported":
+      return status === 422;
+    case "unavailable":
+    case "reset_required":
+      return status === 503;
+    case "execution_failed":
+      return status === 500;
+    case "saturated":
+      return status === 429;
+    case "cancelled":
+      return status === 408;
+    case "timed_out":
+      return status === 504;
+    default:
+      return false;
+  }
+}
+"##;
 
 fn render_index() -> String {
     format!(
@@ -1129,7 +1495,7 @@ fn quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
 
     use serde_json::{Value, json};
@@ -1224,6 +1590,29 @@ mod tests {
             render_schema_type(&schema).unwrap(),
             "readonly (readonly [string, string])[]"
         );
+    }
+
+    #[test]
+    fn dashboard_bindings_carry_each_http_operations_contract_and_skip_mcp_tools() {
+        let http = read_operation("views", json!({}), json!({}));
+        let mut mcp = read_operation("tool_only", json!({}), json!({}));
+        mcp.transport = OperationTransport::McpTool {
+            tool_name: "tool_only".to_owned(),
+        };
+
+        let dashboard = BTreeMap::from([(
+            "binding.http.test.views".to_owned(),
+            vec!["binding.dashboard.views.v1".to_owned()],
+        )]);
+
+        let generated =
+            super::render_dashboard_application(&[http, mcp], &dashboard).expect("rendered");
+
+        assert!(generated.contains(super::TYPES_SOURCE));
+        assert!(generated.contains(
+            "  \"operation.test.views\": { bindingIds: [\"binding.http.test.views\",\"binding.dashboard.views.v1\"], resultSchema: { schemaId: \"schema.test.views.result\", revision: 1 }, terminalStates: [\"completed\"], cancellation: {\"mode\":\"not_cancellable\"}, receipt: \"operation\", reconciliation: \"not_required\" },"
+        ));
+        assert!(!generated.contains("operation.test.tool_only"));
     }
 
     #[test]

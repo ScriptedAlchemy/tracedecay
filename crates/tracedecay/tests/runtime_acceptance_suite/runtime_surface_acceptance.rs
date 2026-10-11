@@ -1285,7 +1285,7 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
         .as_str()
         .expect("initial configuration revision")
         .to_owned();
-    let get_arguments = serde_json::json!({ "key": "diagnostics.prewarm.v1" });
+    let get_arguments = serde_json::json!({ "key": "telemetry.timings.v1" });
     let current = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::ConfigurationGet,
         RequestId::new("request.configuration.mcp-get-before").unwrap(),
@@ -1301,14 +1301,14 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
     .expect("MCP configuration get");
     let initial_value = successful_application(&current)["effective_value"]["value"]
         .as_bool()
-        .expect("initial diagnostics prewarm value");
+        .expect("initial telemetry timings value");
     let next_value = !initial_value;
     let set_arguments = serde_json::json!({
         "layer": {
             "kind": "project",
             "project_id": project_id,
         },
-        "key": "diagnostics.prewarm.v1",
+        "key": "telemetry.timings.v1",
         "value": {
             "kind": "boolean",
             "value": next_value,
@@ -1359,7 +1359,7 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
             "kind": "project",
             "project_id": project_id,
         },
-        "key": "diagnostics.prewarm.v1",
+        "key": "telemetry.timings.v1",
         "value": {
             "kind": "boolean",
             "value": initial_value,
@@ -1400,7 +1400,7 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
                     "kind": "project",
                     "project_id": project_id,
                 },
-                "key": "diagnostics.prewarm.v1",
+                "key": "telemetry.timings.v1",
                 "expected_revision": current_revision,
                 "idempotency_key": "configuration.idempotency.mcp-unset",
             }),
@@ -1424,7 +1424,7 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
         RequestId::new("request.configuration.mcp-get-restored").unwrap(),
         parse_application_surface_request(
             ApplicationSurfaceOperation::ConfigurationGet,
-            serde_json::json!({ "key": "diagnostics.prewarm.v1" }),
+            serde_json::json!({ "key": "telemetry.timings.v1" }),
         )
         .unwrap(),
         RequestedOutputFormat::Json,
@@ -1786,11 +1786,11 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
         String::from_utf8(source_body_markdown.stdout).expect("CLI source_body Markdown is UTF-8");
     assert!(
         source_body_markdown
-            .starts_with("## source\\_body\n\n### Payload\n\n    src/auth/login.rs:"),
+            .starts_with("## source\\_body\n\n### Payload\n\n```text\nsrc/auth/login.rs:"),
         "source payload must be the first rendered field: {source_body_markdown}"
     );
     assert!(
-        source_body_markdown.contains("        Ok(create_session(username))"),
+        source_body_markdown.contains("\n    Ok(create_session(username))\n"),
         "source payload must contain the retrieved body: {source_body_markdown}"
     );
 }

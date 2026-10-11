@@ -28,28 +28,9 @@ import {
   workRoute,
   workTerminal,
 } from '../../../test/workAttemptFixture.ts';
+import { applicationProblem, applicationSuccess } from '../../../test/applicationEnvelope.ts';
 import { workGraphRead, type WorkGraphVersionSpec } from '../../../test/workGraphFixture.ts';
 import { WorkPage } from '../WorkPage.tsx';
-
-/** The application envelope every Work route answers in. */
-function workEnvelope(payload: unknown, bindingId: string) {
-  return {
-    kind: 'success',
-    value: {
-      binding_id: bindingId,
-      contract: { schema_id: 'schema.work.result', schema_revision: 1 },
-      request_id: 'request-1',
-      scope: {
-        project_id: 'project.work',
-        repository_id: 'repository.work',
-        worktree_id: 'worktree.work',
-        reference: null,
-        scope_digest: 'sha256:scope',
-      },
-      outcome: { outcome: 'evidence', value: { payload } },
-    },
-  };
-}
 
 /**
  * The execution record behind the graph above: one task that took two attempts
@@ -110,7 +91,7 @@ const VIEWS_GRAPH: WorkGraphVersionSpec = {
 function viewsBody(spec: WorkGraphVersionSpec = VIEWS_GRAPH) {
   return {
     status: 200,
-    body: workEnvelope(workGraphRead(spec), 'binding.http.work.views'),
+    body: applicationSuccess('operation.work.views', workGraphRead(spec)),
   };
 }
 
@@ -153,7 +134,8 @@ function topologyBody(
 ) {
   return {
     status: 200,
-    body: workEnvelope(
+    body: applicationSuccess(
+      'operation.work.topology',
       {
         state: 'view',
         topology: { generation, task_count: 6 },
@@ -180,7 +162,6 @@ function topologyBody(
           protected_refs: [],
         },
       },
-      'binding.http.work.topology',
     ),
   };
 }
@@ -191,21 +172,21 @@ function topologyBody(
 function serveWork(
   attempts: { status: number; body: unknown } = {
     status: 200,
-    body: workEnvelope(workAttemptList(ATTEMPTS), 'binding.http.work.list_attempts'),
+    body: applicationSuccess('operation.work.list_attempts', workAttemptList(ATTEMPTS)),
   },
   views: { status: number; body: unknown } = viewsBody(),
   topology: { status: number; body: unknown } = topologyBody(),
   executionHistory: { status: number; body: unknown } = {
     status: 503,
-    body: { kind: 'problem' },
+    body: applicationProblem('unavailable'),
   },
   proximity: { status: number; body: unknown } = {
     status: 503,
-    body: { kind: 'problem' },
+    body: applicationProblem('unavailable'),
   },
   evidence: { status: number; body: unknown } = {
     status: 503,
-    body: { kind: 'problem' },
+    body: applicationProblem('unavailable'),
   },
 ) {
   serve((url) =>
@@ -221,7 +202,7 @@ function serveWork(
         ? views
         : url.includes('/work/topology')
           ? topology
-        : { status: 503, body: { kind: 'problem' } },
+        : { status: 503, body: applicationProblem('unavailable') },
   );
 }
 
@@ -408,17 +389,17 @@ describe('the projection switcher', () => {
    * projection that is merely absent.
    */
   it('keeps the camera and the region it controls when the read refuses', async () => {
-    serve(() => ({ status: 503, body: { kind: 'problem', value: { problem: {} } } }));
+    serve(() => ({ status: 503, body: applicationProblem('unavailable') }));
     const { container } = renderPage('/work?view=dag');
 
-    await waitFor(() => expect(screen.getByText(/Work runtime is unavailable/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/fixture unavailable problem/)).toBeTruthy());
     expect(screen.getByRole('tablist', { name: 'Work projection' })).toBeTruthy();
     expect(container.querySelector('[data-work-view]')).toBeNull();
 
     // The refusal is what the camera is now pointed at, so it belongs inside
     // the region the tabs control rather than beside it.
     const panel = screen.getByRole('tabpanel');
-    expect(within(panel).getByText(/Work runtime is unavailable/)).toBeTruthy();
+    expect(within(panel).getByText(/fixture unavailable problem/)).toBeTruthy();
     expect(danglingReferences(container)).toEqual([]);
   });
 });
@@ -583,14 +564,14 @@ describe('the execution record', () => {
   it('states a capped page as a floor rather than totalling what it did not read', async () => {
     serveWork({
       status: 200,
-      body: workEnvelope(
+      body: applicationSuccess(
+        'operation.work.list_attempts',
         workAttemptList(ATTEMPTS, {
           coverage: 'capped',
           remaining: 41,
           resume: 'bc1.resume',
           returned: 3,
         }),
-        'binding.http.work.list_attempts',
       ),
     });
     const container = await openTimeline();
@@ -607,13 +588,13 @@ describe('the execution record', () => {
    * what happened.
    */
   it('draws a refused attempt read as a refusal, never as an empty record', async () => {
-    serveWork({ status: 409, body: { kind: 'problem', value: { problem: {} } } });
+    serveWork({ status: 409, body: applicationProblem('conflict') });
     const container = await openTimeline();
 
     const record = container.querySelector<HTMLElement>('[data-work-execution-record]');
     expect(record?.getAttribute('data-work-execution-record')).toBe('refused');
     // The daemon's sentence, inside the record rather than only on its chip.
-    expect(within(record as HTMLElement).getByText(/the task moved since it was read/)).toBeTruthy();
+    expect(within(record as HTMLElement).getByText(/fixture conflict problem/)).toBeTruthy();
     // Nothing measured is drawn: no executor row, no chain, no ladder.
     expect(container.querySelector('[data-work-executor]')).toBeNull();
     expect(container.querySelector('[data-work-lineage]')).toBeNull();
@@ -625,7 +606,7 @@ describe('the execution record', () => {
   it('reports a typed absence as an absence its policy will not disambiguate', async () => {
     serveWork({
       status: 200,
-      body: workEnvelope({ state: 'absent' }, 'binding.http.work.list_attempts'),
+      body: applicationSuccess('operation.work.list_attempts', { state: 'absent' }),
     });
     const container = await openTimeline();
 
@@ -656,7 +637,7 @@ describe('the execution-topology lens', () => {
   }
 
   it('draws a refused canonical topology read as a refusal, never as an empty lane set', async () => {
-    serveWork(undefined, viewsBody(), { status: 503, body: { kind: 'problem' } });
+    serveWork(undefined, viewsBody(), { status: 503, body: applicationProblem('unavailable') });
     const container = await openTopology();
 
     expect(container.querySelector('[data-work-topology-lane]')).toBeNull();
@@ -664,7 +645,7 @@ describe('the execution-topology lens', () => {
     expect(absences.length).toBeGreaterThan(0);
     expect(
       Array.from(absences).some((absence) =>
-        (absence.textContent ?? '').includes('the Work runtime is unavailable'),
+        (absence.textContent ?? '').includes('fixture unavailable problem'),
       ),
     ).toBe(true);
   });
@@ -734,12 +715,12 @@ describe('the execution-topology lens', () => {
     serveWork(
       {
         status: 200,
-        body: workEnvelope(
+        body: applicationSuccess(
+          'operation.work.list_attempts',
           {
             ...mismatchedAttempts,
             topology: { ...mismatchedAttempts.topology, generation: 'generation-attempt' },
           },
-          'binding.http.work.list_attempts',
         ),
       },
       viewsBody({ ...VIEWS_GRAPH, generationId: 'generation-graph' }),

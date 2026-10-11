@@ -17,6 +17,7 @@ use crate::mcp_server_test::support::{
     jsonrpc_request, response_with_id, run_client_connection_with_messages,
 };
 use crate::support::{TestTraceDecay, open_active_project_scoped_runtime, refusal_problem};
+use tracedecay_runtime_core::path_safety::plain_host_path;
 
 const PROBE_ID: &str = "probe-skill";
 const OTHER_ID: &str = "other-skill";
@@ -180,11 +181,9 @@ async fn skill_view_returns_the_requested_package_and_withholds_support_bytes() 
     create_managed_skill(&fixture.profile_root, other_draft())
         .await
         .expect("other skill");
-    let profile_root = fixture
-        .profile_root
-        .to_str()
-        .expect("profile root is utf-8")
-        .to_string();
+    let profile_root = plain_host_path(&fixture.profile_root)
+        .to_string_lossy()
+        .into_owned();
 
     let summary = call_skill_view(
         &fixture.server,

@@ -64,6 +64,7 @@ pub(super) struct WorktreeResidencyV1 {
     retained_parses: SharedRetainedParsePool,
     last_used: Mutex<Instant>,
     refresh_waits_for_memory: AtomicBool,
+    park_release_after_pass_armed: AtomicBool,
 }
 
 pub(super) struct WorktreeResidencyPartsV1 {
@@ -92,6 +93,7 @@ impl WorktreeResidencyV1 {
             retained_parses: parts.retained_parses,
             last_used: Mutex::new(Instant::now()),
             refresh_waits_for_memory: AtomicBool::new(false),
+            park_release_after_pass_armed: AtomicBool::new(false),
         }
     }
 
@@ -162,6 +164,7 @@ impl WorktreeResidencyV1 {
     /// re-decode.
     pub(super) fn release_decode_when_parked(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
         if self.busy() {
+            self.arm_park_release_after_pass_settles(owners);
             return;
         }
         if !self
@@ -273,6 +276,30 @@ impl WorktreeResidencyV1 {
             return;
         }
         owners.note_headroom();
+    }
+
+    fn arm_park_release_after_pass_settles(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
+        if self
+            .park_release_after_pass_armed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let mut passes = self.reconcile_in_progress.subscribe();
+        let residency = Arc::downgrade(self);
+        let owners = Arc::downgrade(owners);
+        tokio::spawn(async move {
+            if passes.wait_for(|passes| !passes.running()).await.is_err() {
+                return;
+            }
+            if let (Some(residency), Some(owners)) = (residency.upgrade(), owners.upgrade()) {
+                residency
+                    .park_release_after_pass_armed
+                    .store(false, Ordering::Release);
+                residency.release_decode_when_parked(&owners);
+            }
+        });
     }
 
     /// The first catalog warm finishes on a blocking task and does not wake

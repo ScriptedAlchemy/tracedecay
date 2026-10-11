@@ -213,11 +213,8 @@ fn observation_source_ids_are_private_and_follow_native_transcript_identity() {
 
 #[test]
 fn claude_checked_in_assistant_fixture_crosses_the_canonical_boundary() {
-    let path = format!(
-        "{}/../../tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let bytes = std::fs::read(&path).unwrap();
+    let path = "../../tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json";
+    let bytes = std::fs::read(path).unwrap();
     let range = tracedecay_domain::ObservationSourceRangeV1::new(0, bytes.len() as u64).unwrap();
     let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         &bytes,
@@ -353,11 +350,8 @@ fn claude_checked_in_mixed_blocks_keep_authored_message_and_typed_order() {
 
 #[test]
 fn claude_workflow_lookalike_emits_no_workflow_lifecycle() {
-    let path = format!(
-        "{}/../../tests/fixtures/provider_normalization/claude/workflow_lookalike.input.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let bytes = std::fs::read(&path).unwrap();
+    let path = "../../tests/fixtures/provider_normalization/claude/workflow_lookalike.input.json";
+    let bytes = std::fs::read(path).unwrap();
     let range = tracedecay_domain::ObservationSourceRangeV1::new(0, bytes.len() as u64).unwrap();
     let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         &bytes,

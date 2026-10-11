@@ -4,7 +4,6 @@ use crate::memory::encoding::HolographicEncoder;
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
 use tracedecay_runtime_core::db::engine::params;
 
-use amari_holographic::{BindingAlgebra, FHRRAlgebra};
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::{
     FactReadControl, FactStoreResult, ProjectMemoryMemoryAlgebraV1,
@@ -28,11 +27,10 @@ struct StatusCounts {
     rated_fact_count: u64,
 }
 
-fn estimated_holographic_capacity() -> FactStoreResult<u64> {
-    u64::try_from(
-        FHRRAlgebra::<{ HolographicEncoder::DIMENSIONS }>::fhrr_identity().theoretical_capacity(),
-    )
-    .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))
+/// The FHRR superposition capacity estimate D / ln(D), not a fact-store limit.
+fn estimated_holographic_capacity() -> u64 {
+    let dimensions = HolographicEncoder::DIMENSIONS as f64;
+    (dimensions / dimensions.ln()) as u64
 }
 
 async fn project_memory_owner_status_counts_tx(
@@ -165,7 +163,7 @@ pub(super) async fn project_memory_status_tx(
         ProjectMemoryMemoryAlgebraV1::new(
             "amari_fhrr".to_owned(),
             HolographicEncoder::DIMENSIONS as u64,
-            estimated_holographic_capacity()?,
+            estimated_holographic_capacity(),
         )?,
         counts.trust[0],
         counts.trust[1],
@@ -182,4 +180,12 @@ pub(super) async fn project_memory_status_tx(
             feedback_total,
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn published_capacity_estimate_stays_at_the_2048_dimension_value() {
+        assert_eq!(super::estimated_holographic_capacity(), 268);
+    }
 }

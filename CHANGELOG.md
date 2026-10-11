@@ -5,10 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.84](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.83...v1.0.0-beta.84) (2026-10-11)
+
+### Features
+
+* **mcp:** keep every tool callable with stubbed deferred schemas ([8f55196](https://github.com/ScriptedAlchemy/tracedecay/commit/8f55196c308a06dceceacd10384359a460666f7f))
+* **search:** trim weak ranked tails only when bytes are saved ([fac68aa](https://github.com/ScriptedAlchemy/tracedecay/commit/fac68aabc8405983afe86c47041026b1b2a99fe9))
+* **serve:** hint when a tool call nearly repeats a recent one ([7ff5299](https://github.com/ScriptedAlchemy/tracedecay/commit/7ff5299234197a2ca804dab2b6a4cae77a5c47ec))
+* **serve:** point repeated identical reads at the earlier result ([574a9ab](https://github.com/ScriptedAlchemy/tracedecay/commit/574a9ab2b1bdbc4f6e71a21946eb2a7c74f5d109))
+
+### Bug Fixes
+
+* **analytics:** report absent tool context coverage ([e6a13bc](https://github.com/ScriptedAlchemy/tracedecay/commit/e6a13bc115b4d6a833843e23129958b8b1bbd009))
+* **code-index:** route structural ops through the language registry ([d2a3b1e](https://github.com/ScriptedAlchemy/tracedecay/commit/d2a3b1e895f4ef9c4f8d3a636efdf3732ed44417))
+* **code-index:** wait out store readers during text projection ([#3417](https://github.com/ScriptedAlchemy/tracedecay/issues/3417)) ([e13d696](https://github.com/ScriptedAlchemy/tracedecay/commit/e13d696a4c917784cc9d4cf1e60704c185b2e70d))
+* **context:** keep code previews on whole block boundaries ([#3418](https://github.com/ScriptedAlchemy/tracedecay/issues/3418)) ([fb13c61](https://github.com/ScriptedAlchemy/tracedecay/commit/fb13c61b3eaa4c88761e06a5042fa391fae1a8bb))
+* **context:** serve whole declarations from body windows ([#3421](https://github.com/ScriptedAlchemy/tracedecay/issues/3421)) ([773e755](https://github.com/ScriptedAlchemy/tracedecay/commit/773e7558a2c50930864c760950a6add21578f211))
+* **context:** serve whole declarations under their own node ([b3ba8c3](https://github.com/ScriptedAlchemy/tracedecay/commit/b3ba8c392a7fecf729a63080c0fba79facd21dd3))
+* **context:** withhold unattested partial declarations ([ab9f94b](https://github.com/ScriptedAlchemy/tracedecay/commit/ab9f94b5d34d8c6e7f5b25d78c03cc7a896acc4d))
+* **discovery:** resolve proxy tools and family references ([c805dcc](https://github.com/ScriptedAlchemy/tracedecay/commit/c805dcc38e257d47400a3e839993db5233feac50))
+* **exact-sql:** establish leases before answering callers ([504047d](https://github.com/ScriptedAlchemy/tracedecay/commit/504047d28ca20b5ce229afb05d2c58fe1fa06931))
+* **graph:** retain catalogs across admitted reads ([#3438](https://github.com/ScriptedAlchemy/tracedecay/issues/3438)) ([c2f4da7](https://github.com/ScriptedAlchemy/tracedecay/commit/c2f4da77b37d9de0081433d4de68afe6b75b9e34))
+* **index:** set untrusted-ctime mtimes with write attributes ([7d61e2d](https://github.com/ScriptedAlchemy/tracedecay/commit/7d61e2d47cac341369b54612fad0b4091f33c6a7)), closes [#3347](https://github.com/ScriptedAlchemy/tracedecay/issues/3347)
+* **lcm:** preserve typed authority and distinct session omissions ([4b7992c](https://github.com/ScriptedAlchemy/tracedecay/commit/4b7992cefde4c6146e693fb6aa12e6b3841d47e5))
+* **lcm:** report unpublished transcript messages ([#3420](https://github.com/ScriptedAlchemy/tracedecay/issues/3420)) ([d97a700](https://github.com/ScriptedAlchemy/tracedecay/commit/d97a7004b4aeccf74389ccbde1834d90c9c55cf8))
+* **mcp:** negotiate protocol on raw initialize answers ([#3430](https://github.com/ScriptedAlchemy/tracedecay/issues/3430)) ([3d94742](https://github.com/ScriptedAlchemy/tracedecay/commit/3d947425dd9fcad531b342257be2496bf4952d72))
+* **mcp:** price both footer sides in bytes/4 ([#3414](https://github.com/ScriptedAlchemy/tracedecay/issues/3414)) ([77baa9f](https://github.com/ScriptedAlchemy/tracedecay/commit/77baa9f602efe8371de482b1d785858ee1b07ea4))
+* **output:** preserve whole symbol bodies in human previews ([#3425](https://github.com/ScriptedAlchemy/tracedecay/issues/3425)) ([c0c25d3](https://github.com/ScriptedAlchemy/tracedecay/commit/c0c25d3ff019132ef1f23a1ce9c42d1e4cef4f13))
+* **remote:** preserve schema read failures as SQL errors ([42e5200](https://github.com/ScriptedAlchemy/tracedecay/commit/42e520064744000c6e7115ada0c02a27b224686c))
+* **rusqlite-runtime:** admit conflicts after reply settlement ([#3423](https://github.com/ScriptedAlchemy/tracedecay/issues/3423)) ([d9daac1](https://github.com/ScriptedAlchemy/tracedecay/commit/d9daac1f16acc5bb75c239b8191dea870e4c7bc1))
+* **rusqlite-runtime:** settle deferred snapshot ends before reuse ([#3424](https://github.com/ScriptedAlchemy/tracedecay/issues/3424)) ([90c6f1b](https://github.com/ScriptedAlchemy/tracedecay/commit/90c6f1bf28373d318c86f772f9ad109a7c26a693))
+* **rusqlite-runtime:** wait for idle readers to release memory ([2c8f69d](https://github.com/ScriptedAlchemy/tracedecay/commit/2c8f69dee89845552c6655057eccb88593d398fa))
+* **search:** restore ranked tails before replaying measurements ([43da558](https://github.com/ScriptedAlchemy/tracedecay/commit/43da558d7c64ef22fc38cc8296ace2c1cb1308d2))
+* **session:** name blockers and stop corrupt projection retries ([#3415](https://github.com/ScriptedAlchemy/tracedecay/issues/3415)) ([d5c4292](https://github.com/ScriptedAlchemy/tracedecay/commit/d5c4292c692c9712ef59110de2360ddb455f455a))
+* **session:** re-read the source cursor after an exact duplicate ([61a5fd5](https://github.com/ScriptedAlchemy/tracedecay/commit/61a5fd5643cd7fad992037440f1a842d8979d71d))
+* **session:** run refused history pass under its granted permit ([08426f8](https://github.com/ScriptedAlchemy/tracedecay/commit/08426f8dc60a13be4c99632c174f0420b933ba31))
+* **test:** declare plugin agents as mcp_suite runfiles ([f38d7d5](https://github.com/ScriptedAlchemy/tracedecay/commit/f38d7d5544d90fa60614821ce11361d15bd426bb))
+* **work:** kill attempt providers when their daemon dies ([b90cbaf](https://github.com/ScriptedAlchemy/tracedecay/commit/b90cbaf5e8e1511c74b9cf3011d3e27f18cb92ad))
+* **writer:** test batch dwell with a paused clock ([a028623](https://github.com/ScriptedAlchemy/tracedecay/commit/a028623ec05fc418282a558f9eb630515408587d))
+
+### Performance Improvements
+
+* **memory:** skip vectors for lexically ineligible facts ([fa4fc74](https://github.com/ScriptedAlchemy/tracedecay/commit/fa4fc74f16744d4330d72fc3d6f982fe8a2f892c))
+* **session-temporal:** group refresh writes per drain ([e53eadb](https://github.com/ScriptedAlchemy/tracedecay/commit/e53eadb1f731400b602a0c8bae02aa2a6303244a))
+
 ## [Unreleased]
 
 ### Bug Fixes
 
+* **index:** release a parked worktree's seated decode once a running owner pass settles instead of holding it for the idle window ([#3347](https://github.com/ScriptedAlchemy/tracedecay/issues/3347))
+* **sessions:** return a finished Codex turn without waiting for a descendant that escaped the tree kill and still holds the app-server's stdout ([#3347](https://github.com/ScriptedAlchemy/tracedecay/issues/3347))
 * **test:** set untrusted-ctime fixture mtimes with `fs::set_times` so Windows `SetFileTime` receives `FILE_WRITE_ATTRIBUTES` ([#3347](https://github.com/ScriptedAlchemy/tracedecay/issues/3347))
 * **session:** name each provider's historical ingest blocker instead of the first retryable failure in rotation ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))
 * **session:** classify SQLITE_CORRUPT / SQLITE_NOTADB as blocked `projection_store_corrupt` instead of retrying a malformed page ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))

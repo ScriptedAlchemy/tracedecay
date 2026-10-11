@@ -246,8 +246,8 @@ async fn activation_failure_preserves_last_working() {
             &direct_authority,
             &DirectConfigurationMutation::Set {
                 layer: direct_project_layer(),
-                key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-                value: Box::new(ConfigurationValueV1::Boolean(true)),
+                key: SettingKey::new("telemetry.timings.v1").unwrap(),
+                value: Box::new(ConfigurationValueV1::Boolean(false)),
             },
             &root.revision_id,
         )

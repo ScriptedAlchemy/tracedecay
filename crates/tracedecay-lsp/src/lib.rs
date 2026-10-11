@@ -18,7 +18,7 @@
 
 //! Store-free LSP transport and session-protocol contracts.
 //!
-//! This crate owns the stdio framing bridge plus the LSP 3.17 protocol,
+//! This crate owns strict LSP stdio framing plus the LSP 3.17 protocol,
 //! session lifecycle, capability negotiation, overlay, diagnostic-merge, and
 //! analyzer-broker contracts that need no database, socket, analyzer process,
 //! or filesystem authority.
@@ -32,12 +32,12 @@
 pub mod analyzer;
 pub mod compile_diagnostics;
 
-mod bridge;
 mod capabilities;
 mod catalog;
 mod context;
 mod diagnostics;
 mod dispatch;
+mod framing;
 mod gateway;
 mod native_integration;
 mod overlay;
@@ -49,18 +49,13 @@ mod workspace;
 mod workspace_diagnostics;
 
 pub use analyzer::broker::DiagnosticSeverity;
-pub use bridge::{
-    AsyncContentLengthError, BridgeDirection, BridgePumpOutcome, ContentLengthCodec,
-    ContentLengthCodecError, ContentLengthStdioError, ContentLengthStdioTransport,
-    DaemonLspSessionTransport, MAX_LSP_HEADER_BYTES, StdioFrameTransport, StdioLspBridge,
-    StdioLspBridgeError, read_content_length_frame_until,
-};
 pub use capabilities::{
     CapabilityAvailability, CapabilityParseError, CapabilityUnavailable,
     CapabilityUnavailableReason, ClientCapabilities, EffectiveCapabilities, GatewayCapabilities,
     LSP_PROTOCOL_VERSION, PositionEncoding, SemanticCapability, TextDocumentSync,
     UpstreamCapabilities, negotiate_capabilities,
 };
+pub use compile_diagnostics::Diagnostic;
 pub use compile_diagnostics::tsconfig::{
     SearchedTsconfig, TypeScriptFileOwner, TypeScriptProject, TypeScriptProjectConfigInputs,
     typescript_build_info_program, typescript_file_owner, typescript_install_command,
@@ -68,10 +63,6 @@ pub use compile_diagnostics::tsconfig::{
 };
 pub use compile_diagnostics::typescript::{
     TYPESCRIPT_INSTALL_COMMAND, run_compiler as run_typescript_compiler,
-};
-pub use compile_diagnostics::{
-    Diagnostic, DiagnosticsCache, Driver, Scope, is_rust_diagnostics_cold, run_all,
-    rust_diagnostics_target_dir, spawn_rust_diagnostics_prewarm,
 };
 pub use context::{
     CanonicalContextProjectionAuthority, ContextCoverage, ContextExpansionEnvelope,
@@ -94,6 +85,10 @@ pub use diagnostics::{
     MAX_DIAGNOSTIC_URI_BYTES, MAX_DOCUMENT_DIAGNOSTICS, PositionError,
     TRACEDECAY_DIAGNOSTIC_DATA_REVISION, byte_offset_to_utf16_position, merge_diagnostics,
     utf16_position_to_byte_offset,
+};
+pub use framing::{
+    AsyncContentLengthError, ContentLengthCodec, ContentLengthCodecError, MAX_LSP_HEADER_BYTES,
+    read_content_length_frame_until,
 };
 pub use gateway::{
     AdmittedRoot, AnalyzerCancellationAdapter, CallHierarchyItem, DaemonLspGateway,
@@ -124,8 +119,7 @@ pub use overlay::{
 };
 pub use protocol::{
     ClientFrameAdmission, DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspProtocolSession,
-    DaemonLspProtocolTransport, MAX_QUEUED_OUTBOUND_BYTES, MAX_QUEUED_OUTBOUND_MESSAGES,
-    ProtocolDispatch,
+    MAX_QUEUED_OUTBOUND_BYTES, MAX_QUEUED_OUTBOUND_MESSAGES, ProtocolDispatch,
 };
 pub use provider::{
     AnalyzerCancellationPort, AnalyzerEvent, AnalyzerSemanticAdapter, AnalyzerState,

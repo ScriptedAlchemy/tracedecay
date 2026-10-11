@@ -353,7 +353,10 @@ fn run_prompt_with_optional_execution(
                     .map_or(config.timeout, |execution| execution.timeout),
             );
             drop(child);
-            let _ = stdout_reader.join();
+            // The outcome is already decided. A descendant that escaped the
+            // tree kill can hold stdout open for as long as it lives, and
+            // joining would leave the caller's run unsettled until then.
+            drop(stdout_reader);
             outcome
         }
     }
@@ -596,9 +599,22 @@ struct ChildGuard {
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         let process_group = self.child.id();
-        terminate_process_tree(process_group);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // A clean protocol completion can reap the pid before Drop. Force-killing
+        // that tree is required only while the child is still running: on
+        // Windows `taskkill /T /F` always spawns a helper, even for a dead
+        // pid, and that helper is the expensive post-turn stall under IO load.
+        let already_exited = matches!(self.child.try_wait(), Ok(Some(_)));
+        if already_exited {
+            // Unix process-group signal is one syscall and still clears
+            // node/codex descendants after the leader exits. Windows has no
+            // equivalent cheap group signal once the pid is gone.
+            #[cfg(unix)]
+            terminate_process_tree(process_group);
+        } else {
+            terminate_process_tree(process_group);
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
         active_codex_children()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -921,6 +937,8 @@ pub fn strip_reasoning_tags(text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(target_os = "linux")]
+    use std::io::Read as _;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use tracedecay_lcm::{LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange};
@@ -1242,6 +1260,78 @@ mod tests {
         assert_eq!(launch_receipt.started_at(), None);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn work_app_server_cmd_launcher_completes_a_turn() {
+        // Real Windows Codex launches through a `.cmd` shim that execs its
+        // interpreter; the batch itself never parses stdin. Drive the shipped
+        // `cmd /D /C` path through that shape: the interpreter answers
+        // initialize, the `initialized` notification, thread/start, and
+        // turn/start in order, with stdin held open until turn/completed.
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temporary = tempfile::tempdir().expect("temporary app-server directory");
+        let executable = temporary.path().join("fake-codex.cmd");
+        let helper = temporary.path().join("fake-codex-helper.py");
+        std::fs::write(
+            &helper,
+            concat!(
+                "import sys\n",
+                "for line in sys.stdin:\n",
+                "    if '\"id\":0' in line:\n",
+                "        print('{\"id\":0,\"result\":{}}', flush=True)\n",
+                "    elif '\"id\":1' in line:\n",
+                "        print('{\"id\":1,\"result\":{\"thread\":{\"id\":\"cmd-thread\"}}}', flush=True)\n",
+                "    elif '\"id\":2' in line:\n",
+                "        print('{\"method\":\"item/completed\",\"params\":{\"item\":{\"content\":[{\"type\":\"output_text\",\"text\":\"cmd lifecycle result\"}]}}}', flush=True)\n",
+                "        print('{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"cmd-turn\"}}}', flush=True)\n",
+                "        sys.exit(0)\n",
+            ),
+        )
+        .expect("write helper interpreter");
+        let script =
+            "@echo off\r\npython \"%~dp0fake-codex-helper.py\" %*\r\nexit /b %ERRORLEVEL%\r\n";
+        std::fs::write(&executable, script).expect("write fake app-server");
+
+        // The spawn clears the environment before admitting caller values, so
+        // the interpreter inside the shim resolves only through the admitted
+        // PATH, as a real deployment's node inside `codex.cmd` does.
+        let mut admitted_environment = BTreeMap::new();
+        for key in ["PATH", "PATHEXT", "SYSTEMROOT", "WINDIR"] {
+            if let Some(value) = std::env::var_os(key) {
+                admitted_environment.insert(key.to_owned(), value);
+            }
+        }
+        let config = CodexAppServerSummaryConfig {
+            codex_bin: executable.to_string_lossy().into_owned(),
+            model: None,
+            timeout: Duration::from_secs(30),
+        };
+        let launch_receipt = CodexAppServerLaunchReceipt::default();
+        let summary = run_work_with_codex_app_server(
+            "Return a work result.",
+            &config,
+            "tracedecay_work_attempt",
+            CodexAppServerWorkExecution {
+                cancellation: &CodexAppServerCancellation::default(),
+                cwd: temporary.path(),
+                timeout: Duration::from_secs(30),
+                admitted_environment: &admitted_environment,
+                launch_receipt: &launch_receipt,
+                approval: WorkApprovalPolicy::Never,
+                filesystem: WorkFilesystemPolicy::ReadOnly,
+                egress: WorkEgressPolicy::Deny,
+            },
+        );
+
+        assert_eq!(
+            summary.map(|summary| summary.text),
+            Ok("cmd lifecycle result".to_owned())
+        );
+        assert!(launch_receipt.started_at().is_some());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn work_app_server_held_open_for_writing_is_refused_on_the_first_attempt() {
@@ -1255,32 +1345,82 @@ mod tests {
             .append(true)
             .open(&executable)
             .expect("hold the fake app-server open for writing");
-        let launch_receipt = CodexAppServerLaunchReceipt::default();
+        let codex_bin = executable.to_string_lossy().into_owned();
+        let (mut attempts, attempt_marker) = std::io::pipe().expect("attempt pipe");
+        let mut command = codex_app_server_command(&codex_bin);
+        // Every exec attempt forks a child that writes one byte here first, so
+        // the bytes read back count the attempts the spawn made.
+        unsafe {
+            command.pre_exec(move || {
+                let _ = (&attempt_marker).write(&[1]);
+                Ok(())
+            });
+        }
 
-        let started = Instant::now();
-        let error = run_read_only_work(
-            &executable,
-            temporary.path(),
-            Duration::from_secs(1),
-            &launch_receipt,
-        )
-        .expect_err("Linux refuses to exec a file that is open for writing");
-        let elapsed = started.elapsed();
+        let error = spawn_codex_app_server(&mut command, &codex_bin)
+            .expect_err("Linux refuses to exec a file that is open for writing");
+        drop(command);
+        let mut marks = Vec::new();
+        attempts
+            .read_to_end(&mut marks)
+            .expect("read attempt marks");
 
         assert_eq!(
             error,
             CodexAppServerError {
                 class: AgentTaskFailureClass::Unavailable,
                 message: format!(
-                    "failed to start `{}` app-server: Text file busy (os error 26)",
-                    executable.display()
+                    "failed to start `{codex_bin}` app-server: Text file busy (os error 26)"
                 ),
             }
         );
-        assert_eq!(launch_receipt.started_at(), None);
-        assert!(
-            elapsed < Duration::from_millis(80),
-            "the refusal must not wait for the writer to go away: {elapsed:?}"
+        assert_eq!(
+            marks.len(),
+            1,
+            "the refusal must come from the first exec attempt, not a retry"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn work_app_server_returns_while_an_escaped_descendant_holds_stdout() {
+        const SIGKILL: i32 = 9;
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temporary = tempfile::tempdir().expect("temporary app-server directory");
+        let holder_pid = temporary.path().join("holder.pid");
+        let executable = temporary.path().join("fake-codex");
+        let script = format!(
+            "#!/bin/sh\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"id\":0'*) printf '%s\\n' '{{\"id\":0,\"result\":{{}}}}' ;;\n    *'\"id\":1'*) printf '%s\\n' '{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"work-thread\"}}}}}}' ;;\n    *'\"id\":2'*) python3 -c 'import os, sys, time; os.setsid(); f = open(sys.argv[1], \"w\"); f.write(str(os.getpid())); f.close(); time.sleep(60)' {holder_pid} &\n      while [ ! -s {holder_pid} ]; do sleep 0.01; done\n      printf '%s\\n' '{{\"method\":\"item/completed\",\"params\":{{\"item\":{{\"content\":[{{\"type\":\"output_text\",\"text\":\"work result\"}}]}}}}}}'; printf '%s\\n' '{{\"method\":\"turn/completed\",\"params\":{{\"turn\":{{\"id\":\"work-turn\"}}}}}}'; exit 0 ;;\n  esac\ndone\n",
+            holder_pid = holder_pid.display(),
+        );
+        write_executable_script(&executable, script).expect("write fake app-server");
+
+        let summary = run_read_only_work(
+            &executable,
+            temporary.path(),
+            Duration::from_secs(30),
+            &CodexAppServerLaunchReceipt::default(),
+        );
+        let holder: i32 = std::fs::read_to_string(&holder_pid)
+            .expect("the fake app-server started its stdout holder")
+            .trim()
+            .parse()
+            .expect("holder pid");
+        assert_eq!(
+            unsafe { kill(holder, 0) },
+            0,
+            "the turn must return while the escaped descendant still holds stdout"
+        );
+        unsafe { kill(holder, SIGKILL) };
+
+        assert_eq!(
+            summary.map(|summary| summary.text),
+            Ok("work result".to_owned())
         );
     }
 
@@ -1332,6 +1472,61 @@ mod tests {
                 .process_groups
                 .is_empty(),
             "the launched process group must be removed before the timeout returns"
+        );
+    }
+
+    fn already_exited_child_command() -> Command {
+        #[cfg(windows)]
+        {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "exit", "0"]);
+            command
+        }
+        #[cfg(not(windows))]
+        {
+            Command::new("true")
+        }
+    }
+
+    #[test]
+    fn child_guard_drop_does_not_force_kill_an_already_exited_child() {
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            active_codex_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .process_groups
+                .is_empty()
+        );
+        let mut command = already_exited_child_command();
+        let mut child = spawn_codex_app_server(&mut command, "already-exited")
+            .expect("spawn already-exited child");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !matches!(child.try_wait(), Ok(Some(_))) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            matches!(child.try_wait(), Ok(Some(_))),
+            "child must exit before ChildGuard::drop"
+        );
+        let started = Instant::now();
+        drop(ChildGuard {
+            child,
+            cancellation: None,
+        });
+        assert!(
+            started.elapsed() < Duration::from_millis(750),
+            "ChildGuard::drop must reap an already-exited child without a process-tree kill"
+        );
+        assert!(
+            active_codex_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .process_groups
+                .is_empty(),
+            "the launched process group must be unregistered after drop"
         );
     }
 

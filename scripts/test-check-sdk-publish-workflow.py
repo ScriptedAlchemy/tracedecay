@@ -6,6 +6,7 @@ import contextlib
 import importlib.util
 import io
 import re
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,14 +31,30 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         self.checker = load_checker()
         self.workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
-    def assert_rejected(self, workflow: str, violation: str) -> None:
-        self.assertNotEqual(workflow, self.workflow, "mutation must change the workflow")
+    def assert_rejected(
+        self,
+        workflow: str,
+        violation: str,
+        helper_edit: tuple[str, str, str] | None = None,
+    ) -> None:
+        self.assertTrue(
+            workflow != self.workflow or helper_edit, "mutation must change the policy input"
+        )
         with tempfile.TemporaryDirectory() as scratch:
-            path = Path(scratch) / "release.yml"
+            root = Path(scratch)
+            shutil.copytree(REPOSITORY_ROOT / ".github/actions", root / ".github/actions")
+            self.checker.REPOSITORY_ROOT = root
+            path = root / "release.yml"
             self.checker.WORKFLOW_PATH = path
             path.write_text(self.workflow, encoding="utf-8")
             self.checker.main()
             path.write_text(workflow, encoding="utf-8")
+            if helper_edit is not None:
+                helper, old, new = helper_edit
+                action = root / ".github/actions" / helper / "action.yml"
+                text = action.read_text(encoding="utf-8")
+                self.assertIn(old, text)
+                action.write_text(text.replace(old, new, 1), encoding="utf-8")
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
                 self.checker.main()
@@ -154,6 +171,92 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
             "        with:\n"
             "          toolchain: stable",
             "'build-typescript' uses unpinned action 'dtolnay/rust-toolchain@stable'",
+        )
+
+    def test_rejects_unpinned_action_inside_local_helper(self) -> None:
+        self.assert_rejected(
+            self.workflow,
+            "'build-typescript' helper './.github/actions/setup-pnpm' uses unpinned "
+            "action 'pnpm/action-setup@v6'",
+            helper_edit=(
+                "setup-pnpm",
+                "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0",
+                "pnpm/action-setup@v6",
+            ),
+        )
+
+    def test_rejects_unpinned_action_inside_nested_local_helper(self) -> None:
+        self.assert_rejected(
+            self.workflow,
+            "'build-typescript' helper './.github/actions/setup-bazel' uses unpinned "
+            "action 'actions/cache/restore@v6'",
+            helper_edit=(
+                "setup-bazel",
+                "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0",
+                "actions/cache/restore@v6",
+            ),
+        )
+
+    def test_rejects_helper_checkout_that_replaces_validated_source(self) -> None:
+        self.assert_rejected(
+            self.workflow,
+            "'build-typescript' must first and only check out the validated source "
+            "SHA without persisted credentials",
+            helper_edit=(
+                "setup-pnpm",
+                "  steps:\n",
+                "  steps:\n"
+                "    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+                "      with:\n"
+                "        ref: master\n",
+            ),
+        )
+
+    def test_rejects_local_helper_from_mutable_build_checkout(self) -> None:
+        self.assert_rejected_after(
+            "          ref: ${{ needs.validate-release.outputs.source_sha }}\n"
+            "          persist-credentials: false\n\n"
+            "      - uses: dtolnay/rust-toolchain@",
+            "          persist-credentials: false\n\n"
+            "      - uses: dtolnay/rust-toolchain@",
+            "'build-typescript' must first and only check out the validated source "
+            "SHA without persisted credentials",
+        )
+
+    def test_rejects_local_helper_outside_reviewed_actions(self) -> None:
+        self.assert_rejected_after(
+            "        run: npm install -g npm@12.0.2\n\n"
+            "      - uses: ./.github/actions/setup-pnpm\n",
+            "        run: npm install -g npm@12.0.2\n\n"
+            "      - uses: ./sdks/typescript\n",
+            "'build-typescript' helper './sdks/typescript' must be a directory "
+            "under ./.github/actions",
+        )
+
+    def test_rejects_local_helper_in_publish_job(self) -> None:
+        self.assert_rejected_after(
+            "    steps:\n      - uses: actions/download-artifact@",
+            "    steps:\n      - uses: ./.github/actions/setup-pnpm\n"
+            "      - uses: actions/download-artifact@",
+            "'publish-typescript' uses unpinned action './.github/actions/setup-pnpm'",
+        )
+
+    def test_rejects_build_credentials(self) -> None:
+        self.assert_rejected_after(
+            "      - name: Fast unit suite\n"
+            "        working-directory: sdks/typescript\n",
+            "      - name: Fast unit suite\n"
+            "        working-directory: sdks/typescript\n"
+            "        env:\n"
+            "          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n",
+            "'build-typescript' must not receive repository credentials",
+        )
+
+    def test_rejects_unprotected_publish_environment(self) -> None:
+        self.assert_rejected_after(
+            "    environment: npm-tracedecay-sdk\n",
+            "    environment: npm-tracedecay-sdk-unprotected\n",
+            "'publish-typescript' must use the protected npm-tracedecay-sdk environment",
         )
 
     def test_rejects_missing_sdk_registry_client_parity_gate(self) -> None:

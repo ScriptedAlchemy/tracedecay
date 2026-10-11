@@ -171,7 +171,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> SessionTemporalStore<'a, D> {
 
     pub async fn commit_session_refresh_begin_batch_group(
         &self,
-        items: Vec<crate::SessionRefreshBeginBatchItemV1>,
+        items: &[crate::SessionRefreshBeginBatchItemV1],
         execution_control: ExecutionControl,
     ) -> SessionStoreResult<Vec<SessionStoreResult<crate::SessionRefreshBeginBatchOutcomeV1>>> {
         self.access()
@@ -262,7 +262,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> SessionTemporalStore<'a, D> {
             let outcomes = if items.is_empty() {
                 Vec::new()
             } else {
-                self.commit_session_refresh_begin_batch_group(items, ExecutionControl::default())
+                self.commit_session_refresh_begin_batch_group(&items, ExecutionControl::default())
                     .await?
             };
             let mut staging: Vec<
@@ -384,7 +384,7 @@ impl<'a, D: SessionTemporalRegisteredDb + Sync> SessionTemporalStore<'a, D> {
                 Vec::new()
             } else {
                 self.access()
-                    .complete_session_refresh_group(complete_items, ExecutionControl::default())
+                    .complete_session_refresh_group(&complete_items, ExecutionControl::default())
                     .await?
             };
             for (session_id, receipt) in complete_sessions.into_iter().zip(receipts) {

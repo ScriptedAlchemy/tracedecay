@@ -19,10 +19,10 @@ use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CandidateDispositionV1, ConfigurationCandidateV1,
     ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
     ConfigurationLayerIdV1, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
-    ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
-    INDEX_EXCLUDE_SETTING_KEY, ProtectedChange, ProtectedChangePlan, RedactedConfigurationChangeV1,
+    ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, INDEX_EXCLUDE_SETTING_KEY,
+    ProtectedChange, ProtectedChangePlan, RedactedConfigurationChangeV1,
     SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
-    ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
+    ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1, TELEMETRY_TIMINGS_SETTING_KEY,
     WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{
@@ -35,7 +35,7 @@ use tracedecay_domain::test_fixtures::digest;
 fn incomplete_snapshot_requires_reset_instead_of_default_repair() {
     let registry = ConfigurationRegistry::core().unwrap();
     let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
-    let missing_key = SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap();
+    let missing_key = SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).unwrap();
     let mut effective_values = current.effective_values;
     let mut provenance = current.provenance;
     effective_values.remove(&missing_key);
@@ -183,6 +183,16 @@ async fn retired_orphan_db_gc_days_key_converges_out_of_a_beta50_snapshot() {
     assert_retired_key_converges_out(
         "sync.orphan_db_gc_days.v1",
         ConfigurationValueV1::Unsigned(7),
+    )
+    .await;
+}
+
+/// Persisted prewarm settings converge through the retired-key authority.
+#[tokio::test]
+async fn retired_diagnostics_prewarm_key_converges_without_reset() {
+    assert_retired_key_converges_out(
+        "diagnostics.prewarm.v1",
+        ConfigurationValueV1::Boolean(true),
     )
     .await;
 }

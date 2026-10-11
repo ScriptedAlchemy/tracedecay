@@ -15,8 +15,7 @@ rust_library(
     crate_name = "tracedecay_daemon_protocol",
     edition = crate_edition(),
     compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
     version = "0.1.0",
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-framing:tracedecay-framing", "//crates/tracedecay-private-fs:tracedecay-private-fs", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
@@ -32,8 +31,7 @@ rust_library(
     crate_name = "tracedecay_daemon_protocol",
     edition = crate_edition(),
     compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
     version = "0.1.0",
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-framing:tracedecay-framing__+test-helpers__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
@@ -52,9 +50,8 @@ rust_test(
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(0),
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
-    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
 )
 
 filegroup(

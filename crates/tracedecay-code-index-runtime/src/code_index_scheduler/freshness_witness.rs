@@ -28,7 +28,9 @@ use gix::bstr::BStr;
 use gix::dir::walk::{Action, Delegate, ForDeletionMode};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
-use tracedecay_code_index::production::CodeIndexIgnoredSourceAdmissionV1;
+use tracedecay_code_index::production::{
+    CodeIndexIgnoredSourceAdmissionV1, CodeIndexProductionErrorV1,
+};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     CodeSourceOmissionReasonV1, ContentDigest, IndexPathPolicyV1, LanguageId,
@@ -37,6 +39,7 @@ use tracedecay_domain::{
 use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
 use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
 
+use super::reconcile::cancelled_code_index_reconcile;
 use super::{CodeIndexSchedulerErrorV1, classification, ignored_dependencies, privacy};
 use crate::code_index::chunks::content_digest;
 use crate::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
@@ -135,18 +138,29 @@ fn source_candidates(
     let candidates = candidate_paths
         .into_iter()
         .filter_map(|logical_path| {
-            let extension = Path::new(&logical_path).extension()?.to_str()?;
-            let descriptor = registry.descriptor_for_extension(&extension.to_lowercase())?;
-            Some(StatCandidateV1 {
-                explicitly_admitted: admitted_paths.contains(logical_path.as_str()),
-                language: descriptor.language.clone(),
-                logical_path,
-            })
+            let explicitly_admitted = admitted_paths.contains(logical_path.as_str());
+            source_candidate(&registry, logical_path, explicitly_admitted)
         })
         .collect();
     Ok(SourceCandidatesV1 {
         candidates,
         unrepresentable,
+    })
+}
+
+/// `logical_path` as a source candidate, `None` when no registered language
+/// claims its extension.
+fn source_candidate(
+    registry: &StaticLanguageRegistry,
+    logical_path: String,
+    explicitly_admitted: bool,
+) -> Option<StatCandidateV1> {
+    let extension = Path::new(&logical_path).extension()?.to_str()?;
+    let descriptor = registry.descriptor_for_extension(&extension.to_lowercase())?;
+    Some(StatCandidateV1 {
+        explicitly_admitted,
+        language: descriptor.language.clone(),
+        logical_path,
     })
 }
 
@@ -614,25 +628,7 @@ impl SourceSweepCacheV1 {
                         || !self.path_policy.excludes(&candidate.logical_path))
             })
             .collect::<Vec<_>>();
-        let present = stat_concurrently(&eligible, |candidate| {
-            let absolute = project_root.join(&candidate.logical_path);
-            let metadata = std::fs::symlink_metadata(&absolute).ok()?;
-            // A link's own key says nothing about its target's bytes.
-            let key = if metadata.file_type().is_symlink() {
-                if !std::fs::metadata(&absolute).is_ok_and(|target| target.is_file()) {
-                    return None;
-                }
-                None
-            } else if metadata.is_file() {
-                Some(StatKeyV1::of(&metadata, sampled_at))
-            } else {
-                return None;
-            };
-            Some((*candidate, key))
-        })
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        let present = present_candidates(project_root, &eligible, sampled_at);
         stats.candidates = present.len();
         let present_paths = present
             .iter()
@@ -646,6 +642,61 @@ impl SourceSweepCacheV1 {
         {
             return (false, stats);
         }
+        let Ok(disputed) =
+            self.disputed(project_root, present, manifest, shutting_down, &mut stats)
+        else {
+            return (false, stats);
+        };
+        (disputed.is_empty(), stats)
+    }
+
+    /// The sealed files of `manifest` whose bytes on disk no longer carry
+    /// their sealed digests. An unchanged stat identity proves nothing where a
+    /// write leaves no rewrite witness (NTFS, an assume-unchanged index
+    /// entry), so a capture that reuses sealed rows on stat evidence asks this
+    /// sweep which of them the bytes disprove. An absent file is not disputed:
+    /// its deletion is visible to stat.
+    pub fn disputed_sources(
+        &mut self,
+        project_root: &Path,
+        manifest: &SourceContentManifestV1,
+        shutting_down: &AtomicBool,
+    ) -> Result<BTreeSet<String>, CodeIndexSchedulerErrorV1> {
+        let registry = StaticLanguageRegistry::new();
+        let candidates = manifest
+            .files
+            .keys()
+            .filter_map(|logical_path| source_candidate(&registry, logical_path.clone(), false))
+            .collect::<Vec<_>>();
+        let present = present_candidates(
+            project_root,
+            &candidates.iter().collect::<Vec<_>>(),
+            ChangeClockReading::now(),
+        );
+        let disputed = self.disputed(
+            project_root,
+            present,
+            manifest,
+            shutting_down,
+            &mut SourceSweepStatsV1::default(),
+        )?;
+        Ok(disputed
+            .into_iter()
+            .map(|candidate| candidate.logical_path.clone())
+            .collect())
+    }
+
+    /// The `present` candidates whose bytes disagree with `manifest` even
+    /// after git's clean filters. Digests no settled key vouches for are
+    /// re-derived across the indexing pool.
+    fn disputed<'a>(
+        &mut self,
+        project_root: &Path,
+        present: Vec<(&'a StatCandidateV1, Option<StatKeyV1>)>,
+        manifest: &SourceContentManifestV1,
+        shutting_down: &AtomicBool,
+        stats: &mut SourceSweepStatsV1,
+    ) -> Result<Vec<&'a StatCandidateV1>, CodeIndexSchedulerErrorV1> {
         let mut disputed = Vec::new();
         let mut unvouched = Vec::new();
         for (candidate, key) in present {
@@ -676,20 +727,22 @@ impl SourceSweepCacheV1 {
                 .map(|(candidate, _)| derive(candidate))
                 .collect::<Vec<_>>()
         } else {
-            let Ok(derived) = parallelism::install(|| {
+            parallelism::install(|| {
                 unvouched
                     .par_iter()
                     .map(|(candidate, _)| {
                         parallelism::with_background_cpu_permit(|| derive(candidate))
                     })
                     .collect::<Vec<_>>()
-            }) else {
-                return (false, stats);
-            };
-            derived
+            })
+            .map_err(|error| {
+                CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Parallelism(
+                    error,
+                ))
+            })?
         };
         if shutting_down.load(Ordering::Acquire) {
-            return (false, stats);
+            return Err(cancelled_code_index_reconcile());
         }
         for ((candidate, key), content) in unvouched.into_iter().zip(derived) {
             if !content.matches(&candidate.logical_path, manifest) {
@@ -707,53 +760,85 @@ impl SourceSweepCacheV1 {
                 }
             }
         }
-        let matches = disputed.is_empty()
-            || tracked_files_match_after_clean_filters(project_root, &disputed, manifest);
-        (matches, stats)
+        if disputed.is_empty() {
+            return Ok(disputed);
+        }
+        Ok(clean_filter_mismatches(project_root, disputed, manifest))
     }
 }
 
-/// A tracked file whose bytes on disk differ from its sealed digest may still
-/// be exactly what the generation sealed: a clean-tree generation captures
-/// HEAD's blobs, and git's clean filters (`core.autocrlf`, `eol`, `ident`,
-/// filter drivers) are what separate those blobs from the checkout. Running
-/// the disk bytes through the repository's own filter pipeline, the same
-/// conversion gix status applies before it compares content, settles whether
-/// the file is current. Untracked and explicitly admitted sources have no
-/// blob to be sealed from, so their raw mismatch is final.
-fn tracked_files_match_after_clean_filters(
+/// Every candidate that is a regular file or a link to one, with its stat key.
+/// A link's key is `None`: its own key says nothing about its target's bytes.
+fn present_candidates<'a>(
     project_root: &Path,
-    disputed: &[&StatCandidateV1],
+    candidates: &[&'a StatCandidateV1],
+    sampled_at: ChangeClockReading,
+) -> Vec<(&'a StatCandidateV1, Option<StatKeyV1>)> {
+    stat_concurrently(candidates, |candidate| {
+        let absolute = project_root.join(&candidate.logical_path);
+        let metadata = std::fs::symlink_metadata(&absolute).ok()?;
+        let key = if metadata.file_type().is_symlink() {
+            if !std::fs::metadata(&absolute).is_ok_and(|target| target.is_file()) {
+                return None;
+            }
+            None
+        } else if metadata.is_file() {
+            Some(StatKeyV1::of(&metadata, sampled_at))
+        } else {
+            return None;
+        };
+        Some((*candidate, key))
+    })
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// The disputed files the clean filters do not reconcile. A tracked file
+/// whose bytes on disk differ from its sealed digest may still be exactly what
+/// the generation sealed: a clean-tree generation captures HEAD's blobs, and
+/// git's clean filters (`core.autocrlf`, `eol`, `ident`, filter drivers) are
+/// what separate those blobs from the checkout. Running the disk bytes through
+/// the repository's own filter pipeline, the same conversion gix status
+/// applies before it compares content, settles whether the file is current.
+/// Untracked and explicitly admitted sources have no blob to be sealed from,
+/// so their raw mismatch is final.
+fn clean_filter_mismatches<'a>(
+    project_root: &Path,
+    disputed: Vec<&'a StatCandidateV1>,
     manifest: &SourceContentManifestV1,
-) -> bool {
+) -> Vec<&'a StatCandidateV1> {
     let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) else {
-        return false;
+        return disputed;
     };
     let Ok((mut pipeline, index)) = repository.filter_pipeline(None) else {
-        return false;
+        return disputed;
     };
-    disputed.iter().all(|candidate| {
-        let Some(expected) = manifest.files.get(&candidate.logical_path) else {
-            return false;
-        };
-        if candidate.explicitly_admitted
-            || index
-                .entry_by_path(BStr::new(candidate.logical_path.as_str()))
-                .is_none()
-        {
-            return false;
-        }
-        let rela_path = Path::new(&candidate.logical_path);
-        let Ok(file) = std::fs::File::open(project_root.join(rela_path)) else {
-            return false;
-        };
-        let Ok(mut converted) = pipeline.convert_to_git(file, rela_path, &index) else {
-            return false;
-        };
-        let mut bytes = Vec::new();
-        converted.read_to_end(&mut bytes).is_ok()
-            && sanitized_digest(candidate, &bytes).is_ok_and(|digest| digest == *expected)
-    })
+    disputed
+        .into_iter()
+        .filter(|candidate| {
+            let Some(expected) = manifest.files.get(&candidate.logical_path) else {
+                return true;
+            };
+            if candidate.explicitly_admitted
+                || index
+                    .entry_by_path(BStr::new(candidate.logical_path.as_str()))
+                    .is_none()
+            {
+                return true;
+            }
+            let rela_path = Path::new(&candidate.logical_path);
+            let Ok(file) = std::fs::File::open(project_root.join(rela_path)) else {
+                return true;
+            };
+            let Ok(mut converted) = pipeline.convert_to_git(file, rela_path, &index) else {
+                return true;
+            };
+            let mut bytes = Vec::new();
+            !(converted.read_to_end(&mut bytes).is_ok()
+                && sanitized_digest(candidate, &bytes).is_ok_and(|digest| digest == *expected))
+        })
+        .collect()
 }
 
 /// The exact sanitized bytes a generation sealed for `logical_path`, recovered
@@ -765,7 +850,7 @@ fn tracked_files_match_after_clean_filters(
 /// sources) is current while every offset past the first converted line
 /// ending points elsewhere in the disk bytes. The file is tried as it is on
 /// disk first, then through the repository's own filter pipeline, the same
-/// two readings [`tracked_files_match_after_clean_filters`] accepts as current.
+/// two readings [`clean_filter_mismatches`] accepts as current.
 pub fn sealed_source_bytes(
     project_root: &Path,
     logical_path: &str,

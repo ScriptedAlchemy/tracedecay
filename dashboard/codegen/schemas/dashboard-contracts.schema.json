@@ -23144,9 +23144,6 @@
     },
     "SavingsOverviewPayloadV1": {
       "properties": {
-        "costs": {
-          "$ref": "#/$defs/CostsReadModelV1"
-        },
         "pricing": {
           "$ref": "#/$defs/SavingsPricingSummaryV1"
         },
@@ -23164,8 +23161,7 @@
         "savings",
         "sessions",
         "provider_usage",
-        "pricing",
-        "costs"
+        "pricing"
       ],
       "type": "object"
     },

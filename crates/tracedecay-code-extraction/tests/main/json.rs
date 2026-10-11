@@ -1,7 +1,7 @@
 use tracedecay_code_extraction::{JsonExtractor, LanguageExtractor};
 use tracedecay_domain::NodeKind;
 
-const FIXTURE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/typescript-monorepo");
+const FIXTURE_ROOT: &str = "fixtures/typescript-monorepo";
 
 fn fixture(relative: &str) -> String {
     std::fs::read_to_string(format!("{FIXTURE_ROOT}/{relative}"))

@@ -624,3 +624,119 @@ async fn registered_memory_relation_graph_survives_restart_and_isolates_topologi
         .await
         .expect("join restarted daemon graph lifecycles");
 }
+
+#[tokio::test]
+async fn settled_graph_reads_reuse_the_exact_verified_generation() {
+    const SETTLED_FACTS: usize = 24;
+    const REPEATED_READS: usize = 4;
+    let temp = TempDir::new().expect("settled read fixture root");
+    let profile_root = temp.path().join("profile");
+    let project_id = ProjectId::new("project.memory-graph.settled").expect("project id");
+    let project_root = enrolled_root(temp.path(), &project_id);
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        43,
+        "settled project memory graph reads",
+    )
+    .expect("daemon database scope");
+    let lifecycle = TestFactLifecycle::new();
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("daemon registry");
+    let database = registry
+        .project_memory(project_id.clone(), [project_root])
+        .await
+        .expect("project memory authority");
+    let owner = FactOwnerV1::Project { project_id };
+    let facts = add_facts(
+        &database,
+        &lifecycle,
+        &owner,
+        FactCategoryV1::Project,
+        (0..SETTLED_FACTS).map(|index| format!("settled-node-{index:03}")),
+    )
+    .await;
+    link_facts(
+        &database,
+        &lifecycle,
+        &owner,
+        "seed settled chain",
+        facts
+            .windows(2)
+            .map(|pair| {
+                (
+                    pair[0].clone(),
+                    pair[1].clone(),
+                    FactRelationKindV1::Supports,
+                )
+            })
+            .collect(),
+    )
+    .await;
+    wait_for_reconciliation(&database).await;
+    let budget = SETTLED_FACTS * 4;
+    let observer = database.project_memory_reconciliation_telemetry_observer();
+    let first = graph(
+        &database,
+        &lifecycle,
+        owner.clone(),
+        vec![facts[0].clone()],
+        budget,
+    )
+    .await
+    .expect("first settled graph read");
+    assert_eq!(first.facts().len(), SETTLED_FACTS);
+    let settled = observer.snapshot();
+
+    for _ in 0..REPEATED_READS {
+        let repeated = graph(
+            &database,
+            &lifecycle,
+            owner.clone(),
+            vec![facts[0].clone()],
+            budget,
+        )
+        .await
+        .expect("repeated settled graph read");
+        assert_eq!(repeated, first);
+    }
+    let after_reads = observer.snapshot();
+    assert_eq!(after_reads.source_rows_loaded, settled.source_rows_loaded);
+    assert_eq!(after_reads.source_bytes_loaded, settled.source_bytes_loaded);
+    assert_eq!(
+        after_reads.publication_attempts,
+        settled.publication_attempts
+    );
+    assert_eq!(
+        after_reads.reconciliation_passes,
+        settled.reconciliation_passes
+    );
+
+    link_facts(
+        &database,
+        &lifecycle,
+        &owner,
+        "close settled chain",
+        vec![(
+            facts[SETTLED_FACTS - 1].clone(),
+            facts[0].clone(),
+            FactRelationKindV1::Contradicts,
+        )],
+    )
+    .await;
+    wait_for_reconciliation(&database).await;
+    let mutated = graph(&database, &lifecycle, owner, vec![facts[0].clone()], budget)
+        .await
+        .expect("graph read after a source mutation");
+    assert!(has_fact_relation(
+        &mutated,
+        &facts[SETTLED_FACTS - 1],
+        &facts[0],
+        ProjectMemoryGraphRelationKindV1::Contradicts,
+    ));
+    registry
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("join daemon graph lifecycle");
+}

@@ -8,7 +8,7 @@
  * the browser itself uses, never a hand-written mirror: a mirror can be wrong
  * in the same direction as the fixture.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z, type ZodType } from 'zod';
 
 import { resolveFixture, subagentTreeFixture } from './data.ts';
@@ -28,8 +28,6 @@ import {
   DeliveryOverviewV1Schema,
   DoctorFindingsPayloadV1Schema,
   DashboardEnvelopeV1Schema,
-  ExecutionTopologyMetricsV1Schema,
-  FeedbackProximityReadResultV1Schema,
   GraphNeighborsPayloadV1Schema,
   GraphOverviewPayloadV1Schema,
   GraphSearchPayloadV1Schema,
@@ -54,12 +52,19 @@ import {
   SettingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
   StructureReadV12Schema,
-  ListTaskHandoffsResultV1Schema,
-  WorkflowDefinitionSchema,
-  WorkflowRunProjectionSchema,
-  WorkGraphReadV1Schema,
 } from '../../src/contracts/generated.ts';
-import { workPayload } from '../../src/workspaces/work/workApi.ts';
+import { callWork, type WorkRoute } from '../../src/workspaces/work/workApi.ts';
+import {
+  WORK_EXECUTION_TOPOLOGY_METRICS_ROUTE,
+  WORK_VIEWS_ROUTE,
+} from '../../src/workspaces/work/workRoutes.ts';
+import {
+  WORKFLOW_DEFINITION_HISTORY_ROUTE,
+  WORKFLOW_GET_RUN_ROUTE,
+  WORKFLOW_LIST_DEFINITIONS_ROUTE,
+} from '../../src/workspaces/workflows/workflowRoutes.ts';
+import { HANDOFF_LIST_TASK_ROUTE } from '../../src/workspaces/agents/handoffTokens.ts';
+import { FEEDBACK_PROXIMITY_ROUTE } from '../../src/viz/proximity/proximityApi.ts';
 import {
   AutomaticCuratorResponseSchema,
   AutomationOutcomesPayloadSchema,
@@ -134,30 +139,17 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/remote/status': DashboardEnvelopeV1Schema(RemoteOperationalStatusPayloadV1Schema),
 };
 
-/**
- * Routes that answer with the application's `HttpJsonEnvelope` instead of
- * `DashboardEnvelopeV1`, mapped to the generated contract inside it.
- *
- * The wrapper itself has no generated schema. `contract_schema.rs` exports the
- * Work payloads but not the application envelope around them, so these cannot
- * go in `CONTRACTS`, and putting them in `UNCONTRACTED` would be false: their
- * payloads are fully contracted. The gate below unwraps with the production
- * walker rather than reaching into the fixture by hand, so a fixture whose
- * wrapper is subtly wrong fails here exactly as it would in the browser.
- */
-const APPLICATION_ENVELOPE: Readonly<Record<string, ZodType<unknown>>> = {
-  // The work-product graph read. Two workspaces derive from it: the Work
-  // projections, and the Agents handoff frontier and attempt failures.
-  '/api/work/views': WorkGraphReadV1Schema,
-  // A workflow read answers through the same application wrapper Work reads
-  // use; the walked payload is the definitions array itself.
-  '/api/application/workflow/list-definitions': z.array(WorkflowDefinitionSchema),
-  '/api/application/workflow/definition-history': z.array(WorkflowDefinitionSchema),
-  '/api/application/workflow/get-run': WorkflowRunProjectionSchema,
-  '/api/application/handoff/list-task': ListTaskHandoffsResultV1Schema,
-  '/api/work/topology-metrics': ExecutionTopologyMetricsV1Schema,
-  '/api/feedback/proximity': FeedbackProximityReadResultV1Schema,
-};
+const APPLICATION_ROUTES: Readonly<Record<string, WorkRoute<unknown, unknown>>> = Object.fromEntries(
+  [
+    WORK_VIEWS_ROUTE,
+    WORKFLOW_LIST_DEFINITIONS_ROUTE,
+    WORKFLOW_DEFINITION_HISTORY_ROUTE,
+    WORKFLOW_GET_RUN_ROUTE,
+    HANDOFF_LIST_TASK_ROUTE,
+    WORK_EXECUTION_TOPOLOGY_METRICS_ROUTE,
+    FEEDBACK_PROXIMITY_ROUTE,
+  ].map((route): [string, WorkRoute<unknown, unknown>] => [route.path, route]),
+);
 
 /**
  * The routes the resolver synthesizes rather than looking up in `FIXTURES`:
@@ -274,6 +266,10 @@ const DYNAMIC: ReadonlyArray<{
 ];
 
 describe('fixtures parse against the generated contract for their route', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it.each(Object.keys(CONTRACTS))('GET %s', (pathname) => {
     expectParses(CONTRACTS[pathname]!, pathname);
   });
@@ -282,16 +278,12 @@ describe('fixtures parse against the generated contract for their route', () => 
     expectParses(schema, pathname, search ?? '');
   });
 
-  it.each(Object.keys(APPLICATION_ENVELOPE))(
+  it.each(Object.keys(APPLICATION_ROUTES))(
     'POST %s: application envelope, generated payload',
-    (pathname) => {
-      // The walk the browser performs. A wrapper the app cannot open is
-      // reported to the user as `unsupported_schema`, so a fixture that fails
-      // this assertion would have the audit screenshot a refusal plate.
-      const found = workPayload(resolveFixture(pathname));
-      expect(found.found, `${pathname} fixture is not an application envelope`).toBe(true);
-      if (!found.found) return;
-      expectValue(APPLICATION_ENVELOPE[pathname]!, found.payload, pathname);
+    async (pathname) => {
+      vi.stubGlobal('fetch', async () => Response.json(resolveFixture(pathname)));
+      const route = { ...APPLICATION_ROUTES[pathname]!, request: z.unknown() };
+      expect(await callWork(route, {}, pathname)).toMatchObject({ outcome: 'value' });
     },
   );
 

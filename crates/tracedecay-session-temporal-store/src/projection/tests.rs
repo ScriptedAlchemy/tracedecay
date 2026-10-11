@@ -901,7 +901,7 @@ async fn grouped_completion_revalidates_evidence_after_staging() {
     transaction.commit().await.unwrap();
 
     let error = access
-        .complete_session_refresh_group(vec![(request, verified)], control)
+        .complete_session_refresh_group(&[(request, verified)], control)
         .await
         .unwrap()
         .remove(0)
@@ -3517,7 +3517,7 @@ async fn grouped_begin_alone_savepoint_failure_aborts_the_group() {
     );
     let access = SessionTemporalAccess::new(&failing);
     let error = access
-        .commit_session_refresh_begin_batch_group(items, ExecutionControl::default())
+        .commit_session_refresh_begin_batch_group(&items, ExecutionControl::default())
         .await
         .expect_err("the failed _alone savepoint must abort the grouped commit");
     assert_eq!(
