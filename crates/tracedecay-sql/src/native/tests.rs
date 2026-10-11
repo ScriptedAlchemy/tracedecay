@@ -627,6 +627,43 @@ fn identity_fence_rejects_replacement_and_unlink_recreate() {
     ));
 }
 
+/// Catches progress ticks that stop re-checking the file identity: the store
+/// is renamed away while a long join runs, and the join must stop as denied
+/// rather than run on until its deadline.
+#[test]
+fn identity_fence_interrupts_a_running_statement() {
+    let (directory, database) = database();
+    let path = directory.path().join("native.tdb");
+    let guard = execution_guard();
+    let writer = database.connect(Access::Writer).unwrap();
+    writer
+        .execute("CREATE TABLE t(x INTEGER)", &[], &guard)
+        .unwrap();
+    let rows = (0..2000).map(|x| format!("({x})")).collect::<Vec<_>>();
+    writer
+        .execute(
+            &format!("INSERT INTO t VALUES {}", rows.join(",")),
+            &[],
+            &guard,
+        )
+        .unwrap();
+    let staged = directory.path().join("renamed.tdb");
+    let mover = {
+        let (path, staged) = (path.clone(), staged.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            std::fs::rename(path, staged).unwrap();
+        })
+    };
+    let outcome = writer.query("SELECT count(*) FROM t a, t b, t c", &[], &guard);
+    mover.join().unwrap();
+    assert!(
+        matches!(outcome, Err(Error::Denied(_))),
+        "a replaced store stops the running statement: {outcome:?}"
+    );
+    std::fs::rename(&staged, &path).unwrap();
+}
+
 /// (voluntary context switches, CPU clock ticks) of the calling thread.
 #[cfg(target_os = "linux")]
 fn thread_scheduling() -> (u64, u64) {

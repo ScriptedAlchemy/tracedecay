@@ -19,6 +19,11 @@ for (tag, mode, engine), records in groups.items():
     instructions = [r["instructions_u"] for r in records if "instructions_u" in r]
     if instructions:
         line += f" instr:u median {statistics.median(instructions) / 1e9:.1f}G"
+    writer = [r for r in records if "writer_instructions_u" in r]
+    if writer:
+        line += (f" writer instr:u {statistics.median(r['writer_instructions_u'] for r in writer) / 1e9:.1f}G"
+                 f" cycles:u {statistics.median(r['writer_cycles_u'] for r in writer) / 1e9:.1f}G"
+                 f" cpu {statistics.median(r['writer_task_clock_ms'] for r in writer)}ms")
     print(line)
     if mode == "search":
         classes = records[0]["classes"]

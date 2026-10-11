@@ -1,6 +1,8 @@
+diff --git a/storage/page_cache.rs b/storage/page_cache.rs
+index a83bdef..1576339 100644
 --- a/storage/page_cache.rs
 +++ b/storage/page_cache.rs
-@@ -555,6 +555,24 @@
+@@ -555,6 +555,24 @@ impl PageCache {
          }
      }
  
@@ -25,9 +27,11 @@
      /// Notify the cache that a page has been spilled.
      /// This should be called when a page transitions from dirty to spilled.
      /// The page must already be in the cache.
+diff --git a/storage/pager.rs b/storage/pager.rs
+index 72c4550..92a09da 100644
 --- a/storage/pager.rs
 +++ b/storage/pager.rs
-@@ -4753,6 +4753,16 @@
+@@ -4753,6 +4753,16 @@ impl Pager {
                      // all I/O complete, NOW it's safe to advance WAL state
                      let mut commit_info = self.commit_info.write();
                      wal.commit_prepared_frames(&commit_info.prepared_frames);

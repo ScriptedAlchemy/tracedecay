@@ -92,25 +92,49 @@ def perf_counts(path):
     return {
         "instructions_u": int(counts["instructions:u"]),
         "task_clock_ms": round(counts["task-clock"]),
+        "cycles_u": int(counts.get("cycles:u", 0)),
     }
 
 
 def run_once(binary, mode, corpus, extra):
     before = load1()
     started = time.monotonic()
-    with tempfile.NamedTemporaryFile(suffix=".perf") as counters:
-        result = subprocess.run(
+    with (
+        tempfile.NamedTemporaryFile(suffix=".perf") as counters,
+        tempfile.NamedTemporaryFile(suffix=".perf") as writer_counters,
+        tempfile.TemporaryFile("w+") as stdout,
+    ):
+        bench = subprocess.Popen(
             ["perf", "stat", "-x,", "-e", "instructions:u,task-clock", "-o", counters.name,
              str(binary), "--corpus", str(corpus), *extra],
-            capture_output=True,
+            stdout=stdout,
+            stderr=subprocess.PIPE,
             text=True,
-            check=False,
         )
+        # The main thread is the artifact writer; its counters are the
+        # writer's own work, apart from the parallel parse workers.
+        main_thread = None
+        while main_thread is None and bench.poll() is None:
+            children = pathlib.Path(f"/proc/{bench.pid}/task/{bench.pid}/children")
+            pids = children.read_text().split() if children.exists() else []
+            main_thread = pids[0] if pids else None
+        writer = subprocess.Popen(
+            ["perf", "stat", "-x,", "-e", "cycles:u,instructions:u,task-clock", "-t",
+             main_thread, "-o", writer_counters.name],
+            stderr=subprocess.DEVNULL,
+        )
+        stderr = bench.communicate()[1]
+        writer.wait()
         wall_ms = round((time.monotonic() - started) * 1000)
-        if result.returncode != 0:
-            raise SystemExit(f"{binary} failed ({result.returncode}): {result.stderr[-2000:]}")
+        if bench.returncode != 0:
+            raise SystemExit(f"{binary} failed ({bench.returncode}): {stderr[-2000:]}")
         counted = perf_counts(counters.name)
-    report = json.loads(result.stdout)
+        writer_counted = perf_counts(writer_counters.name)
+        counted["writer_instructions_u"] = writer_counted["instructions_u"]
+        counted["writer_task_clock_ms"] = writer_counted["task_clock_ms"]
+        counted["writer_cycles_u"] = writer_counted["cycles_u"]
+        stdout.seek(0)
+        report = json.loads(stdout.read())
     facts = index_facts(report) if mode == "index" else search_facts(report)
     return {
         "load1_before": before,
@@ -168,6 +192,8 @@ def main():
                 print(
                     f"{options.tag} {label} run {run}: ingest {facts['ingest_ms']} ms, "
                     f"instr:u {facts['instructions_u'] / 1e9:.1f}G, "
+                    f"writer instr:u {facts['writer_instructions_u'] / 1e9:.1f}G "
+                    f"cpu {facts['writer_task_clock_ms']} ms, "
                     f"load {facts['load1_before']:.0f}->{facts['load1_after']:.0f}",
                     file=sys.stderr,
                 )
