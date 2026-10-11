@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{BackendKind, QueryExecutor, params};
+use tracedecay_runtime_core::db::native_search::SearchIndex;
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
@@ -11,7 +12,7 @@ use super::definitions::{
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, ActualTableMetadata, read_table_metadata,
 };
-use super::{normalize_trigger_sql, starts_with_ignore_ascii_case};
+use super::starts_with_ignore_ascii_case;
 
 const OPERATION: &str = "validate global database authority schema";
 
@@ -28,6 +29,25 @@ type GraphPublicationSchemaBuildResult =
 
 static EXPECTED_GRAPH_PUBLICATION_SCHEMA: LazyLock<GraphPublicationSchemaBuildResult> =
     LazyLock::new(build_expected_graph_publication_schema);
+
+static EXPECTED_NATIVE_GRAPH_PUBLICATION_SCHEMA: LazyLock<GraphPublicationSchemaBuildResult> =
+    LazyLock::new(|| {
+        let objects = tracedecay_runtime_core::db::migrations::native_final_schema_objects()
+            .map_err(|error| error.to_string())?;
+        Ok(objects
+            .filter(|(_, name, table, _)| belongs_to_graph_publication_namespace(name, table))
+            .map(|(object_type, name, table, sql)| {
+                (
+                    name.to_owned(),
+                    GraphPublicationSchemaObject {
+                        object_type: object_type.to_owned(),
+                        table: table.to_owned(),
+                        sql: sql.to_owned(),
+                    },
+                )
+            })
+            .collect())
+    });
 
 fn build_expected_graph_publication_schema() -> GraphPublicationSchemaBuildResult {
     let connection = tracedecay_sql::Connection::open_in_memory()
@@ -297,10 +317,26 @@ fn contract_indexes_for_table(table: &str) -> Vec<&'static Index> {
 fn validate_indexes_for_table(
     table_contract: &Table,
     expected: &[&Index],
+    search_index: Option<SearchIndex>,
     actual: &[ActualIndex],
 ) -> tracedecay_domain::errors::Result<()> {
     let table = table_contract.name;
     let mut matched_actual = vec![false; actual.len()];
+    if let Some(search_index) = search_index {
+        let Some(position) = actual
+            .iter()
+            .position(|actual| actual.name.eq_ignore_ascii_case(search_index.index_name()))
+        else {
+            return Err(global_db_operation_message(
+                OPERATION,
+                format!(
+                    "table '{table}' is missing native search index '{}'",
+                    search_index.index_name()
+                ),
+            ));
+        };
+        matched_actual[position] = true;
+    }
     for contract in expected {
         let Some(actual_index) = actual
             .iter()
@@ -372,10 +408,10 @@ async fn validate_trigger(
         )),
         None => None,
     };
-    if actual.as_ref().is_some_and(|(table, sql)| {
-        table.eq_ignore_ascii_case(trigger.table)
-            && normalize_trigger_sql(sql) == normalize_trigger_sql(trigger.create_sql)
-    }) {
+    if actual
+        .as_ref()
+        .is_some_and(|(table, sql)| trigger.matches(conn.backend_kind(), table, sql))
+    {
         Ok(())
     } else {
         Err(global_db_operation_message(
@@ -475,9 +511,17 @@ async fn validate_contracts(
             )
         })?;
         validate_table(contract, actual)?;
+        let search_index = (conn.backend_kind() == BackendKind::NativeTurso)
+            .then(|| {
+                SearchIndex::ALL
+                    .into_iter()
+                    .find(|index| index.table_name().eq_ignore_ascii_case(contract.name))
+            })
+            .flatten();
         validate_indexes_for_table(
             contract,
             &contract_indexes_for_table(contract.name),
+            search_index,
             &actual.indexes,
         )?;
     }
@@ -495,9 +539,12 @@ pub async fn validate_session_graph_publication_schema_contract(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
     let actual = read_graph_publication_inventory(conn).await?;
-    let expected = EXPECTED_GRAPH_PUBLICATION_SCHEMA
-        .as_ref()
-        .map_err(|error| global_db_operation_message(OPERATION, error.clone()))?;
+    let expected = match conn.backend_kind() {
+        BackendKind::Sqlite => &EXPECTED_GRAPH_PUBLICATION_SCHEMA,
+        BackendKind::NativeTurso => &EXPECTED_NATIVE_GRAPH_PUBLICATION_SCHEMA,
+    }
+    .as_ref()
+    .map_err(|error| global_db_operation_message(OPERATION, error.clone()))?;
 
     for (name, expected_object) in expected {
         let Some(actual_object) = actual.get(name) else {

@@ -29,7 +29,7 @@ pub async fn install_history_change_schema(
              session_id TEXT NOT NULL,
              UNIQUE(provider, session_id)
          );
-         DROP TRIGGER IF EXISTS git_history_session_insert;
+         DROP TRIGGER IF EXISTS main.git_history_session_insert;
          CREATE TRIGGER git_history_session_insert
          AFTER INSERT ON sessions BEGIN
              DELETE FROM git_history_session_change
@@ -37,7 +37,7 @@ pub async fn install_history_change_schema(
              INSERT INTO git_history_session_change(provider, session_id)
                  VALUES (NEW.provider, NEW.session_id);
          END;
-         DROP TRIGGER IF EXISTS git_history_session_update;
+         DROP TRIGGER IF EXISTS main.git_history_session_update;
          CREATE TRIGGER git_history_session_update
          AFTER UPDATE ON sessions
          WHEN OLD.provider IS NOT NEW.provider OR OLD.session_id IS NOT NEW.session_id
@@ -56,7 +56,7 @@ pub async fn install_history_change_schema(
              INSERT INTO git_history_session_change(provider, session_id)
                  VALUES (NEW.provider, NEW.session_id);
          END;
-         DROP TRIGGER IF EXISTS git_history_session_delete;
+         DROP TRIGGER IF EXISTS main.git_history_session_delete;
          CREATE TRIGGER git_history_session_delete
          AFTER DELETE ON sessions BEGIN
              DELETE FROM git_history_session_change
@@ -64,7 +64,7 @@ pub async fn install_history_change_schema(
              INSERT INTO git_history_session_change(provider, session_id)
                  VALUES (OLD.provider, OLD.session_id);
          END;
-         DROP TRIGGER IF EXISTS git_history_message_insert;
+         DROP TRIGGER IF EXISTS main.git_history_message_insert;
          CREATE TRIGGER git_history_message_insert
          AFTER INSERT ON lcm_raw_messages BEGIN
              DELETE FROM git_history_session_change
@@ -72,7 +72,7 @@ pub async fn install_history_change_schema(
              INSERT INTO git_history_session_change(provider, session_id)
                  VALUES (NEW.provider, NEW.session_id);
          END;
-         DROP TRIGGER IF EXISTS git_history_message_update;
+         DROP TRIGGER IF EXISTS main.git_history_message_update;
          CREATE TRIGGER git_history_message_update
          AFTER UPDATE ON lcm_raw_messages
          WHEN OLD.provider IS NOT NEW.provider OR OLD.session_id IS NOT NEW.session_id
@@ -90,7 +90,7 @@ pub async fn install_history_change_schema(
              INSERT INTO git_history_session_change(provider, session_id)
                  VALUES (NEW.provider, NEW.session_id);
          END;
-         DROP TRIGGER IF EXISTS git_history_message_delete;
+         DROP TRIGGER IF EXISTS main.git_history_message_delete;
          CREATE TRIGGER git_history_message_delete
          AFTER DELETE ON lcm_raw_messages BEGIN
              DELETE FROM git_history_session_change

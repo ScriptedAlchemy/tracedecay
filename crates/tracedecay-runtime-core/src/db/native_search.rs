@@ -14,6 +14,13 @@ pub enum SearchIndex {
 }
 
 impl SearchIndex {
+    pub const ALL: [Self; 4] = [
+        Self::MemoryPayload,
+        Self::RawMessage,
+        Self::Occurrence,
+        Self::Summary,
+    ];
+
     pub const fn table_name(self) -> &'static str {
         match self {
             Self::MemoryPayload => "memory_v2_assertion_payloads",

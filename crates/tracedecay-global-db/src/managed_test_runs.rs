@@ -19,7 +19,7 @@ use super::{RegisteredGlobalDb, global_db_operation_error};
 
 const MANAGED_TEST_RUN_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS managed_test_runs (
-        operation_id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL PRIMARY KEY,
         root_uri TEXT NOT NULL,
         session_id TEXT,
         head_commit_id TEXT,

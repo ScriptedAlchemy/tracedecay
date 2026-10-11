@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
+use tracedecay_runtime_core::db::engine::{BackendKind, Executor, QueryExecutor};
 
 mod inspection;
 
@@ -13,6 +13,16 @@ pub const TOPOLOGY_POLICY_SCHEMA_VERSION: u16 = 1;
 pub const CONFIGURATION_FORMAT_REVISION: i64 = 1;
 const FINAL_CONFIGURATION_SCHEMA_DIGEST: &str =
     "sha256:928b581984f263fac250b1982ddaafa45e6da5737bafec94716343359063a392";
+/// The same definitions as Turso persists and reports them.
+const NATIVE_FINAL_CONFIGURATION_SCHEMA_DIGEST: &str =
+    "sha256:b87e0c57364c67f975fa45fa988e243bf532211ba63cc26999cc45e9a6d9701b";
+
+fn final_configuration_schema_digest(backend: BackendKind) -> &'static str {
+    match backend {
+        BackendKind::Sqlite => FINAL_CONFIGURATION_SCHEMA_DIGEST,
+        BackendKind::NativeTurso => NATIVE_FINAL_CONFIGURATION_SCHEMA_DIGEST,
+    }
+}
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigurationSchemaError {
@@ -393,7 +403,8 @@ async fn validate_configuration_schema(
     let Some(definition_digest) = configuration_definition_digest(connection).await? else {
         return Ok(ConfigurationShape::Absent);
     };
-    let shape = if definition_digest == FINAL_CONFIGURATION_SCHEMA_DIGEST {
+    let shape = if definition_digest == final_configuration_schema_digest(connection.backend_kind())
+    {
         ConfigurationShape::Final
     } else {
         return Err(ConfigurationSchemaError::ResetRequired {
@@ -488,6 +499,28 @@ mod tests {
             .await
             .unwrap();
         (directory, connection)
+    }
+
+    /// Catches configuration DDL changing without its native digest, which
+    /// would make every fresh native store refuse its own install.
+    #[tokio::test]
+    async fn native_install_reports_the_pinned_native_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = tracedecay_runtime_core::db::engine::NativeTestConnection::open(
+            &directory.path().join("configuration.db"),
+        )
+        .unwrap();
+        connection
+            .execute_batch(CONFIGURATION_SCHEMA_SQL)
+            .await
+            .unwrap();
+        assert_eq!(
+            configuration_definition_digest(&*connection)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(NATIVE_FINAL_CONFIGURATION_SCHEMA_DIGEST)
+        );
     }
 
     #[tokio::test]

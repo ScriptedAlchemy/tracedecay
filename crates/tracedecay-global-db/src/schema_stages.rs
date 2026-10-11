@@ -15,7 +15,8 @@ use tracedecay_runtime_core::{
     cancellation::CancellationToken,
     db::{
         Database, DatabaseWriteTransaction,
-        engine::{self, Executor, IntoParams, QueryExecutor, Rows},
+        engine::{self, BackendKind, Executor, IntoParams, QueryExecutor, Rows},
+        native_search::normalize_schema_sql,
     },
     ports::registered_schema::{
         RegisteredSchemaInstallationTransactionV1, RegisteredSchemaInstallationV1,
@@ -210,7 +211,7 @@ const TRANSCRIPT_SCHEMA: &str = "
     BEGIN
         SELECT RAISE(ABORT, 'observability emission outbox identity is immutable');
     END;
-    DROP TRIGGER IF EXISTS observability_emission_outbox_no_delete;
+    DROP TRIGGER IF EXISTS main.observability_emission_outbox_no_delete;
     CREATE TABLE IF NOT EXISTS sessions (
         provider TEXT NOT NULL,
         session_id TEXT NOT NULL,
@@ -1364,6 +1365,12 @@ async fn inspect_workflow_schema_for_admission(
         return Ok(Ok(WorkflowSchemaAdmission::Create));
     }
 
+    // Turso stores DDL re-rendered from its parse tree; SQLite stores the text
+    // as written.
+    let stored_form = |sql: &str| match conn.backend_kind() {
+        BackendKind::Sqlite => sql.to_owned(),
+        BackendKind::NativeTurso => normalize_schema_sql(sql),
+    };
     let actual_workflow_tables = tables
         .iter()
         .filter(|(object_type, name, _)| {
@@ -1372,11 +1379,11 @@ async fn inspect_workflow_schema_for_admission(
                     .iter()
                     .any(|contract| contract.name == name.as_str())
         })
-        .map(|(_, name, sql)| (name.as_str(), sql.as_deref()))
+        .map(|(_, name, sql)| (name.as_str(), sql.as_deref().map(stored_form)))
         .collect::<Vec<_>>();
     let expected_workflow_tables = WORKFLOW_TABLE_CONTRACTS_V1
         .iter()
-        .map(|contract| (contract.name, Some(contract.sql)))
+        .map(|contract| (contract.name, Some(stored_form(contract.sql))))
         .collect::<Vec<_>>();
     if actual_workflow_tables != expected_workflow_tables {
         return Ok(Err(workflow_schema_refusal(
@@ -1517,6 +1524,104 @@ mod tests {
         {
             Ok(_) => panic!("incompatible registered schema must not be admitted"),
             Err(error) => error,
+        }
+    }
+
+    /// Catches any registered stage whose DDL, guard trigger, or admission
+    /// query the native engine rejects. A session store installs every stage,
+    /// then reopens through the same classification as an exactly current
+    /// store whose authority contract still validates.
+    #[tokio::test]
+    async fn the_full_registered_stage_sequence_installs_and_readmits_on_native() {
+        use tracedecay_runtime_core::db::engine::NativeTestConnection;
+
+        let directory = TempDir::new().expect("temp dir");
+        let path = directory.path().join("registered.db");
+        for fresh in [true, false] {
+            let connection = NativeTestConnection::open(&path).expect("open native store");
+            let classification = match super::classify_registered_schema_admission(
+                &*connection,
+                &tracedecay_store::StoreShardScopeV1::ProfileSessions,
+            )
+            .await
+            .expect("classify native registered schema")
+            {
+                super::RegisteredSchemaAdmission::Admissible(classification) => classification,
+                super::RegisteredSchemaAdmission::SessionAuthorityRefused(refused) => {
+                    panic!("native registered schema refused a session authority: {refused:?}")
+                }
+            };
+            assert_eq!(classification.configuration_fresh.is_some(), fresh);
+            assert_eq!(
+                classification.temporal_admission,
+                if fresh {
+                    super::session_temporal_schema::SessionTemporalSchemaAdmission::Fresh
+                } else {
+                    super::session_temporal_schema::SessionTemporalSchemaAdmission::Current
+                }
+            );
+            let force_exhaustive = !super::authority_invariant_triggers_intact(&*connection)
+                .await
+                .expect("inspect native authority triggers");
+            assert_eq!(force_exhaustive, fresh);
+            let transaction = connection
+                .authorized_long_lease_transaction()
+                .await
+                .expect("begin native schema install");
+            let installed = super::install_registered_schema_stages(
+                &transaction,
+                classification.configuration_fresh.as_ref(),
+                classification.temporal_admission,
+                classification.session_features,
+                force_exhaustive,
+            )
+            .await;
+            // Under `bz run`, the uncommitted install is the source of the
+            // native trigger golden, written before admission judges it.
+            if let Some(workspace) = std::env::var_os("BUILD_WORKSPACE_DIRECTORY") {
+                std::fs::write(
+                    std::path::Path::new(&workspace).join(
+                        "crates/tracedecay-global-db/src/schema_contract/invariants/native_triggers.json",
+                    ),
+                    crate::schema_contract::invariants::render_native_trigger_golden(&transaction)
+                        .await,
+                )
+                .expect("write native trigger golden");
+                return;
+            }
+            assert_eq!(
+                crate::schema_contract::invariants::render_native_trigger_golden(&transaction)
+                    .await,
+                crate::schema_contract::invariants::NATIVE_TRIGGER_GOLDEN,
+                "native trigger golden is stale; run \
+                 `bz run //crates/tracedecay-global-db:unit_test -- the_full_registered_stage_sequence`"
+            );
+            let refused = installed.expect("install every registered stage on native");
+            assert!(refused.is_none(), "native install refused an authority");
+            transaction.commit().await.expect("commit native schema");
+            for sql in super::observation_projection::OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL
+                .iter()
+                .chain(tracedecay_lcm::schema::LCM_STATUS_PERFORMANCE_INDEX_SQL)
+            {
+                connection
+                    .execute_batch(sql)
+                    .await
+                    .expect("build native performance index");
+            }
+            super::validate_admitted_authority_schema(&*connection, fresh)
+                .await
+                .expect("native authority schema validates");
+            if fresh {
+                super::ensure_fresh_authority_invariants(&*connection)
+                    .await
+                    .expect("record native fresh authority checkpoint");
+            }
+            assert!(
+                super::authority_invariant_triggers_intact(&*connection)
+                    .await
+                    .expect("inspect native authority triggers"),
+                "native install left an authority trigger missing or drifted"
+            );
         }
     }
 
@@ -1916,10 +2021,10 @@ mod tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys = OFF;
-                 DROP TRIGGER IF EXISTS projection_queue_identity_insert_v1;
-                 DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
-                 DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
-                 DROP TRIGGER IF EXISTS session_query_cursor_keys_rotate_insert_v1;
+                 DROP TRIGGER IF EXISTS main.projection_queue_identity_insert_v1;
+                 DROP TRIGGER IF EXISTS main.session_query_cursor_keys_insert_guard_v1;
+                 DROP TRIGGER IF EXISTS main.session_query_cursor_keys_retire_update_v1;
+                 DROP TRIGGER IF EXISTS main.session_query_cursor_keys_rotate_insert_v1;
                  INSERT INTO projection_queue(observation_id, observation_sequence)
                  VALUES ('orphaned-observation', 1);
                  INSERT INTO session_query_cursor_keys (
@@ -1992,7 +2097,7 @@ mod tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys = OFF;
-                     DROP TRIGGER IF EXISTS projection_queue_identity_insert_v1;
+                     DROP TRIGGER IF EXISTS main.projection_queue_identity_insert_v1;
                      CREATE TABLE audit_parent (id INTEGER PRIMARY KEY);
                      CREATE TABLE audit_child (
                         id INTEGER PRIMARY KEY,
@@ -2048,8 +2153,8 @@ mod tests {
             let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
             connection
                 .execute_batch(
-                    "DROP TRIGGER IF EXISTS projection_queue_identity_insert_v1;
-                     DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;",
+                    "DROP TRIGGER IF EXISTS main.projection_queue_identity_insert_v1;
+                     DROP TRIGGER IF EXISTS main.session_query_cursor_keys_insert_guard_v1;",
                 )
                 .expect("drop guard triggers on an otherwise clean store");
         }

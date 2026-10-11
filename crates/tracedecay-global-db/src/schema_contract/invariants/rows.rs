@@ -648,9 +648,9 @@ mod tests {
             .expect("begin invariant fixture transaction");
         let conn = &transaction;
         conn.execute_batch(
-            "DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
-             DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
-             DROP TRIGGER IF EXISTS session_query_cursor_keys_rotate_insert_v1;
+            "DROP TRIGGER IF EXISTS main.session_query_cursor_keys_insert_guard_v1;
+             DROP TRIGGER IF EXISTS main.session_query_cursor_keys_retire_update_v1;
+             DROP TRIGGER IF EXISTS main.session_query_cursor_keys_rotate_insert_v1;
              INSERT INTO session_query_cursor_keys (
                 key_id, key_version, key_material, created_at, retired_at
              ) VALUES
@@ -693,9 +693,9 @@ mod tests {
             .expect("begin invariant fixture transaction");
         let conn = &transaction;
         conn.execute_batch(
-            "DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
-             DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
-             DROP TRIGGER IF EXISTS session_query_cursor_keys_rotate_insert_v1;
+            "DROP TRIGGER IF EXISTS main.session_query_cursor_keys_insert_guard_v1;
+             DROP TRIGGER IF EXISTS main.session_query_cursor_keys_retire_update_v1;
+             DROP TRIGGER IF EXISTS main.session_query_cursor_keys_rotate_insert_v1;
              INSERT INTO session_query_cursor_keys (
                 key_id, key_version, key_material, created_at, retired_at
              ) VALUES
@@ -718,8 +718,8 @@ mod tests {
             .expect("begin invariant fixture transaction");
         let conn = &transaction;
         conn.execute_batch(
-            "DROP TRIGGER IF EXISTS session_refresh_operations_insert_guard_v1;
-             DROP TRIGGER IF EXISTS session_refresh_operations_state_guard_v1;
+            "DROP TRIGGER IF EXISTS main.session_refresh_operations_insert_guard_v1;
+             DROP TRIGGER IF EXISTS main.session_refresh_operations_state_guard_v1;
              INSERT INTO session_refresh_operations (
                 session_id, operation_id, request_digest, target_frontier_json,
                 state, created_at, updated_at, terminal_at, failure_code
@@ -745,10 +745,10 @@ mod tests {
             .expect("begin invariant fixture transaction");
         let conn = &transaction;
         conn.execute_batch(
-            "DROP TRIGGER IF EXISTS session_temporal_generations_insert_guard_v1;
-             DROP TRIGGER IF EXISTS session_temporal_generations_state_guard_v1;
-             DROP TRIGGER IF EXISTS session_temporal_generations_single_active_insert_v1;
-             DROP TRIGGER IF EXISTS session_temporal_generations_single_active_update_v1;
+            "DROP TRIGGER IF EXISTS main.session_temporal_generations_insert_guard_v1;
+             DROP TRIGGER IF EXISTS main.session_temporal_generations_state_guard_v1;
+             DROP TRIGGER IF EXISTS main.session_temporal_generations_single_active_insert_v1;
+             DROP TRIGGER IF EXISTS main.session_temporal_generations_single_active_update_v1;
              DROP INDEX IF EXISTS idx_session_temporal_generations_one_active;
              INSERT INTO session_temporal_generations (
                 session_id, generation, state, frozen_watermarks_json,
@@ -773,7 +773,7 @@ mod tests {
             .expect("begin invariant fixture transaction");
         let conn = &transaction;
         conn.execute_batch(
-            "DROP TRIGGER IF EXISTS session_summary_availability_owner_insert_v1;
+            "DROP TRIGGER IF EXISTS main.session_summary_availability_owner_insert_v1;
              INSERT INTO retrieval_anchors (
                 anchor_id, anchor_json, owner_json, projection_generation
              ) VALUES ('summary-anchor', '{}', '{}', 'test-generation');

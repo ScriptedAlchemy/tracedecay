@@ -15,11 +15,11 @@ const LCM_PLACEHOLDER_SNIPPET_MIGRATION: &str = "session-canonical-bodies-lcm-sn
 const OPERATION: &str = "compact session canonical bodies";
 const COMPACT_PAGE: i64 = 64;
 const LIFT_OBSERVATION_IMMUTABILITY: &str = "
-    DROP TRIGGER IF EXISTS observations_immutable_update;
+    DROP TRIGGER IF EXISTS main.observations_immutable_update;
     CREATE TRIGGER observations_immutable_update
         BEFORE UPDATE ON observations BEGIN SELECT 1; END;";
 const RESTORE_OBSERVATION_IMMUTABILITY: &str = "
-    DROP TRIGGER IF EXISTS observations_immutable_update;
+    DROP TRIGGER IF EXISTS main.observations_immutable_update;
     CREATE TRIGGER observations_immutable_update
         BEFORE UPDATE ON observations BEGIN
             SELECT RAISE(ABORT, 'observations are immutable');

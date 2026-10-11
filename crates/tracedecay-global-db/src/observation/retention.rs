@@ -124,19 +124,19 @@ const RELEASED_DISPOSITION: &str = "EXISTS (
     )";
 
 const DROP_ANCHOR_UPDATE_TRIGGER: &str =
-    "DROP TRIGGER IF EXISTS retrieval_anchors_immutable_update";
+    "DROP TRIGGER IF EXISTS main.retrieval_anchors_immutable_update";
 const CREATE_ANCHOR_UPDATE_TRIGGER: &str = "CREATE TRIGGER IF NOT EXISTS \
      retrieval_anchors_immutable_update BEFORE UPDATE ON retrieval_anchors BEGIN \
      SELECT RAISE(ABORT, 'retrieval anchors are immutable'); END";
 
 const DROP_OBSERVATION_UPDATE_TRIGGER: &str =
-    "DROP TRIGGER IF EXISTS observations_immutable_update";
+    "DROP TRIGGER IF EXISTS main.observations_immutable_update";
 const CREATE_OBSERVATION_UPDATE_TRIGGER: &str = "CREATE TRIGGER \
      observations_immutable_update BEFORE UPDATE ON observations BEGIN \
      SELECT RAISE(ABORT, 'observations are immutable'); END";
 
 const DROP_PROVENANCE_UPDATE_TRIGGER: &str =
-    "DROP TRIGGER IF EXISTS observation_repository_provenance_immutable_update";
+    "DROP TRIGGER IF EXISTS main.observation_repository_provenance_immutable_update";
 const CREATE_PROVENANCE_UPDATE_TRIGGER: &str = "CREATE TRIGGER IF NOT EXISTS \
      observation_repository_provenance_immutable_update BEFORE UPDATE ON \
      observation_repository_provenance BEGIN SELECT RAISE(ABORT, \

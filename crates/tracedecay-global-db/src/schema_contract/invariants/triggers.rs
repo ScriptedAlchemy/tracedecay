@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::LazyLock;
 
 use tracedecay_domain::errors::{ProjectOpenFailureKind, TraceDecayError};
 use tracedecay_runtime_core::db::engine::{BackendKind, Executor, QueryExecutor};
@@ -7,10 +8,70 @@ use super::rows::audit_read_error;
 
 use super::normalize_trigger_sql;
 
+/// Each authority trigger as Turso persists it. Turso stores CREATE TRIGGER
+/// re-rendered from its parse tree, so native stores are held to this pinned
+/// rendering. Regenerate after changing any trigger with
+/// `bz run //crates/tracedecay-global-db:unit_test -- the_full_registered_stage_sequence`.
+pub(crate) const NATIVE_TRIGGER_GOLDEN: &str = include_str!("native_triggers.json");
+
+static NATIVE_TRIGGER_SQL: LazyLock<BTreeMap<String, String>> =
+    LazyLock::new(|| serde_json::from_str(NATIVE_TRIGGER_GOLDEN).unwrap_or_default());
+
 pub(in crate::schema_contract) struct Trigger {
     pub(in crate::schema_contract) name: &'static str,
     pub(in crate::schema_contract) table: &'static str,
     pub(in crate::schema_contract) create_sql: &'static str,
+}
+
+impl Trigger {
+    /// Whether a persisted trigger is exactly this contract. A malformed or
+    /// stale native golden matches nothing, so admission fails closed.
+    pub(in crate::schema_contract) fn matches(
+        &self,
+        backend: BackendKind,
+        table: &str,
+        sql: &str,
+    ) -> bool {
+        table.eq_ignore_ascii_case(self.table)
+            && match backend {
+                BackendKind::Sqlite => {
+                    normalize_trigger_sql(sql) == normalize_trigger_sql(self.create_sql)
+                }
+                BackendKind::NativeTurso => {
+                    NATIVE_TRIGGER_SQL.get(self.name).map(String::as_str) == Some(sql)
+                }
+            }
+    }
+}
+
+/// The native rendering of every authority trigger installed on `conn`, in
+/// the golden's shape.
+#[cfg(test)]
+pub(crate) async fn render_native_trigger_golden(conn: &impl QueryExecutor) -> String {
+    let mut rows = conn
+        .query(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'",
+            (),
+        )
+        .await
+        .expect("read native triggers");
+    let mut installed = HashMap::new();
+    while let Some(row) = rows.next().await.expect("read native trigger") {
+        installed.insert(
+            row.get::<String>(0).expect("trigger name"),
+            row.get::<String>(1).expect("trigger sql"),
+        );
+    }
+    let rendered = INVARIANTS
+        .iter()
+        .flat_map(|invariant| invariant.triggers_for(BackendKind::NativeTurso))
+        .filter_map(|trigger| {
+            installed
+                .remove(trigger.name)
+                .map(|sql| (trigger.name.to_owned(), sql))
+        })
+        .collect::<BTreeMap<_, _>>();
+    serde_json::to_string_pretty(&rendered).expect("render native trigger golden") + "\n"
 }
 
 pub(in crate::schema_contract) struct Invariant {
@@ -1647,7 +1708,7 @@ pub(super) async fn replace_trigger(
     trigger: &Trigger,
 ) -> tracedecay_domain::errors::Result<()> {
     conn.execute_batch(&format!(
-        "DROP TRIGGER IF EXISTS \"{}\";\n{};",
+        "DROP TRIGGER IF EXISTS main.\"{}\";\n{};",
         trigger.name, trigger.create_sql
     ))
     .await
@@ -1684,10 +1745,7 @@ pub(super) async fn trigger_contracts_intact(
         .all(|trigger| {
             actual
                 .get(&trigger.name.to_ascii_lowercase())
-                .is_some_and(|(table, sql)| {
-                    table.eq_ignore_ascii_case(trigger.table)
-                        && normalize_trigger_sql(sql) == normalize_trigger_sql(trigger.create_sql)
-                })
+                .is_some_and(|(table, sql)| trigger.matches(conn.backend_kind(), table, sql))
         }))
 }
 
@@ -1721,8 +1779,8 @@ mod tests {
 
         transaction
             .execute_batch(
-                "DROP TRIGGER observations_immutable_delete;
-                 DROP TRIGGER observations_immutable_update;
+                "DROP TRIGGER main.observations_immutable_delete;
+                 DROP TRIGGER main.observations_immutable_update;
                  CREATE TRIGGER observations_immutable_update
                      BEFORE UPDATE ON observations BEGIN SELECT 1; END;",
             )

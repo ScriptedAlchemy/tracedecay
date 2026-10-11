@@ -45,7 +45,7 @@ const OBSERVATION_REPOSITORY_CAPTURE_DEDUPE_MIGRATION: &str =
 /// only for this rewrite; the released marker rows carry no capture id and are
 /// left alone.
 const REPOSITORY_CAPTURE_DEDUPE_SQL: &str = "
-    DROP TRIGGER IF EXISTS observation_repository_provenance_immutable_update;
+    DROP TRIGGER IF EXISTS main.observation_repository_provenance_immutable_update;
     INSERT OR IGNORE INTO observation_repository_captures (capture_id, capture_json)
     SELECT json_extract(capture_json, '$.capture_id'), json_extract(capture_json, '$.capture')
     FROM observation_repository_provenance
@@ -130,13 +130,13 @@ const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );
         CREATE TABLE IF NOT EXISTS remote_writer_fences (
-            authority_key TEXT PRIMARY KEY,
+            authority_key TEXT NOT NULL PRIMARY KEY,
             writer_fence_json TEXT NOT NULL CHECK(json_valid(writer_fence_json)),
             frontier_sequence INTEGER NOT NULL CHECK(frontier_sequence >= 0),
             updated_at INTEGER NOT NULL
         ) STRICT;
         CREATE TABLE IF NOT EXISTS remote_observation_events (
-            event_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL PRIMARY KEY,
             frame_digest TEXT NOT NULL,
             enrollment_id TEXT NOT NULL,
             enrollment_revision INTEGER NOT NULL CHECK(enrollment_revision > 0),
@@ -580,7 +580,7 @@ mod tests {
         };
         let released_marker = super::super::retention::PROVENANCE_RELEASED_MARKER;
         transaction
-            .execute_batch("DROP TRIGGER observation_repository_provenance_immutable_update")
+            .execute_batch("DROP TRIGGER main.observation_repository_provenance_immutable_update")
             .await
             .unwrap();
         // The provenance row points at an observation and an anchor, so seed
@@ -742,5 +742,37 @@ mod tests {
             .unwrap()
         );
         transaction.rollback().await.unwrap();
+    }
+
+    /// Catches the native install admitting a writer fence with no authority,
+    /// which no lookup by authority could ever find or replace.
+    #[tokio::test]
+    async fn native_writer_fences_refuse_a_null_authority_key() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let connection = tracedecay_runtime_core::db::engine::NativeTestConnection::open(
+            &directory.path().join("sessions.db"),
+        )
+        .unwrap();
+        assert_eq!(ensure_observation_schema(&*connection).await.unwrap(), None);
+        let insert = "INSERT INTO remote_writer_fences
+             (authority_key, writer_fence_json, frontier_sequence, updated_at)
+             VALUES (?1, '{}', 0, 1)";
+        connection
+            .execute(insert, params!["authority.fixture"])
+            .await
+            .expect("a keyed fence is accepted");
+        connection
+            .execute(insert, params![Option::<String>::None])
+            .await
+            .expect_err("a NULL authority_key must be refused");
+        let mut rows = connection
+            .query("SELECT authority_key FROM remote_writer_fences", ())
+            .await
+            .unwrap();
+        let mut stored = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            stored.push(row.get::<Option<String>>(0).unwrap());
+        }
+        assert_eq!(stored, [Some("authority.fixture".to_owned())]);
     }
 }

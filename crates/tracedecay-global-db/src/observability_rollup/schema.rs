@@ -53,7 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_observability_rollup_dirty_days_retention
     ON observability_rollup_dirty_days(day_start_seconds);
 
 CREATE TABLE IF NOT EXISTS observability_rollup_frontiers (
-    scope_ref TEXT PRIMARY KEY,
+    scope_ref TEXT NOT NULL PRIMARY KEY,
     coverage_start_day_seconds INTEGER NOT NULL,
     next_day_start_seconds INTEGER NOT NULL,
     claimant_id TEXT,

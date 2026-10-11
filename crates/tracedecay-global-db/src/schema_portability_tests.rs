@@ -57,14 +57,19 @@ async fn installed_sessions_store(
 fn portability_violations(connection: &Connection) -> Vec<String> {
     let mut violations = Vec::new();
     let mut tables = connection
-        .prepare("SELECT name, type, wr FROM pragma_table_list WHERE schema = 'main' ORDER BY name")
+        .prepare(
+            "SELECT name, type, wr, strict FROM pragma_table_list
+             WHERE schema = 'main' ORDER BY name",
+        )
         .unwrap();
-    let tables: Vec<(String, String, bool)> = tables
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+    let tables: Vec<(String, String, bool, bool)> = tables
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
         .unwrap()
         .map(Result::unwrap)
         .collect();
-    for (name, kind, without_rowid) in tables {
+    for (name, kind, without_rowid, strict) in tables {
         if name.starts_with("sqlite_") {
             continue;
         }
@@ -78,8 +83,13 @@ fn portability_violations(connection: &Connection) -> Vec<String> {
                 if without_rowid {
                     violations.push(format!("{name}: WITHOUT ROWID"));
                 }
-                violations.extend(
+                let nullable = if strict {
+                    nullable_primary_key_columns(&relaxed_copy(connection, &name), &name)
+                } else {
                     nullable_primary_key_columns(connection, &name)
+                };
+                violations.extend(
+                    nullable
                         .into_iter()
                         .map(|column| format!("{name}.{column}: nullable PRIMARY KEY column")),
                 );
@@ -88,6 +98,28 @@ fn portability_violations(connection: &Connection) -> Vec<String> {
         }
     }
     violations
+}
+
+/// `SQLite` reports a STRICT table's key columns as NOT NULL whether or not the
+/// DDL says so. The key must not depend on an engine's STRICT rule, so the copy
+/// drops STRICT and `pragma_table_info` shows only what the DDL declares.
+fn relaxed_copy(connection: &Connection, table: &str) -> Connection {
+    let sql: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let trimmed = sql.trim_end();
+    let (body, layout) = trimmed.split_at(trimmed.len() - "STRICT".len());
+    assert!(
+        layout.eq_ignore_ascii_case("STRICT"),
+        "{table}: STRICT must be the only table option, got {sql}"
+    );
+    let copy = Connection::open_in_memory().unwrap();
+    copy.execute_batch(body).unwrap();
+    copy
 }
 
 /// A lone `INTEGER PRIMARY KEY` is the rowid itself and can never hold NULL.
