@@ -78,6 +78,9 @@ build:dist --@rules_rust//rust/settings:extra_rustc_flag=-Cstrip=symbols
 # flag above turned off.
 build:dist --@rules_rust//rust/settings:extra_rustc_flag=-Cembed-bitcode=yes
 
+# Owned stores on the native Turso engine instead of SQLite (#3402).
+build:native --//crates/tracedecay-sql:engine=native
+
 # Hosted CI: keep going past one failure so a run reports every red target.
 build:ci --keep_going
 build:ci --show_timestamps

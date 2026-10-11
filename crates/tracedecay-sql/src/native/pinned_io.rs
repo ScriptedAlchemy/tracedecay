@@ -16,7 +16,7 @@ use turso_core::{
     },
 };
 
-use crate::{Error, Result};
+use super::{Error, Result};
 
 pub(crate) struct PinnedIo {
     delegate: Arc<dyn IO>,

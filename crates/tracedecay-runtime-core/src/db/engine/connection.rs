@@ -80,7 +80,7 @@ impl ReadConnection {
 
 impl Connection {
     pub fn attach_native(
-        database: tracedecay_turso_runtime::Database,
+        database: tracedecay_sql::native::Database,
         binding: StoreRuntimeBindingV1,
         authority: Arc<dyn tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority>,
     ) -> Self {
@@ -96,7 +96,7 @@ impl Connection {
     }
 
     pub fn attach_native_with_reader_budget(
-        database: tracedecay_turso_runtime::Database,
+        database: tracedecay_sql::native::Database,
         binding: StoreRuntimeBindingV1,
         authority: Arc<dyn tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority>,
         budget: tracedecay_store::ReaderBudgetV1,
@@ -371,10 +371,10 @@ impl Connection {
             let native_behavior = match behavior {
                 #[cfg(any(test, feature = "test-helpers"))]
                 TransactionBehavior::Deferred => {
-                    tracedecay_turso_runtime::TransactionBehavior::Deferred
+                    tracedecay_sql::native::TransactionBehavior::Deferred
                 }
                 TransactionBehavior::Immediate => {
-                    tracedecay_turso_runtime::TransactionBehavior::Immediate
+                    tracedecay_sql::native::TransactionBehavior::Immediate
                 }
             };
             return runtime
@@ -416,10 +416,7 @@ impl Connection {
     pub async fn authorized_long_lease_transaction(&self) -> Result<Transaction> {
         if let Runtime::Native(runtime) = &self.runtime {
             return runtime
-                .transaction(
-                    true,
-                    tracedecay_turso_runtime::TransactionBehavior::Immediate,
-                )
+                .transaction(true, tracedecay_sql::native::TransactionBehavior::Immediate)
                 .await
                 .map(Transaction::from_native);
         }

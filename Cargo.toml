@@ -46,7 +46,7 @@ members = [
     "crates/tracedecay-source-edit",
     "crates/tracedecay-temporal-query",
     "crates/tracedecay-rusqlite-runtime",
-    "crates/tracedecay-turso-runtime",
+    "crates/tracedecay-sql",
     "crates/tracedecay-store",
     "crates/tracedecay-store-runtime",
     "crates/tracedecay-tool-catalog",

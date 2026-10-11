@@ -7461,8 +7461,8 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-private-fs",
  "tracedecay-rusqlite-runtime",
+ "tracedecay-sql",
  "tracedecay-store",
- "tracedecay-turso-runtime",
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
@@ -7690,6 +7690,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-sql"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "tempfile",
+ "tracing",
+ "turso_core",
+ "turso_parser",
+]
+
+[[package]]
 name = "tracedecay-store"
 version = "0.1.0"
 dependencies = [
@@ -7775,20 +7786,6 @@ dependencies = [
  "thiserror",
  "tracedecay-domain",
  "tracing",
-]
-
-[[package]]
-name = "tracedecay-turso-runtime"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
- "tracedecay-domain",
- "tracedecay-store",
- "tracing",
- "turso_core",
- "turso_parser",
 ]
 
 [[package]]
