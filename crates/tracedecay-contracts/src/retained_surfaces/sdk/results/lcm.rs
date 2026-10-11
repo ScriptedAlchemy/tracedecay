@@ -644,6 +644,9 @@ pub struct LcmDescriptionV1 {
     pub provider: String,
     pub session_id: String,
     pub raw_message_count: i64,
+    /// Raw messages the session's active temporal generation has not
+    /// published; transcript reads cannot page them yet.
+    pub unpublished_message_count: i64,
     pub summary_node_count: i64,
     pub external_payload_count: i64,
     pub first_store_id: Option<i64>,

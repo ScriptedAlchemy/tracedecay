@@ -13,8 +13,8 @@ use std::time::Duration;
 use serde::Serialize;
 
 use tracedecay_code_index::graph_projection::{
-    CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphSymbolRefV1,
-    InteractiveCatalogReaderLeaseV1, UnresolvedCallerGapsV1,
+    CodeGraphInteractiveReader, CodeGraphReadCostMeter, CodeGraphReadinessRequirement,
+    CodeGraphSymbolRefV1, InteractiveCatalogReaderLeaseV1, UnresolvedCallerGapsV1,
 };
 use tracedecay_contracts::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
@@ -1969,10 +1969,12 @@ impl CodeIndexSchedulerRegistryV1 {
         let mut catalog_retain = None;
         if let Some(budget) = remaining_generation_resolution_wait(context.request) {
             let waiting = Arc::clone(&store);
-            match tokio::task::spawn_blocking(move || waiting.await_catalog_and_retain(budget))
-                .await
+            match tokio::task::spawn_blocking(move || {
+                waiting.await_rewarm_and_retain_for(budget, CodeGraphReadinessRequirement::Catalog)
+            })
+            .await
             {
-                Ok(Ok(retain)) => catalog_retain = Some(retain),
+                Ok(Ok(retain)) => catalog_retain = retain,
                 Ok(Err(_pending)) => return Err(CallableCodeCursorError::Unavailable),
                 Err(join_error) => {
                     tracing::warn!(

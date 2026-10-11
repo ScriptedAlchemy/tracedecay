@@ -98,6 +98,10 @@ fn json_extract_neq_predicates(left_alias: &str, json_column: &str, fields: &[&s
         .join("\n                     OR ")
 }
 
+fn records_transient_projection_retry(error: &ProjectionStoreError) -> bool {
+    matches!(error, ProjectionStoreError::Storage { .. }) && !error.is_sqlite_disk_image_corrupt()
+}
+
 /// Projects one queued observation through the guarded registered database
 /// client. The transaction remains bound to that client for its whole life;
 /// no physical engine handle escapes the runtime boundary.
@@ -138,13 +142,15 @@ pub async fn project_observation(
             Ok(()) => Ok(outcome),
             Err(commit_error) => {
                 let error = storage("commit projection transaction", commit_error);
-                persist_projection_retry_on_database(
-                    database,
-                    observation_id,
-                    now_micros,
-                    &error.durable_detail(),
-                )
-                .await?;
+                if records_transient_projection_retry(&error) {
+                    persist_projection_retry_on_database(
+                        database,
+                        observation_id,
+                        now_micros,
+                        &error.durable_detail(),
+                    )
+                    .await?;
+                }
                 Err(error)
             }
         },
@@ -152,7 +158,7 @@ pub async fn project_observation(
             transaction.rollback().await.map_err(|rollback_error| {
                 storage("rollback failed projection transaction", rollback_error)
             })?;
-            if matches!(error, ProjectionStoreError::Storage { .. }) {
+            if records_transient_projection_retry(&error) {
                 persist_projection_retry_on_database(
                     database,
                     observation_id,

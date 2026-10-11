@@ -5242,15 +5242,9 @@ fn assert_savings_footer(result: &Value, source_bytes: usize) {
     assert_eq!(
         footer,
         format!(
-            "\ntracedecay_metrics: before={} after={}",
+            "\ntracedecay_metrics: before={} after={} unit=bytes/4",
             source_bytes / 4,
-            tracedecay_mcp::tools::response_trailers::response_token_count(
-                &tracedecay_mcp::ToolResult::new(
-                    json!({"content": [{"type": "text", "text": body_text(result)}]}),
-                    Vec::new(),
-                ),
-            )
-            .expect("tokenizer")
+            body_text(result).len() / 4
         )
     );
 }

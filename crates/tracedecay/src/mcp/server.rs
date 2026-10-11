@@ -51,7 +51,7 @@ use tracedecay_domain::HostIntegrationIdV1;
 use tracedecay_mcp::hook_events::{self, HookEventPlan};
 use tracedecay_mcp::tools::catalog_discovery::default_catalog_discovery_authority;
 use tracedecay_mcp::{
-    ErrorCode, JsonRpcRequest, JsonRpcResponse, ToolRegistryMode, explore_call_budget,
+    ErrorCode, JsonRpcRequest, JsonRpcResponse, explore_call_budget,
     project_catalog_discovery_scope,
 };
 use tracedecay_session_memory::session::SessionRefreshServicePort;
@@ -104,10 +104,12 @@ pub(crate) const SERVER_INSTRUCTIONS: &str = concat!(
 
 pub(crate) fn initialize_result(
     instructions: &str,
+    requested_protocol: Option<&str>,
 ) -> std::result::Result<Value, tracedecay_project::product_runtime::ProductRuntimeError> {
     Ok(tracedecay_mcp::server::initialize_result(
         tracedecay_project::version::build_version()?,
         instructions,
+        requested_protocol,
     ))
 }
 

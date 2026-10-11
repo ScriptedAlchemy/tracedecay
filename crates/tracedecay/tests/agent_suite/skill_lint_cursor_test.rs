@@ -38,7 +38,7 @@ use std::collections::BTreeSet;
 
 use regex::Regex;
 use tracedecay_automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
-use tracedecay_mcp::get_tool_definitions;
+use tracedecay_mcp::{TOOL_SEARCH_NAME, get_tool_definitions};
 
 use crate::plugin_validation_support::{load_skill_docs_from, repo_path};
 use tempfile::TempDir;
@@ -95,10 +95,7 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
     }
 }
 
-/// `tracedecay_*` identifiers that are documented output artifacts, tool-family
-/// globs, or Rust crate log targets, not single MCP tools (skills tell agents to
-/// report the `tracedecay_metrics:` line, may reference the `tracedecay_lcm_*`
-/// family, and the profiling skill sets `RUST_LOG` to per-crate targets).
+/// Documented output artifacts and Rust crate log targets, rather than MCP tools.
 const NON_TOOL_IDENTIFIERS: &[&str] = &[
     "tracedecay_metrics",
     "tracedecay_lcm",
@@ -120,7 +117,7 @@ fn cursor_skill_references_resolve() {
         Regex::new(r"\b(?:agents|scripts|references|assets)/[A-Za-z0-9][A-Za-z0-9._/-]*").unwrap();
     let skill_ref_re = Regex::new(r"tracedecay:([a-z0-9][a-z0-9-]*)").unwrap();
     let slash_ref_re = Regex::new(r"`/([a-z0-9][a-z0-9-]*)`").unwrap();
-    let tool_ref_re = Regex::new(r"tracedecay_[a-z_]+").unwrap();
+    let tool_ref_re = tool_reference_regex();
     // Regex self-check on literals: the rules below must not pass merely
     // because an extraction regex rotted. The bundle itself may legitimately
     // carry few or no such mentions after a prose rewrite.
@@ -195,8 +192,8 @@ fn cursor_skill_references_resolve() {
         // Stale tool references: every `tracedecay_*` identifier must be a
         // live MCP tool (or a documented non-tool artifact).
         for found in tool_ref_re.find_iter(&skill.raw) {
-            let identifier = found.as_str().trim_end_matches('_');
-            if !tool_names.contains(identifier) && !NON_TOOL_IDENTIFIERS.contains(&identifier) {
+            let identifier = found.as_str();
+            if !tool_reference_resolves(identifier, &tool_names) {
                 violations.push(format!(
                     "{at}: mentions MCP tool {identifier} which the server does not define"
                 ));
@@ -236,7 +233,7 @@ fn cursor_commands_are_hygienic_and_reference_resolve() {
         .collect();
     let tool_names = mcp_tool_names();
     let skill_ref_re = Regex::new(r"tracedecay:([a-z0-9][a-z0-9-]*)").unwrap();
-    let tool_ref_re = Regex::new(r"tracedecay_[a-z_]+").unwrap();
+    let tool_ref_re = tool_reference_regex();
     let mut violations = Vec::new();
 
     let mut entries: Vec<_> = std::fs::read_dir(&command_dir)
@@ -324,8 +321,8 @@ fn cursor_commands_are_hygienic_and_reference_resolve() {
             }
         }
         for found in tool_ref_re.find_iter(&raw) {
-            let identifier = found.as_str().trim_end_matches('_');
-            if !tool_names.contains(identifier) && !NON_TOOL_IDENTIFIERS.contains(&identifier) {
+            let identifier = found.as_str();
+            if !tool_reference_resolves(identifier, &tool_names) {
                 violations.push(format!(
                     "{at}: mentions MCP tool {identifier} which the server does not define"
                 ));
@@ -342,10 +339,39 @@ fn mcp_tool_names() -> BTreeSet<String> {
         .into_iter()
         .map(|definition| definition.name)
         .collect::<BTreeSet<_>>();
-    // Host-gated: filtered out of the definition list when the `ast-grep`
-    // CLI is absent, but still a real tool skills may reference.
-    names.insert("tracedecay_ast_grep_rewrite".to_string());
+    names.insert(TOOL_SEARCH_NAME.to_owned());
     names
+}
+
+fn tool_reference_regex() -> Regex {
+    Regex::new(r"tracedecay_[a-z_]+\*?").unwrap()
+}
+
+fn tool_reference_resolves(reference: &str, names: &BTreeSet<String>) -> bool {
+    match reference.strip_suffix('*') {
+        Some(prefix) => names.iter().any(|name| name.starts_with(prefix)),
+        None => names.contains(reference) || NON_TOOL_IDENTIFIERS.contains(&reference),
+    }
+}
+
+#[test]
+fn cursor_tool_references_resolve_only_existing_tools_and_families() {
+    let names = mcp_tool_names();
+    let regex = tool_reference_regex();
+    for (reference, resolves) in [
+        (TOOL_SEARCH_NAME, true),
+        ("tracedecay_work_*", true),
+        ("tracedecay_workflow_*", true),
+        ("tracedecay_work", false),
+        ("tracedecay_missing_family_*", false),
+    ] {
+        let extracted = regex.find(reference).expect("tool reference").as_str();
+        assert_eq!(
+            tool_reference_resolves(extracted, &names),
+            resolves,
+            "{reference}"
+        );
+    }
 }
 
 fn assert_no_violations(rule_family: &str, violations: &[String]) {

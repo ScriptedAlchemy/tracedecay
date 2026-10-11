@@ -671,6 +671,7 @@ impl MessageSearchInput {
                 page,
                 freshness,
                 omitted,
+                ..
             } => {
                 result.status = RetainedOutcomeStatusV1::Partial;
                 result.outcome = RetainedOutcomeStatusV1::Partial;

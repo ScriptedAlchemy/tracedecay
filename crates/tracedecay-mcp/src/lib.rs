@@ -103,20 +103,19 @@ pub use tool_errors::{
     reset_required_detail, reset_required_remedy, semantic_failure_reason, serialize_response_line,
     tool_error_response, tool_result_has_semantic_error,
 };
+pub use tools::catalog_discovery::TOOL_SEARCH_NAME;
 pub use tools::render::format_relative_time;
 pub use tools::{
     RESERVED_FLAGS_FOOTER, ToolResult, render_tool_cli_help, resolve_property_schema,
     short_tool_name,
 };
 pub use tracedecay_mcp_catalog::{
-    MAX_RESPONSE_CHARS, McpCatalogError, ToolDefinition, ToolRegistryMode,
-    apply_context_warming_budget, ast_grep_available, ast_grep_diagnostics_json,
+    MAX_RESPONSE_CHARS, McpCatalogError, ToolDefinition, apply_context_warming_budget,
     cli_tool_definition, context_description, context_warming_description, explore_call_budget,
-    format_capable_tool_names, get_maximal_tool_definitions,
-    get_maximal_tool_definitions_with_budget, get_tool_definitions, get_tool_definitions_ref,
+    format_capable_tool_names, get_tool_definitions, get_tool_definitions_ref,
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget, mcp_input_schema,
     project_catalog_discovery_scope, registered_project_reader_tool_names,
-    retain_host_available_tool_definitions, tool_defaults_to_markdown,
+    tool_defaults_to_markdown,
 };
 pub use workflow::{
     LibtestReport, MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile,

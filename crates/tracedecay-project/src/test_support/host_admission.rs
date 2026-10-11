@@ -1259,8 +1259,9 @@ fn prepare_host_admission_test_profile_root(profile_root: &Path) -> Result<()> {
 
 /// Pins a fixture project's identity in the sanctioned `.git/` repository
 /// identity marker (initializing a real git repository first when the fixture
-/// root has none). Nothing is written into the working tree and the registry
-/// fixture state stays exactly what each test arranged.
+/// root has none, on `main` so the branch never follows the host's
+/// `init.defaultBranch`). Nothing is written into the working tree and the
+/// registry fixture state stays exactly what each test arranged.
 fn prepare_host_admission_test_project_root(
     project_root: &Path,
     project_id: &ProjectId,
@@ -1281,7 +1282,7 @@ fn prepare_host_admission_test_project_root(
             }
         })?;
         let status = std::process::Command::new(git)
-            .args(["init", "--quiet"])
+            .args(["init", "--quiet", "--initial-branch=main"])
             .current_dir(project_root)
             .status()
             .map_err(|error| TraceDecayError::Config {

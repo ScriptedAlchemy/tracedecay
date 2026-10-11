@@ -8,8 +8,8 @@
 //! installers write permission allowlists and generated plugin schema files
 //! from it. Neither may reach the other. The server composition sits above
 //! the installers, so the catalog lives below both. Everything here is
-//! process-static: the application catalog snapshot and the `ast-grep` host
-//! probe are the only runtime inputs, and both are cached once per process.
+//! process-static: the application catalog snapshot is the only runtime
+//! input, and it is cached once per process.
 //!
 //! An unavailable catalog is a typed [`McpCatalogError`], never an empty tool
 //! set, so no consumer can mistake a composition failure for "this host
@@ -34,14 +34,12 @@ mod definitions;
 mod project_access;
 
 pub use catalog_error::McpCatalogError;
-pub use definitions::ast_grep::{ast_grep_available, ast_grep_diagnostics_json};
 pub use definitions::{
-    ToolRegistryMode, apply_context_warming_budget, cli_tool_definition, context_description,
+    apply_context_warming_budget, cli_tool_definition, context_description,
     context_warming_description, explore_call_budget, format_capable_tool_names,
-    get_maximal_tool_definitions, get_maximal_tool_definitions_with_budget, get_tool_definitions,
-    get_tool_definitions_ref, get_tool_definitions_with_budget,
+    get_tool_definitions, get_tool_definitions_ref, get_tool_definitions_with_budget,
     get_tool_definitions_with_warming_budget, mcp_input_schema, project_catalog_discovery_scope,
-    retain_host_available_tool_definitions, tool_defaults_to_markdown,
+    tool_defaults_to_markdown,
 };
 pub use project_access::registered_project_reader_tool_names;
 

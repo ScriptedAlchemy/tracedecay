@@ -1527,7 +1527,7 @@ async fn quiesced_background_reconcile_admission(
     admission
 }
 
-/// Settle the owner *and* burn the coalesced wake permit a settled owner can
+/// Settle the owners *and* burn the coalesced wake permit a settled owner can
 /// still be holding, so the global admission is idle and stays idle.
 ///
 /// [`wait_for_settled_owner`] proves the pending-arrival slot is empty now, but
@@ -1544,30 +1544,41 @@ async fn quiesced_background_reconcile_admission(
 /// an arrival or enters its guard. Releasing it hands it straight over, so the
 /// drain is done only once a release leaves the permit free.
 ///
+/// Every owner sharing the admission settles together: one owner's pass
+/// holds the single permit while another is drained.
+///
 /// The registry must be single-permit
 /// ([`CodeIndexSchedulerRegistryV1::with_background_reconcile_permits`]): with
 /// the host's default bound, one held permit parks nothing.
-async fn settled_owner_with_idle_admission(
+async fn settled_owners_with_idle_admission(
     registry: &CodeIndexSchedulerRegistryV1,
-    project_root: &Path,
+    project_roots: &[&Path],
 ) {
     let admission = registry.background_reconcile_admission();
-    drop(quiesced_background_reconcile_admission(registry, project_root).await);
+    let held = Arc::clone(&admission)
+        .acquire_owned()
+        .await
+        .expect("hold background workers at their dequeue points");
+    for project_root in project_roots {
+        wait_for_quiescent_owner_pass(registry, project_root).await;
+    }
+    drop(held);
     // A banked permit keeps the worker from parking: it resolves the wake
     // wait at once and its no-op pass takes the admission. Parked with the
     // slot empty is therefore the drained state.
-    wait_for_worker_phase(
-        registry,
-        project_root,
-        crate::code_index_scheduler::CodeIndexWorkerPhaseV1::Parked,
-    )
-    .await;
-    wait_for_settled_owner(registry, project_root).await;
+    for project_root in project_roots {
+        wait_for_worker_phase(
+            registry,
+            project_root,
+            crate::code_index_scheduler::CodeIndexWorkerPhaseV1::Parked,
+        )
+        .await;
+        wait_for_settled_owner(registry, project_root).await;
+    }
     assert_eq!(
         admission.available_permits(),
         1,
-        "the admission for {} never went idle",
-        project_root.display()
+        "the admission for {project_roots:?} never went idle"
     );
 }
 

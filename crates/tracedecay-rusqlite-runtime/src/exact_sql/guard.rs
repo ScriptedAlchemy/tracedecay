@@ -14,6 +14,7 @@ use std::{
 
 use tracedecay_sql::{Capability, Connection, ConnectionControl, ErrorExt, ErrorKind};
 
+use super::clock;
 use super::{
     EXACT_SQL_EXECUTION_LIMIT, ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
     sqlite_error,
@@ -34,7 +35,7 @@ where
     F: FnOnce() -> Result<T, ExactSqlError>,
 {
     let deadline = if enforce_statement_limit {
-        let operation_deadline = Instant::now() + EXACT_SQL_EXECUTION_LIMIT;
+        let operation_deadline = clock::now() + EXACT_SQL_EXECUTION_LIMIT;
         Some(
             execution_deadline
                 .map(|deadline| deadline.min(operation_deadline))
@@ -49,7 +50,7 @@ where
         if shutdown_requested
             .as_ref()
             .is_some_and(|shutdown| shutdown.load(Ordering::Acquire))
-            || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            || deadline.is_some_and(|deadline| clock::now() >= deadline)
         {
             return true;
         }

@@ -115,18 +115,18 @@ fn truncated_markdown_preserves_late_priority_sections() {
 }
 
 #[test]
-fn markdown_truncation_preview_closes_open_code_fence() {
+fn markdown_truncation_preview_omits_partial_code_fence() {
     let markdown = format!("### Code\n```rust\n{}\n", "fn demo() {}\n".repeat(1_000));
 
     let preview = markdown_truncation_preview(&markdown, 1_024);
 
-    assert!(!has_open_markdown_fence(&preview));
+    assert_eq!(preview, "### Code\n");
 }
 
 #[test]
-fn markdown_truncation_preview_closes_prefix_fence_before_preserved_sections() {
+fn markdown_truncation_preview_omits_partial_code_before_preserved_sections() {
     let markdown = format!(
-        "## Code Context\n```rust\n{}\n### Memory Matches\n- fact_id=fact.v1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb category=project trust=0.90 score=0.500: remembered context\n",
+        "## Code Context\n```rust\n{}\n```\n### Memory Matches\n- fact_id=fact.v1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb category=project trust=0.90 score=0.500: remembered context\n",
         "fn demo() {}\n".repeat(5_000)
     );
 
@@ -139,7 +139,44 @@ fn markdown_truncation_preview_closes_prefix_fence_before_preserved_sections() {
         "late priority section should be preserved: {preview}"
     );
 
-    assert!(!has_open_markdown_fence(&preview[..preserved_start]));
+    assert_eq!(&preview[..preserved_start], "## Code Context\n\n\n");
+    assert!(!preview.contains("fn demo"));
+    assert!(preview.contains("remembered context"));
+}
+
+#[test]
+fn markdown_preview_keeps_complete_blocks_and_omits_the_next_body() {
+    let first = "Intro\n```rust\nfn café() {}\n```\n";
+    let second = "```rust\nfn next() { work(); }\n```\n";
+    let markdown = format!("{first}{second}");
+
+    for budget in first.len()..markdown.len() - 4 {
+        assert_eq!(whole_markdown_prefix(&markdown, budget), first);
+    }
+    assert_eq!(whole_markdown_prefix(&markdown, markdown.len()), markdown);
+}
+
+#[test]
+fn code_renderer_encloses_nested_fences_without_changing_the_body() {
+    let body = "```rust\nfn café() {}\n```\n### Memory Matches\ninside code";
+    let mut md = Md::new();
+    md.code("markdown", body);
+    let markdown = md.render();
+    assert_eq!(markdown, format!("````markdown\n{body}\n````\n"));
+    assert_eq!(whole_markdown_prefix(&markdown, markdown.len() - 4), "");
+    assert_eq!(whole_markdown_prefix(&markdown, markdown.len()), markdown);
+    assert_eq!(markdown_heading_at(&markdown, "### Memory Matches"), None);
+}
+
+#[test]
+fn priority_sections_keep_nested_heading_lines_inside_complete_code_blocks() {
+    let markdown = "### Memory Matches\n````markdown\n```\n### Entry Points\ncode\n```\n````\n### Extension Points\nactual section\n";
+    let start = markdown_heading_at(markdown, "### Memory Matches").unwrap();
+    let section = markdown_section_at(markdown, start);
+    assert!(section.ends_with("````\n"));
+    assert!(section.contains("### Entry Points"));
+    assert!(!section.contains("actual section"));
+    assert_eq!(markdown_heading_at(markdown, "### Entry Points"), None);
 }
 
 #[test]

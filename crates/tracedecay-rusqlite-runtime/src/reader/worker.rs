@@ -3,6 +3,7 @@ use std::{
     fmt,
     sync::{
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender},
     },
     thread::{self, JoinHandle},
@@ -27,18 +28,6 @@ use crate::telemetry::{ReaderAdmissionRecorder, take_observed_vm};
 use super::{ExistingReaderLocator, ReaderStartError};
 
 const REPLY_POLL_QUANTUM: Duration = Duration::from_millis(5);
-
-/// How long a cache release waits for a worker that answers on its outer
-/// command channel.
-///
-/// An idle worker answers a `shrink_memory` in microseconds. The only way to
-/// outrun this bound is a `Begin` queued ahead of the release: the worker is
-/// then inside a retained snapshot and will not read the outer channel again
-/// until the snapshot ends, which is unbounded by design. Shrink is
-/// best-effort maintenance, so the release skips that worker instead of
-/// pinning the maintenance thread for the snapshot's lifetime; the queued
-/// command still shrinks the connection when the worker returns to its loop.
-const MEMORY_RELEASE_REPLY_BOUND: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoreSizeTelemetrySample {
@@ -92,9 +81,9 @@ impl ReaderQueryExecutor for ExactSqlOnlyReaderV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WorkerMemoryRelease {
     Released,
-    /// The worker is serving a retained snapshot that outran
-    /// [`MEMORY_RELEASE_REPLY_BOUND`]; the queued command still shrinks the
-    /// connection when the snapshot ends.
+    /// The worker entered a retained snapshot before it read the release;
+    /// the queued command still shrinks the connection when the snapshot
+    /// ends.
     SnapshotBusy,
     /// The worker thread has terminated; its connection and cache are gone.
     Closed,
@@ -173,6 +162,9 @@ enum SnapshotCommand {
 pub(crate) struct WorkerClient {
     sender: Sender<WorkerCommand>,
     snapshot_sender: Arc<Mutex<Option<Sender<SnapshotCommand>>>>,
+    /// Set while the worker runs its snapshot loop, from `Begin` until the
+    /// loop returns, which can outlast the snapshot sender `begin_end` takes.
+    in_snapshot: Arc<AtomicBool>,
     interrupt: Arc<InterruptHandle>,
 }
 
@@ -333,10 +325,19 @@ impl WorkerClient {
         {
             return Ok(WorkerMemoryRelease::Closed);
         }
-        match receive.recv_timeout(MEMORY_RELEASE_REPLY_BOUND) {
-            Ok(result) => result.map(|()| WorkerMemoryRelease::Released),
-            Err(RecvTimeoutError::Timeout) => Ok(WorkerMemoryRelease::SnapshotBusy),
-            Err(RecvTimeoutError::Disconnected) => Ok(WorkerMemoryRelease::Closed),
+        // A slow reply is not a busy worker. A reader on its command loop
+        // always comes back to this channel, however long the host stalls
+        // it; only one inside its snapshot loop, behind a queued `Begin` or
+        // still finishing an ended snapshot, can stay away indefinitely.
+        loop {
+            match receive.recv_timeout(REPLY_POLL_QUANTUM) {
+                Ok(result) => return result.map(|()| WorkerMemoryRelease::Released),
+                Err(RecvTimeoutError::Disconnected) => return Ok(WorkerMemoryRelease::Closed),
+                Err(RecvTimeoutError::Timeout) if self.in_snapshot.load(Ordering::Acquire) => {
+                    return Ok(WorkerMemoryRelease::SnapshotBusy);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
         }
     }
 
@@ -406,6 +407,8 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
     let (sender, receiver) = mpsc::channel();
     let snapshot_sender = Arc::new(Mutex::new(None));
     let worker_snapshot_sender = Arc::clone(&snapshot_sender);
+    let in_snapshot = Arc::new(AtomicBool::new(false));
+    let worker_in_snapshot = Arc::clone(&in_snapshot);
     let (started, startup) = mpsc::sync_channel(1);
     let join = thread::Builder::new()
         .name("tracedecay-rusqlite-reader".to_owned())
@@ -454,6 +457,7 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
                 connection,
                 receiver,
                 worker_snapshot_sender,
+                &worker_in_snapshot,
                 &mut executor,
                 admission,
             );
@@ -466,6 +470,7 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
         client: WorkerClient {
             sender,
             snapshot_sender,
+            in_snapshot,
             interrupt,
         },
         join,
@@ -477,6 +482,7 @@ fn run<E: ReaderQueryExecutor>(
     mut connection: Connection,
     receiver: Receiver<WorkerCommand>,
     published: Arc<Mutex<Option<Sender<SnapshotCommand>>>>,
+    in_snapshot: &AtomicBool,
     executor: &mut E,
     admission: Arc<ReaderAdmissionRecorder>,
 ) {
@@ -497,6 +503,7 @@ fn run<E: ReaderQueryExecutor>(
                 match transaction {
                     Ok(transaction) => {
                         let (sender, commands) = mpsc::channel();
+                        in_snapshot.store(true, Ordering::Release);
                         *published
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sender);
@@ -506,6 +513,11 @@ fn run<E: ReaderQueryExecutor>(
                         if run_snapshot(transaction, commands, executor, &admission) {
                             return;
                         }
+                        // Clear the flag before the sender: a release that
+                        // missed the sender queues on the outer channel and
+                        // must not read a stale `in_snapshot` for a worker
+                        // already back on its command loop.
+                        in_snapshot.store(false, Ordering::Release);
                     }
                     Err(error) => {
                         let _ = reply.send(Err(error));
@@ -659,4 +671,120 @@ fn interruption(probe: &dyn RuntimeRequestProbeV1) -> Option<UnavailableReasonV1
         RuntimeInterruptionV1::Cancelled => UnavailableReasonV1::Cancelled,
         RuntimeInterruptionV1::DeadlineExceeded => UnavailableReasonV1::DeadlineExceeded,
     })
+}
+
+#[cfg(test)]
+mod release_memory_tests {
+    use std::time::Duration;
+
+    use tracedecay_store::OperationPriorityV1;
+
+    use super::*;
+    use crate::reader::tests::{GateExecutor, Probe, TestStore, request};
+
+    /// How long a test waits on one command reply before failing instead of
+    /// hanging until Bazel's overall timeout.
+    const REPLY_BOUND: Duration = Duration::from_secs(60);
+
+    /// Parks the worker inside its snapshot loop on a read whose end is
+    /// already queued: it holds no retained snapshot, yet it is not back on
+    /// its outer command channel either, the state a deferred snapshot end
+    /// leaves behind.
+    fn finishing_snapshot(
+        store: &TestStore,
+        executor: &GateExecutor,
+    ) -> (SpawnedWorker, JoinHandle<()>) {
+        let spawned = spawn(
+            store.locator(),
+            executor.clone(),
+            Arc::new(ReaderAdmissionRecorder::default()),
+        )
+        .unwrap();
+        spawned.client.begin().unwrap();
+        let reading = thread::spawn({
+            let client = spawned.client.clone();
+            let read = request(&store.binding, OperationPriorityV1::Foreground);
+            move || {
+                let probe = Probe::for_request(&read);
+                let _ = client.execute(read, &probe);
+            }
+        });
+        assert!(
+            executor.entered.wait(REPLY_BOUND),
+            "the read must be parked before its snapshot end is queued"
+        );
+        drop(spawned.client.begin_end().unwrap());
+        (spawned, reading)
+    }
+
+    fn release_in_background(
+        client: &WorkerClient,
+    ) -> (
+        Receiver<Result<WorkerMemoryRelease, ReaderWorkerError>>,
+        JoinHandle<()>,
+    ) {
+        let (done, released) = mpsc::channel();
+        let client = client.clone();
+        let releasing = thread::spawn(move || done.send(client.release_memory()).unwrap());
+        (released, releasing)
+    }
+
+    #[test]
+    fn memory_release_skips_a_worker_still_finishing_its_snapshot() {
+        let store = TestStore::new();
+        let executor = GateExecutor::default();
+        let (spawned, reading) = finishing_snapshot(&store, &executor);
+
+        let (released, releasing) = release_in_background(&spawned.client);
+        assert_eq!(
+            released
+                .recv_timeout(REPLY_BOUND)
+                .expect("the release must answer while the read is parked")
+                .unwrap(),
+            WorkerMemoryRelease::SnapshotBusy,
+            "the release must not wait out a read the worker is still running"
+        );
+        executor.release.set();
+
+        releasing.join().unwrap();
+        reading.join().unwrap();
+        spawned.client.shutdown();
+        spawned.join.join().unwrap();
+    }
+
+    #[test]
+    fn memory_release_returns_while_the_worker_holds_a_retained_snapshot() {
+        let store = TestStore::new();
+        let executor = GateExecutor::default();
+        let (spawned, reading) = finishing_snapshot(&store, &executor);
+        let (begin, begun) = mpsc::sync_channel(1);
+        spawned
+            .client
+            .sender
+            .send(WorkerCommand::Begin { reply: begin })
+            .unwrap();
+
+        let (released, releasing) = release_in_background(&spawned.client);
+        executor.release.set();
+        begun
+            .recv_timeout(REPLY_BOUND)
+            .expect("the queued begin must answer")
+            .unwrap();
+        let outcome = released
+            .recv_timeout(REPLY_BOUND)
+            .expect("the release must answer")
+            .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                WorkerMemoryRelease::Released | WorkerMemoryRelease::SnapshotBusy
+            ),
+            "got {outcome:?}"
+        );
+
+        releasing.join().unwrap();
+        reading.join().unwrap();
+        spawned.client.shutdown();
+        spawned.join.join().unwrap();
+    }
 }

@@ -25,7 +25,6 @@ mod admin;
 mod analysis;
 mod application;
 mod application_schema;
-pub mod ast_grep;
 mod edit;
 mod git;
 mod graph;
@@ -43,7 +42,6 @@ use analysis::*;
 use application::*;
 pub use application_schema::mcp_input_schema;
 use application_schema::{canonical_application_request_schema, project_input_schema};
-use ast_grep::ast_grep_available;
 use edit::*;
 use git::*;
 use graph::*;
@@ -203,15 +201,6 @@ pub fn get_tool_definitions_with_budget(
     Ok(defs)
 }
 
-pub fn get_maximal_tool_definitions_with_budget(
-    node_count: u64,
-    budget: u8,
-) -> Result<Vec<ToolDefinition>, McpCatalogError> {
-    let mut defs = get_maximal_tool_definitions()?;
-    apply_context_budget(&mut defs, node_count, budget);
-    Ok(defs)
-}
-
 fn apply_context_budget(defs: &mut [ToolDefinition], node_count: u64, budget: u8) {
     // Replace the context tool's description with the budgeted version
     for def in defs {
@@ -219,12 +208,6 @@ fn apply_context_budget(defs: &mut [ToolDefinition], node_count: u64, budget: u8
             def.description = context_description(node_count, budget);
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToolRegistryMode {
-    HostAvailable,
-    DeterministicMaximal,
 }
 
 pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
@@ -272,36 +255,16 @@ pub fn apply_context_warming_budget(defs: &mut [ToolDefinition], budget: u8) {
 }
 
 /// Returns the list of all tool definitions exposed by this MCP server.
-///
-/// Tools whose backing dependency is missing on the current host are
-/// filtered out so the model never sees a tool that will immediately
-/// fail when called. The host `ast-grep` CLI gates rewrite support.
 pub fn get_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     Ok(get_tool_definitions_ref()?.to_vec())
 }
 
-/// Borrow the host-filtered catalog without cloning every schema body.
-pub fn get_tool_definitions_ref() -> Result<&'static [ToolDefinition], McpCatalogError> {
-    static DEFINITIONS: LazyLock<Result<Vec<ToolDefinition>, String>> = LazyLock::new(|| {
-        let mut definitions = match maximal_tool_definitions() {
-            Ok(definitions) => definitions.to_vec(),
-            Err(error) => return Err(error.to_string()),
-        };
-        retain_host_available_tool_definitions(&mut definitions);
-        Ok(definitions)
-    });
-    match &*DEFINITIONS {
-        Ok(definitions) => Ok(definitions.as_slice()),
-        Err(message) => Err(McpCatalogError::Initialization(message.clone())),
-    }
-}
-
 /// One advertised tool used to parse a CLI invocation.
 ///
-/// `tracedecay tool search` is a one-shot process. Assembling the maximal MCP
+/// `tracedecay tool search` is a one-shot process. Assembling the full MCP
 /// catalog just to read the search schema clones every other tool's JSON body.
 /// Search's request schema is `SearchSurfaceRequestV1`; build that one
-/// definition and leave the maximal registry for `tools/list`.
+/// definition and leave the full registry for `tools/list`.
 pub fn cli_tool_definition(name: &str) -> Result<ToolDefinition, McpCatalogError> {
     if ApplicationSurfaceOperation::from_tool_name(name)
         == Some(ApplicationSurfaceOperation::Search)
@@ -336,43 +299,28 @@ fn build_search_cli_definition() -> Result<ToolDefinition, McpCatalogError> {
     Ok(definitions.remove(0))
 }
 
-/// Counts how many times the maximal registry was actually assembled.
-///
-/// The registry is deterministic, so a correct cache builds it exactly once
-/// per process no matter how many `tools/list` requests arrive.
-#[cfg(test)]
-pub(super) static MAXIMAL_DEFINITION_BUILDS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// The maximal registry, assembled once per process and cloned per caller.
+/// Borrow the registry, assembled once per process.
 ///
 /// Every input is static for the life of the process: the application catalog
-/// is a `LazyLock` snapshot and `ast_grep_available()` is a `OnceLock` host
-/// probe. Nothing session-scoped is frozen here, the per-session passes
-/// (`apply_context_budget`, `apply_context_warming_budget`, and the
-/// profile/capability filtering in
-/// `get_catalog_filtered_tool_definitions_with_budget`) all run on the *clone*
-/// this returns, after the cache.
-pub fn get_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
-    Ok(maximal_tool_definitions()?.to_vec())
-}
-
-fn maximal_tool_definitions() -> Result<&'static [ToolDefinition], McpCatalogError> {
+/// is a `LazyLock` snapshot. Nothing session-scoped is frozen here, the
+/// per-session passes (`apply_context_budget`, `apply_context_warming_budget`,
+/// and the profile/capability filtering in
+/// `get_catalog_filtered_tool_definitions_with_budget`) all run on a clone,
+/// after the cache.
+pub fn get_tool_definitions_ref() -> Result<&'static [ToolDefinition], McpCatalogError> {
     // The error type is not `Clone`, and a failure here is a deterministic
     // catalog/schema defect rather than a transient condition, so the cache
     // retains the rendered message and replays it.
-    static MAXIMAL_DEFINITIONS: LazyLock<std::result::Result<Vec<ToolDefinition>, String>> =
-        LazyLock::new(|| build_maximal_tool_definitions().map_err(|error| error.to_string()));
-    match &*MAXIMAL_DEFINITIONS {
+    static DEFINITIONS: LazyLock<std::result::Result<Vec<ToolDefinition>, String>> =
+        LazyLock::new(|| build_tool_definitions().map_err(|error| error.to_string()));
+    match &*DEFINITIONS {
         Ok(definitions) => Ok(definitions.as_slice()),
         Err(message) => Err(McpCatalogError::Initialization(message.clone())),
     }
 }
 
 #[tracing::instrument(name = "mcp.catalog.assemble", level = "trace", skip_all)]
-fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
-    #[cfg(test)]
-    MAXIMAL_DEFINITION_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+fn build_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     // Work and Workflow own independent executable registries; assemble them
     // concurrently while the application descriptor projection runs here.
     let work_worker = spawn_definition_worker("tracedecay-catalog-work", work::work_definitions)?;
@@ -563,22 +511,6 @@ fn spawn_definition_worker(
                 "failed to start {name} tool catalog worker: {error}"
             ))
         })
-}
-
-pub fn retain_host_available_tool_definitions(definitions: &mut Vec<ToolDefinition>) {
-    if !ast_grep_available() {
-        definitions.retain(|d| d.name != "tracedecay_ast_grep_rewrite");
-    }
-    debug_assert!(
-        !definitions.is_empty(),
-        "get_tool_definitions returned empty list"
-    );
-    debug_assert!(
-        definitions
-            .iter()
-            .all(|d| d.name.starts_with("tracedecay_")),
-        "all tool definitions must have 'tracedecay_' prefix"
-    );
 }
 
 fn add_lcm_storage_scope_property(definitions: &mut [ToolDefinition]) {

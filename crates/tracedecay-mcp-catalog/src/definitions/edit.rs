@@ -449,7 +449,7 @@ pub(super) fn def_ast_grep_search(input_schema: Value) -> ToolDefinition {
 pub(super) fn def_ast_grep_rewrite() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_ast_grep_rewrite".to_string(),
-        description: "Perform structural code rewrite using the host ast-grep CLI. The pattern and rewrite use ast-grep's SGPattern syntax. This tool is advertised only when that CLI is available.".to_string(),
+        description: "Rewrite every structural match of an ast-grep pattern in one file. The pattern and rewrite use ast-grep's SGPattern syntax ($A captures one node, $$$ a run of nodes); matches in comments and strings are left alone. The language is inferred from the file extension.".to_string(),
         input_schema: source_edit_schema(json!({
             "type": "object",
             "properties": {
@@ -467,7 +467,7 @@ pub(super) fn def_ast_grep_rewrite() -> ToolDefinition {
                 },
                 "dry_run": {
                     "type": "boolean",
-                    "description": "If true, preview the rewrite without applying it: ast-grep runs without --update-all (or the built-in literal fallback computes a diff) and the response returns the would-be change, writing nothing (default: false)."
+                    "description": "If true, preview the rewrite without applying it: the response returns the would-be change and writes nothing (default: false)."
                 },
                 "verify": {
                     "type": "boolean",

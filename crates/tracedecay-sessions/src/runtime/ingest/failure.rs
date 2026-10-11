@@ -506,28 +506,48 @@ pub fn classify_claude_observation_failure(
         Store::Contract(_) => permanent("observation_contract_invalid"),
         _ => unavailable("observation_storage_failed"),
     };
-    let projection = |error: &Projection| match error {
-        Projection::Storage { .. } => unavailable("observation_projection_storage_failed"),
-        Projection::SanitizationRefused { .. } => {
-            permanent("observation_projection_sanitization_refused")
+    let projection = |error: &Projection| {
+        if error.is_sqlite_disk_image_corrupt() {
+            return ClaudeObservationFailureClass {
+                reason_code: "projection_store_corrupt",
+                retryable: false,
+                status: Unavailable,
+            };
         }
-        Projection::RetryDeferred { .. } => contended("observation_projection_retry_deferred"),
-        Projection::Gap { .. } => permanent("observation_projection_checkpoint_gap"),
-        Projection::OutputCollision { .. } => permanent("observation_projection_output_collision"),
-        Projection::SessionOutputCollision { .. } => {
-            permanent("observation_projection_session_collision")
-        }
-        Projection::ProvenanceCollision => permanent("observation_projection_provenance_collision"),
-        Projection::Contract(_) => permanent("observation_projection_contract_invalid"),
-        Projection::Anchor(_) => permanent("observation_projection_anchor_invalid"),
-        Projection::SequenceOverflow(_) => permanent("observation_projection_sequence_overflow"),
-        Projection::NotQueued => permanent("observation_projection_not_queued"),
-        Projection::ObservationNotFound => permanent("observation_projection_source_missing"),
-        Projection::UnsupportedProvider(_) => {
-            permanent("observation_projection_provider_unsupported")
-        }
-        Projection::InvalidRebuildFrontier { .. } => {
-            permanent("observation_projection_frontier_invalid")
+        match error {
+            Projection::Corrupt { .. } => ClaudeObservationFailureClass {
+                reason_code: "projection_store_corrupt",
+                retryable: false,
+                status: Unavailable,
+            },
+            Projection::Storage { .. } => unavailable("observation_projection_storage_failed"),
+            Projection::SanitizationRefused { .. } => {
+                permanent("observation_projection_sanitization_refused")
+            }
+            Projection::RetryDeferred { .. } => contended("observation_projection_retry_deferred"),
+            Projection::Gap { .. } => permanent("observation_projection_checkpoint_gap"),
+            Projection::OutputCollision { .. } => {
+                permanent("observation_projection_output_collision")
+            }
+            Projection::SessionOutputCollision { .. } => {
+                permanent("observation_projection_session_collision")
+            }
+            Projection::ProvenanceCollision => {
+                permanent("observation_projection_provenance_collision")
+            }
+            Projection::Contract(_) => permanent("observation_projection_contract_invalid"),
+            Projection::Anchor(_) => permanent("observation_projection_anchor_invalid"),
+            Projection::SequenceOverflow(_) => {
+                permanent("observation_projection_sequence_overflow")
+            }
+            Projection::NotQueued => permanent("observation_projection_not_queued"),
+            Projection::ObservationNotFound => permanent("observation_projection_source_missing"),
+            Projection::UnsupportedProvider(_) => {
+                permanent("observation_projection_provider_unsupported")
+            }
+            Projection::InvalidRebuildFrontier { .. } => {
+                permanent("observation_projection_frontier_invalid")
+            }
         }
     };
     let transcript = |error: &source::TranscriptIngestError| {
@@ -598,6 +618,7 @@ pub fn classify_claude_observation_failure(
 mod cancellation_tests {
     use tracedecay_store::TranscriptStoreError;
 
+    use crate::admission::HostAdmissionStatus;
     use crate::observation::ObservationCancellation;
 
     use super::*;
@@ -629,6 +650,20 @@ mod cancellation_tests {
         let failure = classify_transcript_ingest_failure("test", "observation", &error);
         assert_eq!(failure.reason_code, "transcript_storage_failed");
         assert!(failure.retryable);
+    }
+
+    #[test]
+    fn sqlite_corrupt_projection_is_blocked_not_retryable() {
+        let error = claude_observation::ClaudeObservationIngestError::Projection(
+            tracedecay_store::ProjectionStoreError::storage(
+                "update projection output state",
+                std::io::Error::other("SQLite execute failed: database disk image is malformed"),
+            ),
+        );
+        let failure = classify_claude_observation_failure(&error);
+        assert_eq!(failure.reason_code, "projection_store_corrupt");
+        assert!(!failure.retryable);
+        assert_eq!(failure.status, HostAdmissionStatus::Unavailable);
     }
 
     #[test]

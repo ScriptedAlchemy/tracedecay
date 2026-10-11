@@ -1047,8 +1047,14 @@ const fn projection_store_unavailable() -> HostAdmissionOutcome {
     )
 }
 
-const fn projection_error_outcome(error: &ProjectionStoreError) -> HostAdmissionOutcome {
+fn projection_error_outcome(error: &ProjectionStoreError) -> HostAdmissionOutcome {
     match error {
+        ProjectionStoreError::Corrupt { .. } => {
+            HostAdmissionOutcome::terminal_unavailable("projection_store_corrupt")
+        }
+        ProjectionStoreError::Storage { .. } if error.is_sqlite_disk_image_corrupt() => {
+            HostAdmissionOutcome::terminal_unavailable("projection_store_corrupt")
+        }
         ProjectionStoreError::Storage { .. } => {
             HostAdmissionOutcome::retained_unavailable("projection_storage_retry_scheduled")
         }
@@ -1079,6 +1085,79 @@ const fn projection_error_outcome(error: &ProjectionStoreError) -> HostAdmission
         ProjectionStoreError::SanitizationRefused { .. } => {
             HostAdmissionOutcome::degraded("projection_sanitization_refused")
         }
+    }
+}
+
+#[cfg(test)]
+mod projection_error_outcome_tests {
+    use super::projection_error_outcome;
+    use tracedecay_sessions::admission::HostAdmissionStatus;
+    use tracedecay_store::{ObservationStoreError, ProjectionStoreError};
+
+    fn malformed_disk_image_error(operation: &'static str) -> ProjectionStoreError {
+        ProjectionStoreError::Storage {
+            operation,
+            source: Box::new(std::io::Error::other(
+                "SQLite execute failed: database disk image is malformed",
+            )),
+        }
+    }
+
+    fn not_a_database_error(operation: &'static str) -> ProjectionStoreError {
+        ProjectionStoreError::Storage {
+            operation,
+            source: Box::new(std::io::Error::other(
+                "SQLite execute failed: file is not a database",
+            )),
+        }
+    }
+
+    fn reader_pool_saturated_head_error() -> ProjectionStoreError {
+        ProjectionStoreError::Storage {
+            operation: "dispatch observation projection runtime operation",
+            source: Box::new(ObservationStoreError::Storage {
+                operation: "dispatch observation runtime read",
+                source: Box::new(std::io::Error::other(
+                    "reader acquisition saturated: ReaderPool",
+                )),
+            }),
+        }
+    }
+
+    /// The reporting host retried a malformed page every 5 minutes because
+    /// SQLITE_CORRUPT arrived as `ProjectionStoreError::Storage` and mapped to
+    /// retryable `projection_storage_retry_scheduled`. Corruption cannot
+    /// succeed on retry; status must block and name repair.
+    #[test]
+    fn sqlite_corrupt_head_classifies_as_blocked_projection_store_corrupt() {
+        let outcome = projection_error_outcome(&malformed_disk_image_error(
+            "update projection output state",
+        ));
+        assert_eq!(outcome.reason_code, Some("projection_store_corrupt"));
+        assert!(
+            !outcome.retryable,
+            "a malformed projection store must not stay on the 5-minute retry loop"
+        );
+        assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
+    }
+
+    #[test]
+    fn sqlite_notadb_head_classifies_as_blocked_projection_store_corrupt() {
+        let outcome =
+            projection_error_outcome(&not_a_database_error("update projection output state"));
+        assert_eq!(outcome.reason_code, Some("projection_store_corrupt"));
+        assert!(!outcome.retryable);
+        assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
+    }
+
+    #[test]
+    fn transient_storage_failures_stay_retryable() {
+        let outcome = projection_error_outcome(&reader_pool_saturated_head_error());
+        assert_eq!(
+            outcome.reason_code,
+            Some("projection_storage_retry_scheduled")
+        );
+        assert!(outcome.retryable);
     }
 }
 

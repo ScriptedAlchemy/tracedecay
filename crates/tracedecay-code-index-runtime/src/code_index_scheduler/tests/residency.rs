@@ -966,6 +966,13 @@ async fn linked_worktrees_on_identical_content_hold_one_decoded_generation() {
         .expect("the linked worktree answers");
     assert!(registry.request_complete_generation(&linked).await);
     wait_for_live_complete_generation(&registry, &linked).await;
+    // A seat wait returns from inside the pass that seated, and a demand that
+    // landed mid-pass queues a follow-up pass. A running pass keeps its decode
+    // busy, so an idle release would skip it.
+    for root in [fixture.path(), linked.as_path()] {
+        wait_for_worker_phase(&registry, root, CodeIndexWorkerPhaseV1::Parked).await;
+        wait_for_settled_owner(&registry, root).await;
+    }
     let both = owners.report(Instant::now());
 
     let decoded = |report: &ResidentOwnersReportV1| {

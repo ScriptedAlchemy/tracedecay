@@ -3705,6 +3705,8 @@ fn row_occurrence(row: ArtifactRowV1) -> CodeLexicalArtifactOccurrenceV1 {
         file: row.anchor.file_occurrence_id,
         symbol: row.anchor.symbol_occurrence_id,
         chunk: row.id,
+        grain: row.anchor.grain,
+        parent_chunk: row.anchor.parent_chunk_id,
         source_span: row.anchor.source_span,
         logical_path: row.logical_path,
         sanitized_text: row.sanitized_text,

@@ -137,8 +137,11 @@ impl HostAdmissionFacade<'_> {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
             let Some(observation_id) = store.next_queued_observation().await.map_err(|error| {
-                tracing::warn!(%error, "projection store operation failed during host drain");
-                projection_store_unavailable()
+                warn_projection_drain_store_error(
+                    &error,
+                    "projection store operation failed during host drain",
+                );
+                projection_error_outcome(&error)
             })?
             else {
                 observation_queue_exhausted = true;
@@ -192,11 +195,11 @@ impl HostAdmissionFacade<'_> {
                         .get_observation(&observation_id)
                         .await
                         .map_err(|error| {
-                            tracing::warn!(
-                                %error,
-                                "projection store operation failed during host drain"
+                            warn_projection_drain_store_error(
+                                &error,
+                                "projection store operation failed during host drain",
                             );
-                            projection_store_unavailable()
+                            observation_store_drain_outcome(&error)
                         })?
                     {
                         session_ids.insert(
@@ -225,8 +228,11 @@ impl HostAdmissionFacade<'_> {
                 .next_queued_observation()
                 .await
                 .map_err(|error| {
-                    tracing::warn!(%error, "projection suffix probe failed during host drain");
-                    projection_store_unavailable()
+                    warn_projection_drain_store_error(
+                        &error,
+                        "projection suffix probe failed during host drain",
+                    );
+                    projection_error_outcome(&error)
                 })?
                 .is_some();
             if cancellation.is_cancelled() {
@@ -268,6 +274,27 @@ fn git_evidence_convergence_deferred(
     convergence.later_failure.is_some() || convergence.pass.backfill.skipped_git_error > 0
 }
 
+/// Host drain warnings that used `%error` drop the source chain. Callers pass
+/// either a projection-store or observation-store error; Display of
+/// `ObservationStoreError::Storage` is the journal line
+/// `dispatch observation runtime read failed`.
+fn warn_projection_drain_store_error(error: &dyn std::error::Error, message: &'static str) {
+    tracing::warn!(
+        error = %tracedecay_store::durable_error_detail(error),
+        "{message}"
+    );
+}
+
+fn observation_store_drain_outcome(
+    error: &tracedecay_store::ObservationStoreError,
+) -> HostAdmissionOutcome {
+    if tracedecay_store::error_chain_is_sqlite_disk_image_corrupt(error) {
+        HostAdmissionOutcome::terminal_unavailable("projection_store_corrupt")
+    } else {
+        projection_store_unavailable()
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy)]
 enum SimulatedProjectOutcome {
@@ -293,9 +320,85 @@ fn simulate_drain_project_calls(batch: &[SimulatedProjectOutcome]) -> (u64, usiz
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::{
-        SimulatedProjectOutcome, git_evidence_convergence_deferred, simulate_drain_project_calls,
+        SimulatedProjectOutcome, git_evidence_convergence_deferred,
+        observation_store_drain_outcome, simulate_drain_project_calls,
+        warn_projection_drain_store_error,
     };
+    use tracedecay_sessions::admission::HostAdmissionStatus;
+    use tracedecay_store::ObservationStoreError;
+
+    struct ErrorFieldVisitor(String);
+
+    impl tracing::field::Visit for ErrorFieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "error" {
+                self.0 = format!("{value:?}");
+            }
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "error" {
+                self.0 = value.to_owned();
+            }
+        }
+    }
+
+    struct ErrorFieldCapture {
+        fields: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ErrorFieldCapture {
+        fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+            let fields = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    fields: Arc::clone(&fields),
+                },
+                fields,
+            )
+        }
+    }
+
+    impl tracing::Subscriber for ErrorFieldCapture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = ErrorFieldVisitor(String::new());
+            event.record(&mut visitor);
+            if !visitor.0.is_empty() {
+                self.fields
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(visitor.0);
+            }
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn reader_pool_saturated_observation_error() -> ObservationStoreError {
+        ObservationStoreError::Storage {
+            operation: "dispatch observation runtime read",
+            source: Box::new(std::io::Error::other(
+                "reader acquisition saturated: ReaderPool",
+            )),
+        }
+    }
 
     #[test]
     fn multi_item_batch_continues_after_durable_refusals() {
@@ -349,5 +452,63 @@ mod tests {
             },
         );
         assert!(git_evidence_convergence_deferred(&transient));
+    }
+
+    /// `%error` uses Display, which stops at `ObservationStoreError::Storage`
+    /// (`observation storage operation … failed`) and drops the ReaderPool
+    /// cause. Drain warnings must include the source chain so the journal
+    /// names the real stall.
+    #[test]
+    fn projection_drain_warnings_include_the_source_chain() {
+        let error = reader_pool_saturated_observation_error();
+        assert_eq!(
+            error.to_string(),
+            "observation storage operation dispatch observation runtime read failed"
+        );
+        assert!(
+            !error
+                .to_string()
+                .contains("reader acquisition saturated: ReaderPool"),
+            "Display must omit the source so this test stays a real reproduction"
+        );
+
+        let (subscriber, fields) = ErrorFieldCapture::new();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        warn_projection_drain_store_error(
+            &error,
+            "projection store operation failed during host drain",
+        );
+        drop(_guard);
+        let captured = fields
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(
+            captured
+                .iter()
+                .any(|field| field.contains("reader acquisition saturated: ReaderPool")),
+            "drain warning must include the source chain, got {captured:?}"
+        );
+    }
+
+    #[test]
+    fn observation_store_corrupt_read_is_blocked_not_retryable() {
+        let error = ObservationStoreError::Storage {
+            operation: "dispatch observation runtime read",
+            source: Box::new(std::io::Error::other(
+                "SQLite execute failed: database disk image is malformed",
+            )),
+        };
+        let outcome = observation_store_drain_outcome(&error);
+        assert_eq!(outcome.reason_code, Some("projection_store_corrupt"));
+        assert!(!outcome.retryable);
+        assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
+    }
+
+    #[test]
+    fn observation_store_transient_read_stays_retryable() {
+        let outcome = observation_store_drain_outcome(&reader_pool_saturated_observation_error());
+        assert_eq!(outcome.reason_code, Some("projection_store_unavailable"));
+        assert!(outcome.retryable);
     }
 }

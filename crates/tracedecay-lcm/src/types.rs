@@ -118,6 +118,22 @@ pub struct LcmRecentSession {
     pub last_store_id: i64,
 }
 
+/// Per-provider raw transcript counts for one explicit session id: the raw
+/// store answers for a session the temporal projection has not published
+/// (or has only partially published), where an occurrence page serves no
+/// record to take the measured provider or message counts from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmSessionRawStats {
+    pub provider: String,
+    /// Raw transcript messages stored for the session under this provider.
+    pub raw_message_count: i64,
+    /// Raw rows the session's active temporal generation has not published
+    /// as occurrences (see [`crate::schema::RAW_MESSAGE_UNPUBLISHED_SQL`]).
+    pub unpublished_message_count: i64,
+    /// Summary-DAG nodes visible in the session's active generation.
+    pub summary_node_count: i64,
+}
+
 /// Bounded turn-ordered replay slice request for one session: up to
 /// `head_limit` opening turns, `tail_limit` closing turns, and
 /// `summary_limit` summary-DAG nodes, each snippet capped by chars.

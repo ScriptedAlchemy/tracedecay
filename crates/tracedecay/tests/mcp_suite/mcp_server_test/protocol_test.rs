@@ -1,3 +1,4 @@
+use crate::common::fixture::GitFixture;
 use crate::mcp_server_test::support::*;
 use serde_json::{Value, json};
 use std::fs;
@@ -12,6 +13,23 @@ use tracedecay_mcp::response_handles::{
 };
 use tracedecay_runtime_core::path_safety::{canonical_existing_identity, canonical_root_identity};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
+
+#[tokio::test]
+async fn test_initialize_negotiates_legacy_and_unknown_client_versions() {
+    for (requested, expected) in [("2024-11-05", "2024-11-05"), ("2099-01-01", "2025-11-25")] {
+        let (server, _dir) = setup_server().await;
+        let mut initialize: Value =
+            serde_json::from_str(&spec_initialize_request(json!(1))).unwrap();
+        initialize["params"]["protocolVersion"] = json!(requested);
+        let responses = run_server_with_messages(server, vec![initialize.to_string()]).await;
+        assert_eq!(responses.len(), 1, "{requested}: {responses:?}");
+        let response = parse_response(&responses[0]);
+        assert_eq!(
+            response["result"]["protocolVersion"], expected,
+            "{requested}: {response}"
+        );
+    }
+}
 
 /// Logging is deprecated by MCP SEP-2577 and the server emits no log
 /// notifications, so the advertised capabilities are exactly tools and
@@ -1391,6 +1409,7 @@ async fn test_resources_read_overview() {
 async fn test_resources_read_branches_reports_provenance_scopes() {
     let dir = TempDir::new().unwrap();
     let project = canonical_root_identity(dir.path());
+    let _repo = GitFixture::primary(project.clone());
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
     let cg = Box::pin(tracedecay_project::project::TraceDecay::init(&project))
@@ -1415,28 +1434,45 @@ async fn test_resources_read_branches_reports_provenance_scopes() {
     let result = &response_with_id(&responses, json!(435))["result"];
     assert_eq!(result["contents"][0]["uri"], "tracedecay://branches");
     let text = result["contents"][0]["text"].as_str().unwrap();
+    let body: Value = serde_json::from_str(text).unwrap();
+    let branches = body["branches"]
+        .as_array()
+        .unwrap_or_else(|| panic!("branches list: {body}"));
     assert_eq!(
-        serde_json::from_str::<Value>(text).unwrap(),
-        json!({
-            "branch_count": 2,
-            "branches": [
-                {
-                    "name": "feature/one",
-                    "parent": "main",
-                    "last_synced_at": "7",
-                    "is_current": false,
-                    "is_default": false
-                },
-                {
-                    "name": "main",
-                    "parent": null,
-                    "last_synced_at": "0",
-                    "is_current": false,
-                    "is_default": true
-                }
-            ]
-        })
+        branch_named(branches, "feature/one"),
+        &json!({
+            "name": "feature/one",
+            "parent": "main",
+            "last_synced_at": "7",
+            "is_current": false,
+            "is_default": false
+        }),
+        "{body}"
     );
+    assert_eq!(
+        branch_named(branches, "main"),
+        &json!({
+            "name": "main",
+            "parent": null,
+            "last_synced_at": "0",
+            "is_current": true,
+            "is_default": true
+        }),
+        "{body}"
+    );
+    for branch in branches {
+        assert!(
+            branch.get("db_file").is_none(),
+            "retired store reference leaked: {branch}"
+        );
+    }
+}
+
+fn branch_named<'a>(branches: &'a [Value], name: &str) -> &'a Value {
+    branches
+        .iter()
+        .find(|branch| branch["name"] == name)
+        .unwrap_or_else(|| panic!("{name} missing: {branches:?}"))
 }
 
 #[tokio::test]

@@ -1,4 +1,21 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 load("//scripts:bazel/rust_test.bzl", "rust_test")
+
+py_binary(
+    name = "measure_unused_tool_context",
+    srcs = ["measure-unused-tool-context.py"],
+    main = "measure-unused-tool-context.py",
+)
+
+py_test(
+    name = "unused_tool_context_measure_test",
+    size = "small",
+    srcs = [
+        "measure-unused-tool-context.py",
+        "test-measure-unused-tool-context.py",
+    ],
+    main = "test-measure-unused-tool-context.py",
+)
 
 exports_files(
     [
@@ -9,6 +26,7 @@ exports_files(
         "check-github-hosted-runners.py",
         "test-check-github-hosted-runners.py",
         "test-gen-builds-default-alias.py",
+        "test-measure-ranked-tail-trim.py",
     ],
     visibility = ["//visibility:public"],
 )

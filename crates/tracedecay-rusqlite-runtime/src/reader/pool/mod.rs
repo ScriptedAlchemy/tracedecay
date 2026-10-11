@@ -115,6 +115,21 @@ impl ReaderCheckpointBlockers {
             settled.notify_all();
         }
     }
+
+    /// Test-only: block until every released snapshot has finished, with no
+    /// bound, unlike the checkpoint's own [`Self::await_released_snapshots`].
+    #[cfg(test)]
+    pub(crate) fn wait_until_released_snapshots_finish(&self) {
+        let (released, settled) = &*self.released;
+        let released = released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(
+            settled
+                .wait_while(released, |released| !released.is_empty())
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+    }
 }
 
 impl CheckpointBlockerSource for ReaderCheckpointBlockers {
@@ -745,26 +760,26 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     }
 
     /// Test-only: block until a general-lane acquisition is counted as a
-    /// waiter, or the bound lapses.
+    /// waiter.
     ///
     /// Arming a waiter notifies `capacity_changed`, so this observes the
     /// event directly instead of polling `snapshot`.
     #[cfg(test)]
-    pub(crate) fn wait_until_waiting_general(&self, max_wait: Duration) -> bool {
+    pub(crate) fn wait_until_waiting_general(&self) {
         let state = self
             .inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (state, _) = self
-            .inner
-            .capacity_changed
-            .wait_timeout_while(state, max_wait, |state| state.waiting_general == 0)
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.waiting_general > 0
+        drop(
+            self.inner
+                .capacity_changed
+                .wait_while(state, |state| state.waiting_general == 0)
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
     }
 
-    /// Test-only: block until the pool is quiescent, or the bound lapses.
+    /// Test-only: block until the pool is quiescent.
     ///
     /// Every lane-state transition that feeds quiescence (lease returns,
     /// opens, limbo resolution) notifies `capacity_changed`, so the wait is
@@ -772,8 +787,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     /// the deferred-return thread drops its pool reference immediately after
     /// its notification, and that drop has no event, so the tail of this wait
     /// yields across a window of a few instructions.
+    ///
+    /// There is no bound: a deferred return always resolves its limbo, and a
+    /// host under load can stall that thread for tens of seconds.
     #[cfg(test)]
-    pub(crate) fn wait_until_quiescent(&self, max_wait: Duration) -> bool {
+    pub(crate) fn wait_until_quiescent(&self) {
         fn lanes_busy(state: &PoolState) -> bool {
             state.opening_general != 0
                 || state.opening_health != 0
@@ -782,26 +800,20 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 || state.limbo_general != 0
                 || state.limbo_health != 0
         }
-        let deadline = Instant::now() + max_wait;
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
             let state = self
                 .inner
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let (state, _) = self
+            let state = self
                 .inner
                 .capacity_changed
-                .wait_timeout_while(state, remaining, |state| lanes_busy(state))
+                .wait_while(state, |state| lanes_busy(state))
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let lanes_settled = !lanes_busy(&state);
             drop(state);
-            if lanes_settled && Arc::strong_count(&self.inner) == 1 {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
+            if Arc::strong_count(&self.inner) == 1 {
+                return;
             }
             std::thread::yield_now();
         }

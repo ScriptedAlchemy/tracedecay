@@ -7,7 +7,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphProjectionError, CodeGraphProjectionStore,
-    CodeGraphReadinessRequirement,
+    CodeGraphReadinessRequirement, InteractiveCatalogReaderLeaseV1,
 };
 pub use tracedecay_contracts::retrieval::CodeGraphReadFreshnessV1;
 use tracedecay_contracts::{
@@ -182,6 +182,7 @@ pub struct VerifiedCodeGraphRead {
     scope: ResolvedScope,
     store: Arc<CodeGraphProjectionStore>,
     freshness: CodeGraphReadFreshnessV1,
+    _catalog_retain: Option<Arc<InteractiveCatalogReaderLeaseV1>>,
 }
 
 impl VerifiedCodeGraphRead {
@@ -189,6 +190,7 @@ impl VerifiedCodeGraphRead {
         scope: ResolvedScope,
         store: Arc<CodeGraphProjectionStore>,
         freshness: CodeGraphReadFreshnessV1,
+        catalog_retain: Option<Arc<InteractiveCatalogReaderLeaseV1>>,
     ) -> Result<Self, CodeGraphReadError> {
         scope
             .validate()
@@ -199,6 +201,7 @@ impl VerifiedCodeGraphRead {
             scope,
             store,
             freshness,
+            _catalog_retain: catalog_retain,
         })
     }
 

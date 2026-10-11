@@ -220,14 +220,14 @@ fn public_name_to_canonical(definitions: &[String]) -> BTreeMap<String, String> 
     names
 }
 
-/// Bound routes which are intentionally absent from the maximal public MCP catalog.
+/// Bound routes which are intentionally absent from the public MCP catalog.
 ///
 /// Dispatch binding and the catalog's internal operations, which are served by
 /// name and never advertised, are the authority for whether a persisted event
 /// name was a real daemon route. Subtracting advertised definitions leaves the
 /// private host/runtime routes without duplicating a route inventory here.
-fn bound_but_unadvertised_tool_names(maximal_defined: &[String]) -> BTreeSet<&'static str> {
-    let maximal_public_names: BTreeSet<String> = maximal_defined
+fn bound_but_unadvertised_tool_names(defined: &[String]) -> BTreeSet<&'static str> {
+    let public_names: BTreeSet<String> = defined
         .iter()
         .map(|name| tracedecay_automation::analytics::normalize_tool_name(name))
         .collect();
@@ -240,8 +240,7 @@ fn bound_but_unadvertised_tool_names(maximal_defined: &[String]) -> BTreeSet<&'s
                 .map(|operation| operation.mcp_tool_name()),
         )
         .filter(|name| {
-            !maximal_public_names
-                .contains(&tracedecay_automation::analytics::normalize_tool_name(name))
+            !public_names.contains(&tracedecay_automation::analytics::normalize_tool_name(name))
         })
         .collect()
 }
@@ -251,14 +250,14 @@ mod tests {
     use super::{bound_but_unadvertised_tool_names, public_name_to_canonical, tool_tier};
 
     #[test]
-    fn bound_unadvertised_tool_names_use_the_maximal_public_catalog() {
-        let maximal_defined: Vec<String> = crate::get_maximal_tool_definitions()
+    fn bound_unadvertised_tool_names_use_the_public_catalog() {
+        let defined: Vec<String> = crate::get_tool_definitions()
             .expect("tool definitions are available")
             .into_iter()
             .map(|definition| definition.name)
             .collect();
 
-        let bound_unadvertised = bound_but_unadvertised_tool_names(&maximal_defined);
+        let bound_unadvertised = bound_but_unadvertised_tool_names(&defined);
 
         // Served by name as an internal owner operation, with no dispatch
         // binding row and no advertised definition.
@@ -267,15 +266,11 @@ mod tests {
                 .iter()
                 .any(|binding| binding.name == "tracedecay_admin_cli")
         );
-        assert!(
-            !maximal_defined
-                .iter()
-                .any(|name| name == "tracedecay_admin_cli")
-        );
+        assert!(!defined.iter().any(|name| name == "tracedecay_admin_cli"));
         assert!(bound_unadvertised.contains("tracedecay_admin_cli"));
         assert!(bound_unadvertised.contains("tracedecay_admin_sync"));
         assert!(
-            maximal_defined
+            defined
                 .iter()
                 .any(|name| name == "tracedecay_ast_grep_rewrite")
         );
@@ -284,7 +279,7 @@ mod tests {
 
     #[test]
     fn public_lookup_normalizes_host_namespaces() {
-        let defined: Vec<String> = crate::get_maximal_tool_definitions()
+        let defined: Vec<String> = crate::get_tool_definitions()
             .expect("tool definitions are available")
             .into_iter()
             .map(|definition| definition.name)
@@ -561,18 +556,11 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<AnalyticsToolsSectionV1
         .into_iter()
         .map(|definition| definition.name)
         .collect();
-    let maximal_defined: Vec<String> = crate::get_maximal_tool_definitions()
-        .map_err(config_error)?
-        .into_iter()
-        .map(|definition| definition.name)
-        .collect();
     let available_public_name_to_canonical = public_name_to_canonical(&available_defined);
-    let maximal_public_name_to_canonical = public_name_to_canonical(&maximal_defined);
-    let bound_but_unadvertised = bound_but_unadvertised_tool_names(&maximal_defined);
+    let bound_but_unadvertised = bound_but_unadvertised_tool_names(&available_defined);
     let mut called_available_defined = BTreeSet::new();
     let mut aliased_call_names = Vec::new();
     let mut bound_internal_call_names = Vec::new();
-    let mut unavailable_public_call_names = Vec::new();
     let mut unknown_or_retired_call_names = Vec::new();
     let mut logical_tool_counts: BTreeMap<String, ToolCallCounts> = BTreeMap::new();
     for (event_name, counts) in &per_tool {
@@ -596,11 +584,6 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<AnalyticsToolsSectionV1
             if event_name != canonical_tool_name {
                 aliased_call_names.push(canonical(canonical_tool_name));
             }
-            canonical_tool_name
-        } else if let Some(canonical_tool_name) =
-            maximal_public_name_to_canonical.get(&normalized_event_name)
-        {
-            unavailable_public_call_names.push(canonical(canonical_tool_name));
             canonical_tool_name
         } else if bound_but_unadvertised.contains(normalized_event_name.as_str()) {
             bound_internal_call_names.push(event());
@@ -667,10 +650,8 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<AnalyticsToolsSectionV1
         raw_distinct_event_name_count: per_tool.len(),
         called_available_defined_tool_count: called_available_defined.len(),
         available_defined_tool_count: available_defined.len(),
-        maximal_defined_tool_count: maximal_defined.len(),
         aliased_call_names,
         bound_internal_call_names,
-        unavailable_public_call_names,
         unknown_or_retired_call_names,
         zero_call_available_defined_tools: AnalyticsZeroCallToolsV1 {
             count: zero_call_count,
