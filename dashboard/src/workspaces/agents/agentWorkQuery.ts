@@ -32,11 +32,12 @@ export function useAgentWorkGraph() {
     // The observation instant is minted per fetch and not per render: as a
     // query-key member it would mint a new cache entry every render and turn
     // one read into an unbounded stream of them.
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORK_VIEWS_ROUTE,
         workGraphReadRequest(Date.now() * 1_000),
         scopedUrl(scope, WORK_VIEWS_ROUTE.path),
+        signal,
       ),
   });
 }

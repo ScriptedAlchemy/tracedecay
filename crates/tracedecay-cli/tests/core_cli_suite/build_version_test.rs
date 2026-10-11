@@ -8,7 +8,6 @@
 //! pin that the reported version still starts with the Release Please-owned
 //! version so nothing that compares precedence is disturbed.
 
-use std::path::Path;
 use std::process::Command;
 
 use tracedecay_project::version::PACKAGE_VERSION;
@@ -32,16 +31,9 @@ fn reported_version() -> String {
         .to_string()
 }
 
-fn checkout() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("the CLI crate should live under the workspace crates directory")
-}
-
 /// The full sha embedded in the reported version, after pinning the
 /// `"{PACKAGE_VERSION}+{40-hex}[.dirty]"` shape.
-fn reported_full_sha(version: &str) -> String {
+fn assert_reported_build_metadata(version: &str) {
     let metadata = version
         .strip_prefix(&format!("{PACKAGE_VERSION}+"))
         .unwrap_or_else(|| {
@@ -54,32 +46,20 @@ fn reported_full_sha(version: &str) -> String {
         sha.len() == 40 && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
         "{sha:?} is not a full 40-hex lowercase commit sha (from {version:?})"
     );
-    sha.to_string()
 }
 
-/// A hard-coded or fabricated sha would not match the checkout this test
-/// binary was built from: when the suite runs from a git checkout, the
-/// reported commit must be exactly the checkout's `HEAD`.
+/// Compare against the same stamped source identity consumed by the CLI build;
+/// the runfiles tree deliberately contains no Git checkout metadata.
 #[test]
 fn version_flag_always_names_the_exact_commit() {
     let version = reported_version();
-    let sha = reported_full_sha(&version);
-
-    let head = Command::new("git")
-        .arg("-C")
-        .arg(checkout())
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .expect("git should run");
-    if !head.status.success() {
-        // Built from a non-checkout source (release env or packaged VCS
-        // metadata); the shape assertions above are the contract there.
-        return;
-    }
-    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    assert_reported_build_metadata(&version);
+    let source_identity = std::fs::read_to_string("../../product_git_sha.txt")
+        .expect("the canonical stamped source identity must be declared as test data");
     assert_eq!(
-        sha, head,
-        "`--version` reported {version:?}, but this checkout's HEAD is {head}"
+        version,
+        format!("{PACKAGE_VERSION}+{}", source_identity.trim()),
+        "the reported version must match the stamped source identity, including dirtiness",
     );
 }
 

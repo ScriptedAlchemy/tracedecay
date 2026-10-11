@@ -342,23 +342,33 @@ async fn assert_initialized_route_is_rmcp<R, W>(
 
     write_line(&mut writer, &cancellation(2)).await;
     write_line(&mut writer, &ping_request(4)).await;
-    let ping = read_value(&mut reader, "cancellation control did not precede ping").await;
-    assert_eq!(ping["id"], json!(4));
+    // A request cancelled while it waits on the held response gate settles
+    // without that gate, so its terminal and the later ping race each other.
+    let mut replies = Vec::new();
+    for _ in 0..2 {
+        replies.push(
+            read_value(
+                &mut reader,
+                "cancelled RMCP route and ping did not both answer under the held gate",
+            )
+            .await,
+        );
+    }
+    let ping = replies
+        .iter()
+        .find(|reply| reply["id"] == json!(4))
+        .unwrap_or_else(|| panic!("cancellation control did not precede ping: {replies:?}"));
+    assert!(ping.get("result").is_some(), "{ping}");
+    assert_delivered_cancellation(
+        &replies,
+        2,
+        "response-gate cancellation before request registration",
+    );
     writer
         .shutdown()
         .await
         .expect("shutdown initialized client");
     drop(gate);
-    let cancellation = read_value(
-        &mut reader,
-        "cancelled RMCP route did not emit its terminal response",
-    )
-    .await;
-    assert_delivered_cancellation(
-        &[cancellation],
-        2,
-        "response-gate cancellation before request registration",
-    );
     drop(writer);
     drop(reader);
     if let Some(lifecycle) = lifecycle {

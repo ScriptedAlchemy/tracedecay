@@ -25,6 +25,7 @@ const REPOSITORY_ROOT = resolve(DASHBOARD_ROOT, "..");
 const RUST_SCHEMA_FILE = "codegen/schemas/dashboard-contracts.schema.json";
 const SDK_SOURCE_DIR = "sdks/typescript/src";
 const SDK_RUST_OPERATIONS_FILE = "crates/tracedecay-sdk/src/operations.rs";
+const DASHBOARD_APPLICATION_FILE = "dashboard/src/contracts/application.ts";
 
 function bazelRun(target: string, args: string[]): void {
   const command = ["run", target, "--", ...args];
@@ -59,9 +60,11 @@ function exportSdkSources(): Record<string, string> {
           readFileSync(join(temporaryRoot, SDK_SOURCE_DIR, name), "utf8"),
         ]),
       ),
-      [SDK_RUST_OPERATIONS_FILE]: readFileSync(
-        join(temporaryRoot, SDK_RUST_OPERATIONS_FILE),
-        "utf8",
+      ...Object.fromEntries(
+        [SDK_RUST_OPERATIONS_FILE, DASHBOARD_APPLICATION_FILE].map((file) => [
+          file,
+          readFileSync(join(temporaryRoot, file), "utf8"),
+        ]),
       ),
     };
   } finally {

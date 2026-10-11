@@ -530,7 +530,7 @@ mod tests {
     /// contain exactly those files, not a hand-maintained subset.
     #[test]
     fn slash_commands_match_the_command_directories() {
-        let plugin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin");
+        let plugin = std::path::Path::new("../../plugin");
         let claude_dir = plugin.join("commands");
         let cursor_dir = plugin.join("overlays/cursor/commands");
         let mut claude_slugs = std::fs::read_dir(&claude_dir)

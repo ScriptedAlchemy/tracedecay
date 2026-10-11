@@ -104,4 +104,10 @@ Every automation run that reaches backend validation should be able to produce a
 - optimizer diagnosis
 - Codex handoff
 
+Generated evals are unexecuted examples derived from the recorded validation
+report. Their `record_integrity` check only confirms that the examples match the
+recorded counts and labels. `independent_evaluation` stays `not_run` because no
+behavioral validator or harness executes the examples, and no readiness field
+may report an independent evaluation as passed.
+
 The handoff is the durable output for broader code or behavior changes. It must preserve policy-validation decisions and list validation requirements before any generated recommendation is applied.

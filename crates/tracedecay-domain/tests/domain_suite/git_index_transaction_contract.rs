@@ -402,10 +402,7 @@ fn snapshot_without_complete_native_identity_is_read_only() {
 }
 
 fn legacy_fixture(name: &str) -> serde_json::Value {
-    let path = format!(
-        "{}/tests/fixtures/git_index_legacy/{name}.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = format!("tests/fixtures/git_index_legacy/{name}.json");
     serde_json::from_str(&std::fs::read_to_string(path).expect("legacy fixture"))
         .expect("legacy fixture is JSON")
 }

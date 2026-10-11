@@ -411,13 +411,11 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
             .iter()
             .any(|entry| entry["eval_id"] == json!("skill_writer:accepted:0")
                 && entry["harness"]["commands"][0]
-                    == json!("cargo test --test automation_runner_test skill_writer"))
+                    == json!("bazel test //crates/tracedecay:automation_runner_test --test_arg=skill_writer"))
     );
     assert_eq!(
-        eval_payload["runner"]["commands"][0],
-        json!(
-            "cargo test --test automation_runner_test skill_writer_runner_activates_validated_skills -- --nocapture"
-        )
+        eval_payload["independent_evaluation"]["status"],
+        json!("not_run")
     );
     let handoff_payload =
         read_artifact(&cg, &run.run_id, &run.ledger_record, "codex_handoff").await;
@@ -427,10 +425,8 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
         json!("inspect automatically activated managed skill changes")
     );
     assert_eq!(
-        handoff_payload["eval_replay"]["commands"][0],
-        json!(
-            "cargo test --test automation_runner_test skill_writer_runner_activates_validated_skills -- --nocapture"
-        )
+        handoff_payload["independent_evaluation"]["harness_commands"][0],
+        json!("bazel test //crates/tracedecay:automation_runner_test --test_arg=skill_writer")
     );
 
     let skill = tracedecay_automation_runtime::automation::managed_skills::load_managed_skill(

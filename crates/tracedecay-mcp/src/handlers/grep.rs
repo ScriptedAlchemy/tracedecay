@@ -88,6 +88,7 @@ pub async fn compute_grep(
         fixed_strings: request.fixed_strings.unwrap_or(false),
         case_sensitive: request.case_sensitive.unwrap_or(false),
         path_glob: request.path_glob,
+        scope_prefix: scope_prefix.map(str::to_owned),
         context_lines,
         max_results,
     };
@@ -110,14 +111,7 @@ pub async fn compute_grep(
     )
     .await?;
 
-    // Scope filtering mirrors `tracedecay_search`: when the client pins a
-    // subtree, only hits under it are returned.
-    let mut hits = scan
-        .hits
-        .into_iter()
-        .map(grep_match)
-        .filter(|hit| tracedecay_domain::path_matches_scope(hit.file.as_str(), scope_prefix))
-        .collect::<Vec<_>>();
+    let mut hits = scan.hits.into_iter().map(grep_match).collect::<Vec<_>>();
     let truncated = scan.truncated || hits.len() > max_results;
     hits.truncate(max_results);
 
@@ -426,6 +420,7 @@ mod tests {
                 fixed_strings: false,
                 case_sensitive: true,
                 path_glob: path_glob.map(str::to_owned),
+                scope_prefix: None,
                 context_lines: 0,
                 max_results,
             },
@@ -1028,6 +1023,53 @@ mod tests {
                 "detail": "the code-graph read timed out",
             }),
             "the refusal is reported beside the hits rather than replacing them"
+        );
+    }
+
+    #[tokio::test]
+    async fn subtree_scope_is_admitted_before_reads_and_the_result_cap() {
+        let project = tempfile::tempdir().expect("temp project");
+        let outside = project.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+        for index in 0..16 {
+            std::fs::write(
+                outside.join(format!("{index}.rs")),
+                "SCOPE_TOKEN\nSCOPE_TOKEN\n",
+            )
+            .expect("outside fixture");
+        }
+        std::fs::create_dir_all(project.path().join("target_scope")).expect("scope directory");
+        std::fs::write(project.path().join("target_scope/hit.rs"), "SCOPE_TOKEN\n")
+            .expect("scoped fixture");
+        let graph_unavailable = TraceDecayError::Config {
+            message: "graph unavailable in this fixture".to_owned(),
+        };
+
+        let completion = compute_grep(
+            project.path(),
+            &tracedecay_code_index_runtime::registry_default_index_path_policy(),
+            Err(&graph_unavailable),
+            json!({"pattern": "SCOPE_TOKEN", "fixed_strings": true, "max_results": 1}),
+            Some("target_scope"),
+            None,
+            None,
+        )
+        .await
+        .expect("scoped grep");
+        let output = completion.result.result_value().expect("grep result JSON");
+
+        assert_eq!(
+            output["results"],
+            json!([{"file": "target_scope/hit.rs", "line": 1, "text": "SCOPE_TOKEN"}]),
+            "out-of-scope matches must not consume the scoped result budget"
+        );
+        assert_eq!(
+            output["truncated"], false,
+            "the scope holds exactly one match"
+        );
+        assert_eq!(
+            output["files_scanned"], 1,
+            "files outside the scope are never read"
         );
     }
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ignore::DirEntry;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::{Regex, RegexBuilder};
-use tracedecay_domain::IndexPathPolicyV1;
+use tracedecay_domain::{IndexPathPolicyV1, forward_slash_path};
 
 use crate::parallelism::{CodeIndexParallelismErrorV1, install_interactive};
 use crate::source_walk::{forward_slash_relative, source_walk};
@@ -21,6 +21,9 @@ pub struct GrepSearchQuery {
     pub fixed_strings: bool,
     pub case_sensitive: bool,
     pub path_glob: Option<String>,
+    /// Client subtree, matched with [`tracedecay_domain::path_matches_scope`].
+    /// Files outside it are skipped before any read or hit counting.
+    pub scope_prefix: Option<String>,
     pub context_lines: usize,
     pub max_results: usize,
 }
@@ -124,7 +127,10 @@ pub fn search_tree_with_cancel(
                 }
                 let Some(entry) = walker.next() else { break };
                 match entry {
-                    Ok(entry) if entry.file_type().is_some_and(|kind| kind.is_file()) => {
+                    Ok(entry)
+                        if entry.file_type().is_some_and(|kind| kind.is_file())
+                            && in_scope(&entry, project_root, query.scope_prefix.as_deref()) =>
+                    {
                         batch.push(entry);
                     }
                     Ok(_) => {}
@@ -162,6 +168,17 @@ pub fn search_tree_with_cancel(
         }
     })
     .map_err(GrepSearchError::Parallelism)
+}
+
+fn in_scope(entry: &DirEntry, project_root: &Path, scope_prefix: Option<&str>) -> bool {
+    scope_prefix.is_none_or(|scope| {
+        entry
+            .path()
+            .strip_prefix(project_root)
+            .is_ok_and(|relative| {
+                tracedecay_domain::path_matches_scope(&forward_slash_path(relative), Some(scope))
+            })
+    })
 }
 
 fn scan_grep_file(
@@ -367,6 +384,7 @@ mod tests {
             fixed_strings: false,
             case_sensitive: true,
             path_glob: None,
+            scope_prefix: None,
             context_lines: 0,
             max_results: 10,
         }
@@ -397,6 +415,31 @@ mod tests {
         assert!(parallel.truncated);
         assert!(!parallel.cancelled);
         assert!(parallel.files_scanned <= 4);
+    }
+
+    #[test]
+    fn scope_intersects_the_path_glob_before_any_read() {
+        let project = tempfile::tempdir().unwrap();
+        for path in ["app/x.rs", "app/x.txt", "apple/x.rs", "lib/x.rs"] {
+            let path = project.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "HIT_TOKEN\n").unwrap();
+        }
+        let mut query = query("HIT_TOKEN");
+        query.path_glob = Some("*.rs".to_owned());
+        query.scope_prefix = Some("app".to_owned());
+
+        let result =
+            search_tree_with_cancel(project.path(), &query, &no_exclusions(), || false).unwrap();
+
+        let files = result
+            .hits
+            .iter()
+            .map(|hit| hit.file.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(files, ["app/x.rs"]);
+        assert_eq!(result.files_scanned, 1);
+        assert!(!result.truncated);
     }
 
     #[test]

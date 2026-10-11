@@ -36,6 +36,7 @@ exports_files(
         "bazel/rust_test_environment_probe.txt",
         "check-dashboard-bundle.py",
         "check-github-hosted-runners.py",
+        "run-session-temporal-benchmark.sh",
         "test-check-github-hosted-runners.py",
         "test-gen-builds-default-alias.py",
         "test-measure-ranked-tail-trim.py",

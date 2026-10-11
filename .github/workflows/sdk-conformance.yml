@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
     paths:
+      - ".github/actions/**"
       - ".github/workflows/**"
       - ".github/release-targets.json"
       - "crates/tracedecay-api/**"

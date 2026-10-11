@@ -11,6 +11,7 @@ use crate::support::{
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
 #[tokio::test]
 async fn project_context_returns_the_project_the_caller_named() {
@@ -39,13 +40,9 @@ async fn project_context_returns_the_project_the_caller_named() {
         cg.project_root(),
         &["symbolic-ref", "HEAD", "refs/heads/served-head"],
     );
-    let registry_path = runtime
-        .profile_root_for_test()
-        .join("global.db")
-        .canonicalize()
-        .expect("registry path")
-        .display()
-        .to_string();
+    let registry_path = canonical_root_identity(&runtime.profile_root_for_test().join("global.db"))
+        .to_string_lossy()
+        .into_owned();
 
     // The remote carries a credential. The tool's answer must describe the
     // public registry row and must not repeat that credential.

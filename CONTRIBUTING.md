@@ -67,8 +67,9 @@ is missing or the installed packages no longer match `pnpm-lock.yaml`. Setting
 instead, and only when `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` holds that
 bundle's digest (print it with `python3 scripts/check-dashboard-bundle.py
 dashboard/app-dist --print-digest`); a missing or mismatched digest fails the
-build. CI builds the bundle once in the `dashboard-assets` job and every Rust
-job downloads it as an artifact. GitHub Releases ship prebuilt binaries;
+build. Bazel builds the bundle as `//dashboard:app_dist` and passes it and
+its `//dashboard:bundle_sha256` digest to that skip mode; release workflows
+ship only that embedded output. GitHub Releases ship prebuilt binaries;
 workspace Cargo packages are private.
 
 Do not assume a green baseline for the full suite: run it and read the

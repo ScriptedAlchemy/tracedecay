@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Protocol refusal tests; these never launch or certify a provider."""
+"""Protocol refusal and OS-pipe tests; these never launch or certify a provider."""
 
 import contextlib
 import io
+import os
 import unittest
 from unittest.mock import patch
 
@@ -83,6 +84,32 @@ class StartupResponses(unittest.TestCase):
                 self.assertEqual(smoke.main(), 2)
                 launch.assert_not_called()
                 self.assertNotIn("PASS", output.getvalue())
+
+
+class PipeFrames(unittest.TestCase):
+    def test_frames_delivered_in_one_pipe_write_are_all_read(self):
+        read_fd, write_fd = os.pipe()
+        with os.fdopen(read_fd, "rb", buffering=0) as reader, \
+                os.fdopen(write_fd, "wb", buffering=0) as writer:
+            writer.write(
+                b'{"method":"thread/started","params":{}}\n'
+                b'{"id":1,"result":{"thread":{"id":"thread-one"}}}\n'
+                b'{"method":"turn/started","params":{}}\n'
+                b'{"id":2,"result":{"turn":{"id":"turn-one","status":"inProgress"}}}\n'
+            )
+            thread_id = smoke._receive_until(reader, smoke.thread_start_response, "thread/start response")
+            self.assertEqual(thread_id, "thread-one")
+            turn_id = smoke._receive_until(
+                reader, lambda item: smoke.turn_start_response(item, thread_id), "turn/start response",
+            )
+            self.assertEqual(turn_id, "turn-one")
+
+    def test_stdout_closure_is_a_failure_without_a_matching_response(self):
+        read_fd, write_fd = os.pipe()
+        with os.fdopen(read_fd, "rb", buffering=0) as reader:
+            os.close(write_fd)
+            with self.assertRaisesRegex(RuntimeError, "closed stdout while waiting for thread/start response"):
+                smoke._receive_until(reader, smoke.thread_start_response, "thread/start response")
 
 
 if __name__ == "__main__":

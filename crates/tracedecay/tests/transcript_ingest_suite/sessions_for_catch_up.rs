@@ -2,7 +2,7 @@ use std::path::Path;
 
 use tempfile::TempDir;
 use tracedecay_sessions::runtime::git_correlation::{
-    CommitRelationFilter, GitRefFilter, SessionsForQuery, SystemGit, normalize_worktree,
+    CommitRelationFilter, GitRefFilter, SessionsForQuery, SystemGit,
 };
 
 use crate::restart_atomicity::{
@@ -121,7 +121,7 @@ async fn sessions_imported_after_the_catch_up_frontier_are_listed_for_their_work
     let project = tmp.path().join("project");
     init_repo(&project);
     let db = open_project_session_db(&project).await.unwrap();
-    let worktree = || GitRefFilter::Worktree(normalize_worktree(&project.to_string_lossy()));
+    let worktree = || GitRefFilter::parse("worktree", &project.to_string_lossy()).unwrap();
 
     write_codex_rollout(&home, &project, "codex-recent", "06-01");
     import_and_converge(&home, &db, &project).await;

@@ -819,6 +819,20 @@ impl SourceFreshnessFenceV1 {
             )
     }
 
+    /// The sealed files of `manifest` whose bytes on disk disprove their
+    /// digests, settled through the same cache as every other content proof.
+    fn disputed_sources(
+        &self,
+        project_root: &Path,
+        manifest: &SourceContentManifestV1,
+        shutting_down: &AtomicBool,
+    ) -> Result<BTreeSet<String>, CodeIndexSchedulerErrorV1> {
+        self.sweep_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .disputed_sources(project_root, manifest, shutting_down)
+    }
+
     /// Sweep the current witness and report what the sweep had to read.
     #[cfg(test)]
     pub(super) fn source_sweep_for_test(
@@ -3938,10 +3952,32 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
             None => (None, BTreeSet::new()),
         };
+        // gix status calls a path unchanged on index stat data alone, which a
+        // same-length rewrite that restores its mtime leaves equal wherever
+        // the change time is no rewrite witness (NTFS) or the entry is
+        // assume-unchanged. A sealed row is reused only while its bytes still
+        // carry its digest; every row they disprove beyond the visible commit
+        // and status deltas is a worktree change stat could not see.
+        let stat_blind_paths = match reusable_active.as_ref() {
+            Some(active) => {
+                let visible = classification.changed_paths();
+                self.freshness_fence
+                    .disputed_sources(
+                        &self.project_root,
+                        &SourceContentManifestV1::for_snapshot(active.snapshot()),
+                        &self.shutting_down,
+                    )?
+                    .into_iter()
+                    .filter(|path| !tree_delta.contains(path) && !visible.contains(path))
+                    .collect()
+            }
+            None => BTreeSet::new(),
+        };
+        let has_changes = classification.has_changes() || !stat_blind_paths.is_empty();
         if reusable_active.is_none()
             && allow_active_generation_reuse
             && self.ignored_source_admissions.is_empty()
-            && !classification.has_changes()
+            && !has_changes
             && let (Some(reference), Some(revision), Some(tree)) = (
                 self.identity.head_ref(),
                 self.identity.head_commit(),
@@ -3986,13 +4022,13 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
             }
         }
-        let source_revision = (self.ignored_source_admissions.is_empty()
-            && !classification.has_changes())
-        .then(|| self.identity.head_commit().cloned())
-        .flatten();
+        let source_revision = (self.ignored_source_admissions.is_empty() && !has_changes)
+            .then(|| self.identity.head_commit().cloned())
+            .flatten();
         let mut candidate_paths = classification.candidate_paths();
         let mut changed_paths = classification.changed_paths();
         changed_paths.extend(tree_delta);
+        changed_paths.extend(stat_blind_paths);
         candidate_paths.extend(
             self.ignored_source_admissions
                 .iter()
@@ -4007,7 +4043,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             RepositoryDirtyStateV1::Dirty
         } else if classification.has_conflicted() {
             RepositoryDirtyStateV1::Conflicted
-        } else if !classification.has_changes() {
+        } else if !has_changes {
             RepositoryDirtyStateV1::Clean
         } else {
             RepositoryDirtyStateV1::Dirty

@@ -52,7 +52,7 @@ async fn source_body_serves_while_the_released_catalog_cannot_rewarm() {
     let occurrence = SymbolOccurrenceId::new(node_id).unwrap();
     // An admitted reader pins the catalog, so release it before retaining the engine.
     assert!(matches!(
-        store.release_interactive_catalog(),
+        crate::test_support::release_idle_interactive_catalog(&store).await,
         CodeGraphCatalogReleaseV1::Released { .. }
     ));
     let reader = store

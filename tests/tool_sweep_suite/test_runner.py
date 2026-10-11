@@ -1507,7 +1507,7 @@ class MutationJourneyTests(unittest.TestCase):
 
         def setting():
             return self.response(json.dumps({"payload": {
-                "key": "diagnostics.prewarm.v1",
+                "key": "telemetry.timings.v1",
                 "revision_id": state["revision"],
                 "effective_value": state["value"],
             }}))
@@ -1528,7 +1528,7 @@ class MutationJourneyTests(unittest.TestCase):
             "tracedecay_configuration_set",
             object(),
             {
-                "configuration_scalar_key": "diagnostics.prewarm.v1",
+                "configuration_scalar_key": "telemetry.timings.v1",
                 "configuration_scalar_value": baseline,
                 "project_id": "project.fixture",
             },
@@ -2371,7 +2371,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             ),
             "tracedecay_configuration_list": cls.response(
                 '{"payload":[{"key":"work.topology_policy.v1"},'
-                '{"key":"diagnostics.prewarm.v1"}]}'
+                '{"key":"telemetry.timings.v1"}]}'
             ),
             "tracedecay_configuration_get": cls.response(
                 '{"payload":{"key":"work.topology_policy.v1",'
@@ -2490,10 +2490,10 @@ class FixturePrimingRetryTests(unittest.TestCase):
                     return cls.response(json.dumps(response)), 3
                 if (
                     name == "tracedecay_configuration_get"
-                    and arguments["key"] == "diagnostics.prewarm.v1"
+                    and arguments["key"] == "telemetry.timings.v1"
                 ):
                     return cls.response(
-                        '{"payload":{"key":"diagnostics.prewarm.v1",'
+                        '{"payload":{"key":"telemetry.timings.v1",'
                         '"revision_id":"configuration.fixture.v1",'
                         '"effective_value":{"kind":"boolean","value":false}}}'
                     ), 3

@@ -6758,6 +6758,53 @@ fn clean_filtered_checkout_verifies_current_and_still_disproves_a_rewrite() {
     );
 }
 
+/// gix status never compares an assume-unchanged entry with the file on disk,
+/// the same blindness NTFS stat data has to a same-length rewrite that hands
+/// the file its mtime back. The sealed-digest sweep still reads the new bytes,
+/// so the reconcile it requests must capture them rather than reuse the sealed
+/// row the stat-clean status vouches for.
+#[test]
+fn stat_blind_rewrite_reconciles_the_bytes_the_digest_sweep_disproved() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    git(
+        fixture.path(),
+        &["update-index", "--assume-unchanged", "src/lib.rs"],
+    );
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let baseline = published(scheduler.reconcile_now().expect("initial publish"));
+
+    rewrite_preserving_stat(&fixture, "src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+
+    assert!(
+        !scheduler
+            .exact_source_is_ready()
+            .expect("exact source readiness after rewrite"),
+        "the digest sweep sees the rewrite gix status cannot"
+    );
+    scheduler.policy.staleness_threshold = Duration::ZERO;
+    let outcome = scheduler
+        .ensure_fresh_for_query()
+        .expect("freshness ladder runs")
+        .expect("bytes the sweep disproved must reconcile");
+    assert_ne!(published(outcome).generation_id, baseline.generation_id);
+    let served = served_lexical_texts(&scheduler, "fn alpha");
+    assert!(
+        !served.is_empty() && served.iter().all(|text| text.contains("{ 2 }")),
+        "the served generation carries the rewritten bytes: {served:?}"
+    );
+    assert!(
+        scheduler
+            .exact_source_is_ready()
+            .expect("exact source readiness after reconcile"),
+        "the reconciled generation describes the bytes on disk"
+    );
+}
+
 /// A slow freshness reconcile in one worktree must not serialize another
 /// worktree's query. `latest_complete_fresh` clones the per-worktree handle
 /// under a short map lock and drops the registry guard before reconciling, so

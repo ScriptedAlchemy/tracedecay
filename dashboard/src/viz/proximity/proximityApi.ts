@@ -12,7 +12,7 @@ import {
 } from '../../workspaces/work/workApi.ts';
 
 export const FEEDBACK_PROXIMITY_ROUTE = {
-  operation: 'feedback_proximity',
+  operation: 'operation.application.feedback_proximity',
   path: '/api/feedback/proximity',
   request: FeedbackProximityReadRequestV1Schema,
   response: FeedbackProximityReadResultV1Schema,
@@ -23,11 +23,12 @@ export function useFeedbackProximity(enabled: boolean) {
   return useQuery<WorkResult<FeedbackProximityReadResultV1>>({
     queryKey: ['feedback', 'proximity', scopeKey(scope)],
     enabled,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         FEEDBACK_PROXIMITY_ROUTE,
         { observed_at: Date.now() * 1_000 },
         scopedUrl(scope, FEEDBACK_PROXIMITY_ROUTE.path),
+        signal,
       ),
   });
 }
