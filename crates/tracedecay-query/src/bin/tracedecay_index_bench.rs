@@ -574,6 +574,8 @@ fn run(options: &Options) -> Result<String, String> {
         seal_wall,
         drain_wall,
         ingest_wall,
+        ingest_append_wall: artifact.append_wall,
+        ingest_finalize_wall: artifact.finalize_wall,
         total_wall,
         peak_rss_bytes,
     }))
@@ -693,6 +695,8 @@ struct ArtifactIngestResult {
     committed_pages: u64,
     committed_chunks: u64,
     receipt: VerifiedCodeLexicalArtifactV1,
+    append_wall: Duration,
+    finalize_wall: Duration,
 }
 
 fn ingest_artifact(
@@ -712,6 +716,7 @@ fn ingest_artifact(
     // committed fixture; a real-repository corpus offers pages whose prepared
     // charge exceeds the batch budget, and the builder correctly refuses them.
     let mut offered = 0usize;
+    let append_started = Instant::now();
     while offered < pages.len() {
         let window = &pages[offered..pages.len().min(offered + TEXT_ARTIFACT_BASE_BATCH_PAGES_V1)];
         let prepared = builder
@@ -722,6 +727,8 @@ fn ingest_artifact(
             .map_err(|error| format!("append lexical artifact batch: {error}"))?;
         offered += prepared.accepted_prefix().get();
     }
+    let append_wall = append_started.elapsed();
+    let finalize_started = Instant::now();
     let receipt = loop {
         match builder
             .advance_finalization(source_receipt, FINALIZATION_WORK_BUDGET, control)
@@ -735,6 +742,8 @@ fn ingest_artifact(
         committed_pages: progress.next_page_ordinal,
         committed_chunks: progress.completed_chunks,
         receipt,
+        append_wall,
+        finalize_wall: finalize_started.elapsed(),
     })
 }
 
@@ -1064,6 +1073,8 @@ struct SummaryFields<'a> {
     seal_wall: Duration,
     drain_wall: Duration,
     ingest_wall: Duration,
+    ingest_append_wall: Duration,
+    ingest_finalize_wall: Duration,
     total_wall: Duration,
     peak_rss_bytes: Option<u64>,
 }
@@ -1115,6 +1126,8 @@ fn summary(fields: SummaryFields<'_>) -> String {
             "seal_encode": millis(fields.seal_wall),
             "sealed_page_drain": millis(fields.drain_wall),
             "artifact_ingest": millis(fields.ingest_wall),
+            "artifact_append": millis(fields.ingest_append_wall),
+            "artifact_finalize": millis(fields.ingest_finalize_wall),
             "total": millis(fields.total_wall),
         },
     });

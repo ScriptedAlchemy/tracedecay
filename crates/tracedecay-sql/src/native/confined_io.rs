@@ -14,9 +14,9 @@ use std::{
 };
 
 use turso_core::{
-    IO, LimboError, OpenFlags,
+    Buffer, Completion, IO, LimboError, OpenFlags,
     io::{
-        Clock, FileId,
+        Clock, FileId, FileSyncType,
         clock::{MonotonicInstant, WallClockInstant},
     },
 };
@@ -208,7 +208,7 @@ impl IO for ConfinedIo {
             held.push(wal);
         } else if self.is_temp(path) {
             drop(held);
-            return self.delegate.open_file(path, flags, direct);
+            return self.delegate.open_file(path, flags, direct).map(profiled);
         } else {
             return Err(refused(path));
         }
@@ -228,7 +228,7 @@ impl IO for ConfinedIo {
         if path == self.main {
             self.verify().map_err(limbo)?;
         }
-        Ok(opened)
+        Ok(profiled(opened))
     }
 
     fn remove_file(&self, path: &str) -> turso_core::Result<()> {
@@ -303,6 +303,55 @@ fn descriptor_path(file: &File) -> String {
     return format!("/proc/self/fd/{}", file.as_raw_fd());
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     return format!("/dev/fd/{}", file.as_raw_fd());
+}
+
+fn profiled(file: Arc<dyn turso_core::File>) -> Arc<dyn turso_core::File> {
+    if super::profile::enabled() {
+        Arc::new(ProfiledFile { inner: file })
+    } else {
+        file
+    }
+}
+
+struct ProfiledFile {
+    inner: Arc<dyn turso_core::File>,
+}
+
+impl turso_core::File for ProfiledFile {
+    fn lock_file(&self, exclusive: bool) -> turso_core::Result<()> {
+        self.inner.lock_file(exclusive)
+    }
+    fn unlock_file(&self) -> turso_core::Result<()> {
+        self.inner.unlock_file()
+    }
+    fn pread(&self, pos: u64, c: Completion) -> turso_core::Result<Completion> {
+        self.inner.pread(pos, c)
+    }
+    fn pwrite(
+        &self,
+        pos: u64,
+        buffer: Arc<Buffer>,
+        c: Completion,
+    ) -> turso_core::Result<Completion> {
+        self.inner.pwrite(pos, buffer, c)
+    }
+    fn pwritev(
+        &self,
+        pos: u64,
+        buffers: Vec<Arc<Buffer>>,
+        c: Completion,
+    ) -> turso_core::Result<Completion> {
+        self.inner.pwritev(pos, buffers, c)
+    }
+    fn sync(&self, c: Completion, sync_type: FileSyncType) -> turso_core::Result<Completion> {
+        super::profile::sync(|| self.inner.sync(c, sync_type))
+    }
+    fn size(&self) -> turso_core::Result<u64> {
+        self.inner.size()
+    }
+    fn truncate(&self, len: u64, c: Completion) -> turso_core::Result<Completion> {
+        self.inner.truncate(len, c)
+    }
 }
 
 /// The identity of an open descriptor, as [`path_identity`] reports it.

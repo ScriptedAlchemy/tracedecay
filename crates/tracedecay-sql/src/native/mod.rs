@@ -14,6 +14,7 @@ pub mod crash_io;
 pub(crate) mod driver;
 mod error;
 mod policy;
+mod profile;
 mod value;
 
 pub use connection::{

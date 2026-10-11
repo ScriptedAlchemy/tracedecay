@@ -179,7 +179,7 @@ impl GuardSlot {
         };
         guards.iter().try_for_each(verify)?;
         match &self.confined {
-            Some(io) if verify_identity => io.verify(),
+            Some(io) if verify_identity => super::profile::identity(|| io.verify()),
             _ => Ok(()),
         }
     }
@@ -197,23 +197,25 @@ impl GuardSlot {
     }
 
     fn progress(&self) -> bool {
-        let over_budget = {
-            let mut state = self.state();
-            state.ticks += 1;
-            !state.suspended && state.tick_budget.is_some_and(|budget| state.ticks > budget)
-        };
-        let verdict = if over_budget {
-            Err(Error::OperationLimitExceeded)
-        } else {
-            self.check()
-        };
-        match verdict {
-            Ok(()) => false,
-            Err(error) => {
-                self.state().tripped = Some(error);
-                true
+        super::profile::progress(|| {
+            let over_budget = {
+                let mut state = self.state();
+                state.ticks += 1;
+                !state.suspended && state.tick_budget.is_some_and(|budget| state.ticks > budget)
+            };
+            let verdict = if over_budget {
+                Err(Error::OperationLimitExceeded)
+            } else {
+                self.check()
+            };
+            match verdict {
+                Ok(()) => false,
+                Err(error) => {
+                    self.state().tripped = Some(error);
+                    true
+                }
             }
-        }
+        })
     }
 
     fn take_tripped(&self) -> Option<Error> {
@@ -256,6 +258,7 @@ struct Engine {
 
 impl Drop for Shared {
     fn drop(&mut self) {
+        super::profile::dump();
         // An unregistered instance is dropped by its opener, which already
         // holds the registry.
         let Some(&identity) = self.identity.get() else {
@@ -430,6 +433,7 @@ impl Database {
             confined: engine.confined.clone(),
         });
         let progress = Arc::clone(&guard);
+        super::profile::install();
         inner.set_progress_handler(
             PROGRESS_INTERVAL_OPS.unsigned_abs().into(),
             Some(Box::new(move || progress.progress())),
@@ -918,15 +922,17 @@ impl Connection {
     /// foreign keys are checked before COMMIT writes anything, so that
     /// transaction is known not to be durable.
     pub(crate) fn commit_transaction(&self) -> std::result::Result<(), Settlement> {
-        self.execute_suspended("COMMIT")
-            .map_err(|settlement| match settlement {
-                Settlement::Unknown(
-                    error @ Error::Engine(
-                        LimboError::Constraint(_) | LimboError::ForeignKeyConstraint(_),
-                    ),
-                ) => Settlement::Refused(error),
-                settlement => settlement,
-            })
+        super::profile::commit(|| {
+            self.execute_suspended("COMMIT")
+                .map_err(|settlement| match settlement {
+                    Settlement::Unknown(
+                        error @ Error::Engine(
+                            LimboError::Constraint(_) | LimboError::ForeignKeyConstraint(_),
+                        ),
+                    ) => Settlement::Refused(error),
+                    settlement => settlement,
+                })
+        })
     }
 
     /// Rollback ignores authority, cancellation and file identity: revocation
