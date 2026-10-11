@@ -10,7 +10,7 @@ use tracedecay_store::{
 };
 
 use crate::{
-    RuntimeWriteAuthority, RuntimeWriteAuthorityStage, WriterActorError,
+    RuntimeWriteAuthority, RuntimeWriteAuthorityStage,
     admission::{Permit, QueueItem},
     checkpoint::{
         CheckpointBlockers, CheckpointError, CheckpointResult, MaintenanceCheckpointMode,

@@ -47,7 +47,7 @@ use crate::{
 };
 
 use super::{
-    WriterActorError, WriterStartError, WriterState,
+    WriterStartError, WriterState,
     request::{
         AcceptedRequest, CheckpointCommand, CheckpointCommandKind, ExecutionBatch, SharedReply,
     },
@@ -604,7 +604,7 @@ impl Worker {
                     let lock_work = LockWorkScope::enter();
                     let reply = {
                         let _span = tracing::trace_span!("rusqlite.writer.exact_sql").entered();
-                        { run_writer_command(connection, command, &self.shutdown_requested) }
+                        run_writer_command(connection, command, &self.shutdown_requested)
                     };
                     self.telemetry.exact_sql_command(
                         1,
@@ -1084,7 +1084,7 @@ mod auxiliary_scheduling_tests {
     use std::{
         collections::{HashMap, VecDeque},
         sync::{
-            Arc, Mutex,
+            Arc,
             atomic::{AtomicBool, Ordering},
         },
         time::{Duration, Instant},
@@ -1100,7 +1100,6 @@ mod auxiliary_scheduling_tests {
     };
 
     use crate::{
-        RuntimeWriteAuthority, RuntimeWriteAuthorityError, RuntimeWriteAuthorityStage,
         admission::{Admission, FairQueue, QueueItem},
         telemetry::WriterTelemetry,
         test_support::{metadata, request as test_request},
