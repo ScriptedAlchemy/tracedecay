@@ -1033,6 +1033,7 @@ pub(crate) mod test_support {
                 .collect()
         }
 
+        #[cfg(unix)]
         pub(crate) fn pause_next_session_backfill_page(
             &self,
             entered: Arc<tokio::sync::Barrier>,

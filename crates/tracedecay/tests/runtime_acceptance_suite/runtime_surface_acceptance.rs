@@ -1786,11 +1786,11 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
         String::from_utf8(source_body_markdown.stdout).expect("CLI source_body Markdown is UTF-8");
     assert!(
         source_body_markdown
-            .starts_with("## source\\_body\n\n### Payload\n\n    src/auth/login.rs:"),
+            .starts_with("## source\\_body\n\n### Payload\n\n```text\nsrc/auth/login.rs:"),
         "source payload must be the first rendered field: {source_body_markdown}"
     );
     assert!(
-        source_body_markdown.contains("        Ok(create_session(username))"),
+        source_body_markdown.contains("\n    Ok(create_session(username))\n"),
         "source payload must contain the retrieved body: {source_body_markdown}"
     );
 }

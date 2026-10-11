@@ -910,8 +910,10 @@ pub(in super::super) fn decode_path(
         return Err(BoundedBackfillInterruption::SourceUnavailable);
     }
     let wide = encoded
-        .chunks_exact(2)
-        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|bytes| u16::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     Ok(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
 }

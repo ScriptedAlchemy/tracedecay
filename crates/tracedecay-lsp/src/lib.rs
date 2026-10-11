@@ -18,7 +18,7 @@
 
 //! Store-free LSP transport and session-protocol contracts.
 //!
-//! This crate owns the stdio framing bridge plus the LSP 3.17 protocol,
+//! This crate owns strict LSP stdio framing plus the LSP 3.17 protocol,
 //! session lifecycle, capability negotiation, overlay, diagnostic-merge, and
 //! analyzer-broker contracts that need no database, socket, analyzer process,
 //! or filesystem authority.
@@ -32,12 +32,12 @@
 pub mod analyzer;
 pub mod compile_diagnostics;
 
-mod bridge;
 mod capabilities;
 mod catalog;
 mod context;
 mod diagnostics;
 mod dispatch;
+mod framing;
 mod gateway;
 mod native_integration;
 mod overlay;
@@ -49,12 +49,6 @@ mod workspace;
 mod workspace_diagnostics;
 
 pub use analyzer::broker::DiagnosticSeverity;
-pub use bridge::{
-    AsyncContentLengthError, BridgeDirection, BridgePumpOutcome, ContentLengthCodec,
-    ContentLengthCodecError, ContentLengthStdioError, ContentLengthStdioTransport,
-    DaemonLspSessionTransport, MAX_LSP_HEADER_BYTES, StdioFrameTransport, StdioLspBridge,
-    StdioLspBridgeError, read_content_length_frame_until,
-};
 pub use capabilities::{
     CapabilityAvailability, CapabilityParseError, CapabilityUnavailable,
     CapabilityUnavailableReason, ClientCapabilities, EffectiveCapabilities, GatewayCapabilities,
@@ -92,6 +86,10 @@ pub use diagnostics::{
     TRACEDECAY_DIAGNOSTIC_DATA_REVISION, byte_offset_to_utf16_position, merge_diagnostics,
     utf16_position_to_byte_offset,
 };
+pub use framing::{
+    AsyncContentLengthError, ContentLengthCodec, ContentLengthCodecError, MAX_LSP_HEADER_BYTES,
+    read_content_length_frame_until,
+};
 pub use gateway::{
     AdmittedRoot, AnalyzerCancellationAdapter, CallHierarchyItem, DaemonLspGateway,
     DaemonLspProviderBundle, DaemonLspProviderFactory, DaemonLspRuntimeSession, DiagnosticTrigger,
@@ -121,8 +119,7 @@ pub use overlay::{
 };
 pub use protocol::{
     ClientFrameAdmission, DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspProtocolSession,
-    DaemonLspProtocolTransport, MAX_QUEUED_OUTBOUND_BYTES, MAX_QUEUED_OUTBOUND_MESSAGES,
-    ProtocolDispatch,
+    MAX_QUEUED_OUTBOUND_BYTES, MAX_QUEUED_OUTBOUND_MESSAGES, ProtocolDispatch,
 };
 pub use provider::{
     AnalyzerCancellationPort, AnalyzerEvent, AnalyzerSemanticAdapter, AnalyzerState,

@@ -59,20 +59,20 @@ pub async fn should_proxy_serve_to_daemon(
     .await
 }
 
-#[cfg(not(unix))]
-pub(crate) fn proxy_required_by_platform(transport_supported: bool, endpoint_exists: bool) -> bool {
-    !transport_supported || endpoint_exists
-}
-
-/// Non-Unix clients always use the authenticated loopback broker. There is no
-/// in-process `SQLite` fallback.
+/// Non-Unix clients reach the daemon only through the loopback endpoint its
+/// authority record publishes, so a profile without that record has no daemon
+/// to proxy to. A present but unreadable record still proxies, so the request
+/// reports the record's own failure.
 #[cfg(not(unix))]
 #[allow(clippy::unused_async)] // Preserve parity with the Unix async routing probe.
 pub async fn should_proxy_serve_to_daemon(
-    _profile: &tracedecay_runtime_core::config::ProfileRoot,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
     socket_path: &Path,
 ) -> bool {
-    proxy_required_by_platform(false, socket_path.exists())
+    !matches!(
+        tracedecay_daemon_identity::client_connection(profile.data_dir(), socket_path),
+        Err(error) if super::core_client::authority_absent(&error)
+    )
 }
 
 /// `full_tool_list` serves the daemon's catalog unchanged; otherwise tools the

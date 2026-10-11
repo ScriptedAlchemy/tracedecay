@@ -1255,11 +1255,11 @@ struct CodexRetainedScan {
 enum CodexScanPhase {
     Directories {
         queued: VecDeque<(PathBuf, u8, u8, u64)>,
-        current: Option<(PathBuf, u8, u8, std::fs::ReadDir)>,
+        current: Option<Box<(PathBuf, u8, u8, std::fs::ReadDir)>>,
     },
     Files {
         next_directory: usize,
-        current: Option<(usize, std::fs::ReadDir)>,
+        current: Option<Box<(usize, std::fs::ReadDir)>>,
         deferred: Option<Box<(PathBuf, std::fs::Metadata)>>,
         resume_directories: Option<CodexDirectoryResume>,
     },
@@ -1267,7 +1267,7 @@ enum CodexScanPhase {
 
 struct CodexDirectoryResume {
     queued: VecDeque<(PathBuf, u8, u8, u64)>,
-    current: Option<(PathBuf, u8, u8, std::fs::ReadDir)>,
+    current: Option<Box<(PathBuf, u8, u8, std::fs::ReadDir)>>,
 }
 
 #[derive(Clone, Copy)]
@@ -2386,10 +2386,10 @@ fn retained_scan_step(
                             source,
                         }
                     })?;
-                    *current = Some((path, depth, root_order, listed));
+                    *current = Some(Box::new((path, depth, root_order, listed)));
                     continue;
                 }
-                let (dir, depth, root_order, listed) = current.as_mut().ok_or(
+                let (dir, depth, root_order, listed) = current.as_deref_mut().ok_or(
                     TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                         detail: "retained Codex directory iterator disappeared",
                     },
@@ -2526,9 +2526,9 @@ fn retained_scan_step(
                                     source,
                                 }
                             })?;
-                            *current = Some((*next_directory - 1, listed));
+                            *current = Some(Box::new((*next_directory - 1, listed)));
                         }
-                        let (directory_index, listed) = current.as_mut().ok_or(
+                        let (directory_index, listed) = current.as_deref_mut().ok_or(
                             TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                                 detail: "retained Codex file iterator disappeared",
                             },

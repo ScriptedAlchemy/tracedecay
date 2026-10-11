@@ -516,7 +516,7 @@ async fn sessions_for_names_the_sessions_that_touched_the_git_ref() {
         .await,
         answer(
             "worktree",
-            &normalize_worktree(&feature_worktree),
+            &stored_worktree(&feature_worktree),
             "produced",
             json!([correlation_hit(
                 "s-feature",
@@ -693,12 +693,24 @@ const EMPTY_SPAN_INDEX_MESSAGE: &str = "correlation index empty (no git spans re
 const EMPTY_COMMIT_INDEX_MESSAGE: &str = "no commit evidence indexed yet. Run `tracedecay sync` to ingest direct host/tool evidence; `tracedecay sessions git-sync` adds weaker historical overlap evidence";
 const NO_MATCH_MESSAGE: &str = "no sessions matched this git ref";
 
+/// Mirrors `canonical_worktree_key`: the spelling the store keys on — the
+/// canonical path for one that exists (a tempdir reported as an 8.3 short
+/// name resolves to its long form), else the lexical form.
+fn stored_worktree(worktree: &str) -> String {
+    match std::fs::canonicalize(Path::new(&normalize_worktree(worktree))) {
+        Ok(canonical) => {
+            normalize_worktree(canonical.to_str().expect("fixture paths are valid UTF-8"))
+        }
+        Err(_) => normalize_worktree(worktree),
+    }
+}
+
 fn correlation_hit(session_id: &str, branch: &str, worktree: &str, ts: i64) -> Value {
     json!({
         "provider": "claude",
         "session_id": session_id,
         "branch": branch,
-        "worktree": normalize_worktree(worktree),
+        "worktree": stored_worktree(worktree),
         "first_ts": ts,
         "last_ts": ts,
         "event_count": 1,

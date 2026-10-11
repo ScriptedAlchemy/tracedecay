@@ -1,13 +1,13 @@
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
-use tracedecay_daemon_protocol::FramePoll;
 use tracedecay_lsp::{
-    AdmittedRoot, ClientCapabilities, DaemonLspGateway, DaemonLspProtocolSession,
-    DaemonLspSessionTransport, DiagnosticSeverity, DiagnosticSnapshotOutcome,
+    AdmittedRoot, ClientCapabilities, ClientFrameAdmission, DaemonLspGateway,
+    DaemonLspProtocolSession, DiagnosticSeverity, DiagnosticSnapshotOutcome,
     DiagnosticSnapshotPort, FeedbackCyclePort, FeedbackCycleRequest, FeedbackCycleResponse,
     GatewayCapabilities, GatewayDiagnostic, GenerationDiagnostics, LspPosition, LspRange,
-    MAX_PUBLICATION_BYTES, SemanticProviderPort, UpstreamCapabilities, negotiate_capabilities,
+    MAX_PUBLICATION_BYTES, SemanticProviderPort, SessionLifecycle, UpstreamCapabilities,
+    negotiate_capabilities,
 };
 
 const ROOT_URI: &str = "file:///stress";
@@ -231,6 +231,9 @@ fn disconnect_and_expiry_drop_retained_publications_without_flooding_client() {
 
     assert!(session.poll_outbound().is_none());
     assert!(session.drain_outbound().is_empty());
-    let mut transport = tracedecay_lsp::DaemonLspProtocolTransport::new(session);
-    assert_eq!(transport.poll_daemon_frame(), Ok(FramePoll::Closed));
+    assert_eq!(session.lifecycle(), SessionLifecycle::Expired);
+    assert_eq!(
+        session.try_handle_client_payload(br#"{"jsonrpc":"2.0","method":"initialized"}"#, 4),
+        ClientFrameAdmission::Closed
+    );
 }

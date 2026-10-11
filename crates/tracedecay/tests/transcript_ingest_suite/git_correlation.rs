@@ -1,7 +1,7 @@
 use tempfile::TempDir;
 use tracedecay_sessions::SessionProvider;
 use tracedecay_sessions::runtime::git_correlation::{
-    CommitRelationFilter, GitRefFilter, SessionsForQuery, SystemGit, normalize_worktree,
+    CommitRelationFilter, GitRefFilter, SessionsForQuery, SystemGit,
 };
 
 use crate::restart_atomicity::{ingest_global_sources_for_provider, open_project_session_db};
@@ -57,7 +57,7 @@ async fn sessions_for_lists_a_claude_session_by_its_cwd() {
         .unwrap();
 
     for git_ref in [
-        GitRefFilter::Worktree(normalize_worktree(&project.to_string_lossy())),
+        GitRefFilter::parse("worktree", &project.to_string_lossy()).unwrap(),
         GitRefFilter::Branch("main".to_owned()),
     ] {
         let hits = db
