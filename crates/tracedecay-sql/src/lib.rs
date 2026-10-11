@@ -6,7 +6,6 @@ mod control;
 pub mod native;
 #[cfg(not(td_engine = "native"))]
 mod sqlite;
-pub mod stmt_profile;
 
 #[cfg(td_engine = "native")]
 use native::driver as engine;

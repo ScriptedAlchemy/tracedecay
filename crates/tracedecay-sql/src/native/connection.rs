@@ -747,20 +747,7 @@ impl Connection {
 
     /// Steps until the next row (`true`) or completion (`false`).
     pub(crate) fn step(&self, prepared: &mut Prepared) -> Result<bool> {
-        let profiled = crate::stmt_profile::enabled().then(Instant::now);
-        let driven = self.drive(&mut prepared.statement);
-        if let Some(started) = profiled {
-            crate::stmt_profile::time(&prepared.sql, started.elapsed());
-            if matches!(driven, Ok(false)) {
-                crate::stmt_profile::finish(
-                    &prepared.sql,
-                    prepared
-                        .statement
-                        .stmt_status(turso_core::StatementStatusCounter::VmStep),
-                );
-            }
-        }
-        let row = match driven {
+        let row = match self.drive(&mut prepared.statement) {
             Ok(row) => row,
             Err(error) => {
                 return Err(self.end_interrupted_write(
@@ -857,17 +844,11 @@ impl Connection {
             let write = policy::is_write(&command);
             let mut statement = self.compile(command, input)?;
             self.guard.start(true)?;
-            let started = Instant::now();
             while self
                 .drive(&mut statement)
                 .map_err(|error| self.end_interrupted_write(&mut statement, write, error))?
             {
             }
-            crate::stmt_profile::record(
-                input,
-                started.elapsed(),
-                statement.stmt_status(turso_core::StatementStatusCounter::VmStep),
-            );
             if ddl {
                 self.clear_cache();
             }
@@ -880,13 +861,7 @@ impl Connection {
     pub(crate) fn execute_unchecked(&self, sql: &str) -> Result<()> {
         let mut statement = self.compile(parse_single(sql)?, sql)?;
         self.guard.start(true)?;
-        let started = Instant::now();
         while self.drive(&mut statement)? {}
-        crate::stmt_profile::record(
-            sql,
-            started.elapsed(),
-            statement.stmt_status(turso_core::StatementStatusCounter::VmStep),
-        );
         Ok(())
     }
 
@@ -897,7 +872,6 @@ impl Connection {
             .compile(parse_single(sql).map_err(Settlement::Refused)?, sql)
             .map_err(Settlement::Refused)?;
         let previous = self.guard.set_suspended(true);
-        let started = Instant::now();
         let result = loop {
             match self.drive(&mut statement) {
                 Ok(true) => {}
@@ -906,7 +880,6 @@ impl Connection {
             }
         };
         self.guard.set_suspended(previous);
-        crate::stmt_profile::record(sql, started.elapsed(), 0);
         result
     }
 

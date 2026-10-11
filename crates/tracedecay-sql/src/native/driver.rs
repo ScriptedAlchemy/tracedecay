@@ -310,6 +310,22 @@ pub mod types {
         }
     }
 
+    impl<'a> From<&'a turso_core::Value> for ValueRef<'a> {
+        fn from(value: &'a turso_core::Value) -> Self {
+            match value {
+                turso_core::Value::Null => Self::Null,
+                turso_core::Value::Numeric(turso_core::Numeric::Integer(value)) => {
+                    Self::Integer(*value)
+                }
+                turso_core::Value::Numeric(turso_core::Numeric::Float(value)) => {
+                    Self::Real(f64::from(*value))
+                }
+                turso_core::Value::Text(value) => Self::Text(value.as_str().as_bytes()),
+                turso_core::Value::Blob(value) => Self::Blob(value),
+            }
+        }
+    }
+
     impl Value {
         pub fn data_type(&self) -> Type {
             ValueRef::from(self).data_type()
@@ -1411,7 +1427,7 @@ impl<'s> Rows<'s> {
                 })?;
                 self.current = Some(Row {
                     columns: Arc::clone(&self.columns),
-                    values: row.get_values().map(Value::from_native).collect(),
+                    current: std::ptr::from_ref(row),
                     _statement: PhantomData,
                 });
                 Ok(self.current.as_ref())
@@ -1453,9 +1469,12 @@ where
     }
 }
 
+/// The statement's current result row, read in place rather than copied.
 pub struct Row<'s> {
     columns: Arc<[String]>,
-    values: Vec<Value>,
+    /// Valid until the statement steps again, which needs the `&mut Rows`
+    /// that every `&Row` borrows.
+    current: *const turso_core::Row,
     _statement: PhantomData<&'s ()>,
 }
 
@@ -1483,14 +1502,23 @@ impl RowIndex for &str {
 }
 
 impl Row<'_> {
+    fn value(&self, index: usize) -> Result<ValueRef<'_>> {
+        // SAFETY: see `current`; `self` is borrowed from the `Rows` whose
+        // statement owns the row.
+        let row = unsafe { &*self.current };
+        if index >= row.len() {
+            return Err(Error::InvalidColumnIndex(index));
+        }
+        Ok(ValueRef::from(row.get_value(index)))
+    }
+
     pub fn get_ref<I: RowIndex>(&self, index: I) -> Result<ValueRef<'_>> {
-        let index = index.index(&self.columns)?;
-        Ok(ValueRef::from(&self.values[index]))
+        self.value(index.index(&self.columns)?)
     }
 
     pub fn get<I: RowIndex, T: FromSql>(&self, index: I) -> Result<T> {
         let index = index.index(&self.columns)?;
-        let value = ValueRef::from(&self.values[index]);
+        let value = self.value(index)?;
         T::column_result(value).map_err(|error| match error {
             FromSqlError::InvalidType => {
                 Error::InvalidColumnType(index, self.columns[index].clone(), value.data_type())

@@ -136,9 +136,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let outcome = run(&options);
-    tracedecay_sql::stmt_profile::dump();
-    match outcome {
+    match run(&options) {
         Ok(summary) => {
             println!("{summary}");
             ExitCode::SUCCESS
@@ -389,7 +387,6 @@ fn run(options: &Options) -> Result<String, String> {
     )
     .map_err(|error| format!("reopen lexical artifact: {error}"))?;
     let open_wall = open_started.elapsed();
-    tracedecay_sql::stmt_profile::reset();
 
     let authority = CentralExactAdmissionAuthorityV1::new(
         ExactAdmissionRuleRevision::new(QUERY_EXACT_RULE_REVISION_V1)
