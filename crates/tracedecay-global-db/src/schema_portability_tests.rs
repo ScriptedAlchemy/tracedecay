@@ -105,8 +105,8 @@ fn portability_violations(connection: &Connection) -> Vec<String> {
 }
 
 /// `SQLite` reports a STRICT table's key columns as NOT NULL whether or not the
-/// DDL says so; the native engine enforces only the declared constraint. The
-/// copy drops STRICT so `pragma_table_info` shows what the DDL declares.
+/// DDL says so. The key must not depend on an engine's STRICT rule, so the copy
+/// drops STRICT and `pragma_table_info` shows only what the DDL declares.
 fn relaxed_copy(connection: &Connection, table: &str) -> Connection {
     let sql: String = connection
         .query_row(

@@ -744,9 +744,8 @@ mod tests {
         transaction.rollback().await.unwrap();
     }
 
-    /// SQLite refuses a NULL key in a STRICT table implicitly; Turso stores
-    /// it unless the column says `NOT NULL`. Catches the writer-fence key
-    /// losing that declaration and admitting a NULL authority.
+    /// Catches the native install admitting a writer fence with no authority,
+    /// which no lookup by authority could ever find or replace.
     #[tokio::test]
     async fn native_writer_fences_refuse_a_null_authority_key() {
         let directory = tempfile::TempDir::new().unwrap();
