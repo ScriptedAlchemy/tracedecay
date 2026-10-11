@@ -16,7 +16,7 @@ CREATE TABLE remote_node_identity (
 ) STRICT;
 
 CREATE TABLE remote_authorities (
-    brain_id TEXT PRIMARY KEY,
+    brain_id TEXT NOT NULL PRIMARY KEY,
     runtime_binding_json TEXT NOT NULL,
     authority_state_json TEXT NOT NULL,
     writer_json TEXT NOT NULL,
@@ -24,7 +24,7 @@ CREATE TABLE remote_authorities (
 ) STRICT;
 
 CREATE TABLE remote_enrollment_grants (
-    grant_id TEXT PRIMARY KEY,
+    grant_id TEXT NOT NULL PRIMARY KEY,
     credential_fingerprint TEXT NOT NULL UNIQUE,
     grant_json TEXT NOT NULL,
     admission_json TEXT NOT NULL,
@@ -32,7 +32,7 @@ CREATE TABLE remote_enrollment_grants (
 ) STRICT;
 
 CREATE TABLE remote_enrollments (
-    enrollment_id TEXT PRIMARY KEY,
+    enrollment_id TEXT NOT NULL PRIMARY KEY,
     brain_id TEXT NOT NULL,
     node_id TEXT NOT NULL,
     revision INTEGER NOT NULL CHECK (revision > 0),
@@ -44,26 +44,26 @@ CREATE TABLE remote_enrollments (
 ) STRICT;
 
 CREATE TABLE remote_replay_policies (
-    scope_digest TEXT PRIMARY KEY,
+    scope_digest TEXT NOT NULL PRIMARY KEY,
     policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
     evidence_json TEXT NOT NULL CHECK (json_valid(evidence_json))
 ) STRICT;
 
 CREATE TABLE remote_query_policies (
-    scope_digest TEXT PRIMARY KEY,
+    scope_digest TEXT NOT NULL PRIMARY KEY,
     policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
     record_json TEXT NOT NULL CHECK (json_valid(record_json))
 ) STRICT;
 
 CREATE TABLE remote_recovery_authorities (
-    authority_key TEXT PRIMARY KEY,
+    authority_key TEXT NOT NULL PRIMARY KEY,
     authority_json TEXT NOT NULL CHECK (json_valid(authority_json)),
     frontier_sequence INTEGER NOT NULL CHECK (frontier_sequence >= 0),
     updated_at INTEGER NOT NULL
 ) STRICT;
 
 CREATE TABLE remote_recovery_operations (
-    operation_id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL PRIMARY KEY,
     operation_kind TEXT NOT NULL CHECK (
         operation_kind = 'promotion'
     ),
@@ -99,7 +99,7 @@ CREATE TABLE remote_replay_recovery_lease (
 ) STRICT;
 
 CREATE TABLE remote_spool_frames (
-    event_id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL PRIMARY KEY,
     enrollment_id TEXT NOT NULL,
     sequence INTEGER NOT NULL CHECK (sequence > 0),
     previous_event_id TEXT,

@@ -130,13 +130,13 @@ const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );
         CREATE TABLE IF NOT EXISTS remote_writer_fences (
-            authority_key TEXT PRIMARY KEY,
+            authority_key TEXT NOT NULL PRIMARY KEY,
             writer_fence_json TEXT NOT NULL CHECK(json_valid(writer_fence_json)),
             frontier_sequence INTEGER NOT NULL CHECK(frontier_sequence >= 0),
             updated_at INTEGER NOT NULL
         ) STRICT;
         CREATE TABLE IF NOT EXISTS remote_observation_events (
-            event_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL PRIMARY KEY,
             frame_digest TEXT NOT NULL,
             enrollment_id TEXT NOT NULL,
             enrollment_revision INTEGER NOT NULL CHECK(enrollment_revision > 0),
@@ -742,5 +742,39 @@ mod tests {
             .unwrap()
         );
         transaction.rollback().await.unwrap();
+    }
+
+    /// SQLite refuses a NULL key in a STRICT table implicitly; Turso stores
+    /// it unless the column says `NOT NULL`. Catches the writer-fence key
+    /// losing that declaration and admitting a NULL authority.
+    #[tokio::test]
+    async fn native_writer_fences_refuse_a_null_authority_key() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let connection = tracedecay_runtime_core::db::engine::NativeTestConnection::open(
+            &directory.path().join("sessions.db"),
+        )
+        .unwrap();
+        assert_eq!(ensure_observation_schema(&*connection).await.unwrap(), None);
+        let insert = "INSERT INTO remote_writer_fences
+             (authority_key, writer_fence_json, frontier_sequence, updated_at)
+             VALUES (?1, '{}', 0, 1)";
+        connection
+            .execute(insert, params!["authority.fixture"])
+            .await
+            .expect("a keyed fence is accepted");
+        let refused = connection
+            .execute(insert, params![Option::<String>::None])
+            .await
+            .expect_err("a NULL authority_key must be refused");
+        assert!(refused.to_string().contains("NOT NULL"), "{refused}");
+        let mut rows = connection
+            .query(
+                "SELECT count(*) FROM remote_writer_fences WHERE authority_key IS NULL",
+                (),
+            )
+            .await
+            .unwrap();
+        let stored: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(stored, 0);
     }
 }
