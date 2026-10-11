@@ -989,7 +989,9 @@ const SESSION_ACTIVITY_PAGE_AFTER_SQL: &str = "WITH touched AS (
              WHERE m.provider = s.provider AND m.session_id = s.session_id),
             COALESCE(s.rowid, touched.change_sequence), touched.change_sequence
      FROM touched
-     JOIN sessions s
+     -- CROSS JOIN keeps the journal page the outer loop: native Turso
+     -- otherwise reads every session and probes the page for each.
+     CROSS JOIN sessions s
        ON s.provider = touched.provider AND s.session_id = touched.session_id
      ORDER BY touched.change_sequence ASC
      LIMIT ?2";

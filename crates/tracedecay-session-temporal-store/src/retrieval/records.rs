@@ -223,10 +223,14 @@ pub(super) fn build_record_query_with_relations(
              SELECT MIN(source.ordinal), source.session_id, source.generation,
                     source.occurrence_id, MAX(source.group_anchor_id)
              FROM (
+                 -- CROSS JOIN keeps each candidate the outer loop: native
+                 -- Turso otherwise reads every occurrence of the session and
+                 -- matches it against the candidates.
                  SELECT c.ordinal, o.session_id, c.generation, o.occurrence_id,
                         NULL AS group_anchor_id
                  FROM candidate AS c
-                 JOIN session_occurrences AS o
+                 CROSS JOIN session_occurrences AS o
+                 INDEXED BY idx_session_occurrences_anchor_order
                    ON o.retrieval_anchor_id = c.anchor_id
                   {occurrence_condition}
                  WHERE c.derived_kind IS NULL
@@ -239,13 +243,15 @@ pub(super) fn build_record_query_with_relations(
                  SELECT c.ordinal, o.session_id, c.generation, o.occurrence_id,
                         c.anchor_id
                  FROM candidate AS c
-                 JOIN session_derived_evidence AS derived
+                 CROSS JOIN session_derived_evidence AS derived
+                 INDEXED BY idx_session_derived_evidence_anchor
                    ON derived.session_id = c.session_id
                   AND +derived.generation <= c.generation
                   AND derived.retrieval_anchor_id = c.anchor_id
                   AND derived.evidence_kind = c.derived_kind
                   AND derived.evidence_id = c.retriever_record_id
-                 JOIN session_occurrences AS o INDEXED BY sqlite_autoindex_session_occurrences_1
+                 CROSS JOIN session_occurrences AS o
+                 INDEXED BY sqlite_autoindex_session_occurrences_1
                    ON o.session_id = derived.session_id
                   AND o.occurrence_id = derived.first_occurrence_id
                   {occurrence_condition}
@@ -254,19 +260,37 @@ pub(super) fn build_record_query_with_relations(
                  SELECT c.ordinal, o.session_id, c.generation, o.occurrence_id,
                         c.anchor_id
                  FROM candidate AS c
-                 JOIN session_derived_evidence AS derived
+                 CROSS JOIN session_derived_evidence AS derived
+                 INDEXED BY idx_session_derived_evidence_anchor
                    ON derived.session_id = c.session_id
                   AND +derived.generation <= c.generation
                   AND derived.retrieval_anchor_id = c.anchor_id
                   AND derived.evidence_kind = c.derived_kind
                   AND derived.evidence_id = c.retriever_record_id
-                 JOIN session_occurrences AS o INDEXED BY sqlite_autoindex_session_occurrences_1
+                 CROSS JOIN session_occurrences AS o
+                 INDEXED BY sqlite_autoindex_session_occurrences_1
                    ON o.session_id = derived.session_id
                   AND o.occurrence_id = derived.last_occurrence_id
                   {occurrence_condition}
                  WHERE c.derived_kind IS NOT NULL
              ) AS source
              GROUP BY source.session_id, source.generation, source.occurrence_id
+         ),
+         assertion_candidate(ordinal, generation, session_id, assertion_id) AS (
+             -- One key lookup per side: an OR across the subject and object
+             -- columns cannot seek either index, so it read every assertion
+             -- of the session.
+             SELECT c.ordinal, c.generation, a.session_id, a.assertion_id
+             FROM candidate AS c
+             CROSS JOIN session_assertions AS a INDEXED BY idx_session_assertions_subject
+               ON a.subject_anchor_id = c.anchor_id
+              {assertion_condition}
+             UNION
+             SELECT c.ordinal, c.generation, a.session_id, a.assertion_id
+             FROM candidate AS c
+             CROSS JOIN session_assertions AS a INDEXED BY idx_session_assertions_object_order
+               ON a.object_anchor_id = c.anchor_id
+              {assertion_condition}
          ),
          records AS (
              SELECT oc.ordinal, 0 AS kind_rank, o.occurrence_id AS stable_id,
@@ -301,10 +325,11 @@ pub(super) fn build_record_query_with_relations(
                     a.assertion_kind, a.subject_anchor_id, a.object_anchor_id,
                     a.knowledge_at, a.valid_time_json, a.evidence_json,
                     NULL, NULL, NULL, NULL, NULL, a.session_id
-             FROM candidate AS c
-             JOIN session_assertions AS a
-               ON (a.subject_anchor_id = c.anchor_id OR a.object_anchor_id = c.anchor_id)
-              {assertion_condition}
+             FROM assertion_candidate AS c
+             CROSS JOIN session_assertions AS a
+             INDEXED BY sqlite_autoindex_session_assertions_1
+               ON a.session_id = c.session_id
+              AND a.assertion_id = c.assertion_id
              {assertion_generation_join}
              {assertion_join}
              WHERE {assertion_predicate}
