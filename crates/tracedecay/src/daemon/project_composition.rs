@@ -663,6 +663,10 @@ impl ProjectOpenInputs<'_> {
         if served {
             return;
         }
+        super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(
+            &cg.hook_store_layout().data_root,
+        )
+        .await;
         if let Some(project_id) = hook_project_id_for_layout(cg.hook_store_layout()) {
             unregister_registered_context_scout_owner(project_id, graph_db_path);
         }
