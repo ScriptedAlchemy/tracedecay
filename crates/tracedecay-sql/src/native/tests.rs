@@ -470,6 +470,68 @@ fn in_process_opens_share_one_engine_by_file_identity() {
     holder.commit(&guard).unwrap();
 }
 
+/// Catches a process-wide open lock: while one store's open is held inside
+/// format admission, another store must still open, and a second open of the
+/// held store must wait for that open and share its engine.
+#[test]
+fn a_held_open_delays_only_opens_of_its_own_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let held_path = directory.path().join("held.tdb");
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let held = std::thread::spawn({
+        let path = held_path.clone();
+        move || {
+            connection::pause_next_admit_on_this_thread((entered_tx, release_rx));
+            Database::open(&path)
+        }
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the held open reaches format admission");
+    let joiner = std::thread::spawn({
+        let path = held_path.clone();
+        move || Database::open(&path)
+    });
+    let (other_tx, other_rx) = std::sync::mpsc::channel();
+    let other_path = directory.path().join("other.tdb");
+    let other = std::thread::spawn(move || {
+        let _ = other_tx.send(Database::open(&other_path).map(drop));
+    });
+    other_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("another store's open must not wait for the held open")
+        .unwrap();
+    other.join().unwrap();
+    assert!(
+        !joiner.is_finished(),
+        "a second open of the held store must wait for its first open"
+    );
+    release_tx.send(()).unwrap();
+    let first = held.join().unwrap().unwrap();
+    let second = joiner.join().unwrap().unwrap();
+
+    let guard = execution_guard();
+    let mut holder = first.connect(Access::Writer).unwrap();
+    holder.execute("CREATE TABLE t(x)", &[], &guard).unwrap();
+    holder
+        .begin(TransactionBehavior::Immediate, &guard)
+        .unwrap();
+    holder
+        .execute("INSERT INTO t VALUES (1)", &[], &guard)
+        .unwrap();
+    let mut contender = second.connect(Access::Writer).unwrap();
+    contender.set_busy_timeout(Duration::ZERO);
+    assert!(
+        matches!(
+            contender.execute("INSERT INTO t VALUES (2)", &[], &guard),
+            Err(Error::Busy)
+        ),
+        "the waiting open started a second engine instance"
+    );
+    holder.commit(&guard).unwrap();
+}
+
 /// Catches an engine that opens, rewrites or stamps a file that is not a
 /// TraceDecay native store.
 #[test]

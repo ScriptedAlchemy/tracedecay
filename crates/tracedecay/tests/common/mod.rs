@@ -813,7 +813,11 @@ pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
     apply_hermetic_child_env(command, &home);
     command
         .env(USER_DATA_DIR_ENV, home.join(".tracedecay"))
-        .env(GLOBAL_DB_PATH_ENV, home.join(".tracedecay/global.db"))
+        .env(
+            GLOBAL_DB_PATH_ENV,
+            home.join(".tracedecay")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
+        )
         // A child must never inherit a socket that reaches a daemon running
         // under another profile.
         .env(
