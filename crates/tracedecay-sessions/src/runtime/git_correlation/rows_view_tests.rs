@@ -229,7 +229,11 @@ struct SeededStore {
 
 async fn empty_store() -> SeededStore {
     let directory = tempfile::tempdir().unwrap();
-    let connection = TestConnection::open(&directory.path().join("sessions.db"));
+    let connection = TestConnection::open(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+    );
     ensure_git_correlation_receipt_schema_in_transaction(&connection)
         .await
         .unwrap();

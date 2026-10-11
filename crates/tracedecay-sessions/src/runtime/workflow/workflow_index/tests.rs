@@ -6,7 +6,9 @@ fn test_conn() -> (
 ) {
     let directory = tempfile::tempdir().unwrap();
     let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
-        &directory.path().join("sessions.db"),
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
     );
     (directory, connection)
 }
@@ -232,7 +234,9 @@ async fn runs_for_git_scope_filters_by_resolved_parent_sessions() {
 #[tokio::test]
 async fn registered_snapshot_preserves_workflow_query_semantics() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("sessions.db");
+    let path = directory
+        .path()
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     let conn = tracedecay_runtime_core::db::engine::TestConnection::open(&path);
     ensure_workflow_index_schema(&conn).await.unwrap();
 
