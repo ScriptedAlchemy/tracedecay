@@ -642,8 +642,11 @@ mod reset_project_store_tests {
             path.push(suffix);
             PathBuf::from(path)
         };
+        // The native engine leaves its WAL behind on close; SQLite does not.
         let wal_path = member("-wal");
-        std::fs::write(&wal_path, b"wal").unwrap();
+        if !wal_path.exists() {
+            std::fs::write(&wal_path, b"wal").unwrap();
+        }
         // A dead native process's spill directory belongs to the store.
         let spill = member("-tmp");
         std::fs::create_dir_all(spill.join("dead-sort")).unwrap();
