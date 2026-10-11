@@ -135,25 +135,38 @@ pub fn logical_dump(path: &Path, store_dir: &Path) -> String {
         if !is_dumped_table(table, sql, &virtual_tables) {
             continue;
         }
-        dump_table(&connection, table, store_dir, &mut out);
+        // An engine that cannot read a table yields a line that diverges
+        // from the golden instead of aborting, so one run lists every gap.
+        if let Err(error) = dump_table(&connection, table, store_dir, &mut out) {
+            out.push_str(&format!("table {table} unreadable: {error}\n"));
+        }
     }
     out
 }
 
-fn dump_table(connection: &Connection, table: &str, store_dir: &Path, out: &mut String) {
+fn dump_table(
+    connection: &Connection,
+    table: &str,
+    store_dir: &Path,
+    out: &mut String,
+) -> Result<(), String> {
+    let text = |error: tracedecay_sql::Error| error.to_string();
     let mut info = connection
-        .prepare(&format!("PRAGMA table_info({})", quote(table)))
-        .expect("prepare table_info");
-    let mut rows = info.query([]).expect("read table_info");
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(text)?;
+    let mut rows = info.query([]).map_err(text)?;
     let mut columns = Vec::new();
-    while let Some(row) = rows.next().expect("table_info row") {
+    while let Some(row) = rows.next().map_err(text)? {
         columns.push((
-            row.get::<_, String>(1).expect("column name"),
-            row.get::<_, i64>(5).expect("pk ordinal"),
+            row.get::<_, String>(1).map_err(text)?,
+            row.get::<_, i64>(5).map_err(text)?,
         ));
     }
     drop(rows);
     drop(info);
+    if columns.is_empty() {
+        return Err("table_info returned no columns".to_owned());
+    }
     let mut key = columns.iter().filter(|(_, pk)| *pk > 0).collect::<Vec<_>>();
     key.sort_by_key(|(_, pk)| *pk);
     let order = if key.is_empty() {
@@ -186,19 +199,19 @@ fn dump_table(connection: &Connection, table: &str, store_dir: &Path, out: &mut 
         quote(table),
         order.join(", ")
     );
-    let mut statement = connection.prepare(&select).expect("prepare table scan");
-    let mut rows = statement.query([]).expect("scan table");
+    let mut statement = connection.prepare(&select).map_err(text)?;
+    let mut rows = statement.query([]).map_err(text)?;
     let mut rendered = Vec::new();
-    while let Some(row) = rows.next().expect("scan row") {
+    while let Some(row) = rows.next().map_err(text)? {
         let values = (0..names.len())
             .map(|index| {
-                if normalized[index] {
+                Ok(if normalized[index] {
                     Json::String(NORMALIZED.to_owned())
                 } else {
-                    typed(row.get_ref(index).expect("column value"), store_dir)
-                }
+                    typed(row.get_ref(index).map_err(text)?, store_dir)
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, String>>()?;
         rendered.push(Json::Array(values).to_string());
     }
     out.push_str(&format!(
@@ -211,4 +224,5 @@ fn dump_table(connection: &Connection, table: &str, store_dir: &Path, out: &mut 
         out.push_str(&row);
         out.push('\n');
     }
+    Ok(())
 }

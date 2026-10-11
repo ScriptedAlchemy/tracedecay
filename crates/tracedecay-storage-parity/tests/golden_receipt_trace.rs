@@ -23,6 +23,9 @@ const REGEN: &str = "bazel run //tools/storage/parity:regen";
 const GOLDEN_DIR: &str = "fixtures/golden";
 /// Set by `//tools/storage/parity:regen` to the source golden directory.
 const REGEN_DIR: &str = "TRACEDECAY_PARITY_REGEN_DIR";
+/// Divergent lines listed per golden and direction (`-` golden only,
+/// `+` produced only).
+const MAX_LISTED_LINES: usize = 20;
 
 fn render() -> BTreeMap<String, String> {
     tracedecay_global_db::register_registered_schema_installer();
@@ -83,22 +86,22 @@ fn engine_reproduces_golden_receipt_trace_and_logical_dump() {
         .filter(|(name, expected)| produced[*name] != **expected)
         .map(|(name, expected)| {
             let actual = &produced[name];
-            let line = expected
-                .lines()
-                .zip(actual.lines())
-                .position(|(left, right)| left != right)
-                .unwrap_or_else(|| expected.lines().count().min(actual.lines().count()));
-            format!(
-                "{name}: first difference at line {}\n  golden:   {}\n  produced: {}",
-                line + 1,
-                expected.lines().nth(line).unwrap_or("<end>"),
-                actual.lines().nth(line).unwrap_or("<end>"),
-            )
+            let mut report = format!("{name}:");
+            for (sign, from, other) in [("-", expected, actual), ("+", actual, expected)] {
+                let other = other.lines().collect::<std::collections::HashSet<_>>();
+                let missing = from.lines().filter(|line| !other.contains(line));
+                for line in missing.take(MAX_LISTED_LINES) {
+                    let line = line.chars().take(300).collect::<String>();
+                    report.push_str(&format!("\n  {sign} {line}"));
+                }
+            }
+            report
         })
         .collect::<Vec<_>>();
     assert!(
         mismatched.is_empty(),
-        "engine {:?} diverges from the golden (regenerate only on SQLite with `{REGEN}`):\n{}",
+        "engine {:?} diverges from the golden (regenerate only on SQLite with `{REGEN}`); \
+         - lines are golden only, + lines produced only:\n{}",
         tracedecay_sql::ENGINE,
         mismatched.join("\n")
     );
