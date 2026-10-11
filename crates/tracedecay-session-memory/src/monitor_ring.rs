@@ -151,10 +151,54 @@ fn write_entry_inner(
 
 // ── Reader (used by monitor TUI and tests) ──────────────────────────
 
+/// Stable identity of the file behind a mapping. A replaced ring carries no
+/// reliable header witness (a legacy file's generation field stays zero until
+/// a writer stamps it in place), so identity comes from the filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RingFileId {
+    device: u64,
+    node: u64,
+}
+
+#[cfg(unix)]
+fn ring_file_id(file: &std::fs::File) -> Option<RingFileId> {
+    use std::os::unix::fs::MetadataExt;
+
+    file.metadata().ok().map(|metadata| RingFileId {
+        device: metadata.dev(),
+        node: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn ring_file_id(file: &std::fs::File) -> Option<RingFileId> {
+    tracedecay_private_fs::windows_file::information(file)
+        .ok()
+        .map(|information| RingFileId {
+            device: u64::from(information.volume_serial_number),
+            node: information.file_index,
+        })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn ring_file_id(file: &std::fs::File) -> Option<RingFileId> {
+    let nanos = file
+        .metadata()
+        .and_then(|metadata| metadata.created())
+        .ok()
+        .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())?
+        .as_nanos();
+    Some(RingFileId {
+        device: (nanos >> 64) as u64,
+        node: nanos as u64,
+    })
+}
+
 /// Read-only view of the global monitor mmap.
 pub struct MmapReader {
     mmap: memmap2::Mmap,
     dir: PathBuf,
+    file_id: Option<RingFileId>,
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
@@ -167,6 +211,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 /// How far a reader has drained one ring file.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RingCursor {
+    file_id: Option<RingFileId>,
     generation: u64,
     next_idx: u64,
 }
@@ -192,10 +237,12 @@ impl MmapReader {
     pub fn open_at(dir: &Path) -> std::io::Result<Self> {
         let mmap_path = dir.join(MMAP_FILENAME);
         let file = std::fs::OpenOptions::new().read(true).open(&mmap_path)?;
+        let file_id = ring_file_id(&file);
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         Ok(Self {
             mmap,
             dir: dir.to_path_buf(),
+            file_id,
         })
     }
 
@@ -253,9 +300,19 @@ impl MmapReader {
         let capacity = RING_CAPACITY as u64;
         let generation = read_u64(&self.mmap, OFF_GENERATION);
         let head = self.write_idx();
-        let replaced = generation != 0 && cursor.generation != 0 && generation != cursor.generation;
+        // A nonzero generation alone cannot witness replacement: writers stamp
+        // a legacy ring in place, so 0 -> G is also a continuation. The file
+        // identity distinguishes a new inode at the same path, and an
+        // unobserved identity neither restarts nor rebinds the cursor.
+        let replaced = self
+            .file_id
+            .is_some_and(|file_id| Some(file_id) != cursor.file_id)
+            || (generation != 0 && cursor.generation != 0 && generation != cursor.generation);
         if replaced || head < cursor.next_idx {
             cursor.next_idx = 0;
+        }
+        if self.file_id.is_some() {
+            cursor.file_id = self.file_id;
         }
         if generation != 0 {
             cursor.generation = generation;
@@ -284,6 +341,7 @@ impl MmapReader {
     pub fn refresh(&mut self) -> std::io::Result<()> {
         let mmap_path = self.dir.join(MMAP_FILENAME);
         let file = std::fs::OpenOptions::new().read(true).open(&mmap_path)?;
+        self.file_id = ring_file_id(&file);
         self.mmap = unsafe { memmap2::Mmap::map(&file)? };
         Ok(())
     }
@@ -292,7 +350,9 @@ impl MmapReader {
 #[cfg(test)]
 mod tests {
     use super::{
-        FILE_SIZE, MMAP_FILENAME, MmapReader, RING_CAPACITY, RingCursor, RingDrain, write_entry_to,
+        ENTRY_SIZE, EOFF_DELTA, EOFF_PREFIX, EOFF_PROJECT, EOFF_TIMESTAMP, EOFF_TOOL, FILE_SIZE,
+        HEADER_SIZE, MMAP_FILENAME, MmapReader, OFF_WRITE_IDX, RING_CAPACITY, RingCursor,
+        RingDrain, read_u64, write_entry_to, write_str,
     };
     use std::path::Path;
 
@@ -301,6 +361,32 @@ mod tests {
         for value in values {
             write_entry_to(dir, project, "tracedecay", "search", value, 0);
         }
+    }
+
+    /// Write entries the way a pre-stamp writer did: `OFF_GENERATION` stays
+    /// zero, so the file looks like a legacy ring to a reader.
+    fn write_unstamped(dir: &Path, values: std::ops::RangeInclusive<u64>) {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dir.join(MMAP_FILENAME))
+            .expect("open ring");
+        file.set_len(FILE_SIZE as u64).expect("size ring");
+        let mut mmap = unsafe { memmap2::MmapMut::map_mut(&file).expect("map ring") };
+        let mut write_idx = read_u64(&mmap, OFF_WRITE_IDX);
+        for value in values {
+            let off = HEADER_SIZE + (write_idx as usize % RING_CAPACITY) * ENTRY_SIZE;
+            write_str(&mut mmap, off + EOFF_PREFIX, "tracedecay");
+            write_str(&mut mmap, off + EOFF_PROJECT, "alpha");
+            write_str(&mut mmap, off + EOFF_TOOL, "search");
+            mmap[off + EOFF_DELTA..off + EOFF_DELTA + 8].copy_from_slice(&value.to_le_bytes());
+            mmap[off + EOFF_TIMESTAMP..off + EOFF_TIMESTAMP + 8]
+                .copy_from_slice(&1_u64.to_le_bytes());
+            write_idx += 1;
+        }
+        mmap[OFF_WRITE_IDX..OFF_WRITE_IDX + 8].copy_from_slice(&write_idx.to_le_bytes());
     }
 
     fn deltas(drain: &RingDrain) -> Vec<u64> {
@@ -365,6 +451,68 @@ mod tests {
         reader.refresh().expect("remap replaced ring");
         let drain = reader.drain(&mut cursor);
         assert_eq!(deltas(&drain), (101..=120).collect::<Vec<_>>());
+        assert_eq!(drain.dropped, 0);
+    }
+
+    /// A ring written before the generation stamp keeps `cursor.generation`
+    /// at zero, so the header cannot witness its replacement. The file
+    /// identity restarts the cursor at the new ring's first entry.
+    #[test]
+    fn drain_restarts_when_a_legacy_ring_is_replaced() {
+        let dir = tempfile::tempdir().expect("monitor dir");
+        write_unstamped(dir.path(), 1..=10);
+        let mut reader = MmapReader::open_at(dir.path()).expect("open monitor");
+        let mut cursor = RingCursor::default();
+        assert_eq!(
+            deltas(&reader.drain(&mut cursor)),
+            (1..=10).collect::<Vec<_>>()
+        );
+
+        std::fs::remove_file(dir.path().join(MMAP_FILENAME)).expect("remove ring");
+        write_values(dir.path(), 101..=120);
+        reader.refresh().expect("remap replaced ring");
+        let drain = reader.drain(&mut cursor);
+        assert_eq!(deltas(&drain), (101..=120).collect::<Vec<_>>());
+        assert_eq!(drain.dropped, 0);
+    }
+
+    /// Two legacy rings share no header witness at all; only the file
+    /// identity distinguishes a replacement from a continued ring.
+    #[test]
+    fn drain_restarts_when_a_legacy_ring_is_replaced_by_another_legacy_ring() {
+        let dir = tempfile::tempdir().expect("monitor dir");
+        write_unstamped(dir.path(), 1..=10);
+        let mut reader = MmapReader::open_at(dir.path()).expect("open monitor");
+        let mut cursor = RingCursor::default();
+        assert_eq!(
+            deltas(&reader.drain(&mut cursor)),
+            (1..=10).collect::<Vec<_>>()
+        );
+
+        std::fs::remove_file(dir.path().join(MMAP_FILENAME)).expect("remove ring");
+        write_unstamped(dir.path(), 101..=120);
+        reader.refresh().expect("remap replaced ring");
+        let drain = reader.drain(&mut cursor);
+        assert_eq!(deltas(&drain), (101..=120).collect::<Vec<_>>());
+        assert_eq!(drain.dropped, 0);
+    }
+
+    /// A writer that meets a legacy ring stamps its generation in place: the
+    /// file continues, so the cursor must continue rather than restart.
+    #[test]
+    fn drain_continues_when_a_legacy_ring_is_stamped_in_place() {
+        let dir = tempfile::tempdir().expect("monitor dir");
+        write_unstamped(dir.path(), 1..=10);
+        let reader = MmapReader::open_at(dir.path()).expect("open monitor");
+        let mut cursor = RingCursor::default();
+        assert_eq!(
+            deltas(&reader.drain(&mut cursor)),
+            (1..=10).collect::<Vec<_>>()
+        );
+
+        write_values(dir.path(), 11..=15);
+        let drain = reader.drain(&mut cursor);
+        assert_eq!(deltas(&drain), (11..=15).collect::<Vec<_>>());
         assert_eq!(drain.dropped, 0);
     }
 
