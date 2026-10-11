@@ -605,10 +605,6 @@ impl Connection {
         self.capability.get()
     }
 
-    pub(crate) fn clear_cache(&self) {
-        self.cache.borrow_mut().clear();
-    }
-
     pub(crate) fn push_guard(&self, guard: ExecutionGuard) {
         self.guard.push(guard);
     }
@@ -722,20 +718,9 @@ impl Connection {
 
     /// Steps until the next row (`true`) or completion (`false`).
     pub(crate) fn step(&self, prepared: &mut Prepared) -> Result<bool> {
-        let row = match self.drive(&mut prepared.statement) {
-            Ok(row) => row,
-            Err(error) => {
-                return Err(self.end_interrupted_write(
-                    &mut prepared.statement,
-                    prepared.write,
-                    error,
-                ));
-            }
-        };
-        if !row && prepared.ddl {
-            self.clear_cache();
-        }
-        Ok(row)
+        self.drive(&mut prepared.statement).map_err(|error| {
+            self.end_interrupted_write(&mut prepared.statement, prepared.write, error)
+        })
     }
 
     /// SQLite rolls back the whole transaction when it interrupts an INSERT,
@@ -815,7 +800,6 @@ impl Connection {
             self.authorize(command, capability)?;
         }
         for (command, input) in statements {
-            let ddl = policy::is_ddl(&command);
             let write = policy::is_write(&command);
             let mut statement = self.compile(command, input)?;
             self.guard.start()?;
@@ -823,9 +807,6 @@ impl Connection {
                 .drive(&mut statement)
                 .map_err(|error| self.end_interrupted_write(&mut statement, write, error))?
             {
-            }
-            if ddl {
-                self.clear_cache();
             }
         }
         Ok(())

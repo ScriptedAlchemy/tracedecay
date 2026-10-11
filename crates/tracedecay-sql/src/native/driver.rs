@@ -14,6 +14,8 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
+use turso_core::StatementStatusCounter;
+
 use super::{
     Database, ExecutionGuard,
     connection::{Prepared, Settlement},
@@ -1250,9 +1252,7 @@ impl fmt::Debug for Statement<'_> {
 impl<'c> Statement<'c> {
     fn new(connection: &'c Connection, prepared: Prepared, cached: bool) -> Self {
         let counted = Cell::new(engine_counters(&prepared));
-        let columns = (0..prepared.statement.num_columns())
-            .map(|index| prepared.statement.get_column_name(index).into_owned())
-            .collect();
+        let columns = column_names(&prepared);
         Self {
             connection,
             prepared: Some(prepared),
@@ -1307,10 +1307,14 @@ impl<'c> Statement<'c> {
         let core = &connection.core;
         let columns = Rc::clone(&self.columns);
         let prepared = self.start(params)?;
+        let reprepares = prepared
+            .statement
+            .stmt_status(StatementStatusCounter::Reprepare);
         Ok(Rows {
             core,
             prepared,
             columns,
+            reprepares,
             current: None,
             done: false,
         })
@@ -1342,6 +1346,12 @@ impl<'c> Statement<'c> {
     pub fn exists<P: Params>(&mut self, params: P) -> Result<bool> {
         Ok(self.query(params)?.next()?.is_some())
     }
+}
+
+fn column_names(prepared: &Prepared) -> Rc<[String]> {
+    (0..prepared.statement.num_columns())
+        .map(|index| prepared.statement.get_column_name(index).into_owned())
+        .collect()
 }
 
 fn engine_counters(prepared: &Prepared) -> StatementCounters {
@@ -1400,6 +1410,9 @@ pub struct Rows<'s> {
     core: &'s super::Connection,
     prepared: &'s mut Prepared,
     columns: Rc<[String]>,
+    /// The engine recompiles a program whose schema changed when it next
+    /// steps, so its columns are read again after that.
+    reprepares: u64,
     current: Option<Row<'s>>,
     done: bool,
 }
@@ -1413,6 +1426,14 @@ impl<'s> Rows<'s> {
         }
         match self.core.step(self.prepared) {
             Ok(true) => {
+                let reprepares = self
+                    .prepared
+                    .statement
+                    .stmt_status(StatementStatusCounter::Reprepare);
+                if reprepares != self.reprepares {
+                    self.reprepares = reprepares;
+                    self.columns = column_names(self.prepared);
+                }
                 let row = self.prepared.statement.row().ok_or_else(|| {
                     super::Error::InvalidOperation("native row missing after row step".to_owned())
                 })?;
