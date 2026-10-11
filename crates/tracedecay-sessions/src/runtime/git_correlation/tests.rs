@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 
 fn span(
     id: &str,
@@ -162,8 +164,20 @@ fn canonical_worktree_key_reresolves_a_retargeted_link() {
 
 #[cfg(unix)]
 #[test]
+fn canonical_worktree_key_rejects_non_utf8_identity_conversion() {
+    let identity =
+        std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/non-\xff-utf8".to_vec()));
+    assert!(matches!(
+        worktree_key_for_canonical_identity(&identity, "/link"),
+        Err(GitCorrelationError::Unavailable(message))
+            if message == "worktree identity for /link resolves outside UTF-8"
+    ));
+}
+
+// Linux filesystems can represent this name; APFS rejects it before resolution.
+#[cfg(target_os = "linux")]
+#[test]
 fn canonical_worktree_key_rejects_a_canonical_identity_outside_utf8() {
-    use std::os::unix::ffi::OsStringExt;
     let root = tempfile::tempdir().unwrap();
     // A UTF-8 link name pointing into a non-UTF-8 directory: the resolved
     // identity cannot be stored byte-exactly, so the spelling must fail
@@ -175,7 +189,10 @@ fn canonical_worktree_key_rejects_a_canonical_identity_outside_utf8() {
     let link = root.path().join("link");
     std::os::unix::fs::symlink(&target, &link).unwrap();
     let spelling = normalize_worktree(&link.to_string_lossy());
-    assert!(canonical_worktree_key(&spelling).is_err());
+    assert!(matches!(
+        canonical_worktree_key(&spelling),
+        Err(GitCorrelationError::Unavailable(_))
+    ));
 }
 
 #[cfg(unix)]

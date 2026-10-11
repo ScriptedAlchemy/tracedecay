@@ -8,6 +8,7 @@
 //! number of sessions a project has accumulated.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_text::sha256_hex;
@@ -662,30 +663,32 @@ pub fn normalize_worktree(path: &str) -> String {
 /// identity on the next operation.
 pub(crate) fn canonical_worktree_key(path: &str) -> Result<String, error::GitCorrelationError> {
     let normalized = normalize_worktree(path);
-    let candidate = std::path::Path::new(&normalized);
+    let candidate = Path::new(&normalized);
     // A relative string is left alone: `canonicalize` would resolve it
     // against the current drive, rekeying a missing path it never named.
     if !candidate.is_absolute() {
         return Ok(normalized);
     }
     match tracedecay_runtime_core::path_safety::canonical_existing_identity(candidate) {
-        // `to_str` keeps the identity byte-exact: a canonical path outside
-        // UTF-8 cannot be stored as this key's String, and silently keeping
-        // the caller's alias would key the fold on a different identity, so
-        // it is a typed failure instead of a successful fallback.
-        Ok(canonical) => canonical
-            .to_str()
-            .map(|exact| Ok(normalize_worktree(exact)))
-            .unwrap_or_else(|| {
-                Err(error::GitCorrelationError::Unavailable(format!(
-                    "worktree identity for {normalized} resolves outside UTF-8"
-                )))
-            }),
+        Ok(canonical) => worktree_key_for_canonical_identity(&canonical, &normalized),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(normalized),
         Err(error) => Err(error::GitCorrelationError::Unavailable(format!(
             "cannot resolve worktree identity for {normalized}: {error}"
         ))),
     }
+}
+
+fn worktree_key_for_canonical_identity(
+    identity: &Path,
+    recorded: &str,
+) -> Result<String, error::GitCorrelationError> {
+    // Keeping the alias when UTF-8 conversion fails would store a different identity.
+    let exact = identity.to_str().ok_or_else(|| {
+        error::GitCorrelationError::Unavailable(format!(
+            "worktree identity for {recorded} resolves outside UTF-8"
+        ))
+    })?;
+    Ok(normalize_worktree(exact))
 }
 
 pub fn observation_extends_span(first_ts: i64, last_ts: i64, ts: i64, gap_secs: i64) -> bool {
