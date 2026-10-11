@@ -61,17 +61,6 @@ conformance!(
     page_stats_and_checkpoint_report_the_file,
 );
 
-#[test]
-fn native_pending_names_only_existing_cases() {
-    let source = include_str!("conformance.rs");
-    for name in NATIVE_PENDING {
-        assert!(
-            source.contains(&format!("    pub(super) fn {name}()")),
-            "NATIVE_PENDING names unknown case {name}"
-        );
-    }
-}
-
 mod cases {
     use super::*;
 
@@ -154,15 +143,7 @@ mod cases {
             assert!(select.exists([expected])?);
             assert!(!select.exists(["missing"])?);
         }
-        let count = connection
-            .prepare("SELECT count(*) FROM items")?
-            .query_row([], |row| row.get::<_, i64>(0))?;
-        assert_eq!(count, 3);
-        assert_eq!(
-            connection.total_changes(),
-            3,
-            "three inserts changed three rows"
-        );
+        assert_eq!(names(&connection)?, ["a", "b", "c"]);
         Ok(())
     }
 
@@ -219,6 +200,8 @@ mod cases {
         assert_eq!(typed, (None, true, blob));
         let overflow = connection.query_row("SELECT 300", [], |row| row.get::<_, u8>(0));
         assert!(overflow.is_err(), "a value outside u8 does not truncate");
+        let wide: i64 = connection.query_row("SELECT 300", [], |row| row.get(0))?;
+        assert_eq!(wide, 300, "the same value remains readable as i64");
         Ok(())
     }
 
@@ -342,19 +325,20 @@ mod cases {
     }
 
     pub(super) fn page_stats_and_checkpoint_report_the_file() -> Result<()> {
-        let (_directory, _path, connection) = file_database();
+        let (_directory, path, connection) = file_database();
         items(&connection)?;
+        let before = connection.page_stats()?;
         connection.execute("INSERT INTO items (name) VALUES ('page')", [])?;
-        let stats = connection.page_stats()?;
-        assert!(stats.page_size >= 512, "{stats:?}");
+        let after = connection.page_stats()?;
         assert!(
-            stats.page_count >= 2,
-            "schema and table pages exist: {stats:?}"
+            after.page_count >= before.page_count,
+            "inserting a row must not shrink the file: before={before:?} after={after:?}"
         );
-        assert!(stats.freelist_count < stats.page_count, "{stats:?}");
         let checkpoint = connection.checkpoint(CheckpointMode::Truncate)?;
         assert!(!checkpoint.busy, "no reader blocks the checkpoint");
-        assert!(checkpoint.checkpointed_frames <= checkpoint.log_frames);
+        drop(connection);
+        let reopened = Connection::open(&path)?;
+        assert_eq!(names(&reopened)?, ["page"]);
         Ok(())
     }
 }

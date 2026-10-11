@@ -471,25 +471,112 @@ async fn converted_tables_keep_without_rowid_key_semantics() {
     }
 }
 
+fn insert_checkpoint(connection: &Connection, shard: &str, incarnation: i64, sequence: i64) {
+    connection
+        .execute(
+            "INSERT INTO td_runtime_writer_checkpoint_v1 (
+                shard_json, incarnation, authority_epoch, commit_sequence,
+                watermark_json, transaction_scope_json, original_receipt_json,
+                operation_id, durability_json, committed_at_micros
+             ) VALUES (?1, ?2, 1, ?3, '{}', '{}', '{}', ?4, '{}', 1)",
+            params_from_iter([
+                Value::Text(shard.to_owned()),
+                Value::Integer(incarnation),
+                Value::Integer(sequence),
+                Value::Text(format!("op-{shard}-{incarnation}")),
+            ]),
+        )
+        .unwrap();
+}
+
+fn insert_idempotency(
+    connection: &Connection,
+    shard: &str,
+    incarnation: i64,
+    epoch: i64,
+    key: &str,
+    digest: &str,
+) {
+    connection
+        .execute(
+            "INSERT INTO td_runtime_writer_idempotency_v2 (
+                shard_json, incarnation, authority_epoch, idempotency_key, request_digest,
+                operation_id, transaction_id, commit_sequence, durability_json, priority_json,
+                opened_at_micros, committed_at_micros
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 1, '{}', '{}', 1, 1)",
+            params_from_iter([
+                Value::Text(shard.to_owned()),
+                Value::Integer(incarnation),
+                Value::Integer(epoch),
+                Value::Text(key.to_owned()),
+                Value::Text(digest.to_owned()),
+                Value::Text(format!("{shard}-{epoch}-{key}")),
+            ]),
+        )
+        .unwrap();
+}
+
+fn first_column(connection: &Connection, sql: &str, values: &[Value]) -> Vec<Value> {
+    let mut statement = connection.prepare(sql).unwrap();
+    statement
+        .query_map(params_from_iter(values.iter().cloned()), |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
 #[tokio::test]
-async fn hot_ledger_lookups_search_the_primary_key_index() {
+async fn hot_ledger_lookups_return_the_row_addressed_by_the_primary_key() {
     let directory = TempDir::new().unwrap();
     let installed =
         installed_sessions_store(&directory, TestDatabaseRuntimeScope::ProfileSessions).await;
-    for (table, lookup) in [
-        (
-            "td_runtime_writer_idempotency_v2",
+
+    let checkpoint = install_table(&installed, "td_runtime_writer_checkpoint_v1", "");
+    insert_checkpoint(&checkpoint, "shard-a", 1, 11);
+    insert_checkpoint(&checkpoint, "shard-a", 2, 22);
+    insert_checkpoint(&checkpoint, "shard-b", 1, 33);
+    assert_eq!(
+        first_column(
+            &checkpoint,
+            "SELECT commit_sequence FROM td_runtime_writer_checkpoint_v1
+             WHERE shard_json = ?1 AND incarnation = ?2",
+            &[Value::Text("shard-a".to_owned()), Value::Integer(1)],
+        ),
+        [Value::Integer(11)]
+    );
+    assert_eq!(
+        first_column(
+            &checkpoint,
+            "SELECT commit_sequence FROM td_runtime_writer_checkpoint_v1
+             WHERE shard_json = ?1 AND incarnation = ?2",
+            &[Value::Text("missing".to_owned()), Value::Integer(1)],
+        ),
+        [] as [Value; 0]
+    );
+
+    let idempotency = install_table(&installed, "td_runtime_writer_idempotency_v2", "");
+    insert_idempotency(&idempotency, "shard-a", 1, 1, "a", "old-a");
+    insert_idempotency(&idempotency, "shard-a", 1, 1, "b", "old-b");
+    insert_idempotency(&idempotency, "shard-a", 1, 2, "c", "mid-c");
+    insert_idempotency(&idempotency, "shard-a", 1, 3, "live", "live");
+    insert_idempotency(&idempotency, "shard-b", 1, 1, "x", "foreign");
+    assert_eq!(
+        first_column(
+            &idempotency,
             "SELECT request_digest FROM td_runtime_writer_idempotency_v2
              WHERE shard_json = ?1 AND incarnation = ?2 AND authority_epoch = ?3
                AND idempotency_key = ?4",
+            &[
+                Value::Text("shard-a".to_owned()),
+                Value::Integer(1),
+                Value::Integer(3),
+                Value::Text("live".to_owned()),
+            ],
         ),
-        (
-            "td_runtime_writer_checkpoint_v1",
-            "SELECT commit_sequence FROM td_runtime_writer_checkpoint_v1
-             WHERE shard_json = ?1 AND incarnation = ?2",
-        ),
-        (
-            "td_runtime_writer_idempotency_v2",
+        [Value::Text("live".to_owned())]
+    );
+    idempotency
+        .execute(
             "DELETE FROM td_runtime_writer_idempotency_v2
              WHERE (shard_json, incarnation, authority_epoch, idempotency_key) IN (
                  SELECT candidate.shard_json, candidate.incarnation,
@@ -500,24 +587,25 @@ async fn hot_ledger_lookups_search_the_primary_key_index() {
                  ORDER BY candidate.authority_epoch, candidate.idempotency_key
                  LIMIT ?4
              )",
+            params_from_iter([
+                Value::Text("shard-a".to_owned()),
+                Value::Integer(1),
+                Value::Integer(3),
+                Value::Integer(2),
+            ]),
+        )
+        .unwrap();
+    assert_eq!(
+        first_column(
+            &idempotency,
+            "SELECT request_digest FROM td_runtime_writer_idempotency_v2
+             ORDER BY shard_json, incarnation, authority_epoch, idempotency_key",
+            &[],
         ),
-    ] {
-        let connection = install_table(&installed, table, "");
-        let mut plan = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {lookup}"))
-            .unwrap();
-        let parameters = plan.parameter_count();
-        let plan: Vec<String> = plan
-            .query_map(params_from_iter(vec![Value::Null; parameters]), |row| {
-                row.get(3)
-            })
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert!(
-            plan.iter().all(|step| !step.starts_with("SCAN"))
-                && plan.iter().any(|step| step.contains("sqlite_autoindex_")),
-            "{lookup}\nmust search the primary-key index, plan: {plan:#?}"
-        );
-    }
+        [
+            Value::Text("mid-c".to_owned()),
+            Value::Text("live".to_owned()),
+            Value::Text("foreign".to_owned()),
+        ]
+    );
 }

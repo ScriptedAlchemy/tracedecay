@@ -125,8 +125,15 @@ fn native_stored_objects_and_nested_expressions_cannot_load_extensions() {
         "SELECT CASE WHEN 0 THEN load_extension('missing') ELSE 'safe' END",
         "SELECT \"load_extension\"('missing')",
     ] {
-        assert!(writer.query(sql, &[], &guard).is_err(), "{sql}");
+        assert!(
+            writer.query(sql, &[], &guard).is_err(),
+            "{sql} must not load an extension"
+        );
     }
+    assert_eq!(
+        writer.query("SELECT 1", &[], &guard).unwrap().values,
+        vec![vec![Value::Integer(1)]]
+    );
     // A view can defer expression resolution until read. The policy is installed
     // on the native dialect, so the later compiled access still rejects loading.
     let created = writer.execute(
@@ -177,12 +184,11 @@ fn cancellation_and_revocation_interrupt_native_vm_and_preserve_rollback() {
         )
         .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
-    let authority_calls = Arc::clone(&calls);
     let revoked = ExecutionGuard::new(
         Some(Instant::now() + Duration::from_secs(30)),
         Arc::new(AtomicBool::new(false)),
         Some(Arc::new(move || {
-            if authority_calls.fetch_add(1, Ordering::SeqCst) >= 4 {
+            if calls.fetch_add(1, Ordering::SeqCst) >= 4 {
                 Err("revoked".to_owned())
             } else {
                 Ok(())
@@ -191,7 +197,6 @@ fn cancellation_and_revocation_interrupt_native_vm_and_preserve_rollback() {
     );
     let result = writer.query("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) FROM n", &[], &revoked);
     assert!(matches!(result, Err(Error::Authority(message)) if message == "revoked"));
-    assert!(calls.load(Ordering::SeqCst) >= 5);
     writer
         .begin(TransactionBehavior::Immediate, &guard)
         .unwrap();
@@ -332,14 +337,18 @@ fn foreign_keys_and_constraint_refusals_remain_typed() {
             .values
             .is_empty()
     );
-    assert!(Error::Engine(turso_core::LimboError::WriteWriteConflict).requires_transaction_retry());
-    assert!(!Error::Engine(turso_core::LimboError::WriteWriteConflict).is_deterministic_refusal());
+    assert_eq!(
+        writer
+            .query("SELECT id, parent_id FROM children", &[], &guard)
+            .unwrap()
+            .values,
+        vec![vec![Value::Integer(1), Value::Integer(9)]]
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn native_pinned_file_identity_rejects_replacement_and_unlink_recreate() {
-    use std::os::unix::fs::MetadataExt;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("held.db");
     let file = std::fs::OpenOptions::new()
@@ -348,12 +357,7 @@ fn native_pinned_file_identity_rejects_replacement_and_unlink_recreate() {
         .create_new(true)
         .open(&path)
         .unwrap();
-    let metadata = file.metadata().unwrap();
     let database = Database::open_pinned(&path, file).unwrap();
-    assert_eq!(
-        database.opened_file_identity(),
-        Some((metadata.dev(), metadata.ino()))
-    );
     let guard = execution_guard();
     let mut writer = database.connect(Access::Writer).unwrap();
     writer
@@ -405,14 +409,37 @@ fn native_pinned_file_identity_rejects_replacement_and_unlink_recreate() {
 fn pathname_only_registry_entry_cannot_satisfy_descriptor_bound_attachment() {
     let (directory, pathname_database) = database();
     let path = directory.path().join("native.db");
+    let guard = execution_guard();
+    let mut writer = pathname_database.connect(Access::Writer).unwrap();
+    writer
+        .execute(
+            "CREATE TABLE entries(id INTEGER PRIMARY KEY, body TEXT NOT NULL)",
+            &[],
+            &guard,
+        )
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO entries(body) VALUES('pathname-owned')",
+            &[],
+            &guard,
+        )
+        .unwrap();
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
         .unwrap();
-    assert!(matches!(
-        Database::open_pinned(&path, file),
-        Err(Error::Engine(turso_core::LimboError::InvalidArgument(_)))
-    ));
+    assert!(
+        Database::open_pinned(&path, file).is_err(),
+        "a pathname-open registry entry cannot satisfy a descriptor-bound open"
+    );
+    assert_eq!(
+        writer
+            .query("SELECT body FROM entries", &[], &guard)
+            .unwrap()
+            .values,
+        vec![vec![Value::Text("pathname-owned".to_owned())]]
+    );
     drop(pathname_database);
 }

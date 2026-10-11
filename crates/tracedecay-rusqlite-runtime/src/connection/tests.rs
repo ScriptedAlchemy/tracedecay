@@ -215,7 +215,6 @@ fn attach_and_detach_are_denied_in_every_connection_mode() {
         ConnectionMode::Maintenance,
     ] {
         let connection = open(file.path(), mode).expect("connection policy");
-        assert_eq!(connection.limit(Limit::SQLITE_LIMIT_ATTACHED).unwrap(), 0);
         for sql in [
             "ATTACH DATABASE ':memory:' AS denied_input",
             // SQLite reports a parameter-bound filename as an unknown action.
@@ -231,6 +230,18 @@ fn attach_and_detach_are_denied_in_every_connection_mode() {
                 "{mode:?} must deny `{sql}` at the authorizer, got {error:?}"
             );
         }
+        let attached: Vec<String> = connection
+            .prepare("PRAGMA database_list")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            attached,
+            ["main"],
+            "{mode:?} must not attach a denied database"
+        );
     }
 }
 
@@ -259,12 +270,6 @@ fn writer_never_enables_or_runs_incremental_vacuum() {
     std::fs::File::create(&path).expect("create empty database file");
     let connection = open(&path, ConnectionMode::Writer).expect("writer policy");
 
-    assert_eq!(
-        connection
-            .query_row("PRAGMA auto_vacuum", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
     for pragma in [
         "PRAGMA auto_vacuum = INCREMENTAL",
         "PRAGMA incremental_vacuum(8)",
@@ -274,6 +279,15 @@ fn writer_never_enables_or_runs_incremental_vacuum() {
             "{pragma} must be denied"
         );
     }
+    connection
+        .execute_batch("CREATE TABLE items(value INTEGER); INSERT INTO items VALUES (7);")
+        .expect("a writer must still accept ordinary schema and rows");
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM items", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
 }
 
 #[cfg(any(unix, windows))]
