@@ -240,7 +240,9 @@ impl From<tracedecay_sql::native::Error> for Error {
             | Native::Unsupported(message) => Self::InvalidOperation(message),
             Native::RequestLimitExceeded
             | Native::QueryLimitExceeded
-            | Native::TransactionControlDenied => Self::InvalidOperation(error.to_string()),
+            | Native::OperationLimitExceeded
+            | Native::TransactionControlDenied
+            | Native::ForeignFormat => Self::InvalidOperation(error.to_string()),
             Native::Busy => Self::Busy,
             Native::Cancelled => Self::Cancelled,
             Native::DeadlineExceeded => Self::TransactionExpired,

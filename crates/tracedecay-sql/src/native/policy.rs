@@ -145,7 +145,6 @@ pub(crate) fn authorize(command: &Cmd, capability: Capability) -> Result<()> {
     use Capability::{ExactSql, ExactSqlRead, Maintenance, Reader, Writer};
 
     let temp = |name: &QualifiedName| is_temp(name.db_name.as_ref());
-    let read_only = matches!(capability, Reader | ExactSqlRead);
     let allowed = match statement(command) {
         Stmt::Select(_) => true,
         Stmt::Pragma { name, body } => {
@@ -156,17 +155,13 @@ pub(crate) fn authorize(command: &Cmd, capability: Capability) -> Result<()> {
         | Stmt::Rollback {
             savepoint_name: None,
             ..
-        } => {
-            return transaction_control(matches!(capability, Reader | Writer | Maintenance));
-        }
+        } => return authorize_transaction_control(capability, false),
         Stmt::Rollback { .. } | Stmt::Savepoint { .. } | Stmt::Release { .. } => {
-            return transaction_control(match capability {
-                Reader | Writer | Maintenance => true,
-                ExactSql { savepoints } => savepoints,
-                ExactSqlRead => false,
-            });
+            return authorize_transaction_control(capability, true);
         }
-        Stmt::Insert { .. } | Stmt::Delete { .. } | Stmt::Update(_) => !read_only,
+        Stmt::Insert { .. } | Stmt::Delete { .. } | Stmt::Update(_) | Stmt::Reindex { .. } => {
+            !read_only(capability)
+        }
         Stmt::CreateTable {
             temporary,
             tbl_name,
@@ -205,7 +200,6 @@ pub(crate) fn authorize(command: &Cmd, capability: Capability) -> Result<()> {
         | Stmt::DropIndex { .. }
         | Stmt::DropTable { .. }
         | Stmt::Optimize { .. } => durable_schema(capability),
-        Stmt::Reindex { .. } => !read_only,
         // Attachment, in-place VACUUM and the engine's non-SQLite object
         // kinds have no owned-store caller under any capability.
         Stmt::Attach { .. }
@@ -228,22 +222,28 @@ pub(crate) fn authorize(command: &Cmd, capability: Capability) -> Result<()> {
     }
 }
 
-/// Transaction control and savepoints are judged before anything else so a
-/// denial reports [`Error::TransactionControlDenied`], as on the SQLite arm.
-fn transaction_control(allowed: bool) -> Result<()> {
-    if allowed {
-        Ok(())
-    } else {
-        Err(Error::TransactionControlDenied)
-    }
-}
-
 /// Triggers, views, drops and other schema surgery beyond the ledger
 /// bootstrap's `CREATE TABLE`/`CREATE INDEX`.
 fn durable_schema(capability: Capability) -> bool {
     match capability {
         Capability::Reader | Capability::ExactSqlRead | Capability::Writer => false,
         Capability::ExactSql { .. } | Capability::Maintenance => true,
+    }
+}
+
+fn read_only(capability: Capability) -> bool {
+    matches!(capability, Capability::Reader | Capability::ExactSqlRead)
+}
+
+/// Caller-supplied SQL never begins or ends a transaction: the runtime owns
+/// it. Savepoints are allowed only under a transaction lease.
+fn authorize_transaction_control(capability: Capability, savepoint: bool) -> Result<()> {
+    match capability {
+        Capability::ExactSql { savepoints: true } if savepoint => Ok(()),
+        Capability::ExactSqlRead | Capability::ExactSql { .. } => {
+            Err(Error::TransactionControlDenied)
+        }
+        Capability::Reader | Capability::Writer | Capability::Maintenance => Ok(()),
     }
 }
 
@@ -286,10 +286,16 @@ fn authorize_pragma(name: &str, body: Option<&PragmaBody>, capability: Capabilit
             .trim_matches(|c| c == '\'' || c == '"')
             .to_owned()
     });
-    let allowed = match (capability, value) {
-        (Capability::ExactSql { .. }, value) => is_allowed_exact_sql_pragma(name, value.as_deref()),
+    // Commit durability is the driver's: every connection fsyncs on commit.
+    if is(&"synchronous") && value.is_some() {
+        return Err(Error::Denied(
+            "the native driver fixes synchronous at FULL".to_owned(),
+        ));
+    }
+    let allowed = match (capability, value.as_deref()) {
+        (Capability::ExactSql { .. }, value) => is_allowed_exact_sql_pragma(name, value),
         (_, None) => true,
-        (capability, Some(_)) => {
+        (_, Some(_)) => {
             capability == Capability::Maintenance
                 || INTROSPECTION.iter().any(is)
                 || (capability == Capability::Writer && is_safe_writer_pragma(name))
