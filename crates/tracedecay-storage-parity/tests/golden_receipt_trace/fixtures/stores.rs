@@ -3,6 +3,7 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
+use super::BRAIN;
 use serde_json::json;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_contracts::remote::capture::{
@@ -31,7 +32,6 @@ use tracedecay_domain::{
     WorkflowOperationRef, WorkflowOutputName, WorkflowStep, WorkflowStepId, WorktreeId,
     canonical_sha256,
 };
-use super::BRAIN;
 use tracedecay_rusqlite_runtime::remote::{
     RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1,
 };
@@ -123,7 +123,9 @@ pub fn workflow_effect(
         [id("capability.workflow.handoff_issue")]
             .into_iter()
             .collect(),
-        [id("use-case.workflow.handoff_issue")].into_iter().collect(),
+        [id("use-case.workflow.handoff_issue")]
+            .into_iter()
+            .collect(),
         DisclosureClass::Metadata,
     )
     .unwrap();
@@ -192,7 +194,10 @@ impl RemoteSpoolKeyringV1 for Keyring {
         Ok(Arc::clone(&self.0))
     }
 
-    fn key(&self, revision: u64) -> Result<Option<Arc<RemoteSpoolKeyV1>>, RemoteSqliteStorageErrorV1> {
+    fn key(
+        &self,
+        revision: u64,
+    ) -> Result<Option<Arc<RemoteSpoolKeyV1>>, RemoteSqliteStorageErrorV1> {
         Ok((revision == self.0.revision()).then(|| Arc::clone(&self.0)))
     }
 }

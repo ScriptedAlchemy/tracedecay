@@ -156,9 +156,9 @@ table session_refresh_receipts (session_id, operation_id, terminal_state, fronti
 table session_relation_effect_journal (session_id, generation, projection_json, created_at) rows=0
 table session_relation_receipts (session_id, generation, scope_kind, scope_id, expected_graph_watermark, state, graph_watermark, created_at, applied_at, recovery_state, recovery_failure_code, recovery_failure_count, recovery_next_attempt_at) rows=0
 table session_schema_migrations (name, version, applied_at) rows=3
-  [{"t":"git_correlation"},{"i":10},{"i":1791690179}]
-  [{"t":"lcm"},{"i":15},{"i":1791690179}]
-  [{"t":"workflow_indexing"},{"i":1},{"i":1791690179}]
+  [{"t":"git_correlation"},{"i":10},"<normalized>"]
+  [{"t":"lcm"},{"i":15},"<normalized>"]
+  [{"t":"workflow_indexing"},{"i":1},"<normalized>"]
 table session_summary_availability (session_id, generation, summary_id, availability, source_horizon_json, reason, checked_at) rows=0
 table session_summary_nodes (summary_id, session_id, provider, conversation_id, depth, summary_anchor_id, summary_text, summary_hash, summary_token_count, source_token_count, source_time_start, source_time_end, expand_hint, metadata_json, source_horizon_json, publication_json, created_at) rows=0
 table session_summary_sources (summary_id, ordinal, source_kind, source_id) rows=0
@@ -167,7 +167,7 @@ table session_temporal_observation_effects (observation_id, observation_sequence
 table session_temporal_projection_receipts (session_id, generation, batch_ordinal, batch_digest, frozen_watermarks_json, source_through, projection_through, occurrence_count, occurrence_digest, dimension_count, dimension_digest, copy_count, copy_digest, assertion_count, assertion_digest, supersession_count, supersession_digest, current_count, current_digest, fts_count, fts_digest, committed_at, batch_item_count, committed_item_count, committed_copy_count) rows=0
 table session_temporal_resets (session_id, requested_at, reset_generation) rows=0
 table session_temporal_schema_migrations (name, version, applied_at) rows=1
-  [{"t":"session-temporal"},{"i":8},{"i":1791690179}]
+  [{"t":"session-temporal"},{"i":8},"<normalized>"]
 table session_threads (session_id, generation, thread_id, grouping_provenance, created_at) rows=0
 table session_turn_members (session_id, generation, turn_id, occurrence_id, ordinal) rows=0
 table session_turns (session_id, generation, turn_id, ordinal, grouping_provenance, created_at) rows=0

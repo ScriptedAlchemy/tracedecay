@@ -69,8 +69,11 @@ pub async fn work_and_workflow() -> String {
     match store.database.workflow_storage() {
         Ok(workflow) => {
             let definition = stores::workflow_definition(&project_id);
-            let register =
-                stores::workflow_effect(&project_id, WorkflowEffectOperationV1::RegisterDefinition, 'p');
+            let register = stores::workflow_effect(
+                &project_id,
+                WorkflowEffectOperationV1::RegisterDefinition,
+                'p',
+            );
             let prepared = WorkflowEffectPreparedV1::register_definition(
                 register.input_digest().clone(),
                 definition.clone(),
@@ -83,18 +86,29 @@ pub async fn work_and_workflow() -> String {
                 "workflow_register_definition_replay",
                 debug(workflow.execute_effect(&register, &prepared, UtcMicros(21))),
             );
-            let activate =
-                stores::workflow_effect(&project_id, WorkflowEffectOperationV1::ActivateDefinition, 'q');
+            let activate = stores::workflow_effect(
+                &project_id,
+                WorkflowEffectOperationV1::ActivateDefinition,
+                'q',
+            );
             let prepared = WorkflowEffectPreparedV1::activate_definition(
                 activate.input_digest().clone(),
-                stores::workflow_lifecycle(&definition, WorkflowLifecycleOperation::Activate, 1, 50),
+                stores::workflow_lifecycle(
+                    &definition,
+                    WorkflowLifecycleOperation::Activate,
+                    1,
+                    50,
+                ),
             );
             store.trace.note(
                 "workflow_activate_definition",
                 debug(workflow.execute_effect(&activate, &prepared, UtcMicros(40))),
             );
-            let retire =
-                stores::workflow_effect(&project_id, WorkflowEffectOperationV1::RetireDefinition, 'r');
+            let retire = stores::workflow_effect(
+                &project_id,
+                WorkflowEffectOperationV1::RetireDefinition,
+                'r',
+            );
             let prepared = WorkflowEffectPreparedV1::retire_definition(
                 retire.input_digest().clone(),
                 stores::workflow_lifecycle(&definition, WorkflowLifecycleOperation::Retire, 3, 60),
@@ -112,7 +126,8 @@ pub async fn work_and_workflow() -> String {
 }
 
 pub async fn remote() -> String {
-    let mut store = Registered::publish("remote-node.db", TestDatabaseRuntimeScope::RemoteNode).await;
+    let mut store =
+        Registered::publish("remote-node.db", TestDatabaseRuntimeScope::RemoteNode).await;
     let StoreShardScopeV1::RemoteNode { node_id } = store.binding.shard_id.scope.clone() else {
         panic!("remote-node fixture publishes a remote-node shard");
     };
@@ -135,11 +150,19 @@ pub async fn remote() -> String {
             let capture = stores::admitted_capture(node_id.as_str(), epoch);
             store.trace.note(
                 "remote_capture_pending",
-                debug(remote.capture_pending(&capture).map(|receipt| receipt.disposition)),
+                debug(
+                    remote
+                        .capture_pending(&capture)
+                        .map(|receipt| receipt.disposition),
+                ),
             );
             store.trace.note(
                 "remote_capture_pending_again",
-                debug(remote.capture_pending(&capture).map(|receipt| receipt.disposition)),
+                debug(
+                    remote
+                        .capture_pending(&capture)
+                        .map(|receipt| receipt.disposition),
+                ),
             );
         }
         Err(error) => store

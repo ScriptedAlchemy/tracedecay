@@ -22,7 +22,7 @@ use tracedecay_store::{
     StoreRuntimeBindingV1,
 };
 
-use super::dump::{logical_dump, normalize_json, scrub_path};
+use super::dump::{logical_dump, scrub_path};
 
 /// `sha256:` followed by 64 copies of `byte`, a valid command digest.
 pub fn digest(byte: char) -> String {
@@ -150,11 +150,7 @@ impl Trace {
 
     pub fn record(&mut self, step: &str, result: Result<RuntimeSubmitOutcomeV1, impl Debug>) {
         let entry = match result {
-            Ok(outcome) => {
-                let mut outcome = serde_json::to_value(outcome).expect("serialize outcome");
-                normalize_json(&mut outcome);
-                json!({ "step": step, "outcome": outcome })
-            }
+            Ok(outcome) => json!({ "step": step, "outcome": outcome }),
             Err(error) => self.error_entry(step, &error),
         };
         self.lines.push(entry.to_string());
@@ -163,11 +159,7 @@ impl Trace {
     /// A step whose result is not a submit outcome (exact-SQL store calls).
     pub fn note(&mut self, step: &str, result: Result<impl serde::Serialize, impl Debug>) {
         let entry = match result {
-            Ok(value) => {
-                let mut value: Json = serde_json::to_value(value).expect("serialize result");
-                normalize_json(&mut value);
-                json!({ "step": step, "result": value })
-            }
+            Ok(value) => json!({ "step": step, "result": value }),
             Err(error) => self.error_entry(step, &error),
         };
         self.lines.push(entry.to_string());

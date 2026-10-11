@@ -27,12 +27,22 @@ pub async fn profile() -> String {
             ],
         )
         .await;
-    let commit = || Payload::Configuration(Box::new(project::configuration("configuration.revision.child", 'a')));
+    let commit = || {
+        Payload::Configuration(Box::new(project::configuration(
+            "configuration.revision.child",
+            'a',
+        )))
+    };
     store
         .submit("configuration_commit", "key.configuration", 'a', commit())
         .await;
     store
-        .submit("configuration_exact_replay", "key.configuration", 'a', commit())
+        .submit(
+            "configuration_exact_replay",
+            "key.configuration",
+            'a',
+            commit(),
+        )
         .await;
     store.finish()
 }
@@ -71,8 +81,9 @@ pub async fn project() -> String {
         )
         .await;
 
-    let diagnostics =
-        |generation, message| Payload::Diagnostics(Box::new(project::diagnostics(generation, message)));
+    let diagnostics = |generation, message| {
+        Payload::Diagnostics(Box::new(project::diagnostics(generation, message)))
+    };
     store
         .submit(
             "diagnostics_fresh",
@@ -197,7 +208,12 @@ pub async fn sessions() -> String {
         Payload::Observation(Box::new(observation::single(&project_id, body, receipt)))
     };
     store
-        .submit("observation_fresh", "key.observation", 'a', single("parity", "receipt.parity"))
+        .submit(
+            "observation_fresh",
+            "key.observation",
+            'a',
+            single("parity", "receipt.parity"),
+        )
         .await;
     store
         .submit(
@@ -223,7 +239,8 @@ pub async fn sessions() -> String {
             Payload::ObservationBatch(observation::batch(&project_id)),
         )
         .await;
-    let advance = || Payload::ObservationCursorAdvance(Box::new(observation::cursor_advance(&project_id)));
+    let advance =
+        || Payload::ObservationCursorAdvance(Box::new(observation::cursor_advance(&project_id)));
     store
         .submit("cursor_advance_fresh", "key.cursor", 'a', advance())
         .await;
@@ -231,7 +248,12 @@ pub async fn sessions() -> String {
         .submit("cursor_advance_exact_replay", "key.cursor", 'a', advance())
         .await;
     store
-        .submit("cursor_advance_idempotency_conflict", "key.cursor", 'b', advance())
+        .submit(
+            "cursor_advance_idempotency_conflict",
+            "key.cursor",
+            'b',
+            advance(),
+        )
         .await;
 
     let binding = store.binding.clone();

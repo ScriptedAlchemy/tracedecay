@@ -1,7 +1,7 @@
 //! Streams over registered stores: the production registry publishes each
 //! shard, installs its real schema, and routes submits to its writer.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tempfile::TempDir;
 use tracedecay_domain::{BrainId, UserProfileId};
@@ -76,22 +76,17 @@ impl Registered {
     pub async fn seed(&mut self, step: &str, sql: &str, params: Params) {
         let result = async {
             let transaction = self.database.begin_write_transaction(step).await?;
-            let changed = transaction
-                .execute(sql, params)
-                .await
-                .map_err(|error| tracedecay_domain::errors::TraceDecayError::Database {
+            let changed = transaction.execute(sql, params).await.map_err(|error| {
+                tracedecay_domain::errors::TraceDecayError::Database {
                     message: error.to_string(),
                     operation: step.to_owned(),
-                })?;
+                }
+            })?;
             transaction.commit().await?;
             Ok::<_, tracedecay_domain::errors::TraceDecayError>(changed)
         }
         .await;
         self.trace.note(step, result);
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     pub fn finish(self) -> String {

@@ -9,25 +9,27 @@ use std::path::Path;
 use serde_json::{Value as Json, json};
 use tracedecay_sql::{Connection, OpenFlags, types::ValueRef};
 
-/// A column whose stored value is wall-clock or otherwise run-dependent.
+/// A column whose stored value is run-dependent.
 pub struct ColumnNormalization {
     pub table: &'static str,
     pub column: &'static str,
     pub reason: &'static str,
 }
 
-/// Every column the dump replaces with `"<normalized>"`. Fixture inputs are
-/// fixed, so only values the runtime derives from the clock land here.
+/// Every column the dump replaces with `"<normalized>"`. Fixture inputs fix
+/// every id and timestamp (receipts take `committed_at` from the request's
+/// `admitted_at`), so only runtime randomness and schema-install wall-clock
+/// stamps land here.
 pub const NORMALIZED_COLUMNS: &[ColumnNormalization] = &[
     ColumnNormalization {
-        table: "td_runtime_writer_checkpoint_v1",
-        column: "committed_at_micros",
-        reason: "writer stamps the commit with the wall clock",
+        table: "session_schema_migrations",
+        column: "applied_at",
+        reason: "schema install stamps each migration with the wall clock",
     },
     ColumnNormalization {
-        table: "td_runtime_writer_idempotency_v2",
-        column: "committed_at_micros",
-        reason: "writer stamps the commit with the wall clock",
+        table: "session_temporal_schema_migrations",
+        column: "applied_at",
+        reason: "schema install stamps each migration with the wall clock",
     },
     ColumnNormalization {
         table: "remote_spool_frames",
@@ -41,23 +43,16 @@ pub const NORMALIZED_COLUMNS: &[ColumnNormalization] = &[
     },
 ];
 
-/// JSON object keys replaced with `"<normalized>"` wherever they appear: in
-/// submit outcomes and inside JSON text columns.
-pub const NORMALIZED_JSON_KEYS: &[(&str, &str)] = &[(
-    "committed_at",
-    "commit receipts carry the writer's wall-clock commit time",
-)];
-
 pub const NORMALIZED: &str = "<normalized>";
 
 /// Every normalization the goldens rely on, one per line.
 pub fn normalization_listing() -> String {
     let mut out = String::new();
     for rule in NORMALIZED_COLUMNS {
-        out.push_str(&format!("column {}.{}: {}\n", rule.table, rule.column, rule.reason));
-    }
-    for (key, reason) in NORMALIZED_JSON_KEYS {
-        out.push_str(&format!("json key {key}: {reason}\n"));
+        out.push_str(&format!(
+            "column {}.{}: {}\n",
+            rule.table, rule.column, rule.reason
+        ));
     }
     out.push_str("path <store temp dir>: replaced with $STORE in errors and text values\n");
     out
@@ -79,45 +74,14 @@ fn canonical(path: &Path) -> std::path::PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Replaces every normalized key in `value`, returning whether any matched.
-pub fn normalize_json(value: &mut Json) -> bool {
-    match value {
-        Json::Object(map) => {
-            let mut changed = false;
-            for (key, entry) in map.iter_mut() {
-                if NORMALIZED_JSON_KEYS.iter().any(|(name, _)| name == key) {
-                    *entry = Json::String(NORMALIZED.to_owned());
-                    changed = true;
-                } else {
-                    changed |= normalize_json(entry);
-                }
-            }
-            changed
-        }
-        Json::Array(items) => items
-            .iter_mut()
-            .fold(false, |changed, item| normalize_json(item) | changed),
-        _ => false,
-    }
-}
-
-fn text_value(text: &str, store_dir: &Path) -> Json {
-    let text = scrub_path(text, store_dir);
-    if text.starts_with(['{', '['])
-        && let Ok(mut parsed) = serde_json::from_str::<Json>(&text)
-        && normalize_json(&mut parsed)
-    {
-        return json!({ "t": parsed.to_string() });
-    }
-    json!({ "t": text })
-}
-
 fn typed(value: ValueRef<'_>, store_dir: &Path) -> Json {
     match value {
         ValueRef::Null => Json::Null,
         ValueRef::Integer(value) => json!({ "i": value }),
         ValueRef::Real(value) => json!({ "r": value }),
-        ValueRef::Text(bytes) => text_value(&String::from_utf8_lossy(bytes), store_dir),
+        ValueRef::Text(bytes) => {
+            json!({ "t": scrub_path(&String::from_utf8_lossy(bytes), store_dir) })
+        }
         ValueRef::Blob(bytes) => json!({ "b": hex::encode(bytes) }),
     }
 }

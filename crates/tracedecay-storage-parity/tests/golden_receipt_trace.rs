@@ -58,7 +58,11 @@ fn regenerate(directory: &Path, produced: &BTreeMap<String, String>) {
     for (name, content) in produced {
         fs::write(directory.join(name), content).expect("write golden");
     }
-    eprintln!("wrote {} goldens to {}", produced.len(), directory.display());
+    eprintln!(
+        "wrote {} goldens to {}",
+        produced.len(),
+        directory.display()
+    );
 }
 
 #[test]

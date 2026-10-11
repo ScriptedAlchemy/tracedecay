@@ -1,7 +1,9 @@
 //! Transactional outbox and inbox effects for the ledger stream.
 
 use serde_json::{Value as Json, json};
-use tracedecay_store::{StoreRuntimeBindingV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1};
+use tracedecay_store::{
+    StoreRuntimeBindingV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+};
 
 use super::super::harness::digest;
 
@@ -49,7 +51,10 @@ pub fn outbox_entry(
 }
 
 /// The target's receipt for `effect_id`, acknowledging it at the source.
-pub fn inbox_receipt(binding: &StoreRuntimeBindingV1, effect_id: &str) -> TransactionalInboxReceiptV1 {
+pub fn inbox_receipt(
+    binding: &StoreRuntimeBindingV1,
+    effect_id: &str,
+) -> TransactionalInboxReceiptV1 {
     serde_json::from_value(json!({
         "identity": effect_identity(binding, effect_id),
         "disposition": "applied",

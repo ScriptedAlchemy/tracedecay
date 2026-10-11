@@ -13,11 +13,13 @@ fn main() {
     let workspace = env::var_os("BUILD_WORKSPACE_DIRECTORY")
         .map(PathBuf::from)
         .expect("run through `bazel run`, which sets BUILD_WORKSPACE_DIRECTORY");
-    let runfiles = env::var_os("RUNFILES_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        let mut path = env::current_exe().expect("regen executable path");
-        path.as_mut_os_string().push(".runfiles");
-        path
-    });
+    let runfiles = env::var_os("RUNFILES_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut path = env::current_exe().expect("regen executable path");
+            path.as_mut_os_string().push(".runfiles");
+            path
+        });
     let scratch = tempfile_dir();
     let status = Command::new(
         runfiles

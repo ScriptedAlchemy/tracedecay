@@ -173,10 +173,9 @@ pub async fn ledger() -> String {
         ),
         (
             "acknowledge_outbox",
-            RepositoryWritePayloadV1::AcknowledgeOutbox(Box::new(fixtures::effects::inbox_receipt(
-                &binding,
-                "effect.parity.dispatched",
-            ))),
+            RepositoryWritePayloadV1::AcknowledgeOutbox(Box::new(
+                fixtures::effects::inbox_receipt(&binding, "effect.parity.dispatched"),
+            )),
         ),
     ];
     for (step, payload) in effects {
