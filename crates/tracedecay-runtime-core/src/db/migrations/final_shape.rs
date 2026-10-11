@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::LazyLock;
 
-use crate::db::engine::QueryExecutor;
+use serde::{Deserialize, Serialize};
+
+use crate::db::engine::{BackendKind, QueryExecutor};
 use tracedecay_domain::canonical_text::canonical_framed_sha256;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -12,8 +14,9 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 /// every cache keyed on the digest; keep it stable.
 const SCHEMA_SHAPE_FINGERPRINT_DOMAIN: &[u8] = b"tracedecay.final-schema-shape.v1";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct SchemaObject {
+    #[serde(rename = "type")]
     object_type: String,
     table: String,
     sql: String,
@@ -23,6 +26,44 @@ type SchemaInventory = BTreeMap<String, SchemaObject>;
 
 static EXPECTED_FINAL_SHAPE: LazyLock<std::result::Result<SchemaInventory, String>> =
     LazyLock::new(build_expected_final_shape);
+
+/// Workspace path of the native golden inventory.
+const NATIVE_FINAL_SHAPE_GOLDEN_PATH: &str =
+    "crates/tracedecay-runtime-core/src/db/migrations/native_final_shape.json";
+
+/// The `sqlite_master` inventory of a fresh native install, as Turso persists
+/// it. Regenerate after any memory-store DDL change with
+/// `bz run //crates/tracedecay-runtime-core:unit_test -- native_final_shape_golden`.
+const NATIVE_FINAL_SHAPE_GOLDEN: &str = include_str!("native_final_shape.json");
+
+static NATIVE_FINAL_SHAPE: LazyLock<std::result::Result<SchemaInventory, String>> =
+    LazyLock::new(|| {
+        serde_json::from_str(NATIVE_FINAL_SHAPE_GOLDEN)
+            .map_err(|error| format!("native final-shape golden is malformed: {error}"))
+    });
+
+fn expected_inventory(backend: BackendKind) -> Result<&'static SchemaInventory> {
+    match backend {
+        BackendKind::Sqlite => &EXPECTED_FINAL_SHAPE,
+        BackendKind::NativeTurso => &NATIVE_FINAL_SHAPE,
+    }
+    .as_ref()
+    .map_err(|error| database_error(error.clone()))
+}
+
+/// The inventory of the owned-store engine compiled into this binary.
+fn compiled_engine_inventory() -> Result<&'static SchemaInventory> {
+    expected_inventory(match tracedecay_sql::ENGINE {
+        tracedecay_sql::Engine::Sqlite => BackendKind::Sqlite,
+        tracedecay_sql::Engine::Native => BackendKind::NativeTurso,
+    })
+}
+
+fn render_native_golden(inventory: &SchemaInventory) -> std::result::Result<String, String> {
+    serde_json::to_string_pretty(inventory)
+        .map(|json| json + "\n")
+        .map_err(|error| format!("failed to render native final-shape golden: {error}"))
+}
 
 fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> {
     let connection = rusqlite::Connection::open_in_memory()
@@ -129,10 +170,7 @@ where
 /// migration DDL. Callers that need the schema read this instead of keeping a
 /// second document.
 pub fn render_expected_final_schema_markdown() -> Result<String> {
-    let inventory = EXPECTED_FINAL_SHAPE
-        .as_ref()
-        .map_err(|error| database_error(error.clone()))?;
-    Ok(render_schema_markdown(inventory))
+    Ok(render_schema_markdown(compiled_engine_inventory()?))
 }
 
 fn render_schema_markdown(inventory: &SchemaInventory) -> String {
@@ -185,9 +223,7 @@ fn write_schema_section(out: &mut String, title: &str, objects: &[(&str, &Schema
 
 /// Fingerprint of the exact final shape this binary creates and admits.
 pub fn expected_final_schema_fingerprint() -> Result<String> {
-    let inventory = EXPECTED_FINAL_SHAPE
-        .as_ref()
-        .map_err(|error| database_error(error.clone()))?;
+    let inventory = compiled_engine_inventory()?;
     Ok(fingerprint_schema_objects(inventory.iter().map(
         |(name, object)| (name.as_str(), object.sql.as_str()),
     )))
@@ -197,7 +233,7 @@ pub(super) fn require_admissible_final_shape_rusqlite(
     connection: &rusqlite::Connection,
 ) -> Result<()> {
     let actual = read_rusqlite_inventory(connection).map_err(database_error)?;
-    require_final_shape_inventory(&actual)
+    require_final_shape_inventory(expected_inventory(BackendKind::Sqlite)?, &actual)
 }
 
 async fn read_inventory(conn: &impl QueryExecutor) -> Result<SchemaInventory> {
@@ -268,18 +304,14 @@ fn reset_required(reason: impl Into<String>) -> TraceDecayError {
 }
 
 pub(super) async fn require_exact_final_shape(conn: &impl QueryExecutor) -> Result<()> {
-    if conn.backend_kind() == crate::db::engine::BackendKind::NativeTurso {
-        return Err(database_error(
-            "native final-memory schema inventory verification is not implemented; registered native admission remains unavailable".to_owned(),
-        ));
-    }
-    require_final_shape_inventory(&read_inventory(conn).await?)
+    let expected = expected_inventory(conn.backend_kind())?;
+    require_final_shape_inventory(expected, &read_inventory(conn).await?)
 }
 
-fn require_final_shape_inventory(actual: &SchemaInventory) -> Result<()> {
-    let expected = EXPECTED_FINAL_SHAPE
-        .as_ref()
-        .map_err(|error| database_error(error.clone()))?;
+fn require_final_shape_inventory(
+    expected: &SchemaInventory,
+    actual: &SchemaInventory,
+) -> Result<()> {
     for (name, expected_object) in expected {
         let Some(actual_object) = actual.get(name) else {
             return Err(reset_required(format!(
@@ -310,13 +342,11 @@ fn require_final_shape_inventory(actual: &SchemaInventory) -> Result<()> {
 mod render_tests {
     use std::collections::BTreeSet;
 
-    use super::{EXPECTED_FINAL_SHAPE, render_expected_final_schema_markdown};
+    use super::{compiled_engine_inventory, render_expected_final_schema_markdown};
 
     #[test]
     fn rendered_schema_markdown_is_the_admission_inventory() {
-        let inventory = EXPECTED_FINAL_SHAPE
-            .as_ref()
-            .expect("canonical schema inventory");
+        let inventory = compiled_engine_inventory().expect("canonical schema inventory");
         let markdown = render_expected_final_schema_markdown().expect("schema markdown");
         let headings: BTreeSet<&str> = markdown
             .lines()
@@ -372,6 +402,80 @@ mod fingerprint_tests {
             same_key,
             fingerprint_schema_objects(different_ddl),
             "a DDL change must produce a different cache key"
+        );
+    }
+}
+
+#[cfg(test)]
+mod native_final_shape_golden {
+    use std::path::Path;
+
+    use super::{
+        NATIVE_FINAL_SHAPE_GOLDEN, NATIVE_FINAL_SHAPE_GOLDEN_PATH, read_inventory,
+        render_native_golden,
+    };
+    use crate::db::engine::NativeTestConnection;
+
+    /// Catches a memory-store DDL change that was not regenerated into the
+    /// golden, which would refuse every fresh native store. Under `bz run`
+    /// this test writes the golden instead of comparing it.
+    #[tokio::test]
+    async fn native_final_shape_golden_matches_a_fresh_native_install() {
+        let directory = tempfile::tempdir().expect("golden temp dir");
+        let connection = NativeTestConnection::open(&directory.path().join("golden.db"))
+            .expect("open native golden store");
+        let transaction = connection
+            .authorized_long_lease_transaction()
+            .await
+            .expect("begin native golden install");
+        super::super::install_final_schema_objects(&transaction)
+            .await
+            .expect("install final schema objects on native");
+        transaction.commit().await.expect("commit native golden");
+        let rendered = render_native_golden(
+            &read_inventory(&*connection)
+                .await
+                .expect("read native inventory"),
+        )
+        .expect("render native golden");
+        if let Some(workspace) = std::env::var_os("BUILD_WORKSPACE_DIRECTORY") {
+            std::fs::write(
+                Path::new(&workspace).join(NATIVE_FINAL_SHAPE_GOLDEN_PATH),
+                rendered,
+            )
+            .expect("write native golden");
+            return;
+        }
+        assert!(
+            rendered == NATIVE_FINAL_SHAPE_GOLDEN,
+            "native final-shape golden is stale; run \
+             `bz run //crates/tracedecay-runtime-core:unit_test -- native_final_shape_golden`"
+        );
+    }
+
+    /// Catches native admission refusing the shape this binary installs, or
+    /// admitting a store that lost an object of it.
+    #[tokio::test]
+    async fn native_admission_accepts_the_installed_shape_and_refuses_drift() {
+        let directory = tempfile::tempdir().expect("admission temp dir");
+        let connection = NativeTestConnection::open(&directory.path().join("memory.db"))
+            .expect("open native store");
+        super::super::create_schema_connection(&connection)
+            .await
+            .expect("fresh native schema installs and admits");
+        super::super::verify_final_schema_connection(&*connection)
+            .await
+            .expect("installed native shape is admitted");
+        connection
+            .execute_batch("DROP INDEX idx_read_cache_session")
+            .await
+            .expect("drop one final-shape index");
+        let error = super::super::verify_final_schema_connection(&*connection)
+            .await
+            .expect_err("a native store missing a final-shape index is refused");
+        assert!(
+            error.is_store_reset_required(),
+            "drift must be a typed reset, got {error}"
         );
     }
 }

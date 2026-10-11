@@ -1525,6 +1525,82 @@ mod tests {
         }
     }
 
+    /// Catches any registered stage whose DDL, guard trigger, or admission
+    /// query the native engine rejects. A session store installs every stage,
+    /// then reopens through the same classification as an exactly current
+    /// store whose authority contract still validates.
+    #[tokio::test]
+    async fn the_full_registered_stage_sequence_installs_and_readmits_on_native() {
+        use tracedecay_runtime_core::db::engine::NativeTestConnection;
+
+        let directory = TempDir::new().expect("temp dir");
+        let path = directory.path().join("registered.db");
+        for fresh in [true, false] {
+            let connection = NativeTestConnection::open(&path).expect("open native store");
+            let super::RegisteredSchemaAdmission::Admissible(classification) =
+                super::classify_registered_schema_admission(
+                    &*connection,
+                    &tracedecay_store::StoreShardScopeV1::ProfileSessions,
+                )
+                .await
+                .expect("classify native registered schema")
+            else {
+                panic!("native registered schema refused a session authority");
+            };
+            assert_eq!(classification.configuration_fresh.is_some(), fresh);
+            assert_eq!(
+                classification.temporal_admission,
+                if fresh {
+                    super::session_temporal_schema::SessionTemporalSchemaAdmission::Fresh
+                } else {
+                    super::session_temporal_schema::SessionTemporalSchemaAdmission::Current
+                }
+            );
+            let force_exhaustive = !super::authority_invariant_triggers_intact(&*connection)
+                .await
+                .expect("inspect native authority triggers");
+            assert_eq!(force_exhaustive, fresh);
+            let transaction = connection
+                .authorized_long_lease_transaction()
+                .await
+                .expect("begin native schema install");
+            let refused = super::install_registered_schema_stages(
+                &transaction,
+                classification.configuration_fresh.as_ref(),
+                classification.temporal_admission,
+                classification.session_features,
+                force_exhaustive,
+            )
+            .await
+            .expect("install every registered stage on native");
+            assert!(refused.is_none(), "native install refused an authority");
+            transaction.commit().await.expect("commit native schema");
+            for sql in super::observation_projection::OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL
+                .iter()
+                .chain(tracedecay_lcm::schema::LCM_STATUS_PERFORMANCE_INDEX_SQL)
+            {
+                connection
+                    .execute_batch(sql)
+                    .await
+                    .expect("build native performance index");
+            }
+            super::validate_admitted_authority_schema(&*connection, fresh)
+                .await
+                .expect("native authority schema validates");
+            if fresh {
+                super::ensure_fresh_authority_invariants(&*connection)
+                    .await
+                    .expect("record native fresh authority checkpoint");
+            }
+            assert!(
+                super::authority_invariant_triggers_intact(&*connection)
+                    .await
+                    .expect("inspect native authority triggers"),
+                "native install left an authority trigger missing or drifted"
+            );
+        }
+    }
+
     /// Every registered store a released binary wrote carries the same
     /// session-feature markers, `global.db` included. A session store with an
     /// older LCM, git correlation, or workflow schema is refused for its

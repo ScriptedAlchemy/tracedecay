@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::handle::{SessionTemporalAccess, SessionTemporalQuery, SessionTemporalRegisteredDb};
-use tracedecay_runtime_core::db::engine::{BackendKind, Error as EngineError};
+use tracedecay_runtime_core::db::engine::{BackendKind, Error as EngineError, params};
 use tracedecay_runtime_core::db::native_search::{SearchIndex, normalize_schema_sql};
 
 use crate::schema_constants::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
@@ -943,8 +943,6 @@ async fn diagnose_snapshot(
     }
 
     if conn.backend_kind() == BackendKind::NativeTurso {
-        status = SessionTemporalHealthStatus::Partial;
-        partial_reasons.insert("native_search: posting_membership_check_unavailable".to_owned());
         for (index, kind) in [
             (
                 SearchIndex::Occurrence,
@@ -955,9 +953,9 @@ async fn diagnose_snapshot(
                 SessionTemporalHealthFindingKind::SummaryFtsCorruption,
             ),
         ] {
-            match native_search_index_readable(conn, index).await {
-                Ok(true) => {}
-                Ok(false) => merge_finding(&mut findings, kind, 1),
+            match native_posting_drift(conn, index).await {
+                Ok(0) => {}
+                Ok(drift) => merge_finding(&mut findings, kind, drift),
                 Err(error) if error.is_busy_or_locked() => {
                     return unavailable_report_with_detail(
                         SessionTemporalHealthStatus::Locked,
@@ -966,6 +964,7 @@ async fn diagnose_snapshot(
                     );
                 }
                 Err(error) => {
+                    status = SessionTemporalHealthStatus::Partial;
                     merge_finding(&mut findings, kind, 1);
                     partial_reasons.insert(format!("native_search: {error}"));
                 }
@@ -1010,10 +1009,16 @@ async fn diagnose_snapshot(
     }
 }
 
-async fn native_search_index_readable(
+/// Counts canonical rows the native index holds no posting for, plus postings
+/// it holds for no canonical row. Canonical rows are enumerated in rowid
+/// batches; each batch's rowid range, which together partition the whole
+/// rowid space, is matched with Tantivy's match-all query `*`, so the whole
+/// table is covered in bounded memory. A missing or drifted index definition
+/// is one finding.
+async fn native_posting_drift(
     conn: &impl crate::handle::SessionTemporalQuery,
     index: SearchIndex,
-) -> tracedecay_runtime_core::db::engine::Result<bool> {
+) -> tracedecay_runtime_core::db::engine::Result<u64> {
     let mut rows = conn
         .query(
             "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1 AND tbl_name = ?2",
@@ -1021,22 +1026,50 @@ async fn native_search_index_readable(
         )
         .await?;
     let Some(row) = rows.next().await? else {
-        return Ok(false);
+        return Ok(1);
     };
     let sql: String = row.get(0)?;
     if normalize_schema_sql(&sql) != normalize_schema_sql(index.create_sql()) {
-        return Ok(false);
+        return Ok(1);
     }
-    conn.query(
-        &format!(
-            "SELECT rowid FROM {} WHERE fts_match({}, ?1) LIMIT 1",
-            index.table_name(),
-            index.columns().join(", ")
-        ),
-        ["tracedecay_health_probe_token"],
-    )
-    .await?;
-    Ok(true)
+    drop(rows);
+    let table = index.table_name();
+    let canonical_sql =
+        format!("SELECT rowid FROM {table} WHERE rowid > ?1 ORDER BY rowid LIMIT ?2");
+    let indexed_sql = format!(
+        "SELECT rowid FROM {table} WHERE fts_match({}, ?1) AND rowid > ?2 AND rowid <= ?3",
+        index.columns().join(", ")
+    );
+    let mut after = i64::MIN;
+    let mut drift = 0_u64;
+    loop {
+        let mut batch = BTreeSet::new();
+        let mut rows = conn
+            .query(&canonical_sql, params![after, HEALTH_PROBE_PAGE_SIZE])
+            .await?;
+        while let Some(row) = rows.next().await? {
+            batch.insert(row.get::<i64>(0)?);
+        }
+        let last_batch = batch.len() < HEALTH_PROBE_PAGE_SIZE as usize;
+        let upper = match batch.last() {
+            Some(&last) if !last_batch => last,
+            _ => i64::MAX,
+        };
+        let mut hits = conn.query(&indexed_sql, params!["*", after, upper]).await?;
+        let mut matched = 0_u64;
+        while let Some(row) = hits.next().await? {
+            if batch.contains(&row.get::<i64>(0)?) {
+                matched += 1;
+            } else {
+                drift += 1;
+            }
+        }
+        drift += batch.len() as u64 - matched;
+        if last_batch || drift >= MAX_FINDING_COUNT {
+            return Ok(drift.min(MAX_FINDING_COUNT));
+        }
+        after = upper;
+    }
 }
 
 async fn diagnose_health_check(
@@ -1413,6 +1446,60 @@ mod probe_tests {
         assert_eq!(
             partial_reasons,
             BTreeSet::from(["missing_anchor: bounded_row_probe_incomplete".to_owned()])
+        );
+    }
+
+    /// Catches a native membership probe that miscounts healthy postings: a
+    /// match-all query that bypassed the index, or batch ranges that skip or
+    /// double count rows across the batch boundary or after deletes. A
+    /// dropped index must still surface as a finding.
+    #[tokio::test]
+    async fn native_posting_membership_covers_every_batch_and_flags_a_missing_index() {
+        use tracedecay_runtime_core::db::engine::NativeTestConnection;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let connection =
+            NativeTestConnection::open(&tmp.path().join("doctor-native.db")).expect("native");
+        let values = (1..=HEALTH_PROBE_PAGE_SIZE * 2 + 37)
+            .map(|value| format!("({}, 'occurrence word{value}')", value * 3))
+            .collect::<Vec<_>>()
+            .join(", ");
+        SessionTemporalExec::execute_batch(
+            &*connection,
+            &format!(
+                "CREATE TABLE session_occurrences (rowid INTEGER PRIMARY KEY, index_text TEXT NOT NULL);
+                 CREATE TABLE session_summary_nodes (rowid INTEGER PRIMARY KEY, summary_text TEXT NOT NULL);
+                 {}
+                 {}
+                 INSERT INTO session_occurrences (rowid, index_text) VALUES {values};
+                 INSERT INTO session_summary_nodes (rowid, summary_text)
+                 SELECT rowid, index_text FROM session_occurrences;
+                 DELETE FROM session_occurrences WHERE rowid % 7 = 0;",
+                SearchIndex::Occurrence.create_sql(),
+                SearchIndex::Summary.create_sql(),
+            ),
+        )
+        .await
+        .expect("seed native search rows");
+
+        for index in [SearchIndex::Occurrence, SearchIndex::Summary] {
+            assert_eq!(
+                native_posting_drift(&*connection, index)
+                    .await
+                    .expect("native posting membership"),
+                0,
+                "healthy {} postings reported drift",
+                index.index_name()
+            );
+        }
+        SessionTemporalExec::execute_batch(&*connection, "DROP INDEX session_summary_nodes_fts")
+            .await
+            .expect("drop summary index");
+        assert_eq!(
+            native_posting_drift(&*connection, SearchIndex::Summary)
+                .await
+                .expect("probe without index"),
+            1
         );
     }
 
