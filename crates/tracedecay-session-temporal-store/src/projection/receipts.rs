@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -28,6 +28,7 @@ use crate::sql::{SHARED_GENERATION_TABLES, live_effect_predicate};
 )]
 pub async fn validate_final_projection_receipt(
     conn: &impl crate::handle::SessionTemporalQuery,
+    reads: Option<&ProjectionSegmentReads>,
     session_id: &tracedecay_domain::SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
     watermarks: &tracedecay_store::SessionFrozenWatermarksV1,
@@ -36,74 +37,123 @@ pub async fn validate_final_projection_receipt(
 ) -> SessionStoreResult<()> {
     checkpoint_relation_rebuild_control(control)?;
     let generation_i64 = generation_i64(generation, super::super::query::ACTIVATE_OPERATION)?;
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*), MIN(batch_ordinal), MAX(batch_ordinal)
-             FROM session_temporal_projection_receipts
-             WHERE session_id = ?1 AND generation = ?2",
-            params![session_id.as_str(), generation_i64],
-        )
-        .await
-        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?
-        .ok_or_else(|| {
-            storage_message(
-                super::super::query::ACTIVATE_OPERATION,
-                "projection receipt aggregate returned no row",
-            )
-        })?;
-    let count: i64 = row
-        .get(0)
-        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-    let minimum: Option<i64> = row
-        .get(1)
-        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-    let maximum: Option<i64> = row
-        .get(2)
-        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-    drop(rows);
+    let (count, minimum, maximum) = match reads {
+        Some(reads) => reads.aggregate(session_id.as_str(), generation_i64),
+        None => {
+            let mut rows = conn
+                .query(
+                    "SELECT COUNT(*), MIN(batch_ordinal), MAX(batch_ordinal)
+                     FROM session_temporal_projection_receipts
+                     WHERE session_id = ?1 AND generation = ?2",
+                    params![session_id.as_str(), generation_i64],
+                )
+                .await
+                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?
+                .ok_or_else(|| {
+                    storage_message(
+                        super::super::query::ACTIVATE_OPERATION,
+                        "projection receipt aggregate returned no row",
+                    )
+                })?;
+            let count: i64 = row
+                .get(0)
+                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+            let minimum: Option<i64> = row
+                .get(1)
+                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+            let maximum: Option<i64> = row
+                .get(2)
+                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+            drop(rows);
+            (count, minimum, maximum)
+        }
+    };
     if count <= 0 || minimum != Some(0) || maximum != Some(count - 1) {
         return Err(storage_message(
             super::super::query::ACTIVATE_OPERATION,
             "candidate projection receipts are missing or noncontiguous",
         ));
     }
-    let mut rows = conn
-        .query(
-            "SELECT source_through, projection_through,
-                    occurrence_count, occurrence_digest,
-                    dimension_count, dimension_digest,
-                    copy_count, copy_digest,
-                    assertion_count, assertion_digest,
-                    supersession_count, supersession_digest,
-                    current_count, current_digest,
-                    fts_count, fts_digest
-             FROM session_temporal_projection_receipts
-             WHERE session_id = ?1 AND generation = ?2
-             ORDER BY batch_ordinal DESC LIMIT 1",
-            params![session_id.as_str(), generation_i64],
-        )
-        .await
-        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?
-        .ok_or_else(|| {
-            storage_message(
-                super::super::query::ACTIVATE_OPERATION,
-                "candidate final projection receipt is missing",
+    let (source_through, projection_through, expected) = match reads {
+        Some(reads) => {
+            let row = reads
+                .final_receipt(session_id.as_str(), generation_i64)
+                .ok_or_else(|| {
+                    storage_message(
+                        super::super::query::ACTIVATE_OPERATION,
+                        "candidate final projection receipt is missing",
+                    )
+                })?;
+            (
+                row.source_through,
+                row.projection_through,
+                row.coverage.clone(),
             )
-        })?;
-    let source_through: i64 = row
-        .get(0)
-        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-    let projection_through: i64 = row
-        .get(1)
-        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+        }
+        None => {
+            let mut rows = conn
+                .query(
+                    "SELECT source_through, projection_through,
+                            occurrence_count, occurrence_digest,
+                            dimension_count, dimension_digest,
+                            copy_count, copy_digest,
+                            assertion_count, assertion_digest,
+                            supersession_count, supersession_digest,
+                            current_count, current_digest,
+                            fts_count, fts_digest
+                     FROM session_temporal_projection_receipts
+                     WHERE session_id = ?1 AND generation = ?2
+                     ORDER BY batch_ordinal DESC LIMIT 1",
+                    params![session_id.as_str(), generation_i64],
+                )
+                .await
+                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?
+                .ok_or_else(|| {
+                    storage_message(
+                        super::super::query::ACTIVATE_OPERATION,
+                        "candidate final projection receipt is missing",
+                    )
+                })?;
+            let source_through: i64 = row
+                .get(0)
+                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+            let projection_through: i64 = row
+                .get(1)
+                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+            let expected = {
+                let component = |index: i32| -> SessionStoreResult<RowMultisetDigest> {
+                    let count =
+                        usize::try_from(row.get::<i64>(index * 2 + 2).map_err(|error| {
+                            storage(super::super::query::ACTIVATE_OPERATION, error)
+                        })?)
+                        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+                    let digest = row
+                        .get::<String>(index * 2 + 3)
+                        .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
+                    RowMultisetDigest::decode(count, &digest)
+                };
+                ProjectionCoverage {
+                    occurrences: component(0)?,
+                    dimensions: component(1)?,
+                    copies: component(2)?,
+                    assertions: component(3)?,
+                    supersession: component(4)?,
+                    current: component(5)?,
+                    fts: component(6)?,
+                }
+            };
+            drop(rows);
+            (source_through, projection_through, expected)
+        }
+    };
     if u64::try_from(source_through).ok() != Some(watermarks.source_frontier())
         || u64::try_from(projection_through).ok() != Some(watermarks.projection_frontier())
     {
@@ -112,28 +162,8 @@ pub async fn validate_final_projection_receipt(
             "final projection receipt does not cover the frozen frontiers",
         ));
     }
-    let count = |index| -> SessionStoreResult<usize> {
-        let value = row
-            .get::<i64>(index)
-            .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))?;
-        usize::try_from(value)
-            .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))
-    };
-    let digest = |index| {
-        row.get::<String>(index)
-            .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error))
-    };
-    let expected = ProjectionCoverage {
-        occurrences: RowMultisetDigest::decode(count(2)?, &digest(3)?)?,
-        dimensions: RowMultisetDigest::decode(count(4)?, &digest(5)?)?,
-        copies: RowMultisetDigest::decode(count(6)?, &digest(7)?)?,
-        assertions: RowMultisetDigest::decode(count(8)?, &digest(9)?)?,
-        supersession: RowMultisetDigest::decode(count(10)?, &digest(11)?)?,
-        current: RowMultisetDigest::decode(count(12)?, &digest(13)?)?,
-        fts: RowMultisetDigest::decode(count(14)?, &digest(15)?)?,
-    };
-    drop(rows);
-    let actual = candidate_projection_coverage(conn, session_id, generation, control).await?;
+    let actual =
+        candidate_projection_coverage(conn, session_id, generation, control, reads).await?;
     if actual != expected {
         return Err(storage_message(
             super::super::query::ACTIVATE_OPERATION,
@@ -150,7 +180,10 @@ pub async fn validate_final_projection_receipt(
         conn,
         session_id,
         generation_i64,
-        base_source_frontier(conn, session_id, generation_i64).await?,
+        match reads {
+            Some(reads) => reads.base_frontier(session_id.as_str(), generation_i64)?,
+            None => base_source_frontier(conn, session_id, generation_i64).await?,
+        },
         watermarks.source_frontier(),
         control,
     )
@@ -1060,6 +1093,7 @@ pub(crate) async fn candidate_projection_coverage(
     session_id: &tracedecay_domain::SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
     control: &ExecutionControl,
+    reads: Option<&ProjectionSegmentReads>,
 ) -> SessionStoreResult<ProjectionCoverage> {
     let cancellation = super::super::store::execution_control_graph_cancellation(control);
     let copies = match introduced_logical_copies(conn, session_id, generation, cancellation).await?
@@ -1069,24 +1103,49 @@ pub(crate) async fn candidate_projection_coverage(
         // the settled relations were reconstructed; recompute every
         // component from the rows the candidate reads with them.
         IntroducedCopies::Reconstructed(copies) => {
-            return full_projection_coverage(conn, session_id, generation, &copies, control).await;
+            return full_projection_coverage(conn, session_id, generation, &copies, control, reads)
+                .await;
         }
     };
     let generation_value = generation_i64(generation, PERSIST_OPERATION)?;
-    let mut coverage = base_projection_coverage(conn, session_id, generation_value).await?;
+    let mut coverage = match reads {
+        Some(reads) => reads.base_coverage(session_id.as_str(), generation_value)?,
+        None => base_projection_coverage(conn, session_id, generation_value).await?,
+    };
     for (index, sources) in coverage_components().into_iter().enumerate() {
         let digest = coverage_component_mut(&mut coverage, index);
-        for rows in [CoverageRows::Introduced, CoverageRows::Superseded] {
-            fold_coverage_rows(
-                conn,
-                session_id.as_str(),
-                generation_value,
-                sources,
-                rows,
-                digest,
-                control,
-            )
-            .await?;
+        for (direction, rows) in [
+            (0_u8, CoverageRows::Introduced),
+            (1_u8, CoverageRows::Superseded),
+        ] {
+            match reads {
+                Some(reads) => {
+                    if let Some(rows) =
+                        reads
+                            .fold_rows
+                            .get(&(session_id.as_str().to_owned(), index, direction))
+                    {
+                        for encoding in rows {
+                            match direction {
+                                1_u8 => digest.remove(encoding.as_bytes())?,
+                                _ => digest.add(encoding.as_bytes())?,
+                            }
+                        }
+                    }
+                }
+                None => {
+                    fold_coverage_rows(
+                        conn,
+                        session_id.as_str(),
+                        generation_value,
+                        sources,
+                        rows,
+                        digest,
+                        control,
+                    )
+                    .await?;
+                }
+            }
         }
     }
     for copy in &copies {
@@ -1108,20 +1167,37 @@ pub(crate) async fn full_projection_coverage(
     generation: tracedecay_domain::SessionProjectionGenerationV1,
     copies: &[LogicalCopyRelation],
     control: &ExecutionControl,
+    reads: Option<&ProjectionSegmentReads>,
 ) -> SessionStoreResult<ProjectionCoverage> {
     let generation_value = generation_i64(generation, PERSIST_OPERATION)?;
     let mut coverage = empty_projection_coverage();
     for (index, sources) in coverage_components().into_iter().enumerate() {
-        fold_coverage_rows(
-            conn,
-            session_id.as_str(),
-            generation_value,
-            sources,
-            CoverageRows::Visible,
-            coverage_component_mut(&mut coverage, index),
-            control,
-        )
-        .await?;
+        let digest = coverage_component_mut(&mut coverage, index);
+        match reads {
+            Some(reads) => {
+                if let Some(rows) =
+                    reads
+                        .fold_rows
+                        .get(&(session_id.as_str().to_owned(), index, 2_u8))
+                {
+                    for encoding in rows {
+                        digest.add(encoding.as_bytes())?;
+                    }
+                }
+            }
+            None => {
+                fold_coverage_rows(
+                    conn,
+                    session_id.as_str(),
+                    generation_value,
+                    sources,
+                    CoverageRows::Visible,
+                    digest,
+                    control,
+                )
+                .await?;
+            }
+        }
     }
     coverage.copies = copy_coverage(copies)?;
     Ok(coverage)
@@ -1201,6 +1277,411 @@ pub(crate) fn copy_coverage(
         digest.add(&copy_encoding(copy)?)?;
     }
     Ok(digest)
+}
+
+/// One projection receipt row a segment session holds: every component
+/// digest the final-receipt and base-coverage checks decode, plus the
+/// generation/ordinal keys the per-item queries select on.
+struct SegmentReceiptRow {
+    session_id: String,
+    generation: i64,
+    batch_ordinal: i64,
+    source_through: i64,
+    projection_through: i64,
+    coverage: ProjectionCoverage,
+}
+
+/// Candidate-validation rows a completion segment resolves once inside its
+/// group transaction. The projection receipt, generation and reset tables are
+/// written only by earlier committed transactions, and the coverage folds
+/// read rows this transaction never writes, so a `session_id IN` segment
+/// load sees exactly what the per-item scoped selects would see — session by
+/// session — while a duplicated session's later segment still loads after
+/// the earlier occurrence's writes. A failed grouped read propagates as the
+/// transaction's error; there is no fallback query.
+pub(crate) struct ProjectionSegmentReads {
+    receipts: HashMap<String, Vec<SegmentReceiptRow>>,
+    settled: HashMap<(String, i64), String>,
+    resets: HashMap<String, i64>,
+    /// Coverage row encodings per `(session_id, component index, direction)`
+    /// where direction is 0 = introduced, 1 = superseded, 2 = visible.
+    fold_rows: HashMap<(String, usize, u8), Vec<String>>,
+}
+
+impl ProjectionSegmentReads {
+    fn receipt_rows(
+        &self,
+        session_id: &str,
+        generation: i64,
+    ) -> impl Iterator<Item = &SegmentReceiptRow> {
+        self.receipts
+            .get(session_id)
+            .into_iter()
+            .flatten()
+            .filter(move |row| row.generation == generation)
+    }
+
+    /// COUNT(*), MIN(batch_ordinal), MAX(batch_ordinal) for one
+    /// `(session_id, generation)` — the per-item aggregate's result computed
+    /// from the segment's preloaded rows.
+    fn aggregate(&self, session_id: &str, generation: i64) -> (i64, Option<i64>, Option<i64>) {
+        let mut count = 0_i64;
+        let mut minimum: Option<i64> = None;
+        let mut maximum: Option<i64> = None;
+        for row in self.receipt_rows(session_id, generation) {
+            count += 1;
+            minimum = Some(minimum.map_or(row.batch_ordinal, |m: i64| m.min(row.batch_ordinal)));
+            maximum = Some(maximum.map_or(row.batch_ordinal, |m: i64| m.max(row.batch_ordinal)));
+        }
+        (count, minimum, maximum)
+    }
+
+    /// The row `ORDER BY batch_ordinal DESC LIMIT 1` would return.
+    fn final_receipt(&self, session_id: &str, generation: i64) -> Option<&SegmentReceiptRow> {
+        self.receipt_rows(session_id, generation)
+            .max_by_key(|row| row.batch_ordinal)
+    }
+
+    /// The receipt `base_projection_coverage` / `base_source_frontier` would
+    /// select: newest receipt below the candidate, whose generation is
+    /// settled (active/superseded) and above the session's reset point.
+    fn base_row(&self, session_id: &str, generation: i64) -> Option<&SegmentReceiptRow> {
+        let reset = self.resets.get(session_id).copied().unwrap_or(0);
+        self.receipts
+            .get(session_id)
+            .into_iter()
+            .flatten()
+            .filter(|row| row.generation < generation)
+            .filter(|row| row.generation > reset)
+            .filter(|row| {
+                matches!(
+                    self.settled.get(&(session_id.to_owned(), row.generation)),
+                    Some(state) if state == "active" || state == "superseded"
+                )
+            })
+            .max_by_key(|row| (row.generation, row.batch_ordinal))
+    }
+
+    fn base_coverage(
+        &self,
+        session_id: &str,
+        generation: i64,
+    ) -> SessionStoreResult<ProjectionCoverage> {
+        Ok(match self.base_row(session_id, generation) {
+            Some(row) => row.coverage.clone(),
+            None => empty_projection_coverage(),
+        })
+    }
+
+    fn base_frontier(&self, session_id: &str, generation: i64) -> SessionStoreResult<u64> {
+        match self.base_row(session_id, generation) {
+            Some(row) => u64::try_from(row.source_through)
+                .map_err(|error| storage(super::super::query::ACTIVATE_OPERATION, error)),
+            None => Ok(0),
+        }
+    }
+}
+
+/// Loads the segment's receipt, generation and reset rows plus every
+/// coverage row its candidates fold, inside the same transaction the group
+/// holds. `pairs` lists each item's `(session_id, candidate_generation)`
+/// from its resolved binding.
+#[tracing::instrument(
+    name = "session_temporal.projection.segment_reads",
+    level = "trace",
+    skip_all
+)]
+pub(crate) async fn load_projection_segment_reads(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    session_ids: &str,
+    pairs: &str,
+    control: &ExecutionControl,
+) -> SessionStoreResult<ProjectionSegmentReads> {
+    let mut receipts: HashMap<String, Vec<SegmentReceiptRow>> = HashMap::new();
+    let mut rows = conn
+        .query(
+            "SELECT source_through, projection_through,
+                    occurrence_count, occurrence_digest, dimension_count, dimension_digest,
+                    copy_count, copy_digest, assertion_count, assertion_digest,
+                    supersession_count, supersession_digest, current_count, current_digest,
+                    fts_count, fts_digest,
+                    session_id, generation, batch_ordinal
+             FROM session_temporal_projection_receipts
+             WHERE session_id IN (SELECT value FROM json_each(?1))",
+            params![session_ids],
+        )
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?
+    {
+        let component = |index: i32| -> SessionStoreResult<RowMultisetDigest> {
+            let count = usize::try_from(
+                row.get::<i64>(index * 2 + 2)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            )
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let digest = row
+                .get::<String>(index * 2 + 3)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            RowMultisetDigest::decode(count, &digest)
+        };
+        let entry = SegmentReceiptRow {
+            source_through: row
+                .get(0)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            projection_through: row
+                .get(1)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            coverage: ProjectionCoverage {
+                occurrences: component(0)?,
+                dimensions: component(1)?,
+                copies: component(2)?,
+                assertions: component(3)?,
+                supersession: component(4)?,
+                current: component(5)?,
+                fts: component(6)?,
+            },
+            session_id: row
+                .get(16)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            generation: row
+                .get(17)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            batch_ordinal: row
+                .get(18)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+        };
+        receipts
+            .entry(entry.session_id.clone())
+            .or_default()
+            .push(entry);
+    }
+    drop(rows);
+    let mut settled = HashMap::new();
+    let mut rows = conn
+        .query(
+            "SELECT session_id, generation, state
+             FROM session_temporal_generations
+             WHERE session_id IN (SELECT value FROM json_each(?1))",
+            params![session_ids],
+        )
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?
+    {
+        settled.insert(
+            (
+                row.get::<String>(0)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
+                row.get::<i64>(1)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            ),
+            row.get::<String>(2)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+        );
+    }
+    drop(rows);
+    let mut resets = HashMap::new();
+    let mut rows = conn
+        .query(
+            "SELECT session_id, reset_generation
+             FROM session_temporal_resets
+             WHERE session_id IN (SELECT value FROM json_each(?1))",
+            params![session_ids],
+        )
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?
+    {
+        resets.insert(
+            row.get::<String>(0)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            row.get::<i64>(1)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+        );
+    }
+    drop(rows);
+    let mut fold_rows: HashMap<(String, usize, u8), Vec<String>> = HashMap::new();
+    for (index, sources) in coverage_components().into_iter().enumerate() {
+        for rows_kind in [
+            CoverageRows::Introduced,
+            CoverageRows::Superseded,
+            CoverageRows::Visible,
+        ] {
+            fold_coverage_rows_grouped(
+                conn,
+                pairs,
+                index,
+                sources,
+                rows_kind,
+                &mut fold_rows,
+                control,
+            )
+            .await?;
+        }
+    }
+    Ok(ProjectionSegmentReads {
+        receipts,
+        settled,
+        resets,
+        fold_rows,
+    })
+}
+
+/// `coverage_sql` rewritten for a segment: the `?1` session scope becomes a
+/// join against the `pairs` json table and `?2` its per-session generation,
+/// so one paged scan serves every session in the segment. The page cursor
+/// gains the session key, keeping the same `(generation, rowid)` order per
+/// session.
+fn coverage_sql_grouped(
+    source: &CoverageSource,
+    rows: CoverageRows,
+) -> SessionStoreResult<Option<String>> {
+    let table = SHARED_GENERATION_TABLES
+        .iter()
+        .find(|table| table.name == source.table)
+        .ok_or_else(|| {
+            storage_message(
+                PERSIST_OPERATION,
+                "coverage source is not a generation-shared table",
+            )
+        })?;
+    let key_match = |alias: &str| {
+        table
+            .key
+            .split(", ")
+            .map(|column| format!("{alias}.{column} = row.{column}"))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    };
+    let (driver, from, scope, driver_session) = match rows {
+        CoverageRows::Visible => (
+            "row",
+            source.from.to_owned(),
+            if table.versioned {
+                format!(
+                    "row.generation <= pairs.generation AND NOT EXISTS (
+                         SELECT 1 FROM {name} AS newer
+                         WHERE newer.session_id = row.session_id AND {matches}
+                           AND newer.generation > row.generation AND newer.generation <= pairs.generation
+                     )",
+                    name = table.name,
+                    matches = key_match("newer"),
+                )
+            } else {
+                "row.generation <= pairs.generation".to_owned()
+            },
+            "row.session_id",
+        ),
+        CoverageRows::Introduced => (
+            "row",
+            source.from.to_owned(),
+            "row.generation = pairs.generation".to_owned(),
+            "row.session_id",
+        ),
+        CoverageRows::Superseded if !table.versioned => return Ok(None),
+        CoverageRows::Superseded => (
+            "successor",
+            format!("{} AS successor CROSS JOIN {}", table.name, source.from),
+            format!(
+                "successor.session_id = pairs.session_id
+                 AND successor.generation = pairs.generation
+                 AND row.generation < pairs.generation AND {matches}",
+                matches = key_match("successor"),
+            ),
+            "successor.session_id",
+        ),
+    };
+    Ok(Some(format!(
+        "SELECT {encoding}, {scope_session}, {driver}.generation, {driver}.rowid
+         FROM (SELECT json_extract(value, '$[0]') AS session_id,
+                      json_extract(value, '$[1]') AS generation
+               FROM json_each(?1)) AS pairs, {from}
+         WHERE {scope_session} = pairs.session_id AND {scope}
+           AND ({scope_session}, {driver}.generation, {driver}.rowid) > (?2, ?3, ?4)
+         ORDER BY {scope_session}, {driver}.generation, {driver}.rowid LIMIT ?5",
+        encoding = source.encoding,
+        scope_session = driver_session,
+    )))
+}
+
+/// The grouped twin of `fold_coverage_rows`: pages each component's rows for
+/// the whole segment at once and collects the raw encodings per session, so
+/// the per-item fold applies the identical `digest.add` sequence.
+async fn fold_coverage_rows_grouped(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    pairs: &str,
+    component: usize,
+    sources: &[CoverageSource],
+    rows_kind: CoverageRows,
+    out: &mut HashMap<(String, usize, u8), Vec<String>>,
+    control: &ExecutionControl,
+) -> SessionStoreResult<()> {
+    let direction = match rows_kind {
+        CoverageRows::Introduced => 0_u8,
+        CoverageRows::Superseded => 1_u8,
+        CoverageRows::Visible => 2_u8,
+    };
+    for source in sources {
+        let Some(sql) = coverage_sql_grouped(source, rows_kind)? else {
+            continue;
+        };
+        let mut after = (String::new(), 0_i64, 0_i64);
+        loop {
+            checkpoint_relation_rebuild_control(control)?;
+            let mut page = conn
+                .query(
+                    &sql,
+                    params![
+                        pairs,
+                        after.0.clone(),
+                        after.1,
+                        after.2,
+                        COVERAGE_DIGEST_PAGE_ROWS
+                    ],
+                )
+                .await
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let mut page_rows = 0_i64;
+            while let Some(row) = page
+                .next()
+                .await
+                .map_err(|error| storage(PERSIST_OPERATION, error))?
+            {
+                page_rows += 1;
+                let encoding: String = row
+                    .get(0)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?;
+                let session_id: String = row
+                    .get(1)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?;
+                let generation: i64 = row
+                    .get(2)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?;
+                let rowid: i64 = row
+                    .get(3)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?;
+                out.entry((session_id.clone(), component, direction))
+                    .or_default()
+                    .push(encoding);
+                after = (session_id, generation, rowid);
+            }
+            drop(page);
+            if page_rows < COVERAGE_DIGEST_PAGE_ROWS {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) async fn insert_projection_receipt(

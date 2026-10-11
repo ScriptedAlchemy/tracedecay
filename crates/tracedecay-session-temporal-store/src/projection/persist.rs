@@ -104,7 +104,8 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
     // generation's coverage plus the rows this candidate added and minus the
     // versions it superseded. Activation recomputes that delta before the CAS.
     let coverage = if terminal {
-        candidate_projection_coverage(conn, batch.session_id(), batch.generation(), control).await?
+        candidate_projection_coverage(conn, batch.session_id(), batch.generation(), control, None)
+            .await?
     } else {
         empty_projection_coverage()
     };

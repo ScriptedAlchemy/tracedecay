@@ -21,8 +21,8 @@ use tracing::Instrument as _;
 
 use super::cursor_keys::ensure_active_session_cursor_key_in_transaction;
 use super::projection::{
-    digest_bytes, persist_session_temporal_projection_batch_in_transaction,
-    validate_final_projection_receipt,
+    ProjectionSegmentReads, digest_bytes, load_projection_segment_reads,
+    persist_session_temporal_projection_batch_in_transaction, validate_final_projection_receipt,
 };
 use super::query::{
     decode_generation_i64, discard_candidate_rows, discard_session_rows, encode_watermarks,
@@ -1144,6 +1144,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .map_err(|error| storage(COMPLETE_REFRESH, error))?;
         let receipt = complete_session_refresh_in_transaction(
             &transaction,
+            None,
             request,
             &relation_projection,
             &execution_control,
@@ -1185,64 +1186,80 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .await
             .map_err(|error| storage(COMPLETE_REFRESH, error))?;
         let mut receipts = Vec::with_capacity(items.len());
-        for (index, (request, relation_projection)) in items.iter().enumerate() {
-            let savepoint = format!("refresh_complete_item_{index}");
-            if let Err(error) = transaction
-                .execute(&format!("SAVEPOINT {savepoint}"), ())
-                .await
-                .map_err(|error| storage(COMPLETE_REFRESH, error))
-            {
-                return abort_grouped_transaction(transaction, error, COMPLETE_REFRESH).await;
-            }
-            let receipt = complete_session_refresh_in_transaction(
+        for range in unique_session_ranges(items, |(request, _)| request.session_id()) {
+            let reads = match load_completion_segment(
                 &transaction,
-                request.clone(),
-                relation_projection,
+                &items[range.clone()],
                 &execution_control,
             )
-            .await;
-            let outcome = match receipt {
-                Ok(receipt) => match transaction
-                    .execute(&format!("RELEASE SAVEPOINT {savepoint}"), ())
+            .await
+            {
+                Ok(reads) => reads,
+                Err(error) => {
+                    return abort_grouped_transaction(transaction, error, COMPLETE_REFRESH).await;
+                }
+            };
+            for (index, (request, relation_projection)) in items[range.clone()].iter().enumerate() {
+                let index = range.start + index;
+                let savepoint = format!("refresh_complete_item_{index}");
+                if let Err(error) = transaction
+                    .execute(&format!("SAVEPOINT {savepoint}"), ())
                     .await
+                    .map_err(|error| storage(COMPLETE_REFRESH, error))
                 {
-                    Ok(_) => Ok(receipt),
-                    Err(error) => {
-                        return abort_grouped_transaction(
-                            transaction,
-                            storage(COMPLETE_REFRESH, error),
-                            COMPLETE_REFRESH,
-                        )
-                        .await;
-                    }
-                },
-                Err(item_error) => {
-                    let rollback = async {
-                        transaction
-                            .execute(&format!("ROLLBACK TO SAVEPOINT {savepoint}"), ())
-                            .await
-                            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
-                        transaction
-                            .execute(&format!("RELEASE SAVEPOINT {savepoint}"), ())
-                            .await
-                            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
-                        Ok::<_, SessionStoreError>(())
-                    }
-                    .await;
-                    match rollback {
-                        Ok(()) => Err(item_error),
-                        Err(rollback_error) => {
+                    return abort_grouped_transaction(transaction, error, COMPLETE_REFRESH).await;
+                }
+                let receipt = complete_session_refresh_in_transaction(
+                    &transaction,
+                    Some(&reads),
+                    request.clone(),
+                    relation_projection,
+                    &execution_control,
+                )
+                .await;
+                let outcome = match receipt {
+                    Ok(receipt) => match transaction
+                        .execute(&format!("RELEASE SAVEPOINT {savepoint}"), ())
+                        .await
+                    {
+                        Ok(_) => Ok(receipt),
+                        Err(error) => {
                             return abort_grouped_transaction(
                                 transaction,
-                                rollback_error,
+                                storage(COMPLETE_REFRESH, error),
                                 COMPLETE_REFRESH,
                             )
                             .await;
                         }
+                    },
+                    Err(item_error) => {
+                        let rollback = async {
+                            transaction
+                                .execute(&format!("ROLLBACK TO SAVEPOINT {savepoint}"), ())
+                                .await
+                                .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+                            transaction
+                                .execute(&format!("RELEASE SAVEPOINT {savepoint}"), ())
+                                .await
+                                .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+                            Ok::<_, SessionStoreError>(())
+                        }
+                        .await;
+                        match rollback {
+                            Ok(()) => Err(item_error),
+                            Err(rollback_error) => {
+                                return abort_grouped_transaction(
+                                    transaction,
+                                    rollback_error,
+                                    COMPLETE_REFRESH,
+                                )
+                                .await;
+                            }
+                        }
                     }
-                }
-            };
-            receipts.push(outcome);
+                };
+                receipts.push(outcome);
+            }
         }
         transaction
             .commit()
@@ -3188,36 +3205,269 @@ pub enum SessionRefreshCompletionStage {
     },
 }
 
+/// Maximal ranges of a group's items that each name every `session_id` at
+/// most once. A repeated session begins a new segment so its segment preload
+/// reads rows the earlier occurrence already wrote inside this transaction,
+/// preserving Joined and exact-receipt behavior for idempotent duplicates
+/// instead of rejecting the input.
+fn unique_session_ranges<'a, T>(
+    items: &'a [T],
+    session_id: impl Fn(&'a T) -> &'a SessionId,
+) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0_usize;
+    let mut seen = std::collections::HashSet::new();
+    for (index, item) in items.iter().enumerate() {
+        if !seen.insert(session_id(item).as_str()) {
+            ranges.push(start..index);
+            seen.clear();
+            seen.insert(session_id(item).as_str());
+            start = index;
+        }
+    }
+    if start < items.len() {
+        ranges.push(start..items.len());
+    }
+    ranges
+}
+
+/// A JSON array of the segment's session ids, bound into the dynamic
+/// `IN (SELECT value FROM json_each(?))` clauses grouped reads share.
+fn segment_sessions_json<'a, T>(
+    items: &'a [T],
+    session_id: impl Fn(&'a T) -> &'a SessionId,
+) -> SessionStoreResult<String> {
+    serde_json::to_string(
+        &items
+            .iter()
+            .map(|item| session_id(item).as_str())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| storage_message(COMPLETE_REFRESH, &error.to_string()))
+}
+
+/// Rows a completion segment resolves once inside its group transaction for
+/// every item it covers. Each keyed read is session-scoped and runs before
+/// the item's own writes, so within a segment of distinct session ids the
+/// preloaded row is identical to what the per-item query would return; a
+/// later segment loads after the previous segment's writes and therefore
+/// still sees them (Joined / already-completed receipts).
+struct CompletionSegmentReads {
+    receipts: std::collections::HashMap<(String, String), SessionRefreshReceiptV1>,
+    bindings: std::collections::HashMap<(String, String), (String, Result<RefreshBinding, String>)>,
+    progress: std::collections::HashMap<(String, String), SessionRefreshProgressV1>,
+    projection: ProjectionSegmentReads,
+}
+
+async fn load_completion_segment(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    items: &[(SessionRefreshCompletionRequestV1, SessionRelationProjection)],
+    execution_control: &ExecutionControl,
+) -> SessionStoreResult<CompletionSegmentReads> {
+    let sessions =
+        segment_sessions_json(items, |(request, _)| request.session_id()).map_err(|error| {
+            storage_message(COMPLETE_REFRESH, &format!("segment session list: {error}"))
+        })?;
+    let operation = COMPLETE_REFRESH;
+    let mut receipts = std::collections::HashMap::new();
+    let mut rows = conn
+        .query(
+            "SELECT terminal_state, frontier_json, coverage_json, failure_code, terminal_at,
+                    session_id, operation_id
+             FROM session_refresh_receipts
+             WHERE session_id IN (SELECT value FROM json_each(?1))",
+            params![sessions.as_str()],
+        )
+        .await
+        .map_err(|error| storage(operation, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(operation, error))?
+    {
+        let session_id: String = row.get(5).map_err(|error| storage(operation, error))?;
+        let operation_id: String = row.get(6).map_err(|error| storage(operation, error))?;
+        let receipt = decode_receipt(
+            &row,
+            SessionRefreshOperationIdV1::new(&operation_id)
+                .map_err(|error| storage_message(operation, &error.to_string()))?,
+            SessionId::new(&session_id)
+                .map_err(|error| storage_message(operation, &error.to_string()))?,
+        )?;
+        receipts.insert((session_id, operation_id), receipt);
+    }
+    drop(rows);
+    let mut bindings = std::collections::HashMap::new();
+    let mut rows = conn
+        .query(
+            "SELECT binding.generation, binding.source_frontier, binding.target_frontier,
+                    binding.frozen_watermarks_json, operation.state,
+                    binding.projector_version, binding.config_digest, binding.binding_digest,
+                    binding.session_id, binding.operation_id
+             FROM session_refresh_bindings AS binding
+             JOIN session_refresh_operations AS operation
+               ON operation.session_id = binding.session_id
+              AND operation.operation_id = binding.operation_id
+             WHERE binding.session_id IN (SELECT value FROM json_each(?1))",
+            params![sessions.as_str()],
+        )
+        .await
+        .map_err(|error| storage(operation, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(operation, error))?
+    {
+        let session_id: String = row.get(8).map_err(|error| storage(operation, error))?;
+        let operation_id: String = row.get(9).map_err(|error| storage(operation, error))?;
+        let state: String = row.get(4).map_err(|error| storage(operation, error))?;
+        let binding = decode_binding(&row, operation).map_err(|error| error.to_string());
+        bindings.insert((session_id, operation_id), (state, binding));
+    }
+    drop(rows);
+    let mut progress =
+        std::collections::HashMap::<(String, String), (i64, SessionRefreshProgressV1)>::new();
+    let mut rows = conn
+        .query(
+            "SELECT frontier_json, coverage_json, committed_batches,
+                    committed_records, recorded_at, progress_ordinal,
+                    session_id, operation_id
+             FROM session_refresh_progress
+             WHERE session_id IN (SELECT value FROM json_each(?1))",
+            params![sessions.as_str()],
+        )
+        .await
+        .map_err(|error| storage(operation, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(operation, error))?
+    {
+        let session_id: String = row.get(6).map_err(|error| storage(operation, error))?;
+        let operation_id: String = row.get(7).map_err(|error| storage(operation, error))?;
+        let ordinal: i64 = row.get(5).map_err(|error| storage(operation, error))?;
+        let decoded = decode_progress(
+            &row,
+            SessionRefreshOperationIdV1::new(&operation_id)
+                .map_err(|error| storage_message(operation, &error.to_string()))?,
+            SessionId::new(&session_id)
+                .map_err(|error| storage_message(operation, &error.to_string()))?,
+        )?;
+        match progress.entry((session_id, operation_id)) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if ordinal > entry.get().0 {
+                    entry.insert((ordinal, decoded));
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert((ordinal, decoded));
+            }
+        }
+    }
+    let mut pairs: Vec<(String, i64)> = Vec::with_capacity(items.len());
+    for (request, _) in items {
+        let key = (
+            request.session_id().as_str().to_owned(),
+            request.operation_id().as_str().to_owned(),
+        );
+        if let Some((_, Ok(binding))) = bindings.get(&key) {
+            pairs.push((key.0, generation_i64(binding.generation, operation)?));
+        }
+    }
+    let pairs_json = serde_json::to_string(&pairs)
+        .map_err(|error| storage_message(operation, &error.to_string()))?;
+    let projection =
+        load_projection_segment_reads(conn, &sessions, &pairs_json, execution_control).await?;
+    Ok(CompletionSegmentReads {
+        receipts,
+        bindings,
+        progress: progress
+            .into_iter()
+            .map(|(key, (_, decoded))| (key, decoded))
+            .collect(),
+        projection,
+    })
+}
+
 async fn complete_session_refresh_in_transaction(
     transaction: &impl SessionTemporalWriteTxn,
+    reads: Option<&CompletionSegmentReads>,
     request: SessionRefreshCompletionRequestV1,
     relation_projection: &SessionRelationProjection,
     execution_control: &ExecutionControl,
 ) -> SessionStoreResult<SessionRefreshReceiptV1> {
-    if let Some(receipt) =
-        read_receipt(transaction, request.session_id(), request.operation_id()).await?
-    {
+    let key = (
+        request.session_id().as_str().to_owned(),
+        request.operation_id().as_str().to_owned(),
+    );
+    let receipt = match reads {
+        Some(reads) => reads.receipts.get(&key).cloned(),
+        None => read_receipt(transaction, request.session_id(), request.operation_id()).await?,
+    };
+    if let Some(receipt) = receipt {
         require_exact_completion(&receipt, &request)?;
         checkpoint_relation_rebuild_control(execution_control)?;
         return Ok(receipt);
     }
-    let binding = require_running_binding(
-        transaction,
-        request.session_id(),
-        request.operation_id(),
-        COMPLETE_REFRESH,
-    )
-    .await?;
-    let progress = require_exact_terminal_progress(
-        transaction,
-        request.session_id(),
-        request.operation_id(),
-        request.frontier(),
-        request.coverage(),
-    )
-    .await?;
+    let binding = match reads {
+        Some(reads) => match reads.bindings.get(&key) {
+            None => {
+                return Err(storage_message(
+                    COMPLETE_REFRESH,
+                    "session refresh binding is missing",
+                ));
+            }
+            Some((state, _)) if state != "running" => {
+                return Err(SessionStoreError::InvalidRefreshState {
+                    operation_id: request.operation_id().clone(),
+                    state: decode_refresh_state(state, COMPLETE_REFRESH)?,
+                });
+            }
+            Some((_, Ok(binding))) => binding.clone(),
+            Some((_, Err(message))) => return Err(storage_message(COMPLETE_REFRESH, message)),
+        },
+        None => {
+            require_running_binding(
+                transaction,
+                request.session_id(),
+                request.operation_id(),
+                COMPLETE_REFRESH,
+            )
+            .await?
+        }
+    };
+    let progress = match reads {
+        Some(reads) => match reads.progress.get(&key) {
+            None => {
+                return Err(SessionStoreError::InvalidStateTransition {
+                    context: "refresh terminal transition requires durable progress",
+                });
+            }
+            Some(progress) => {
+                if progress.frontier() != request.frontier()
+                    || progress.coverage() != request.coverage()
+                {
+                    return Err(SessionStoreError::InvalidStateTransition {
+                        context: "refresh terminal transition must use last durable progress",
+                    });
+                }
+                progress.clone()
+            }
+        },
+        None => {
+            require_exact_terminal_progress(
+                transaction,
+                request.session_id(),
+                request.operation_id(),
+                request.frontier(),
+                request.coverage(),
+            )
+            .await?
+        }
+    };
     validate_final_projection_receipt(
         transaction,
+        reads.map(|reads| &reads.projection),
         request.session_id(),
         binding.generation,
         &binding.watermarks,

@@ -876,6 +876,7 @@ async fn grouped_completion_revalidates_evidence_after_staging() {
     let validation_snapshot = database.read_snapshot().await.unwrap();
     super::validate_final_projection_receipt(
         &validation_snapshot,
+        None,
         &session_id,
         generation,
         recovery.frozen_watermarks(),
@@ -2602,6 +2603,7 @@ async fn incremental_refresh_receipts_and_relations_equal_a_from_scratch_recompu
             generation,
             &reconstructed.logical_copies,
             &ExecutionControl::default(),
+            None,
         )
         .await
         .unwrap();
