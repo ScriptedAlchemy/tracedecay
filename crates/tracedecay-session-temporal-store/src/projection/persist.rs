@@ -247,6 +247,7 @@ pub(super) async fn persist_occurrences(
             .or_default()
             .push(occurrence);
     }
+    let mut memo = EnsureMemo::default();
     for occurrences in occurrences_by_source.into_values() {
         checkpoint_relation_rebuild_control(control)?;
         let first = occurrences.first().ok_or_else(|| {
@@ -266,10 +267,91 @@ pub(super) async fn persist_occurrences(
                     "canonical observation has no atomically recorded temporal effect output",
                 )
             })?;
-            persist_occurrence(conn, batch, occurrence, &canonical, output).await?;
+            persist_occurrence(conn, batch, occurrence, &canonical, output, &mut memo).await?;
         }
     }
     Ok(())
+}
+
+/// Tracks the minimum bound values already issued to the `ensure_*` writers
+/// for each entity within one projection batch. Each `ensure_*` statement is a
+/// monotone MIN-merge keyed on `(session_id, entity, generation)`, so a repeat
+/// call whose values cannot lower any bound already issued is a no-op and can
+/// be skipped without changing the committed rows.
+#[derive(Default)]
+struct EnsureMemo {
+    threads: BTreeMap<String, (String, i64)>,
+    turns: BTreeMap<String, (i64, String, i64)>,
+    agents: BTreeMap<String, i64>,
+}
+
+impl EnsureMemo {
+    fn thread_needs(&mut self, thread_id: &str, grouping: &str, created_at: i64) -> bool {
+        match self.threads.get_mut(thread_id) {
+            None => {
+                self.threads
+                    .insert(thread_id.to_string(), (grouping.to_string(), created_at));
+                true
+            }
+            Some(min) => {
+                let needs = grouping < min.0.as_str() || created_at < min.1;
+                if grouping < min.0.as_str() {
+                    min.0 = grouping.to_string();
+                }
+                if created_at < min.1 {
+                    min.1 = created_at;
+                }
+                needs
+            }
+        }
+    }
+
+    fn turn_needs(
+        &mut self,
+        turn_id: &str,
+        ordinal: i64,
+        grouping: &str,
+        created_at: i64,
+    ) -> bool {
+        match self.turns.get_mut(turn_id) {
+            None => {
+                self.turns.insert(
+                    turn_id.to_string(),
+                    (ordinal, grouping.to_string(), created_at),
+                );
+                true
+            }
+            Some(min) => {
+                let needs = ordinal < min.0 || grouping < min.1.as_str() || created_at < min.2;
+                if ordinal < min.0 {
+                    min.0 = ordinal;
+                }
+                if grouping < min.1.as_str() {
+                    min.1 = grouping.to_string();
+                }
+                if created_at < min.2 {
+                    min.2 = created_at;
+                }
+                needs
+            }
+        }
+    }
+
+    fn agent_needs(&mut self, agent_id: &str, created_at: i64) -> bool {
+        match self.agents.get_mut(agent_id) {
+            None => {
+                self.agents.insert(agent_id.to_string(), created_at);
+                true
+            }
+            Some(min) => {
+                let needs = created_at < *min;
+                if needs {
+                    *min = created_at;
+                }
+                needs
+            }
+        }
+    }
 }
 
 async fn persist_occurrence(
@@ -278,6 +360,7 @@ async fn persist_occurrence(
     occurrence: &MessageOccurrenceRecordV1,
     canonical: &CanonicalOccurrenceProjection,
     output: &SessionMessageProjection,
+    memo: &mut EnsureMemo,
 ) -> SessionStoreResult<bool> {
     let envelope = &canonical.envelope;
     if output.session().session_id != occurrence.session_id.as_str() {
@@ -304,29 +387,45 @@ async fn persist_occurrence(
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
     if let (Some(thread_id), Some(grouping)) = (&occurrence.thread_id, &occurrence.thread_grouping)
     {
-        ensure_thread(
-            conn,
-            batch.session_id().as_str(),
-            generation,
-            thread_id.as_str(),
-            &serde_json::to_string(grouping).map_err(|error| storage(PERSIST_OPERATION, error))?,
-            occurrence.knowledge_at.0,
-        )
-        .await?;
+        let grouping =
+            serde_json::to_string(grouping).map_err(|error| storage(PERSIST_OPERATION, error))?;
+        if memo.thread_needs(thread_id.as_str(), &grouping, occurrence.knowledge_at.0) {
+            ensure_thread(
+                conn,
+                batch.session_id().as_str(),
+                generation,
+                thread_id.as_str(),
+                &grouping,
+                occurrence.knowledge_at.0,
+            )
+            .await?;
+        }
     }
     if let (Some(turn_id), Some(grouping)) = (&occurrence.turn_id, &occurrence.turn_grouping) {
-        ensure_turn(
-            conn,
-            batch.session_id().as_str(),
-            generation,
+        let grouping =
+            serde_json::to_string(grouping).map_err(|error| storage(PERSIST_OPERATION, error))?;
+        let ordinal = i64::from(occurrence.projection_output_ordinal.value());
+        if memo.turn_needs(
             turn_id.as_str(),
-            &serde_json::to_string(grouping).map_err(|error| storage(PERSIST_OPERATION, error))?,
-            i64::from(occurrence.projection_output_ordinal.value()),
+            ordinal,
+            &grouping,
             occurrence.knowledge_at.0,
-        )
-        .await?;
+        ) {
+            ensure_turn(
+                conn,
+                batch.session_id().as_str(),
+                generation,
+                turn_id.as_str(),
+                &grouping,
+                ordinal,
+                occurrence.knowledge_at.0,
+            )
+            .await?;
+        }
     }
-    if let Some(agent_id) = &occurrence.agent_id {
+    if let Some(agent_id) = &occurrence.agent_id
+        && memo.agent_needs(agent_id.as_str(), occurrence.knowledge_at.0)
+    {
         ensure_agent(
             conn,
             batch.session_id().as_str(),
@@ -336,7 +435,9 @@ async fn persist_occurrence(
         )
         .await?;
     }
-    if let Some(parent_agent_id) = envelope.relations().parent_agent_id() {
+    if let Some(parent_agent_id) = envelope.relations().parent_agent_id()
+        && memo.agent_needs(parent_agent_id.as_str(), occurrence.knowledge_at.0)
+    {
         ensure_agent(
             conn,
             batch.session_id().as_str(),
