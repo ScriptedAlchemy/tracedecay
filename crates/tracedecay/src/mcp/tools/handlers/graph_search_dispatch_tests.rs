@@ -68,6 +68,7 @@ fn completed_sparse_search_for_generation(
                     qualified_name: "crate::SparseLexicalWidget".to_owned(),
                     kind: "function".to_owned(),
                     path: "src/lib.rs".to_owned(),
+                    site: None,
                 },
             )]),
             display_unavailable_by_anchor: HashMap::new(),

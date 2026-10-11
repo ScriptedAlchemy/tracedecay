@@ -598,7 +598,9 @@ mod tests {
             ),
             "{blocks:?}"
         );
-        let after = (blocks[0].len() + blocks[1].len()) / 4;
+        let after =
+            tracedecay_tokenizer::count_ordinary_tokens(&format!("{}{}", blocks[0], blocks[1]))
+                .expect("tokenizer");
         assert_eq!(
             blocks[2],
             format!("\ntracedecay_metrics: before=200 after={after}")
@@ -843,12 +845,10 @@ mod tests {
         crate::tools::response_trailers::account_tool_result(Some(root.path()), &mut rendered);
         let blocks = texts(&rendered);
         assert_eq!(blocks.len(), 2, "{blocks:?}");
+        let after = tracedecay_tokenizer::count_ordinary_tokens(&blocks[0]).expect("tokenizer");
         assert_eq!(
             blocks[1],
-            format!(
-                "\ntracedecay_metrics: before=10 after={}",
-                blocks[0].len() / 4
-            )
+            format!("\ntracedecay_metrics: before=10 after={after}")
         );
     }
 }

@@ -15,6 +15,7 @@ use tracedecay_contracts::{ApplicationOutcome, ResolvedSetting};
 use tracedecay_domain::configuration::{
     ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
 };
+use tracedecay_domain::errors::ProjectOpenFailureKind;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
@@ -307,19 +308,18 @@ fn render_current_project_daemon_status(
             dc.warn(&format!("{RUNTIME_TELEMETRY_PENDING} within {RUNTIME_TELEMETRY_WARMUP:?}; health remains unknown until the project is admitted"));
             DoctorDaemonFindingsV1::unread("daemon_storage_telemetry_pending")
         }
-        Some(Ok(Some(status))) => render_daemon_status(dc, status)?,
+        Some(Ok(Some(status))) => match crate::daemon::reject_stalled_project_open_status(status) {
+            Ok(()) => render_daemon_status(dc, status)?,
+            Err(error) => classify_daemon_status_or_reset(
+                dc,
+                profile_root,
+                project_path,
+                pending_reset,
+                &error,
+            ),
+        },
         Some(Err(error)) => {
-            if let Some((authority, reason)) = tracedecay_mcp::reset_required_context(error) {
-                *pending_reset = true;
-                dc.pending(&format!(
-                    "Current project is not served: {authority} requires reset ({reason}). \
-                     Pending operator action: run `{}`",
-                    tracedecay_mcp::reset_required_command(&authority, Some(project_path))
-                ));
-                DoctorDaemonFindingsV1::unread("reset_required")
-            } else {
-                classify_daemon_status_error(dc, profile_root, project_path, error)
-            }
+            classify_daemon_status_or_reset(dc, profile_root, project_path, pending_reset, error)
         }
     })
 }
@@ -781,6 +781,25 @@ fn daemon_runtime_status(
 /// The closed-connection / WAL recovery text belongs to a daemon that
 /// disappeared while owning the store. A profile that is still warming, or a
 /// repository walk blocked on one path, is a retryable state.
+fn classify_daemon_status_or_reset(
+    dc: &mut DoctorCounters,
+    profile_root: &Path,
+    project_path: &Path,
+    pending_reset: &mut bool,
+    error: &tracedecay_domain::errors::TraceDecayError,
+) -> DoctorDaemonFindingsV1 {
+    if let Some((authority, reason)) = tracedecay_mcp::reset_required_context(error) {
+        *pending_reset = true;
+        dc.pending(&format!(
+            "Current project is not served: {authority} requires reset ({reason}). \
+             Pending operator action: run `{}`",
+            tracedecay_mcp::reset_required_command(&authority, Some(project_path))
+        ));
+        return DoctorDaemonFindingsV1::unread("reset_required");
+    }
+    classify_daemon_status_error(dc, profile_root, project_path, error)
+}
+
 fn classify_daemon_status_error(
     dc: &mut DoctorCounters,
     profile_root: &Path,
@@ -794,6 +813,19 @@ fn classify_daemon_status_error(
     if crate::daemon::error_is_project_not_enrolled(error) {
         report_project_not_enrolled(dc, project_path);
         return DoctorDaemonFindingsV1::unread("project_not_enrolled");
+    }
+    if let Some((reason, _, detail)) = error.project_route_context()
+        && reason == crate::daemon::PROJECT_SERVER_CAPACITY_REASON_CODE
+    {
+        dc.fail(&format!("Project open stalled: {detail}"));
+        return DoctorDaemonFindingsV1::unread("project_server_capacity_reached");
+    }
+    // A stalled snapshot whose recorded cause was not a real project-route
+    // refusal arrives as the honest typed backoff, so the finding names that
+    // backoff kind instead of reporting the daemon unavailable.
+    if let Some(ProjectOpenFailureKind::BackedOff { .. }) = error.project_open_failure_kind() {
+        dc.fail(&format!("Project open stalled: {error}"));
+        return DoctorDaemonFindingsV1::unread("project_route_open_backoff");
     }
     report_daemon_diagnostics_unavailable(
         dc,

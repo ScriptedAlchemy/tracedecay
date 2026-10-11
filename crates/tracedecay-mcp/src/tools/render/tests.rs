@@ -58,6 +58,7 @@ fn truncated_json_envelope_reports_character_counts_for_utf8() {
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
     assert_eq!(parsed["original_chars"], MAX_RESPONSE_CHARS);
+    assert_eq!(parsed["truncated"], true);
     let preview = parsed["preview"].as_str().unwrap();
     assert_eq!(parsed["preview_chars"], preview.chars().count());
 }
