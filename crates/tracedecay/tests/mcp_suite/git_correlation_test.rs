@@ -251,7 +251,7 @@ async fn sessions_for_distinguishes_empty_correlation_index_from_no_match() {
         &project_root,
         TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
-            global_db_path: Some(base.join("global.db")),
+            global_db_path: Some(base.join(tracedecay_store::StoreFile::Profile.file_name())),
         },
     )
     .await
@@ -359,7 +359,7 @@ async fn sessions_for_names_the_sessions_that_touched_the_git_ref() {
         &project_root,
         TraceDecayOpenOptions {
             profile_root: Some(profile_root),
-            global_db_path: Some(base.join("global.db")),
+            global_db_path: Some(base.join(tracedecay_store::StoreFile::Profile.file_name())),
         },
     )
     .await

@@ -148,7 +148,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
-        let global_db_path = tmp_root.join("global").join("global.db");
+        let global_db_path = tmp_root.join("global").join(tracedecay_store::StoreFile::Profile.file_name());
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let profile = ProfileRoot::new(&profile_root)
             .with_global_db_override(&global_db_path);
@@ -423,7 +423,9 @@ fn fact_store_curate_answers_with_its_receipt_while_a_slow_curator_runs() {
         let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
-        let global_db_path = tmp_root.join("global").join("global.db");
+        let global_db_path = tmp_root
+            .join("global")
+            .join(tracedecay_store::StoreFile::Profile.file_name());
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
 
@@ -516,7 +518,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
-        let global_db_path = tmp_root.join("global").join("global.db");
+        let global_db_path = tmp_root.join("global").join(tracedecay_store::StoreFile::Profile.file_name());
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let profile = ProfileRoot::new(&profile_root)
             .with_global_db_override(&global_db_path);
@@ -670,7 +672,9 @@ fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_rece
         let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
-        let global_db_path = tmp_root.join("global").join("global.db");
+        let global_db_path = tmp_root
+            .join("global")
+            .join(tracedecay_store::StoreFile::Profile.file_name());
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
 

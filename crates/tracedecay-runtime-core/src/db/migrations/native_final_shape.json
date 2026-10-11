@@ -477,7 +477,7 @@
   "memory_v2_payloads_digest_delete": {
     "type": "trigger",
     "table": "memory_v2_assertion_payloads",
-    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_payloads_digest_delete AFTER DELETE ON memory_v2_assertion_payloads BEGIN DELETE FROM memory_v2_assertion_payload_digests WHERE payload_rowid = OLD.rowid; END"
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_payloads_digest_delete BEFORE DELETE ON memory_v2_assertion_payloads BEGIN DELETE FROM memory_v2_assertion_payload_digests WHERE payload_rowid = OLD.rowid; END"
   },
   "memory_v2_payloads_no_update": {
     "type": "trigger",

@@ -55,7 +55,7 @@ async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
     assert_eq!(worktree_cg.store_layout().data_root, main_store);
     assert_path_eq(
         &worktree_cg.store_layout().sessions_db_path,
-        main_store.join("sessions.db"),
+        main_store.join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
     );
     assert_path_eq(worktree_cg.db_path(), &main_database);
     assert!(
@@ -173,7 +173,7 @@ async fn linked_worktree_refuses_retired_local_enrollment_until_reset() {
     .unwrap();
     let options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
-        global_db_path: Some(profile_root.join("global.db")),
+        global_db_path: Some(profile_root.join(tracedecay_store::StoreFile::Profile.file_name())),
     };
 
     let refused = TraceDecay::resolve_store_layout_for_identity_with_options(&worktree, &options)
@@ -216,7 +216,7 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
     let second_worktree = dir.path().join("repo-wt-two");
     let home = test_home(&dir);
     let profile_root = home.join(".tracedecay");
-    let global_db_path = profile_root.join("global.db");
+    let global_db_path = profile_root.join(tracedecay_store::StoreFile::Profile.file_name());
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn registered_root() {}\n").unwrap();
     let profile = test_profile(&home);
@@ -243,8 +243,16 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
     ] {
         let data_root = profile_root.join(format!("projects/{project_id}"));
         fs::create_dir_all(&data_root).unwrap();
-        fs::write(data_root.join("tracedecay.db"), project_id).unwrap();
-        fs::write(data_root.join("sessions.db"), b"sessions").unwrap();
+        fs::write(
+            data_root.join(tracedecay_store::StoreFile::Project.file_name()),
+            project_id,
+        )
+        .unwrap();
+        fs::write(
+            data_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+            b"sessions",
+        )
+        .unwrap();
         branch_meta::save_branch_meta(&data_root, &BranchMeta::new("main")).unwrap();
         write_store_manifest_to_path(
             &data_root.join(STORE_MANIFEST_FILENAME),
@@ -255,8 +263,10 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
                 storage_mode: StorageMode::ProfileSharded,
                 project_root: manifest_root.to_path_buf(),
                 data_root,
-                graph_db_relpath: "tracedecay.db".into(),
-                sessions_db_relpath: "sessions.db".into(),
+                graph_db_relpath: tracedecay_store::StoreFile::Project.file_name().into(),
+                sessions_db_relpath: tracedecay_store::StoreFile::ProjectSessions
+                    .file_name()
+                    .into(),
                 branch_meta_relpath: "branch-meta.json".into(),
                 sessions_schema_digest: None,
             },

@@ -246,7 +246,10 @@ fn init_accepts_relative_current_directory() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        !project_root.join(".tracedecay/tracedecay.db").exists(),
+        !project_root
+            .join(".tracedecay")
+            .join(tracedecay_store::StoreFile::Project.file_name())
+            .exists(),
         "default init must use the profile-sharded store, not a repo-local graph DB"
     );
 }
@@ -996,7 +999,7 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
     std::fs::create_dir_all(&shard_root).unwrap();
     tracedecay_runtime_core::storage::pin_fixture_repository_identity(&project, "proj_cli")
         .unwrap();
-    let graph_db_path = shard_root.join("tracedecay.db");
+    let graph_db_path = shard_root.join(tracedecay_store::StoreFile::Project.file_name());
     std::thread::spawn(move || {
         create_runtime()
             .block_on(crate::common::initialize_test_database(&graph_db_path))
@@ -1008,7 +1011,9 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
     // registered-schema admission installs the production shape on first
     // mount; a non-empty wrong-shape file trips the workflow persisted-shape
     // gate and is refused as reset-required.
-    write_empty_sqlite_fixture(&shard_root.join("sessions.db"));
+    write_empty_sqlite_fixture(
+        &shard_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+    );
     write_branch_meta(&shard_root, &[]);
     let manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
@@ -1017,8 +1022,10 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
         storage_mode: StorageMode::ProfileSharded,
         project_root: project,
         data_root: shard_root.clone(),
-        graph_db_relpath: "tracedecay.db".into(),
-        sessions_db_relpath: "sessions.db".into(),
+        graph_db_relpath: tracedecay_store::StoreFile::Project.file_name().into(),
+        sessions_db_relpath: tracedecay_store::StoreFile::ProjectSessions
+            .file_name()
+            .into(),
         branch_meta_relpath: "branch-meta.json".into(),
         sessions_schema_digest: None,
     };
@@ -1169,7 +1176,11 @@ fn init_skips_gitignore_prompt_when_stdin_not_a_terminal() {
     assert!(
         std::fs::read_dir(profile_root(home.path()).join("projects"))
             .unwrap()
-            .any(|entry| entry.unwrap().path().join("tracedecay.db").is_file()),
+            .any(|entry| entry
+                .unwrap()
+                .path()
+                .join(tracedecay_store::StoreFile::Project.file_name())
+                .is_file()),
         "init should still create the project index in the profile store"
     );
     let gitignore = project.path().join(".gitignore");
@@ -2319,22 +2330,35 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
     #[cfg(unix)]
     std::fs::set_permissions(&identity_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    let database_paths = [
-        profile.join("global.db"),
-        profile.join("user-sessions.db"),
-        profile.join("user-memory.db"),
-        profile.join("projects/orphan-project/tracedecay.db"),
-        profile.join("projects/orphan-project/sessions.db"),
-        profile.join("stores/legacy-orphan/tracedecay.db"),
-        profile.join(format!("remote/nodes/{}/remote.db", "a".repeat(64))),
-    ];
-    for database in &database_paths {
-        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let mut member = database.as_os_str().to_os_string();
-            member.push(suffix);
-            std::fs::write(PathBuf::from(member), b"not a compatible SQLite schema").unwrap();
-        }
+    // Spelled out rather than taken from `StoreFile`, which wipe itself
+    // reads: the SQLite-era family of every owned store, plus the native
+    // family when the native engine is compiled in.
+    let mut suffixes = vec![".db", ".db-wal", ".db-shm", ".db-journal"];
+    if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Native {
+        suffixes.extend([".tdb", ".tdb-wal"]);
+    }
+    let database_members: Vec<PathBuf> = [
+        (profile.clone(), "global"),
+        (profile.clone(), "user-sessions"),
+        (profile.clone(), "user-memory"),
+        (profile.join("projects/orphan-project"), "tracedecay"),
+        (profile.join("projects/orphan-project"), "sessions"),
+        (profile.join("stores/legacy-orphan"), "tracedecay"),
+        (
+            profile.join(format!("remote/nodes/{}", "a".repeat(64))),
+            "remote",
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(directory, stem)| {
+        suffixes
+            .iter()
+            .map(move |suffix| directory.join(format!("{stem}{suffix}")))
+    })
+    .collect();
+    for member in &database_members {
+        std::fs::create_dir_all(member.parent().unwrap()).unwrap();
+        std::fs::write(member, b"not a compatible SQLite schema").unwrap();
     }
     let grafeo_paths = [
         profile.join("user-sessions.grafeo"),
@@ -2348,7 +2372,10 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
         std::fs::create_dir(&wal).unwrap();
         std::fs::write(wal.join("segment"), b"graph wal").unwrap();
     }
-    let host_admission = profile.join(".user-sessions.db.host-admission");
+    let host_admission = profile.join(format!(
+        ".{}.host-admission",
+        tracedecay_store::StoreFile::ProfileSessions.file_name()
+    ));
     std::fs::create_dir(&host_admission).unwrap();
     std::fs::write(host_admission.join("pending"), b"admission spool").unwrap();
     // What the beta.65 operator profile kept after `wipe --all` (#2875).
@@ -2391,15 +2418,8 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
             "wipe --all warning omitted {named_state:?}\nstderr:\n{stderr}"
         );
     }
-    for database in &database_paths {
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let mut member = database.as_os_str().to_os_string();
-            member.push(suffix);
-            assert_namespace_absent(
-                &PathBuf::from(member),
-                "wipe --all left a database family member",
-            );
-        }
+    for member in &database_members {
+        assert_namespace_absent(member, "wipe --all left a database family member");
     }
     for removed_root in ["projects", "stores", "remote"] {
         assert_namespace_absent(
@@ -2516,7 +2536,11 @@ async fn wipe_all_does_not_repair_host_bundles_before_removing_profile_store() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!shard_root.join("tracedecay.db").exists());
+    assert!(
+        !shard_root
+            .join(tracedecay_store::StoreFile::Project.file_name())
+            .exists()
+    );
     assert!(!shard_root.join(STORE_MANIFEST_FILENAME).exists());
     assert_cursor_plugin_was_not_implicitly_installed(home.path());
     let reopened = HostAdmissionTestRuntimeV1::profile(&profile_root)
@@ -2814,7 +2838,11 @@ async fn projects_forget_cli_removes_only_the_selected_project() {
     for project_id in ["proj_forget_a", "proj_forget_b"] {
         let store = profile.join("projects").join(project_id);
         std::fs::create_dir_all(&store).unwrap();
-        std::fs::write(store.join("tracedecay.db"), b"store bytes").unwrap();
+        std::fs::write(
+            store.join(tracedecay_store::StoreFile::Project.file_name()),
+            b"store bytes",
+        )
+        .unwrap();
     }
     write_wedged_generation_debris(&profile.join("projects").join("proj_forget_a"));
 
@@ -2840,7 +2868,7 @@ async fn projects_forget_cli_removes_only_the_selected_project() {
         profile
             .join("projects")
             .join("proj_forget_b")
-            .join("tracedecay.db")
+            .join(tracedecay_store::StoreFile::Project.file_name())
             .exists(),
         "forget must not touch the sibling project's store"
     );
@@ -2897,7 +2925,9 @@ async fn projects_forget_dry_run_previews_without_mutation() {
         "the preview must name the store directories\nstdout:\n{stdout}"
     );
     assert!(
-        shard_root.join("tracedecay.db").exists(),
+        shard_root
+            .join(tracedecay_store::StoreFile::Project.file_name())
+            .exists(),
         "a dry run must not delete store bytes"
     );
 }
@@ -3427,7 +3457,11 @@ async fn branch_removeall_retires_every_tracked_branch() {
         vec!["main"],
         "branch removeall should retire every non-default tracked branch"
     );
-    assert!(shard_root.join("tracedecay.db").exists());
+    assert!(
+        shard_root
+            .join(tracedecay_store::StoreFile::Project.file_name())
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -3487,7 +3521,12 @@ fn init_refuses_ephemeral_project_in_persistent_profile() {
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
     let output = command
         .env("TRACEDECAY_DATA_DIR", profile.path())
-        .env("TRACEDECAY_GLOBAL_DB", profile.path().join("global.db"))
+        .env(
+            "TRACEDECAY_GLOBAL_DB",
+            profile
+                .path()
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
+        )
         .args(["init", "."])
         .output()
         .expect("init ephemeral project");
@@ -3535,12 +3574,23 @@ fn storage_report_prints_registered_store_size_and_unregistered_backlog() {
     // which is not a store any profile would ever hold.
     let registered_root = profile_root.join("projects/proj_cli");
     std::fs::create_dir_all(&registered_root).unwrap();
-    let store_db = tracedecay_sql::Connection::open(registered_root.join("tracedecay.db")).unwrap();
+    let store_db = tracedecay_sql::Connection::open(
+        registered_root.join(tracedecay_store::StoreFile::Project.file_name()),
+    )
+    .unwrap();
+    // Both fixtures close idle: every frame checkpointed, as their owner
+    // leaves them.
     store_db
-        .execute_batch("CREATE TABLE fixture (id INTEGER PRIMARY KEY);")
+        .execute_batch(
+            "CREATE TABLE fixture (id INTEGER PRIMARY KEY);
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
         .unwrap();
     drop(store_db);
-    let global_db = tracedecay_sql::Connection::open(profile_root.join("global.db")).unwrap();
+    let global_db = tracedecay_sql::Connection::open(
+        profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+    )
+    .unwrap();
     global_db
         .execute_batch(
             "CREATE TABLE code_projects (project_id TEXT PRIMARY KEY, canonical_root TEXT NOT NULL);",
@@ -3552,13 +3602,20 @@ fn storage_report_prints_registered_store_size_and_unregistered_backlog() {
             tracedecay_sql::params![project.path().display().to_string()],
         )
         .unwrap();
+    global_db
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
     drop(global_db);
 
     // An unregistered leaf directory under `projects/`.
     let unregistered = profile_root.join("projects/proj_ghost");
     std::fs::create_dir_all(&unregistered).unwrap();
     std::fs::write(unregistered.join("payload.bin"), vec![0u8; 4096]).unwrap();
-    std::fs::write(profile_root.join("user-sessions.db"), vec![1u8; 2048]).unwrap();
+    std::fs::write(
+        profile_root.join(tracedecay_store::StoreFile::ProfileSessions.file_name()),
+        vec![1u8; 2048],
+    )
+    .unwrap();
 
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
     command.args([
@@ -3606,7 +3663,10 @@ async fn storage_report_uses_active_daemon_authority_without_hanging() {
             .expect("paged storage project should register");
         let data_root = profile_root.join("projects").join(&project_id);
         std::fs::create_dir_all(&data_root).unwrap();
-        let connection = tracedecay_sql::Connection::open(data_root.join("tracedecay.db")).unwrap();
+        let connection = tracedecay_sql::Connection::open(
+            data_root.join(tracedecay_store::StoreFile::Project.file_name()),
+        )
+        .unwrap();
         connection
             .execute_batch("CREATE TABLE fixture (id INTEGER PRIMARY KEY);")
             .unwrap();

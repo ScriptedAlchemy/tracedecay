@@ -187,7 +187,7 @@ pub fn apply_isolated_profile_env(command: &mut Command, home: &Path, profile: &
     apply_hermetic_child_env(command, home);
     command
         .env("TRACEDECAY_DATA_DIR", profile)
-        .env("TRACEDECAY_GLOBAL_DB", profile.join("global.db"))
+        .env_remove("TRACEDECAY_GLOBAL_DB")
         .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");
 }
 

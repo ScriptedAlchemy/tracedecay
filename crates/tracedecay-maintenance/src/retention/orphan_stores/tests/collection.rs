@@ -330,14 +330,23 @@ async fn empty_memory_table_does_not_block_collection() {
     .await;
     {
         let connection = tracedecay_sql::Connection::open(data_root.join("graph.db")).unwrap();
+        let search_index = match tracedecay_sql::ENGINE {
+            tracedecay_sql::Engine::Sqlite => {
+                "CREATE VIRTUAL TABLE memory_facts_fts USING fts5(content);"
+            }
+            tracedecay_sql::Engine::Native => {
+                "CREATE INDEX memory_facts_fts ON memory_facts USING fts (content);"
+            }
+        };
         connection
-            .execute_batch(
+            .execute_batch(&format!(
                 "CREATE TABLE memory_facts (
                     fact_id INTEGER PRIMARY KEY,
                     content TEXT NOT NULL
                  );
-                 CREATE VIRTUAL TABLE memory_facts_fts USING fts5(content);",
-            )
+                 {search_index}
+                 PRAGMA wal_checkpoint(TRUNCATE);"
+            ))
             .unwrap();
     }
 
@@ -582,8 +591,63 @@ async fn unregistered_collection_payload_fence_deadline_is_distinct() {
     assert!(data_root.join("bucket/payload.bin").is_file());
 }
 
+/// Seeds an unregistered `projects/<id>` store whose manifest names its graph
+/// database, with a `memory_facts` table holding `memory_rows` rows, aged to
+/// `mtime_secs`.
+fn seed_unregistered_manifest_store(data_root: &Path, memory_rows: usize, mtime_secs: i64) {
+    std::fs::create_dir_all(data_root).unwrap();
+    let graph = tracedecay_store::StoreFile::Project.file_name();
+    {
+        let connection = tracedecay_sql::Connection::open(data_root.join(graph)).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);",
+            )
+            .unwrap();
+        for fact_id in 0..memory_rows {
+            connection
+                .execute(
+                    "INSERT INTO memory_facts (fact_id, content) VALUES (?1, 'durable fact')",
+                    [i64::try_from(fact_id).unwrap()],
+                )
+                .unwrap();
+        }
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+    }
+    let manifest = StoreManifest {
+        schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+        project_id: None,
+        store_kind: StoreKind::CodeProject,
+        storage_mode: StorageMode::ProfileSharded,
+        project_root: PathBuf::from("/moved-away-repo"),
+        data_root: data_root.to_path_buf(),
+        graph_db_relpath: PathBuf::from(graph),
+        sessions_db_relpath: PathBuf::from(
+            tracedecay_store::StoreFile::ProjectSessions.file_name(),
+        ),
+        branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
+        sessions_schema_digest: None,
+    };
+    std::fs::write(
+        data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    for entry in std::fs::read_dir(data_root).unwrap() {
+        filetime::set_file_mtime(
+            entry.unwrap().path(),
+            filetime::FileTime::from_unix_time(mtime_secs, 0),
+        )
+        .unwrap();
+    }
+}
+
 /// A durable-memory guard applies to unregistered directories exactly as it
-/// does to registered orphan stores.
+/// does to registered orphan stores: the manifest-named graph with a memory
+/// row is kept, and the same-aged store whose memory table is empty is
+/// collected in the same sweep.
 #[tokio::test]
 async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -592,35 +656,40 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
     let (_runtime, db) = open_registered_db(&profile_root).await;
 
     let base = 1_700_000_000i64;
-    let dir = profile_root.join("projects").join("proj_ghost_with_memory");
-    std::fs::create_dir_all(&dir).unwrap();
-    {
-        let connection = tracedecay_sql::Connection::open(
-            dir.join(tracedecay_store::StoreFile::Project.file_name()),
-        )
-        .unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
-                 INSERT INTO memory_facts (fact_id, content) VALUES (1, 'durable fact');",
-            )
-            .unwrap();
-    }
-    filetime::set_file_mtime(
-        dir.join(tracedecay_store::StoreFile::Project.file_name()),
-        filetime::FileTime::from_unix_time(base - 100 * DAY, 0),
-    )
-    .unwrap();
+    let protected = profile_root.join("projects").join("proj_ghost_with_memory");
+    let empty = profile_root
+        .join("projects")
+        .join("proj_ghost_empty_memory");
+    seed_unregistered_manifest_store(&protected, 1, base - 100 * DAY);
+    seed_unregistered_manifest_store(&empty, 0, base - 100 * DAY);
 
     let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, true)
         .await
         .unwrap();
-    assert_eq!(report.outcome.collected.len(), 0);
+
     assert_eq!(
-        report.outcome.errors[0].kind,
-        CollectionFailureKind::DurableDataProtected
+        report
+            .outcome
+            .collected
+            .iter()
+            .map(|store| store.store_id.as_str())
+            .collect::<Vec<_>>(),
+        ["proj_ghost_empty_memory"]
     );
-    assert!(dir.exists());
+    assert_eq!(
+        report
+            .outcome
+            .errors
+            .iter()
+            .map(|failure| (failure.store_id.as_str(), &failure.kind))
+            .collect::<Vec<_>>(),
+        [(
+            "proj_ghost_with_memory",
+            &CollectionFailureKind::DurableDataProtected
+        )]
+    );
+    assert!(protected.exists());
+    assert!(!empty.exists());
 }
 
 /// Seeds `branches/feature.db` (carrying a durable memory row) and its WAL the
@@ -896,7 +965,9 @@ mod durable_inventory {
             project_root: project_root.clone(),
             data_root: project_root,
             graph_db_relpath: PathBuf::from(graph_db_relpath),
-            sessions_db_relpath: PathBuf::from("sessions.db"),
+            sessions_db_relpath: PathBuf::from(
+                tracedecay_store::StoreFile::ProjectSessions.file_name(),
+            ),
             branch_meta_relpath: PathBuf::from(
                 tracedecay_runtime_core::storage::BRANCH_META_FILENAME,
             ),

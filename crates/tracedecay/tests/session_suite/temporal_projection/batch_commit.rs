@@ -200,8 +200,9 @@ async fn incremental_batch_commit_is_atomic_and_rolls_back_on_late_failure() {
         0
     );
     assert_eq!(
-        scalar(&path, "SELECT COUNT(*) FROM session_occurrences_fts").await,
-        0
+        scalar(&path, &occurrence_search_count_sql("atomic")).await,
+        0,
+        "the rejected batch's occurrence text is not searchable"
     );
 }
 

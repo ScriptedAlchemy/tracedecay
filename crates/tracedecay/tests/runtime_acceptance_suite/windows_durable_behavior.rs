@@ -6,56 +6,47 @@
 
 use crate::common;
 
+/// Commits land in the WAL and stay there until the writer's checkpoint lane
+/// runs: the engine never checkpoints on its own, even past its default
+/// 1000-page auto-checkpoint threshold.
 #[tokio::test]
-async fn sqlite_writer_uses_production_wal_normal_policy() {
-    let tmp = tempfile::TempDir::new().expect("create SQLite policy fixture");
-    let (database, _) = common::initialize_test_database(&tmp.path().join("policy.db"))
+async fn production_writer_keeps_commits_in_the_wal_until_the_checkpoint_lane() {
+    let tmp = tempfile::TempDir::new().expect("create WAL policy fixture");
+    let path = tmp.path().join("policy.db");
+    let (database, _) = common::initialize_test_database(&path)
         .await
-        .expect("initialize SQLite policy fixture");
-    let writer = database
-        .begin_write_transaction("inspect SQLite writer policy")
-        .await
-        .expect("begin production writer policy inspection");
-    let (journal_mode, synchronous) = {
-        let mut rows = writer
-            .query(
-                "SELECT lower(journal_mode), synchronous
-                 FROM pragma_journal_mode(), pragma_synchronous()",
-                (),
-            )
-            .await
-            .expect("inspect production SQLite journal policy");
-        let row = rows
-            .next()
-            .await
-            .expect("read production SQLite journal policy")
-            .expect("production SQLite journal policy row");
-        (
-            row.get::<String>(0).expect("journal_mode"),
-            row.get::<i64>(1).expect("synchronous"),
-        )
+        .expect("initialize WAL policy fixture");
+    let wal = {
+        let mut name = path.as_os_str().to_owned();
+        name.push("-wal");
+        std::path::PathBuf::from(name)
     };
-    let wal_autocheckpoint = {
-        let mut rows = writer
-            .query("PRAGMA wal_autocheckpoint", ())
+    let main_before = std::fs::metadata(&path).expect("main file").len();
+    let value = "w".repeat(1024 * 1024);
+    for index in 0..8 {
+        database
+            .set_metadata(&format!("wal-policy-{index}"), &value)
             .await
-            .expect("inspect production SQLite checkpoint policy");
-        let row = rows
-            .next()
+            .expect("commit a 1 MiB metadata row");
+    }
+
+    assert_eq!(
+        std::fs::metadata(&path).expect("main file").len(),
+        main_before,
+        "no automatic checkpoint copied committed pages into the main file"
+    );
+    assert!(
+        std::fs::metadata(&wal).expect("WAL file").len() >= 8 * 1024 * 1024,
+        "all eight committed MiB are retained in the WAL"
+    );
+    assert_eq!(
+        database
+            .get_metadata("wal-policy-7")
             .await
-            .expect("read production SQLite checkpoint policy")
-            .expect("production SQLite checkpoint policy row");
-        row.get::<i64>(0).expect("wal_autocheckpoint")
-    };
-
-    writer
-        .rollback()
-        .await
-        .expect("finish writer policy inspection");
-
-    assert_eq!(journal_mode, "wal");
-    assert_eq!(synchronous, 1);
-    assert_eq!(wal_autocheckpoint, 0);
+            .expect("read the last commit")
+            .map(|stored| stored.len()),
+        Some(value.len())
+    );
 }
 
 mod temporal_kernel_behavior {

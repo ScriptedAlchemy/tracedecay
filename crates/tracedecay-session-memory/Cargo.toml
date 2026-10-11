@@ -52,3 +52,4 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", 
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 tracedecay-lcm = { path = "../tracedecay-lcm", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
+tracedecay-sql = { path = "../tracedecay-sql" }

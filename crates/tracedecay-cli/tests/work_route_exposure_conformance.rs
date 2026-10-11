@@ -179,7 +179,10 @@ impl ProductionDaemon {
     fn profile_root(&self) -> ProfileRoot {
         ProfileRoot::new(&self.profile)
             .with_home(self.home.path())
-            .with_global_db_override(self.profile.join("global.db"))
+            .with_global_db_override(
+                self.profile
+                    .join(tracedecay_store::StoreFile::Profile.file_name()),
+            )
     }
 
     /// External URL for a canonical route path, which already starts with

@@ -158,10 +158,14 @@ fn status_and_list_render_a_reset_required_project_registry() {
     let (_home, _project, home_path, project_path) =
         setup_daemon_project("pub fn reset_marker() {}\n");
     drop(common::spawn_tracedecay_daemon(&home_path));
-    tracedecay_sql::Connection::open(home_path.join(".tracedecay/global.db"))
-        .unwrap()
-        .execute_batch("ALTER TABLE code_projects DROP COLUMN default_branch")
-        .unwrap();
+    tracedecay_sql::Connection::open(
+        home_path
+            .join(".tracedecay")
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
+    )
+    .unwrap()
+    .execute_batch("ALTER TABLE code_projects ADD COLUMN unexpected_column TEXT")
+    .unwrap();
     common::ensure_tracedecay_daemon(&home_path);
 
     let expected = "Error: project route error (application.reset-required)\n\

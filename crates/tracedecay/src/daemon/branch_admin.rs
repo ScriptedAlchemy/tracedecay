@@ -2325,7 +2325,7 @@ mod tests {
 
         let client_identity = tracedecay_daemon_protocol::DaemonClientIdentity {
             profile_root: profile_root.clone(),
-            global_db_path: profile_root.join("global.db"),
+            global_db_path: profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
         };
         let Some(ProfileHostAdmissionBootstrapStatus::Terminal(observed_error)) =
             super::super::project_server_lifecycle::schedule_user_profile_host_admission_replay_for_identity(

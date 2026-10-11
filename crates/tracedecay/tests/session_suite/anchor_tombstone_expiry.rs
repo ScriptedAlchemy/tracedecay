@@ -25,7 +25,7 @@ use tracedecay_store::{
     FactWriteBatch, FactWriteControl, RetrievalAnchorQuery,
 };
 
-use crate::common::open_graph_db_from_template;
+use crate::common::initialize_test_database;
 
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -42,8 +42,10 @@ fn write_control() -> FactWriteControl {
 
 async fn make_store() -> (Database, TempDir) {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join("tracedecay.db");
-    let db = open_graph_db_from_template(&db_path).await;
+    let db_path = tmp
+        .path()
+        .join(tracedecay_store::StoreFile::Project.file_name());
+    let (db, _) = initialize_test_database(&db_path).await.unwrap();
     (db, tmp)
 }
 

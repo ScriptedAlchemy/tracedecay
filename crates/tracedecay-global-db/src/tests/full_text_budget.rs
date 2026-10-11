@@ -28,7 +28,7 @@ fn occurrence_store(rows: usize) -> (TempDir, Connection) {
         )
         .unwrap();
     connection
-        .execute_batch(match BackendKind::LINKED {
+        .execute_batch(match BackendKind::EXACT_SQL {
             BackendKind::Sqlite => {
                 "CREATE VIRTUAL TABLE session_occurrences_fts USING fts5(
                      index_text, content='session_occurrences', content_rowid='rowid'
@@ -50,7 +50,7 @@ fn occurrence_store(rows: usize) -> (TempDir, Connection) {
             )
             .unwrap();
     }
-    if BackendKind::LINKED == BackendKind::Sqlite {
+    if BackendKind::EXACT_SQL == BackendKind::Sqlite {
         transaction
             .execute_batch(
                 "INSERT INTO session_occurrences_fts(rowid, index_text)
@@ -65,7 +65,7 @@ fn occurrence_store(rows: usize) -> (TempDir, Connection) {
 /// The temporal occurrence candidate shape on the linked engine: every hit of
 /// the phrase, newest first, one row kept.
 fn newest_hit_sql() -> &'static str {
-    match BackendKind::LINKED {
+    match BackendKind::EXACT_SQL {
         BackendKind::Sqlite => {
             "SELECT o.occurrence_id
              FROM session_occurrences_fts

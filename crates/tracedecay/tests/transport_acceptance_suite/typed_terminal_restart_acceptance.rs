@@ -60,6 +60,23 @@ use crate::common::{
     tracedecay_command_with_home,
 };
 
+/// The main file of `file` under `dir` plus the sidecars a live WAL-mode
+/// store of the compiled engine keeps beside it, in path order.
+fn live_store_family(dir: &Path, file: tracedecay_store::StoreFile) -> Vec<std::path::PathBuf> {
+    let main = file.file_name();
+    let mut family: Vec<_> = std::iter::once(main.to_owned())
+        .chain(
+            tracedecay_store::StoreFile::SIDECAR_SUFFIXES
+                .iter()
+                .filter(|suffix| **suffix != "-journal")
+                .map(|suffix| format!("{main}{suffix}")),
+        )
+        .map(|name| dir.join(name))
+        .collect();
+    family.sort();
+    family
+}
+
 const TOOL_DEADLINE_ENV: &str = "TRACEDECAY_TOOL_DEADLINE_MS";
 const FACT_COMMIT_BARRIER_DIR_ENV: &str = "TRACEDECAY_TEST_FACT_COMMIT_BARRIER_DIR";
 const MAX_MARKER_TOKEN_BYTES: usize = 36;

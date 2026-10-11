@@ -430,7 +430,7 @@ async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
         return;
     }
     let root = PathBuf::from(std::env::var_os(ROOT_ENV).unwrap());
-    let db_path = root.join("global.db");
+    let db_path = root.join(tracedecay_store::StoreFile::Profile.file_name());
 
     let error = match DatabaseAuthority::for_runtime(&db_path, "missing daemon fixture") {
         Err(error) => error,

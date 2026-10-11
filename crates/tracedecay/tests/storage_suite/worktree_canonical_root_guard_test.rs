@@ -102,7 +102,7 @@ fn build_fixture() -> Fixture {
 
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
-        global_db_path: Some(profile_root.join("global.db")),
+        global_db_path: Some(profile_root.join(tracedecay_store::StoreFile::Profile.file_name())),
     };
 
     Fixture {
@@ -134,7 +134,7 @@ async fn observation_store_resolver_maps_primary_and_linked_worktree_to_same_sto
     let fx = build_fixture();
     let project_id = init_primary(&fx).await;
     let store_root = fx.profile_root.join(format!("projects/{project_id}"));
-    let database_path = store_root.join("sessions.db");
+    let database_path = store_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     if !database_path.exists() {
         let (database, _) = crate::common::initialize_test_database(&database_path)
             .await
@@ -285,7 +285,18 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
         .expect("list project store")
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("db"))
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    [
+                        tracedecay_store::StoreFile::Project,
+                        tracedecay_store::StoreFile::ProjectSessions,
+                    ]
+                    .iter()
+                    .any(|store| store.file_name() == name)
+                })
+        })
         .unwrap_or_else(|| panic!("project store artifact under {}", store_root.display()));
     let artifact_bytes = std::fs::read(&artifact).expect("read store artifact");
     std::fs::write(&artifact, artifact_bytes).expect("bump store artifact mtime");

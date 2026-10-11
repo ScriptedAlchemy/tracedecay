@@ -15,7 +15,9 @@ use tracedecay_runtime_core::path_safety::canonical_root_identity;
 async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
-    let registry_path = registry_dir.path().join("global.db");
+    let registry_path = registry_dir
+        .path()
+        .join(tracedecay_store::StoreFile::Profile.file_name());
     let seeded_project_root = registry_dir.path().join("registered-alpha-project");
     fs::create_dir_all(&seeded_project_root).unwrap();
     drop(seed_project_registry(&registry_path, &seeded_project_root).await);
@@ -223,7 +225,9 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
 async fn project_context_surfaces_registry_read_failure_as_tool_error() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
-    let registry_path = registry_dir.path().join("global.db");
+    let registry_path = registry_dir
+        .path()
+        .join(tracedecay_store::StoreFile::Profile.file_name());
     let runtime =
         HostAdmissionTestRuntimeV1::project_scoped(registry_dir.path(), cg.project_root(), {
             cg.store_layout()
@@ -288,7 +292,9 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
 async fn project_search_surfaces_registry_read_failure_as_tool_error() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
-    let registry_path = registry_dir.path().join("global.db");
+    let registry_path = registry_dir
+        .path()
+        .join(tracedecay_store::StoreFile::Profile.file_name());
     let runtime =
         HostAdmissionTestRuntimeV1::project_scoped(registry_dir.path(), cg.project_root(), {
             cg.store_layout()
@@ -351,7 +357,9 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
     let (cg, _env, _dir) = setup_empty_project().await;
     let process_registry_dir = test_temp_dir();
     let client_registry_dir = test_temp_dir();
-    let client_registry_path = client_registry_dir.path().join("global.db");
+    let client_registry_path = client_registry_dir
+        .path()
+        .join(tracedecay_store::StoreFile::Profile.file_name());
 
     let process_db = HostAdmissionTestRuntimeV1::profile(process_registry_dir.path())
         .await

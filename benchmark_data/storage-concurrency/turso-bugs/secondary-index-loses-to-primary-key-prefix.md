@@ -43,8 +43,23 @@ steps) instead of the primary key (16 steps with
 `INDEXED BY sqlite_autoindex_prov_1`), while `COUNT(*)` on the same key picks
 the primary key (17 steps).
 
+A bound parameter makes it worse. In a correlated
+`(SELECT COUNT(*) FROM prov WHERE projector_version = ?1 AND observation_id = outer.id)`
+over 16 outer rows, a literal `'v1'` seeks the primary key (335 VM steps for
+the page) but the bound `?1` runs through `prov_output (projector_version=?)`
+(108,291 VM steps). This made `tracedecay-global-db`'s resumed authority audit
+grow with the store on native.
+
 ## Workaround
 
 Statements whose bound depends on a secondary index name it with
 `INDEXED BY`. SQLite already chose that index, so the hint only pins the plan
 both engines should run.
+
+Where a secondary index only duplicated another, it is deleted instead:
+`idx_observation_projection_provenance_output (projector_version,
+output_provider, output_message_id)` is gone, and output lookups use
+`idx_observation_projection_provenance_global_output (output_provider,
+output_message_id, projector_version)`. With no secondary index leading with
+`projector_version`, every primary-key lookup on the provenance table seeks
+the primary key.

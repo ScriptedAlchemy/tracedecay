@@ -20,7 +20,8 @@ static PRODUCTION_DASHBOARD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mut
 fn project_open_test_route(name: &str) -> ProjectRouteKey {
     ProjectRouteKey {
         profile_root: std::path::PathBuf::from(format!("/profiles/{name}")),
-        global_db_path: std::path::PathBuf::from(format!("/profiles/{name}/global.db")),
+        global_db_path: std::path::PathBuf::from(format!("/profiles/{name}"))
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_path: std::path::PathBuf::from(format!("/projects/{name}")),
         scope_prefix: None,
     }
@@ -1148,7 +1149,7 @@ async fn remote_project_deletion_ignores_unrelated_server_retirement() {
     let engine = test_daemon_engine_for_profile(&profile_root);
     let unrelated_owner = StoreOwnerKey {
         profile_root: profile_root.clone(),
-        global_db_path: profile_root.join("global.db"),
+        global_db_path: profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
         project_id: Some("proj_unrelated_retirement".to_owned()),
         store_root: profile_root.join("projects/proj_unrelated_retirement"),
         graph_db_path: profile_root.join("projects/proj_unrelated_retirement/graph.db"),
@@ -1406,7 +1407,7 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
     let tasks = super::super::project_open_tasks(engine.project_open_gates.as_ref()).await;
     let route = ProjectRouteKey {
         profile_root: profile_root.clone(),
-        global_db_path: profile_root.join("global.db"),
+        global_db_path: profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
         project_path: project_root,
         scope_prefix: None,
     };
@@ -1472,7 +1473,7 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
         .expect("account deletion after joined open");
     let late_route = ProjectRouteKey {
         profile_root: profile_root.clone(),
-        global_db_path: profile_root.join("global.db"),
+        global_db_path: profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
         project_path: root.join("late-project"),
         scope_prefix: None,
     };
@@ -2894,7 +2895,7 @@ async fn project_deletion_retires_rootless_open_by_persisted_project_identity() 
     .expect("pin fixture repository identity");
     let route = ProjectRouteKey {
         profile_root: profile_root.canonicalize().expect("canonical profile"),
-        global_db_path: profile_root.join("global.db"),
+        global_db_path: profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
         project_path: project_root.canonicalize().expect("canonical project"),
         scope_prefix: None,
     };

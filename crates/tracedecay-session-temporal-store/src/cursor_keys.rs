@@ -119,8 +119,8 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
 
     let mut history_rows = transaction
         .query(
-            "SELECT COALESCE(MAX(key_version), 0), COALESCE(MAX(created_at), 0)
-             FROM session_query_cursor_keys",
+            "SELECT COALESCE((SELECT MAX(key_version) FROM session_query_cursor_keys), 0),
+                    COALESCE((SELECT MAX(created_at) FROM session_query_cursor_keys), 0)",
             (),
         )
         .await

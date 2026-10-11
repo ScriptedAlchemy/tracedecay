@@ -163,7 +163,9 @@ async fn sweep_atomically_relinks_moved_store_to_registered_live_project() {
         project_root: live_root,
         data_root: store_root.clone(),
         graph_db_relpath: PathBuf::from("graph.db"),
-        sessions_db_relpath: PathBuf::from("sessions.db"),
+        sessions_db_relpath: PathBuf::from(
+            tracedecay_store::StoreFile::ProjectSessions.file_name(),
+        ),
         branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
         sessions_schema_digest: None,
     };
@@ -458,15 +460,21 @@ async fn unregistered_store_with_a_vanished_manifest_root_waits_out_the_window()
         storage_mode: StorageMode::ProfileSharded,
         project_root: project_root.to_path_buf(),
         data_root: data_root.to_path_buf(),
-        graph_db_relpath: PathBuf::from("tracedecay.db"),
-        sessions_db_relpath: PathBuf::from("sessions.db"),
+        graph_db_relpath: PathBuf::from(tracedecay_store::StoreFile::Project.file_name()),
+        sessions_db_relpath: PathBuf::from(
+            tracedecay_store::StoreFile::ProjectSessions.file_name(),
+        ),
         branch_meta_relpath: PathBuf::from("branch-meta.json"),
         sessions_schema_digest: None,
     };
     let seed = |name: &str, project_root: Option<&Path>| {
         let data_root = profile_root.join("projects").join(name);
         std::fs::create_dir_all(&data_root).unwrap();
-        std::fs::write(data_root.join("sessions.db"), b"fresh payload").unwrap();
+        std::fs::write(
+            data_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+            b"fresh payload",
+        )
+        .unwrap();
         if let Some(project_root) = project_root {
             tracedecay_runtime_core::storage::write_store_manifest_to_path(
                 &data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),

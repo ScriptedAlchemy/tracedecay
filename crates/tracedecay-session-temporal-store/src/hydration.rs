@@ -1592,10 +1592,13 @@ mod tests {
             Executor::execute_batch(&writer, "DROP TRIGGER observations_immutable_update;")
                 .await
                 .expect("drop observation immutability for corruption fixture");
+            // Valid JSON that is no observation: native Turso evaluates the
+            // `json_valid` partial index's key on malformed JSON and refuses the
+            // write (turso-bugs/partial-index-and-short-circuit.md).
             Executor::execute(
                 &writer,
                 "UPDATE observations
-                 SET observation_json = '{'
+                 SET observation_json = '[]'
                  WHERE observation_id = ?1",
                 [observation_id],
             )

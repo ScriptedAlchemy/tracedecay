@@ -262,7 +262,8 @@ pub(super) fn build_record_query_with_relations(
                     NULL AS extra_json, NULL AS source_json, NULL AS predecessor,
                     NULL AS publication_json, NULL AS state, o.session_id AS scope_session
              FROM occurrence_candidate AS oc
-             JOIN session_occurrences AS o
+             CROSS JOIN session_occurrences AS o
+             INDEXED BY sqlite_autoindex_session_occurrences_1
                ON o.session_id = oc.session_id
               AND +o.generation <= oc.generation
               AND o.occurrence_id = oc.occurrence_id
@@ -774,7 +775,9 @@ impl RecordModeSql {
     pub(super) fn new(mode: TemporalModeV1, cutoff_param: usize) -> Self {
         match mode {
             TemporalModeV1::Current => Self {
-                occurrence_join: "JOIN session_current_entities AS occurrence_current
+                // CROSS JOIN: native Turso otherwise scans every current
+                // entity as the outer loop and seeks occurrences per entity.
+                occurrence_join: "CROSS JOIN session_current_entities AS occurrence_current
                     ON occurrence_current.session_id = o.session_id
                    AND +occurrence_current.generation <= oc.generation
                    AND occurrence_current.entity_kind = 'occurrence_anchor'

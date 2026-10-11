@@ -121,7 +121,7 @@ async fn open_search_fixture() -> SearchFixture {
 
     let registry_path = registry_dir
         .path()
-        .join("global.db")
+        .join(tracedecay_store::StoreFile::Profile.file_name())
         .canonicalize()
         .expect("registry database")
         .display()
