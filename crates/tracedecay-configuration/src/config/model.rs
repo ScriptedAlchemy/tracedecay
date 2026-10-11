@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::config::ProfileRoot;
 
@@ -18,13 +17,9 @@ fn default_retention_interval_hours() -> u64 {
     24
 }
 
-fn default_compaction_threshold() -> Option<CompactionThresholdConfig> {
-    Some(CompactionThresholdConfig::default())
-}
-
-/// The daemon retention/compaction policy tree (Plan 38). Safe, bounded
-/// maintenance is active by default for proven orphan stores, incident
-/// debris, redundant projection-durable session copies, and free-page bloat.
+/// The daemon retention policy tree (Plan 38). Safe, bounded maintenance is
+/// active by default for proven orphan stores, incident debris, and redundant
+/// projection-durable session copies.
 /// Lossy session/evidence deletion remains disabled and soft budgets remain
 /// owner-configured findings only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,9 +34,6 @@ pub struct RetentionConfig {
     /// the sweep; the Doctor surface still reports findings read-only.
     #[serde(default = "default_thirty_day_retention")]
     pub orphan_store_gc_days: Option<u64>,
-    /// Incremental-vacuum compaction trigger. `None` disables compaction.
-    #[serde(default = "default_compaction_threshold")]
-    pub compaction: Option<CompactionThresholdConfig>,
     /// Owner-configured soft byte budgets keyed by exact logical store key.
     /// Missing entries mean no budget was configured for that store.
     #[serde(default)]
@@ -58,7 +50,6 @@ impl Default for RetentionConfig {
             observation:
                 tracedecay_global_db::observation::retention::ObservationRetentionConfig::default(),
             orphan_store_gc_days: default_thirty_day_retention(),
-            compaction: default_compaction_threshold(),
             store_soft_budgets_bytes: BTreeMap::new(),
             interval_hours: default_retention_interval_hours(),
         }
@@ -147,7 +138,7 @@ pub struct SyncConfig {
     /// Poll cadence (seconds) for PR-branch auto-tracking discovery. Clamped up
     /// to [`MIN_AUTO_TRACK_PR_POLL_SECS`] at read time.
     pub auto_track_pr_poll_secs: u64,
-    /// Daemon retention/compaction policy tree (Plan 38).
+    /// Daemon retention policy tree (Plan 38).
     pub retention: RetentionConfig,
 }
 

@@ -116,12 +116,6 @@ export const DECLARED_RETENTION_LIFECYCLES: readonly DeclaredRetentionLifecycle[
     declared: 'expires within 24 hours',
     observedAge: null,
   },
-  {
-    id: 'backup_copies',
-    label: 'backup copies',
-    declared: 'expire within 30 days',
-    observedAge: null,
-  },
 ];
 
 export interface RetentionBacklogReading {

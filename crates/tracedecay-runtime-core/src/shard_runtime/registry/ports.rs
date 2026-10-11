@@ -514,23 +514,6 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         )
     }
 
-    fn run_bounded_incremental_compaction(
-        &self,
-        max_pages: u32,
-        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> StoreRuntimeRegistryFuture<'_, Result<(), StoreRuntimeRegistryFailure>> {
-        Box::pin(async move {
-            RepositoryRuntimePhysicalAttachment::run_bounded_incremental_compaction(
-                self, max_pages, authority,
-            )
-            .await
-            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "run bounded repository compaction",
-                message: error.to_string(),
-            })
-        })
-    }
-
     fn run_checkpoint(
         &self,
         request: tracedecay_rusqlite_runtime::CheckpointRequest,
