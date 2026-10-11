@@ -11,7 +11,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 test-helpers = []
 
 [dependencies]
-rusqlite = { workspace = true, features = ["bundled", "hooks", "limits"] }
+rusqlite = { workspace = true, features = ["bundled", "hooks", "limits", "trace"] }
 turso_core.workspace = true
 turso_parser.workspace = true
 tracing = "0.1"

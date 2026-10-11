@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Regenerate the guard-parity artifacts in crates/tracedecay-sql/tests/testdata
 # (#3402) while the owned stores still run on SQLite:
-#   policy.tsv, policy-fixture.sql  the SQLite authorizers' verdicts per capability
-#   census.tsv                      every distinct statement the owned-store
-#                                   suites ran, with its capability
-#   known_native_gaps.tsv           the native gate's current failures (`gaps`)
+#   policy.tsv             the SQLite arm's verdict per capability for each
+#                          statement already listed (add rows to extend it)
+#   census.tsv             every distinct statement the owned-store suites ran,
+#                          with its capability
+#   known_native_gaps.tsv  the native gate's current failures (`gaps`)
 #
 # Usage: scripts/storage/sql-census.sh [census|gaps] [bazel test flags...]
 # BAZEL names the bazel wrapper (default: bazel).
@@ -44,6 +45,7 @@ census)
     //crates/tracedecay-session-memory/...
     //crates/tracedecay-session-temporal-store/...
     //crates/tracedecay-sessions/...
+    //crates/tracedecay-query/...
     //crates/tracedecay:storage_suite
   )
   status=0
@@ -51,24 +53,22 @@ census)
     --nozip_undeclared_test_outputs --keep_going "$@" "${census_targets[@]}" || status=$?
   [ "$status" -eq 0 ] || echo "sql-census: some census suites failed (exit $status); their statements up to the failure are kept" >&2
 
-  copy_output //crates/tracedecay-rusqlite-runtime:unit_test policy.tsv
-  copy_output //crates/tracedecay-rusqlite-runtime:unit_test policy-fixture.sql
-
   # Every tests/outputs dir under the census packages, then the sqlite_replay
-  # column, which the default-engine parity test computes.
+  # column and the policy verdicts, which the default-engine parity test
+  # computes.
   dirs=$("$bazel" query "tests(set(${census_targets[*]}))" 2>/dev/null | while read -r target; do outputs "$target"; done)
   {
     printf 'capability\tsql\tsqlite_replay\n'
     for dir in $dirs; do cat "$dir"/sql-census-*.tsv 2>/dev/null || true; done |
       LC_ALL=C sort -u | sed 's/$/\tmissing/'
   } >"$testdata/census.tsv"
-  "$bazel" test --nozip_undeclared_test_outputs "$@" "$parity" --test_filter=census_sqlite_replay_column_is_current >/dev/null 2>&1 || true
+  "$bazel" test --nozip_undeclared_test_outputs "$@" "$parity" >/dev/null 2>&1 || true
   copy_output "$parity" census.tsv
-  "$bazel" test --nozip_undeclared_test_outputs "$@" "$parity"
+  copy_output "$parity" policy.tsv
+  "$bazel" test "$@" "$parity"
   ;;
 gaps)
-  "$bazel" test --config=native --nozip_undeclared_test_outputs "$@" "$parity" \
-    --test_filter=every_census_statement_runs_under_its_capability >/dev/null 2>&1 || true
+  "$bazel" test --config=native --nozip_undeclared_test_outputs "$@" "$parity" >/dev/null 2>&1 || true
   copy_output "$parity" known_native_gaps.tsv
   "$bazel" test --config=native "$@" "$parity"
   ;;
