@@ -155,7 +155,7 @@ pub struct Seeds {
     pub parent_commit: Option<String>,
     /// (fact_id, related_fact_id, search_query, [entities])
     pub fact_pair: Option<(String, String, String, Vec<String>)>,
-    /// Scalar boolean key toggled during seed (diagnostics.prewarm.v1).
+    /// Scalar boolean key toggled during seed (telemetry.timings.v1).
     pub config_key: Option<String>,
     /// Latest configuration revision after the seed set/unset pair.
     pub config_revision: Option<String>,

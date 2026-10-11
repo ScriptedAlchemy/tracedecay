@@ -11,8 +11,8 @@ use crate::support::{
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
 
-const PREWARM_KEY: &str = "diagnostics.prewarm.v1";
-const UNSET_KEY: &str = "configuration.idempotency.mcp-unset-prewarm";
+const TIMINGS_KEY: &str = "telemetry.timings.v1";
+const UNSET_KEY: &str = "configuration.idempotency.mcp-unset-timings";
 
 fn registry_default_candidate() -> Value {
     json!({
@@ -45,11 +45,11 @@ fn setting(server_result: &(Value, Value)) -> Value {
     payload(&server_result.1, "evidence").clone()
 }
 
-async fn read_prewarm(server: &McpServer) -> (Value, Value) {
+async fn read_timings(server: &McpServer) -> (Value, Value) {
     call_mcp(
         server,
         "tracedecay_configuration_get",
-        json!({"key": PREWARM_KEY}),
+        json!({"key": TIMINGS_KEY}),
     )
     .await
 }
@@ -67,9 +67,9 @@ async fn configuration_unset_removes_the_project_override_and_replays() {
         .await
         .expect("registered fixture project");
 
-    let before = setting(&read_prewarm(&server).await);
-    assert_eq!(before["key"], json!(PREWARM_KEY));
-    assert_eq!(before["effective_value"], boolean_value(false));
+    let before = setting(&read_timings(&server).await);
+    assert_eq!(before["key"], json!(TIMINGS_KEY));
+    assert_eq!(before["effective_value"], boolean_value(true));
     assert_eq!(before["candidates"], json!([registry_default_candidate()]));
     let initial_revision = before["revision_id"]
         .as_str()
@@ -81,8 +81,8 @@ async fn configuration_unset_removes_the_project_override_and_replays() {
         "tracedecay_configuration_set",
         json!({
             "layer": {"kind": "project", "project_id": project_id},
-            "key": PREWARM_KEY,
-            "value": boolean_value(true),
+            "key": TIMINGS_KEY,
+            "value": boolean_value(false),
             "expected_revision": initial_revision,
             "idempotency_key": "configuration.idempotency.mcp-unset-proof-set"
         }),
@@ -100,8 +100,8 @@ async fn configuration_unset_removes_the_project_override_and_replays() {
         .to_owned();
     assert_ne!(override_revision, initial_revision);
 
-    let overridden = setting(&read_prewarm(&server).await);
-    assert_eq!(overridden["effective_value"], boolean_value(true));
+    let overridden = setting(&read_timings(&server).await);
+    assert_eq!(overridden["effective_value"], boolean_value(false));
     assert_eq!(overridden["revision_id"], json!(override_revision));
     assert_eq!(
         overridden["candidates"],
@@ -118,7 +118,7 @@ async fn configuration_unset_removes_the_project_override_and_replays() {
         "tracedecay_configuration_unset",
         json!({
             "layer": {"kind": "project", "project_id": project_id},
-            "key": PREWARM_KEY,
+            "key": TIMINGS_KEY,
             "expected_revision": override_revision,
             "idempotency_key": UNSET_KEY
         }),
@@ -147,9 +147,9 @@ async fn configuration_unset_removes_the_project_override_and_replays() {
         .to_owned();
     assert_ne!(restored_revision, override_revision);
 
-    let restored = setting(&read_prewarm(&server).await);
-    assert_eq!(restored["key"], json!(PREWARM_KEY));
-    assert_eq!(restored["effective_value"], boolean_value(false));
+    let restored = setting(&read_timings(&server).await);
+    assert_eq!(restored["key"], json!(TIMINGS_KEY));
+    assert_eq!(restored["effective_value"], boolean_value(true));
     assert_eq!(restored["revision_id"], json!(restored_revision));
     assert_eq!(
         restored["candidates"],
@@ -161,7 +161,7 @@ async fn configuration_unset_removes_the_project_override_and_replays() {
         "tracedecay_configuration_unset",
         json!({
             "layer": {"kind": "project", "project_id": project_id},
-            "key": PREWARM_KEY,
+            "key": TIMINGS_KEY,
             "expected_revision": override_revision,
             "idempotency_key": UNSET_KEY
         }),
@@ -177,8 +177,8 @@ async fn configuration_unset_removes_the_project_override_and_replays() {
         replay_envelope["outcome"]["value"]["idempotency_key"],
         json!(UNSET_KEY)
     );
-    let after_replay = setting(&read_prewarm(&server).await);
-    assert_eq!(after_replay["effective_value"], boolean_value(false));
+    let after_replay = setting(&read_timings(&server).await);
+    assert_eq!(after_replay["effective_value"], boolean_value(true));
     assert_eq!(after_replay["revision_id"], json!(restored_revision));
     assert_eq!(
         after_replay["candidates"],
@@ -198,7 +198,7 @@ async fn configuration_unset_refuses_stale_protected_unknown_and_default_layer()
         .project_id(&production.project_root)
         .await
         .expect("registered fixture project");
-    let initial = setting(&read_prewarm(&server).await);
+    let initial = setting(&read_timings(&server).await);
     let initial_revision = initial["revision_id"]
         .as_str()
         .expect("initial configuration revision")
@@ -209,8 +209,8 @@ async fn configuration_unset_refuses_stale_protected_unknown_and_default_layer()
         "tracedecay_configuration_set",
         json!({
             "layer": {"kind": "project", "project_id": project_id},
-            "key": PREWARM_KEY,
-            "value": boolean_value(true),
+            "key": TIMINGS_KEY,
+            "value": boolean_value(false),
             "expected_revision": initial_revision,
             "idempotency_key": "configuration.idempotency.mcp-unset-refusal-set"
         }),
@@ -226,7 +226,7 @@ async fn configuration_unset_refuses_stale_protected_unknown_and_default_layer()
         "tracedecay_configuration_unset",
         json!({
             "layer": {"kind": "project", "project_id": project_id},
-            "key": PREWARM_KEY,
+            "key": TIMINGS_KEY,
             "expected_revision": "revision.stale-configuration-unset",
             "idempotency_key": "configuration.idempotency.mcp-unset-stale"
         }),
@@ -321,7 +321,7 @@ async fn configuration_unset_refuses_stale_protected_unknown_and_default_layer()
         "tracedecay_configuration_unset",
         json!({
             "layer": {"kind": "default"},
-            "key": PREWARM_KEY,
+            "key": TIMINGS_KEY,
             "expected_revision": override_revision,
             "idempotency_key": "configuration.idempotency.mcp-unset-default-layer"
         }),
@@ -348,8 +348,8 @@ async fn configuration_unset_refuses_stale_protected_unknown_and_default_layer()
     assert_eq!(default_layer["problem"]["retry"], json!("never"));
     assert_eq!(default_layer["problem"]["legal_actions"], json!([]));
 
-    let still = setting(&read_prewarm(&server).await);
-    assert_eq!(still["effective_value"], boolean_value(true));
+    let still = setting(&read_timings(&server).await);
+    assert_eq!(still["effective_value"], boolean_value(false));
     assert_eq!(still["revision_id"], json!(override_revision));
     assert_eq!(
         still["candidates"],

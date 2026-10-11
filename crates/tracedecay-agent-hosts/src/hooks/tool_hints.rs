@@ -391,7 +391,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         label: "memory store",
         skill: "project-memory",
         message: "For durable facts, prefer tracedecay_fact_store_add over hand-editing harness memory files.",
-        context: "tracedecay_fact_store_add persists a trust-ranked project/user fact that survives across sessions and is recalled by tracedecay_context and tracedecay_recall; a memory markdown edit is only visible to the current harness. Keep secrets and unnecessary PII out of stored facts.",
+        context: "tracedecay_fact_store_add persists a trust-ranked project/user fact that survives across sessions and is recalled by tracedecay_context and tracedecay_fact_store_search; a memory markdown edit is only visible to the current harness. Keep secrets and unnecessary PII out of stored facts.",
         expected_tools: &["tracedecay_fact_store_add"],
         nonblocking: false,
     }.checked(),

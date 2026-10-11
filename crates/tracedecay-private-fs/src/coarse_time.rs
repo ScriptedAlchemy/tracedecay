@@ -299,8 +299,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn only_stamps_a_reading_settled_compare_equal() {
-        let metadata = std::fs::metadata(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-            .expect("stat the crate manifest");
+        let metadata = std::fs::metadata("Cargo.toml").expect("stat the crate manifest");
         let changed_at = RewriteWitness::ChangeTime
             .change_time_nanos(&metadata)
             .expect("unix stats carry a change time");
@@ -340,8 +339,7 @@ mod tests {
 
     #[test]
     fn only_a_change_time_witness_vouches_for_a_settled_file() {
-        let settled = std::fs::metadata(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-            .expect("stat the crate manifest");
+        let settled = std::fs::metadata("Cargo.toml").expect("stat the crate manifest");
 
         assert_eq!(
             RewriteWitness::ChangeTime.vouches_for_unchanged_bytes(&settled),

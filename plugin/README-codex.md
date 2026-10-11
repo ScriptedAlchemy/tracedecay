@@ -12,6 +12,10 @@ Codex.
   selection, code search, symbol inspection, and bounded graphs. It requires
   Node.js 20 or later on PATH; invoke `tracedecay_workspace` to open it.
   Both MCP servers use the resolved TraceDecay binary from installation.
+  The install sets `TRACEDECAY_MCP_REPEAT_READ_POINTERS=1` on the graph
+  server: Codex starts one server per thread, so a repeated identical read
+  with unchanged content gets a short pointer to the result that thread
+  already holds. Repeating the call once more returns the full content.
 - **Skills** (`skills/`): one skill per common workflow, searching for code,
   reading code cheaply, mapping architecture, impact analysis, reviewing diffs,
   recalling project memory and session context, and more. Codex auto-discovers

@@ -868,6 +868,11 @@ fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, policy: CodexBundlePolicy) 
     }
     let server = &mut mcp["mcpServers"]["graph"];
     server["args"] = policy.mcp_args();
+    server["env"] = CODEX_MCP_SERVER_ENV
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), serde_json::json!(value)))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
     server["startup_timeout_sec"] = CODEX_MCP_STARTUP_TIMEOUT_SECS.into();
     server["tool_timeout_sec"] = CODEX_MCP_TOOL_TIMEOUT_SECS.into();
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
@@ -938,6 +943,12 @@ const CODEX_MCP_TOOL_TIMEOUT_SECS: u64 = 900;
 /// bundle appends its own `--path .` on top of this base rather than restating
 /// `serve`.
 const CODEX_MCP_SERVER_ARGS: &[&str] = &["serve"];
+
+/// Environment for the tracedecay MCP server under Codex, shared the same way
+/// as [`CODEX_MCP_SERVER_ARGS`]. Codex starts one server per thread, so each
+/// connection belongs to one agent and `serve` may answer a repeated identical
+/// read with a pointer to the result that agent already holds.
+const CODEX_MCP_SERVER_ENV: &[(&str, &str)] = &[("TRACEDECAY_MCP_REPEAT_READ_POINTERS", "1")];
 
 fn codex_mcp_timeouts_current(mcp: &serde_json::Value) -> bool {
     let Some(server) = mcp.pointer("/mcpServers/graph") else {

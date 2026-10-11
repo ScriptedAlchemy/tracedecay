@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useScope } from '../../data/scope/store.ts';
+import { applicationSuccess } from '../../test/applicationEnvelope.ts';
 import { ExecutionTopologyMetrics } from './ExecutionTopologyMetrics.tsx';
 
 describe('the Observatory execution-topology metrics projection', () => {
@@ -10,9 +11,8 @@ describe('the Observatory execution-topology metrics projection', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
-        response({
-          kind: 'success',
-          value: {
+        response(
+          applicationSuccess('operation.work.topology_metrics', topologyMetricsPayload(), {
             scope: {
               project_id: 'project.tracedecay',
               repository_id: 'repository.tracedecay',
@@ -21,12 +21,8 @@ describe('the Observatory execution-topology metrics projection', () => {
               scope_digest:
                 'sha256:e0f55213520e40ec75c565c7e153a8d6452d09ac4abac1a4a4312ca4abcd3bcb',
             },
-            outcome: {
-              outcome: 'evidence',
-              value: { payload: topologyMetricsPayload() },
-            },
-          },
-        }),
+          }),
+        ),
       ),
     );
   });

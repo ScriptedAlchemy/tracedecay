@@ -8,22 +8,28 @@ use tempfile::TempDir;
 #[cfg(unix)]
 use crate::common;
 use crate::common::canonical_existing_path;
-use crate::serve_harness::run_serve_runtime;
+use crate::serve_harness::run_serve_requests;
 #[cfg(unix)]
-use crate::serve_harness::{
-    assert_unenrolled_cwd_serve_session, run_serve_requests, unenrolled_cwd_serve_requests,
-};
+use crate::serve_harness::{assert_unenrolled_cwd_serve_session, unenrolled_cwd_serve_requests};
 
 #[tokio::test]
 async fn literal_template_without_daemon_fails_closed_before_mcp_handshake() {
     let home = TempDir::new().unwrap();
     let cwd = canonical_existing_path(home.path());
 
-    let output = run_serve_runtime(
+    let output = run_serve_requests(
         home.path(),
         &cwd,
         Some(OsStr::new("${workspaceFolder}")),
-        json!({}),
+        &[
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": { "name": "tracedecay_runtime", "arguments": { "format": "json" } }
+            }),
+        ],
     );
 
     assert!(!output.status.success());

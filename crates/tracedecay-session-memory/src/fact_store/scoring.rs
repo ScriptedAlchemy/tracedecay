@@ -165,6 +165,11 @@ pub(super) fn project_memory_fact_vector(
             return Ok(Arc::clone(vector));
         }
     }
+    let encoding = tracing::debug_span!(
+        "runtime_core.memory.fact_vector.encode",
+        cache_inserted = tracing::field::Empty,
+    );
+    let _encoding = encoding.enter();
     let vector = Arc::new(encoder.encode_fact(fact.content(), fact.entities())?);
     let mut cache = FACT_VECTOR_CACHE
         .lock()
@@ -174,6 +179,7 @@ pub(super) fn project_memory_fact_vector(
         .insert(key.clone(), Arc::clone(&vector))
         .is_none()
     {
+        encoding.record("cache_inserted", true);
         cache.order.push_back(key);
         while cache.order.len() > FACT_VECTOR_CACHE_CAPACITY {
             let Some(evicted) = cache.order.pop_front() else {

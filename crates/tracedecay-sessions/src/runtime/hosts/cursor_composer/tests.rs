@@ -1,12 +1,14 @@
 use super::capture::*;
 #[cfg(windows)]
 use super::ingest::snapshot_generation;
-use super::ingest::{
-    COMPOSER_RETRY_KEY_PREFIX, ComposerIngestContext, complete_composer_retry, composer_retry_key,
-    composer_retry_key_prefix, ensure_composer_retry,
-};
 #[cfg(unix)]
-use super::ingest::{directory_entry_is_real_dir, path_is_regular_file_no_follow};
+use super::ingest::{
+    COMPOSER_RETRY_KEY_PREFIX, directory_entry_is_real_dir, path_is_regular_file_no_follow,
+};
+use super::ingest::{
+    ComposerIngestContext, complete_composer_retry, composer_retry_key, composer_retry_key_prefix,
+    ensure_composer_retry,
+};
 use super::sqlite::*;
 use super::store::*;
 use super::*;

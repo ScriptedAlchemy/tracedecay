@@ -15,7 +15,6 @@ use tracedecay_domain::{
     RetrievalAnchorRecord, ShardDispositionV1, UtcMicros,
 };
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
-use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{Value, params};
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome,
@@ -79,21 +78,25 @@ pub(in crate::fact_store) async fn query_current_facts_tx(
 
     let mut loaded = BTreeMap::new();
     for batch in fact_ids.chunks(CURRENT_FACTS_BATCH_SIZE) {
-        let mut values = vec![
+        let requested =
+            serde_json::to_string(&batch.iter().map(FactId::as_str).collect::<Vec<_>>())
+                .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+        let values = vec![
             Value::Text(owner.kind.to_string()),
             Value::Text(owner.project_id.clone()),
             Value::Text(owner.json.clone()),
+            Value::Text(requested),
         ];
-        values.extend(
-            batch
-                .iter()
-                .map(|fact_id| Value::Text(fact_id.as_str().to_owned())),
-        );
-        let sql = format!(
-            "SELECT facts.fact_id, current_facts.payload_access, current_facts.trust_score,
+        // The requested ids drive the primary-key seek: native Turso never
+        // seeks `fact_id IN (...)` behind the owner prefix and scans the owner.
+        let sql = "SELECT facts.fact_id, current_facts.payload_access, current_facts.trust_score,
                     current_facts.active_assertion_id, current_facts.last_event_id,
                     current_facts.updated_at, payloads.payload_json
-             FROM memory_v2_current_facts AS current_facts
+             FROM (
+                 SELECT DISTINCT CAST(value AS TEXT) AS fact_id FROM json_each(?4)
+             ) AS requested
+             CROSS JOIN memory_v2_current_facts AS current_facts
+               ON current_facts.fact_id = requested.fact_id
              JOIN memory_v2_facts AS facts
                ON facts.fact_id = current_facts.fact_id
               AND facts.owner_kind = current_facts.owner_kind
@@ -104,14 +107,11 @@ pub(in crate::fact_store) async fn query_current_facts_tx(
               AND payloads.owner_kind = current_facts.owner_kind
               AND payloads.project_id = current_facts.project_id
               AND current_facts.payload_access = 'eligible'
-             WHERE current_facts.owner_kind = ?
-               AND current_facts.project_id = ?
-               AND facts.owner_json = ?
-               AND current_facts.fact_id IN ({})",
-            build_qmark_placeholders(batch.len())
-        );
+             WHERE current_facts.owner_kind = ?1
+               AND current_facts.project_id = ?2
+               AND facts.owner_json = ?3";
         let mut batch_rows = snapshot
-            .query(&sql, values)
+            .query(sql, values)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         while let Some(row) = batch_rows

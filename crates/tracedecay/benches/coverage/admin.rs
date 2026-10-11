@@ -1088,7 +1088,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
             Query::prepared_read(
                 "config_get",
                 "tracedecay_configuration_get",
-                json!({"key": ctx.seeds.config_key.clone().unwrap_or_else(|| "diagnostics.prewarm.v1".into())}),
+                json!({"key": ctx.seeds.config_key.clone().unwrap_or_else(|| "telemetry.timings.v1".into())}),
                 i,
                 super::configuration_read_prime,
             )

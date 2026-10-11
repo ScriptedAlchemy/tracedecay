@@ -82,7 +82,6 @@ pub(crate) async fn write_improvement_artifacts(
                 "optimizer_action": policy.optimizer_action,
                 "next_actions": policy.next_actions(record.accepted_count),
                 "handoff_tests": [policy.handoff_test()],
-                "eval_replay_commands": [policy.eval_replay_command()],
             },
             "request": request,
             "response": response,
@@ -183,7 +182,9 @@ pub(crate) async fn write_improvement_artifacts(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::super::outcomes::automation_outcomes_path;
-    use super::super::run_ledger::{AutomationRunStatus, AutomationTrigger};
+    use super::super::run_ledger::{
+        AutomationRunStatus, AutomationTrigger, read_run_artifact_payload,
+    };
     use super::*;
 
     fn artifact_record(run_id: &str) -> AutomationRunLedgerRecord {
@@ -225,6 +226,59 @@ mod tests {
             completed_at: "1".to_string(),
             completed_at_micros: Some(1_000_000),
         }
+    }
+
+    #[tokio::test]
+    async fn schema_v1_six_kind_chain_stays_readable() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let run_id = "legacy-v1-chain";
+        let legacy_evals = serde_json::json!({
+            "schema_version": 1,
+            "loop_stage": "generated_evals",
+            "runner": {"type": "validation_replay", "status": "passed"},
+        });
+        let chain = [
+            AutomationRunArtifactKind::Traces,
+            AutomationRunArtifactKind::Feedback,
+            AutomationRunArtifactKind::GeneratedEvals,
+            AutomationRunArtifactKind::ValidationGate,
+            AutomationRunArtifactKind::OptimizerDiagnosis,
+            AutomationRunArtifactKind::CodexHandoff,
+        ]
+        .into_iter()
+        .map(|kind| {
+            let payload = if kind == AutomationRunArtifactKind::GeneratedEvals {
+                legacy_evals.clone()
+            } else {
+                serde_json::json!({"schema_version": 1, "loop_stage": kind.as_str()})
+            };
+            prepare_run_artifact(run_id, kind, &payload, None, "1").unwrap()
+        })
+        .collect();
+        publish_run_artifact_chain(
+            temp.path(),
+            run_id,
+            chain,
+            &serde_json::json!({"sha256": "legacy"}),
+        )
+        .await
+        .unwrap();
+
+        let artifacts = read_published_artifact_chain(temp.path(), run_id, None)
+            .await
+            .unwrap()
+            .expect("legacy chain");
+        assert_eq!(artifacts.len(), 6);
+        let evals = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "generated_evals")
+            .unwrap();
+        assert_eq!(
+            read_run_artifact_payload(temp.path(), run_id, evals)
+                .await
+                .unwrap(),
+            legacy_evals
+        );
     }
 
     #[tokio::test]

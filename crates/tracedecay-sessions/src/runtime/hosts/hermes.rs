@@ -41,8 +41,6 @@ pub use ingest::{
     ingest_user_homes, ingest_user_homes_capped, ingest_user_sessions_capped,
 };
 
-#[cfg(all(test, windows))]
-use coverage::sqlite_incarnation;
 #[cfg(test)]
 use observation::{
     HermesAdmissionAction, HermesObservationRecord, HermesProjectionMetadata,

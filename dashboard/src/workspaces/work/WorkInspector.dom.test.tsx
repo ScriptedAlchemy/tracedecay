@@ -12,27 +12,9 @@ import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useScope } from '../../data/scope/store.ts';
+import { applicationProblem, applicationSuccess } from '../../test/applicationEnvelope.ts';
 import { workGraphRead, type WorkGraphVersionSpec } from '../../test/workGraphFixture.ts';
 import { WorkPage } from './WorkPage.tsx';
-
-function workEnvelope(payload: unknown, bindingId: string) {
-  return {
-    kind: 'success',
-    value: {
-      binding_id: bindingId,
-      contract: { schema_id: 'schema.work.result', schema_revision: 1 },
-      request_id: 'request-1',
-      scope: {
-        project_id: 'project.work',
-        repository_id: 'repository.work',
-        worktree_id: 'worktree.work',
-        reference: null,
-        scope_digest: 'sha256:scope',
-      },
-      outcome: { outcome: 'evidence', value: { payload } },
-    },
-  };
-}
 
 const OBSERVED_AT = 1_800_000_000_000_000;
 
@@ -83,8 +65,8 @@ function serve(payload: unknown = workGraphRead(GRAPH)) {
     'fetch',
     vi.fn(async (url: string) => {
       const { status, body } = String(url).includes('/work/views')
-        ? { status: 200, body: workEnvelope(payload, 'binding.http.work.views') }
-        : { status: 503, body: { kind: 'problem', value: { problem: {} } } };
+        ? { status: 200, body: applicationSuccess('operation.work.views', payload) }
+        : { status: 503, body: applicationProblem('unavailable') };
       return new Response(JSON.stringify(body), {
         status,
         headers: { 'content-type': 'application/json' },

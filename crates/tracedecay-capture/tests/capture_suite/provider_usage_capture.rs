@@ -152,8 +152,7 @@ fn cursor_transcript_usage_without_model_stays_typed_unknown() {
 
 #[test]
 fn cursor_composer_bubble_token_count_lands_as_correlated_provider_usage() {
-    let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/provider_normalization/cursor_composer");
+    let fixture_root = PathBuf::from("../../tests/fixtures/provider_normalization/cursor_composer");
     let native: Value = serde_json::from_str(
         &fs::read_to_string(fixture_root.join("assistant_bubble.input.json")).unwrap(),
     )

@@ -67,6 +67,7 @@ fn completed_sparse_search_for_generation(
                     name: "SparseLexicalWidget".to_owned(),
                     qualified_name: "crate::SparseLexicalWidget".to_owned(),
                     kind: "function".to_owned(),
+                    occurrence: None,
                     path: "src/lib.rs".to_owned(),
                     site: None,
                 },

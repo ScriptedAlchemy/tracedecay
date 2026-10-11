@@ -52,15 +52,10 @@ pub(super) fn optimizer_blockers(improvement_decision: &str, eval_count: usize) 
             },
             "required_action": "collect feedback or generated eval examples before optimizer handoff",
         })],
-        "blocked_pending_eval_run" => vec![json!({
-            "id": "pending_eval_run",
-            "reason": "Generated regression evals exist but have not been replayed.",
-            "required_action": "run the generated eval replay commands before optimizer or Codex handoff",
-        })],
-        "blocked_failed_eval_replay" => vec![json!({
-            "id": "failed_eval_replay",
-            "reason": "Generated regression eval definitions did not match validation results.",
-            "required_action": "fix generated eval definitions before optimizer or Codex handoff",
+        "blocked_failed_record_integrity" => vec![json!({
+            "id": "failed_record_integrity",
+            "reason": "Generated eval definitions do not match the counts or labels the run recorded.",
+            "required_action": "repair the recorded validation report before optimizer or Codex handoff",
         })],
         _ => Vec::new(),
     }
@@ -86,7 +81,7 @@ pub(super) fn optimizer_recommendations(record: &AutomationRunLedgerRecord) -> V
         vec![json!({
             "id": "review_accepted_changes",
             "priority": "medium",
-            "action": "Review accepted automation outputs and keep the generated evals with the run artifact.",
+            "action": "Review accepted automation outputs and keep the unexecuted generated examples with the run artifact.",
             "rationale": "Accepted items provide regression examples for future backend behavior.",
             "evidence_refs": ["feedback:model:accepted", "generated_evals:accepted"],
         })]

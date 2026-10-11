@@ -19,8 +19,7 @@ use std::sync::{Arc, OnceLock};
 use tracedecay_contracts::{ConfigurationSettingActionV1, ConfigurationSettingFindingV1};
 use tracedecay_domain::configuration::{
     ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
-    DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
-    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
+    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
     INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
     LcmSummarizerExecutablesV1, SYNC_AUTO_INIT_SETTING_KEY,
@@ -50,9 +49,6 @@ pub struct RuntimeTraceDecayConfig {
     pub max_file_size: u64,
     pub extract_docstrings: bool,
     pub track_call_sites: bool,
-    /// A cold `tracedecay_diagnostics` call prewarms in the background instead
-    /// of blocking on the dependency build.
-    pub diagnostics_prewarm: bool,
     /// Whether the persistent native code graph may activate. Disabling it
     /// leaves exact and lexical retrieval available.
     pub native_graph_activation: bool,
@@ -263,7 +259,6 @@ fn runtime_config_from_snapshot(
         max_file_size: required_unsigned(snapshot, INDEX_MAX_FILE_SIZE_SETTING_KEY)?,
         extract_docstrings: required_bool(snapshot, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY)?,
         track_call_sites: required_bool(snapshot, INDEX_TRACK_CALL_SITES_SETTING_KEY)?,
-        diagnostics_prewarm: required_bool(snapshot, DIAGNOSTICS_PREWARM_SETTING_KEY)?,
         native_graph_activation: required_bool(
             snapshot,
             INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,

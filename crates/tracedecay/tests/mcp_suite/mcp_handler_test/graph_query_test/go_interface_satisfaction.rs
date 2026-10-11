@@ -9,10 +9,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 
-const FIXTURE_ROOT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../tracedecay-code-extraction/fixtures/go-satisfaction"
-);
+const FIXTURE_ROOT: &str = "../tracedecay-code-extraction/fixtures/go-satisfaction";
 
 fn copy_fixture(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();

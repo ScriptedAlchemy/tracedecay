@@ -77,7 +77,7 @@ async fn candidates_tx(
                ON payloads.rowid = memory_v2_assertion_payloads_fts.rowid"
         }
         BackendKind::NativeTurso => {
-            "hits JOIN memory_v2_assertion_payloads AS payloads ON payloads.rowid = hits.payload_rowid"
+            "hits CROSS JOIN memory_v2_assertion_payloads AS payloads ON payloads.rowid = hits.payload_rowid"
         }
     };
     let predicate = native_search::predicate(
@@ -109,12 +109,13 @@ async fn candidates_tx(
     let candidates = format!(
         "SELECT current_facts.fact_id, {rank} AS rank
              FROM {source}
-             JOIN memory_v2_current_facts AS current_facts
+             CROSS JOIN memory_v2_current_facts AS current_facts
+             INDEXED BY sqlite_autoindex_memory_v2_current_facts_1
                ON current_facts.active_assertion_id = payloads.assertion_id
               AND current_facts.fact_id = payloads.fact_id
               AND current_facts.owner_kind = payloads.owner_kind
               AND current_facts.project_id = payloads.project_id
-             JOIN memory_v2_facts AS facts
+             CROSS JOIN memory_v2_facts AS facts
                ON facts.fact_id = current_facts.fact_id
               AND facts.owner_kind = current_facts.owner_kind
               AND facts.project_id = current_facts.project_id

@@ -7,8 +7,8 @@ use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY,
     AnalyzerSettingsV1, CONFIGURATION_SETTING_KEYS_V1, CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     CodeIndexWorkerSelectionV1, ConfigurationValueKindV1, ConfigurationValueV1,
-    ContextScoutSettingsV1, DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1,
-    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
+    ContextScoutSettingsV1, DeprecationStateV1, INDEX_EXCLUDE_SETTING_KEY,
+    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
     INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
     LcmSummarizerExecutablesV1, PROFILE_SETTING_KEYS_V1,
@@ -23,9 +23,10 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1,
     SettingKey, SettingScopeV1, SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY,
     USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
-    USER_UPLOAD_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
-    USER_WORK_EXPERTISE_CONSENT_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
-    WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
+    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1,
+    safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 use tracedecay_domain::{DomainError, validate_index_path_patterns};
@@ -420,6 +421,11 @@ fn register_profile_scalar_settings(
             RestartRequirementV1::None,
         ),
         (
+            USER_REPEATED_QUERY_HINTS_SETTING_KEY,
+            ConfigurationValueV1::Boolean(false),
+            RestartRequirementV1::None,
+        ),
+        (
             USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
             ConfigurationValueV1::Unsigned(2_000),
             RestartRequirementV1::DaemonRestart,
@@ -466,7 +472,6 @@ struct ProjectDefaults {
     max_file_size: u64,
     extract_docstrings: bool,
     track_call_sites: bool,
-    diagnostics_prewarm: bool,
     native_graph_activation: bool,
     telemetry_timings: bool,
     sync: SyncDefaults,
@@ -532,7 +537,6 @@ impl Default for ProjectDefaults {
             max_file_size: 1_048_576,
             extract_docstrings: true,
             track_call_sites: true,
-            diagnostics_prewarm: false,
             native_graph_activation: true,
             telemetry_timings: true,
             sync: SyncDefaults::default(),
@@ -576,12 +580,6 @@ fn register_project_settings(
             ConfigurationValueV1::Boolean(defaults.track_call_sites),
             SettingSensitivityV1::Public,
             RestartRequirementV1::DaemonRestart,
-        ),
-        (
-            DIAGNOSTICS_PREWARM_SETTING_KEY,
-            ConfigurationValueV1::Boolean(defaults.diagnostics_prewarm),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::None,
         ),
         (
             INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
@@ -866,6 +864,11 @@ mod user_profile_settings_tests {
         for (raw_key, kind, restart) in [
             (
                 USER_UPLOAD_ENABLED_SETTING_KEY,
+                ConfigurationValueKindV1::Boolean,
+                RestartRequirementV1::None,
+            ),
+            (
+                USER_REPEATED_QUERY_HINTS_SETTING_KEY,
                 ConfigurationValueKindV1::Boolean,
                 RestartRequirementV1::None,
             ),

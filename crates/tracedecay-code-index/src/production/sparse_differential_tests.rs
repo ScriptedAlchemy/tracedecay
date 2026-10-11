@@ -11,10 +11,7 @@ use super::worker_tests::{
 };
 use super::*;
 
-pub(super) const FIXTURE_ROOT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../tracedecay-code-extraction/fixtures/cross-file-calls"
-);
+pub(super) const FIXTURE_ROOT: &str = "../tracedecay-code-extraction/fixtures/cross-file-calls";
 
 /// Every file under `root`, path-sorted, as `(root-relative path, source)`.
 pub(super) fn fixture_files(root: &Path) -> Vec<(String, String)> {

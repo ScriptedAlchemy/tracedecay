@@ -440,6 +440,10 @@ pub struct CodeIndexSearchDisplayV1 {
     pub name: String,
     pub qualified_name: String,
     pub kind: String,
+    /// The exact symbol occurrence the match names, or `None` for a file
+    /// hit. Same-file declarations can share a qualified name and kind, so
+    /// only the occurrence binds a match to one graph symbol.
+    pub occurrence: Option<tracedecay_domain::SymbolOccurrenceId>,
     /// Repository-relative logical path of the declaring file within the
     /// generation that answered. Savings accounting reads it: the raw-file
     /// counterfactual needs the referenced files on every serving route.

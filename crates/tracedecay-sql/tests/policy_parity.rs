@@ -593,17 +593,14 @@ mod native {
         /// `dbstat`, and the NOOP checkpoint the native arm answers from the
         /// engine's WAL frame counts.
         SqliteIntrospectionRemoved,
-        /// `auto_vacuum` and `incremental_vacuum`.
-        VacuumRemoved,
         /// `secure_delete`: native deletes logically, without page scrubbing.
         SecureDelete,
     }
 
     impl ApprovedDelta {
-        const ALL: [Self; 4] = [
+        const ALL: [Self; 3] = [
             Self::FtsShape,
             Self::SqliteIntrospectionRemoved,
-            Self::VacuumRemoved,
             Self::SecureDelete,
         ];
 
@@ -618,8 +615,6 @@ mod native {
                 Some(Self::FtsShape)
             } else if named("dbstat") || (pragma == "wal_checkpoint" && named("noop")) {
                 Some(Self::SqliteIntrospectionRemoved)
-            } else if matches!(pragma, "auto_vacuum" | "incremental_vacuum") {
-                Some(Self::VacuumRemoved)
             } else if pragma == "secure_delete" {
                 Some(Self::SecureDelete)
             } else {

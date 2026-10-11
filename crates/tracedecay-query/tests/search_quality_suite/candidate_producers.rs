@@ -3470,12 +3470,11 @@ fn annotation_uses_mint_no_lexical_artifact_documents() {
 /// scheduler would retry.
 #[test]
 fn reader_refuses_historical_v10_writer_artifact_as_incompatible() {
-    let checked_in =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lexical-artifact-v10.sqlite");
+    let checked_in = Path::new("tests/fixtures/lexical-artifact-v10.sqlite");
     let control = ArtifactControl { cancelled: false };
     let native = tracedecay_sql::ENGINE == tracedecay_sql::Engine::Native;
     if !native {
-        let on_disk_revision: i64 = tracedecay_sql::Connection::open(&checked_in)
+        let on_disk_revision: i64 = tracedecay_sql::Connection::open(checked_in)
             .expect("inspect v10 fixture")
             .query_row(
                 "SELECT format_revision FROM artifact_state WHERE singleton = 1",
@@ -3491,7 +3490,7 @@ fn reader_refuses_historical_v10_writer_artifact_as_incompatible() {
 
     let directory = tempfile::tempdir().expect("private v10 reopen dir");
     let artifact_path = directory.path().join("lexical-artifact-v10.sqlite");
-    std::fs::copy(&checked_in, &artifact_path).expect("copy historical v10 fixture");
+    std::fs::copy(checked_in, &artifact_path).expect("copy historical v10 fixture");
     drop(
         tracedecay_private_fs::make_private_file(&artifact_path)
             .expect("restore private-file protection for content-addressed open"),

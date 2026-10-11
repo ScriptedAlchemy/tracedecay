@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
-use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{Value, params};
 
 use tracedecay_domain::{
@@ -244,18 +243,18 @@ async fn load_project_memory_projections_inner_tx(
 
     for batch in fact_ids.chunks(PROJECT_MEMORY_PROJECTION_BATCH_SIZE) {
         ensure_active()?;
-        let mut values = vec![
+        let requested =
+            serde_json::to_string(&batch.iter().map(FactId::as_str).collect::<Vec<_>>())
+                .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+        let values = vec![
             Value::Text(key.kind.to_string()),
             Value::Text(key.project_id.clone()),
             Value::Text(key.json.clone()),
+            Value::Text(requested),
         ];
-        values.extend(
-            batch
-                .iter()
-                .map(|fact_id| Value::Text(fact_id.as_str().to_owned())),
-        );
-        let sql = format!(
-            "SELECT facts.fact_id,
+        // The requested ids drive the primary-key seek: native Turso never
+        // seeks `fact_id IN (...)` behind the owner prefix and scans the owner.
+        let sql = "SELECT facts.fact_id,
                     current_facts.payload_access,
                     current_facts.updated_at,
                     facts.owner_json,
@@ -273,7 +272,11 @@ async fn load_project_memory_projections_inner_tx(
                     current_facts.last_recalled_at,
                     current_facts.last_feedback_at,
                     last_events.event_json
-             FROM memory_v2_current_facts AS current_facts
+             FROM (
+                 SELECT DISTINCT CAST(value AS TEXT) AS fact_id FROM json_each(?4)
+             ) AS requested
+             CROSS JOIN memory_v2_current_facts AS current_facts
+               ON current_facts.fact_id = requested.fact_id
              JOIN memory_v2_facts AS facts
                ON facts.fact_id = current_facts.fact_id
               AND facts.owner_kind = current_facts.owner_kind
@@ -289,14 +292,11 @@ async fn load_project_memory_projections_inner_tx(
               AND payloads.owner_kind = current_facts.owner_kind
               AND payloads.project_id = current_facts.project_id
               AND current_facts.payload_access = 'eligible'
-             WHERE current_facts.owner_kind = ?
-               AND current_facts.project_id = ?
-               AND facts.owner_json = ?
-               AND current_facts.fact_id IN ({})",
-            build_qmark_placeholders(batch.len())
-        );
+             WHERE current_facts.owner_kind = ?1
+               AND current_facts.project_id = ?2
+               AND facts.owner_json = ?3";
         let mut rows = transaction
-            .query(&sql, values)
+            .query(sql, values)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         ensure_active()?;

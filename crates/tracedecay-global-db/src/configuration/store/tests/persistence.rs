@@ -21,7 +21,7 @@ use crate::configuration::resolver::resolve_configuration;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
     ConfigurationMutationOperationV1, SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY,
-    USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
 };
 
 #[tokio::test]
@@ -182,6 +182,12 @@ async fn worker_only_profile_store_converges_onto_the_profile_registry() {
         converged.value(USER_UPLOAD_ENABLED_SETTING_KEY).unwrap(),
         &ConfigurationValueV1::Boolean(false)
     );
+    assert_eq!(
+        converged
+            .value(USER_REPEATED_QUERY_HINTS_SETTING_KEY)
+            .unwrap(),
+        &ConfigurationValueV1::Boolean(false)
+    );
 }
 
 #[tokio::test]
@@ -240,8 +246,8 @@ async fn activation_failure_preserves_last_working() {
             &direct_authority,
             &DirectConfigurationMutation::Set {
                 layer: direct_project_layer(),
-                key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-                value: Box::new(ConfigurationValueV1::Boolean(true)),
+                key: SettingKey::new("telemetry.timings.v1").unwrap(),
+                value: Box::new(ConfigurationValueV1::Boolean(false)),
             },
             &root.revision_id,
         )

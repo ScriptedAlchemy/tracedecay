@@ -587,8 +587,8 @@ pub(super) fn outcome_feedback_section(
 }
 
 /// Generated-eval entries derived from real post-activation outcomes rather
-/// than validation-time signals. Kept separate from the validation-replay
-/// definitions so the replay gate keeps checking only validation examples.
+/// than validation-time signals. Kept separate from the validation examples so
+/// the record-integrity check covers only what the validation report recorded.
 pub(super) fn outcome_eval_definitions(
     task: AgentTaskKind,
     task_key: &str,
