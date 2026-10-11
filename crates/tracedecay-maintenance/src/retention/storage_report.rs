@@ -268,11 +268,14 @@ impl StorageReport {
         }
 
         // Store rows size every file under `projects/<id>/`. Profile-level
-        // files beside `global.db` and `user-sessions.db` (spools, daemon
-        // state) are only sized by the full census, so this total is a floor.
-        let mut excluded_families = vec![
-            "profile-level files outside global.db, user-sessions.db, and projects/".to_owned(),
-        ];
+        // files beside the profile and profile-sessions stores (spools,
+        // daemon state) are only sized by the full census, so this total is a
+        // floor.
+        let mut excluded_families = vec![format!(
+            "profile-level files outside {}, {}, and projects/",
+            StoreFile::Profile.file_name(),
+            StoreFile::ProfileSessions.file_name()
+        )];
         if self.coverage.state == StorageReportCoverageState::Partial {
             excluded_families.push("registered stores beyond this page".to_owned());
         }
@@ -413,8 +416,9 @@ struct SampledRegisteredStorage {
 fn read_registered_project_rows(
     global_db_path: &Path,
 ) -> tracedecay_domain::errors::Result<Vec<(String, String)>> {
-    let connection = super::quiesced_store::open_quiesced(global_db_path)
-        .map_err(|error| report_error("open quiesced global.db for read-only report", error))?;
+    let connection = super::quiesced_store::open_quiesced(global_db_path).map_err(|error| {
+        report_error("open quiesced profile database for read-only report", error)
+    })?;
     let mut statement = connection
         .prepare("SELECT project_id, canonical_root FROM code_projects ORDER BY project_id")
         .map_err(|error| report_error("list registered projects", error))?;
@@ -1207,10 +1211,14 @@ mod tests {
         let total = report.profile_total_size();
         assert_eq!(total.state, ProfileTotalCoverageStateV1::Partial);
         assert_eq!(total.accounted_bytes, 500);
+        let profile_files = match tracedecay_sql::ENGINE {
+            tracedecay_sql::Engine::Sqlite => "global.db, user-sessions.db",
+            tracedecay_sql::Engine::Native => "global.tdb, user-sessions.tdb",
+        };
         assert_eq!(
             total.excluded_families,
             vec![
-                "profile-level files outside global.db, user-sessions.db, and projects/".to_owned(),
+                format!("profile-level files outside {profile_files}, and projects/"),
                 "2 unreadable entries under registered stores".to_owned(),
             ]
         );
@@ -1230,12 +1238,9 @@ mod tests {
         assert_eq!(total.state, ProfileTotalCoverageStateV1::Partial);
         assert_eq!(total.accounted_bytes, 550);
         assert_eq!(total.user_sessions_db_bytes, 50);
-        assert!(
-            total
-                .excluded_families
-                .iter()
-                .any(|family| family.contains("user-sessions.db"))
-        );
+        assert!(total.excluded_families.iter().any(|family| {
+            family.contains(tracedecay_store::StoreFile::ProfileSessions.file_name())
+        }));
     }
 
     #[test]
@@ -1278,8 +1283,12 @@ mod tests {
             data_root.join(tracedecay_store::StoreFile::Project.file_name()),
         )
         .unwrap();
+        // An idle store: its owner checkpointed every frame before closing.
         connection
-            .execute_batch("CREATE TABLE fixture (id INTEGER PRIMARY KEY);")
+            .execute_batch(
+                "CREATE TABLE fixture (id INTEGER PRIMARY KEY);
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
             .unwrap();
     }
 
@@ -1685,7 +1694,11 @@ mod tests {
         seed_global_db(&profile_root, &[("proj_a", "/repos/a")]).await;
         seed_graph_db(&profile_root, "proj_a");
 
-        std::fs::write(profile_root.join("sessions.db"), vec![1u8; 2_048]).unwrap();
+        std::fs::write(
+            profile_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+            vec![1u8; 2_048],
+        )
+        .unwrap();
         let generations = profile_root
             .join("projects")
             .join("proj_a")
@@ -1733,7 +1746,11 @@ mod tests {
             }
             let wal = sqlite_family_member(&global_db, "-wal");
             assert_eq!(wal.metadata().unwrap().len() == 0, checkpointed);
-            assert!(sqlite_family_member(&global_db, "-shm").is_file());
+            assert_eq!(
+                sqlite_family_member(&global_db, "-shm").is_file(),
+                StoreFile::SIDECAR_SUFFIXES.contains(&"-shm"),
+                "a live store keeps exactly its engine's sidecars"
+            );
             seed_graph_db(&profile_root, "proj_a");
             let before = sqlite_family_bytes(&global_db);
             let profile_listing = directory_listing(&profile_root);
@@ -1762,9 +1779,13 @@ mod tests {
                 profile_listing,
                 "reporting must never leave a copy or scratch file in the profile"
             );
+            writer
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
             drop(writer);
             let closed = sqlite_family_bytes(&global_db);
-            assert!(!sqlite_family_member(&global_db, "-wal").exists());
+            let wal = sqlite_family_member(&global_db, "-wal");
+            assert!(!wal.exists() || wal.metadata().unwrap().len() == 0);
             assert!(!sqlite_family_member(&global_db, "-shm").exists());
             let report = build_storage_report(&profile_root).await.unwrap();
             assert_eq!(report.stores.len(), 1);
@@ -1819,9 +1840,14 @@ mod tests {
         assert!(report.stores[0].total_bytes > 0);
 
         assert_eq!(report.stores.len(), 1);
+        let directory_bytes: u64 = std::fs::read_dir(graph_db.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().metadata().unwrap())
+            .filter(std::fs::Metadata::is_file)
+            .map(|metadata| metadata.len())
+            .sum();
         assert_eq!(
-            report.stores[0].total_bytes,
-            std::fs::metadata(&graph_db).unwrap().len(),
+            report.stores[0].total_bytes, directory_bytes,
             "size must come from filesystem metadata"
         );
         assert!(
@@ -2013,9 +2039,14 @@ mod tests {
         let profile_root = tmp.path().join("profile");
         let data_root = profile_root.join("projects").join("proj_a");
         let scope = data_root.join("code-index-v1").join("a".repeat(64));
+        let project = tracedecay_store::StoreFile::Project.file_name();
+        let sessions = tracedecay_store::StoreFile::ProjectSessions.file_name();
+        let project_wal = format!("{project}-wal");
+        let sessions_wal = format!("{sessions}-wal");
+        let sessions_admission = format!(".{sessions}.host-admission/claim");
         for (relative, bytes) in [
-            ("tracedecay.db", 4_096),
-            ("tracedecay.db-wal", 100),
+            (project, 4_096),
+            (project_wal.as_str(), 100),
             ("tracedecay.sealed/digest/generation.grafeo", 3_000),
             (
                 "code-index-v1/code-text-artifacts-v1/text-artifact.bin",
@@ -2026,9 +2057,9 @@ mod tests {
                 300,
             ),
             ("tracedecay.graph-replay/generation.json", 40),
-            ("sessions.db", 900),
-            ("sessions.db-wal", 10),
-            (".sessions.db.host-admission/claim", 5),
+            (sessions, 900),
+            (sessions_wal.as_str(), 10),
+            (sessions_admission.as_str(), 5),
             ("hook-delivery-spool/claude/record", 7),
         ] {
             let path = data_root.join(relative);
@@ -2194,9 +2225,15 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_root = tmp.path().join("profile");
         std::fs::create_dir_all(profile_root.join("projects/proj_a")).unwrap();
-        std::fs::write(profile_root.join("global.db"), vec![0u8; 300]).unwrap();
         std::fs::write(
-            profile_root.join("projects/proj_a/tracedecay.db"),
+            profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+            vec![0u8; 300],
+        )
+        .unwrap();
+        std::fs::write(
+            profile_root
+                .join("projects/proj_a")
+                .join(tracedecay_store::StoreFile::Project.file_name()),
             vec![0u8; 700],
         )
         .unwrap();

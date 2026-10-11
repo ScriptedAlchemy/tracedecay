@@ -1076,10 +1076,10 @@ pub(crate) async fn close_test_graph(cg: TestTraceDecay) {
 
 pub(crate) async fn init_test_project(project: &Path) -> (TestTraceDecay, TestEnv) {
     let profile = common::isolated_profile_under_home(&project.join("home"));
-    let cg = fixture::init_project_from_template_with_options(
+    let cg = Box::pin(TraceDecay::init_with_options(
         project,
         TraceDecayOpenOptions::for_profile(&profile),
-    )
+    ))
     .await
     .unwrap();
     (TestTraceDecay::new(cg), TestEnv { profile })
@@ -1292,7 +1292,7 @@ pub(crate) async fn seed_project_registry(
         runtime
             .profile_relative_path_for_test(db_path)
             .expect("test registry path must be inside the runtime profile"),
-        Path::new("global.db"),
+        Path::new(tracedecay_store::StoreFile::Profile.file_name()),
         "test registry path must be the runtime-owned profile database"
     );
     let project = runtime
@@ -1338,7 +1338,10 @@ pub(crate) async fn seed_project_registry(
         .upsert_store_artifact(tracedecay_global_db::StoreArtifactUpsert {
             store_id: store.store_id,
             artifact_kind: "graph_db".to_string(),
-            relpath: "projects/proj_alpha/tracedecay.db".to_string(),
+            relpath: format!(
+                "projects/proj_alpha/{}",
+                tracedecay_store::StoreFile::Project.file_name()
+            ),
             size_bytes: Some(128),
             schema_version: Some("1".to_string()),
             updated_at: Some(1_800_000_003),

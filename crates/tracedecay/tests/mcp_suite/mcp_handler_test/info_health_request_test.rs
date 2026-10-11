@@ -117,7 +117,7 @@ async fn info_and_runtime_reads_refuse_arguments_outside_their_typed_request() {
         .expect("registered project id");
     let registry_path = canonical_existing_identity(fixture.harness.profile_root())
         .expect("canonical profile root")
-        .join("global.db")
+        .join(tracedecay_store::StoreFile::Profile.file_name())
         .display()
         .to_string();
 
@@ -400,7 +400,7 @@ async fn admin_project_answers_through_its_owners_and_refuses_arguments_outside_
             "outcomes": [{
                 "project_id": project_id,
                 "store_root": store_root.display().to_string(),
-                "graph_db_path": store_root.join("tracedecay.db").display().to_string(),
+                "graph_db_path": store_root.join(tracedecay_store::StoreFile::Project.file_name()).display().to_string(),
                 "scope_prefix": null,
                 "outcome": "owner_unavailable",
             }],

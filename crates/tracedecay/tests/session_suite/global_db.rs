@@ -449,7 +449,7 @@ async fn analytics_events_query_since_bounds_timestamp() {
 async fn incompatible_profile_refusal_preserves_fresh_analytics_behavior() {
     let tmp = TempDir::new().unwrap();
     let legacy_root = tmp.path().join("legacy").join(".tracedecay");
-    let legacy_db = legacy_root.join("global.db");
+    let legacy_db = legacy_root.join(tracedecay_store::StoreFile::Profile.file_name());
     std::fs::create_dir_all(&legacy_root).unwrap();
 
     let conn = tracedecay_sql::Connection::open(&legacy_db).unwrap();

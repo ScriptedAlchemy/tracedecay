@@ -7,7 +7,9 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
     // the journey runs in a child test process that pins the global DB.
     if !crate::common::in_child_test() {
         let pinned = tempdir_or_panic();
-        let global_db = pinned.path().join("global.db");
+        let global_db = pinned
+            .path()
+            .join(tracedecay_store::StoreFile::Profile.file_name());
         crate::common::rerun_test_in_child(
             "settings::settings_dashboard_api_aggregates_and_updates_config",
             &[("TRACEDECAY_GLOBAL_DB", Some(global_db.as_os_str()))],

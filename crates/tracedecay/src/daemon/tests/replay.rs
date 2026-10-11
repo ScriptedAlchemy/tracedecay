@@ -63,7 +63,7 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
         .clone();
     let identity = DaemonClientIdentity {
         profile_root: profile_root.clone(),
-        global_db_path: profile_root.join("global.db"),
+        global_db_path: profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
     };
 
     let user_db = first_admin

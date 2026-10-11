@@ -137,13 +137,15 @@ async fn project_parity_fixture(tmp: &TempDir, incremental: bool) -> Vec<Vec<Str
          FROM session_assertion_supersession
          WHERE generation <= 2
          ORDER BY superseded_assertion_id, superseding_assertion_id",
-        "SELECT occurrence.occurrence_id || ':' || fts.index_text || ':' || occurrence.snippet_text
-         FROM session_occurrences AS occurrence
-         JOIN session_occurrences_fts AS fts ON fts.rowid = occurrence.rowid
-         WHERE occurrence.generation <= 2
-         ORDER BY occurrence.occurrence_id",
     ] {
         projected.push(rows(&path, projection).await);
+    }
+    for term in ["first", "second"] {
+        projected.push(vec![
+            scalar(&path, &occurrence_search_count_sql(term))
+                .await
+                .to_string(),
+        ]);
     }
     projected
 }
@@ -160,6 +162,11 @@ async fn incremental_and_one_shot_refreshes_have_identical_bytes_and_order() {
         one_shot[1].len(),
         1,
         "the supersession assertion is projected"
+    );
+    assert_eq!(
+        one_shot[one_shot.len() - 2..],
+        [vec!["1".to_owned()], vec!["1".to_owned()]],
+        "each occurrence is searchable by its own text"
     );
     assert_eq!(one_shot, incremental);
 }

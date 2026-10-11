@@ -230,7 +230,7 @@ fn multi_root_families_refuse_cross_family_fallback() {
 
 fn test_client_identity_for(profile_root: PathBuf) -> DaemonClientIdentity {
     DaemonClientIdentity {
-        global_db_path: profile_root.join("global.db"),
+        global_db_path: profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
         profile_root,
     }
 }

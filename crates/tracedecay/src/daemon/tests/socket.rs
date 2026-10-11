@@ -829,7 +829,7 @@ async fn projectless_project_list_reads_the_empty_profile_registry() {
     assert!(
         payload["registry_path"]
             .as_str()
-            .is_some_and(|path| path.ends_with("global.db")),
+            .is_some_and(|path| path.ends_with(tracedecay_store::StoreFile::Profile.file_name())),
         "listing must name the registry it read: {payload}"
     );
 

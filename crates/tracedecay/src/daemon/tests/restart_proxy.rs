@@ -432,7 +432,9 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
         )
         .await
         .expect("open retained profile runtime");
-    let global_db_path = profile.path().join("global.db");
+    let global_db_path = profile
+        .path()
+        .join(tracedecay_store::StoreFile::Profile.file_name());
     registry
         .upsert_code_project("project-a", &project_a, None, None, None)
         .await
@@ -536,7 +538,9 @@ async fn daemon_resolves_registry_only_initialize_root_alias() {
         )
         .await
         .expect("open retained profile runtime");
-    let global_db_path = profile.path().join("global.db");
+    let global_db_path = profile
+        .path()
+        .join(tracedecay_store::StoreFile::Profile.file_name());
     registry
         .upsert_code_project("project-registry-only", &canonical, None, None, None)
         .await

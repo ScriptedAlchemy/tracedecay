@@ -713,7 +713,9 @@ mod detail_coverage_tests {
     async fn bounded_prefix_keeps_exact_last_agent_and_total_count_queryable() {
         let directory = tempfile::tempdir().expect("tempdir");
         let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
-            &directory.path().join("sessions.db"),
+            &directory
+                .path()
+                .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
         );
         ensure_workflow_index_schema(&connection)
             .await
