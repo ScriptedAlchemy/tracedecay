@@ -116,13 +116,11 @@ pub(super) fn load_next_pending_projection_any(
 ) -> tracedecay_sql::Result<Option<SourcePendingProjectionV1>> {
     let binding = connection
         .prepare_cached(
-            // Walks pending rows in queue order through the registered
-            // stores' `idx_external_source_pending_order_v1` and stops at the
-            // first one its binding's frontier admits, instead of sorting the
-            // whole backlog, which Turso does unless the index is named.
+            // Pending rows drive the join, so the registered stores'
+            // `idx_external_source_pending_order_v1` can serve the ORDER BY
+            // and stop at the first row its binding's frontier admits.
             "SELECT revisions.binding_json
              FROM external_source_pending_projections_v1 AS pending
-                  INDEXED BY idx_external_source_pending_order_v1
              CROSS JOIN external_source_states_v1 AS states
                ON states.binding_id = pending.binding_id
               AND pending.predecessor_frontier_digest =

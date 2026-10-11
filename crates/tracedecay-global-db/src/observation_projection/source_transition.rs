@@ -115,8 +115,7 @@ pub(crate) async fn verify_native_source_supersession(
     let mut aliases = conn
         .query(
             "SELECT COUNT(*) FROM retrieval_anchor_aliases
-         INDEXED BY sqlite_autoindex_retrieval_anchor_aliases_2
-         WHERE owner_json = ?1 AND anchor_id = ?2",
+         WHERE +owner_json = ?1 AND anchor_id = ?2",
             params![owner, new_anchor.anchor_id().as_str()],
         )
         .await

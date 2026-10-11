@@ -1321,7 +1321,6 @@ fn validate_revision_collisions(
              SELECT stored.native_object_digest, stored.revision_digest, stored.mutation_json
              FROM requested
              CROSS JOIN external_source_mutations_v1 AS stored
-                  INDEXED BY sqlite_autoindex_external_source_mutations_v1_2
              WHERE stored.binding_id = ?1
                AND stored.native_object_digest = requested.native_object_digest
                AND stored.revision_digest = requested.revision_digest",
