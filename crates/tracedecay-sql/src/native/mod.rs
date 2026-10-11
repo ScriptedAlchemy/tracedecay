@@ -4,6 +4,9 @@
 //! guarded `Connection` directly; the rusqlite-shaped `driver` over it is the
 //! crate's public surface under `--config=native`.
 mod confined_io;
+// The driver-only half of the guarded connection is unused on the default
+// engine, where only the facade runs.
+#[cfg_attr(not(td_engine = "native"), allow(dead_code))]
 mod connection;
 #[cfg(td_engine = "native")]
 pub(crate) mod driver;
