@@ -443,7 +443,7 @@ fn census_sqlite_replay_column_is_current() {
 
 #[cfg(td_engine = "native")]
 mod native {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
     use tracedecay_sql::{Capability, Connection, ConnectionControl, types::Value};
 
@@ -752,7 +752,7 @@ mod native {
             );
         }
 
-        let mut excused: BTreeMap<ApprovedDelta, usize> = BTreeMap::new();
+        let mut excused = BTreeSet::new();
         let mut failing = Vec::new();
         for row in census.iter().filter(|row| row.sqlite > Reach::Missing) {
             let (reach, error) = isolated(&store, capability(&row.capability), &row.sql);
@@ -760,7 +760,9 @@ mod native {
                 continue;
             }
             match ApprovedDelta::of(&row.sql, &search) {
-                Some(delta) if reach == Reach::Missing => *excused.entry(delta).or_default() += 1,
+                Some(delta) if reach == Reach::Missing => {
+                    excused.insert(delta);
+                }
                 _ => failing.push(format!(
                     "{}\t{}\tSQLite {}, native {}: {}",
                     row.capability,
@@ -785,7 +787,7 @@ mod native {
         );
         let unused: Vec<ApprovedDelta> = ApprovedDelta::ALL
             .into_iter()
-            .filter(|delta| !excused.contains_key(delta))
+            .filter(|delta| !excused.contains(delta))
             .collect();
         assert!(
             unused.is_empty(),
