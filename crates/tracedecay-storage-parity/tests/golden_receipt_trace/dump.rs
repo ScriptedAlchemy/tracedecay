@@ -50,6 +50,19 @@ pub const NORMALIZED_JSON_KEYS: &[(&str, &str)] = &[(
 
 pub const NORMALIZED: &str = "<normalized>";
 
+/// Every normalization the goldens rely on, one per line.
+pub fn normalization_listing() -> String {
+    let mut out = String::new();
+    for rule in NORMALIZED_COLUMNS {
+        out.push_str(&format!("column {}.{}: {}\n", rule.table, rule.column, rule.reason));
+    }
+    for (key, reason) in NORMALIZED_JSON_KEYS {
+        out.push_str(&format!("json key {key}: {reason}\n"));
+    }
+    out.push_str("path <store temp dir>: replaced with $STORE in errors and text values\n");
+    out
+}
+
 /// Replaces the fixture's temp directory, which differs per run.
 pub fn scrub_path(text: &str, store_dir: &Path) -> String {
     let mut text = text.to_owned();

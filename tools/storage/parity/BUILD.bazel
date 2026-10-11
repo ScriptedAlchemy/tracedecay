@@ -7,6 +7,7 @@ rust_binary(
     srcs = ["regen.rs"],
     crate_root = "regen.rs",
     edition = "2024",
+    testonly = True,
     data = ["//crates/tracedecay-storage-parity:golden_receipt_trace"],
 )
 

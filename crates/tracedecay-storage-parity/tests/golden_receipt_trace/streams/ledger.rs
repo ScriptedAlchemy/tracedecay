@@ -1,6 +1,6 @@
-//! Ledger dispositions on a bare project store: fresh commit, exact replay,
-//! idempotency conflict, revoked authority, and the effect payloads the
-//! repository executor rejects.
+//! Ledger dispositions on a project store: fresh commit, exact replay,
+//! idempotency conflict, authority revoked at each writer stage, and the
+//! effect payloads the repository attachment cannot commit.
 
 use std::sync::Arc;
 
@@ -10,7 +10,8 @@ use tracedecay_rusqlite_runtime::{
     repository::{RepositoryPhysicalAttachmentFactory, RepositoryRuntimePhysicalAttachment},
 };
 use tracedecay_store::{
-    AdmissionConfigV1, RepositoryWritePayloadV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, GENERATION_DIAGNOSTICS_SCHEMA_DDL, RepositoryWritePayloadV1,
+    StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 use super::super::{
@@ -77,23 +78,46 @@ fn close(attachment: RepositoryRuntimePhysicalAttachment) {
     attachment.close_and_join().expect("close parity store");
 }
 
+/// A store holding only the diagnostics tables, so a `Diagnostics` payload is
+/// the one write that can commit and every disposition below is the ledger's.
+fn attach_with_diagnostics_schema(
+    binding: &StoreRuntimeBindingV1,
+    path: &std::path::Path,
+) -> RepositoryRuntimePhysicalAttachment {
+    tracedecay_sql::Connection::open(path)
+        .and_then(|connection| connection.execute_batch(GENERATION_DIAGNOSTICS_SCHEMA_DDL))
+        .expect("install diagnostics schema");
+    let locator = VerifiedStoreLocatorV1::new(
+        binding.shard_id.clone(),
+        binding.incarnation,
+        LocatorDigest::new(digest('d')).expect("locator digest"),
+    );
+    RepositoryPhysicalAttachmentFactory
+        .attach(
+            binding.clone(),
+            locator,
+            path.canonicalize().expect("canonical ledger store path"),
+            AdmissionConfigV1::default(),
+        )
+        .expect("attach parity ledger store")
+}
+
 pub async fn ledger() -> String {
     let directory = tempfile::tempdir().expect("ledger store directory");
     let path = directory.path().join("ledger.db");
     let binding = project_binding();
-    let attachment = initialize(&binding, &path);
+    let attachment = attach_with_diagnostics_schema(&binding, &path);
     let mut trace = Trace::new(directory.path());
-    let dispatched = || {
-        RepositoryWritePayloadV1::EnqueueOutbox(Box::new(fixtures::effects::outbox_entry(
-            &binding,
-            "effect.parity.dispatched",
-            "dispatched",
+    let diagnostics = || {
+        RepositoryWritePayloadV1::Diagnostics(Box::new(fixtures::project::diagnostics(
+            "generation.ledger",
+            "ledger message",
         )))
     };
     let stream = [
-        ("fresh", "key.enqueue", 'a', None),
-        ("exact_replay", "key.enqueue", 'a', None),
-        ("idempotency_conflict", "key.enqueue", 'b', None),
+        ("fresh", "key.ledger", 'a', None),
+        ("exact_replay", "key.ledger", 'a', None),
+        ("idempotency_conflict", "key.ledger", 'b', None),
         (
             "revoked_before_admission",
             "key.revoked.admission",
@@ -112,13 +136,25 @@ pub async fn ledger() -> String {
             'c',
             Some(RuntimeWriteAuthorityStage::BeforeCommit),
         ),
-        ("after_revocation", "key.after", 'e', None),
     ];
     for (step, key, byte, revoked_at) in stream {
-        let request = submit_request(&binding, step, key, byte, dispatched());
+        let request = submit_request(&binding, step, key, byte, diagnostics());
         submit(&attachment, &mut trace, step, request, revoked_at).await;
     }
+    let republished = RepositoryWritePayloadV1::Diagnostics(Box::new(
+        fixtures::project::diagnostics("generation.ledger", "ledger message after revocation"),
+    ));
+    let request = submit_request(&binding, "after_revocation", "key.after", 'e', republished);
+    submit(&attachment, &mut trace, "after_revocation", request, None).await;
     let effects = [
+        (
+            "enqueue_dispatched_without_pending",
+            RepositoryWritePayloadV1::EnqueueOutbox(Box::new(fixtures::effects::outbox_entry(
+                &binding,
+                "effect.parity.dispatched",
+                "dispatched",
+            ))),
+        ),
         (
             "enqueue_pending_rejected",
             RepositoryWritePayloadV1::EnqueueOutbox(Box::new(fixtures::effects::outbox_entry(

@@ -20,5 +20,9 @@ pub async fn render_all() -> BTreeMap<String, String> {
             stores::work_and_workflow().await,
         ),
         ("remote.golden".to_owned(), stores::remote().await),
+        (
+            "normalizations.golden".to_owned(),
+            super::dump::normalization_listing(),
+        ),
     ])
 }

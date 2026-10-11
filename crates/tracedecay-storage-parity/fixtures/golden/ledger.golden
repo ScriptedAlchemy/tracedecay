@@ -1,0 +1,12 @@
+# receipt trace
+{"error":"WriterRuntime(Infrastructure { operation: \"runtime ledger: runtime ledger outbox effect identity already exists\" })","step":"fresh"}
+{"error":"WriterRuntime(Infrastructure { operation: \"runtime ledger: runtime ledger outbox effect identity already exists\" })","step":"exact_replay"}
+{"error":"WriterRuntime(Infrastructure { operation: \"runtime ledger: runtime ledger outbox effect identity already exists\" })","step":"idempotency_conflict"}
+{"outcome":{"kind":"unavailable","reason":"missing_authority"},"step":"revoked_before_admission"}
+{"outcome":{"kind":"unavailable","reason":"missing_authority"},"step":"revoked_after_dequeue"}
+{"outcome":{"kind":"unavailable","reason":"missing_authority"},"step":"revoked_before_commit"}
+{"error":"WriterRuntime(Infrastructure { operation: \"runtime ledger: runtime ledger outbox effect identity already exists\" })","step":"after_revocation"}
+{"error":"WriterRuntime(Infrastructure { operation: \"closed native operation: native SQLite operation failed: Invalid parameter name: repository attachment does not own enqueue outbox effect\" })","step":"enqueue_pending_rejected"}
+{"error":"WriterRuntime(Infrastructure { operation: \"closed native operation: native SQLite operation failed: Invalid parameter name: repository attachment does not own apply inbox effect\" })","step":"apply_inbox_rejected"}
+{"error":"WriterRuntime(Infrastructure { operation: \"runtime ledger: runtime ledger outbox effect identity already exists\" })","step":"acknowledge_outbox"}
+# logical dump
