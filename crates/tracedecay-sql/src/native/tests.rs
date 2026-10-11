@@ -635,7 +635,7 @@ fn identity_fence_interrupts_a_running_statement() {
     let (directory, database) = database();
     let path = directory.path().join("native.tdb");
     let guard = execution_guard();
-    let writer = database.connect(Access::Writer).unwrap();
+    let mut writer = database.connect(Access::Writer).unwrap();
     writer
         .execute("CREATE TABLE t(x INTEGER)", &[], &guard)
         .unwrap();
@@ -675,7 +675,7 @@ fn file_sorts_spill_inside_the_store_and_leave_nothing_behind() {
         .unwrap()
         .join("native.tdb-tmp");
     let guard = execution_guard();
-    let connection = database
+    let mut connection = database
         .connect_with(Capability::Maintenance, false)
         .unwrap();
     connection
