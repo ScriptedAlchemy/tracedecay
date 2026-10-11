@@ -1928,12 +1928,12 @@ async fn clear_active_projection(
             output_provider TEXT NOT NULL,
             output_message_id TEXT NOT NULL,
             PRIMARY KEY(output_provider, output_message_id)
-         ) WITHOUT ROWID;
+         );
          CREATE TEMP TABLE IF NOT EXISTS observation_projection_rebuild_cleared_outputs (
             output_provider TEXT NOT NULL,
             output_message_id TEXT NOT NULL,
             PRIMARY KEY(output_provider, output_message_id)
-         ) WITHOUT ROWID;
+         );
          DELETE FROM temp.observation_projection_rebuild_retained_outputs;
          DELETE FROM temp.observation_projection_rebuild_cleared_outputs;",
     )
@@ -2036,7 +2036,7 @@ async fn retire_projection_predecessor_state(
             output_provider TEXT NOT NULL,
             output_message_id TEXT NOT NULL,
             PRIMARY KEY(output_provider, output_message_id)
-         ) WITHOUT ROWID;
+         );
          DELETE FROM temp.observation_projection_predecessor_cleared_outputs;",
     )
     .await
@@ -2356,7 +2356,7 @@ async fn prepare_rebuild_output_activation(
             cross_owned INTEGER NOT NULL CHECK(cross_owned IN (0, 1)),
             staged_created INTEGER NOT NULL CHECK(staged_created IN (0, 1)),
             PRIMARY KEY(output_provider, output_message_id)
-         ) WITHOUT ROWID;",
+         );",
     )
     .await
     .map_err(|error| storage("prepare staged projection output activation", error))?;

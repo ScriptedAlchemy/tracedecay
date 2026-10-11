@@ -26,8 +26,10 @@ pub(super) const PAYLOAD_DIGESTS_SCHEMA: &str =
                 length(content_digest) = 71 AND content_digest LIKE 'sha256:%'
             ),
             UNIQUE(assertion_id, fact_id, owner_kind, project_id),
-            FOREIGN KEY(payload_rowid)
-                REFERENCES memory_v2_assertion_payloads(rowid)
+            FOREIGN KEY(assertion_id, fact_id, owner_kind, project_id)
+                REFERENCES memory_v2_assertion_payloads(
+                    assertion_id, fact_id, owner_kind, project_id
+                )
         );
 
         CREATE INDEX IF NOT EXISTS memory_v2_assertion_payload_digests_lookup

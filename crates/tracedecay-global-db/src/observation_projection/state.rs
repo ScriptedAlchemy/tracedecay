@@ -576,12 +576,12 @@ pub(in super::super) async fn ensure_projection_output_state_cache(
             projector_owned INTEGER NOT NULL CHECK(projector_owned IN (0, 1)),
             owner_count INTEGER NOT NULL CHECK(owner_count > 0),
             PRIMARY KEY(projector_version, output_provider, output_message_id)
-        ) WITHOUT ROWID;
+        );
         CREATE TEMP TABLE IF NOT EXISTS observation_projection_output_state_meta (
-            initialized INTEGER PRIMARY KEY CHECK(initialized = 1),
+            initialized INTEGER NOT NULL UNIQUE CHECK(initialized = 1),
             data_version INTEGER NOT NULL CHECK(data_version >= 0),
             provenance_rowid INTEGER NOT NULL CHECK(provenance_rowid >= 0)
-        ) WITHOUT ROWID;",
+        );",
     )
     .await
     .map_err(|error| storage("create projection output state cache", error))?;

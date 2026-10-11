@@ -1,0 +1,2 @@
+target	test	category	evidence
+//crates/tracedecay-global-db:unit_test	schema_portability_tests::every_registered_store_installs_only_engine_portable_shapes	secure-delete	native refuses PRAGMA secure_delete (no page scrubbing); SQLite still reads 0

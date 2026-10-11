@@ -175,16 +175,24 @@ async fn every_registered_store_installs_only_engine_portable_shapes() {
     tracedecay_runtime_core::db::migrations::create_schema_connection(&installer)
         .await
         .unwrap();
-    let mut secure_delete = installer.query("PRAGMA secure_delete", ()).await.unwrap();
-    let secure_delete = secure_delete
-        .next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get::<i64>(0)
-        .unwrap();
-    if secure_delete != 0 {
-        violations.push("project store: schema install enables secure_delete".to_owned());
+    // Deletion is logical on both engines: SQLite must not scrub pages, and the
+    // native engine has no secure deletion to read back.
+    match (
+        tracedecay_sql::ENGINE,
+        installer.query("PRAGMA secure_delete", ()).await,
+    ) {
+        (tracedecay_sql::Engine::Sqlite, Ok(mut rows)) => {
+            let secure_delete = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+            if secure_delete != 0 {
+                violations.push("project store: schema install enables secure_delete".to_owned());
+            }
+        }
+        (tracedecay_sql::Engine::Native, Err(error))
+            if error.to_string().contains("secure deletion") => {}
+        (engine, outcome) => violations.push(format!(
+            "project store: {engine:?} secure_delete probe returned {:?}",
+            outcome.map(|_| "rows")
+        )),
     }
     drop(installer);
     violations.extend(
