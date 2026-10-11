@@ -423,7 +423,6 @@ async fn validate_configuration_schema(
     Ok(shape)
 }
 
-/// Read-only admission: only the exact final shape is admissible.
 pub async fn admit_configuration_schema(
     connection: &impl QueryExecutor,
     fresh_store: Option<&FreshConfigurationStoreEvidence>,

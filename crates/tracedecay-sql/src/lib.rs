@@ -25,5 +25,4 @@ pub use engine::{
 #[cfg(not(td_engine = "native"))]
 pub use sqlite::params;
 
-/// The engine compiled into this binary.
 pub const ENGINE: Engine = engine::ENGINE;

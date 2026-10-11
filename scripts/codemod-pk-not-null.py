@@ -4,8 +4,8 @@
 Reads `table.column` lines (or full lint lines such as
 `project store: metadata.key: nullable PRIMARY KEY column`) on stdin and adds
 `NOT NULL` after the column's declared type in every `CREATE TABLE` of that
-table in non-test Rust sources under crates/. tracedecay-query is skipped: its
-lexical artifact moves to the native engine in its own unit.
+table in non-test Rust sources under crates/. tracedecay-query is skipped.
+Its lexical artifact is outside this rewrite.
 
 Usage: python3 scripts/codemod-pk-not-null.py < violations.txt
 """

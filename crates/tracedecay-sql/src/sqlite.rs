@@ -1,5 +1,5 @@
 //! The SQLite arm: rusqlite's types plus the control surface as extension
-//! traits. The flip unit deletes this module together with the engine flag.
+//! traits.
 
 use std::{
     ffi::CString,
@@ -295,9 +295,6 @@ fn denies_transaction_control(capability: Capability, action: &AuthAction<'_>) -
     }
 }
 
-/// Schema-introspection and integrity pragmas that cannot mutate the database,
-/// file, or connection configuration. These stay available to read-only lanes
-/// so health and shape audits work without a writable connection.
 fn is_read_only_introspection_pragma(name: &str) -> bool {
     [
         "collation_list",
