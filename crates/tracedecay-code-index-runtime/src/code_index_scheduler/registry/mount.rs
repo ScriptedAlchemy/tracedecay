@@ -66,7 +66,7 @@ enum PublicationAuthorityResetV1 {
 }
 
 /// Why a wait for the code-generation store lock ended without a release.
-enum StoreReleaseWaitStopV1 {
+pub(super) enum StoreReleaseWaitStopV1 {
     /// Shutdown or retirement of this worker ended the wait.
     Shutdown,
     /// The kernel wait itself failed. The worktree parks until the next wake.
@@ -107,7 +107,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// here. The holder may be another process, so the kernel lock is the
     /// signal. Shutdown ends the wait; a wait that cannot complete parks the
     /// worktree typed.
-    async fn wait_for_worker_store_release(
+    pub(super) async fn wait_for_worker_store_release(
         store_root: &Path,
         shutting_down: &AtomicBool,
         serving_generation_changed: &tokio::sync::watch::Sender<()>,
@@ -1144,6 +1144,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         let projection_pending_wake = Arc::clone(&worker_pending_wake);
                         let projection_wake = Arc::clone(&worker_wake);
                         let projection_serving_changed = worker_serving_generation_changed.clone();
+                        let projection_store_root = worker_scope_store_root.clone();
                         retained_text_projection = Some(tokio::spawn(async move {
                             let _projection_pass = projection_pass;
                             #[cfg(any(test, feature = "test-helpers"))]
@@ -1154,6 +1155,8 @@ impl CodeIndexSchedulerRegistryV1 {
                                 park,
                                 Some(installed),
                                 None,
+                                &projection_store_root,
+                                &projection_serving_changed,
                                 #[cfg(test)]
                                 gated_root,
                             )
@@ -1720,6 +1723,8 @@ impl CodeIndexSchedulerRegistryV1 {
                         let park = Arc::clone(&worker_convergence_park);
                         let projection_pending_wake = Arc::clone(&worker_pending_wake);
                         let projection_wake = Arc::clone(&worker_wake);
+                        let projection_store_root = worker_scope_store_root.clone();
+                        let projection_serving_changed = worker_serving_generation_changed.clone();
                         #[cfg(test)]
                         let project_root = worker_project_root.clone();
                         published_text_projection = Some(tokio::spawn(async move {
@@ -1730,6 +1735,8 @@ impl CodeIndexSchedulerRegistryV1 {
                                 park,
                                 None,
                                 Some(opened),
+                                &projection_store_root,
+                                &projection_serving_changed,
                                 #[cfg(test)]
                                 project_root,
                             )
