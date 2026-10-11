@@ -778,15 +778,15 @@ fn spill_check_work_per_commit_stays_flat_as_the_store_grows() {
         .execute("CREATE TABLE t(body TEXT)", &[], &guard)
         .unwrap();
     // One row per page, three cache-fulls per commit.
-    let row = format!("('{}')", "x".repeat(3_000));
     let insert = format!(
         "INSERT INTO t VALUES {}",
-        vec![row; 3 * CACHE_PAGES as usize].join(",")
+        vec!["(?1)"; 3 * CACHE_PAGES as usize].join(",")
     );
+    let body = [Value::Text("x".repeat(3_000))];
     let walked = (0..6)
         .map(|_| {
             let before = page_cache_entries_walked();
-            connection.execute(&insert, &[], &guard).unwrap();
+            connection.execute(&insert, &body, &guard).unwrap();
             page_cache_entries_walked() - before
         })
         .collect::<Vec<_>>();

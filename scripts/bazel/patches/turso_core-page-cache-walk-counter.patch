@@ -1,15 +1,15 @@
-diff --git a/lib.rs b/lib.rs
-index aa5e5df..09b977a 100644
---- a/lib.rs
-+++ b/lib.rs
-@@ -161,6 +161,7 @@ pub use storage::{
-     buffer_pool::BufferPool,
-     database::{DatabaseStorage, IOContext},
-     encryption::{CipherMode, EncryptionContext, EncryptionKey},
-+    page_cache::page_cache_entries_walked,
-     page_transform::{PageCodec, PageCodecContext, PageCodecHeaderInfo, PageCodecId, PageLocation},
-     pager::{Page, PageRef, Pager},
-     wal::{CheckpointMode, CheckpointResult, Wal, WalAutoActions, WalFile, WalFileShared},
+diff --git a/storage/mod.rs b/storage/mod.rs
+index fdfe774..068eb5c 100644
+--- a/storage/mod.rs
++++ b/storage/mod.rs
+@@ -20,6 +20,7 @@ pub(crate) mod journal_mode;
+ pub mod page_cache;
+ #[cfg(not(feature = "aristo-instr"))]
+ pub(crate) mod page_cache;
++pub use page_cache::page_cache_entries_walked;
+ pub(crate) mod page_transform;
+ #[allow(clippy::arc_with_non_send_sync)]
+ pub(crate) mod pager;
 diff --git a/storage/page_cache.rs b/storage/page_cache.rs
 index 1576339..ab41725 100644
 --- a/storage/page_cache.rs

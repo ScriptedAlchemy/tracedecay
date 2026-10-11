@@ -26,7 +26,7 @@ pub use value::{Rows, Value};
 /// calling thread, a cycle-free measure of that O(n) work.
 #[cfg(feature = "test-helpers")]
 pub fn page_cache_entries_walked() -> u64 {
-    turso_core::page_cache_entries_walked()
+    turso_core::storage::page_cache_entries_walked()
 }
 
 #[cfg(test)]
