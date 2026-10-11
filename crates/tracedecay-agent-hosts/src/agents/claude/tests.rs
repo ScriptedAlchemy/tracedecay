@@ -192,6 +192,11 @@ fn deploy_stamps_version_and_binary_path() {
         mcp["mcpServers"]["graph"]["command"].as_str().unwrap(),
         "/abs/bin/tracedecay"
     );
+    assert_eq!(
+        mcp["mcpServers"]["graph"]["args"],
+        serde_json::json!(["serve", "--claude-code-tool-search"]),
+        "Claude plugin must pass the native tool-search flag, not guess the host"
+    );
 }
 
 /// A binary path carrying a JSON-special char must be escaped via serde so

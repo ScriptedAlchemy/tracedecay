@@ -486,29 +486,35 @@ pub(super) struct CallableSyntax<'tree> {
 }
 
 fn callable_syntax(owner: TreeSitterNode<'_>) -> Option<CallableSyntax<'_>> {
-    owner
-        .child_by_field_name("body")
-        .map(|body| CallableSyntax {
-            owner,
-            body,
-            body_boundary_complete: true,
-        })
-        .or_else(|| {
-            SyntaxPreorder::new(owner).skip(1).find_map(|candidate| {
-                candidate
-                    .child_by_field_name("body")
-                    .map(|body| CallableSyntax {
-                        owner: candidate,
-                        body,
-                        body_boundary_complete: true,
-                    })
-            })
-        })
-        .or(Some(CallableSyntax {
-            owner,
-            body: owner,
-            body_boundary_complete: false,
-        }))
+    if let Some(body) = owner.child_by_field_name("body") {
+        return cloneable_body(owner, body, true);
+    }
+    if let Some(syntax) = SyntaxPreorder::new(owner).skip(1).find_map(|candidate| {
+        candidate
+            .child_by_field_name("body")
+            .and_then(|body| cloneable_body(candidate, body, true))
+    }) {
+        return Some(syntax);
+    }
+    cloneable_body(owner, owner, false)
+}
+
+/// A zero-width body is not a clone candidate. Tree-sitter-python emits one
+/// for an empty or comment-only suite; treating that span as identity input
+/// failed chunking and parked the worktree (#3401).
+fn cloneable_body<'tree>(
+    owner: TreeSitterNode<'tree>,
+    body: TreeSitterNode<'tree>,
+    body_boundary_complete: bool,
+) -> Option<CallableSyntax<'tree>> {
+    if body.start_byte() == body.end_byte() {
+        return None;
+    }
+    Some(CallableSyntax {
+        owner,
+        body,
+        body_boundary_complete,
+    })
 }
 
 fn syntax_owner(

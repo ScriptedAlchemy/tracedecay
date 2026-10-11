@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+* **mcp:** default `tracedecay serve` lists a 17-tool core set plus `tracedecay_tool_search` (no stubs); search ranks exact names first, loads matches with `list_changed`, and returns full schemas in the result text. `--claude-code-tool-search` (or `TRACEDECAY_MCP_CLAUDE_CODE_TOOL_SEARCH`) serves the full catalog with `_meta["anthropic/alwaysLoad"]` on the core tools for Claude Code native tool search. Drop that flag under `ANTHROPIC_BASE_URL` proxies, Foundry, or `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` ([#3374](https://github.com/ScriptedAlchemy/tracedecay/issues/3374), [#3383](https://github.com/ScriptedAlchemy/tracedecay/issues/3383))
 * **sessions:** measure unused returned tool context from stored history ([#3372](https://github.com/ScriptedAlchemy/tracedecay/issues/3372))
 
 ### Bug Fixes
 
+* **index:** skip empty or comment-only Python clone-body spans so one stub cannot fail chunk identity and park the worktree ([#3401](https://github.com/ScriptedAlchemy/tracedecay/issues/3401))
 * **sessions:** record a real `o200k_base` `token_count` and a `cut` marker on stored `tool_result` facts at ingest; `source_read` no longer writes chars/4 ([#3397](https://github.com/ScriptedAlchemy/tracedecay/issues/3397))
 * **cli:** give explicit upgrade lookups their own GitHub deadline so a 1s advisory budget cannot fail `tracedecay upgrade` ([#3371](https://github.com/ScriptedAlchemy/tracedecay/issues/3371))
 * **git:** settle `git_hunks` within its existing deadline while preserving exact worktree identity and releasing the real index lock on cancellation ([#3360](https://github.com/ScriptedAlchemy/tracedecay/issues/3360))

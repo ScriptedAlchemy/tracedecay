@@ -534,6 +534,16 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
         .set_nonblocking(true)
         .expect("nonblocking fake daemon listener");
 
+    let mut serve = tracedecay_command_with_home(home.path());
+    serve
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
     let fake_daemon = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -589,16 +599,7 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
         }
     });
 
-    let mut child = tracedecay_command_with_home(home.path())
-        .arg("serve")
-        .arg("--path")
-        .arg(project.path())
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tracedecay serve should run");
+    let mut child = serve.spawn().expect("tracedecay serve should run");
     {
         let stdin = child.stdin.as_mut().expect("stdin should be piped");
         writeln!(
@@ -618,10 +619,7 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
     let output = child
         .wait_with_output()
         .expect("tracedecay serve should exit after stdin closes");
-    let handshake = fake_daemon
-        .join()
-        .expect("fake daemon thread should exit")
-        .expect("serve should connect to the daemon before project resolution");
+    let handshake = fake_daemon.join().expect("fake daemon thread should exit");
 
     assert!(
         output.status.success(),
@@ -629,6 +627,13 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let handshake = handshake.unwrap_or_else(|| {
+        panic!(
+            "serve did not connect before project resolution\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
     let response: Value = serde_json::from_slice(&output.stdout).expect("initialize response json");
     assert_eq!(
         response["result"]["serverInfo"]["name"],
@@ -1005,9 +1010,9 @@ fn configuration_get_request(id: i64, key: &str) -> Value {
 }
 
 /// A session served without any project still reads and writes the profile's
-/// user settings over MCP: discovery lists the configuration tools that can
-/// name a user key, `configuration_get` answers from the profile store, and a
-/// project-scoped key is the typed `project_required` refusal.
+/// user settings over MCP: the tool search loads the configuration tools that
+/// can name a user key, `configuration_get` answers from the profile store, and
+/// a project-scoped key is the typed `project_required` refusal.
 #[cfg(unix)]
 #[tokio::test]
 async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
@@ -1032,6 +1037,16 @@ async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
             configuration_get_request(2, "user.upload_enabled.v1"),
             json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
             configuration_get_request(4, "index.max_file_size.v1"),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_tool_search",
+                    "arguments": { "query": "configuration get set unset batch runtime" }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list" }),
         ],
     );
     assert!(output.status.success(), "{output:?}");
@@ -1049,13 +1064,24 @@ async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
         "{setting}"
     );
 
-    let tools = json_rpc_response(&output.stdout, 3);
+    assert!(
+        json_rpc_response(&output.stdout, 3)["result"]["tools"].is_array(),
+        "projectless tools/list must answer with a tool array"
+    );
+    // The configuration tools sit outside the core list; the tool search loads
+    // them from this session's projectless catalog, which has no project-bound
+    // tools such as tracedecay_runtime to load.
+    let tools = json_rpc_response(&output.stdout, 6);
     let names: std::collections::BTreeSet<&str> = tools["result"]["tools"]
         .as_array()
         .unwrap_or_else(|| panic!("tools/list must carry a tool array: {tools}"))
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect();
+    assert!(
+        !names.contains("tracedecay_runtime"),
+        "a projectless search must not load project-bound tools: {names:?}"
+    );
     for tool in [
         "tracedecay_configuration_get",
         "tracedecay_configuration_set",

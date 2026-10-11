@@ -325,6 +325,7 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 jsonschema = { version = "0.46.8", default-features = false }
 tracedecay-sdk = { path = "../tracedecay-sdk" }
+tracedecay-tokenizer = { path = "../tracedecay-tokenizer" }
 tracedecay-capture = { path = "../tracedecay-capture" }
 # Test builds opt into the query kernel's `*_for_test` constructors; the
 # feature stays off for production builds.
