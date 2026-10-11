@@ -81,8 +81,8 @@ tempfile = "3"
 
 [dev-dependencies]
 criterion = "0.5"
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
+tracedecay-sql = { path = "../tracedecay-sql" }
 
 [[bench]]
 name = "native_state_100k"

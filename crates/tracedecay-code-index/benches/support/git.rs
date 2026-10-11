@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rusqlite::Savepoint;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_domain::UtcMicros;
@@ -17,6 +16,7 @@ use tracedecay_rusqlite_runtime::{
     reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
     repository::{GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage},
 };
+use tracedecay_sql::Savepoint;
 use tracedecay_store::{
     AdmissionConfigV1, BrainId, GraphProjectionIdentityV1, GraphPublicationInputDigestV1,
     GraphPublicationOperationContextV1, GraphPublicationStoreV1, ProjectId,
@@ -77,7 +77,7 @@ impl StorageOperationExecutor for NoWrites {
         &mut self,
         _savepoint: &Savepoint<'_>,
         _payload: &tracedecay_store::RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         Ok(())
     }
 }
@@ -88,7 +88,7 @@ struct NoReads;
 impl ReaderQueryExecutor for NoReads {
     fn execute_read(
         &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
+        _snapshot: &tracedecay_sql::Transaction<'_>,
         _request: &tracedecay_store::RuntimeReadRequestV1,
     ) -> Result<tracedecay_store::RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1>
     {
@@ -181,7 +181,7 @@ impl PersistentGitGraph {
         );
         let relational_path = root.path().join("publication.sqlite3");
         drop(
-            rusqlite::Connection::open(&relational_path)
+            tracedecay_sql::Connection::open(&relational_path)
                 .expect("benchmark publication database is created"),
         );
         let relational_path = relational_path

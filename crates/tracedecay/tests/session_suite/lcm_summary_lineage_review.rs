@@ -218,7 +218,7 @@ async fn exact_replay_rejects_missing_generation() {
         .database_path(HostAdmissionScope::Profile)
         .expect("profile database path")
         .to_path_buf();
-    let fixture = rusqlite::Connection::open(database_path).unwrap();
+    let fixture = tracedecay_sql::Connection::open(database_path).unwrap();
     fixture.pragma_update(None, "foreign_keys", "OFF").unwrap();
     fixture
         .execute_batch("DROP TRIGGER IF EXISTS session_temporal_generations_delete_guard_v1;")
@@ -227,7 +227,7 @@ async fn exact_replay_rejects_missing_generation() {
         .execute(
             "DELETE FROM session_temporal_generations
              WHERE session_id = ?1 AND generation = ?2",
-            rusqlite::params!["session-missing-gen", first.generation],
+            tracedecay_sql::params!["session-missing-gen", first.generation],
         )
         .unwrap();
     drop(fixture);

@@ -4,12 +4,12 @@
 
 use std::path::Path;
 
-use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags, params_from_iter};
 use tempfile::TempDir;
 use tracedecay_domain::ProjectId;
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
 use tracedecay_runtime_core::db::engine::TestConnection;
+use tracedecay_sql::types::Value;
+use tracedecay_sql::{Connection, ErrorExt, ErrorKind, OpenFlags, params_from_iter};
 
 use crate::tests::harness::open_registered_test_database_fixture;
 
@@ -175,7 +175,8 @@ async fn every_registered_store_installs_only_engine_portable_shapes() {
 #[derive(Debug, PartialEq)]
 enum Outcome {
     Changed(usize),
-    Refused(i32),
+    /// The constraint failure message, which names the refusing columns.
+    Refused(String),
 }
 
 struct KeyedTable {
@@ -276,7 +277,7 @@ impl KeyedTable {
 fn run(connection: &Connection, sql: &str, values: &[Value]) -> Outcome {
     match connection.execute(sql, params_from_iter(values)) {
         Ok(changed) => Outcome::Changed(changed),
-        Err(rusqlite::Error::SqliteFailure(error, _)) => Outcome::Refused(error.extended_code),
+        Err(error) if error.kind() == ErrorKind::Constraint => Outcome::Refused(error.to_string()),
         Err(error) => panic!("{sql}: {error}"),
     }
 }
@@ -287,9 +288,6 @@ fn key_semantics_script(
     connection: &Connection,
     table: &KeyedTable,
 ) -> (Vec<Outcome>, Vec<Vec<Value>>) {
-    use rusqlite::ffi::{
-        SQLITE_CONSTRAINT_NOTNULL, SQLITE_CONSTRAINT_PRIMARYKEY, SQLITE_CONSTRAINT_UNIQUE,
-    };
     let insert = table.insert_sql("INSERT");
     let first = table.row(1);
     let mut outcomes = Vec::new();
@@ -306,8 +304,8 @@ fn key_semantics_script(
     let duplicate = run(connection, &insert, &first);
     assert!(
         matches!(
-            duplicate,
-            Outcome::Refused(SQLITE_CONSTRAINT_PRIMARYKEY | SQLITE_CONSTRAINT_UNIQUE)
+            &duplicate,
+            Outcome::Refused(message) if message.starts_with("UNIQUE constraint failed")
         ),
         "{}: duplicate key must be refused, got {duplicate:?}",
         table.name
@@ -318,9 +316,11 @@ fn key_semantics_script(
         let mut row = table.row(2);
         row[table.position(key)] = Value::Null;
         let null_key = run(connection, &insert, &row);
-        assert_eq!(
-            null_key,
-            Outcome::Refused(SQLITE_CONSTRAINT_NOTNULL),
+        assert!(
+            matches!(
+                &null_key,
+                Outcome::Refused(message) if message.starts_with("NOT NULL constraint failed")
+            ),
             "{}.{key}: NULL primary-key column must be refused, not stored or auto-assigned",
             table.name
         );

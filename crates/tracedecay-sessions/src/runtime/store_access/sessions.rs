@@ -1359,7 +1359,7 @@ mod identity_tests {
         let opened = alias.to_str().unwrap();
         let canonical = durable_project_path_key(opened);
         assert_ne!(opened, canonical);
-        let db = rusqlite::Connection::open_in_memory().unwrap();
+        let db = tracedecay_sql::Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE sessions (project_key TEXT, project_path TEXT);")
             .unwrap();
         for (key, path) in [
@@ -1380,7 +1380,9 @@ mod identity_tests {
             _ => panic!("project identity parameters must be text"),
         });
         let count: i64 = db
-            .query_row(&sql, rusqlite::params_from_iter(params), |row| row.get(0))
+            .query_row(&sql, tracedecay_sql::params_from_iter(params), |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(
             count, 3,

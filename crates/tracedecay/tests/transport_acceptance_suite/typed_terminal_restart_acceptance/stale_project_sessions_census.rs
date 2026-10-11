@@ -246,7 +246,7 @@ fn previous_lcm_schema_profile_resets_its_session_stores_and_keeps_the_registry(
             .map(|id| PathBuf::from("projects").join(id).join("sessions.db")),
     );
     for store in &released_stores {
-        let rewritten = rusqlite::Connection::open(profile_root.join(store))
+        let rewritten = tracedecay_sql::Connection::open(profile_root.join(store))
             .expect("open a registered store")
             .execute(
                 "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'lcm'",

@@ -592,7 +592,7 @@ mod tests {
         let authority =
             DatabaseAuthority::for_runtime(&path, "mount exact-close code runtime").unwrap();
         let profile_path = path.with_file_name("profile.db");
-        rusqlite::Connection::open(&profile_path).unwrap();
+        tracedecay_sql::Connection::open(&profile_path).unwrap();
         let profile_path = profile_path.canonicalize().unwrap();
         let registry = StoreRuntimeRegistry::new(
             Arc::new(FixtureResolver { profile_path }),
@@ -838,7 +838,7 @@ mod tests {
         let opened_identity = code.opened_file_identity().unwrap();
         let detached = path.with_extension("detached.db");
         let replacement = path.with_extension("replacement.db");
-        rusqlite::Connection::open(&replacement).unwrap();
+        tracedecay_sql::Connection::open(&replacement).unwrap();
         std::fs::rename(&path, &detached).unwrap();
         std::fs::rename(&replacement, &path).unwrap();
         drop(code);
@@ -1082,11 +1082,11 @@ mod tests {
     async fn failed_exact_close_retains_a_faulted_evicting_runtime() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
-        rusqlite::Connection::open(&path).unwrap();
+        tracedecay_sql::Connection::open(&path).unwrap();
         let path = path.canonicalize().unwrap();
         let authority = DatabaseAuthority::for_runtime(&path, "mount failing exact-close").unwrap();
         let profile_path = path.with_file_name("profile.db");
-        rusqlite::Connection::open(&profile_path).unwrap();
+        tracedecay_sql::Connection::open(&profile_path).unwrap();
         let profile_path = profile_path.canonicalize().unwrap();
         let registry = StoreRuntimeRegistry::with_config(
             Arc::new(FixtureResolver { profile_path }),

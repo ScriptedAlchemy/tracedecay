@@ -73,7 +73,7 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     let raw_store_ids_before = projected_raw_store_ids(&tmp).await;
     assert_eq!(counts_before, (1, 2, 2, 1, 0, 1));
     let anchor_store_id = raw_store_ids_before[0].1;
-    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     raw_conn
         .execute_batch(
             "INSERT INTO retrieval_anchors (
@@ -94,7 +94,7 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
         .execute(
             "INSERT INTO session_summary_sources (summary_id, source_kind, source_id, ordinal)
              VALUES ('summary.rebuild-store-id', 'raw_message', ?1, 0)",
-            rusqlite::params![anchor_store_id.to_string()],
+            tracedecay_sql::params![anchor_store_id.to_string()],
         )
         .unwrap();
     raw_conn
@@ -102,7 +102,7 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
             "INSERT INTO lcm_lifecycle_state (
                 provider, conversation_id, current_session_id, current_frontier_store_id
              ) VALUES ('claude', 'session-rebuild', 'session-rebuild', ?1)",
-            rusqlite::params![anchor_store_id],
+            tracedecay_sql::params![anchor_store_id],
         )
         .unwrap();
     drop(raw_conn);
@@ -118,7 +118,7 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     rows_after.sort();
     assert_eq!(rows_after, rows_before);
     assert_eq!(projected_raw_store_ids(&tmp).await, raw_store_ids_before);
-    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     let identity = raw_conn
         .query_row(
             "SELECT source.source_id, lifecycle.current_frontier_store_id
@@ -379,13 +379,13 @@ async fn durable_projection_alias_survives_rebuild_without_rewriting_observation
     );
     persist(&store, candidate.clone(), None).await;
 
-    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     raw_conn
         .execute(
             "INSERT INTO observation_projection_aliases
                 (projector_version, observation_id, output_provider, output_message_id)
              VALUES (?1, ?2, 'claude', 'consolidated/source/message-alias')",
-            rusqlite::params![
+            tracedecay_sql::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 candidate.observation_id().as_str()
             ],
@@ -531,7 +531,7 @@ async fn v5_predecessor_cutover_rolls_back_and_retries_after_activation_failure(
     persist(&store, predecessor.clone(), None).await;
     drain_projection_queue(&store).await;
     seed_v4_predecessor_with_stale_current_provenance(&tmp, predecessor.observation_id());
-    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     raw_conn
         .execute_batch(
             "CREATE TRIGGER interrupt_v5_predecessor_cutover
@@ -974,7 +974,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
         expected_cursor = Some(cursor("session-interrupted-rebuild", end));
     }
     let aliased_observation = aliased_observation.unwrap();
-    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     raw_conn
         .execute(
             "INSERT INTO observation_projection_aliases (
@@ -983,7 +983,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
                 ?1, ?2, 'claude',
                 'consolidated/pinned/message-interrupted-rebuild-200'
              )",
-            rusqlite::params![
+            tracedecay_sql::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
@@ -1012,7 +1012,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
             "UPDATE observation_projection_aliases
              SET output_message_id = 'consolidated/transient/message-interrupted-rebuild-200'
              WHERE projector_version = ?1 AND observation_id = ?2",
-            rusqlite::params![
+            tracedecay_sql::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
@@ -1023,7 +1023,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
             "SELECT output_message_id
              FROM observation_projection_rebuild_aliases
              WHERE projector_version = ?1 AND observation_id = ?2",
-            rusqlite::params![
+            tracedecay_sql::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
@@ -1039,7 +1039,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
             "UPDATE observation_projection_aliases
              SET output_message_id = 'consolidated/pinned/message-interrupted-rebuild-200'
              WHERE projector_version = ?1 AND observation_id = ?2",
-            rusqlite::params![
+            tracedecay_sql::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
@@ -1061,7 +1061,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
             "SELECT generation, staged_through, state
              FROM observation_projection_rebuilds
              WHERE projector_version = ?1",
-            rusqlite::params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            tracedecay_sql::params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -1092,7 +1092,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
     drop(raw_conn);
     drop(runtime);
     checkpoint_database(&tmp).await;
-    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     raw_conn
         .execute_batch(
             "DROP TRIGGER interrupt_projection_rebuild_activation;

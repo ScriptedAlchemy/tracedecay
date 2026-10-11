@@ -53,11 +53,11 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
 /// tables, a layout every storage engine supports.
 pub const SCHEMA_VERSION: u32 = 40;
 
-/// Verifies that a rusqlite connection sees the exact final relational shape
+/// Verifies that a synchronous driver connection sees the exact final relational shape
 /// this binary creates. This is query-only and shares the daemon's schema
 /// authority.
-pub fn verify_admissible_final_shape_rusqlite(conn: &rusqlite::Connection) -> Result<()> {
-    final_shape::require_admissible_final_shape_rusqlite(conn)
+pub fn verify_admissible_final_shape_rusqlite(conn: &tracedecay_sql::Connection) -> Result<()> {
+    final_shape::require_admissible_final_shape_connection(conn)
 }
 
 /// Reads the current schema version from `PRAGMA user_version`.

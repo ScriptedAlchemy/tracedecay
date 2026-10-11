@@ -150,9 +150,11 @@ async fn upsert_registry_fixture(db: &HostAdmissionTestRuntimeV1, project_root: 
 }
 
 fn project_column_exists(db_path: &Path, column: &str) -> bool {
-    let conn =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap();
+    let conn = tracedecay_sql::Connection::open_with_flags(
+        db_path,
+        tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
     let mut statement = conn.prepare("PRAGMA table_info(projects)").unwrap();
     statement
         .query_map([], |row| row.get::<_, String>(1))
@@ -175,11 +177,11 @@ async fn registered_profile_runtime_refuses_non_canonical_project_rows_without_m
         .await
         .unwrap();
     close_profile_runtime(db).await;
-    let raw_conn = rusqlite::Connection::open(&db_path).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(&db_path).unwrap();
     raw_conn
         .execute(
             "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)",
-            rusqlite::params![legacy_key.as_str(), 77_i64],
+            tracedecay_sql::params![legacy_key.as_str(), 77_i64],
         )
         .unwrap();
     drop(raw_conn);
@@ -196,9 +198,11 @@ async fn registered_profile_runtime_refuses_non_canonical_project_rows_without_m
     );
     assert!(error.to_string().contains("non-canonical key"), "{error}");
 
-    let raw_conn =
-        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap();
+    let raw_conn = tracedecay_sql::Connection::open_with_flags(
+        &db_path,
+        tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
     let mut statement = raw_conn
         .prepare("SELECT path, tokens_saved FROM projects ORDER BY path")
         .unwrap();
@@ -207,7 +211,7 @@ async fn registered_profile_runtime_refuses_non_canonical_project_rows_without_m
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
         .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
+        .collect::<tracedecay_sql::Result<Vec<_>>>()
         .unwrap();
     assert_eq!(rows, vec![(legacy_key, 77)]);
 }

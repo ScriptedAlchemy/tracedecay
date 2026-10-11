@@ -829,7 +829,7 @@ impl HostAdmissionTestRuntimeV1 {
                 message: error.to_string(),
             })?;
 
-        let connection = rusqlite::Connection::open(database.db_path()).map_err(|error| {
+        let connection = tracedecay_sql::Connection::open(database.db_path()).map_err(|error| {
             TraceDecayError::Database {
                 operation: "prepare missing lcm generation fixture".to_owned(),
                 message: error.to_string(),

@@ -27,9 +27,9 @@ tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 
 [dev-dependencies]
-# `test_support` seeds fixtures through a raw SQLite handle.
-rusqlite = { version = "0.40.1", default-features = false }
 tempfile = "3"
+# `test_support` seeds fixtures through a raw connection.
+tracedecay-sql = { path = "../tracedecay-sql" }
 tokio = { version = "1", features = ["full"] }
 # This crate's own test target needs the kernel's `db::engine::TestConnection`.
 # Declaring the same path dependency with the feature keeps it out of the lib

@@ -31,9 +31,11 @@ async fn fresh_current_store() -> (TempDir, PathBuf) {
 }
 
 fn object_sql(path: &Path, object_type: &str, name: &str) -> Option<String> {
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .expect("open final-shape fixture read-only");
+    let connection = tracedecay_sql::Connection::open_with_flags(
+        path,
+        tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open final-shape fixture read-only");
     connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
@@ -45,9 +47,11 @@ fn object_sql(path: &Path, object_type: &str, name: &str) -> Option<String> {
 }
 
 fn table_has_column(path: &Path, table: &str, column: &str) -> bool {
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .expect("open final-shape fixture read-only");
+    let connection = tracedecay_sql::Connection::open_with_flags(
+        path,
+        tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open final-shape fixture read-only");
     let mut statement = connection
         .prepare("SELECT 1 FROM pragma_table_xinfo(?1) WHERE name = ?2 COLLATE NOCASE")
         .expect("prepare final-shape column probe");
@@ -55,9 +59,11 @@ fn table_has_column(path: &Path, table: &str, column: &str) -> bool {
 }
 
 fn store_snapshot(path: &Path) -> StoreSnapshot {
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .expect("open final-shape snapshot read-only");
+    let connection = tracedecay_sql::Connection::open_with_flags(
+        path,
+        tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open final-shape snapshot read-only");
     let user_version = connection
         .query_row("PRAGMA user_version", (), |row| row.get(0))
         .expect("read final-shape snapshot version");
@@ -83,7 +89,8 @@ fn store_snapshot(path: &Path) -> StoreSnapshot {
 }
 
 fn tamper(path: &Path, sql: &str) {
-    let connection = rusqlite::Connection::open(path).expect("open final-shape fixture to tamper");
+    let connection =
+        tracedecay_sql::Connection::open(path).expect("open final-shape fixture to tamper");
     connection
         .execute_batch(sql)
         .expect("apply literal final-shape tamper");
@@ -156,9 +163,11 @@ async fn admit_existing(path: &Path, context: &str) {
 }
 
 fn ledger_tables(path: &Path) -> Vec<String> {
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .expect("open final-shape fixture read-only");
+    let connection = tracedecay_sql::Connection::open_with_flags(
+        path,
+        tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open final-shape fixture read-only");
     let mut statement = connection
         .prepare(
             "SELECT name FROM sqlite_master

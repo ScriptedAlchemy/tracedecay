@@ -727,7 +727,7 @@ mod doctor_runtime_route_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    use rusqlite::Connection;
+    use tracedecay_sql::Connection;
 
     use super::{
         CoreDoctorStatusV1, cold_doctor_runtime_value, core_status_request_id,

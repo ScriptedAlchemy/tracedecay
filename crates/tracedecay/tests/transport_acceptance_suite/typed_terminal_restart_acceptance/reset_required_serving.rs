@@ -82,7 +82,7 @@ fn stamp_profile_sessions_git_correlation_version(home: &Path, version: i64) {
         "the daemon should have created the profile session store at {}",
         db_path.display()
     );
-    let stamped = rusqlite::Connection::open(&db_path)
+    let stamped = tracedecay_sql::Connection::open(&db_path)
         .expect("open the profile session store")
         .execute(
             "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'git_correlation'",
@@ -200,7 +200,7 @@ fn reset_required_profile_session_store_is_served_typed_until_its_named_reset() 
 
 /// Stamps a registered store with a session-temporal schema version.
 fn stamp_session_temporal_version(db_path: &Path, version: i64) {
-    let stamped = rusqlite::Connection::open(db_path)
+    let stamped = tracedecay_sql::Connection::open(db_path)
         .expect("open the registered store")
         .execute(
             "UPDATE session_temporal_schema_migrations SET version = ?1
@@ -217,7 +217,7 @@ fn stamp_session_temporal_version(db_path: &Path, version: i64) {
 }
 
 fn session_temporal_version(db_path: &Path) -> i64 {
-    rusqlite::Connection::open(db_path)
+    tracedecay_sql::Connection::open(db_path)
         .expect("open the registered store")
         .query_row(
             "SELECT version FROM session_temporal_schema_migrations
@@ -231,7 +231,7 @@ fn session_temporal_version(db_path: &Path) -> i64 {
 /// Gives a store session-temporal state, as a store that projected a session
 /// under the released format holds.
 fn record_session_generation(db_path: &Path) {
-    let inserted = rusqlite::Connection::open(db_path)
+    let inserted = tracedecay_sql::Connection::open(db_path)
         .expect("open the registered store")
         .execute(
             "INSERT INTO session_temporal_generations (

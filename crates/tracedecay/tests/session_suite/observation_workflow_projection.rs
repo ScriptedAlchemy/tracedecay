@@ -206,7 +206,7 @@ where
 }
 
 fn workflow_rows(database_path: &Path) -> Vec<WorkflowRow> {
-    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(database_path).unwrap();
     let mut statement = conn
         .prepare(
             "SELECT semantic_kind, provider_reference, item_id, parent_reference,
@@ -238,7 +238,7 @@ fn workflow_rows(database_path: &Path) -> Vec<WorkflowRow> {
 }
 
 fn table_count(database_path: &Path, table: &str) -> i64 {
-    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(database_path).unwrap();
     let quoted = table.replace('"', "\"\"");
     conn.query_row(&format!("SELECT COUNT(*) FROM \"{quoted}\""), (), |row| {
         row.get(0)
@@ -254,7 +254,7 @@ struct SessionMessageSearchHit {
     message: SessionMessageRecord,
 }
 
-fn workflow_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMessageRecord> {
+fn workflow_message(row: &tracedecay_sql::Row<'_>) -> tracedecay_sql::Result<SessionMessageRecord> {
     let observation_id: String = row.get(1)?;
     let fact_ordinal: i64 = row.get(2)?;
     let mut metadata = serde_json::Map::new();
@@ -321,7 +321,7 @@ fn search_session_messages(
     query: &str,
     limit: usize,
 ) -> Vec<SessionMessageSearchHit> {
-    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(database_path).unwrap();
     let terms = query
         .split_whitespace()
         .map(|term| {
@@ -348,18 +348,18 @@ fn search_session_messages(
            AND w.provider = ?2"
         .to_owned();
     let mut values = vec![
-        rusqlite::types::Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned()),
-        rusqlite::types::Value::Text(provider.to_owned()),
+        tracedecay_sql::types::Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned()),
+        tracedecay_sql::types::Value::Text(provider.to_owned()),
     ];
     if let Some(project_key) = project_key {
-        values.push(rusqlite::types::Value::Text(project_key.to_owned()));
+        values.push(tracedecay_sql::types::Value::Text(project_key.to_owned()));
         workflow_sql.push_str(&format!(
             " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
             values.len()
         ));
     }
     for term in &terms {
-        values.push(rusqlite::types::Value::Text(term.clone()));
+        values.push(tracedecay_sql::types::Value::Text(term.clone()));
         workflow_sql.push_str(&format!(
             " AND instr(lower(w.content_text), ?{}) > 0",
             values.len()
@@ -372,7 +372,7 @@ fn search_session_messages(
     );
     let mut statement = conn.prepare(&workflow_sql).unwrap();
     let mut results = statement
-        .query_map(rusqlite::params_from_iter(values), |row| {
+        .query_map(tracedecay_sql::params_from_iter(values), |row| {
             Ok(SessionMessageSearchHit {
                 message: workflow_message(row)?,
             })
@@ -409,7 +409,7 @@ fn search_session_messages(
             .unwrap();
         let transcript_results = statement
             .query_map(
-                rusqlite::params![
+                tracedecay_sql::params![
                     fts_query,
                     provider,
                     project_key,
@@ -452,7 +452,7 @@ fn recent_session_goals_filtered(
     status: Option<&str>,
     limit: usize,
 ) -> Vec<SessionMessageSearchHit> {
-    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(database_path).unwrap();
     let mut statement = conn
         .prepare(
             "WITH ranked_goals AS (
@@ -485,7 +485,7 @@ fn recent_session_goals_filtered(
         .unwrap();
     statement
         .query_map(
-            rusqlite::params![
+            tracedecay_sql::params![
                 SESSION_MESSAGE_PROJECTOR_VERSION,
                 provider,
                 project_key,
@@ -505,7 +505,7 @@ fn recent_session_goals_filtered(
 }
 
 fn upsert_session_message(database_path: &Path, message: &SessionMessageRecord) -> bool {
-    rusqlite::Connection::open(database_path)
+    tracedecay_sql::Connection::open(database_path)
         .and_then(|conn| {
             conn.execute(
                 "INSERT INTO lcm_raw_messages
@@ -525,7 +525,7 @@ fn upsert_session_message(database_path: &Path, message: &SessionMessageRecord) 
                     source_path = excluded.source_path,
                     source_offset = excluded.source_offset,
                     metadata_json = excluded.metadata_json",
-                rusqlite::params![
+                tracedecay_sql::params![
                     message.provider,
                     message.message_id,
                     message.session_id,
@@ -939,12 +939,12 @@ async fn workflow_only_v5_profile_rebuilds_before_current_search() {
     );
     persist_and_project(&store, candidate, None).await;
 
-    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     conn.execute(
         "UPDATE observation_workflow_facts
          SET projector_version = ?1
          WHERE projector_version = ?2",
-        rusqlite::params![
+        tracedecay_sql::params![
             SESSION_MESSAGE_PROJECTOR_VERSION_V5,
             SESSION_MESSAGE_PROJECTOR_VERSION,
         ],
@@ -954,7 +954,7 @@ async fn workflow_only_v5_profile_rebuilds_before_current_search() {
         "UPDATE observation_projection_checkpoints
          SET projector_version = ?1
          WHERE projector_version = ?2",
-        rusqlite::params![
+        tracedecay_sql::params![
             SESSION_MESSAGE_PROJECTOR_VERSION_V5,
             SESSION_MESSAGE_PROJECTOR_VERSION,
         ],
@@ -1187,7 +1187,7 @@ async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
         .unwrap();
     assert!(matches!(persisted, ObservationPersistOutcome::Committed(_)));
 
-    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     raw_conn
         .execute_batch(
             "CREATE TRIGGER fail_workflow_projection
@@ -1268,13 +1268,13 @@ async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
     drop(reopened_store);
     drop(reopened);
 
-    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     raw_conn
         .execute(
             "UPDATE observation_workflow_facts
              SET status = 'tampered'
              WHERE item_id = ?1",
-            rusqlite::params!["task.stable.recovery"],
+            tracedecay_sql::params!["task.stable.recovery"],
         )
         .unwrap();
     drop(raw_conn);

@@ -30,18 +30,18 @@ static EXPECTED_GRAPH_PUBLICATION_SCHEMA: LazyLock<GraphPublicationSchemaBuildRe
     LazyLock::new(build_expected_graph_publication_schema);
 
 fn build_expected_graph_publication_schema() -> GraphPublicationSchemaBuildResult {
-    let connection = rusqlite::Connection::open_in_memory()
+    let connection = tracedecay_sql::Connection::open_in_memory()
         .map_err(|error| format!("failed to open canonical graph publication schema: {error}"))?;
     connection
         .execute_batch(tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1)
         .map_err(|error| {
             format!("failed to install canonical graph publication schema: {error}")
         })?;
-    read_rusqlite_graph_publication_inventory(&connection)
+    read_connection_graph_publication_inventory(&connection)
 }
 
-fn read_rusqlite_graph_publication_inventory(
-    connection: &rusqlite::Connection,
+fn read_connection_graph_publication_inventory(
+    connection: &tracedecay_sql::Connection,
 ) -> std::result::Result<GraphPublicationSchemaInventory, String> {
     let mut statement = connection
         .prepare(

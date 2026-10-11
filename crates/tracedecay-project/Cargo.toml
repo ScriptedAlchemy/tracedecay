@@ -20,7 +20,7 @@ doctest = false
 # by this feature; it compiles only under `cfg(test)` or when a consumer asks
 # for it explicitly.
 test-helpers = [
-    "dep:rusqlite",
+    "dep:tracedecay-sql",
     "tracedecay-automation-runtime/test-helpers",
     "tracedecay-code-index-runtime/test-helpers",
     "tracedecay-host-admission/test-helpers",
@@ -52,8 +52,6 @@ test-transport = [
 ]
 
 [dependencies]
-# Only the `test-helpers` LCM fixture opens a raw connection.
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup"], optional = true }
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
@@ -84,14 +82,16 @@ tracedecay-session-runtime = { path = "../tracedecay-session-runtime" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store" }
 tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-source-edit = { path = "../tracedecay-source-edit" }
+# Only the `test-helpers` LCM fixture opens a raw connection.
+tracedecay-sql = { path = "../tracedecay-sql", optional = true }
 tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", optional = true }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
 [dev-dependencies]
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tempfile = "3"
+tracedecay-sql = { path = "../tracedecay-sql" }
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-application = { path = "../tracedecay-application", features = ["test-helpers"] }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", features = ["test-helpers"] }

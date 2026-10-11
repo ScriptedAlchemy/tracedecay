@@ -344,16 +344,17 @@ async fn daemon_denies_observation_anchor_with_corrupt_source_generation() {
             ObservationSourceGenerationV1::new(GENERATION + 1).unwrap(),
         ),
     );
-    let raw_conn =
-        rusqlite::Connection::open(runtime.database_path(HostAdmissionScope::Profile).unwrap())
-            .unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(
+        runtime.database_path(HostAdmissionScope::Profile).unwrap(),
+    )
+    .unwrap();
     raw_conn
         .execute_batch("DROP TRIGGER retrieval_anchors_immutable_update;")
         .unwrap();
     raw_conn
         .execute(
             "UPDATE retrieval_anchors SET anchor_json = ?1 WHERE anchor_id = ?2",
-            rusqlite::params![
+            tracedecay_sql::params![
                 serde_json::to_string(&corrupted).unwrap(),
                 corrupted.anchor_id().as_str()
             ],

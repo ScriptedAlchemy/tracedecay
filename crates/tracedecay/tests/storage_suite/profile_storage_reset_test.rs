@@ -121,9 +121,11 @@ fn run_git(project: &Path, args: &[&str]) {
 }
 
 fn schema_version(db_path: &Path) -> u32 {
-    let connection =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap();
+    let connection = tracedecay_sql::Connection::open_with_flags(
+        db_path,
+        tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
     let version = connection
         .query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0))
         .unwrap();
@@ -182,7 +184,7 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
     drop(initialized);
 
     let incompatible_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION - 1;
-    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    let connection = tracedecay_sql::Connection::open(&db_path).unwrap();
     connection
         .pragma_update(None, "user_version", incompatible_version)
         .unwrap();

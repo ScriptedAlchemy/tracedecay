@@ -3,14 +3,14 @@ use tracedecay_store::SessionMessageRecord;
 
 /// Stores a pre-existing message row exactly as the projector would store
 /// `message`, the shape a matching row takes whoever wrote it.
-fn insert_stored_message(conn: &rusqlite::Connection, message: SessionMessageRecord) {
+fn insert_stored_message(conn: &tracedecay_sql::Connection, message: SessionMessageRecord) {
     let stored = tracedecay_lcm::raw::projection_stored_message(&message).unwrap();
     conn.execute(
         "INSERT INTO lcm_raw_messages
             (provider, message_id, session_id, role, timestamp, ordinal, content, content_hash,
              storage_kind, kind, model, tool_names, source_path, source_offset, metadata_json)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'inline', ?9, ?10, ?11, ?12, ?13, ?14)",
-        rusqlite::params![
+        tracedecay_sql::params![
             stored.provider,
             stored.message_id,
             stored.session_id,
@@ -50,12 +50,12 @@ async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
     );
     persist(&store, candidate.clone(), None).await;
 
-    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     conn.execute(
         "INSERT INTO sessions
             (provider, session_id, project_key, project_path, title, is_subagent)
          VALUES (?1, ?2, 'legacy-project', '/legacy/project', 'V1 title', 0)",
-        rusqlite::params!["claude", "session-v1"],
+        tracedecay_sql::params!["claude", "session-v1"],
     )
     .unwrap();
     insert_stored_message(
@@ -90,7 +90,7 @@ async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
     rebuild_projection_to_completion(&store, 1).await;
     assert_eq!(projection_ownership_rows(&tmp).await, vec![0]);
     assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
-    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     let row = conn
         .query_row(
             "SELECT project_key, project_path, title FROM sessions
@@ -152,7 +152,7 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
     )
     .await;
 
-    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(database_path).unwrap();
     conn.execute(
         "INSERT INTO sessions
             (provider, session_id, project_key, project_path, is_subagent)

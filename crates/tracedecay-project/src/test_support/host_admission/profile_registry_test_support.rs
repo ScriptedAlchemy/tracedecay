@@ -328,15 +328,15 @@ async fn vacuum_into_for_test(source: &Path, destination: &Path) -> Result<()> {
     let source = source.to_path_buf();
     let destination = destination.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let connection = rusqlite::Connection::open_with_flags(
+        let connection = tracedecay_sql::Connection::open_with_flags(
             &source,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         connection.execute(
             "VACUUM INTO ?1",
             [destination.to_string_lossy().into_owned()],
         )?;
-        Ok::<(), rusqlite::Error>(())
+        Ok::<(), tracedecay_sql::Error>(())
     })
     .await
     .map_err(|error| TraceDecayError::Database {

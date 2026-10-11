@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 use std::{path::Path, time::Duration};
 
-use rusqlite::Connection;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 use serde_json::Value;
 use serde_json::json;
@@ -22,6 +21,7 @@ use tracedecay_domain::{
     SessionId, UtcMicros,
 };
 use tracedecay_global_db::GlobalDbObservationStore;
+use tracedecay_sql::Connection;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationReplayRequest,
     ObservationStore, ObservationStoreError, ObservationWrite,

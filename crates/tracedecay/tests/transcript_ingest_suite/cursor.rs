@@ -855,7 +855,7 @@ async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
         .database_path(HostAdmissionScope::Project)
         .unwrap()
         .to_path_buf();
-    let broken_conn = rusqlite::Connection::open(&db_path).unwrap();
+    let broken_conn = tracedecay_sql::Connection::open(&db_path).unwrap();
     broken_conn
         .execute_batch(
             "CREATE TRIGGER fail_cursor_message_write BEFORE INSERT ON lcm_raw_messages

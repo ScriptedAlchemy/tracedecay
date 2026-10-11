@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Params};
+use tracedecay_sql::{Connection, Params};
 
 use super::{
     LIVE_PROJECTION_AUTHORITY_SQL, REBUILD_PROJECTION_AUTHORITY_SQL,
@@ -48,7 +48,7 @@ fn projection_authority_is_one_indexed_statement() {
     let live = query_plan(
         &connection,
         LIVE_PROJECTION_AUTHORITY_SQL,
-        rusqlite::params![SESSION_MESSAGE_PROJECTOR_VERSION, "observation"],
+        tracedecay_sql::params![SESSION_MESSAGE_PROJECTOR_VERSION, "observation"],
     );
     assert_point_read(
         &live,
@@ -60,7 +60,7 @@ fn projection_authority_is_one_indexed_statement() {
     let rebuild = query_plan(
         &connection,
         REBUILD_PROJECTION_AUTHORITY_SQL,
-        rusqlite::params![
+        tracedecay_sql::params![
             SESSION_MESSAGE_PROJECTOR_VERSION,
             "generation",
             "observation"

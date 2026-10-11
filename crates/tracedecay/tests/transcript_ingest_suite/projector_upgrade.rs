@@ -60,7 +60,7 @@ async fn ingest_both(db: &ProjectSessionTestRuntime, home: &Path, project: &Path
 /// marker at 14, its projection rows owned by projector v6, and the Cursor
 /// rows holding the block array's JSON.
 fn shape_store_as_shipped(db_path: &Path) {
-    let conn = rusqlite::Connection::open(db_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(db_path).unwrap();
     conn.execute(
         "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'lcm'",
         [SHIPPED_LCM_SCHEMA_VERSION],
@@ -72,7 +72,7 @@ fn shape_store_as_shipped(db_path: &Path) {
     ] {
         conn.execute(
             &format!("UPDATE {table} SET projector_version = ?1 WHERE projector_version = ?2"),
-            rusqlite::params![SHIPPED_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION],
+            tracedecay_sql::params![SHIPPED_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .unwrap();
     }
@@ -182,7 +182,7 @@ async fn shipped_store_is_reset_required_and_a_reset_store_serves_both_messages(
         ),
         "{refused:?}"
     );
-    let untouched: i64 = rusqlite::Connection::open(&db_path)
+    let untouched: i64 = tracedecay_sql::Connection::open(&db_path)
         .unwrap()
         .query_row(
             "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",

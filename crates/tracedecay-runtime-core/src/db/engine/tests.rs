@@ -1,4 +1,3 @@
-use rusqlite::Savepoint;
 use tempfile::TempDir;
 use tracedecay_domain::LocatorDigest;
 use tracedecay_rusqlite_runtime::{
@@ -6,6 +5,7 @@ use tracedecay_rusqlite_runtime::{
     exact_sql::ExactSqlHandle,
     reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
 };
+use tracedecay_sql::Savepoint;
 use tracedecay_store::{
     AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
     StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
@@ -136,7 +136,7 @@ impl StorageOperationExecutor for NoWrites {
         &mut self,
         _savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         Ok(())
     }
 }
@@ -147,7 +147,7 @@ struct NoReads;
 impl ReaderQueryExecutor for NoReads {
     fn execute_read(
         &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
+        _snapshot: &tracedecay_sql::Transaction<'_>,
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
         unreachable!("engine exact SQL does not use the product read contract")
@@ -165,7 +165,7 @@ struct Fixture {
 fn runtime_fixture() -> Fixture {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("engine.sqlite3");
-    rusqlite::Connection::open(&path).unwrap();
+    tracedecay_sql::Connection::open(&path).unwrap();
     let path = path.canonicalize().unwrap();
     let binding: StoreRuntimeBindingV1 = serde_json::from_value(serde_json::json!({
         "shard_id": {
@@ -438,10 +438,10 @@ async fn runtime_connection_and_transactions_preserve_sqlite_semantics() {
 async fn default_transaction_is_deferred_and_does_not_take_the_write_lock() {
     let fixture = runtime_fixture();
     let deferred = fixture.connection.transaction().await.unwrap();
-    let mut external = rusqlite::Connection::open(&fixture.path).unwrap();
+    let mut external = tracedecay_sql::Connection::open(&fixture.path).unwrap();
 
     let external_write = external
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .transaction_with_behavior(tracedecay_sql::TransactionBehavior::Immediate)
         .expect("default engine transaction must remain deferred");
 
     external_write.rollback().unwrap();

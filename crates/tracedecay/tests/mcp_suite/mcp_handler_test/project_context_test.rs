@@ -304,7 +304,7 @@ async fn project_context_reports_a_broken_registry_read_as_a_tool_error() {
         .upsert_project_alias(Path::new("registered-alias"), "proj_broken")
         .await
         .expect("seed alias");
-    rusqlite::Connection::open(&registry_path)
+    tracedecay_sql::Connection::open(&registry_path)
         .expect("open registry")
         .execute_batch("DROP TABLE project_aliases")
         .expect("drop aliases");

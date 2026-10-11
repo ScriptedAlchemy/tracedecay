@@ -20,6 +20,16 @@ allowed=(
   -g '!crates/tracedecay-sessions/Cargo.toml'
   -g '!crates/tracedecay-query/src/retrieval/lexical/**'
   -g '!crates/tracedecay-query/Cargo.toml'
+  # Fixtures that write or read a host's own SQLite database, and the test
+  # that exercises the SQLite C library those foreign readers link.
+  -g '!crates/tracedecay-sessions/src/runtime/source/tests.rs'
+  -g '!crates/tracedecay/tests/transcript_ingest_suite/hermes.rs'
+  -g '!crates/tracedecay/tests/transcript_ingest_suite/cursor_composer.rs'
+  -g '!crates/tracedecay/tests/transcript_ingest_suite/opencode.rs'
+  -g '!crates/tracedecay/tests/claude_observation_benchmark/runner.rs'
+  -g '!crates/tracedecay/tests/runtime_acceptance_suite/hermes_state_fixture.rs'
+  -g '!crates/tracedecay/Cargo.toml'
+  -g '!crates/tracedecay-cli/tests/c_library_allocator.rs'
 )
 
 # Code paths (`rusqlite::`, `use rusqlite;`, `extern crate rusqlite`) and

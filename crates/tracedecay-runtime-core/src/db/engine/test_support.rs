@@ -1,6 +1,5 @@
 use std::{ops::Deref, path::Path, sync::Arc};
 
-use rusqlite::Savepoint;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::LocatorDigest;
 use tracedecay_rusqlite_runtime::{
@@ -8,6 +7,7 @@ use tracedecay_rusqlite_runtime::{
     exact_sql::{ExactSqlError, ExactSqlHandle, ExactSqlWriteAuthority, ExactSqlWriteIntent},
     reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
 };
+use tracedecay_sql::Savepoint;
 use tracedecay_store::{
     AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
     StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
@@ -41,7 +41,7 @@ impl TestConnection {
     // This test-only constructor turns fixture setup failures into immediate test failures.
     #[allow(clippy::expect_used)]
     fn open_inner(path: &Path, authority: Option<Arc<dyn ExactSqlWriteAuthority>>) -> Self {
-        rusqlite::Connection::open(path).expect("create engine test database");
+        tracedecay_sql::Connection::open(path).expect("create engine test database");
         let path = path
             .canonicalize()
             .expect("canonicalize engine test database");
@@ -152,7 +152,7 @@ impl StorageOperationExecutor for NoWrites {
         &mut self,
         _savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         Ok(())
     }
 }
@@ -163,7 +163,7 @@ struct NoReads;
 impl ReaderQueryExecutor for NoReads {
     fn execute_read(
         &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
+        _snapshot: &tracedecay_sql::Transaction<'_>,
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
         unreachable!("engine test SQL does not use the product read contract")
