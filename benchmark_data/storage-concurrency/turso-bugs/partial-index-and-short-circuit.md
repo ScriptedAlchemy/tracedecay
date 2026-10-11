@@ -23,11 +23,6 @@ Seen through `tracedecay-lcm` `gc::tests::*` under `--config=native`: every raw
 message whose `metadata_json` holds a placeholder that is not JSON failed to
 insert because of `idx_lcm_raw_lossy_ingest`.
 
-A `CASE WHEN json_valid(...) THEN json_type(...) END` guard fixed the INSERT
-but not the UPDATE that rewrites a placeholder row
-(`gc::tests::delete_tombstones_only_the_owner_row`), so the guard is not a
-complete workaround.
-
 ## Workaround
 
 `idx_lcm_raw_lossy_ingest` indexes `WHERE metadata_json LIKE '%"lossy"%'`, a

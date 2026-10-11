@@ -70,10 +70,9 @@ const MIGRATION_NAME: &str = "lcm";
 /// that relies on it: SQLite substitutes a partial index only when its query
 /// terms structurally imply the index's WHERE clause. The status predicates
 /// live in [`super::query`]; the raw direct-user candidate predicate lives in
-/// [`super::query::grep`]. Turso evaluates a partial-index predicate on every
-/// insert and update without short-circuiting, so the lossy-ingest predicate
-/// is a JSON-free `LIKE` prefilter and the queries apply the exact JSON test
-/// to the indexed rows
+/// [`super::query::grep`]. Turso evaluates a partial-index predicate without
+/// short-circuiting, so the lossy-ingest predicate is a JSON-free `LIKE`
+/// prefilter and the queries apply the exact JSON test to the indexed rows
 /// (`benchmark_data/storage-concurrency/turso-bugs/partial-index-and-short-circuit.md`).
 pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_lcm_raw_lossy_ingest
