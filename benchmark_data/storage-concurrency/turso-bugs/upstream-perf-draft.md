@@ -1,4 +1,4 @@
-# Draft: bulk-insert workload runs 1.4-1.6x slower than SQLite (not posted)
+# Draft: bulk-insert workload runs 1.3-1.5x slower than SQLite (not posted)
 
 Turso rev `2829ee1662bd01d79f60c2c170af684a2b50af86`, opt build, Linux x86_64.
 
@@ -17,10 +17,14 @@ host load.
 | SQLite 3 (bundled) | 60.9 G | 38.7 G | 14.1 s | 9.8 s |
 | Turso, unpatched | 99.3 G | 65.2 G | 19.8 s | 16.9 s |
 | Turso + evictable-count fix | 97.9 G | 59.5 G | 21.1 s | 15.4 s |
+| + temp-dir fix (base of the next rows) | 97.9 G | 61.2 G | 19.1 s | 17.0 s |
+| + unique-index seek reuse | 89.2 G | 61.4 G | 19.9 s | 16.0 s |
+| + one-copy parameter bind (TraceDecay driver) | 88.8 G | 65.9 G | 24.5 s | 19.6 s |
 
-Records: `benchmark_data/storage-concurrency/native-perf.jsonl`, tag
-`perf2-writer`. Wall times were taken at load average 30-118 on a shared
-96-core host; compare the counters.
+Records: `benchmark_data/storage-concurrency/native-perf.jsonl`, tags
+`perf2-writer`, `perf3-baseline`, `perf3-seek` and `perf3-bind`. Wall times
+and cycles were taken at load average 30-118 on a shared 96-core host and
+move by 20-30% between runs of one binary; compare the instruction counts.
 
 ## Findings
 
@@ -35,35 +39,52 @@ Records: `benchmark_data/storage-concurrency/native-perf.jsonl`, tag
    directory, so a confined `IO` must force `TempStore::Memory` and sorts
    cannot spill. Patch: `scripts/bazel/patches/turso_core-io-temp-dir.patch`.
    Note: `temp-files-ignore-the-io-backend.md`.
-3. Per-row insert cost. Statement-level timings put plain inserts at 4-7x
-   SQLite per row (`INSERT INTO clone_fingerprint_postings`: 7.2 us against
-   1.36 us over 117,764 rows into a fresh file, where no spill runs). The
-   remaining 37 G writer instructions (+61%) are spread through the VDBE and
-   B-tree insert path with no single dominant frame: `Statement::_step`,
-   `BTreeCursor::indexbtree_move_to_internal`, `indexbtree_seek_inner`,
-   `compare_payload_generic`, `op_make_record`, `ProgramState::reset`, and
-   glibc `malloc`/`free`/`malloc_consolidate` together at about 12% of the
-   writer thread's on-CPU samples over the whole bench run, which also
-   includes TraceDecay's own allocation (per-record and per-page temporary
-   allocations; the 3 MiB buffer-pool
-   arena, `core/storage/buffer_pool.rs:130`, covers 768 of the cache's 16384
-   pages, and the rest fall back to `Buffer::new_temporary`).
-4. Spilled pages are read back and written twice. A commit re-reads every
-   spilled page that was evicted (`PageSource::Evicted`,
-   `core/storage/pager.rs:4568`) to append it again as a commit frame;
-   SQLite's commit reuses the spill frames. Raising the cache to 256 MiB left
-   the pread count unchanged (14,943 against 14,947), so on this workload the
-   reads come from cold source pages in the canonical copy, not from spills.
-5. Vectored WAL appends of up to `IOV_MAX` = 1024 frames
-   (`core/storage/wal.rs:2558`) allocate large page-cache folios; on a host
-   under memory pressure 6.4% of the writer's samples sit in
-   `__x64_sys_pwritev` -> `__alloc_pages_slowpath` (direct reclaim and
-   compaction). SQLite's 4 KiB `pwrite`s stay on the order-0 fast path. This
-   is host-dependent.
+3. A unique index insert seeks the index twice: `emit_commit_phase`
+   (`core/translate/insert.rs:1382`) emits `IdxInsert` without `USE_SEEK`
+   after the preflight `NoConflict` probe already positioned the cursor, so
+   `op_idx_insert` (`core/vdbe/execute.rs:13156`) descends from the root
+   again. That second seek was 7.5% of the writer's instructions:u. Patch:
+   `scripts/bazel/patches/turso_core-insert-use-seek-result.patch` (writer
+   instructions 97.9 G to 89.2 G, byte-identical artifact). Note:
+   `unique-index-insert-seeks-twice.md`.
+4. Per-row cost that remains. A frame-pointer build's instruction profile
+   of the writer (2 M-instruction samples, 49,813 of them) puts 47.7% of the
+   writer inside `Statement::_step` and 41% in TraceDecay itself. With the
+   double seek gone, the remaining Turso cost is spread over the insert path:
+   `NoConflict` probes 6.7% (`indexbtree_move_to_internal`,
+   `indexbtree_seek_inner` and the `compare_payload_*` family, about 11 k
+   instructions per probe), `BTreeCursor::insert` 9.4% (balance 4.0%,
+   `Pager::add_dirty` 1.7% with `subjournal_page_if_required` 1.0% and the
+   dirty-page `RoaringBitmap` insert 0.4% even for an already dirty page),
+   per-execution setup and teardown about 7% (`ProgramState::reset` 1.8%,
+   `op_open_write` 1.9% boxing a fresh `BTreeCursor` and `Arc<IndexInfo>`
+   per execution, `op_transaction` 1.1% re-reading the header page for the
+   schema cookie, `op_halt`, `Program::abort`), `op_variable` 0.9% cloning
+   each text or blob parameter into a register that the next reset drops,
+   and the sorter 2.5%.
+5. Allocation. A `malloc` size histogram of the writer thread (bpftrace
+   uprobe) counts 27.8 M calls for Turso against 12.1 M for SQLite, and only
+   7,082 of Turso's fall in the 4-4.5 KiB page-buffer range, so the
+   buffer-pool arena (`core/storage/buffer_pool.rs:130`) is not the
+   allocation cost; the thread-local temporary buffer cache absorbs page
+   churn. The extra 15.7 M are small (4 to 136 bytes): cursor boxes, record
+   value vectors (`try_from_result_iter`), parameter and register clones.
+6. Spilled pages are read back and written twice at commit
+   (`PageSource::Evicted`, `core/storage/pager.rs:4568`). On this workload it
+   costs nothing measurable: a 256 MiB cache, where nothing spills, left the
+   pread count unchanged (14,943 against 14,947).
+7. Vectored WAL appends of up to `IOV_MAX` = 1024 frames
+   (`core/storage/wal.rs:2558`) can push the kernel into direct reclaim on a
+   host under memory pressure. Capping them at 64 frames moved neither the
+   writer's instructions (89.2 G against 89.3 G) nor its minimum CPU time
+   (18.9 s against 19.6 s), so it is not carried.
 
 ## Asks
 
-- Take fixes 1 and 2 (or equivalents).
-- A buffer-pool arena that grows with `cache_size`, or a per-connection page
-  buffer free list, to take allocation off the insert path.
-- Reuse spill frames at commit instead of re-reading evicted pages.
+- Take fixes 1, 2 and 3 (or equivalents).
+- Cut per-execution overhead for prepared single-row statements: reuse the
+  cursor allocation and `IndexInfo` across executions, cache the schema
+  cookie for the duration of a write transaction, and skip the dirty-set
+  insert for a page that is already dirty.
+- Cheaper index key comparison on seeks (decode the probe key once, compare
+  serialized fields without building `ValueRef` vectors).
