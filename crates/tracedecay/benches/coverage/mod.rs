@@ -982,7 +982,7 @@ async fn seed_configuration(
     // Attempt receipts persist across runs and bind their authority; keys
     // must be run-unique.
     let nonce = format!("{}", now_micros());
-    let scalar_key = "diagnostics.prewarm.v1";
+    let scalar_key = "telemetry.timings.v1";
     // CAS conflicts on the configuration registry are retryable; re-read the
     // revision and retry the whole set/unset roundtrip a few times.
     let mut seeded_revision = None;

@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoomPage } from './LoomPage.tsx';
 import { useScope } from '../../data/scope/store.ts';
+import { applicationSuccess } from '../../test/applicationEnvelope.ts';
 
 /**
  * What this suite guards is not layout, it is the surface's claims.
@@ -338,22 +339,17 @@ function readyEnvelope(payload: unknown) {
 }
 
 function applicationEnvelope(payload: unknown) {
-  return {
-    kind: 'success',
-    value: {
-      binding_id: 'binding.dashboard.feedback_proximity.v1',
-      contract: { schema_id: 'schema.application.feedback.proximity.result', schema_revision: 1 },
-      request_id: 'request-proximity',
-      scope: {
-        project_id: 'project-loom',
-        repository_id: 'repository-loom',
-        worktree_id: 'worktree-loom',
-        reference: 'refs/heads/main',
-        scope_digest: 'sha256:scope',
-      },
-      outcome: { outcome: 'evidence', value: { payload } },
+  return applicationSuccess('operation.application.feedback_proximity', payload, {
+    bindingId: 'binding.dashboard.feedback_proximity.v1',
+    requestId: 'request-proximity',
+    scope: {
+      project_id: 'project-loom',
+      repository_id: 'repository-loom',
+      worktree_id: 'worktree-loom',
+      reference: 'refs/heads/main',
+      scope_digest: 'sha256:scope',
     },
-  };
+  });
 }
 
 const PROXIMITY_SCOPE = {

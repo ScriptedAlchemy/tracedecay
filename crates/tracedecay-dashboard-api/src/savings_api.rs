@@ -173,7 +173,6 @@ pub struct SavingsOverviewPayloadV1 {
     sessions: SavingsSessionSummaryV1,
     provider_usage: ProviderUsageSummaryV1,
     pricing: SavingsPricingSummaryV1,
-    costs: CostsReadModelV1,
 }
 
 fn provider_usage_scope(state: &DashboardState) -> Option<ObservationScopeV1> {
@@ -860,26 +859,12 @@ pub async fn overview(
         "offline": pricing_full.get("offline"),
         "model_count": pricing_full.get("model_count"),
     });
-    let costs = match (state.savings_db.as_deref(), usage_aggregate.as_ref()) {
-        (Some(db), Some(aggregate)) => {
-            crate::application::observability::costs_read_model_with_provider_usage(
-                db, None, 0, aggregate,
-            )
-            .await
-        }
-        _ => crate::application::observability::costs_unavailable_read_model(
-            None,
-            0,
-            "accounting_store_unavailable",
-        ),
-    };
     let payload: Result<SavingsOverviewPayloadV1, String> = (|| {
         Ok(SavingsOverviewPayloadV1 {
             savings: decode_contract(savings, "savings summary")?,
             sessions: decode_contract(sessions, "session savings summary")?,
             provider_usage: decode_contract(provider_usage, "provider usage summary")?,
             pricing: decode_contract(pricing, "pricing summary")?,
-            costs,
         })
     })();
     match payload {

@@ -47,12 +47,13 @@ const BASE = '/api/plugins/savings';
 /**
  * Costs, channel 11: actual provider spend, attributed.
  *
- * Two independent reads compose the surface. `/overview` carries the all-time
- * usage totals, the savings ledger windows, the pricing authority's identity,
- * and the canonical cost projection; `/models?range=` carries the exact
- * provider usage of the selected range priced by that same authority, grouped
- * by provider, model, and UTC day. A failure in one must not blank the other,
- * so every panel resolves its own read and reports its own typed state.
+ * Independent reads compose the surface. `/overview` carries the all-time
+ * usage totals, the savings ledger windows, and the pricing authority's
+ * identity; `/models?range=` carries the exact provider usage of the selected
+ * range priced by that same authority, grouped by provider, model, and UTC
+ * day; `CanonicalCosts` owns `/api/costs`, the page's only canonical cost
+ * projection. A failure in one must not blank another, so every panel
+ * resolves its own read and reports its own typed state.
  *
  * The one invariant every panel shares: no dollar figure is manufactured.
  * Priced, partially priced, unpriced, null-identity, undated, and unavailable

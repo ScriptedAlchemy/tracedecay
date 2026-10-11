@@ -1835,10 +1835,9 @@ mod tests {
     /// for this platform, so the executable is the whole release.
     #[test]
     fn required_members_match_the_release_target_manifest() {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/release-targets.json");
         let manifest: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read("../../.github/release-targets.json").unwrap())
+                .unwrap();
         let target = manifest["include"]
             .as_array()
             .unwrap()

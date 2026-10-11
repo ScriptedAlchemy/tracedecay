@@ -4637,7 +4637,6 @@ export type SavingsModelsPayloadV1 = {
 };
 
 export type SavingsOverviewPayloadV1 = {
-  costs: CostsReadModelV1;
   pricing: SavingsPricingSummaryV1;
   provider_usage: ProviderUsageSummaryV1;
   savings: SavingsAccountingSummaryV1;

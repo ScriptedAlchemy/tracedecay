@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { FIXTURES, resolveFixture } from '../../../stories/fixtures/data.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
+import { applicationSuccess } from '../../test/applicationEnvelope.ts';
 import { CostsPage } from './CostsPage.tsx';
 
 /** Every option the spend field handed its chart instance, in order. jsdom has
@@ -357,6 +358,38 @@ describe('CostsPage provider spend attribution', () => {
     ).toBe(true);
   });
 
+  it('reads the canonical cost projection once per refresh, from /api/costs alone', async () => {
+    const { fetch: fetchMock } = renderCosts();
+    const calls = (pathname: string) =>
+      fetchMock.mock.calls.filter(
+        ([input]) => new URL(String(input), 'http://localhost').pathname === pathname,
+      ).length;
+
+    const tokens = await screen.findByText('provider tokens');
+    expect(screen.getByText('41,882,140')).toBeTruthy();
+    expect(calls('/api/costs')).toBe(1);
+    expect(calls('/api/plugins/savings/overview')).toBe(1);
+
+    const canonical = tokens.closest('section[aria-label="Canonical cost observations"]');
+    expect(canonical).toBeTruthy();
+    fireEvent.click(within(canonical as HTMLElement).getByRole('button', { name: /refresh/i }));
+    await waitFor(() => expect(calls('/api/costs')).toBe(2));
+    expect(calls('/api/plugins/savings/overview')).toBe(1);
+  });
+
+  it('reports a failed canonical cost read in its own section without a second projection', async () => {
+    const { fetch: fetchMock } = renderCosts({ costsStatus: 503 });
+    const canonical = await screen.findByRole('region', { name: 'Canonical cost observations' });
+    expect(await within(canonical).findByText(/HTTP 503/)).toBeTruthy();
+    expect(within(canonical).queryByText('provider tokens')).toBeNull();
+    expect(await screen.findByRole('region', { name: 'Provider spend detail table' })).toBeTruthy();
+    expect(
+      fetchMock.mock.calls.filter(
+        ([input]) => new URL(String(input), 'http://localhost').pathname === '/api/costs',
+      ),
+    ).toHaveLength(1);
+  });
+
   it('reports the saved-token window matching the range as count only', async () => {
     renderCosts({ route: '/costs?range=30d' });
     const headline = await screen.findByText(/saved · 30d/i);
@@ -394,10 +427,17 @@ function renderCosts(options: {
   overview?: Record<string, unknown>;
   overviewStatus?: number;
   modelsResponse?: { status: number; body: unknown };
+  costsStatus?: number;
 } = {}) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), 'http://localhost');
     const pathname = url.pathname;
+    if (pathname === '/api/costs' && options.costsStatus !== undefined) {
+      return new Response('{}', {
+        status: options.costsStatus,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     if (pathname === '/api/plugins/savings/overview') {
       // A non-2xx overview is a proxy or daemon fault with no envelope behind
       // it; a 503 carrying a valid envelope would be read as that envelope.
@@ -457,13 +497,9 @@ function savingsOverviewPayload(): Record<string, unknown> {
 }
 
 function workEnvelope(payload: unknown) {
-  return {
-    kind: 'success',
-    value: {
-      scope: resolvedWorkScope(),
-      outcome: { outcome: 'evidence', value: { payload } },
-    },
-  };
+  return applicationSuccess('operation.work.topology_metrics', payload, {
+    scope: resolvedWorkScope(),
+  });
 }
 
 /** Test equivalent of `ResolvedScope::compute_digest`: transparent domain ids

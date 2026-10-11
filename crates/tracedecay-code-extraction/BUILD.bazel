@@ -180,3 +180,9 @@ genrule(
     tags = ["manual"],
     visibility = ["//visibility:public"],
 )
+
+filegroup(
+    name = "fixtures",
+    srcs = glob(["fixtures/**"]),
+    visibility = ["//visibility:public"],
+)

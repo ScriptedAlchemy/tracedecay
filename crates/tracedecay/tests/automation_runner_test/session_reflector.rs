@@ -756,12 +756,15 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
             .any(
                 |entry| entry["eval_id"] == json!("session_reflector:accepted:0")
                     && entry["harness"]["commands"][0]
-                        == json!("cargo test --test automation_runner_test session_reflector")
+                        == json!(
+                            "bazel test //crates/tracedecay:automation_runner_test --test_arg=session_reflector"
+                        )
+                    && entry["harness"]["status"] == json!("not_run")
             )
     );
     assert_eq!(
-        eval_payload["runner"]["commands"].as_array().unwrap().len(),
-        1
+        eval_payload["independent_evaluation"]["status"],
+        json!("not_run")
     );
     let handoff_payload =
         read_artifact(&cg, &run.run_id, &run.ledger_record, "codex_handoff").await;
@@ -771,7 +774,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
         json!("inspect automatically applied fact receipts and canonical fact ids")
     );
     assert_eq!(
-        handoff_payload["eval_replay"]["commands"]
+        handoff_payload["independent_evaluation"]["harness_commands"]
             .as_array()
             .unwrap()
             .len(),

@@ -596,9 +596,22 @@ struct ChildGuard {
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         let process_group = self.child.id();
-        terminate_process_tree(process_group);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // A clean protocol completion can reap the pid before Drop. Force-killing
+        // that tree is required only while the child is still running: on
+        // Windows `taskkill /T /F` always spawns a helper, even for a dead
+        // pid, and that helper is the expensive post-turn stall under IO load.
+        let already_exited = matches!(self.child.try_wait(), Ok(Some(_)));
+        if already_exited {
+            // Unix process-group signal is one syscall and still clears
+            // node/codex descendants after the leader exits. Windows has no
+            // equivalent cheap group signal once the pid is gone.
+            #[cfg(unix)]
+            terminate_process_tree(process_group);
+        } else {
+            terminate_process_tree(process_group);
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
         active_codex_children()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -921,6 +934,8 @@ pub fn strip_reasoning_tags(text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(target_os = "linux")]
+    use std::io::Read as _;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use tracedecay_lcm::{LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange};
@@ -1255,32 +1270,39 @@ mod tests {
             .append(true)
             .open(&executable)
             .expect("hold the fake app-server open for writing");
-        let launch_receipt = CodexAppServerLaunchReceipt::default();
+        let codex_bin = executable.to_string_lossy().into_owned();
+        let (mut attempts, attempt_marker) = std::io::pipe().expect("attempt pipe");
+        let mut command = codex_app_server_command(&codex_bin);
+        // Every exec attempt forks a child that writes one byte here first, so
+        // the bytes read back count the attempts the spawn made.
+        unsafe {
+            command.pre_exec(move || {
+                let _ = (&attempt_marker).write(&[1]);
+                Ok(())
+            });
+        }
 
-        let started = Instant::now();
-        let error = run_read_only_work(
-            &executable,
-            temporary.path(),
-            Duration::from_secs(1),
-            &launch_receipt,
-        )
-        .expect_err("Linux refuses to exec a file that is open for writing");
-        let elapsed = started.elapsed();
+        let error = spawn_codex_app_server(&mut command, &codex_bin)
+            .expect_err("Linux refuses to exec a file that is open for writing");
+        drop(command);
+        let mut marks = Vec::new();
+        attempts
+            .read_to_end(&mut marks)
+            .expect("read attempt marks");
 
         assert_eq!(
             error,
             CodexAppServerError {
                 class: AgentTaskFailureClass::Unavailable,
                 message: format!(
-                    "failed to start `{}` app-server: Text file busy (os error 26)",
-                    executable.display()
+                    "failed to start `{codex_bin}` app-server: Text file busy (os error 26)"
                 ),
             }
         );
-        assert_eq!(launch_receipt.started_at(), None);
-        assert!(
-            elapsed < Duration::from_millis(80),
-            "the refusal must not wait for the writer to go away: {elapsed:?}"
+        assert_eq!(
+            marks.len(),
+            1,
+            "the refusal must come from the first exec attempt, not a retry"
         );
     }
 
@@ -1332,6 +1354,61 @@ mod tests {
                 .process_groups
                 .is_empty(),
             "the launched process group must be removed before the timeout returns"
+        );
+    }
+
+    fn already_exited_child_command() -> Command {
+        #[cfg(windows)]
+        {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "exit", "0"]);
+            command
+        }
+        #[cfg(not(windows))]
+        {
+            Command::new("true")
+        }
+    }
+
+    #[test]
+    fn child_guard_drop_does_not_force_kill_an_already_exited_child() {
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            active_codex_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .process_groups
+                .is_empty()
+        );
+        let mut command = already_exited_child_command();
+        let mut child = spawn_codex_app_server(&mut command, "already-exited")
+            .expect("spawn already-exited child");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !matches!(child.try_wait(), Ok(Some(_))) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            matches!(child.try_wait(), Ok(Some(_))),
+            "child must exit before ChildGuard::drop"
+        );
+        let started = Instant::now();
+        drop(ChildGuard {
+            child,
+            cancellation: None,
+        });
+        assert!(
+            started.elapsed() < Duration::from_millis(750),
+            "ChildGuard::drop must reap an already-exited child without a process-tree kill"
+        );
+        assert!(
+            active_codex_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .process_groups
+                .is_empty(),
+            "the launched process group must be unregistered after drop"
         );
     }
 

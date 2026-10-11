@@ -132,7 +132,7 @@ rust_test(
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"]
         + ["//crates/tracedecay-hooks:fixtures_host_events_claude", "//dashboard:hermes-wrapper", "//dashboard:hermes-wrapper_src", "//plugin:opencode", "//plugin:pi", "//plugin:pi_skill"],
-    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//plugin:sources"],
 )
 
 filegroup(

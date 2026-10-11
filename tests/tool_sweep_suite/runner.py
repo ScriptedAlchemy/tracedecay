@@ -1343,9 +1343,9 @@ def prime_fixture_values(
             raise SweepError("configuration list producer omitted work.topology_policy.v1")
         fixture["configuration_key"] = configuration_key
 
-        scalar_key = "diagnostics.prewarm.v1"
+        scalar_key = "telemetry.timings.v1"
         if scalar_key not in keys:
-            raise SweepError("configuration list producer omitted diagnostics.prewarm.v1")
+            raise SweepError("configuration list producer omitted telemetry.timings.v1")
         scalar = _producer_call(
             client,
             "tracedecay_configuration_get",

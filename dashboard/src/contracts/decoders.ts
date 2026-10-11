@@ -8295,13 +8295,11 @@ export const SavingsModelsPayloadV1Schema: z.ZodObject<{
 });
 
 export const SavingsOverviewPayloadV1Schema: z.ZodObject<{
-  costs: z.ZodType<CostsReadModelV1, unknown>;
   pricing: z.ZodType<SavingsPricingSummaryV1, unknown>;
   provider_usage: z.ZodType<ProviderUsageSummaryV1, unknown>;
   savings: z.ZodType<SavingsAccountingSummaryV1, unknown>;
   sessions: z.ZodType<SavingsSessionSummaryV1, unknown>;
 }> = z.object({
-  costs: z.lazy(() => CostsReadModelV1Schema),
   pricing: z.lazy(() => SavingsPricingSummaryV1Schema),
   provider_usage: z.lazy(() => ProviderUsageSummaryV1Schema),
   savings: z.lazy(() => SavingsAccountingSummaryV1Schema),

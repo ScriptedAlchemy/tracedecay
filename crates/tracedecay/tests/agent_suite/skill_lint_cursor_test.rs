@@ -71,7 +71,7 @@ fn command_slugs() -> BTreeSet<String> {
     std::fs::read_dir(repo_path(CURSOR_COMMAND_ROOT))
         .expect("cursor commands dir readable")
         .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+        .filter(|entry| entry.path().is_file())
         .filter_map(|entry| {
             entry
                 .path()

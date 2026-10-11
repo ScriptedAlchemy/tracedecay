@@ -16,7 +16,7 @@ use crate::queries::{PrimeStep, QueryContext, ToolGroup, five};
 
 use super::eq;
 
-const SCALAR_KEY: &str = "diagnostics.prewarm.v1";
+const SCALAR_KEY: &str = "telemetry.timings.v1";
 const TOPOLOGY_KEY: &str = "work.topology_policy.v1";
 
 pub(crate) fn configuration_effect_key(tool: &str) -> Option<&'static str> {
@@ -332,7 +332,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                             args: json!({
                                 "layer": project_layer(ctx),
                                 "key": SCALAR_KEY,
-                                "value": {"kind": "boolean", "value": true},
+                                "value": {"kind": "boolean", "value": false},
                                 "expected_revision": "{{revision}}",
                                 "idempotency_key": "bench-cfg-unset-prime-{{iter}}",
                                 "format": "json",

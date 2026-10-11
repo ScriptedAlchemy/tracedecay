@@ -52,8 +52,10 @@ pub const LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY: &str = "lcm.summarizer_executa
 /// of the worktree, which always honors `.gitignore`. The upload,
 /// watcher-debounce, and extraction-timeout user settings were stored in each
 /// project's snapshot through v1.0.0-beta.61 and now live only in the profile
-/// store ([`PROFILE_SETTING_KEYS_V1`]).
+/// store ([`PROFILE_SETTING_KEYS_V1`]). `diagnostics.prewarm.v1` shipped
+/// through v1.0.0-beta.83 and left with the compile-on-read cargo prewarm.
 pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] = &[
+    "diagnostics.prewarm.v1",
     "index.git_ignore.v1",
     "semantic.runtime.v1",
     "sync.orphan_db_gc_days.v1",
@@ -93,7 +95,6 @@ pub const INDEX_MAX_FILE_SIZE_SETTING_KEY: &str = "index.max_file_size.v1";
 pub const INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY: &str = "index.extract_docstrings.v1";
 pub const INDEX_TRACK_CALL_SITES_SETTING_KEY: &str = "index.track_call_sites.v1";
 pub const INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY: &str = "index.native_graph_activation.v1";
-pub const DIAGNOSTICS_PREWARM_SETTING_KEY: &str = "diagnostics.prewarm.v1";
 pub const SYNC_AUTO_WATCH_SETTING_KEY: &str = "sync.auto_watch.v1";
 pub const SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY: &str = "sync.watch_linked_worktrees.v1";
 pub const SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY: &str = "sync.watch_debounce_ms.v1";
@@ -138,7 +139,6 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
     INDEX_TRACK_CALL_SITES_SETTING_KEY,
     INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-    DIAGNOSTICS_PREWARM_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY,
     SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
