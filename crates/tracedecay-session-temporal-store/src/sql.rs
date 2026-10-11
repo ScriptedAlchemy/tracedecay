@@ -114,7 +114,9 @@ pub(crate) fn retire_superseded_versions_sql(table: &SharedGenerationTable) -> S
 /// observation, or a later observation through the frontier may own its
 /// message. The owner follows the projection's rule: the newest owner when
 /// the projector created the message, the oldest otherwise. An effect without
-/// projection provenance is canonical.
+/// projection provenance is canonical. The owner probes match the projector
+/// version with `+` so they seek the output index on the message instead of
+/// the primary key's projector prefix, which spans the whole store on Turso.
 pub(crate) fn live_effect_predicate(frontier: &str) -> String {
     let version = tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
     let retired_reason = tracedecay_store::ProjectionSkipReason::SourceRecordRetired.as_str();
@@ -134,7 +136,7 @@ pub(crate) fn live_effect_predicate(frontier: &str) -> String {
                    FROM observation_projection_provenance AS owner
                    JOIN observations AS owner_observation
                      ON owner_observation.observation_id = owner.observation_id
-                   WHERE owner.projector_version = own.projector_version
+                   WHERE +owner.projector_version = own.projector_version
                      AND owner.output_provider = own.output_provider
                      AND owner.output_message_id = own.output_message_id
                      AND owner_observation.sequence <= {frontier}
@@ -143,7 +145,7 @@ pub(crate) fn live_effect_predicate(frontier: &str) -> String {
                                 FROM observation_projection_provenance AS created
                                 JOIN observations AS created_observation
                                   ON created_observation.observation_id = created.observation_id
-                                WHERE created.projector_version = own.projector_version
+                                WHERE +created.projector_version = own.projector_version
                                   AND created.output_provider = own.output_provider
                                   AND created.output_message_id = own.output_message_id
                                   AND created.message_created = 1

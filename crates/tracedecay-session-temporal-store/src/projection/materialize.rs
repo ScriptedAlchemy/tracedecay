@@ -628,8 +628,8 @@ async fn candidate_parent_message_resolver(
                         SELECT occurrence.occurrence_id
                         FROM session_occurrences AS occurrence
                              INDEXED BY idx_session_occurrences_message
-                        WHERE occurrence.session_id = ?1
-                          AND occurrence.message_id = requested.value
+                        WHERE occurrence.session_id = (SELECT ?1)
+                          AND occurrence.message_id = CAST(requested.value AS TEXT)
                           AND +occurrence.generation <= ?2
                         ORDER BY occurrence.source_sequence,
                                  occurrence.projection_output_ordinal,

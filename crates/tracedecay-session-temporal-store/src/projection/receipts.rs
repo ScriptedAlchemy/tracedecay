@@ -944,16 +944,31 @@ fn coverage_sql(source: &CoverageSource, rows: CoverageRows) -> SessionStoreResu
         ),
         CoverageRows::Introduced => (
             "row",
-            source.from.to_owned(),
+            source.from.replacen(
+                " AS row",
+                &format!(" AS row INDEXED BY idx_{}_introduced", table.name),
+                1,
+            ),
             "row.generation = ?2".to_owned(),
         ),
         // Rows of an append-only table are never re-versioned.
         CoverageRows::Superseded if !table.versioned => return Ok(None),
         // Each key the candidate re-versioned has one older visible version:
         // activation deletes a version once its successor activates.
+        // The older version is one primary-key seek per successor; unnamed,
+        // Turso seeks `(session_id, generation)` and reads every older row
+        // (turso-bugs/secondary-index-loses-to-primary-key-prefix.md).
         CoverageRows::Superseded => (
             "successor",
-            format!("{} AS successor CROSS JOIN {}", table.name, source.from),
+            format!(
+                "{name} AS successor INDEXED BY idx_{name}_introduced CROSS JOIN {from}",
+                name = table.name,
+                from = source.from.replacen(
+                    " AS row",
+                    &format!(" AS row INDEXED BY sqlite_autoindex_{}_1", table.name),
+                    1,
+                ),
+            ),
             format!(
                 "successor.session_id = ?1 AND successor.generation = ?2
                  AND row.generation < ?2 AND {matches}",

@@ -710,6 +710,11 @@ impl Connection {
         Self::open_with_flags(path, OpenFlags::default())
     }
 
+    #[cfg(test)]
+    pub(crate) fn compiled_statements(&self) -> u64 {
+        self.core.compiles()
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         Self::open_with_flags(":memory:", OpenFlags::default())
     }
@@ -905,7 +910,6 @@ impl ConnectionControl for Connection {
         self.core.take_transaction_control_denied();
         self.core.set_capability(scoped);
         let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
-        self.core.clear_cache();
         self.core.set_capability(base);
         let result = match result {
             Ok(result) => result,

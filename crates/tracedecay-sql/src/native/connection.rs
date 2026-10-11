@@ -424,6 +424,7 @@ impl Database {
             transaction_control_denied: Cell::new(false),
             read_only,
             cache: RefCell::default(),
+            compiles: Cell::new(0),
             database: self.clone(),
         };
         connection.set_capability(capability);
@@ -543,6 +544,8 @@ pub struct Connection {
     read_only: bool,
     /// Compiled non-DDL statements and whether each writes.
     cache: RefCell<HashMap<(Capability, String), (turso_core::Statement, bool)>>,
+    /// Programs compiled on this connection, cached or not.
+    compiles: Cell<u64>,
     database: Database,
 }
 
@@ -660,7 +663,13 @@ impl Connection {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn compiles(&self) -> u64 {
+        self.compiles.get()
+    }
+
     fn compile(&self, command: Cmd, sql: &str) -> Result<turso_core::Statement> {
+        self.compiles.set(self.compiles.get() + 1);
         self.inner
             .prepare_translated_cmd(command, sql)
             .map_err(classify_prepare)

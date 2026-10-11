@@ -314,7 +314,7 @@ async fn persist_derived_record(
 }
 
 const DERIVED_ANCHOR_OWNER_SQL: &str = "SELECT anchor.owner_json
-     FROM session_occurrences AS occurrence
+     FROM session_occurrences AS occurrence INDEXED BY sqlite_autoindex_session_occurrences_1
      JOIN retrieval_anchors AS anchor
        ON anchor.anchor_id = occurrence.retrieval_anchor_id
      WHERE occurrence.session_id = ?1

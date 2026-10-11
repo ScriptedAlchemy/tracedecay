@@ -1065,10 +1065,22 @@ async fn introduced_occurrence_relations(
     let generation_value = generation_i64(generation, RECONSTRUCT_OPERATION)?;
     let mut rows = conn
         .query(
-            "SELECT knowledge_at, projection_output_ordinal
-             FROM session_occurrences INDEXED BY idx_session_occurrences_generation_order
-             WHERE session_id = ?1 AND generation < ?2
-             ORDER BY knowledge_at DESC, projection_output_ordinal DESC
+            // The newest instant first, then the highest ordinal within it:
+            // the index orders by instant only, and Turso sorts every row of
+            // the session for the two-key ORDER BY instead of its top group.
+            "SELECT settled.knowledge_at, settled.projection_output_ordinal
+             FROM session_occurrences AS settled
+                  INDEXED BY idx_session_occurrences_generation_order
+             WHERE settled.session_id = ?1 AND settled.generation < ?2
+               AND settled.knowledge_at = (
+                   SELECT newest.knowledge_at
+                   FROM session_occurrences AS newest
+                        INDEXED BY idx_session_occurrences_generation_order
+                   WHERE newest.session_id = ?1 AND newest.generation < ?2
+                   ORDER BY newest.knowledge_at DESC
+                   LIMIT 1
+               )
+             ORDER BY settled.projection_output_ordinal DESC
              LIMIT 1",
             params![session_id.as_str(), generation_value],
         )
