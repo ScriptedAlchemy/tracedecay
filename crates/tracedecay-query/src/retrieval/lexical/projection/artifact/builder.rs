@@ -1879,12 +1879,8 @@ fn write_canonical_copy(
         let mut select = source
             .prepare(&format!("SELECT * FROM \"{table}\" ORDER BY {order}"))
             .map_err(sqlite_error)?;
-        let mut insert = transaction
-            .prepare(&format!(
-                "INSERT INTO \"{table}\" VALUES ({})",
-                vec!["?"; columns.len()].join(", ")
-            ))
-            .map_err(sqlite_error)?;
+        let quoted = format!("\"{table}\"");
+        let mut insert = MultiRowInsertV1::new(&transaction, &quoted, columns.len(), sqlite_error)?;
         let mut rows = select.query([]).map_err(sqlite_error)?;
         while let Some(row) = rows.next().map_err(sqlite_error)? {
             if copied.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
@@ -1892,13 +1888,13 @@ fn write_canonical_copy(
             }
             copied += 1;
             let values = (0..columns.len())
-                .map(|index| row.get::<_, Value>(index))
+                .map(|index| row.get::<_, Value>(index).map(ToSqlOutput::Owned))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(sqlite_corrupt)?;
-            insert
-                .execute(tracedecay_sql::params_from_iter(values))
-                .map_err(sqlite_error)?;
+            insert.push(values)?;
         }
+        drop(rows);
+        insert.finish()?;
     }
     for kind in ["index", "trigger"] {
         for (_, sql) in of_kind(kind) {
@@ -3265,9 +3261,9 @@ fn validate_prepared_page_batch(
 /// rows keep arriving, one shorter statement for the remainder at `finish`.
 /// Row order is preserved, so the clustered-key insert plans still append
 /// at the tail of their trees.
-struct MultiRowInsertV1<'transaction, 'row> {
+pub(super) struct MultiRowInsertV1<'transaction, 'row> {
     transaction: &'transaction Transaction<'transaction>,
-    table_columns: &'static str,
+    table_columns: &'row str,
     columns: usize,
     conflict_clause: &'static str,
     full_statement: tracedecay_sql::CachedStatement<'transaction>,
@@ -3276,9 +3272,9 @@ struct MultiRowInsertV1<'transaction, 'row> {
 }
 
 impl<'transaction, 'row> MultiRowInsertV1<'transaction, 'row> {
-    fn new(
+    pub(super) fn new(
         transaction: &'transaction Transaction<'transaction>,
-        table_columns: &'static str,
+        table_columns: &'row str,
         columns: usize,
         map_error: fn(tracedecay_sql::Error) -> CodeLexicalArtifactErrorV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
@@ -3292,7 +3288,7 @@ impl<'transaction, 'row> MultiRowInsertV1<'transaction, 'row> {
     /// than signal a bug.
     fn new_with_conflict_clause(
         transaction: &'transaction Transaction<'transaction>,
-        table_columns: &'static str,
+        table_columns: &'row str,
         columns: usize,
         conflict_clause: &'static str,
         map_error: fn(tracedecay_sql::Error) -> CodeLexicalArtifactErrorV1,
@@ -3316,7 +3312,7 @@ impl<'transaction, 'row> MultiRowInsertV1<'transaction, 'row> {
         })
     }
 
-    fn push(
+    pub(super) fn push(
         &mut self,
         values: impl IntoIterator<Item = ToSqlOutput<'row>>,
     ) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -3336,7 +3332,7 @@ impl<'transaction, 'row> MultiRowInsertV1<'transaction, 'row> {
         Ok(())
     }
 
-    fn finish(mut self) -> Result<(), CodeLexicalArtifactErrorV1> {
+    pub(super) fn finish(mut self) -> Result<(), CodeLexicalArtifactErrorV1> {
         if self.buffer.is_empty() {
             return Ok(());
         }
@@ -3377,7 +3373,7 @@ fn multi_row_insert_sql(
     )
 }
 
-fn sql_integer<'row>(value: i64) -> ToSqlOutput<'row> {
+pub(super) fn sql_integer<'row>(value: i64) -> ToSqlOutput<'row> {
     ToSqlOutput::Owned(Value::Integer(value))
 }
 
@@ -3385,7 +3381,7 @@ fn sql_text(value: &str) -> ToSqlOutput<'_> {
     ToSqlOutput::Borrowed(ValueRef::Text(value.as_bytes()))
 }
 
-fn sql_blob(value: &[u8]) -> ToSqlOutput<'_> {
+pub(super) fn sql_blob(value: &[u8]) -> ToSqlOutput<'_> {
     ToSqlOutput::Borrowed(ValueRef::Blob(value))
 }
 
@@ -3638,25 +3634,23 @@ fn derive_clone_fingerprint_postings(
              ORDER BY language, class, normalization_revision, fingerprint, occurrence_ordinal, token_position",
         )
         .map_err(sqlite_error)?;
-    let mut insert = transaction
-        .prepare(
-            "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, posting_count, postings) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .map_err(sqlite_error)?;
-    let mut seal = |(language, class, revision, fingerprint): &FingerprintKeyV1,
+    let mut insert = MultiRowInsertV1::new(
+        transaction,
+        "clone_fingerprint_postings(language, class, normalization_revision, fingerprint, posting_count, postings)",
+        6,
+        sqlite_error,
+    )?;
+    let mut seal = |(language, class, revision, fingerprint): FingerprintKeyV1,
                     postings: &[(u32, u32)]|
      -> Result<(), CodeLexicalArtifactErrorV1> {
-        insert
-            .execute(params![
-                language,
-                class,
-                revision,
-                fingerprint,
-                i64::try_from(postings.len()).map_err(contract_number)?,
-                encode_fingerprint_postings(postings)?,
-            ])
-            .map_err(sqlite_error)?;
-        Ok(())
+        insert.push([
+            ToSqlOutput::Owned(Value::Text(language)),
+            sql_integer(class),
+            sql_integer(revision),
+            sql_integer(fingerprint),
+            sql_integer(i64::try_from(postings.len()).map_err(contract_number)?),
+            ToSqlOutput::Owned(Value::Blob(encode_fingerprint_postings(postings)?)),
+        ])
     };
     let mut rows = select.query([]).map_err(sqlite_error)?;
     let mut current: Option<(FingerprintKeyV1, Vec<(u32, u32)>)> = None;
@@ -3677,7 +3671,7 @@ fn derive_clone_fingerprint_postings(
         let position =
             u32::try_from(row.get::<_, i64>(5).map_err(sqlite_error)?).map_err(contract_number)?;
         if let Some((sealed, postings)) = current.take_if(|(current, _)| *current != key) {
-            seal(&sealed, &postings)?;
+            seal(sealed, &postings)?;
         }
         current
             .get_or_insert_with(|| (key, Vec::new()))
@@ -3685,11 +3679,12 @@ fn derive_clone_fingerprint_postings(
             .push((occurrence, position));
     }
     if let Some((sealed, postings)) = current {
-        seal(&sealed, &postings)?;
+        seal(sealed, &postings)?;
     }
+    drop(seal);
     drop(rows);
     drop(select);
-    drop(insert);
+    insert.finish()?;
     transaction
         .execute_batch("DROP TABLE clone_fingerprint_postings_pages;")
         .map_err(sqlite_error)
@@ -4738,10 +4733,13 @@ fn derive_term_postings(
             "SELECT term, field, postings FROM term_posting_runs ORDER BY term, field, page_ordinal",
         )
         .map_err(sqlite_error)?;
-    let mut insert = transaction
-        .prepare("INSERT INTO term_postings(term, in_fuzzy, lists) VALUES (?1, ?2, ?3)")
-        .map_err(sqlite_error)?;
-    let mut seal = |term: &str,
+    let mut insert = MultiRowInsertV1::new(
+        transaction,
+        "term_postings(term, in_fuzzy, lists)",
+        3,
+        sqlite_error,
+    )?;
+    let mut seal = |term: String,
                     lists: Vec<(i64, PostingListEncoderV1)>|
      -> Result<(), CodeLexicalArtifactErrorV1> {
         let in_fuzzy = lists.iter().any(|(field, _)| *field != subtoken);
@@ -4749,10 +4747,11 @@ fn derive_term_postings(
             .into_iter()
             .map(|(field, encoder)| Ok((field, encoder.len(), encoder.finish()?)))
             .collect::<Result<Vec<_>, CodeLexicalArtifactErrorV1>>()?;
-        insert
-            .execute(params![term, in_fuzzy, encode_term_lists(&lists)?])
-            .map_err(sqlite_error)?;
-        Ok(())
+        insert.push([
+            ToSqlOutput::Owned(Value::Text(term)),
+            sql_integer(i64::from(in_fuzzy)),
+            ToSqlOutput::Owned(Value::Blob(encode_term_lists(&lists)?)),
+        ])
     };
     let mut rows = select.query([]).map_err(sqlite_error)?;
     let mut current: Option<(String, Vec<(i64, PostingListEncoderV1)>)> = None;
@@ -4772,7 +4771,7 @@ fn derive_term_postings(
             .and_then(|value| value.as_blob().map_err(tracedecay_sql::Error::from))
             .map_err(sqlite_corrupt)?;
         if let Some((sealed, lists)) = current.take_if(|(current, _)| current != term) {
-            seal(&sealed, lists)?;
+            seal(sealed, lists)?;
         }
         let lists = &mut current
             .get_or_insert_with(|| (term.to_owned(), Vec::new()))
@@ -4791,11 +4790,12 @@ fn derive_term_postings(
         append_staged_run(encoder, staged, true)?;
     }
     if let Some((sealed, lists)) = current {
-        seal(&sealed, lists)?;
+        seal(sealed, lists)?;
     }
+    drop(seal);
     drop(rows);
     drop(select);
-    drop(insert);
+    insert.finish()?;
     checkpoint(control)?;
     transaction
         .execute_batch(
@@ -4818,9 +4818,21 @@ fn derive_exact_postings(
             "SELECT term_id, field, documents FROM exact_posting_runs ORDER BY term_id, field, page_ordinal",
         )
         .map_err(sqlite_error)?;
-    let mut insert = transaction
-        .prepare("INSERT INTO exact_postings(term_id, field, documents) VALUES (?1, ?2, ?3)")
-        .map_err(sqlite_error)?;
+    let mut insert = MultiRowInsertV1::new(
+        transaction,
+        "exact_postings(term_id, field, documents)",
+        3,
+        sqlite_error,
+    )?;
+    let mut seal = |(term_id, field): (i64, i64),
+                    encoder: PostingListEncoderV1|
+     -> Result<(), CodeLexicalArtifactErrorV1> {
+        insert.push([
+            sql_integer(term_id),
+            sql_integer(field),
+            ToSqlOutput::Owned(Value::Blob(encoder.finish()?)),
+        ])
+    };
     let mut rows = select.query([]).map_err(sqlite_error)?;
     let mut list: Option<((i64, i64), PostingListEncoderV1)> = None;
     let mut visited = 0usize;
@@ -4837,24 +4849,21 @@ fn derive_exact_postings(
             .get_ref(2)
             .and_then(|value| value.as_blob().map_err(tracedecay_sql::Error::from))
             .map_err(sqlite_corrupt)?;
-        if let Some(((term_id, field), encoder)) = list.take_if(|(list_key, _)| *list_key != key) {
-            insert
-                .execute(params![term_id, field, encoder.finish()?])
-                .map_err(sqlite_error)?;
+        if let Some((sealed, encoder)) = list.take_if(|(list_key, _)| *list_key != key) {
+            seal(sealed, encoder)?;
         }
         let encoder = &mut list
             .get_or_insert_with(|| (key, PostingListEncoderV1::new(false)))
             .1;
         append_staged_run(encoder, staged, false)?;
     }
-    if let Some(((term_id, field), encoder)) = list {
-        insert
-            .execute(params![term_id, field, encoder.finish()?])
-            .map_err(sqlite_error)?;
+    if let Some((sealed, encoder)) = list {
+        seal(sealed, encoder)?;
     }
+    drop(seal);
     drop(rows);
     drop(select);
-    drop(insert);
+    insert.finish()?;
     checkpoint(control)?;
     transaction
         .execute_batch(
@@ -5176,11 +5185,12 @@ fn derive_ngram_postings(
     authority: &ServingIndexStepAuthorityV1<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let mut insert = transaction
-        .prepare(
-            "INSERT INTO ngram_postings(kind, ngram, document_frequency, documents) VALUES (?1, ?2, ?3, ?4)",
-        )
-        .map_err(sqlite_error)?;
+    let mut insert = MultiRowInsertV1::new(
+        transaction,
+        "ngram_postings(kind, ngram, document_frequency, documents)",
+        4,
+        sqlite_error,
+    )?;
     let partitions = tracedecay_code_index::parallelism::install(rayon::current_num_threads)
         .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
     let mut lower: Option<(i64, i64)> = None;
@@ -5227,16 +5237,19 @@ fn derive_ngram_postings(
             if ordinal.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
                 checkpoint(control)?;
             }
-            insert
-                .execute(params![key.0, key.1, document_frequency, documents])
-                .map_err(sqlite_error)?;
+            insert.push([
+                sql_integer(key.0),
+                sql_integer(key.1),
+                sql_integer(document_frequency),
+                ToSqlOutput::Owned(Value::Blob(documents)),
+            ])?;
         }
         match cutoff {
             Some(cutoff) => lower = Some(cutoff),
             None => break,
         }
     }
-    drop(insert);
+    insert.finish()?;
     transaction
         .execute_batch(
             "CREATE TRIGGER frozen_ngram_postings_insert BEFORE INSERT ON ngram_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical ngram postings'); END;",

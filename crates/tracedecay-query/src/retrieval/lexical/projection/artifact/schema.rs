@@ -2,6 +2,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_sql::{Transaction, params};
 
 use super::super::LexicalFieldV1;
+use super::builder::{MultiRowInsertV1, sql_blob, sql_integer};
 use super::prepared::PreparedCodeLexicalArtifactPageV1;
 use super::{CodeLexicalArtifactErrorV1, checkpoint};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
@@ -179,22 +180,25 @@ pub(super) fn stage_row_dictionary(
     pages: &[PreparedCodeLexicalArtifactPageV1],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let mut insert = transaction
-        .prepare_cached(
-            "INSERT INTO row_dictionary_pages(page_ordinal, entry_id, entry) VALUES (?1, ?2, ?3)",
-        )
-        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+    let mut insert = MultiRowInsertV1::new(
+        transaction,
+        "row_dictionary_pages(page_ordinal, entry_id, entry)",
+        3,
+        |error| CodeLexicalArtifactErrorV1::Io(error.to_string()),
+    )?;
     for page in pages {
         let page_ordinal = i64::try_from(page.page_ordinal)
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
         for (entry_id, entry) in &page.row_dictionary {
             checkpoint(control)?;
-            insert
-                .execute(params![page_ordinal, entry_id, entry.as_slice()])
-                .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+            insert.push([
+                sql_integer(page_ordinal),
+                sql_integer(*entry_id),
+                sql_blob(entry),
+            ])?;
         }
     }
-    Ok(())
+    insert.finish()
 }
 
 /// Derive the sealed `row_dictionary` from the staged pages: refuse any id
