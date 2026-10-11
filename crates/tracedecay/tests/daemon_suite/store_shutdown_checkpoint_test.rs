@@ -171,12 +171,6 @@ async fn stop_during_project_open_truncates_project_store_wals() {
     settle_interrupted_init(init, &socket);
 
     let (graph_db, sessions_db) = project_stores(environment.home(), &project);
-    eprintln!(
-        "DIAG graph_wal={} sessions_wal={} LOG\n{}",
-        wal_bytes(&graph_db),
-        wal_bytes(&sessions_db),
-        fs::read_to_string(&log_path).unwrap_or_default()
-    );
     for store in [&graph_db, &sessions_db] {
         assert!(store.is_file(), "{} was mounted", store.display());
         assert_eq!(
