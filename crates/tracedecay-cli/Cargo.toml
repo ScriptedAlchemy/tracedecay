@@ -139,8 +139,10 @@ clap = { version = "4.6", features = ["derive"] }
 flate2 = "1"
 futures-util = "0.3.33"
 hex = "0.4"
+# The SQLite C library the foreign host readers link; startup routes its
+# allocator.
+libsqlite3-sys = { version = "0.38.2", default-features = false }
 rayon = "1"
-rusqlite = { version = "0.40.1", default-features = false }
 self-replace = "1"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
@@ -180,6 +182,7 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-sdk = { path = "../tracedecay-sdk" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory" }
 tracedecay-sessions = { path = "../tracedecay-sessions" }
+tracedecay-sql = { path = "../tracedecay-sql" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracing = "0.1"
@@ -237,6 +240,9 @@ tracedecay-project = { path = "../tracedecay-project", features = ["test-helpers
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction" }
+# `tests/c_library_allocator.rs` drives the SQLite C library the foreign host
+# readers link.
+rusqlite = { version = "0.40.1", default-features = false }
 tree-sitter-rust = "0.24"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

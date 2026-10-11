@@ -758,7 +758,7 @@ fn observation_write_requires_exact_source_contiguity() {
 }
 
 fn user_table_counts(database_path: &Path) -> BTreeMap<String, i64> {
-    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(database_path).unwrap();
     let mut statement = conn
         .prepare(
             "SELECT name
@@ -860,7 +860,7 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
         ObservationProjectionStatus::Queued
     );
 
-    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     let mut columns = raw_conn.prepare("PRAGMA table_info(observations)").unwrap();
     let column_names = columns
         .query_map((), |row| row.get::<_, String>(1))
@@ -876,7 +876,7 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
         raw_conn
             .execute(
                 "UPDATE observations SET observation_json = '{}' WHERE observation_id = ?1",
-                rusqlite::params![candidate.observation_id().as_str()],
+                tracedecay_sql::params![candidate.observation_id().as_str()],
             )
             .is_err(),
         "immutable observations must reject updates"
@@ -885,7 +885,7 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
         raw_conn
             .execute(
                 "DELETE FROM observations WHERE observation_id = ?1",
-                rusqlite::params![candidate.observation_id().as_str()],
+                tracedecay_sql::params![candidate.observation_id().as_str()],
             )
             .is_err(),
         "immutable observations must reject deletes"
@@ -895,7 +895,7 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
             .execute(
                 "UPDATE retrieval_anchors SET projection_generation = 'projection.mutated' \
                  WHERE anchor_id = ?1",
-                rusqlite::params![receipt.retrieval_anchor_id().as_str()],
+                tracedecay_sql::params![receipt.retrieval_anchor_id().as_str()],
             )
             .is_err(),
         "stable retrieval anchors must reject updates"
@@ -904,7 +904,7 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
         raw_conn
             .execute(
                 "DELETE FROM observation_retrieval_anchors WHERE observation_id = ?1",
-                rusqlite::params![candidate.observation_id().as_str()],
+                tracedecay_sql::params![candidate.observation_id().as_str()],
             )
             .is_err(),
         "observation retrieval anchor bindings must reject deletes"
@@ -944,7 +944,7 @@ async fn drifted_observation_shape_refuses_admission_with_reset_required() {
         .to_path_buf();
     drop(bootstrap);
 
-    let raw_conn = rusqlite::Connection::open(&db_path).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(&db_path).unwrap();
     raw_conn.pragma_update(None, "foreign_keys", false).unwrap();
     raw_conn
         .execute_batch(
@@ -981,7 +981,7 @@ async fn drifted_observation_shape_refuses_admission_with_reset_required() {
         "the refusal must name the drifted table: {reason}"
     );
 
-    let verify_conn = rusqlite::Connection::open(&db_path).unwrap();
+    let verify_conn = tracedecay_sql::Connection::open(&db_path).unwrap();
     let legacy_columns_intact = verify_conn
         .query_row(
             "SELECT EXISTS(
@@ -1147,7 +1147,7 @@ async fn relocated_native_duplicate_advances_coverage_without_reinserting_observ
     assert_eq!(replay.len(), 1);
     assert_eq!(replay[0].observation(), &original);
 
-    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     let mut statement = conn
         .prepare("SELECT coverage_json, reason, receipt_id FROM source_cursor_advances")
         .unwrap();
@@ -1247,7 +1247,7 @@ async fn canonical_payload_revision_replays_advance_typed_coverage() {
         // Retained observations can outlive a rebuilt source frontier. The
         // replay must restore that missing coverage without rewriting the
         // immutable pre-revision observation row.
-        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
         connection
             .execute("DELETE FROM source_cursors", ())
             .unwrap();
@@ -1283,7 +1283,7 @@ async fn canonical_payload_revision_replays_advance_typed_coverage() {
                 42,
             ))
         );
-        let connection = rusqlite::Connection::open(database_path).unwrap();
+        let connection = tracedecay_sql::Connection::open(database_path).unwrap();
         let advance = connection
             .query_row(
                 "SELECT reason, receipt_id FROM source_cursor_advances",
@@ -1679,7 +1679,7 @@ async fn cursor_only_progress_persists_non_payload_receipt_and_retries_idempoten
         ])
     );
 
-    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     let receipt = conn
         .query_row(
             "SELECT coverage_json, reason FROM source_cursor_advances",
@@ -1741,7 +1741,7 @@ async fn cursor_already_owned_keeps_the_first_reason_for_a_later_owner() {
         store.get_source_cursor(&source(), &scope()).await.unwrap(),
         Some(cursor(10))
     );
-    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     let reason: String = conn
         .query_row("SELECT reason FROM source_cursor_advances", (), |row| {
             row.get(0)
@@ -1816,7 +1816,7 @@ async fn contiguous_observation_commit_is_atomic() {
     let candidate = observation(10, 30, "receipt.contiguous", "retained payload");
     let write = write(candidate.clone(), Some(cursor(10)));
 
-    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     raw_conn
         .execute_batch(
             "CREATE TRIGGER fail_contiguous_enqueue
@@ -1927,7 +1927,7 @@ async fn sanitizer_cursor_progress_persists_typed_nonpayload_receipt_atomically(
         );
     }
 
-    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     let row = conn
         .query_row(
             "SELECT advance.reason, advance.receipt_id,
@@ -2224,7 +2224,7 @@ async fn every_observation_statement_failure_rolls_back_the_authoritative_transa
         );
         let counts_before = user_table_counts(&database_path);
 
-        let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+        let raw_conn = tracedecay_sql::Connection::open(&database_path).unwrap();
         raw_conn
             .execute_batch(&format!(
                 "CREATE TRIGGER fail_observation_{stage}

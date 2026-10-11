@@ -10,7 +10,7 @@ pub(crate) mod mimalloc_v3 {
     use std::num::NonZeroUsize;
     use std::sync::{Mutex, PoisonError};
 
-    use rusqlite::ffi::{SQLITE_CONFIG_MALLOC, SQLITE_OK, sqlite3_config, sqlite3_mem_methods};
+    use libsqlite3_sys::{SQLITE_CONFIG_MALLOC, SQLITE_OK, sqlite3_config, sqlite3_mem_methods};
     use tracedecay_code_index::parallelism::run_on_every_installed_worker;
     use tracedecay_domain::process_heap::{
         OwnerHeapCallsV1, ProcessAllocatorReleaseV1, install_process_allocator_release_v1,

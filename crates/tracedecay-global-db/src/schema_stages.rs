@@ -1563,7 +1563,7 @@ mod tests {
                 .await
                 .unwrap();
             drop((lease, owner));
-            rusqlite::Connection::open(&path)
+            tracedecay_sql::Connection::open(&path)
                 .unwrap()
                 .execute_batch(&age_session_features)
                 .unwrap();
@@ -1587,7 +1587,7 @@ mod tests {
                 .map(|project| project.project_id)
                 .collect();
             drop((lease, owner));
-            let markers: (i64, i64, String) = rusqlite::Connection::open(&path)
+            let markers: (i64, i64, String) = tracedecay_sql::Connection::open(&path)
                 .unwrap()
                 .query_row(
                     "SELECT
@@ -1632,7 +1632,7 @@ mod tests {
         let database_path = directory.path().join("sessions.db");
         install_registered_schema(&database_path).await;
         {
-            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
             connection
                 .execute_batch(
                     "DROP INDEX idx_sessions_project_provider_session;
@@ -1695,7 +1695,7 @@ mod tests {
         let database_path = directory.path().join("sessions.db");
         install_registered_schema(&database_path).await;
         {
-            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
             connection
                 .execute_batch("DROP TABLE remote_deletion_tombstones")
                 .expect("remove required final V2 catalog");
@@ -1731,7 +1731,7 @@ mod tests {
         let database_path = directory.path().join("sessions.db");
         install_registered_schema(&database_path).await;
         {
-            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
             connection
                 .execute_batch(
                     "ALTER TABLE remote_deletion_tombstones
@@ -1787,7 +1787,7 @@ mod tests {
             let directory = TempDir::new().unwrap();
             let database_path = directory.path().join("sessions.db");
             install_registered_schema(&database_path).await;
-            rusqlite::Connection::open(&database_path)
+            tracedecay_sql::Connection::open(&database_path)
                 .unwrap()
                 .execute_batch(drift)
                 .unwrap();
@@ -1802,7 +1802,7 @@ mod tests {
                 )),
                 "{drift}"
             );
-            let columns: String = rusqlite::Connection::open(&database_path)
+            let columns: String = tracedecay_sql::Connection::open(&database_path)
                 .unwrap()
                 .query_row(
                     "SELECT group_concat(name, ',') FROM pragma_table_xinfo('code_projects')",
@@ -1823,7 +1823,7 @@ mod tests {
         let database_path = directory.path().join("sessions.db");
         install_registered_schema(&database_path).await;
         {
-            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
             let dependents = connection
                 .prepare(
                     "SELECT sql FROM sqlite_schema
@@ -1885,7 +1885,7 @@ mod tests {
                  columns (operation: validate global database authority schema)"
             ))
         );
-        let row: (String, String) = rusqlite::Connection::open(&database_path)
+        let row: (String, String) = tracedecay_sql::Connection::open(&database_path)
             .unwrap()
             .query_row(
                 "SELECT (SELECT group_concat(name, ',') FROM pragma_table_xinfo('graph_scopes')),
@@ -1912,7 +1912,7 @@ mod tests {
         let database_path = directory.path().join("sessions.db");
         install_registered_schema(&database_path).await;
         {
-            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys = OFF;
@@ -1988,7 +1988,7 @@ mod tests {
         let database_path = directory.path().join("sessions.db");
         install_registered_schema(&database_path).await;
         {
-            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys = OFF;
@@ -2045,7 +2045,7 @@ mod tests {
         let database_path = directory.path().join("sessions.db");
         install_registered_schema(&database_path).await;
         {
-            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
             connection
                 .execute_batch(
                     "DROP TRIGGER IF EXISTS projection_queue_identity_insert_v1;

@@ -195,9 +195,9 @@ fn verified_graph_db_schema(
             ),
         });
     }
-    let connection = rusqlite::Connection::open_with_flags(
+    let connection = tracedecay_sql::Connection::open_with_flags(
         graph_db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(
         |error| tracedecay_domain::errors::TraceDecayError::Database {
@@ -213,18 +213,17 @@ fn verified_graph_db_schema(
                 message: error.to_string(),
             },
         )?;
-    let exact_final_shape =
-        if schema_version != i64::from(tracedecay_runtime_core::db::migrations::SCHEMA_VERSION) {
-            false
-        } else {
-            match tracedecay_runtime_core::db::migrations::verify_admissible_final_shape_rusqlite(
-                &connection,
-            ) {
-                Ok(()) => true,
-                Err(tracedecay_domain::errors::TraceDecayError::ResetRequired { .. }) => false,
-                Err(error) => return Err(error),
-            }
-        };
+    let exact_final_shape = if schema_version
+        != i64::from(tracedecay_runtime_core::db::migrations::SCHEMA_VERSION)
+    {
+        false
+    } else {
+        match tracedecay_runtime_core::db::migrations::verify_admissible_final_shape(&connection) {
+            Ok(()) => true,
+            Err(tracedecay_domain::errors::TraceDecayError::ResetRequired { .. }) => false,
+            Err(error) => return Err(error),
+        }
+    };
     Ok((schema_version, exact_final_shape))
 }
 
@@ -592,7 +591,7 @@ mod reset_project_store_tests {
 
     fn write_graph_db_with_user_version(db_path: &Path, version: u32) {
         std::fs::create_dir_all(db_path.parent().expect("db parent")).expect("db dir");
-        let connection = rusqlite::Connection::open(db_path).expect("create store");
+        let connection = tracedecay_sql::Connection::open(db_path).expect("create store");
         connection
             .execute_batch(&format!(
                 "PRAGMA user_version = {version}; CREATE TABLE anchor (id INTEGER);"
@@ -696,7 +695,7 @@ mod reset_project_store_tests {
         ] = <[_; 2]>::try_from(stores).unwrap();
         let incompatible_project_id = incompatible_project_id.as_str();
 
-        let connection = rusqlite::Connection::open(&incompatible_db).unwrap();
+        let connection = tracedecay_sql::Connection::open(&incompatible_db).unwrap();
         connection
             .execute_batch("DROP TABLE diagnostic_generation_publications")
             .unwrap();

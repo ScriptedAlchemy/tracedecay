@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use tracedecay_domain::ObservationSourceGenerationV1;
 
 use super::opencode::scan_error;
+use super::sqlite_reader::{VerifiedReader, VerifiedReaderError, open_verified_read_snapshot};
 use crate::runtime::host_scan::HostScanBudget;
 use crate::runtime::source::{HostCoverageReason, TranscriptIngestError, TranscriptIngestResult};
 
@@ -10,7 +11,7 @@ const PROVIDER: &str = "opencode";
 /// A verified snapshot establishes the physical source identity before admission.
 /// Content changes are identified by each record's existing payload digest.
 pub(super) struct OpenCodeDatabase {
-    pub(super) reader: tracedecay_rusqlite_runtime::VerifiedReader,
+    pub(super) reader: VerifiedReader,
     pub(super) generation: ObservationSourceGenerationV1,
     pub(super) source_file_identity: u64,
 }
@@ -81,13 +82,11 @@ fn inspect_database(
     if !budget.checkpoint() {
         return Ok((OpenedOpenCodeDatabase::Stopped, budget));
     }
-    let reader = match tracedecay_rusqlite_runtime::open_verified_read_snapshot(path) {
+    let reader = match open_verified_read_snapshot(path) {
         Ok(reader) => reader,
         Err(error) => {
             let reason = match error {
-                tracedecay_rusqlite_runtime::VerifiedReaderError::Identity(_) => {
-                    HostCoverageReason::SourceIdentityUnavailable
-                }
+                VerifiedReaderError::Identity(_) => HostCoverageReason::SourceIdentityUnavailable,
                 _ => HostCoverageReason::DatabaseUnreadable,
             };
             return Ok((OpenedOpenCodeDatabase::Refused(reason), budget));

@@ -4,10 +4,7 @@ use tempfile::NamedTempFile;
 use tracedecay_sql::{Connection, ConnectionControl, ErrorExt, ErrorKind};
 use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
-use super::{
-    ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, VerifiedReaderError, open,
-    open_immutable_reader, open_verified_reader, open_writer,
-};
+use super::{ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, open, open_writer};
 
 fn database() -> NamedTempFile {
     let file = NamedTempFile::new().expect("temporary database");
@@ -157,37 +154,6 @@ fn reader_authorizer_allows_integrity_diagnostics_and_denies_mutating_pragmas() 
             "{pragma} must remain denied"
         );
     }
-}
-
-#[test]
-fn immutable_reader_applies_full_reader_policy_without_sidecars() {
-    let file = database();
-    let wal = sidecar_path(file.path(), "-wal");
-    let shm = sidecar_path(file.path(), "-shm");
-    let journal = sidecar_path(file.path(), "-journal");
-    let before = std::fs::read(file.path()).unwrap();
-
-    let connection = open_immutable_reader(file.path()).expect("immutable reader policy");
-    assert_eq!(pragma_i64(&connection, "query_only"), 1);
-    assert_eq!(pragma_i64(&connection, "foreign_keys"), 1);
-    assert_eq!(pragma_i64(&connection, "trusted_schema"), 0);
-    assert_eq!(pragma_i64(&connection, "busy_timeout"), 0);
-    assert!(
-        connection
-            .execute("INSERT INTO items VALUES (2)", [])
-            .is_err()
-    );
-    assert!(
-        connection
-            .execute_batch("ATTACH DATABASE ':memory:' AS other")
-            .is_err()
-    );
-    drop(connection);
-
-    assert_eq!(std::fs::read(file.path()).unwrap(), before);
-    assert!(!wal.exists());
-    assert!(!shm.exists());
-    assert!(!journal.exists());
 }
 
 /// Fails if any connection mode lets `ATTACH`/`DETACH` past its capability.
@@ -435,79 +401,6 @@ fn writer_identity_fence_rejects_a_replacement_hidden_by_path_restore() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn verified_immutable_reader_never_binds_transient_b_to_restored_a_identity() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("identity.db");
-    let replacement = directory.path().join("identity.replacement.db");
-    let retired = directory.path().join("identity.retired.db");
-    for (candidate, marker) in [(&path, "a"), (&replacement, "b")] {
-        let connection = Connection::open(candidate).unwrap();
-        connection
-            .execute_batch(&format!(
-                "CREATE TABLE identity(composer_id TEXT, bubble_id TEXT, marker TEXT);\
-                 INSERT INTO identity VALUES ('same-composer', 'same-bubble', '{marker}');"
-            ))
-            .unwrap();
-    }
-    let expected_a = OpenedDatabaseFile::pin(&path).unwrap().identity();
-
-    let pinned = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let swapped = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let opened = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let restored = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let replacer = {
-        let path = path.clone();
-        let replacement = replacement.clone();
-        let retired = retired.clone();
-        let pinned = std::sync::Arc::clone(&pinned);
-        let swapped = std::sync::Arc::clone(&swapped);
-        let opened = std::sync::Arc::clone(&opened);
-        let restored = std::sync::Arc::clone(&restored);
-        std::thread::spawn(move || {
-            pinned.wait();
-            std::fs::rename(&path, &retired).unwrap();
-            std::fs::rename(&replacement, &path).unwrap();
-            swapped.wait();
-            opened.wait();
-            std::fs::rename(&path, &replacement).unwrap();
-            std::fs::rename(&retired, &path).unwrap();
-            restored.wait();
-        })
-    };
-
-    let result = open_verified_reader(
-        &path,
-        open_immutable_reader,
-        || {
-            pinned.wait();
-            swapped.wait();
-        },
-        || {
-            opened.wait();
-            restored.wait();
-        },
-    );
-    replacer.join().unwrap();
-
-    match result {
-        Ok(reader) => {
-            assert_eq!(reader.file_identity(), expected_a);
-            assert_eq!(
-                reader
-                    .connection()
-                    .query_row("SELECT marker FROM identity", [], |row| row
-                        .get::<_, String>(0))
-                    .unwrap(),
-                "a"
-            );
-        }
-        Err(VerifiedReaderError::Identity(OpenedDatabaseFileError::Replaced)) => {}
-        Err(error) => panic!("unexpected verified immutable open failure: {error}"),
-    }
-}
-
 #[cfg(windows)]
 #[test]
 fn windows_pinned_file_blocks_replacement_until_authority_closes() {
@@ -726,43 +619,4 @@ fn verbatim_disk_path_opens_the_same_wal_database() {
     );
     drop(reader);
     drop(writer);
-}
-
-#[test]
-fn verified_live_snapshot_retains_committed_wal_view_and_denies_writes() {
-    let file = database();
-    let writer = Connection::open(file.path()).unwrap();
-    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
-    let reader = super::open_verified_read_snapshot(file.path()).unwrap();
-    writer.execute("UPDATE items SET value = 2", []).unwrap();
-    assert_eq!(
-        reader
-            .connection()
-            .query_row("SELECT value FROM items", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    assert!(
-        reader
-            .connection()
-            .execute("UPDATE items SET value = 3", [])
-            .is_err()
-    );
-    drop(reader);
-    let reader = super::open_verified_read_snapshot(file.path()).unwrap();
-    assert_eq!(
-        reader
-            .connection()
-            .query_row("SELECT value FROM items", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        2
-    );
-    drop(reader);
-    let busy: i64 = writer
-        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(
-        busy, 0,
-        "dropping the reader must release its checkpoint lock"
-    );
 }

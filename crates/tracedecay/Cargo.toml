@@ -277,7 +277,6 @@ tracedecay-lcm = { path = "../tracedecay-lcm" }
 tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-source-edit = { path = "../tracedecay-source-edit" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
-rusqlite = { version = "0.40.1", default-features = false }
 tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracedecay-application = { path = "../tracedecay-application" }
@@ -307,6 +306,9 @@ tracedecay-search-eval = { path = "../tracedecay-search-eval", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
+# Writes foreign host databases (Hermes, Cursor, OpenCode) for ingest fixtures.
+rusqlite = { version = "0.40.1", default-features = false }
+tracedecay-sql = { path = "../tracedecay-sql" }
 tree-sitter = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

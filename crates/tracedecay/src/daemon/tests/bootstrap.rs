@@ -297,7 +297,8 @@ pub(super) fn enroll_project_on_disk_only(
     .expect("layout");
     std::fs::create_dir_all(&layout.data_root).expect("profile store root");
     tracedecay_runtime_core::storage::write_store_manifest(&layout).expect("store manifest");
-    let sessions = rusqlite::Connection::open(&layout.sessions_db_path).expect("sessions database");
+    let sessions =
+        tracedecay_sql::Connection::open(&layout.sessions_db_path).expect("sessions database");
     sessions
         .execute_batch("PRAGMA user_version = 1;")
         .expect("initialize sessions database");
@@ -499,7 +500,8 @@ fn enroll_nongit_project_on_disk(
     .expect("nongit layout");
     std::fs::create_dir_all(&layout.data_root).expect("profile store root");
     tracedecay_runtime_core::storage::write_store_manifest(&layout).expect("store manifest");
-    let sessions = rusqlite::Connection::open(&layout.sessions_db_path).expect("sessions database");
+    let sessions =
+        tracedecay_sql::Connection::open(&layout.sessions_db_path).expect("sessions database");
     sessions
         .execute_batch("PRAGMA user_version = 1;")
         .expect("initialize sessions database");

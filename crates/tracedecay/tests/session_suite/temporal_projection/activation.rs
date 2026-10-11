@@ -276,7 +276,7 @@ async fn activation_is_pinned_to_the_generation_the_refresh_extends() {
     .await
     .unwrap();
 
-    let conn = rusqlite::Connection::open(&path).unwrap();
+    let conn = tracedecay_sql::Connection::open(&path).unwrap();
     conn.execute_batch(&format!(
         "UPDATE session_temporal_generations
          SET state = 'superseded', completed_at = activated_at
@@ -399,13 +399,13 @@ async fn activation_rejects_incomplete_frontier_and_receipt_digest_mismatch() {
 
     let tampered_profile = TempDir::new().unwrap();
     let (runtime, path, candidate) = frontier_digest_fixture(&tampered_profile, true).await;
-    rusqlite::Connection::open(&path)
+    tracedecay_sql::Connection::open(&path)
         .unwrap()
         .execute(
             "UPDATE session_occurrences
              SET index_text = 'tampered'
              WHERE session_id = ?1 AND generation = ?2",
-            rusqlite::params![
+            tracedecay_sql::params![
                 candidate.session_id().as_str(),
                 i64::try_from(candidate.candidate_generation().value()).unwrap()
             ],

@@ -249,7 +249,7 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
         .upsert_project_alias(Path::new("registered-alias"), "proj_broken_registry")
         .await
         .unwrap();
-    rusqlite::Connection::open(&registry_path)
+    tracedecay_sql::Connection::open(&registry_path)
         .unwrap()
         .execute_batch("DROP TABLE project_aliases")
         .unwrap();
@@ -310,7 +310,7 @@ async fn project_search_surfaces_registry_read_failure_as_tool_error() {
         )
         .await
         .unwrap();
-    rusqlite::Connection::open(&registry_path)
+    tracedecay_sql::Connection::open(&registry_path)
         .unwrap()
         .execute_batch("DROP TABLE project_aliases")
         .unwrap();
@@ -547,11 +547,11 @@ struct AdmittedStorePages {
 
 #[cfg(feature = "test-transport")]
 fn admitted_store_pages(path: &Path) -> AdmittedStorePages {
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap_or_else(|error| {
-                panic!("open admitted graph store {}: {error}", path.display())
-            });
+    let connection = tracedecay_sql::Connection::open_with_flags(
+        path,
+        tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap_or_else(|error| panic!("open admitted graph store {}: {error}", path.display()));
     let page_size: i64 = connection
         .pragma_query_value(None, "page_size", |row| row.get(0))
         .unwrap_or_else(|error| panic!("read page_size from {}: {error}", path.display()));

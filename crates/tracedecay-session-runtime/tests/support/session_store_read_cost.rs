@@ -644,9 +644,9 @@ pub async fn project_history_pass(
 /// Levels of every B-tree in the fixture's project session store: the pages
 /// one point lookup in that tree reads on a cold reader.
 pub fn session_store_tree_depths(fixture: &DrainFixture) -> BTreeMap<String, u32> {
-    let connection = rusqlite::Connection::open_with_flags(
+    let connection = tracedecay_sql::Connection::open_with_flags(
         session_store_path(fixture),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
     let mut statement = connection

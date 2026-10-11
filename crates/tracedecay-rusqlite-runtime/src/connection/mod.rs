@@ -47,13 +47,13 @@ const RETAINED_WAL_BYTES: i64 = WAL_SOFT_LIMIT_BYTES as i64;
 /// that same physical file. Attachments retain the identity, never a later
 /// pathname stat.
 #[derive(Debug)]
-pub(crate) struct OpenedDatabaseFile {
+pub struct OpenedDatabaseFile {
     file: File,
     identity: u64,
 }
 
 impl OpenedDatabaseFile {
-    pub(crate) fn pin(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
+    pub fn pin(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
         let file = open_pinned_database(path).map_err(|_| OpenedDatabaseFileError::Open)?;
         Self::adopt(file)
     }
@@ -75,7 +75,7 @@ impl OpenedDatabaseFile {
         Ok(Self { file, identity })
     }
 
-    pub(crate) const fn identity(&self) -> u64 {
+    pub const fn identity(&self) -> u64 {
         self.identity
     }
 
@@ -146,7 +146,7 @@ impl OpenedDatabaseFile {
     /// `SQLITE_FCNTL_HAS_MOVED`, rechecked afterwards) and re-pins the file
     /// before it reports startup, the same fence that already makes the
     /// writer's canonical-path open safe on these hosts.
-    pub(crate) fn reader_open_path(
+    pub fn reader_open_path(
         &self,
         canonical_path: &Path,
     ) -> Result<PathBuf, OpenedDatabaseFileError> {
@@ -161,7 +161,7 @@ impl OpenedDatabaseFile {
         Err(OpenedDatabaseFileError::Unsupported)
     }
 
-    pub(crate) fn verify_current_path(&self, path: &Path) -> Result<(), OpenedDatabaseFileError> {
+    pub fn verify_current_path(&self, path: &Path) -> Result<(), OpenedDatabaseFileError> {
         let current = File::open(path).map_err(|_| OpenedDatabaseFileError::Open)?;
         if identity_of(&current)? != self.identity {
             return Err(OpenedDatabaseFileError::Replaced);
@@ -362,58 +362,6 @@ impl std::error::Error for ConnectionPolicyError {
     }
 }
 
-#[derive(Debug)]
-pub enum VerifiedReaderError {
-    Resolve(io::Error),
-    Identity(OpenedDatabaseFileError),
-    Policy(ConnectionPolicyError),
-}
-
-impl fmt::Display for VerifiedReaderError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Resolve(error) => {
-                write!(formatter, "could not resolve SQLite reader path: {error}")
-            }
-            Self::Identity(error) => write!(formatter, "SQLite reader identity failed: {error}"),
-            Self::Policy(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl std::error::Error for VerifiedReaderError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Resolve(error) => Some(error),
-            Self::Identity(error) => Some(error),
-            Self::Policy(error) => Some(error),
-        }
-    }
-}
-
-/// Foreign-database reader bound to the physical file actually
-/// opened by SQLite rather than a later pathname observation.
-pub struct VerifiedReader {
-    _opened_file: OpenedDatabaseFile,
-    connection: Connection,
-    canonical_path: PathBuf,
-    file_identity: u64,
-}
-
-impl VerifiedReader {
-    pub fn connection(&self) -> &Connection {
-        &self.connection
-    }
-
-    pub const fn file_identity(&self) -> u64 {
-        self.file_identity
-    }
-
-    pub fn into_parts(self) -> (Connection, PathBuf, u64) {
-        (self.connection, self.canonical_path, self.file_identity)
-    }
-}
-
 pub(crate) fn open(path: &Path, mode: ConnectionMode) -> Result<Connection, ConnectionPolicyError> {
     finish_open(open_raw(path, mode)?, mode)
 }
@@ -460,7 +408,7 @@ pub(crate) fn open_writer(
 /// ASCII list misses (superscript-digit COM¹..COM³, LPT¹..LPT³) must keep
 /// the prefix, and SQLite's `-wal`/`-shm` sidecars must fit the classic
 /// `CreateFileW` limit measured in UTF-16 code units.
-fn sqlite_host_path(path: &Path) -> PathBuf {
+pub fn sqlite_host_path(path: &Path) -> PathBuf {
     let simplified = dunce::simplified(path);
     if simplified == path {
         return path.to_path_buf();
@@ -552,111 +500,6 @@ fn finish_open(
             Ok(connection)
         }
     }
-}
-
-/// Opens a verified live database in a retained, query-only SQLite read transaction.
-/// The caller bounds its lifetime; dropping the connection releases the snapshot.
-pub fn open_verified_read_snapshot(path: &Path) -> Result<VerifiedReader, VerifiedReaderError> {
-    open_verified_reader(
-        path,
-        |path| {
-            let connection = open(path, ConnectionMode::Reader)?;
-            connection
-                .execute_batch("BEGIN DEFERRED")
-                .map_err(|source| policy("begin read snapshot", source))?;
-            connection
-                .query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(()))
-                .map_err(|source| policy("pin read snapshot", source))?;
-            Ok(connection)
-        },
-        || {},
-        || {},
-    )
-}
-
-/// Opens an immutable, query-only connection for a foreign or health database.
-///
-/// Uses `file:…?immutable=1&mode=ro` so diagnosis never creates WAL/SHM
-/// sidecars or acquires authority locks. The caller owns the source-specific
-/// policy for a non-empty WAL: reject it when a complete current snapshot is
-/// mandatory, or accept eventual main-file visibility for best-effort foreign
-/// ingestion.
-pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicyError> {
-    {
-        let _span = tracing::trace_span!("rusqlite.connection.open_immutable").entered();
-        {
-            let uri = immutable_health_uri(&sqlite_host_path(path))?;
-            let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
-            let connection =
-                Connection::open_with_flags(uri, flags).map_err(|source| policy("open", source))?;
-            apply_policy(&connection, ConnectionMode::Reader)?;
-            Ok(connection)
-        }
-    }
-}
-
-pub fn open_verified_immutable_reader(path: &Path) -> Result<VerifiedReader, VerifiedReaderError> {
-    open_verified_reader(path, open_immutable_reader, || {}, || {})
-}
-
-fn open_verified_reader(
-    path: &Path,
-    open_reader: impl FnOnce(&Path) -> Result<Connection, ConnectionPolicyError>,
-    after_pin: impl FnOnce(),
-    after_open: impl FnOnce(),
-) -> Result<VerifiedReader, VerifiedReaderError> {
-    let canonical_path = path.canonicalize().map_err(VerifiedReaderError::Resolve)?;
-    let pinned = OpenedDatabaseFile::pin(&canonical_path).map_err(VerifiedReaderError::Identity)?;
-    let open_path = pinned
-        .reader_open_path(&canonical_path)
-        .map_err(VerifiedReaderError::Identity)?;
-    after_pin();
-    let connection = open_reader(&open_path).map_err(VerifiedReaderError::Policy)?;
-    after_open();
-    pinned
-        .verify_connection(&connection, &canonical_path)
-        .map_err(VerifiedReaderError::Identity)?;
-    Ok(VerifiedReader {
-        connection,
-        canonical_path,
-        file_identity: pinned.identity(),
-        _opened_file: pinned,
-    })
-}
-
-fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {
-    #[cfg(unix)]
-    let raw = {
-        use std::os::unix::ffi::OsStrExt;
-        path.as_os_str().as_bytes()
-    };
-    #[cfg(not(unix))]
-    let raw = path
-        .to_str()
-        .ok_or_else(|| ConnectionPolicyError {
-            stage: "immutable uri",
-            source: tracedecay_sql::Error::InvalidPath(path.to_path_buf()),
-        })?
-        .as_bytes();
-
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::with_capacity(raw.len().saturating_mul(3).saturating_add(24));
-    for byte in raw {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
-                encoded.push(*byte as char)
-            }
-            _ => {
-                encoded.push('%');
-                encoded.push(HEX[(byte >> 4) as usize] as char);
-                encoded.push(HEX[(byte & 0x0f) as usize] as char);
-            }
-        }
-    }
-    Ok(format!("file:{encoded}?immutable=1&mode=ro"))
 }
 
 /// Engine policy first, so no later pragma waits on a lock; then the mode's

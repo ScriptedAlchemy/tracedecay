@@ -25,7 +25,7 @@ async fn an_older_git_correlation_schema_is_refused_without_mutation() {
             .unwrap(),
     );
     let previous = GIT_CORRELATION_SCHEMA_VERSION - 1;
-    rusqlite::Connection::open(&database_path)
+    tracedecay_sql::Connection::open(&database_path)
         .unwrap()
         .execute(
             "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'git_correlation'",

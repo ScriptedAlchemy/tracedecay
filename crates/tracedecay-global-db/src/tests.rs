@@ -746,7 +746,7 @@ async fn analytics_batch_ids_preserve_input_order_across_insert_chunks() {
 #[tokio::test]
 async fn single_analytics_append_commits_in_one_writer_dispatch() {
     let harness = RegisteredGlobalDbHarness::open("analytics-single-dispatch").await;
-    let inspection = rusqlite::Connection::open(harness.registered.db_path()).unwrap();
+    let inspection = tracedecay_sql::Connection::open(harness.registered.db_path()).unwrap();
     inspection
         .busy_timeout(std::time::Duration::from_millis(100))
         .unwrap();

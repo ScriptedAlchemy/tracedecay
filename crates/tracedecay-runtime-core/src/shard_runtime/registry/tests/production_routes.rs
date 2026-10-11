@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rusqlite::Connection;
 use tempfile::TempDir;
 use tracedecay_domain::{
     BrainId, BrainNodeId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros,
     WorktreeId,
 };
+use tracedecay_sql::Connection;
 use tracedecay_store::{
     CodeShardScopeV1, ConsistencyModeV1, OperationPriorityV1, RuntimeCancellationIdV1,
     RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeReadOperationV1,
@@ -455,7 +455,7 @@ async fn remote_node_initialization_installs_only_the_final_registered_schema() 
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
-        .collect::<rusqlite::Result<_>>()
+        .collect::<tracedecay_sql::Result<_>>()
         .unwrap();
     assert_eq!(
         tables,

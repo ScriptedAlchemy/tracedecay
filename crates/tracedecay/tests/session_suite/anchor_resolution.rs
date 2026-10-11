@@ -517,9 +517,10 @@ async fn ambiguous_resolution_reports_typed_state_from_record_and_store_conflict
     )
     .await;
     let conflict_anchor_id = first_receipt.retrieval_anchor().anchor_id().clone();
-    let raw_conn =
-        rusqlite::Connection::open(runtime.database_path(HostAdmissionScope::Profile).unwrap())
-            .unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(
+        runtime.database_path(HostAdmissionScope::Profile).unwrap(),
+    )
+    .unwrap();
     // Simulate out-of-band store corruption: a second binding for the same
     // anchor id that the authoritative writer would never commit. The foreign
     // key exemption stays local to this raw connection.
@@ -533,7 +534,7 @@ async fn ambiguous_resolution_reports_typed_state_from_record_and_store_conflict
              )
              SELECT 'observation.anchor-conflict-ghost', '{}', '{}', anchor_id, owner_json
              FROM retrieval_anchors WHERE anchor_id = ?1",
-            rusqlite::params![conflict_anchor_id.as_str()],
+            tracedecay_sql::params![conflict_anchor_id.as_str()],
         )
         .expect("conflicting anchor binding must insert");
     drop(raw_conn);

@@ -47,3 +47,4 @@ tracedecay-lcm = { path = "../tracedecay-lcm", features = ["test-helpers"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
+tracedecay-sql = { path = "../tracedecay-sql" }

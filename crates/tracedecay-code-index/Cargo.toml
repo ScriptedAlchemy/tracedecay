@@ -90,12 +90,12 @@ tree-sitter = "0.26"
 # the `test-helpers` hooks; production builds never select them.
 tracedecay-code-index = { path = ".", default-features = false, features = ["test-helpers"] }
 criterion = "0.5"
-rusqlite = { version = "0.40.1", default-features = false }
 tempfile = "3"
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false, features = ["lite", "test-helpers"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
 tracedecay-privacy = { path = "../tracedecay-privacy" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
+tracedecay-sql = { path = "../tracedecay-sql" }
 tracedecay-store = { path = "../tracedecay-store" }
 
 [[bench]]

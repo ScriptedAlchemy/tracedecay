@@ -52,7 +52,7 @@ const LEGACY_SESSIONS_COLUMNS: &[&str] = &[
 ];
 
 fn legacy_sessions_columns(database_path: &std::path::Path) -> Vec<String> {
-    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(database_path).unwrap();
     conn.prepare("PRAGMA table_info(sessions)")
         .unwrap()
         .query_map([], |row| row.get::<_, String>(1))
@@ -452,7 +452,7 @@ async fn incompatible_profile_refusal_preserves_fresh_analytics_behavior() {
     let legacy_db = legacy_root.join("global.db");
     std::fs::create_dir_all(&legacy_root).unwrap();
 
-    let conn = rusqlite::Connection::open(&legacy_db).unwrap();
+    let conn = tracedecay_sql::Connection::open(&legacy_db).unwrap();
     conn.execute_batch(
         "CREATE TABLE sessions (
             provider TEXT NOT NULL,
@@ -1290,7 +1290,7 @@ async fn pre_marker_sessions_table_is_refused_and_parent_columns_round_trip() {
     let legacy_db = tracedecay_sessions::runtime::user_sessions_db_path(&legacy_root);
     std::fs::create_dir_all(legacy_db.parent().unwrap()).unwrap();
 
-    let conn = rusqlite::Connection::open(&legacy_db).unwrap();
+    let conn = tracedecay_sql::Connection::open(&legacy_db).unwrap();
     conn.execute_batch(
         "CREATE TABLE sessions (
             provider TEXT NOT NULL,
@@ -1334,7 +1334,7 @@ async fn pre_marker_sessions_table_is_refused_and_parent_columns_round_trip() {
         LEGACY_SESSIONS_COLUMNS,
         "a refused open must not migrate the retired sessions table"
     );
-    let conn = rusqlite::Connection::open(&legacy_db).unwrap();
+    let conn = tracedecay_sql::Connection::open(&legacy_db).unwrap();
     let retained = conn
         .query_row(
             "SELECT session_id, title, metadata_json FROM sessions",

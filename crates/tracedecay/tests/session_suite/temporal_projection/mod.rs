@@ -605,14 +605,14 @@ pub(crate) async fn fail_candidate(
 }
 
 pub(crate) async fn scalar(path: &std::path::Path, sql: &str) -> i64 {
-    rusqlite::Connection::open(path)
+    tracedecay_sql::Connection::open(path)
         .unwrap()
         .query_row(sql, (), |row| row.get(0))
         .unwrap()
 }
 
 pub(crate) async fn rows(path: &std::path::Path, sql: &str) -> Vec<String> {
-    let conn = rusqlite::Connection::open(path).unwrap();
+    let conn = tracedecay_sql::Connection::open(path).unwrap();
     let mut statement = conn.prepare(sql).unwrap();
     let mapped = statement.query_map((), |row| row.get(0)).unwrap();
     mapped.collect::<Result<Vec<_>, _>>().unwrap()

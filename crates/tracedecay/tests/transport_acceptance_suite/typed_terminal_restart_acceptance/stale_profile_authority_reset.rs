@@ -32,7 +32,7 @@ pub(super) const REGISTRY_REASON: &str = "database error: table 'graph_scopes' h
 /// Every registered store carries these tables. Returns how many scopes the
 /// store records.
 pub(super) fn give_registry_the_released_graph_scope_shape(db_path: &Path) -> i64 {
-    let connection = rusqlite::Connection::open(db_path).expect("open a registered store");
+    let connection = tracedecay_sql::Connection::open(db_path).expect("open a registered store");
     let dependents: Vec<String> = connection
         .prepare(
             "SELECT sql FROM sqlite_schema WHERE tbl_name = 'graph_scopes' \
@@ -41,7 +41,7 @@ pub(super) fn give_registry_the_released_graph_scope_shape(db_path: &Path) -> i6
         .expect("list graph scope dependents")
         .query_map([], |row| row.get(0))
         .expect("read graph scope dependents")
-        .collect::<rusqlite::Result<_>>()
+        .collect::<tracedecay_sql::Result<_>>()
         .expect("graph scope dependents");
     connection
         .execute_batch(

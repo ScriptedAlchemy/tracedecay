@@ -454,7 +454,7 @@ async fn one_stored_body_serves_search_grep_and_expand_redacted() {
     db.snapshot_session_database_for_test(HostAdmissionScope::Profile, &snapshot_path)
         .await
         .unwrap();
-    let connection = rusqlite::Connection::open(&snapshot_path).unwrap();
+    let connection = tracedecay_sql::Connection::open(&snapshot_path).unwrap();
     let tables: Vec<(String, Vec<String>)> = connection
         .prepare(
             "SELECT name FROM sqlite_master

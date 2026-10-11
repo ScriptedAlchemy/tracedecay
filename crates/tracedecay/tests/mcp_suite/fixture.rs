@@ -23,13 +23,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 use tracedecay_domain::errors::Result as TdResult;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_runtime_core::path_safety::{canonical_existing_identity, canonical_root_identity};
 use tracedecay_runtime_core::storage::{PrivateStoreIo, default_profile_project_id};
+use tracedecay_sql::Connection;
 
 /// Store schema versions admitted by recorded version rather than by the
 /// graph-DB final shape. Init refuses a store recorded at any other version,

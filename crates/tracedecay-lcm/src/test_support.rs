@@ -6,20 +6,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tracedecay_runtime_core::db::engine::{BackendKind, Executor, Value, params};
 
-fn sqlite_value(value: &Value) -> rusqlite::types::Value {
+fn sqlite_value(value: &Value) -> tracedecay_sql::types::Value {
     match value {
-        Value::Null => rusqlite::types::Value::Null,
-        Value::Integer(value) => rusqlite::types::Value::Integer(*value),
-        Value::Real(value) => rusqlite::types::Value::Real(*value),
-        Value::Text(value) => rusqlite::types::Value::Text(value.clone()),
-        Value::Blob(value) => rusqlite::types::Value::Blob(value.clone()),
+        Value::Null => tracedecay_sql::types::Value::Null,
+        Value::Integer(value) => tracedecay_sql::types::Value::Integer(*value),
+        Value::Real(value) => tracedecay_sql::types::Value::Real(*value),
+        Value::Text(value) => tracedecay_sql::types::Value::Text(value.clone()),
+        Value::Blob(value) => tracedecay_sql::types::Value::Blob(value.clone()),
     }
 }
 
 /// Counts actual SQLite virtual-machine steps for the exact SQL, rather than
 /// the rows materialized by the engine test adapter.
 pub(crate) fn sqlite_vm_steps(database_path: &Path, sql: &str, values: &[Value]) -> usize {
-    let connection = rusqlite::Connection::open(database_path)
+    let connection = tracedecay_sql::Connection::open(database_path)
         .expect("open native SQLite connection for VM-step measurement");
     let steps = Arc::new(AtomicUsize::new(0));
     let counted_steps = Arc::clone(&steps);
@@ -38,7 +38,7 @@ pub(crate) fn sqlite_vm_steps(database_path: &Path, sql: &str, values: &[Value])
             .expect("prepare VM-step measurement statement");
         let native_values = values.iter().map(sqlite_value).collect::<Vec<_>>();
         let mut rows = statement
-            .query(rusqlite::params_from_iter(native_values))
+            .query(tracedecay_sql::params_from_iter(native_values))
             .expect("execute VM-step measurement statement");
         while rows
             .next()

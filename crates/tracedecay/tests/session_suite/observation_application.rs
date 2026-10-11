@@ -104,7 +104,7 @@ async fn table_counts(runtime: &HostAdmissionTestRuntimeV1) -> Vec<i64> {
         .snapshot_session_database_for_test(HostAdmissionScope::Profile, &database_path)
         .await
         .unwrap();
-    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(database_path).unwrap();
     OBSERVATION_TABLES
         .iter()
         .map(|table| {
@@ -123,7 +123,7 @@ async fn durable_text(runtime: &HostAdmissionTestRuntimeV1) -> Vec<String> {
         .snapshot_session_database_for_test(HostAdmissionScope::Profile, &database_path)
         .await
         .unwrap();
-    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(database_path).unwrap();
     let mut statement = conn
         .prepare(
             "SELECT observation_json FROM observations

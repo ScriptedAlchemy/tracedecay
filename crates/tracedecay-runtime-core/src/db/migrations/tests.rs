@@ -32,7 +32,7 @@ impl ExactSqlWriteAuthority for AllowSchemaWrites {
 async fn create_raw_db() -> (TestConnection, TempDir) {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("test.db");
-    let setup = rusqlite::Connection::open(&db_path).expect("open schema fixture");
+    let setup = tracedecay_sql::Connection::open(&db_path).expect("open schema fixture");
     setup
         .execute_batch(
             "PRAGMA journal_mode = WAL;

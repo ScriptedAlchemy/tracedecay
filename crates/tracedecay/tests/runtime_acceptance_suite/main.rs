@@ -15,6 +15,7 @@ mod canonical_git_observation_correlation;
 mod cross_host_handoff_test;
 mod daemon_runtime_acceptance;
 mod grafeo_restart_acceptance;
+mod hermes_state_fixture;
 mod host_event_fixture_test;
 mod lifecycle_production_authority_test;
 #[cfg(unix)]

@@ -350,7 +350,7 @@ async fn project_list_reports_a_broken_registry_as_a_tool_error() {
     .await
     .expect("project-scoped registry");
     let registry_path = runtime.profile_database_for_test().db_path().to_path_buf();
-    rusqlite::Connection::open(&registry_path)
+    tracedecay_sql::Connection::open(&registry_path)
         .expect("open registry")
         .execute_batch("DROP TABLE project_aliases")
         .expect("drop project aliases");
@@ -508,7 +508,7 @@ fn truncated_beta_markdown(beta: &RegisteredProject) -> String {
 }
 
 fn pin_registration_times(registry_path: &Path, active_id: &str) {
-    let connection = rusqlite::Connection::open(registry_path).expect("open registry");
+    let connection = tracedecay_sql::Connection::open(registry_path).expect("open registry");
     for (project_id, created_at, seen_at) in [
         ("proj_alpha", ALPHA_CREATED_AT, ALPHA_SEEN_AT),
         ("proj_beta", BETA_CREATED_AT, BETA_SEEN_AT),
@@ -517,7 +517,7 @@ fn pin_registration_times(registry_path: &Path, active_id: &str) {
         let updated = connection
             .execute(
                 "UPDATE code_projects SET created_at = ?1, last_seen_at = ?2 WHERE project_id = ?3",
-                rusqlite::params![created_at, seen_at, project_id],
+                tracedecay_sql::params![created_at, seen_at, project_id],
             )
             .expect("pin registration times");
         assert_eq!(updated, 1, "missing registry row {project_id}");

@@ -24,8 +24,6 @@ use crate::serve_harness::{
 #[cfg(unix)]
 use crate::serve_harness::{init_project_under, register_global_project};
 use crate::serve_harness::{init_project_with_file, profile_root};
-#[cfg(unix)]
-use rusqlite::Connection;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -46,6 +44,8 @@ use tracedecay_project::project::TraceDecayOpenOptions;
 use tracedecay_runtime_core::storage::default_profile_sharded_layout;
 #[cfg(unix)]
 use tracedecay_runtime_core::storage::{PrivateStoreIo, pin_fixture_repository_identity};
+#[cfg(unix)]
+use tracedecay_sql::Connection;
 
 fn json_rpc_tool_payload(stdout: &[u8], id: i64) -> Value {
     let stdout_text = String::from_utf8(stdout.to_vec()).unwrap();

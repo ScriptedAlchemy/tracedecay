@@ -40,7 +40,7 @@ async fn assert_workflow_schema_reset_without_mutation(malformed_schema: String)
     drop(connection);
     drop(database);
     {
-        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
         connection.execute_batch(&malformed_schema).unwrap();
         connection
             .execute_batch(

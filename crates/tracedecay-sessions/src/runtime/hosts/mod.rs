@@ -19,4 +19,5 @@ pub(in crate::runtime) mod opencode_frontier;
 pub(in crate::runtime) mod opencode_part_scan;
 pub(in crate::runtime) mod opencode_snapshot;
 pub mod pi;
+pub(in crate::runtime) mod sqlite_reader;
 pub mod vibe;

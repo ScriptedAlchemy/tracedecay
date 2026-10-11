@@ -327,7 +327,7 @@ fn conversational_payload(message_id: &str, text: &str) -> Value {
 }
 
 async fn table_count(tmp: &TempDir, table: &str) -> i64 {
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let quoted = table.replace('"', "\"\"");
     conn.query_row(&format!("SELECT COUNT(*) FROM \"{quoted}\""), (), |row| {
         row.get(0)
@@ -336,7 +336,7 @@ async fn table_count(tmp: &TempDir, table: &str) -> i64 {
 }
 
 async fn checkpoint_database(tmp: &TempDir) {
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let checkpoint = conn
         .query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |row| {
             Ok((
@@ -372,7 +372,7 @@ async fn search_session_messages(
     query: &str,
     limit: usize,
 ) -> Vec<TestSessionMessageSearchHit> {
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let fts_query = query
         .split_whitespace()
         .filter_map(|word| {
@@ -401,7 +401,7 @@ async fn search_session_messages(
         .unwrap();
     statement
         .query_map(
-            rusqlite::params![fts_query, i64::try_from(limit).unwrap()],
+            tracedecay_sql::params![fts_query, i64::try_from(limit).unwrap()],
             |row| {
                 Ok(TestSessionMessageSearchHit {
                     message: TestSessionMessage {
@@ -425,7 +425,7 @@ async fn search_session_messages(
 }
 
 async fn add_other_projector_owner(tmp: &TempDir, observation_id: &CanonicalObservationIdV1) {
-    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     raw_conn
         .execute(
             "INSERT INTO observation_projection_provenance (
@@ -435,7 +435,7 @@ async fn add_other_projector_owner(tmp: &TempDir, observation_id: &CanonicalObse
                       receipt_id, output_provider, output_message_id, output_digest, 0
                FROM observation_projection_provenance
                WHERE projector_version = ?1 AND observation_id = ?2",
-            rusqlite::params![
+            tracedecay_sql::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 observation_id.as_str(),
             ],
@@ -448,13 +448,13 @@ fn seed_v4_predecessor_with_stale_current_provenance(
     observation_id: &CanonicalObservationIdV1,
 ) {
     seed_v4_predecessor(tmp, observation_id);
-    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     raw_conn
         .execute(
             "UPDATE observation_projection_provenance
              SET output_digest = ?1
              WHERE projector_version = ?2 AND observation_id = ?3",
-            rusqlite::params![
+            tracedecay_sql::params![
                 format!("sha256:{}", "0".repeat(64)),
                 SESSION_MESSAGE_PROJECTOR_VERSION,
                 observation_id.as_str(),
@@ -464,7 +464,7 @@ fn seed_v4_predecessor_with_stale_current_provenance(
 }
 
 fn seed_v4_predecessor(tmp: &TempDir, observation_id: &CanonicalObservationIdV1) {
-    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     raw_conn
         .execute(
             "INSERT INTO observation_projection_provenance (
@@ -474,7 +474,7 @@ fn seed_v4_predecessor(tmp: &TempDir, observation_id: &CanonicalObservationIdV1)
                       receipt_id, output_provider, output_message_id, output_digest, 0
                FROM observation_projection_provenance
                WHERE projector_version = ?2 AND observation_id = ?3",
-            rusqlite::params![
+            tracedecay_sql::params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V4,
                 SESSION_MESSAGE_PROJECTOR_VERSION,
                 observation_id.as_str(),
@@ -489,13 +489,13 @@ fn seed_v5_predecessor_with_stale_split_output(
 ) {
     const STALE_MESSAGE_ID: &str = "message-v5-stale-split";
 
-    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     raw_conn
         .execute(
             "UPDATE observation_projection_provenance
              SET projector_version = ?1
              WHERE projector_version = ?2 AND observation_id = ?3",
-            rusqlite::params![
+            tracedecay_sql::params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V5,
                 SESSION_MESSAGE_PROJECTOR_VERSION,
                 observation_id.as_str(),
@@ -511,7 +511,7 @@ fn seed_v5_predecessor_with_stale_split_output(
                  SELECT ?1, last_sequence
                  FROM observation_projection_checkpoints
                  WHERE projector_version = ?2",
-                rusqlite::params![
+                tracedecay_sql::params![
                     SESSION_MESSAGE_PROJECTOR_VERSION_V5,
                     SESSION_MESSAGE_PROJECTOR_VERSION,
                 ],
@@ -542,7 +542,7 @@ fn seed_v5_predecessor_with_stale_split_output(
              WHERE provenance.projector_version = ?2
                AND provenance.observation_id = ?3
                AND provenance.output_ordinal = 0",
-            rusqlite::params![
+            tracedecay_sql::params![
                 STALE_MESSAGE_ID,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V5,
                 observation_id.as_str(),
@@ -559,7 +559,7 @@ fn seed_v5_predecessor_with_stale_split_output(
                     output_provider, ?1, ?2, 1
              FROM observation_projection_provenance
              WHERE projector_version = ?3 AND observation_id = ?4 AND output_ordinal = 0",
-            rusqlite::params![
+            tracedecay_sql::params![
                 STALE_MESSAGE_ID,
                 format!("sha256:{}", "0".repeat(64)),
                 SESSION_MESSAGE_PROJECTOR_VERSION_V5,
@@ -570,7 +570,7 @@ fn seed_v5_predecessor_with_stale_split_output(
 }
 
 fn projection_owner_count(tmp: &TempDir, projector_version: &str) -> i64 {
-    rusqlite::Connection::open(isolated_lcm_db_path(tmp))
+    tracedecay_sql::Connection::open(isolated_lcm_db_path(tmp))
         .unwrap()
         .query_row(
             "SELECT COUNT(*) FROM observation_projection_provenance
@@ -619,7 +619,7 @@ async fn projection_counts(tmp: &TempDir) -> (i64, i64, i64, i64, i64, i64) {
 async fn projection_provenance_rows(
     tmp: &TempDir,
 ) -> Vec<(String, String, String, String, String, String, String)> {
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let mut statement = conn
         .prepare(
             "SELECT projector_version, observation_id, retrieval_anchor_id, receipt_id,
@@ -654,7 +654,7 @@ async fn projected_raw_store_ids(tmp: &TempDir) -> Vec<(String, i64)> {
 }
 
 async fn projected_raw_store_ids_for_provider(tmp: &TempDir, provider: &str) -> Vec<(String, i64)> {
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let mut statement = conn
         .prepare(
             "SELECT message_id, store_id FROM lcm_raw_messages
@@ -673,7 +673,7 @@ async fn all_projected_message_texts(tmp: &TempDir) -> Vec<String> {
 }
 
 async fn projected_message_texts_where(tmp: &TempDir, predicate: &str) -> Vec<String> {
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let sql = format!(
         "SELECT COALESCE(content, placeholder_text, '') FROM lcm_raw_messages {predicate}
          ORDER BY message_id"
@@ -687,7 +687,7 @@ async fn projected_message_texts_where(tmp: &TempDir, predicate: &str) -> Vec<St
 }
 
 async fn projection_ownership_rows(tmp: &TempDir) -> Vec<i64> {
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let mut statement = conn
         .prepare(
             "SELECT message_created

@@ -34,7 +34,7 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
         );
         persist(&store, candidate.clone(), None).await;
 
-        let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+        let raw_conn = tracedecay_sql::Connection::open(&database_path).unwrap();
         raw_conn
             .execute_batch(&format!(
                 "CREATE TRIGGER fail_projection_{stage}
@@ -109,7 +109,7 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
             "{stage} failure consumed the queue item"
         );
 
-        let trigger_conn = rusqlite::Connection::open(&database_path).unwrap();
+        let trigger_conn = tracedecay_sql::Connection::open(&database_path).unwrap();
         trigger_conn
             .execute_batch(&format!(
                 "DROP TRIGGER fail_projection_{stage};
@@ -159,7 +159,7 @@ async fn restart_rearms_projection_retries_and_failed_attempts_resume_backoff() 
     );
     persist(&store, candidate.clone(), None).await;
 
-    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     raw_conn
         .execute_batch(
             "CREATE TRIGGER fail_projection_restart_backoff
@@ -182,7 +182,7 @@ async fn restart_rearms_projection_retries_and_failed_attempts_resume_backoff() 
     // not mutate the recorded retry state. Pin the recorded deadline far in
     // the future first so suite load cannot race the real backoff clock (the
     // reopened mount must clear even a distant deadline).
-    let pin_deadline = |conn: &rusqlite::Connection| {
+    let pin_deadline = |conn: &tracedecay_sql::Connection| {
         let far_future = tracedecay_contracts::clock::now_micros()
             .0
             .saturating_add(3_600_000_000);
@@ -190,7 +190,7 @@ async fn restart_rearms_projection_retries_and_failed_attempts_resume_backoff() 
             conn.execute(
                 "UPDATE projection_queue SET next_retry_at_micros = ?1
                  WHERE observation_id = ?2",
-                rusqlite::params![far_future, candidate.observation_id().as_str()],
+                tracedecay_sql::params![far_future, candidate.observation_id().as_str()],
             )
             .unwrap(),
             1
@@ -223,7 +223,7 @@ async fn restart_rearms_projection_retries_and_failed_attempts_resume_backoff() 
     let reopened_store = reopened_runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let retry_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let retry_conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     let retry = retry_conn
         .query_row(
             "SELECT attempt_count, next_retry_at_micros, last_error
@@ -398,7 +398,7 @@ async fn deterministic_contract_rejection_records_disposition_and_checkpoint() {
         1
     );
     assert_eq!(table_count(&tmp, "projection_queue").await, 0);
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     let reason = conn
         .query_row(
             "SELECT reason FROM observation_projection_dispositions
@@ -496,7 +496,7 @@ async fn deterministic_sanitization_refusal_records_disposition_and_drains_rest(
         store.projection_checkpoint().await.unwrap().last_sequence(),
         1
     );
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     let (receipt_id, reason) = conn
         .query_row(
             "SELECT receipt_id, reason FROM observation_projection_dispositions
@@ -577,7 +577,7 @@ async fn environmental_raw_authority_failure_schedules_projection_retry() {
     // through, but with an engine fault: this side of the boundary must stay
     // environmental, retained on the queue with a durable retry, never a
     // committed skip disposition.
-    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     raw_conn
         .execute_batch(
             "CREATE TRIGGER fail_projection_raw_upsert
@@ -783,7 +783,7 @@ async fn projected_message_update_invalidates_audit_and_fails_reopen() {
         .unwrap()
         .to_path_buf();
     drop(runtime);
-    let raw_conn = rusqlite::Connection::open(database_path).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(database_path).unwrap();
     raw_conn
         .execute(
             "UPDATE lcm_raw_messages SET content = 'tampered projection body'
@@ -830,7 +830,7 @@ async fn projected_message_delete_is_restored_from_the_immutable_projection() {
         "fixture did not ship the rendering this test deletes: {shipped:?}"
     );
 
-    let raw_conn = rusqlite::Connection::open(database_path).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(database_path).unwrap();
     raw_conn
         .execute(
             "DELETE FROM lcm_raw_messages

@@ -1156,7 +1156,7 @@ mod tests {
             .expect("initialize project graph");
         let db_path = initialized.store_layout().graph_db_path.clone();
         initialized.close();
-        let connection = rusqlite::Connection::open(&db_path).expect("open graph fixture");
+        let connection = tracedecay_sql::Connection::open(&db_path).expect("open graph fixture");
         connection
             .pragma_update(
                 None,

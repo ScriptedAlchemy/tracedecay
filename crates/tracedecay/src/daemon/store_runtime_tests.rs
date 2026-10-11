@@ -1566,7 +1566,7 @@ async fn daemon_reopen_resumes_from_the_trusted_authority_checkpoint() {
 async fn background_convergence_failure_remains_observable_as_degraded() {
     let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
         project_sessions_pending_convergence("project.schema-degraded").await;
-    rusqlite::Connection::open(&sessions_path)
+    tracedecay_sql::Connection::open(&sessions_path)
         .expect("open corruption fixture")
         .execute_batch(
             "DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
@@ -2259,7 +2259,7 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
     std::fs::create_dir_all(&project_store_root).expect("project store directory");
     let main_path = project_store_root.join(tracedecay_runtime_core::config::DB_FILENAME);
     let unpublished_path = project_store_root.join("unpublished.db");
-    rusqlite::Connection::open(&unpublished_path)
+    tracedecay_sql::Connection::open(&unpublished_path)
         .expect("seed unpublished branch database")
         .execute_batch("CREATE TABLE seed(value INTEGER);")
         .expect("seed unpublished branch schema");
@@ -2375,7 +2375,7 @@ async fn read_only_worktree_mount_never_recreates_a_deleted_database() {
     let database_path = profile_root.join("stores/worktree.db");
     std::fs::create_dir_all(database_path.parent().expect("database parent"))
         .expect("database directory");
-    rusqlite::Connection::open(&database_path)
+    tracedecay_sql::Connection::open(&database_path)
         .expect("seed worktree database")
         .execute_batch("CREATE TABLE seed(value INTEGER);")
         .expect("seed worktree schema");

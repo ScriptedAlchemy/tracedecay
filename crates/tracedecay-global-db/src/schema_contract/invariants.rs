@@ -1145,7 +1145,7 @@ mod tests {
     async fn foreign_key_audit_finds_violations_by_child_table() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
-        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
                 "PRAGMA foreign_keys = OFF;
@@ -1171,7 +1171,7 @@ mod tests {
     async fn foreign_key_audit_resumes_after_last_durable_table() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
-        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
                 "PRAGMA foreign_keys = OFF;

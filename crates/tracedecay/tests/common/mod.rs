@@ -1739,7 +1739,7 @@ pub async fn open_graph_db_from_template(db_path: &Path) -> Database {
             // database. `VACUUM INTO` writes a transactionally consistent
             // standalone copy of the closed fixture.
             let template_source =
-                rusqlite::Connection::open(&init_path).expect("open template graph db");
+                tracedecay_sql::Connection::open(&init_path).expect("open template graph db");
             template_source
                 .execute(
                     "VACUUM INTO ?1",

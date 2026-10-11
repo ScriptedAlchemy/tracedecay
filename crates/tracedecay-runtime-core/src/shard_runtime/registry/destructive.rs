@@ -537,8 +537,8 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let profile_path = temporary.path().join("profile.db");
         let code_path = temporary.path().join("code.db");
-        rusqlite::Connection::open(&profile_path).unwrap();
-        rusqlite::Connection::open(&code_path).unwrap();
+        tracedecay_sql::Connection::open(&profile_path).unwrap();
+        tracedecay_sql::Connection::open(&code_path).unwrap();
         let profile_path = profile_path.canonicalize().unwrap();
         let code_path = code_path.canonicalize().unwrap();
         let opened_file_identity = crate::db::sqlite_generation_identity(&code_path).unwrap();
@@ -630,8 +630,8 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let profile_path = temporary.path().join("profile.db");
         let code_path = temporary.path().join("code.db");
-        rusqlite::Connection::open(&profile_path).unwrap();
-        rusqlite::Connection::open(&code_path).unwrap();
+        tracedecay_sql::Connection::open(&profile_path).unwrap();
+        tracedecay_sql::Connection::open(&code_path).unwrap();
         let profile_path = profile_path.canonicalize().unwrap();
         let code_path = code_path.canonicalize().unwrap();
         let opened_file_identity = crate::db::sqlite_generation_identity(&code_path).unwrap();

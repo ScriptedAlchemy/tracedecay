@@ -25,7 +25,7 @@ static EXPECTED_FINAL_SHAPE: LazyLock<std::result::Result<SchemaInventory, Strin
     LazyLock::new(build_expected_final_shape);
 
 fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> {
-    let connection = rusqlite::Connection::open_in_memory()
+    let connection = tracedecay_sql::Connection::open_in_memory()
         .map_err(|error| format!("failed to open canonical in-memory schema: {error}"))?;
     connection
         .execute_batch(super::ROOT_SCHEMA)
@@ -57,11 +57,11 @@ fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> 
             .execute_batch(schema)
             .map_err(|error| format!("failed to install canonical retained schema: {error}"))?;
     }
-    read_rusqlite_inventory(&connection)
+    read_connection_inventory(&connection)
 }
 
-fn read_rusqlite_inventory(
-    connection: &rusqlite::Connection,
+fn read_connection_inventory(
+    connection: &tracedecay_sql::Connection,
 ) -> std::result::Result<SchemaInventory, String> {
     let mut statement = connection
         .prepare(
@@ -193,10 +193,10 @@ pub fn expected_final_schema_fingerprint() -> Result<String> {
     )))
 }
 
-pub(super) fn require_admissible_final_shape_rusqlite(
-    connection: &rusqlite::Connection,
+pub(super) fn require_admissible_final_shape_connection(
+    connection: &tracedecay_sql::Connection,
 ) -> Result<()> {
-    let actual = read_rusqlite_inventory(connection).map_err(database_error)?;
+    let actual = read_connection_inventory(connection).map_err(database_error)?;
     require_final_shape_inventory(&actual)
 }
 

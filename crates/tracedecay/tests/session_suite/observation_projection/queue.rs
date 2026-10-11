@@ -48,7 +48,7 @@ async fn claude_updates_with_one_native_message_id_drain_without_collisions() {
     );
     drop(runtime);
 
-    let connection = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let connection = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     let session = connection
         .query_row(
             "SELECT project_key, project_path, metadata_json
@@ -159,7 +159,7 @@ async fn composer_bubble_projects_one_row_carrying_every_part() {
     };
     drop(runtime);
 
-    let conn = rusqlite::Connection::open(database_path).unwrap();
+    let conn = tracedecay_sql::Connection::open(database_path).unwrap();
     let mut statement = conn
         .prepare(
             "SELECT output_ordinal, output_message_id
@@ -170,7 +170,7 @@ async fn composer_bubble_projects_one_row_carrying_every_part() {
         .unwrap();
     let actual = statement
         .query_map(
-            rusqlite::params![SESSION_MESSAGE_PROJECTOR_VERSION],
+            tracedecay_sql::params![SESSION_MESSAGE_PROJECTOR_VERSION],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )
         .unwrap()
@@ -180,7 +180,7 @@ async fn composer_bubble_projects_one_row_carrying_every_part() {
     let row = conn
         .query_row(
             "SELECT kind, tool_names, content FROM lcm_raw_messages WHERE message_id = ?1",
-            rusqlite::params![message_id.as_str()],
+            tracedecay_sql::params![message_id.as_str()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -288,20 +288,20 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     assert_eq!(provenance[0].5, "record-message-atomic");
     assert!(PayloadDigestV1::new(provenance[0].6.clone()).is_ok());
 
-    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     let error = raw_conn
         .execute(
             "UPDATE observation_projection_provenance SET retrieval_anchor_id = NULL
          WHERE projector_version = ?1 AND observation_id = ?2",
-            rusqlite::params![
+            tracedecay_sql::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 candidate.observation_id().as_str()
             ],
         )
         .expect_err("current projection must preserve its anchor binding");
     assert_eq!(
-        error.sqlite_error().unwrap().extended_code,
-        rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+        tracedecay_sql::ErrorExt::kind(&error),
+        tracedecay_sql::ErrorKind::Constraint
     );
     assert!(
         error
@@ -337,20 +337,20 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let raw_conn = tracedecay_sql::Connection::open(&database_path).unwrap();
     let error = raw_conn
         .execute(
             "UPDATE observation_projection_provenance SET retrieval_anchor_id = NULL
          WHERE projector_version = ?1 AND observation_id = ?2",
-            rusqlite::params![
+            tracedecay_sql::params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 candidate.observation_id().as_str()
             ],
         )
         .expect_err("reopened current projection must preserve its anchor binding");
     assert_eq!(
-        error.sqlite_error().unwrap().extended_code,
-        rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+        tracedecay_sql::ErrorExt::kind(&error),
+        tracedecay_sql::ErrorKind::Constraint
     );
     assert!(
         error
@@ -535,12 +535,12 @@ async fn stale_exact_duplicate_queue_item_is_consumed_before_later_observation()
         .await
         .unwrap();
 
-    rusqlite::Connection::open(database_path)
+    tracedecay_sql::Connection::open(database_path)
         .unwrap()
         .execute(
             "INSERT INTO projection_queue (observation_id, observation_sequence)
              VALUES (?1, 1)",
-            rusqlite::params![first.observation_id().as_str()],
+            tracedecay_sql::params![first.observation_id().as_str()],
         )
         .unwrap();
 

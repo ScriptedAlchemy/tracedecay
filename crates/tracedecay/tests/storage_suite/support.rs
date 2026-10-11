@@ -114,7 +114,7 @@ pub async fn seed_latest_graph_db(dest: &Path) {
             .expect("failed to initialize template database");
         db.close();
         let template_source =
-            rusqlite::Connection::open(&init_path).expect("failed to open template database");
+            tracedecay_sql::Connection::open(&init_path).expect("failed to open template database");
         template_source
             .execute(
                 "VACUUM INTO ?1",

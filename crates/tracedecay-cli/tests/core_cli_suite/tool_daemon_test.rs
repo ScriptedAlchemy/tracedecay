@@ -3734,7 +3734,7 @@ async fn daemon_reopens_retained_receipts_without_reset() {
     let db_path = home.path().join(".tracedecay/global.db");
     common::write_empty_global_db_schema(&db_path).await;
     {
-        let db = rusqlite::Connection::open(&db_path).unwrap();
+        let db = tracedecay_sql::Connection::open(&db_path).unwrap();
         // Older schema versions are refused with typed reset-required at
         // admission; this seeds the final shape and proves reopen retains
         // receipts without reset.
@@ -3769,9 +3769,9 @@ async fn daemon_reopens_retained_receipts_without_reset() {
     }
     for _ in 0..2 {
         let daemon = spawn_tracedecay_daemon(home.path());
-        let db = rusqlite::Connection::open_with_flags(
+        let db = tracedecay_sql::Connection::open_with_flags(
             &db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
         let retained: (String, String, i64, i64, Option<String>, i64, i64) = db

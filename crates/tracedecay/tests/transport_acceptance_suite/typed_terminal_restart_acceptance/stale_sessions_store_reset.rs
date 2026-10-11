@@ -66,7 +66,7 @@ const SERVE_TIMEOUT: Duration = Duration::from_secs(90);
 /// wrote before the unified observation identity: one observation row and no
 /// unified-identity marker.
 fn seed_pre_unified_observation_rows(db_path: &Path) {
-    let connection = rusqlite::Connection::open(db_path).expect("open the session store");
+    let connection = tracedecay_sql::Connection::open(db_path).expect("open the session store");
     let unmarked = connection
         .execute(
             "DELETE FROM global_schema_migrations \
@@ -325,7 +325,7 @@ fn session_status(home: &Path, project: &Path, storage_scope: &str) -> Value {
 
 /// Rewrites exactly one recorded shape row of a stopped session store.
 fn execute_once(db_path: &Path, sql: &str) {
-    let connection = rusqlite::Connection::open(db_path).expect("open the session store");
+    let connection = tracedecay_sql::Connection::open(db_path).expect("open the session store");
     assert_eq!(
         connection.execute(sql, []).expect("age the session store"),
         1,
@@ -746,7 +746,7 @@ fn project_session_store_with_another_workflow_schema_identity_refuses_sessions_
 /// settles a colliding record past its frontier.
 fn seed_cursor_identity_collision_refusal(db_path: &Path, project_id: &str) {
     let scope_json = json!({ "kind": "project", "project_id": project_id }).to_string();
-    rusqlite::Connection::open(db_path)
+    tracedecay_sql::Connection::open(db_path)
         .expect("open the session store")
         .execute(
             "INSERT INTO source_cursor_advances \

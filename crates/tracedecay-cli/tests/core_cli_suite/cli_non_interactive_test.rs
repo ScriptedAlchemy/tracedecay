@@ -1041,7 +1041,7 @@ fn write_empty_sqlite_fixture(path: &Path) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
-    drop(rusqlite::Connection::open(path).expect("empty SQLite fixture"));
+    drop(tracedecay_sql::Connection::open(path).expect("empty SQLite fixture"));
 }
 
 async fn register_profile_sharded_store(
@@ -3535,12 +3535,12 @@ fn storage_report_prints_registered_store_size_and_unregistered_backlog() {
     // which is not a store any profile would ever hold.
     let registered_root = profile_root.join("projects/proj_cli");
     std::fs::create_dir_all(&registered_root).unwrap();
-    let store_db = rusqlite::Connection::open(registered_root.join("tracedecay.db")).unwrap();
+    let store_db = tracedecay_sql::Connection::open(registered_root.join("tracedecay.db")).unwrap();
     store_db
         .execute_batch("CREATE TABLE fixture (id INTEGER PRIMARY KEY);")
         .unwrap();
     drop(store_db);
-    let global_db = rusqlite::Connection::open(profile_root.join("global.db")).unwrap();
+    let global_db = tracedecay_sql::Connection::open(profile_root.join("global.db")).unwrap();
     global_db
         .execute_batch(
             "CREATE TABLE code_projects (project_id TEXT PRIMARY KEY, canonical_root TEXT NOT NULL);",
@@ -3549,7 +3549,7 @@ fn storage_report_prints_registered_store_size_and_unregistered_backlog() {
     global_db
         .execute(
             "INSERT INTO code_projects (project_id, canonical_root) VALUES ('proj_cli', ?1)",
-            rusqlite::params![project.path().display().to_string()],
+            tracedecay_sql::params![project.path().display().to_string()],
         )
         .unwrap();
     drop(global_db);
@@ -3606,7 +3606,7 @@ async fn storage_report_uses_active_daemon_authority_without_hanging() {
             .expect("paged storage project should register");
         let data_root = profile_root.join("projects").join(&project_id);
         std::fs::create_dir_all(&data_root).unwrap();
-        let connection = rusqlite::Connection::open(data_root.join("tracedecay.db")).unwrap();
+        let connection = tracedecay_sql::Connection::open(data_root.join("tracedecay.db")).unwrap();
         connection
             .execute_batch("CREATE TABLE fixture (id INTEGER PRIMARY KEY);")
             .unwrap();

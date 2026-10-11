@@ -127,11 +127,11 @@ async fn native_stream_projection_replaces_retained_effects_and_rebuilds_without
         // A retained alias is a consolidation output binding, so it must carry
         // the shape the authority audit admits at every reopen:
         // `consolidated/<lineage>/<unaliased message id>`.
-        let conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+        let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
         conn.execute(
         "INSERT INTO observation_projection_aliases (projector_version, observation_id, output_provider, output_message_id)
          VALUES (?1, ?2, 'cline', ?3)",
-        rusqlite::params![
+        tracedecay_sql::params![
             tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION,
             old.observation_id().as_str(),
             RETAINED_CLINE_ALIAS,
@@ -227,7 +227,7 @@ async fn native_stream_projection_replaces_retained_effects_and_rebuilds_without
             original_effect,
             "source transition, replay and rebuild preserve the immutable temporal effect receipt"
         );
-        let conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+        let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
         let superseded: i64 = conn.query_row(
             "SELECT COUNT(*) FROM observation_projection_dispositions WHERE reason = 'native_source_superseded'",
             (), |row| row.get(0),
@@ -267,14 +267,14 @@ async fn forged_native_source_supersession_requires_a_projected_successor() {
         }
         drop(store);
         drop(runtime);
-        let conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+        let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
         conn.execute(
             "DELETE FROM observation_projection_provenance WHERE observation_id = ?1",
             [old.observation_id().as_str()],
         )
         .unwrap();
         conn.execute("INSERT INTO observation_projection_dispositions (projector_version, observation_id, receipt_id, reason) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION, old.observation_id().as_str(),
+            tracedecay_sql::params![tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION, old.observation_id().as_str(),
                 old.receipt().receipt().receipt_id().as_str(), ProjectionSkipReason::NativeSourceSuperseded.as_str()]).unwrap();
         drop(conn);
         let Err(error) = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay")).await
@@ -315,7 +315,7 @@ async fn native_source_projection_failure_keeps_predecessor_authority_until_retr
     let next_write = canonical_write(next.clone());
     let next_anchor = next_write.retrieval_anchor_id().as_str().to_owned();
     store.persist_observation(next_write).await.unwrap();
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     conn.execute_batch("CREATE TRIGGER reject_native_source_disposition BEFORE INSERT ON observation_projection_dispositions
         WHEN NEW.reason = 'native_source_superseded'
         BEGIN SELECT RAISE(ABORT, 'fixture native source activation failure'); END;").unwrap();
@@ -360,7 +360,7 @@ async fn native_source_projection_failure_keeps_predecessor_authority_until_retr
         .project_observation(next.observation_id())
         .await
         .unwrap();
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     let active_alias: String = conn
         .query_row(
             "SELECT anchor_id FROM retrieval_anchor_aliases",
@@ -396,18 +396,17 @@ async fn native_source_wrong_predecessor_receipt_is_rejected_before_activation()
     let next_write = canonical_write(next.clone());
     let next_anchor = next_write.retrieval_anchor_id().as_str().to_owned();
     store.persist_observation(next_write).await.unwrap();
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     // Both receipts exist, but the canonical guard rejects a foreign binding.
     let error = conn.execute(
         "INSERT INTO observation_projection_dispositions (projector_version, observation_id, receipt_id, reason)
          VALUES (?1, ?2, ?3, 'non_conversational_record')",
-        rusqlite::params![tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION,
+        tracedecay_sql::params![tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION,
             old.observation_id().as_str(), next.receipt().receipt().receipt_id().as_str()],
     ).unwrap_err();
     assert!(
-        matches!(error, rusqlite::Error::SqliteFailure(ref code, ref message)
-        if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
-            && message.as_deref() == Some("projection disposition receipt mismatch")),
+        tracedecay_sql::ErrorExt::kind(&error) == tracedecay_sql::ErrorKind::Constraint
+            && error.to_string() == "projection disposition receipt mismatch",
         "{error}"
     );
     let active_alias: String = conn
@@ -440,7 +439,7 @@ async fn native_source_wrong_predecessor_receipt_is_rejected_before_activation()
         .project_observation(next.observation_id())
         .await
         .unwrap();
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     let active_alias: String = conn
         .query_row(
             "SELECT anchor_id FROM retrieval_anchor_aliases",
@@ -456,7 +455,7 @@ async fn native_source_wrong_predecessor_receipt_is_rejected_before_activation()
 }
 
 fn temporal_effect_receipt(tmp: &TempDir, observation_id: &str) -> String {
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
+    let conn = tracedecay_sql::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     conn.query_row(
         "SELECT json_array(observation_id, observation_sequence, session_id, receipt_id,
                            effect_digest, output_count, recorded_at)
