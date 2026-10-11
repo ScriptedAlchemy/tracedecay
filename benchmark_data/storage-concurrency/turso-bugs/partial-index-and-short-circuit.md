@@ -31,3 +31,19 @@ as SQLite partial-index substitution needs, and apply the exact
 `json_type(... '$.ingest_protection.lossy') = 'true'` test behind a
 `json_valid` guard to the indexed rows only (`tracedecay-lcm` `query/status.rs`
 and the global-db schema contract test).
+
+## The same gap in a `CASE WHEN` condition
+
+`CASE WHEN json_valid(m) AND json_extract(m, '$.a') IS NOT NULL THEN 1 ELSE 0 END`
+also raises `malformed JSON` on Turso for `m = '[x'`. A nested `CASE` defers
+the extraction and returns 0 on both engines:
+
+```sql
+CASE WHEN CASE WHEN json_valid(m) THEN json_extract(m, '$.a') END IS NOT NULL
+     THEN 1 ELSE 0 END
+```
+
+`tracedecay-lcm` `summary_convergence.rs` (the raw-row update trigger that
+reads `$.ingest_protection.sanitization_receipt`) uses that form; before it,
+tombstoning a payload placeholder in a row whose metadata is not JSON failed
+the payload delete (`gc::tests::delete_tombstones_only_the_owner_row`).

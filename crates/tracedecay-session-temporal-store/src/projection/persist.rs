@@ -1298,7 +1298,7 @@ pub(super) async fn rebuild_current_occurrences(
                        ) AS precedence
                 FROM session_occurrences
                 WHERE session_id = ?1 AND +generation <= ?2
-                  AND retrieval_anchor_id IN (SELECT value FROM json_each(?3))
+                  AND retrieval_anchor_id IN (SELECT CAST(value AS TEXT) FROM json_each(?3))
              ),
              winners AS (
                 SELECT 'occurrence_anchor' AS entity_kind,

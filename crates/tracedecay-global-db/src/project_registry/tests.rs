@@ -10,7 +10,9 @@ use tracedecay_runtime_core::db::engine::{
 };
 
 use crate::RegisteredGlobalDb;
-use crate::tests::harness::{RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime};
+use crate::tests::harness::{
+    RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime, statement_vm_steps,
+};
 
 #[cfg(unix)]
 #[test]
@@ -29,12 +31,6 @@ fn ephemeral_admission_resolves_missing_profiles_through_symlinked_parents() {
         .join("not-created/profile");
     assert!(!profile.exists());
     assert!(super::ephemeral_root_rejection(temporary.path(), &profile).is_some());
-}
-
-struct RegistryQueryPlans {
-    recent: Vec<String>,
-    git_common_dir: Vec<String>,
-    canonical_root: Vec<String>,
 }
 
 struct CountingQuery<'a> {
@@ -171,59 +167,48 @@ async fn large_registry_fixture() -> (tempfile::TempDir, TestConnection) {
     (directory, connection)
 }
 
-async fn explain(
-    db: &RegisteredGlobalDb,
-    sql: &str,
-    params: impl tracedecay_runtime_core::db::engine::IntoParams,
-) -> Vec<String> {
-    let snapshot = db.read_snapshot().await.expect("registry read snapshot");
-    let mut rows = snapshot
-        .query(&format!("EXPLAIN QUERY PLAN {sql}"), params)
-        .await
-        .expect("explain registry query");
-    let mut plan = Vec::new();
-    while let Some(row) = rows.next().await.expect("read registry query plan") {
-        plan.push(row.get::<String>(3).expect("query plan detail"));
-    }
-    plan
-}
+/// The registry's indexed read shapes, each with the index that bounds it.
+const REGISTRY_READS: [(&str, &str); 3] = [
+    (
+        "idx_code_projects_last_seen_project",
+        "SELECT project_id, canonical_root
+         FROM code_projects
+         ORDER BY last_seen_at DESC, project_id
+         LIMIT 20",
+    ),
+    (
+        "idx_code_projects_git_common_dir",
+        "SELECT project_id FROM code_projects WHERE git_common_dir = '/repo-7/.git'",
+    ),
+    (
+        "idx_code_projects_canonical_root_project",
+        "SELECT project_id
+         FROM code_projects
+         WHERE canonical_root = '/repo-7' AND project_id != 'project-a'",
+    ),
+];
 
-async fn registry_query_plans(db: &RegisteredGlobalDb) -> RegistryQueryPlans {
-    RegistryQueryPlans {
-        recent: explain(
-            db,
-            "SELECT project_id, canonical_root
-             FROM code_projects
-             ORDER BY last_seen_at DESC, project_id
-             LIMIT ?1",
-            params![20_i64],
-        )
-        .await,
-        git_common_dir: explain(
-            db,
-            "SELECT project_id
-             FROM code_projects
-             WHERE git_common_dir = ?1",
-            params!["/repo/.git"],
-        )
-        .await,
-        canonical_root: explain(
-            db,
-            "SELECT project_id
-             FROM code_projects
-             WHERE canonical_root = ?1 AND project_id != ?2",
-            params!["/repo", "project-a"],
-        )
-        .await,
-    }
-}
-
-fn assert_plan_uses(plan: &[String], index: &str) {
-    assert!(
-        plan.iter().any(|detail| detail.contains(index)),
-        "query must use {index}:\n{}",
-        plan.join("\n")
-    );
+/// Grows the registry to `projects` rows, each with its own root and git
+/// directory, and returns the VM steps of every [`REGISTRY_READS`] shape.
+fn registry_read_steps(path: &Path, projects: i64) -> Vec<u64> {
+    let connection = tracedecay_sql::Connection::open(path).expect("open registry file");
+    connection
+        .execute_batch(&format!(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < {})
+             INSERT OR IGNORE INTO code_projects (
+                 project_id, canonical_root, display_root, git_common_dir,
+                 created_at, last_seen_at
+             )
+             SELECT 'project-' || i, '/repo-' || i, '/repo-' || i, '/repo-' || i || '/.git',
+                    i, i
+             FROM n",
+            projects - 1
+        ))
+        .expect("grow the project registry");
+    REGISTRY_READS
+        .iter()
+        .map(|(_, sql)| statement_vm_steps(&connection, sql, []))
+        .collect()
 }
 
 async fn register(db: &RegisteredGlobalDb, project_id: &str, root: &Path) {
@@ -413,7 +398,7 @@ async fn moved_project_alias_survives_runtime_restart_and_missing_symlink_tail()
 }
 
 #[tokio::test]
-async fn project_registry_indexes_migrate_on_reopen_and_cover_actual_read_shapes() {
+async fn project_registry_indexes_migrate_on_reopen_and_bound_actual_read_shapes() {
     let harness = RegisteredGlobalDbHarness::open("project-registry-read-index-migration").await;
     harness
         .registered
@@ -427,37 +412,38 @@ async fn project_registry_indexes_migrate_on_reopen_and_cover_actual_read_shapes
         .await
         .expect("remove project registry read indexes");
 
-    let pre = registry_query_plans(&harness.registered).await;
-    for (name, plan) in [
-        ("idx_code_projects_last_seen_project", &pre.recent),
-        ("idx_code_projects_git_common_dir", &pre.git_common_dir),
-        (
-            "idx_code_projects_canonical_root_project",
-            &pre.canonical_root,
-        ),
-    ] {
+    // Each read's work is measured on a registry and on one 8x larger. Without
+    // its index a read visits every project; the reopen must reinstall the
+    // indexes so the same reads stop growing with the registry.
+    let mut unindexed = Vec::new();
+    let harness = harness
+        .restart_after(|path| {
+            unindexed.push(registry_read_steps(path, 64));
+            unindexed.push(registry_read_steps(path, 512));
+        })
+        .await;
+    let mut indexed = Vec::new();
+    drop(
+        harness
+            .restart_after(|path| {
+                indexed.push(registry_read_steps(path, 512));
+                indexed.push(registry_read_steps(path, 4_096));
+            })
+            .await,
+    );
+    for (shape, (index, sql)) in REGISTRY_READS.iter().enumerate() {
+        let (small, large) = (unindexed[0][shape], unindexed[1][shape]);
         assert!(
-            plan.iter().all(|detail| !detail.contains(name)),
-            "pre-migration plan unexpectedly used {name}:\n{}",
-            plan.join("\n")
+            large >= 4 * small,
+            "without {index} the read must grow with the registry ({small} -> {large}): {sql}"
+        );
+        let (small, large) = (indexed[0][shape], indexed[1][shape]);
+        assert!(
+            large <= 2 * small,
+            "{index} must keep the read flat as the registry grows 8x \
+             ({small} -> {large}): {sql}"
         );
     }
-    assert!(
-        pre.recent
-            .iter()
-            .any(|detail| detail.contains("USE TEMP B-TREE FOR ORDER BY")),
-        "pre-migration recent-project query must expose its sorting regression:\n{}",
-        pre.recent.join("\n")
-    );
-
-    let harness = harness.restart().await;
-    let post = registry_query_plans(&harness.registered).await;
-    assert_plan_uses(&post.recent, "idx_code_projects_last_seen_project");
-    assert_plan_uses(&post.git_common_dir, "idx_code_projects_git_common_dir");
-    assert_plan_uses(
-        &post.canonical_root,
-        "idx_code_projects_canonical_root_project",
-    );
 }
 
 #[tokio::test]

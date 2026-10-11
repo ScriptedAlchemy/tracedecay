@@ -427,11 +427,15 @@ pub(super) async fn read_message(
     Ok(Some(message))
 }
 
+/// Names its index: Turso otherwise seeks only the primary key's
+/// `projector_version` prefix, once per group
+/// (`turso-bugs/secondary-index-loses-to-primary-key-prefix.md`).
 fn output_owner_lookup_sql(select_expr: &str, ordering: &str) -> String {
     format!(
         "(
                     SELECT {select_expr}
                     FROM observation_projection_provenance AS provenance
+                         INDEXED BY idx_observation_projection_provenance_output
                     JOIN observations AS observation
                       ON observation.observation_id = provenance.observation_id
                     WHERE provenance.projector_version = groups.projector_version

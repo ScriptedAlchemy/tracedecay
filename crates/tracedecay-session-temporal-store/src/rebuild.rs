@@ -151,7 +151,8 @@ async fn require_unsettled_message_ids(
              FROM json_each(?3) AS requested
              WHERE EXISTS (
                  SELECT 1 FROM session_occurrences INDEXED BY idx_session_occurrences_message
-                 WHERE session_id = ?1 AND message_id = requested.value AND generation < ?2
+                 WHERE session_id = ?1 AND message_id = CAST(requested.value AS TEXT)
+                   AND generation < ?2
              )
              LIMIT 1",
             params![session_id, generation, requested],

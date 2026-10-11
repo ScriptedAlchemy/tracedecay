@@ -436,7 +436,7 @@ impl ProjectionProvenanceRow {
                      FROM json_each(?2) AS requested
                      CROSS JOIN observation_projection_provenance AS provenance
                      WHERE provenance.projector_version = ?1
-                       AND provenance.observation_id = requested.value",
+                       AND provenance.observation_id = CAST(requested.value AS TEXT)",
                     params![SESSION_MESSAGE_PROJECTOR_VERSION, requested.as_str()],
                 )
                 .await
@@ -2407,16 +2407,6 @@ mod tests {
                 .filter(|sql| sql.contains(needle))
                 .count()
         }
-
-        fn statement_containing(&self, needle: &str) -> String {
-            self.statements
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|sql| sql.contains(needle))
-                .cloned()
-                .unwrap_or_else(|| panic!("no captured statement contained {needle:?}"))
-        }
     }
 
     impl<T: QueryExecutor> QueryExecutor for CountingSnapshot<'_, T> {
@@ -2740,69 +2730,8 @@ mod tests {
             "projected messages must reuse the page authority instead of reading per output"
         );
 
-        let authority_sql =
-            counting.statement_containing("MAX(provenance.message_created) AS projector_owned");
-        let requested = serde_json::to_string(&[serde_json::json!({
-            "provider": "codex",
-            "message_id": "message.record.audit-batch-0"
-        })])
-        .unwrap();
-        let mut rows = snapshot
-            .query(
-                &format!("EXPLAIN QUERY PLAN {authority_sql}"),
-                params![SESSION_MESSAGE_PROJECTOR_VERSION, requested],
-            )
-            .await
-            .unwrap();
-        let mut plan = Vec::new();
-        while let Some(row) = rows.next().await.unwrap() {
-            plan.push(row.get::<String>(3).unwrap());
-        }
-        assert!(
-            plan.iter().any(|detail| {
-                detail.contains("idx_observation_projection_provenance_output")
-                    && detail.contains(
-                        "projector_version=? AND output_provider=? AND output_message_id=?",
-                    )
-            }),
-            "authority lookup must seek each requested output through the exact index: {plan:?}"
-        );
-        assert!(
-            !plan.iter().any(|detail| {
-                detail.contains("idx_observation_projection_provenance_output")
-                    && detail.ends_with("(projector_version=?)")
-            }),
-            "authority lookup regressed to a projector-wide provenance scan: {plan:?}"
-        );
-
-        let provenance_sql = counting
-            .statement_containing("SELECT provenance.observation_id, provenance.output_ordinal");
-        let requested = serde_json::to_string(&["observation.audit-batch-0"]).unwrap();
-        let mut rows = snapshot
-            .query(
-                &format!("EXPLAIN QUERY PLAN {provenance_sql}"),
-                params![SESSION_MESSAGE_PROJECTOR_VERSION, requested],
-            )
-            .await
-            .unwrap();
-        let mut plan = Vec::new();
-        while let Some(row) = rows.next().await.unwrap() {
-            plan.push(row.get::<String>(3).unwrap());
-        }
-        assert!(
-            plan.iter().any(|detail| {
-                detail.contains("observation_projection_provenance")
-                    && detail.contains("projector_version=? AND observation_id=?")
-            }),
-            "provenance lookup must seek each requested observation: {plan:?}"
-        );
-        assert!(
-            !plan.iter().any(|detail| {
-                detail.contains("observation_projection_provenance")
-                    && detail.ends_with("(projector_version=?)")
-            }),
-            "provenance lookup regressed to a projector-wide scan: {plan:?}"
-        );
+        // Each page's reads seeking rather than scanning the projector is held
+        // by `resumed_authority_audit_work_follows_new_observations_not_the_store`.
         // The per-row baseline this replaced spent fifteen reads on every
         // projected message; the batched path must stay comfortably under ten.
         let queries = counting.queries.load(Ordering::Relaxed);
