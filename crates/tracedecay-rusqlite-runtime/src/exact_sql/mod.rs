@@ -8,8 +8,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rusqlite::{Connection, TransactionBehavior, params_from_iter};
 use tokio::sync::mpsc as tokio_mpsc;
+use tracedecay_sql::{
+    CachedStatement, Capability, Connection, ErrorExt, ErrorKind, TransactionBehavior,
+    params_from_iter,
+};
 use tracedecay_store::{
     OperationPriorityV1, StoreRuntimeBindingV1, UnavailableReasonV1, VerifiedStoreLocatorV1,
 };
@@ -27,7 +30,6 @@ const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SQL_BYTES: usize = 1024 * 1024;
 const MAX_SQL_PARAMETERS: usize = 32_766;
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
-const EXACT_SQL_PROGRESS_INTERVAL_OPS: i32 = 1_000;
 #[cfg(not(test))]
 const EXACT_SQL_EXECUTION_LIMIT: Duration = Duration::from_secs(30);
 // Test-mode limits keep the expiry paths exercisable in seconds. They must
@@ -339,22 +341,10 @@ impl ExactSqlHandle {
 
     /// Runs one statement that returns rows on the writer actor. Once admitted,
     /// the write completes even when its caller abandons the reply waiter.
-    pub fn execute_returning(
-        &self,
-        statement: ExactSqlStatement,
-    ) -> Result<ExactSqlRows, ExactSqlError> {
-        statement.validate()?;
-        match self.dispatch_writer(SqlRequest::ExecuteReturning(statement))? {
-            SqlResult::Queried(rows) => Ok(rows),
-            _ => Err(ExactSqlError::WriterUnavailable),
-        }
-    }
-
     pub async fn execute_returning_async(
         &self,
         statement: ExactSqlStatement,
     ) -> Result<ExactSqlRows, ExactSqlError> {
-        statement.validate()?;
         match self
             .dispatch_writer_async(SqlRequest::ExecuteReturning(statement))
             .await?
@@ -1008,14 +998,14 @@ fn execute_request(
     validate_request(&request)?;
     with_exact_sql_guard(
         connection,
-        pinned_transaction,
-        false,
+        Capability::ExactSql {
+            savepoints: pinned_transaction,
+        },
+        Capability::Writer,
         shutdown_requested,
         execution_deadline,
         enforce_statement_limit,
         repeated_authority,
-        crate::connection::authorize_writer,
-        true,
         || match request {
             SqlRequest::Validate(statement) => connection
                 .prepare_cached(&statement.sql)
@@ -1128,14 +1118,12 @@ pub(crate) fn execute_query(
     request.validate()?;
     with_exact_sql_guard(
         connection,
-        false,
-        false,
+        Capability::ExactSqlRead,
+        Capability::Reader,
         None,
         None,
         true,
         None,
-        crate::connection::authorize_reader,
-        false,
         || execute_query_unchecked(connection, request),
     )
 }
@@ -1151,20 +1139,14 @@ pub(crate) fn execute_query(
 fn prepare_read_statement<'c>(
     connection: &'c Connection,
     sql: &str,
-) -> Result<rusqlite::CachedStatement<'c>, ExactSqlError> {
+) -> Result<CachedStatement<'c>, ExactSqlError> {
     const ATTEMPTS: u32 = 8;
     const BACKOFF: std::time::Duration = std::time::Duration::from_millis(25);
     let mut attempt = 0;
     loop {
         match connection.prepare_cached(sql) {
             Ok(statement) => return Ok(statement),
-            Err(rusqlite::Error::SqliteFailure(failure, _))
-                if attempt < ATTEMPTS
-                    && matches!(
-                        failure.code,
-                        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                    ) =>
-            {
+            Err(error) if attempt < ATTEMPTS && error.kind() == ErrorKind::Busy => {
                 attempt += 1;
                 std::thread::sleep(BACKOFF);
             }
@@ -1208,7 +1190,7 @@ fn execute_query_unchecked(
 
 /// Materializes a result set under the row-count and byte ceilings.
 fn materialize_rows(
-    query: &mut rusqlite::Rows<'_>,
+    query: &mut tracedecay_sql::Rows<'_>,
     columns: &[String],
 ) -> Result<Vec<ExactSqlRow>, ExactSqlError> {
     let column_count = columns.len();
@@ -1258,13 +1240,8 @@ fn materialize_rows(
     Ok(rows)
 }
 
-fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> ExactSqlError {
-    let (code, extended_code) = match &error {
-        rusqlite::Error::SqliteFailure(error, _) => {
-            (Some(error.extended_code & 0xff), Some(error.extended_code))
-        }
-        _ => (None, None),
-    };
+fn sqlite_error(operation: &'static str, error: tracedecay_sql::Error) -> ExactSqlError {
+    let (code, extended_code) = error.sqlite_codes().unzip();
     ExactSqlError::Sqlite {
         operation,
         code,

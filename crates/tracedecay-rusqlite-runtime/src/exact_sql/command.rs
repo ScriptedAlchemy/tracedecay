@@ -13,7 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rusqlite::{Connection, DropBehavior, ErrorCode, Transaction, TransactionBehavior};
+use tracedecay_sql::{
+    Capability, Connection, DropBehavior, ErrorExt, ErrorKind, Transaction, TransactionBehavior,
+};
 
 use super::guard::with_exact_sql_guard;
 use super::{
@@ -70,7 +72,7 @@ pub(super) fn begin_transaction_with_busy_retry<'connection>(
     behavior: TransactionBehavior,
     shutdown_requested: &AtomicBool,
     cancelled: impl FnMut() -> bool,
-) -> rusqlite::Result<Transaction<'connection>> {
+) -> tracedecay_sql::Result<Transaction<'connection>> {
     if !matches!(behavior, TransactionBehavior::Immediate) {
         return Transaction::new_unchecked(connection, behavior);
     }
@@ -86,11 +88,11 @@ pub(super) fn begin_transaction_with_busy_retry<'connection>(
     }
 }
 
-pub(super) fn retry_busy_begin<T>(
-    mut begin: impl FnMut() -> rusqlite::Result<T>,
+pub(super) fn retry_busy_begin<T, E: ErrorExt>(
+    mut begin: impl FnMut() -> Result<T, E>,
     shutdown_requested: &AtomicBool,
     mut cancelled: impl FnMut() -> bool,
-) -> rusqlite::Result<T> {
+) -> Result<T, E> {
     let deadline = Instant::now() + EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT;
     let mut original_busy_error = None;
     loop {
@@ -108,7 +110,7 @@ pub(super) fn retry_busy_begin<T>(
                 }
                 return Ok(value);
             }
-            Err(error) if sqlite_busy_or_locked(&error) => {
+            Err(error) if error.kind() == ErrorKind::Busy => {
                 let exhausted = shutdown_requested.load(Ordering::Acquire)
                     || cancelled()
                     || Instant::now() >= deadline;
@@ -125,14 +127,6 @@ pub(super) fn retry_busy_begin<T>(
             Err(error) => return Err(error),
         }
     }
-}
-
-fn sqlite_busy_or_locked(error: &rusqlite::Error) -> bool {
-    matches!(
-        error,
-        rusqlite::Error::SqliteFailure(error, _)
-            if matches!(error.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
-    )
 }
 
 /// Clock behind every transaction lease deadline: idle, absolute, renewal.
@@ -289,7 +283,7 @@ pub(crate) fn run_writer_command(
                                         Ok(_) => Err(error),
                                         Err(rollback_error) => {
                                             shutdown_requested.store(true, Ordering::Release);
-                                            Err(rollback_error)
+                                            Err(rollback_failed_after(error, rollback_error))
                                         }
                                     },
                                 }
@@ -377,14 +371,12 @@ pub(crate) fn run_writer_command(
                 {
                     with_exact_sql_guard(
                         connection,
-                        false,
-                        false,
+                        Capability::Writer,
+                        Capability::Writer,
                         Some(Arc::clone(shutdown_requested)),
                         None,
                         true,
                         None,
-                        crate::connection::authorize_writer,
-                        false,
                         || execute_query_unchecked(connection, statement),
                     )
                 }
@@ -432,6 +424,28 @@ fn discard_transaction(
         .rollback()
         .map(|()| receipt)
         .map_err(|error| sqlite_error("rollback write transaction", error))
+}
+
+/// The rollback failure leads, since it is the one that faulted the writer;
+/// the write error that forced the rollback stays in its message.
+pub(super) fn rollback_failed_after(
+    write: ExactSqlError,
+    rollback: ExactSqlError,
+) -> ExactSqlError {
+    match rollback {
+        ExactSqlError::Sqlite {
+            operation,
+            code,
+            extended_code,
+            message,
+        } => ExactSqlError::Sqlite {
+            operation,
+            code,
+            extended_code,
+            message: format!("{message}; rolling back after: {write}"),
+        },
+        rollback => rollback,
+    }
 }
 
 /// Releases the writer-owned transaction and publishes the receipt for it.

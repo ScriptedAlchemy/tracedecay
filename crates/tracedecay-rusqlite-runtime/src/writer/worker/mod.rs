@@ -16,12 +16,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rusqlite::TransactionBehavior;
 use tokio::{
     runtime::Runtime,
     sync::{mpsc, watch},
 };
 use tracedecay_domain::process_heap::collect_idle_thread_heap_v1;
+use tracedecay_sql::{ErrorExt, ErrorKind, TransactionBehavior};
 use tracedecay_store::{
     AdmissionConfigV1, OperationPriorityV1, RuntimeBatchCompatibilityV1, RuntimeInterruptionV1,
     RuntimeRequestProbeV1, StoreOperationIdV1, StoreRuntimeBindingV1,
@@ -1037,7 +1037,7 @@ fn checkpoint_sample(result: &CheckpointResult) -> WalCheckpointSample {
     skip_all
 )]
 pub(super) fn process_execution_batch<E: crate::StorageOperationExecutor>(
-    connection: &mut rusqlite::Connection,
+    connection: &mut tracedecay_sql::Connection,
     binding: &StoreRuntimeBindingV1,
     batch: ExecutionBatch,
     persistence: &mut crate::persistence::RuntimeWriterPersistence<E>,
@@ -1080,7 +1080,7 @@ fn queue_wait_micros(enqueued_at: impl IntoIterator<Item = Instant>, dequeued_at
 }
 
 fn run_incremental_vacuum(
-    connection: &mut rusqlite::Connection,
+    connection: &mut tracedecay_sql::Connection,
     command: IncrementalVacuumCommand,
 ) {
     if command
@@ -1201,16 +1201,9 @@ fn scheduled_checkpoint_error_is_transient(
         crate::checkpoint::CheckpointError::MaintenanceStillDraining(_)
         | crate::checkpoint::CheckpointError::AuthorityDenied(_) => true,
         crate::checkpoint::CheckpointError::Driver(
-            crate::checkpoint::RusqliteCheckpointError::Sqlite(rusqlite::Error::SqliteFailure(
-                failure,
-                _,
-            )),
-        ) => matches!(
-            failure.code,
-            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-        ),
-        crate::checkpoint::CheckpointError::Driver(_)
-        | crate::checkpoint::CheckpointError::InvalidConfig(_) => false,
+            crate::checkpoint::RusqliteCheckpointError::Sqlite(error),
+        ) => error.kind() == ErrorKind::Busy,
+        crate::checkpoint::CheckpointError::InvalidConfig(_) => false,
     }
 }
 
@@ -1888,7 +1881,7 @@ mod auxiliary_scheduling_tests {
 
     #[test]
     fn incremental_vacuum_samples_worker_authority_stages() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
         connection
             .pragma_update(None, "auto_vacuum", "INCREMENTAL")
             .unwrap();
@@ -1916,7 +1909,7 @@ mod auxiliary_scheduling_tests {
 
     #[test]
     fn incremental_vacuum_rolls_back_when_authority_is_revoked() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
         connection
             .pragma_update(None, "auto_vacuum", "INCREMENTAL")
             .unwrap();

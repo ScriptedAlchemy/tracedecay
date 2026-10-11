@@ -236,6 +236,7 @@ impl StatementControl for Statement<'_> {
             vm_steps: take(StatementStatus::VmStep),
             fullscan_steps: take(StatementStatus::FullscanStep),
             sort_steps: take(StatementStatus::Sort),
+            reprepares: take(StatementStatus::RePrepare),
         }
     }
 }

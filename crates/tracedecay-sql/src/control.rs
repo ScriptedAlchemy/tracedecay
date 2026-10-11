@@ -159,6 +159,9 @@ pub struct StatementCounters {
     pub vm_steps: u64,
     pub fullscan_steps: u64,
     pub sort_steps: u64,
+    /// Times the statement was compiled again because the schema or the
+    /// capability changed under it.
+    pub reprepares: u64,
 }
 
 pub trait StatementControl {
