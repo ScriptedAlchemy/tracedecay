@@ -461,6 +461,13 @@ async fn fresh_graph_activation_never_delays_the_published_text_owner() {
             .is_none(),
         "the seat waits for the held graph activation"
     );
+    // A parked worktree with no complete-generation demand gives its seated
+    // decode back as soon as the pass ends, so the seat would be gone before
+    // this wait reads it. Demand it the way a graph read does.
+    fixture
+        .registry
+        .request_complete_generation(&fixture.project)
+        .await;
     let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
     gate.release();
     tokio::time::timeout(CONVERGENCE_DEADLINE, async {
