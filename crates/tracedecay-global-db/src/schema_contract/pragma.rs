@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params_from_iter};
+use tracedecay_runtime_core::db::engine::{BackendKind, QueryExecutor, params_from_iter};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 
@@ -253,13 +253,22 @@ pub(super) async fn read_table_metadata(
                 },
             )
         });
+        let cid: i64 = row
+            .get(5)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let name: Option<String> = row
+            .get(6)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        // Turso reports an expression key column as cid -1 named by its
+        // expression text; SQLite reports cid -2 with no name.
+        let (cid, name) = if conn.backend_kind() == BackendKind::NativeTurso && cid == -1 {
+            (-2, None)
+        } else {
+            (cid, name)
+        };
         index.columns.push(ActualIndexColumn {
-            cid: row
-                .get(5)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            name: row
-                .get(6)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            cid,
+            name,
             descending: row
                 .get::<i64>(7)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?
