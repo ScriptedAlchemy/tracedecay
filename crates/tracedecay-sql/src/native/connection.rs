@@ -84,6 +84,8 @@ impl Database {
             Error::InvalidOperation("native database path is not UTF-8".to_owned())
         })?;
         let io = turso_core::Database::io_for_path(path)?;
+        #[cfg(all(unix, feature = "test-helpers"))]
+        let io = super::crash_io::wrap(io);
         let options = OpenOptions::new(policy::dialect()).db_opts(
             DatabaseOpts::new()
                 .with_index_method(true)
@@ -104,10 +106,14 @@ impl Database {
     pub fn open_pinned(path: &Path, file: std::fs::File) -> Result<Self> {
         let pinned = super::pinned_io::PinnedIo::new(path, file)?;
         let native_file = pinned.open_main()?;
+        #[cfg(feature = "test-helpers")]
+        let native_file = super::crash_io::wrap_file(pinned.canonical_path(), native_file);
         let path = pinned.canonical_path().to_str().ok_or_else(|| {
             Error::InvalidOperation("native database path is not UTF-8".to_owned())
         })?;
         let io: Arc<dyn turso_core::IO> = pinned.clone();
+        #[cfg(feature = "test-helpers")]
+        let io = super::crash_io::wrap(io);
         let storage = Arc::new(turso_core::storage::database::DatabaseFile::new(
             native_file,
         ));

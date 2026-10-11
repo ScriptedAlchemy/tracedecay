@@ -3,6 +3,8 @@
 //! `engine::native` facade still drives it; the rusqlite-shaped `driver` over it
 //! is the crate's public surface under `--config=native`.
 mod connection;
+#[cfg(all(unix, feature = "test-helpers"))]
+pub mod crash_io;
 #[cfg(td_engine = "native")]
 pub(crate) mod driver;
 mod error;
