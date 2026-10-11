@@ -47,6 +47,7 @@ conformance!(
     busy_checkpoint_reports_the_wal_it_could_not_reset,
     a_copied_back_wal_starts_over_on_the_next_write,
     an_interrupted_write_ends_its_transaction,
+    unique_index_entries_stay_findable_under_every_conflict_mode,
 );
 
 mod cases {
@@ -797,6 +798,94 @@ mod cases {
             connection.query_row("SELECT count(*) FROM child", [], |row| row.get(0))?;
         assert_eq!(children, 0);
         Ok(())
+    }
+
+    /// Every row is findable through each unique index, and each index scans
+    /// in key order, after inserts that probe, skip, ignore and replace in
+    /// scattered key order. An index entry written at a stale cursor position
+    /// breaks both.
+    pub(super) fn unique_index_entries_stay_findable_under_every_conflict_mode() -> Result<()> {
+        use std::collections::BTreeMap;
+
+        fn key(i: u64) -> String {
+            format!("k{:05}", i.wrapping_mul(7_919) % 10_007)
+        }
+        fn number(i: u64) -> i64 {
+            (i.wrapping_mul(104_729) % 99_991) as i64
+        }
+        fn verify(
+            connection: &Connection,
+            table: &str,
+            rows: &BTreeMap<String, i64>,
+        ) -> Result<()> {
+            for (a, b) in rows {
+                let by_a: Option<i64> = connection
+                    .query_row(&format!("SELECT b FROM {table} WHERE a = ?1"), [a], |row| {
+                        row.get(0)
+                    })
+                    .optional()?;
+                assert_eq!(by_a, Some(*b), "{table}: row {a} lost from the a index");
+                let by_b: Option<String> = connection
+                    .query_row(&format!("SELECT a FROM {table} WHERE b = ?1"), [b], |row| {
+                        row.get(0)
+                    })
+                    .optional()?;
+                assert_eq!(
+                    by_b.as_ref(),
+                    Some(a),
+                    "{table}: row {b} lost from the b index"
+                );
+            }
+            let mut statement = connection.prepare(&format!("SELECT a FROM {table} ORDER BY a"))?;
+            let scanned = statement
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<String>>>()?;
+            assert_eq!(
+                scanned,
+                rows.keys().cloned().collect::<Vec<_>>(),
+                "{table}: the a index scan is not the row set in key order"
+            );
+            Ok(())
+        }
+
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "CREATE TABLE pairs (id INTEGER PRIMARY KEY, a TEXT NOT NULL UNIQUE, b INTEGER NOT NULL UNIQUE);
+             CREATE TABLE mixed (id INTEGER PRIMARY KEY, a TEXT NOT NULL UNIQUE, b INTEGER NOT NULL UNIQUE ON CONFLICT REPLACE);",
+        )?;
+        let mut pairs = BTreeMap::new();
+        let mut plain = connection.prepare("INSERT INTO pairs (a, b) VALUES (?1, ?2)")?;
+        for i in 0..600 {
+            plain.execute(params![key(i), number(i)])?;
+            pairs.insert(key(i), number(i));
+        }
+        let mut upsert = connection
+            .prepare("INSERT INTO pairs (a, b) VALUES (?1, ?2) ON CONFLICT(a) DO NOTHING")?;
+        for i in 300..900 {
+            let b = 200_000 + i as i64;
+            upsert.execute(params![key(i), b])?;
+            pairs.entry(key(i)).or_insert(b);
+        }
+        let mut ignore =
+            connection.prepare("INSERT OR IGNORE INTO pairs (a, b) VALUES (?1, ?2)")?;
+        for i in 850..1_000 {
+            let b = number(i % 700);
+            ignore.execute(params![key(i), b])?;
+            if !pairs.contains_key(&key(i)) && !pairs.values().any(|existing| *existing == b) {
+                pairs.insert(key(i), b);
+            }
+        }
+        verify(&connection, "pairs", &pairs)?;
+
+        let mut mixed = BTreeMap::new();
+        let mut replace = connection.prepare("INSERT INTO mixed (a, b) VALUES (?1, ?2)")?;
+        for i in 0..500 {
+            let b = number(i % 150);
+            replace.execute(params![key(i), b])?;
+            mixed.retain(|_, existing| *existing != b);
+            mixed.insert(key(i), b);
+        }
+        verify(&connection, "mixed", &mixed)
     }
 
     pub(super) fn close_rolls_back_and_path_names_the_store() -> Result<()> {
