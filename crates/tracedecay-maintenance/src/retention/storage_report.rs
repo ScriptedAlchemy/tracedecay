@@ -1921,9 +1921,11 @@ mod tests {
             report.stores[0].free_bytes,
             Some(stats.page_size * stats.freelist_count)
         );
-        #[allow(clippy::cast_precision_loss)]
         let ratio = stats.freelist_count as f64 / stats.page_count as f64;
-        assert_eq!(report.stores[0].free_page_ratio, Some(ratio));
+        assert_eq!(
+            report.stores[0].free_page_ratio.map(f64::to_bits),
+            Some(ratio.to_bits())
+        );
         assert_eq!(directory_listing(&profile_root), before);
     }
 
@@ -1968,7 +1970,10 @@ mod tests {
 
         assert_eq!(unbrokered.stores[0].free_bytes, None);
         assert_eq!(brokered.stores[0].free_bytes, Some(4 * 4096));
-        assert_eq!(brokered.stores[0].free_page_ratio, Some(0.4));
+        assert_eq!(
+            brokered.stores[0].free_page_ratio.map(f64::to_bits),
+            Some(0.4_f64.to_bits())
+        );
         drop(writer);
     }
 
