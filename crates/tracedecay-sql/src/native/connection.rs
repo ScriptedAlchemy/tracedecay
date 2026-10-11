@@ -51,12 +51,7 @@ struct Slot {
 
 impl Slot {
     fn for_identity(identity: FileIdentity) -> Arc<Self> {
-        let started = Instant::now();
         let mut slots = lock(&OPEN_IDENTITIES);
-        let waited = started.elapsed();
-        if waited >= Duration::from_millis(50) {
-            eprintln!("U12F_LOCKWAIT global_ms={}", waited.as_millis());
-        }
         if let Some(slot) = slots.get(&identity).and_then(Weak::upgrade) {
             return slot;
         }
@@ -66,16 +61,6 @@ impl Slot {
         });
         slots.insert(identity, Arc::downgrade(&slot));
         slot
-    }
-
-    fn live(&self) -> std::sync::MutexGuard<'_, Weak<Shared>> {
-        let started = Instant::now();
-        let guard = lock(&self.live);
-        let waited = started.elapsed();
-        if waited >= Duration::from_millis(50) {
-            eprintln!("U12F_LOCKWAIT slot_ms={}", waited.as_millis());
-        }
-        guard
     }
 }
 
@@ -315,7 +300,7 @@ impl Drop for Shared {
         };
         // The engine's descriptors close while the slot is held, so no reopen
         // can lock the file before this instance has released it.
-        let _live = slot.live();
+        let _live = lock(&slot.live);
         drop(self.engine.take());
     }
 }
@@ -347,7 +332,7 @@ impl Database {
         // its locks.
         let (file, identity) = if let Ok(identity) = confined_io::path_identity(text) {
             let slot = Slot::for_identity(identity);
-            let mut live = slot.live();
+            let mut live = lock(&slot.live);
             if let Some(shared) = live.upgrade() {
                 drop(live);
                 return Self { shared }.shared_for(writable);
@@ -361,7 +346,7 @@ impl Database {
             open()?
         };
         let slot = Slot::for_identity(identity);
-        let mut live = slot.live();
+        let mut live = lock(&slot.live);
         if let Some(shared) = live.upgrade() {
             drop(live);
             // ponytail: the path was renamed onto a live store between stat
