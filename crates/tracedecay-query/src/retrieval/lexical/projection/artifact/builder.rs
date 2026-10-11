@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::ExtractionAdmittedCodeSearchChunkV1;
+use tracedecay_code_index::parallelism::with_background_cpu_permit;
 use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, SealedLexicalFileReplacementV1, UninterruptibleCodeIndexControlV1,
     VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageV1,
@@ -28,7 +29,7 @@ use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 use tracedecay_sql::types::{ToSqlOutput, Value, ValueRef};
 use tracedecay_sql::{Connection, ConnectionControl, OptionalExtension, Transaction, params};
 
-use super::clone_census::read_clone_index_census;
+use super::clone_census::{CodeLexicalCloneIndexCensusV1, read_clone_index_census};
 use super::clone_codec::{digest_from_key, digest_key};
 use super::fingerprints::CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1;
 use super::format::{
@@ -60,22 +61,18 @@ use super::schema::{
     stage_row_dictionary,
 };
 use super::{
-    ARTIFACT_SQLITE_CACHE_BYTES, BuilderDurabilityV1,
-    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1, CodeLexicalArtifactBatchLimitV1,
     CodeLexicalArtifactErrorV1, NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1, checkpoint,
-    enter_resumable_journal, leave_resumable_journal, open_builder_connection, sqlite_corrupt,
-    sqlite_error,
+    fold_journal, open_builder_connection, remove_journal_sidecar, sqlite_corrupt, sqlite_error,
 };
 use crate::retrieval::lexical::LexicalFieldV1;
 
 use super::super::{CodeLexicalProjectionMetadataV1, normalized_search_text};
 
-const SQLITE_HEADER_HISTORY_OFFSETS: [u64; 3] = [24, 40, 92];
-const SEALED_HEADER_HISTORY: u32 = 1;
 const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, next_cursor \
      FROM source_page_cursors ORDER BY page_ordinal DESC LIMIT 1";
 const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -599,12 +596,15 @@ struct StableArtifactFileIdentityV1 {
 
 pub struct CodeLexicalArtifactBuilderV1 {
     path: PathBuf,
+    /// Declared before `private_file` so it closes first: closing any
+    /// descriptor of the file releases every POSIX record lock this process
+    /// holds on it, including the native engine's exclusive lock.
+    connection: Connection,
     /// Keeps the exact no-follow/private file handle alive while the SQLite
     /// connection is in use. Every public transition rebinds the pathname to
     /// this identity before it trusts the connection's contents.
     private_file: File,
     file_identity: StableArtifactFileIdentityV1,
-    connection: Connection,
     metadata: CodeLexicalProjectionMetadataV1,
     metadata_digest: ManifestDigest,
     memory_budget_bytes: usize,
@@ -659,9 +659,8 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         let metadata_digest = metadata_digest(&metadata)?;
-        publish_initialized_staging(path, &metadata, &metadata_digest, memory_budget_bytes)?;
-        let (connection, private_file, file_identity) =
-            open_private_builder_connection(path, memory_budget_bytes)?;
+        publish_initialized_staging(path, &metadata, &metadata_digest)?;
+        let (connection, private_file, file_identity) = open_private_builder_connection(path)?;
         verify_layout_dependent_triggers(&connection)?;
         crate::observe::Residency::Cold.record("query.artifact.residency");
         Ok(Self {
@@ -695,7 +694,7 @@ impl CodeLexicalArtifactBuilderV1 {
         let path = path.as_ref();
         let (connection, private_file, file_identity) = {
             let _span = tracing::trace_span!("query.artifact.open.sqlite_connect").entered();
-            open_private_builder_connection(path, memory_budget_bytes)
+            open_private_builder_connection(path)
         }?;
         require_staged_revision(&connection)?;
         {
@@ -808,8 +807,7 @@ impl CodeLexicalArtifactBuilderV1 {
             let _span = tracing::trace_span!("query.artifact.carry.copy").entered();
             copy_sealed_parent(parent, parent_digest, parent_size_bytes, path, control)
         }?;
-        let (mut connection, private_file, file_identity) =
-            open_private_builder_connection(path, memory_budget_bytes)?;
+        let (mut connection, private_file, file_identity) = open_private_builder_connection(path)?;
         require_staged_revision(&connection)?;
         verify_artifact_table_layout(&connection)?;
         if read_receipt_with_control(&connection, control)?.is_none()
@@ -819,7 +817,6 @@ impl CodeLexicalArtifactBuilderV1 {
                 "a carried lexical parent must be a sealed artifact".to_owned(),
             ));
         }
-        enter_resumable_journal(&connection)?;
         let transaction = connection.transaction().map_err(sqlite_error)?;
         let carried = without_triggers(&transaction, || {
             carry_parent_rows(
@@ -1251,11 +1248,10 @@ impl CodeLexicalArtifactBuilderV1 {
                 control,
             )
         }?;
-        enter_resumable_journal(&self.connection)?;
-        super::with_memory_statement_journals(&mut self.connection, |connection| {
+        {
             let _span = tracing::trace_span!("query.artifact.batch.sqlite").entered();
             {
-                let transaction = connection.transaction().map_err(sqlite_error)?;
+                let transaction = self.connection.transaction().map_err(sqlite_error)?;
                 let mutation = (|| {
                     {
                         let _span =
@@ -1306,7 +1302,7 @@ impl CodeLexicalArtifactBuilderV1 {
                     transaction.commit().map_err(sqlite_error)
                 }
             }
-        })?;
+        }?;
         // Do not observe cancellation between durable COMMIT and publishing
         // its exact progress. The source callback must be able to advance its
         // cursor once the whole batch has committed.
@@ -1387,25 +1383,12 @@ impl CodeLexicalArtifactBuilderV1 {
                 )?,
             };
             verify_sealed_receipt_header(&receipt, &self.metadata_digest, &summary)?;
-            self.canonicalize_sealed_header()?;
+            self.seal_file()?;
             let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
             record_finalization_step(&step);
             return Ok(step);
         }
-        enter_resumable_journal(&self.connection)?;
-
         let pending_state = load_finalization_state(&self.connection)?;
-        super::select_temp_store(
-            &self.connection,
-            merge_wake_fits_memory_temp_store(
-                &self.connection,
-                pending_state
-                    .as_ref()
-                    .map(|state| (state.phase, state.section_ordinal)),
-                self.memory_budget_bytes
-                    .saturating_sub(ARTIFACT_SQLITE_CACHE_BYTES),
-            )?,
-        )?;
         if pending_state.is_none() {
             let Some(source) = source else {
                 return Err(CodeLexicalArtifactErrorV1::Contract(
@@ -1416,8 +1399,8 @@ impl CodeLexicalArtifactBuilderV1 {
             verify_staged_source_chain(&transaction, source, control)?;
             // The sorted pass and the count aggregation are the heaviest
             // sorter statements in finalization; run them under the same
-            // sorter CPU admission as the pre-digest index wakes.
-            super::with_builder_sorter_cpu_admission(&transaction, || {
+            // CPU admission as the pre-digest index wakes.
+            with_background_cpu_permit(|| {
                 let _span = tracing::trace_span!(
                     "query.artifact.finalization.derive_clone_fingerprint_postings"
                 )
@@ -1425,7 +1408,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 with_cancellable_sqlite_statement(&transaction, control, || {
                     derive_clone_fingerprint_postings(&transaction, control)
                 })
-            })??;
+            })?;
             let content_epoch = authenticated_authority_epoch(&transaction, source, control)?;
             install_base_freeze(&transaction)?;
             store_finalization_state(
@@ -1463,7 +1446,7 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         if state.phase != PersistedFinalizationPhaseV1::Digest {
-            super::with_builder_sorter_cpu_admission(&transaction, || {
+            with_background_cpu_permit(|| {
                 advance_pre_digest_work(
                     &transaction,
                     &mut state,
@@ -1473,7 +1456,7 @@ impl CodeLexicalArtifactBuilderV1 {
                     },
                     control,
                 )
-            })??;
+            })?;
             store_finalization_state(&transaction, &state)?;
             checkpoint(control)?;
             commit_finalization_transaction(transaction)?;
@@ -1596,29 +1579,22 @@ impl CodeLexicalArtifactBuilderV1 {
                 control,
             )
         }?;
-        // The resume state binds the building worktree's source; the sealed
-        // file keeps none of it, not even the space its row occupied.
+        // The resume state binds the building worktree's source, so the
+        // sealed file keeps no table of it. Its pages stay on the freelist:
+        // deletion is logical and never scrubs them.
         transaction
             .execute_batch("DROP TABLE finalization_state;")
             .map_err(sqlite_error)?;
-        release_free_pages(&transaction, control)?;
-        let file_size_bytes = sqlite_file_size(&transaction)?;
-        let receipt = new_verified_receipt(
-            self.metadata_digest.clone(),
+        let receipt = seal_receipt(
+            &transaction,
+            &self.metadata_digest,
             &summary,
-            sections,
-            clone_index_census,
-            file_size_bytes,
+            &sections,
+            &clone_index_census,
         )?;
-        transaction
-            .execute(
-                "UPDATE artifact_state SET receipt = ?1 WHERE singleton = 1",
-                params![padded_receipt(&receipt)?],
-            )
-            .map_err(sqlite_error)?;
         checkpoint(control)?;
         commit_finalization_transaction(transaction)?;
-        self.canonicalize_sealed_header()?;
+        self.seal_file()?;
         let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
         record_finalization_step(&step);
         Ok(step)
@@ -1630,7 +1606,6 @@ impl CodeLexicalArtifactBuilderV1 {
     /// sibling once, which then replaces the staging path. The sibling
     /// carries the finalization state, so a crash on either side of the
     /// rename resumes into this same rewrite.
-    #[cfg(unix)]
     fn rewrite_canonical_layout(
         &mut self,
         control: &dyn CodeIndexExecutionControlV1,
@@ -1642,63 +1617,50 @@ impl CodeLexicalArtifactBuilderV1 {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(private_staging_error(error)),
         }
+        remove_journal_sidecar(&compacting)?;
         // The staging WAL is named after the path the compacted file takes
         // over, so it must be folded away before the rename.
-        leave_resumable_journal(&self.connection)?;
-        let (mut target, compacted, _) =
-            create_private_builder_connection(&compacting, self.memory_budget_bytes)?;
+        fold_journal(&self.connection, &self.path)?;
+        let (mut target, compacted, compacted_identity) =
+            create_private_builder_connection(&compacting)?;
         with_cancellable_sqlite_statement(&self.connection, control, || {
             write_canonical_copy(&self.connection, &mut target, control)
         })?;
+        fold_journal(&target, &compacting)?;
         drop(target);
         compacted.sync_all().map_err(private_staging_error)?;
-        std::fs::rename(&compacting, &self.path).map_err(private_staging_error)?;
+        // No engine may hold either file across the rename: Windows refuses
+        // to replace an open file, and an engine left on the old file would
+        // keep a WAL named after the path. From here the compacted handle is
+        // the staging authority.
+        let placeholder = Connection::open_in_memory().map_err(sqlite_error)?;
+        drop(std::mem::replace(&mut self.connection, placeholder));
+        drop(std::mem::replace(&mut self.private_file, compacted));
+        replace_staging_file(&compacting, &self.path)?;
         sync_parent_directory(&self.path, DirectorySyncPolicy::Strict)
             .map_err(private_staging_error)?;
-        let (connection, private_file, file_identity) =
-            open_private_builder_connection(&self.path, self.memory_budget_bytes)?;
-        if file_identity != stable_file_identity(&compacted)? {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+        let connection = open_builder_connection(&self.path)?;
+        verify_staging_file_binding(&self.path, &compacted_identity).map_err(|_| {
+            CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact staging path changed while its compacted file was installed"
                     .to_owned(),
-            ));
-        }
+            )
+        })?;
         self.connection = connection;
-        self.private_file = private_file;
-        self.file_identity = file_identity;
+        self.file_identity = compacted_identity;
         Ok(())
     }
 
-    /// Windows refuses to rename onto a path this builder holds open, so the
-    /// file is rewritten in place.
-    #[cfg(windows)]
-    fn rewrite_canonical_layout(
-        &mut self,
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<(), CodeLexicalArtifactErrorV1> {
-        with_cancellable_sqlite_statement(&self.connection, control, || {
-            self.connection
-                .execute_batch("VACUUM;")
-                .map_err(sqlite_error)
-        })
-    }
-
-    /// SQLite's file change counter (header offset 24) and version-valid-for
-    /// number (offset 92) count commits, and its schema cookie (offset 40)
-    /// counts schema edits, which the layout rewrite carries forward. One
-    /// content staged through a different history (a cold build, or a
-    /// carried parent) differs only there. Once sealed no connection writes
-    /// the file again, and all three are set to one value.
-    fn canonicalize_sealed_header(&self) -> Result<(), CodeLexicalArtifactErrorV1> {
+    /// Leave the sealed artifact as one durable file. Its header needs no
+    /// rewrite: the canonical rewrite starts a fresh file, so the commit and
+    /// schema counters SQLite keeps there (offsets 24, 40 and 92) count the
+    /// same commits for one content whatever history staged it. The native
+    /// engine never advances the commit counters, and rewriting its schema
+    /// cookie behind a live engine fails that engine's next statement.
+    fn seal_file(&self) -> Result<(), CodeLexicalArtifactErrorV1> {
         self.verify_path_binding()?;
-        leave_resumable_journal(&self.connection)?;
-        let mut file = &self.private_file;
-        for offset in SQLITE_HEADER_HISTORY_OFFSETS {
-            file.seek(SeekFrom::Start(offset))
-                .and_then(|_| file.write_all(&SEALED_HEADER_HISTORY.to_be_bytes()))
-                .map_err(private_staging_error)?;
-        }
-        file.sync_all().map_err(private_staging_error)
+        fold_journal(&self.connection, &self.path)?;
+        self.private_file.sync_all().map_err(private_staging_error)
     }
 
     #[tracing::instrument(name = "query.artifact.finalize", level = "trace", skip_all)]
@@ -1744,7 +1706,6 @@ fn publish_initialized_staging(
     path: &Path,
     metadata: &CodeLexicalProjectionMetadataV1,
     metadata_digest: &ManifestDigest,
-    memory_budget_bytes: usize,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let initializing = initializing_staging_sibling(path)?;
     // An incarnation that exited inside initialization left a sibling that
@@ -1754,9 +1715,9 @@ fn publish_initialized_staging(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(private_staging_error(error)),
     }
+    remove_journal_sidecar(&initializing)?;
     let metadata_bytes = content_metadata_bytes(metadata)?;
-    let (mut connection, private_file, _) =
-        create_private_builder_connection(&initializing, memory_budget_bytes)?;
+    let (mut connection, private_file, _) = create_private_builder_connection(&initializing)?;
     let initialization = connection.transaction().map_err(sqlite_error)?;
     create_schema(&initialization)?;
     verify_layout_dependent_triggers(&initialization)?;
@@ -1778,11 +1739,12 @@ fn publish_initialized_staging(
         )
         .map_err(sqlite_error)?;
     initialization.commit().map_err(sqlite_error)?;
-    // SQLite names a rollback journal after the path its connection opened, so
-    // the initializing connection closes before the rename; appends run under a
-    // connection bound to the visible staging path. The sibling's commit did
-    // not sync, so this fsync is what makes the initialized state durable
-    // before it is named.
+    // A journal is named after the path its connection opened, so the
+    // committed state is folded into the sibling and the initializing
+    // connection closes before the rename; appends run under a connection
+    // bound to the visible staging path. This fsync makes the folded state
+    // durable before it is named.
+    fold_journal(&connection, &initializing)?;
     drop(connection);
     private_file
         .sync_all()
@@ -1886,11 +1848,6 @@ fn write_canonical_copy(
             .filter(move |(object, _, _)| object == kind)
             .map(|(_, name, sql)| (name.as_str(), sql.as_str()))
     };
-    // Dropped staging tables must leave the sealed file, as they left the
-    // staging file, so the copy keeps the staging file's vacuum mode.
-    target
-        .execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
-        .map_err(sqlite_error)?;
     let transaction = target.transaction().map_err(sqlite_error)?;
     for (_, sql) in of_kind("table") {
         transaction.execute_batch(sql).map_err(sqlite_error)?;
@@ -1999,7 +1956,6 @@ fn initializing_staging_sibling(path: &Path) -> Result<PathBuf, CodeLexicalArtif
 
 /// Named like the staging database's SQLite sidecars, so staging retirement
 /// and retention treat it as part of the same staging family.
-#[cfg(unix)]
 fn compacting_staging_sibling(path: &Path) -> Result<PathBuf, CodeLexicalArtifactErrorV1> {
     staging_sibling(path, "-compacting")
 }
@@ -2019,46 +1975,45 @@ fn staging_sibling(path: &Path, suffix: &str) -> Result<PathBuf, CodeLexicalArti
 
 fn create_private_builder_connection(
     path: &Path,
-    memory_budget_bytes: usize,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
     let private_file = create_private_file_retained(path)
         .map_err(|failure| private_staging_error(failure.into_error()))?;
-    open_bound_builder_connection(
-        path,
-        private_file,
-        BuilderDurabilityV1::Unpublished,
-        memory_budget_bytes,
-    )
+    open_bound_builder_connection(path, private_file)
 }
 
 fn open_private_builder_connection(
     path: &Path,
-    memory_budget_bytes: usize,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
     let private_file = open_private_file(path).map_err(private_staging_error)?;
-    open_bound_builder_connection(
-        path,
-        private_file,
-        BuilderDurabilityV1::Resumable,
-        memory_budget_bytes,
-    )
+    open_bound_builder_connection(path, private_file)
 }
 
 fn open_bound_builder_connection(
     path: &Path,
     private_file: File,
-    durability: BuilderDurabilityV1,
-    memory_budget_bytes: usize,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
     let identity = stable_file_identity(&private_file)?;
-    let connection = open_builder_connection(path, durability, memory_budget_bytes)?;
-    let rebound = open_private_file(path).map_err(private_staging_error)?;
-    if stable_file_identity(&rebound)? != identity {
+    let connection = open_builder_connection(path)?;
+    if path_file_identity(path)? != identity {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "lexical artifact staging path changed while its SQLite connection opened".to_owned(),
         ));
     }
     Ok((connection, private_file, identity))
+}
+
+/// Name the compacted sibling the staging path. Windows replaces a file only
+/// through the handle-based rename.
+fn replace_staging_file(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    #[cfg(windows)]
+    return tracedecay_private_fs::replace_file_atomically(source, destination)
+        .map(drop)
+        .map_err(private_staging_error);
+    #[cfg(not(windows))]
+    std::fs::rename(source, destination).map_err(private_staging_error)
 }
 
 fn stable_file_identity(
@@ -2086,12 +2041,41 @@ fn stable_file_identity(
     }
 }
 
+/// The identity of the file `path` names now. On Unix it is read with
+/// `lstat`: opening and closing a descriptor of the staging file would
+/// release every POSIX record lock this process holds on it, including the
+/// native engine's exclusive lock that keeps other processes out. Windows
+/// locks belong to their handle, so a checked open is safe there.
+fn path_file_identity(
+    path: &Path,
+) -> Result<StableArtifactFileIdentityV1, CodeLexicalArtifactErrorV1> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::symlink_metadata(path).map_err(private_staging_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(private_staging_error(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the staging path is not a regular file",
+            )));
+        }
+        Ok(StableArtifactFileIdentityV1 {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        stable_file_identity(&open_private_file(path).map_err(private_staging_error)?)
+    }
+}
+
 fn verify_staging_file_binding(
     path: &Path,
     expected: &StableArtifactFileIdentityV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let current = open_private_file(path).map_err(private_staging_error)?;
-    if stable_file_identity(&current)? != *expected {
+    if path_file_identity(path)? != *expected {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "lexical artifact staging path no longer names the opened private file".to_owned(),
         ));
@@ -3945,18 +3929,58 @@ pub(super) fn sqlite_file_size(connection: &Connection) -> Result<u64, CodeLexic
     })
 }
 
+/// Store the receipt, which binds the size of the file that holds it.
+///
+/// SQLite overwrites an equal-length receipt in place. The native engine
+/// writes the new overflow chain before it frees the old one, so the first
+/// write can grow the file. Every receipt has the same length, so the
+/// second write reuses the freed chain and the size settles.
+fn seal_receipt(
+    transaction: &Transaction<'_>,
+    metadata_digest: &ManifestDigest,
+    summary: &CodeLexicalSourceSummaryV1,
+    sections: &[CodeLexicalArtifactSectionDigestV1],
+    clone_index_census: &CodeLexicalCloneIndexCensusV1,
+) -> Result<VerifiedCodeLexicalArtifactV1, CodeLexicalArtifactErrorV1> {
+    const MAXIMUM_RECEIPT_WRITES: usize = 3;
+    let mut file_size_bytes = sqlite_file_size(transaction)?;
+    for _ in 0..MAXIMUM_RECEIPT_WRITES {
+        let receipt = new_verified_receipt(
+            metadata_digest.clone(),
+            summary,
+            sections.to_vec(),
+            clone_index_census.clone(),
+            file_size_bytes,
+        )?;
+        transaction
+            .execute(
+                "UPDATE artifact_state SET receipt = ?1 WHERE singleton = 1",
+                params![padded_receipt(&receipt)?],
+            )
+            .map_err(sqlite_error)?;
+        let written_size_bytes = sqlite_file_size(transaction)?;
+        if written_size_bytes == file_size_bytes {
+            return Ok(receipt);
+        }
+        file_size_bytes = written_size_bytes;
+    }
+    Err(CodeLexicalArtifactErrorV1::Contract(format!(
+        "lexical artifact size did not settle after {MAXIMUM_RECEIPT_WRITES} receipt writes"
+    )))
+}
+
 fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactErrorV1> {
     // Append tables (`*_runs`, `*_pages`, `field_stats_staging`) take batches
     // in page order; finalization derives each sealed serving table from its
-    // staging table and drops it. Incremental auto-vacuum must be chosen
-    // before the first table exists so those dropped pages leave the file.
-    // `row_dictionary`, `row_chunks`, and the three posting tables stay empty
-    // until then. The field statistics key is `INT`, not `INTEGER`, so it is
-    // not a rowid alias and a NULL field is refused instead of numbered.
+    // staging table and drops it. The dropped pages stay on the staging
+    // file's freelist until the canonical rewrite, which copies only live
+    // content. `row_dictionary`, `row_chunks`, and the three posting tables
+    // stay empty until then. The field statistics key is `INT`, not
+    // `INTEGER`, so it is not a rowid alias and a NULL field is refused
+    // instead of numbered.
     connection
         .execute_batch(
             "
-            PRAGMA auto_vacuum = INCREMENTAL;
             CREATE TABLE artifact_state (
                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
                 format_revision INTEGER NOT NULL,
@@ -4176,12 +4200,42 @@ fn verify_layout_dependent_triggers(
         .filter(|(present, _)| *present)
         .flat_map(|(_, layout)| layout.iter().copied())
     {
-        let expected = format!(
-            "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
-        );
+        let expected = stored_trigger_sql(
+            table,
+            &format!(
+                "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
+            ),
+        )?;
         verify_trigger_schema(connection, name, table, &expected)?;
     }
     Ok(())
+}
+
+/// The schema text the running engine stores for the trigger `ddl` on
+/// `table`. SQLite keeps the statement as written; the native engine renders
+/// it again from its syntax tree. Rendered once per statement per process.
+fn stored_trigger_sql(table: &str, ddl: &str) -> Result<String, CodeLexicalArtifactErrorV1> {
+    static RENDERED: std::sync::LazyLock<std::sync::Mutex<HashMap<String, String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let mut rendered = RENDERED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(sql) = rendered.get(ddl) {
+        return Ok(sql.clone());
+    }
+    let probe = Connection::open_in_memory().map_err(sqlite_error)?;
+    probe
+        .execute_batch(&format!("CREATE TABLE {table}(x); {ddl};"))
+        .map_err(sqlite_error)?;
+    let sql: String = probe
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'trigger'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    rendered.insert(ddl.to_owned(), sql.clone());
+    Ok(sql)
 }
 
 /// `(trigger name, table, operation, abort message)` of one immutability
@@ -4400,37 +4454,6 @@ fn verify_clone_rows(
     Ok(())
 }
 
-/// Whether a finalization wake runs with memory-backed temporary storage.
-/// A merge wake inserts every merged list into a serving table; when those
-/// inserts journal their statements under file-backed storage, the first
-/// journal to spill stays a temp file that every later insert of
-/// the wake rewrites (1.1 GB of `write()` for the 198k term lists of the
-/// 768-file journey). Memory storage keeps those journals in memory but also
-/// holds the merge's whole `ORDER BY` input, so a merge over staged runs is
-/// admitted only when those runs fit the sorter budget. The allowance per
-/// run covers the sorter's record header and list node.
-fn merge_wake_fits_memory_temp_store(
-    connection: &Connection,
-    pending_step: Option<(PersistedFinalizationPhaseV1, u64)>,
-    sorter_budget_bytes: usize,
-) -> Result<bool, CodeLexicalArtifactErrorV1> {
-    let Some((PersistedFinalizationPhaseV1::Indexes, ordinal)) = pending_step else {
-        return Ok(false);
-    };
-    let staged_runs = match ordinal {
-        1 => "SELECT coalesce(sum(length(term) + length(postings) + 64), 0) FROM term_posting_runs",
-        2 => "SELECT coalesce(sum(length(documents) + 64), 0) FROM exact_posting_runs",
-        // The n-gram rebuild orders its lists in Rust under its own budget.
-        3 => return Ok(true),
-        _ => return Ok(false),
-    };
-    let staged_bytes: i64 = connection
-        .query_row(staged_runs, [], |row| row.get(0))
-        .map_err(sqlite_error)?;
-    let staged_bytes = u64::try_from(staged_bytes).map_err(contract_number)?;
-    Ok(staged_bytes <= u64::try_from(sorter_budget_bytes).map_err(contract_number)?)
-}
-
 fn advance_pre_digest_work(
     transaction: &Transaction<'_>,
     state: &mut PersistedFinalizationStateV1,
@@ -4441,7 +4464,7 @@ fn advance_pre_digest_work(
     match state.phase {
         PersistedFinalizationPhaseV1::Statistics => {
             with_cancellable_sqlite_statement(transaction, control, || {
-                derive_statistics_step(transaction, state.section_ordinal, control)?;
+                derive_statistics_step(transaction, state.section_ordinal)?;
                 Ok(())
             })?;
             state.section_ordinal = state.section_ordinal.checked_add(1).ok_or_else(|| {
@@ -4617,7 +4640,6 @@ fn stage_field_totals(
 fn derive_statistics_step(
     transaction: &Transaction<'_>,
     ordinal: u64,
-    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     match ordinal {
         0 => {
@@ -4635,18 +4657,14 @@ fn derive_statistics_step(
             )
             }
              },
-        // Every staging table is gone; return its pages to the filesystem
-        // before the digest and the sealed size.
-        1 => { let _span = tracing::trace_span!("query.artifact.finalization.release_staging_pages").entered(); {
-            // The staged per-page cursors bind the building worktree's
-            // source state; the finalization state keeps the terminal one
-            // until the seal.
-            transaction
-                .execute_batch("DROP TABLE source_page_cursors;")
-                .map_err(sqlite_error)?;
-            release_free_pages(transaction, control)?;
-            Ok(())
-        } },
+        // The staged per-page cursors bind the building worktree's source
+        // state; the finalization state keeps the terminal one until the
+        // seal.
+        1 => {
+            let _span =
+                tracing::trace_span!("query.artifact.finalization.drop_source_cursors").entered();
+            transaction.execute_batch("DROP TABLE source_page_cursors;")
+        }
         _ => {
             return Err(CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact selected an unknown statistics step".to_owned(),
@@ -4654,26 +4672,6 @@ fn derive_statistics_step(
         }
     }
     .map_err(sqlite_error)?;
-    Ok(())
-}
-
-/// Return every free page to the filesystem. The pragma yields one row per
-/// released page, so it must be stepped to completion.
-fn release_free_pages(
-    transaction: &Transaction<'_>,
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let mut statement = transaction
-        .prepare("PRAGMA incremental_vacuum")
-        .map_err(sqlite_error)?;
-    let mut released = statement.query([]).map_err(sqlite_error)?;
-    let mut pages = 0usize;
-    while released.next().map_err(sqlite_error)?.is_some() {
-        if pages.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
-            checkpoint(control)?;
-        }
-        pages += 1;
-    }
     Ok(())
 }
 
@@ -6545,38 +6543,6 @@ mod tests {
         }
     }
 
-    /// A merge wake keeps its statement journals in memory only while its
-    /// staged runs, plus the per-run sorter allowance, fit the sorter budget;
-    /// the n-gram rebuild sorts in Rust, and every other wake keeps the
-    /// file-backed sorter.
-    #[test]
-    fn merge_wakes_use_memory_temp_storage_only_within_the_sorter_budget() {
-        let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE term_posting_runs(page_ordinal INTEGER, term TEXT, field INTEGER, postings BLOB);
-                 INSERT INTO term_posting_runs VALUES (0, 'alpha', 4, X'0102'), (1, 'beta', 4, X'03');
-                 CREATE TABLE exact_posting_runs(page_ordinal INTEGER, term_id INTEGER, field INTEGER, documents BLOB);
-                 INSERT INTO exact_posting_runs VALUES (0, 9, 1, X'010203');",
-            )
-            .unwrap();
-        let fits =
-            |step, budget| merge_wake_fits_memory_temp_store(&connection, step, budget).unwrap();
-        let indexes = |ordinal| Some((PersistedFinalizationPhaseV1::Indexes, ordinal));
-
-        assert!(fits(indexes(1), 140));
-        assert!(!fits(indexes(1), 139));
-        assert!(fits(indexes(2), 67));
-        assert!(!fits(indexes(2), 66));
-        assert!(fits(indexes(3), 0));
-        assert!(!fits(indexes(0), usize::MAX));
-        assert!(!fits(
-            Some((PersistedFinalizationPhaseV1::Digest, 1)),
-            usize::MAX
-        ));
-        assert!(!fits(None, usize::MAX));
-    }
-
     #[test]
     fn clone_payload_conflict_checks_cover_full_and_partial_batches() {
         let mut connection = Connection::open_in_memory().unwrap();
@@ -6658,10 +6624,11 @@ mod tests {
     }
 
     /// The tables that left the `WITHOUT ROWID` layout keep its key
-    /// semantics: each runs the same NULL-key, duplicate-key, UPSERT and
-    /// DELETE sequence against its rowid table and its `WITHOUT ROWID` twin,
-    /// and both must accept and refuse the same statements and end with the
-    /// same rows.
+    /// semantics: each runs a NULL-key, duplicate-key, UPSERT and DELETE
+    /// sequence and must accept and refuse exactly what a `WITHOUT ROWID`
+    /// table does, ending with only the upserted row. The expected outcomes
+    /// are spelled out because the native engine has no `WITHOUT ROWID`
+    /// twin to compare against.
     #[test]
     fn rowid_tables_keep_without_rowid_key_semantics() {
         const CONVERTED: [&str; 11] = [
@@ -6706,12 +6673,10 @@ mod tests {
                 .map(|(name, _, _)| name.as_str())
                 .collect::<Vec<_>>();
             // A table keyed on every column can only skip a conflicting row.
-            let conflict = columns
-                .iter()
-                .find(|(_, _, pk)| *pk == 0)
-                .map_or("DO NOTHING".to_owned(), |(payload, _, _)| {
-                    format!("DO UPDATE SET {payload} = excluded.{payload}")
-                });
+            let payload = columns.iter().find(|(_, _, pk)| *pk == 0);
+            let conflict = payload.map_or("DO NOTHING".to_owned(), |(payload, _, _)| {
+                format!("DO UPDATE SET {payload} = excluded.{payload}")
+            });
             let names = columns
                 .iter()
                 .map(|(name, _, _)| name.as_str())
@@ -6757,33 +6722,49 @@ mod tests {
                     row(3, Some(column))
                 ));
             }
-            let run = |ddl: &str| {
-                let connection = Connection::open_in_memory().expect("twin database");
-                connection.execute_batch(ddl).expect("create twin table");
-                let outcomes = statements
-                    .iter()
-                    .map(|statement| connection.execute(statement, []).ok())
-                    .collect::<Vec<_>>();
-                let rows = connection
-                    .prepare(&format!(
-                        "SELECT * FROM {table} ORDER BY {}",
-                        key.join(", ")
-                    ))
-                    .expect("prepare contents")
-                    .query_map([], |row| {
-                        (0..columns.len())
-                            .map(|index| row.get::<_, Value>(index))
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                    .expect("read contents")
-                    .collect::<Result<Vec<_>, _>>()
-                    .expect("collect contents");
-                (outcomes, rows)
-            };
-            let twin = format!("{ddl}{}", concat!(" WITHOUT", " ROWID"));
+            let connection = Connection::open_in_memory().expect("converted table database");
+            connection
+                .execute_batch(&ddl)
+                .expect("create converted table");
+            let outcomes = statements
+                .iter()
+                .map(|statement| connection.execute(statement, []).ok())
+                .collect::<Vec<_>>();
+            let rows = connection
+                .prepare(&format!("SELECT * FROM {table}"))
+                .expect("prepare contents")
+                .query_map([], |row| {
+                    (0..columns.len())
+                        .map(|index| row.get::<_, Value>(index))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .expect("read contents")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect contents");
+
+            // Insert, refuse the duplicate, insert, upsert (a keyed-only
+            // table skips the conflicting row), delete, then refuse a NULL
+            // in every key column.
+            let mut expected_outcomes = vec![
+                Some(1),
+                None,
+                Some(1),
+                Some(usize::from(payload.is_some())),
+                Some(1),
+            ];
+            expected_outcomes.extend(key.iter().map(|_| None));
+            let upserted = columns
+                .iter()
+                .map(|(_, kind, pk)| match (kind.as_str(), *pk > 0) {
+                    ("TEXT", _) => Value::Text("v2".to_owned()),
+                    ("BLOB", _) => Value::Blob(vec![0x02]),
+                    (_, true) => Value::Integer(2),
+                    (_, false) => Value::Integer(1),
+                })
+                .collect::<Vec<_>>();
             assert_eq!(
-                run(&ddl),
-                run(&twin),
+                (outcomes, rows),
+                (expected_outcomes, vec![upserted]),
                 "{table} must keep its WITHOUT ROWID key semantics"
             );
         }
@@ -6896,7 +6877,7 @@ mod tests {
                 vec![(1, 2 + 3 + 4), (3, 7), (7, 11)]
             };
             let transaction = connection.transaction().expect("statistics transaction");
-            derive_statistics_step(&transaction, 0, &ActiveControl).expect("derive statistics");
+            derive_statistics_step(&transaction, 0).expect("derive statistics");
             let actual = transaction
                 .prepare("SELECT field, total_length FROM field_stats ORDER BY field")
                 .expect("derived sums")
@@ -6920,7 +6901,8 @@ mod tests {
     /// SQLite's Unix VFS cannot open a full name of 512 bytes or more and
     /// says only "unable to open database file", which the scheduler kept
     /// retrying as an unavailable store. The builder names the limit as a
-    /// contract failure, which ends the build.
+    /// contract failure, which ends the build. The native engine opens the
+    /// held descriptor, so the same path builds.
     #[cfg(unix)]
     #[test]
     fn create_refuses_a_staging_path_sqlite_cannot_address() {
@@ -6932,7 +6914,13 @@ mod tests {
         std::fs::create_dir_all(&parent).expect("deep staging parent");
         let path = parent.join("staging.sqlite");
 
-        let error = match CodeLexicalArtifactBuilderV1::create(&path, test_metadata()) {
+        let created = CodeLexicalArtifactBuilderV1::create(&path, test_metadata());
+        if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Native {
+            assert_eq!(tracedecay_sql::max_database_path_bytes(), None);
+            created.expect("the native engine opens a long staging path");
+            return;
+        }
+        let error = match created {
             Ok(_) => panic!("SQLite cannot open a staging path this long"),
             Err(error) => error,
         };
@@ -7107,19 +7095,29 @@ mod tests {
             unique_payloads: 1,
             ..CodeLexicalCloneIndexCensusV1::default()
         };
-        let receipt = sourceless_test_receipt(
-            metadata_digest,
-            compute_section_digests(&connection, &ActiveControl).expect("section digests"),
-            sealed_census.clone(),
-            sqlite_file_size(&connection).expect("file size"),
-        )
-        .expect("sealed receipt");
-        connection
-            .execute(
-                "UPDATE artifact_state SET receipt = ?1 WHERE singleton = 1",
-                [padded_receipt(&receipt).expect("padded receipt")],
+        // The receipt binds the size of the file that stores it; rewrite it
+        // until the size it names is the size it leaves.
+        let receipt = loop {
+            let receipt = sourceless_test_receipt(
+                metadata_digest.clone(),
+                compute_section_digests(&connection, &ActiveControl).expect("section digests"),
+                sealed_census.clone(),
+                sqlite_file_size(&connection).expect("file size"),
             )
-            .expect("seal the receipt");
+            .expect("sealed receipt");
+            connection
+                .execute(
+                    "UPDATE artifact_state SET receipt = ?1 WHERE singleton = 1",
+                    [padded_receipt(&receipt).expect("padded receipt")],
+                )
+                .expect("seal the receipt");
+            if sqlite_file_size(&connection).expect("file size") == receipt.file_size_bytes() {
+                break receipt;
+            }
+        };
+        connection
+            .checkpoint(tracedecay_sql::CheckpointMode::Truncate)
+            .expect("fold the sealed fixture");
         drop(connection);
 
         let reader = CodeLexicalArtifactReaderV1::open_with_control(
@@ -7366,7 +7364,7 @@ mod tests {
             build_serving_index_step(&transaction, ordinal, &authority, &ActiveControl)
                 .expect("merge posting family");
         }
-        derive_statistics_step(&transaction, 1, &ActiveControl).expect("release staging pages");
+        derive_statistics_step(&transaction, 1).expect("drop source cursors");
         transaction.commit().expect("commit merges");
 
         for table in ["term_posting_runs", "exact_posting_runs"] {
@@ -7377,13 +7375,6 @@ mod tests {
         }
         verify_layout_dependent_triggers(&connection)
             .expect("sealed layout verifies without the staging tables");
-        let free_pages: i64 = connection
-            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
-            .expect("read freelist");
-        assert_eq!(
-            free_pages, 0,
-            "every page the dropped staging tables held leaves the file"
-        );
         let ngram_lists: i64 = connection
             .query_row("SELECT COUNT(*) FROM ngram_postings", [], |row| row.get(0))
             .expect("count ngram lists");
@@ -7648,10 +7639,7 @@ mod tests {
         symlink(&target, &linked).expect("link private target");
 
         assert!(matches!(
-            open_private_builder_connection(
-                &linked,
-                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-            ),
+            open_private_builder_connection(&linked),
             Err(CodeLexicalArtifactErrorV1::Contract(_))
         ));
     }
@@ -7661,11 +7649,8 @@ mod tests {
         let directory = tempfile::tempdir().expect("private staging directory");
         let artifact = directory.path().join("artifact.sqlite");
         let replacement = directory.path().join("replacement.sqlite");
-        let (connection, _retained, identity) = create_private_builder_connection(
-            &artifact,
-            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-        )
-        .expect("open artifact");
+        let (connection, _retained, identity) =
+            create_private_builder_connection(&artifact).expect("open artifact");
         drop(connection);
         drop(create_private_file_retained(&replacement).expect("create replacement"));
         std::fs::rename(&replacement, &artifact).expect("replace staged artifact");

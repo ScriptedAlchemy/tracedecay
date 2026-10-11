@@ -33,6 +33,19 @@ mod census;
 
 pub const ENGINE: Engine = Engine::Sqlite;
 
+/// `mxPathname` of SQLite's default VFS: the longest full pathname, in bytes,
+/// it opens. Its Unix VFS refuses a longer name and its Windows VFS silently
+/// truncates it.
+pub fn max_database_path_bytes() -> Option<usize> {
+    // SAFETY: `sqlite3_vfs_find` initializes SQLite on first use and returns
+    // either null or a pointer to a registered VFS that lives for the rest of
+    // the process; only its immutable `mxPathname` field is read.
+    let vfs = unsafe { rusqlite::ffi::sqlite3_vfs_find(std::ptr::null()) };
+    // SAFETY: a non-null `vfs` points at a registered, never-freed VFS.
+    let max_pathname = unsafe { vfs.as_ref() }?.mxPathname;
+    usize::try_from(max_pathname).ok()
+}
+
 pub mod types {
     pub use rusqlite::types::{
         FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Type, Value, ValueRef,

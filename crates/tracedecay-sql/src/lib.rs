@@ -20,7 +20,7 @@ pub use control::{
 pub use engine::{
     CachedStatement, Connection, DropBehavior, Error, InterruptHandle, MappedRows, OpenFlags,
     OptionalExtension, Params, Result, Row, Rows, Savepoint, Statement, ToSql, Transaction,
-    TransactionBehavior, params_from_iter, types,
+    TransactionBehavior, max_database_path_bytes, params_from_iter, types,
 };
 #[cfg(not(td_engine = "native"))]
 pub use sqlite::params;
