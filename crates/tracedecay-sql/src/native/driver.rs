@@ -142,6 +142,7 @@ impl From<super::Error> for Error {
                 LimboError::ReadOnly => ErrorKind::ReadOnly,
                 LimboError::SchemaUpdated | LimboError::SchemaConflict => ErrorKind::Schema,
                 LimboError::NotADB => ErrorKind::ForeignFormat,
+                LimboError::Corrupt(_) => ErrorKind::Corrupt,
                 _ => ErrorKind::Other,
             },
             super::Error::InvalidOperation(_)

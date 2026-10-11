@@ -188,7 +188,10 @@ fn sqlite_open_path(path: &Path) -> Result<PathBuf, CodeLexicalArtifactErrorV1> 
 
 fn sqlite_corrupt(error: tracedecay_sql::Error) -> CodeLexicalArtifactErrorV1 {
     match error.kind() {
-        ErrorKind::Corrupt => CodeLexicalArtifactErrorV1::Corrupt(error.to_string()),
+        // The native engine reports a damaged header as a foreign format.
+        ErrorKind::Corrupt | ErrorKind::ForeignFormat => {
+            CodeLexicalArtifactErrorV1::Corrupt(error.to_string())
+        }
         _ => CodeLexicalArtifactErrorV1::Io(error.to_string()),
     }
 }
