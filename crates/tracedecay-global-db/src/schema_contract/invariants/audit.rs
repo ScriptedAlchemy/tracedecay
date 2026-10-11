@@ -2724,7 +2724,8 @@ mod tests {
             "canonical-owner provenance must reuse the page authority instead of reading per output"
         );
         assert_eq!(
-            counting.issued("FROM sessions WHERE provider = ?1 AND session_id = ?2"),
+            counting
+                .issued("FROM sessions INDEXED BY sqlite_autoindex_sessions_1 WHERE provider = ?1"),
             0,
             "projected sessions must reuse the page authority instead of reading per output"
         );

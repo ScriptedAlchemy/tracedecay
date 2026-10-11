@@ -481,7 +481,8 @@ async fn session_project_key(
 ) -> Result<String, LcmError> {
     let mut rows = conn
         .query(
-            "SELECT project_key FROM sessions WHERE provider = ?1 AND session_id = ?2",
+            "SELECT project_key FROM sessions INDEXED BY sqlite_autoindex_sessions_1
+             WHERE provider = ?1 AND session_id = ?2",
             params![provider, session_id],
         )
         .await?;

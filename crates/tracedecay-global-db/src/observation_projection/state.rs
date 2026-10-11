@@ -382,7 +382,7 @@ pub(super) async fn read_session(
             "SELECT provider, session_id, project_key, project_path, title, started_at, ended_at,
                     transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
                     parent_tool_use_id
-             FROM sessions WHERE provider = ?1 AND session_id = ?2",
+             FROM sessions INDEXED BY sqlite_autoindex_sessions_1 WHERE provider = ?1 AND session_id = ?2",
             params![provider, session_id],
         )
         .await

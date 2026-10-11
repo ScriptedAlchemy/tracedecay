@@ -494,7 +494,7 @@ pub(super) async fn apply_session(
                 return Ok(());
             }
             conn.execute(
-                "UPDATE sessions
+                "UPDATE sessions INDEXED BY sqlite_autoindex_sessions_1
                  SET project_key = ?3, project_path = ?4, title = ?5, started_at = ?6,
                      ended_at = ?7, transcript_path = ?8, metadata_json = ?9,
                      parent_session_id = ?10, is_subagent = ?11, agent_id = ?12,

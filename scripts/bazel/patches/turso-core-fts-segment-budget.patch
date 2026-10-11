@@ -1,0 +1,29 @@
+--- a/index_method/fts/mod.rs
++++ b/index_method/fts/mod.rs
+@@ -132,6 +132,16 @@
+ /// Memory budget for Tantivy's per-segment writer arena.
+ pub const DEFAULT_MEMORY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+ 
++/// Tantivy sizes a segment writer's term tables from its memory budget, so
++/// the full budget allocates, zeroes and finally scans 2^19-entry tables for
++/// every statement flush, even a one-row INSERT. Size the budget by the
++/// documents being flushed; the tables still grow when a batch needs more.
++fn segment_memory_budget(documents: usize) -> usize {
++    documents
++        .saturating_mul(64 * 1024)
++        .clamp(1024 * 1024, DEFAULT_MEMORY_BUDGET_BYTES)
++}
++
+ /// Chunk size (512 KiB) for splitting segment files into backing rows.
+ pub const DEFAULT_CHUNK_SIZE: usize = 512 * 1024;
+ 
+@@ -1988,7 +1998,8 @@
+         self.register_tokenizers(&index);
+         let segment_id = self.mint_segment_id();
+         let segment = index.segment(index.new_segment_meta(segment_id, 0));
+-        let mut writer = SegmentWriter::for_segment(DEFAULT_MEMORY_BUDGET_BYTES, segment)
++        let mut writer =
++            SegmentWriter::for_segment(segment_memory_budget(self.doc_buffer.len()), segment)
+             .map_err(|e| build_dir.write_error(e, "FTS segment writer"))?;
+         let identity_base = self.mint_identity_base();
+         let mut added = 0u32;

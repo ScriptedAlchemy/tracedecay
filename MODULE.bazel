@@ -59,6 +59,16 @@ crate.annotation(
     version = "0.45.0",
 )
 
+# Native FTS builds one Tantivy segment per statement flush with term tables
+# sized for a 64 MiB budget, so each one-row INSERT into an FTS-indexed table
+# allocated and scanned megabytes
+# (benchmark_data/storage-concurrency/turso-bugs/fts-flush-sizes-tables-by-full-budget.md).
+crate.annotation(
+    crate = "turso_core",
+    patch_args = ["-p1"],
+    patches = ["//scripts:bazel/patches/turso-core-fts-segment-budget.patch"],
+)
+
 # .cargo/config.toml's [env] LIBSQLITE3_FLAGS, which Cargo hands every build
 # script and Bazel does not: bundled SQLite's worker-thread cap and disabled
 # memory status counters.
