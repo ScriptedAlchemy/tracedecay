@@ -27,7 +27,7 @@ impl ReadSnapshot {
 
     pub fn backend_kind(&self) -> super::BackendKind {
         match &self.runtime {
-            Runtime::Sqlite(_) => super::BackendKind::Sqlite,
+            Runtime::Sqlite(_) => super::BackendKind::EXACT_SQL,
             Runtime::Native(_) => super::BackendKind::NativeTurso,
         }
     }
