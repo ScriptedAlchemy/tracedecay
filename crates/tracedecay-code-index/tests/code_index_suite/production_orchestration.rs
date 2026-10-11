@@ -4565,6 +4565,59 @@ fn carried_forward_clone_bodies_admit_through_the_reused_sealed_segment() {
     );
 }
 
+/// A Python suite that is empty or only comments is a missing clone
+/// candidate. Emitting its zero-width span used to fail chunk identity
+/// (`clone_body_empty_span`) and refuse the whole generation (#3401). The
+/// stub stays a symbol; the neighboring function still publishes.
+#[test]
+fn empty_python_clone_bodies_do_not_refuse_the_generation() {
+    const PYTHON_SOURCE: &str = "\
+def pending():
+    # leftover from a generator
+
+def publish(value):
+    parsed = parse(value)
+    return validate(parsed)
+";
+    let mut request = request_at_path("file.empty-span.python", "src/hooks.py", 1_100_000);
+    request.snapshot.files[0].language = Some(id::<LanguageId>("python"));
+    request.snapshot.files[0].content_digest = content_digest(PYTHON_SOURCE.as_bytes());
+    request.snapshot.content_identity = content_digest(PYTHON_SOURCE.as_bytes());
+    request.captured_files[0].sanitized_bytes = Arc::from(PYTHON_SOURCE.as_bytes());
+
+    let generation = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("production owner")
+    .build_and_publish(request, &ActiveControl)
+    .expect("one empty Python suite must not refuse the generation");
+    let generation = cold_generation(&generation);
+    let names = generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| symbol.qualified_name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        names.iter().any(|name| name.ends_with("::pending")),
+        "the stub remains a symbol: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name.ends_with("::publish")),
+        "the neighboring function remains a symbol: {names:?}"
+    );
+    let bindings = sealed_clone_bindings(&generation);
+    assert!(
+        bindings
+            .values()
+            .flatten()
+            .all(|body| !body.body_span.is_empty()),
+        "published clone bodies must stay non-empty: {bindings:?}"
+    );
+}
+
 /// Every function body keeps a conservative and a rename clone-token stream
 /// for the life of the generation, so their resident form bounds what one
 /// index holds. On this 500-file fixture the generation retains 12,203,554
