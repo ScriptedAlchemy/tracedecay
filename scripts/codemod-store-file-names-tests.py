@@ -10,8 +10,8 @@ Covered shapes, where NAME is a legacy main file such as `global.db`:
   format!("dir/{x}/NAME", ...) and "dir/NAME" as a value
   "NAME" as a whole literal
 
-Assertion messages, raw strings, comments and sidecar names (`-wal`, `-shm`,
-`.host-admission`) are left for review by hand. Run from the repository root
+Assertion messages, `.contains("...")` text checks, raw strings, comments and
+sidecar names (`-wal`, `-shm`, `.host-admission`) are left for review by hand. Run from the repository root
 with the crate directories to rewrite.
 """
 
@@ -66,7 +66,9 @@ REWRITES = [
 
 def rewrite_line(line: str) -> str:
     stripped = line.lstrip()
-    if stripped.startswith("//") or 'r#"' in line:
+    # `.contains("...")` checks rendered text, such as guidance that must not
+    # name a retired path, so its literal stays as written.
+    if stripped.startswith("//") or 'r#"' in line or '.contains("' in line:
         return line
     for pattern, replacement in REWRITES:
         line = pattern.sub(replacement, line)
