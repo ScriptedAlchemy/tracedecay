@@ -37,5 +37,13 @@ pub enum BackendKind {
     NativeTurso,
 }
 
+impl BackendKind {
+    /// The dialect of the exact SQL runtime: the engine this build selected.
+    pub(crate) const EXACT_SQL: Self = match tracedecay_sql::ENGINE {
+        tracedecay_sql::Engine::Sqlite => Self::Sqlite,
+        tracedecay_sql::Engine::Native => Self::NativeTurso,
+    };
+}
+
 #[cfg(test)]
 mod native_tests;

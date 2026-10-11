@@ -1,5 +1,3 @@
-use std::time::{Duration, Instant};
-
 use tracedecay_rusqlite_runtime::{WriterActorError, WriterState};
 use tracedecay_store::{
     AdmissionConfigV1, CorruptionClassV1, OperationPriorityV1, RuntimeSubmitOutcomeV1,
@@ -129,16 +127,10 @@ fn executor_panic_faults_the_actor_and_releases_the_pending_request() {
         Err(WriterActorError::ReplyDropped)
     ));
 
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while Instant::now() < deadline {
-        let telemetry = writer.telemetry_snapshot();
-        if writer.state() == WriterState::Faulted
-            && telemetry.queue.queued_operations == 0
-            && telemetry.error_events >= 1
-            && telemetry.operations.admitted_operations == telemetry.operations.completed_operations
-        {
-            break;
-        }
+    // The reply drops while the worker unwinds; the fault is published after
+    // the unwind. Wait for that event itself: a wall-clock bound only measured
+    // how fast a loaded host schedules the unwinding thread.
+    while writer.state() != WriterState::Faulted {
         std::thread::yield_now();
     }
     assert_eq!(writer.state(), WriterState::Faulted);

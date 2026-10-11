@@ -42,6 +42,8 @@ pub enum CrashOp {
 pub enum CrashEffect {
     Kill,
     PowerLoss,
+    /// The `nth` operation fails with an I/O error and the process lives on.
+    Fail,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,17 +152,23 @@ impl Tracked {
 }
 
 /// Counts `op` on `tracked` and crashes the process when it is the armed one.
-fn before(tracked: &Tracked, op: CrashOp) {
+/// Under [`CrashEffect::Fail`] the armed operation instead fails.
+fn before(tracked: &Tracked, op: CrashOp) -> turso_core::Result<()> {
     let mut guard = ARMED.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(armed) = guard.as_mut() else {
-        return;
+        return Ok(());
     };
     if armed.plan.target != tracked.target || armed.plan.op != op {
-        return;
+        return Ok(());
     }
     armed.seen += 1;
-    if armed.seen < armed.plan.nth {
-        return;
+    if armed.seen != armed.plan.nth {
+        return Ok(());
+    }
+    if armed.plan.effect == CrashEffect::Fail {
+        return Err(turso_core::LimboError::InternalError(format!(
+            "crash io: injected {op:?} failure"
+        )));
     }
     if armed.plan.effect == CrashEffect::PowerLoss {
         for file in &armed.files {
@@ -215,9 +223,10 @@ impl CrashFile {
         Arc::new(Self { inner, tracked })
     }
 
-    fn write(&self, pos: u64, len: usize) {
-        before(&self.tracked, CrashOp::Write);
+    fn write(&self, pos: u64, len: usize) -> turso_core::Result<()> {
+        before(&self.tracked, CrashOp::Write)?;
         self.tracked.save(pos, len);
+        Ok(())
     }
 }
 
@@ -284,7 +293,7 @@ impl turso_core::File for CrashFile {
         buffer: Arc<Buffer>,
         c: Completion,
     ) -> turso_core::Result<Completion> {
-        self.write(pos, buffer.len());
+        self.write(pos, buffer.len())?;
         self.inner.pwrite(pos, buffer, c)
     }
     fn pwritev(
@@ -293,11 +302,11 @@ impl turso_core::File for CrashFile {
         buffers: Vec<Arc<Buffer>>,
         c: Completion,
     ) -> turso_core::Result<Completion> {
-        self.write(pos, buffers.iter().map(|buffer| buffer.len()).sum());
+        self.write(pos, buffers.iter().map(|buffer| buffer.len()).sum())?;
         self.inner.pwritev(pos, buffers, c)
     }
     fn sync(&self, c: Completion, sync_type: FileSyncType) -> turso_core::Result<Completion> {
-        before(&self.tracked, CrashOp::Sync);
+        before(&self.tracked, CrashOp::Sync)?;
         // The native Unix backend fsyncs before `sync` returns.
         let completion = self.inner.sync(c, sync_type)?;
         self.tracked.synced();

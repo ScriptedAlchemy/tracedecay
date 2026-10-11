@@ -125,7 +125,10 @@ fn preflight_is_read_only_and_fast_forward_apply_and_rollback_use_exact_ref_cas(
     let (source, destination) = fixture.setup_fast_forward();
     let refs_before = fixture.git(&["show-ref"]);
     let status_before = fixture.git(&["status", "--porcelain=v1"]);
-    let objects_before = fixture.git(&["count-objects", "-v"]);
+    // The object set, not `count-objects` sizes: those are st_blocks, which a
+    // filesystem with delayed allocation changes after writeback.
+    let objects = || fixture.git(&["cat-file", "--batch-all-objects", "--batch-check"]);
+    let objects_before = objects();
 
     let preview = preflight(
         &fixture,
@@ -136,7 +139,7 @@ fn preflight_is_read_only_and_fast_forward_apply_and_rollback_use_exact_ref_cas(
     assert_eq!(preview.disposition, GitNativePreflightDisposition::Eligible);
     assert_eq!(fixture.git(&["show-ref"]), refs_before);
     assert_eq!(fixture.git(&["status", "--porcelain=v1"]), status_before);
-    assert_eq!(fixture.git(&["count-objects", "-v"]), objects_before);
+    assert_eq!(objects(), objects_before);
 
     let authority = GitRepositoryAuthority::discover(fixture.path()).unwrap();
     let candidate = preview.candidate_tree.as_ref().unwrap();

@@ -381,8 +381,8 @@ impl Worker {
         }
         let opened_file_identity = match self.expected_file_identity {
             Some(expected) => {
-                let actual = match OpenedDatabaseFile::pin(&self.path) {
-                    Ok(opened) => opened.identity(),
+                let actual = match connection::current_identity(&self.path) {
+                    Ok(identity) => identity,
                     Err(error) => {
                         return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
                     }
@@ -449,8 +449,10 @@ impl Worker {
             eprintln!(
                 "[tracedecay] rusqlite writer worker panicked; writer is now faulted: {message}"
             );
-            state.store(WriterState::Faulted as u8, Ordering::Release);
+            // Settle the telemetry first: a caller that observes the fault
+            // reads final counts.
             telemetry.fault_unsettled();
+            state.store(WriterState::Faulted as u8, Ordering::Release);
         }
     }
 

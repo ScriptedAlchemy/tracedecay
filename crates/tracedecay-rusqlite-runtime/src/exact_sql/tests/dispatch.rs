@@ -270,7 +270,13 @@ fn execute_returning_commit_failure_rolls_back_and_releases_writer() {
     )
     .unwrap_err();
     assert!(
-        matches!(error, ExactSqlError::Sqlite { code: Some(19), .. }),
+        matches!(
+            error,
+            ExactSqlError::Sqlite {
+                kind: ErrorKind::Constraint,
+                ..
+            }
+        ),
         "{error:?}"
     );
     let rows = channel

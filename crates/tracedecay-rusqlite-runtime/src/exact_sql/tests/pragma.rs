@@ -16,8 +16,7 @@ fn mutating_no_argument_pragmas_are_denied() {
             matches!(
                 error,
                 ExactSqlError::Sqlite {
-                    code: Some(23),
-                    extended_code: Some(23),
+                    kind: ErrorKind::Denied,
                     ..
                 }
             ),

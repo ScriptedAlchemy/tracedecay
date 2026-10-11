@@ -49,12 +49,6 @@ impl RusqliteCheckpointDriver {
 }
 
 impl RusqliteCheckpointDriver {
-    pub(crate) fn disable_auto_checkpoint(&mut self) -> Result<(), RusqliteCheckpointError> {
-        self.connection
-            .pragma_update(None, "wal_autocheckpoint", 0_i64)
-            .map_err(Into::into)
-    }
-
     /// Sampling runs after every batch, inside `rusqlite.writer.checkpoint`,
     /// so it is measured apart from `rusqlite.wal_checkpoint`: a hot writer
     /// span with cold checkpoints means the per-commit NOOP probe itself is
