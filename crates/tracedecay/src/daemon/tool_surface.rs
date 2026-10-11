@@ -494,7 +494,7 @@ mod tests {
         message["result"]["tools"]
             .as_array()
             .expect("tools")
-            .to_vec()
+            .clone()
     }
 
     fn search_text(answer: &[String]) -> String {
