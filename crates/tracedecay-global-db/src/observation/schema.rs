@@ -45,7 +45,7 @@ const OBSERVATION_REPOSITORY_CAPTURE_DEDUPE_MIGRATION: &str =
 /// only for this rewrite; the released marker rows carry no capture id and are
 /// left alone.
 const REPOSITORY_CAPTURE_DEDUPE_SQL: &str = "
-    DROP TRIGGER IF EXISTS observation_repository_provenance_immutable_update;
+    DROP TRIGGER IF EXISTS main.observation_repository_provenance_immutable_update;
     INSERT OR IGNORE INTO observation_repository_captures (capture_id, capture_json)
     SELECT json_extract(capture_json, '$.capture_id'), json_extract(capture_json, '$.capture')
     FROM observation_repository_provenance
@@ -580,7 +580,7 @@ mod tests {
         };
         let released_marker = super::super::retention::PROVENANCE_RELEASED_MARKER;
         transaction
-            .execute_batch("DROP TRIGGER observation_repository_provenance_immutable_update")
+            .execute_batch("DROP TRIGGER main.observation_repository_provenance_immutable_update")
             .await
             .unwrap();
         // The provenance row points at an observation and an anchor, so seed

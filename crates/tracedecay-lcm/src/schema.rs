@@ -312,9 +312,9 @@ pub async fn rebuild_raw_fts(conn: &(impl Executor + ?Sized)) -> Option<()> {
         return Some(());
     }
     conn.execute_batch(
-        "DROP TRIGGER IF EXISTS lcm_raw_messages_fts_insert;
-         DROP TRIGGER IF EXISTS lcm_raw_messages_fts_delete;
-         DROP TRIGGER IF EXISTS lcm_raw_messages_fts_update;
+        "DROP TRIGGER IF EXISTS main.lcm_raw_messages_fts_insert;
+         DROP TRIGGER IF EXISTS main.lcm_raw_messages_fts_delete;
+         DROP TRIGGER IF EXISTS main.lcm_raw_messages_fts_update;
          DROP TABLE IF EXISTS lcm_raw_messages_fts;",
     )
     .await
@@ -787,7 +787,7 @@ mod tests {
             "lcm_raw_messages_fts_delete",
             "lcm_raw_messages_fts_update",
         ] {
-            conn.execute_batch(&format!("DROP TRIGGER {trigger}"))
+            conn.execute_batch(&format!("DROP TRIGGER main.{trigger}"))
                 .await
                 .map_err(|error| error.to_string())?;
             assert_eq!(
@@ -802,7 +802,7 @@ mod tests {
         }
 
         conn.execute_batch(
-            "DROP TRIGGER lcm_raw_messages_fts_update;
+            "DROP TRIGGER main.lcm_raw_messages_fts_update;
              CREATE TRIGGER lcm_raw_messages_fts_update
                  AFTER UPDATE ON lcm_raw_messages BEGIN
                      SELECT 1;

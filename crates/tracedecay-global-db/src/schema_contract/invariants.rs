@@ -16,7 +16,9 @@ pub(crate) mod test_fixture;
 mod triggers;
 
 #[cfg(test)]
-pub(crate) use triggers::SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL;
+pub(crate) use triggers::{
+    NATIVE_TRIGGER_GOLDEN, SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL, render_native_trigger_golden,
+};
 
 use audit::{
     AuditCheckpoint, AuditProgress, audit_checkpoint_is_plausible, ensure_audit_checkpoint_schema,

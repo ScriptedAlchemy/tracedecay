@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{BackendKind, QueryExecutor, params};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
@@ -11,7 +11,7 @@ use super::definitions::{
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, ActualTableMetadata, read_table_metadata,
 };
-use super::{normalize_trigger_sql, starts_with_ignore_ascii_case};
+use super::starts_with_ignore_ascii_case;
 
 const OPERATION: &str = "validate global database authority schema";
 
@@ -28,6 +28,25 @@ type GraphPublicationSchemaBuildResult =
 
 static EXPECTED_GRAPH_PUBLICATION_SCHEMA: LazyLock<GraphPublicationSchemaBuildResult> =
     LazyLock::new(build_expected_graph_publication_schema);
+
+static EXPECTED_NATIVE_GRAPH_PUBLICATION_SCHEMA: LazyLock<GraphPublicationSchemaBuildResult> =
+    LazyLock::new(|| {
+        let objects = tracedecay_runtime_core::db::migrations::native_final_schema_objects()
+            .map_err(|error| error.to_string())?;
+        Ok(objects
+            .filter(|(_, name, table, _)| belongs_to_graph_publication_namespace(name, table))
+            .map(|(object_type, name, table, sql)| {
+                (
+                    name.to_owned(),
+                    GraphPublicationSchemaObject {
+                        object_type: object_type.to_owned(),
+                        table: table.to_owned(),
+                        sql: sql.to_owned(),
+                    },
+                )
+            })
+            .collect())
+    });
 
 fn build_expected_graph_publication_schema() -> GraphPublicationSchemaBuildResult {
     let connection = rusqlite::Connection::open_in_memory()
@@ -372,10 +391,10 @@ async fn validate_trigger(
         )),
         None => None,
     };
-    if actual.as_ref().is_some_and(|(table, sql)| {
-        table.eq_ignore_ascii_case(trigger.table)
-            && normalize_trigger_sql(sql) == normalize_trigger_sql(trigger.create_sql)
-    }) {
+    if actual
+        .as_ref()
+        .is_some_and(|(table, sql)| trigger.matches(conn.backend_kind(), table, sql))
+    {
         Ok(())
     } else {
         Err(global_db_operation_message(
@@ -495,8 +514,11 @@ pub async fn validate_session_graph_publication_schema_contract(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<()> {
     let actual = read_graph_publication_inventory(conn).await?;
-    let expected = EXPECTED_GRAPH_PUBLICATION_SCHEMA
-        .as_ref()
+    let expected = match conn.backend_kind() {
+        BackendKind::Sqlite => &EXPECTED_GRAPH_PUBLICATION_SCHEMA,
+        BackendKind::NativeTurso => &EXPECTED_NATIVE_GRAPH_PUBLICATION_SCHEMA,
+    }
+    .as_ref()
         .map_err(|error| global_db_operation_message(OPERATION, error.clone()))?;
 
     for (name, expected_object) in expected {

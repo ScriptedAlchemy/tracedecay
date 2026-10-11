@@ -47,6 +47,23 @@ fn expected_inventory(backend: BackendKind) -> Result<&'static SchemaInventory> 
     .map_err(|error| database_error(error.clone()))
 }
 
+/// Every object of the native golden as `(type, name, table, sql)`. Schemas
+/// it embeds, such as graph publication, read their native text from here
+/// because Turso persists table DDL re-rendered from its parse tree.
+pub fn native_final_schema_objects()
+-> Result<impl Iterator<Item = (&'static str, &'static str, &'static str, &'static str)>> {
+    Ok(expected_inventory(BackendKind::NativeTurso)?
+        .iter()
+        .map(|(name, object)| {
+            (
+                object.object_type.as_str(),
+                name.as_str(),
+                object.table.as_str(),
+                object.sql.as_str(),
+            )
+        }))
+}
+
 /// The inventory of the owned-store engine compiled into this binary.
 fn compiled_engine_inventory() -> Result<&'static SchemaInventory> {
     expected_inventory(match tracedecay_sql::ENGINE {

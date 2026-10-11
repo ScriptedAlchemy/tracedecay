@@ -14,7 +14,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 mod final_shape;
 
 pub use final_shape::{
-    expected_final_schema_fingerprint, fingerprint_schema_objects,
+    expected_final_schema_fingerprint, fingerprint_schema_objects, native_final_schema_objects,
     render_expected_final_schema_markdown,
 };
 

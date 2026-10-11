@@ -212,7 +212,7 @@ const TRANSCRIPT_SCHEMA: &str = "
     BEGIN
         SELECT RAISE(ABORT, 'observability emission outbox identity is immutable');
     END;
-    DROP TRIGGER IF EXISTS observability_emission_outbox_no_delete;
+    DROP TRIGGER IF EXISTS main.observability_emission_outbox_no_delete;
     CREATE TABLE IF NOT EXISTS sessions (
         provider TEXT NOT NULL,
         session_id TEXT NOT NULL,
@@ -1564,15 +1564,35 @@ mod tests {
                 .authorized_long_lease_transaction()
                 .await
                 .expect("begin native schema install");
-            let refused = super::install_registered_schema_stages(
+            let installed = super::install_registered_schema_stages(
                 &transaction,
                 classification.configuration_fresh.as_ref(),
                 classification.temporal_admission,
                 classification.session_features,
                 force_exhaustive,
             )
-            .await
-            .expect("install every registered stage on native");
+            .await;
+            // Under `bz run`, the uncommitted install is the source of the
+            // native trigger golden, written before admission judges it.
+            if let Some(workspace) = std::env::var_os("BUILD_WORKSPACE_DIRECTORY") {
+                std::fs::write(
+                    std::path::Path::new(&workspace).join(
+                        "crates/tracedecay-global-db/src/schema_contract/invariants/native_triggers.json",
+                    ),
+                    crate::schema_contract::invariants::render_native_trigger_golden(&transaction)
+                        .await,
+                )
+                .expect("write native trigger golden");
+                return;
+            }
+            assert_eq!(
+                crate::schema_contract::invariants::render_native_trigger_golden(&transaction)
+                    .await,
+                crate::schema_contract::invariants::NATIVE_TRIGGER_GOLDEN,
+                "native trigger golden is stale; run \
+                 `bz run //crates/tracedecay-global-db:unit_test -- the_full_registered_stage_sequence`"
+            );
+            let refused = installed.expect("install every registered stage on native");
             assert!(refused.is_none(), "native install refused an authority");
             transaction.commit().await.expect("commit native schema");
             for sql in super::observation_projection::OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL
@@ -1997,10 +2017,10 @@ mod tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys = OFF;
-                 DROP TRIGGER IF EXISTS projection_queue_identity_insert_v1;
-                 DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
-                 DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
-                 DROP TRIGGER IF EXISTS session_query_cursor_keys_rotate_insert_v1;
+                 DROP TRIGGER IF EXISTS main.projection_queue_identity_insert_v1;
+                 DROP TRIGGER IF EXISTS main.session_query_cursor_keys_insert_guard_v1;
+                 DROP TRIGGER IF EXISTS main.session_query_cursor_keys_retire_update_v1;
+                 DROP TRIGGER IF EXISTS main.session_query_cursor_keys_rotate_insert_v1;
                  INSERT INTO projection_queue(observation_id, observation_sequence)
                  VALUES ('orphaned-observation', 1);
                  INSERT INTO session_query_cursor_keys (
@@ -2073,7 +2093,7 @@ mod tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys = OFF;
-                     DROP TRIGGER IF EXISTS projection_queue_identity_insert_v1;
+                     DROP TRIGGER IF EXISTS main.projection_queue_identity_insert_v1;
                      CREATE TABLE audit_parent (id INTEGER PRIMARY KEY);
                      CREATE TABLE audit_child (
                         id INTEGER PRIMARY KEY,
@@ -2129,8 +2149,8 @@ mod tests {
             let connection = rusqlite::Connection::open(&database_path).unwrap();
             connection
                 .execute_batch(
-                    "DROP TRIGGER IF EXISTS projection_queue_identity_insert_v1;
-                     DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;",
+                    "DROP TRIGGER IF EXISTS main.projection_queue_identity_insert_v1;
+                     DROP TRIGGER IF EXISTS main.session_query_cursor_keys_insert_guard_v1;",
                 )
                 .expect("drop guard triggers on an otherwise clean store");
         }
