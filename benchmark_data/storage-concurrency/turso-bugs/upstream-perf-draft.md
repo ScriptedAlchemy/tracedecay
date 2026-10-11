@@ -20,6 +20,13 @@ host load.
 | + temp-dir fix (base of the next rows) | 97.9 G | 61.2 G | 19.1 s | 17.0 s |
 | + unique-index seek reuse | 89.2 G | 61.4 G | 19.9 s | 16.0 s |
 | + one-copy parameter bind (TraceDecay driver) | 88.8 G | 65.9 G | 24.5 s | 19.6 s |
+| + no second reset at admit (TraceDecay driver) | 88.2 G | 58.6 G | 19.6 s | 14.1 s |
+| + write-tx schema cookie | 87.8 G | 57.8 G | 17.0 s | 14.3 s |
+| + shared IndexInfo | 87.2 G | 63.9 G | 19.2 s | 15.0 s |
+| + same-type key compare | 86.2 G | 55.2 G | 18.0 s | 15.2 s |
+
+The last four rows are tag `perf4`, where SQLite measured 61.0 G, 39.7 G,
+10.6 s and 8.9 s; see `per-execution-overhead.md`.
 
 Records: `benchmark_data/storage-concurrency/native-perf.jsonl`, tags
 `perf2-writer`, `perf3-baseline`, `perf3-seek` and `perf3-bind`. Wall times
