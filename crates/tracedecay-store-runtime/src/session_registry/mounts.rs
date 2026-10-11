@@ -11,7 +11,7 @@ use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
 use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
 use tracedecay_runtime_core::storage::{
-    SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, profile_sharded_data_root, read_store_manifest,
+    STORE_MANIFEST_FILENAME, profile_sharded_data_root, read_store_manifest,
     write_store_manifest_to_path,
 };
 #[cfg(any(test, feature = "test-helpers"))]
@@ -325,7 +325,11 @@ impl DaemonSessionRuntimeRegistryV1 {
             return Ok(());
         };
         // A project whose root is gone cannot open its store either.
-        if !store_root.join(SESSIONS_DB_FILENAME).is_file() || !manifest.project_root.is_dir() {
+        if !tracedecay_store::StoreFile::ProjectSessions
+            .path(&store_root)
+            .is_file()
+            || !manifest.project_root.is_dir()
+        {
             return Ok(());
         }
         let project_id = ProjectId::new(project_id)
@@ -400,7 +404,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         let mut databases = entries
             .map(|entry| {
                 entry
-                    .map(|entry| entry.path().join("remote.db"))
+                    .map(|entry| {
+                        tracedecay_store::StoreFile::RemoteNode
+                            .path(&entry.path())
+                            .into_path_buf()
+                    })
                     .map_err(|error| {
                         session_registry_error(
                             "discover registered Remote Brain node",

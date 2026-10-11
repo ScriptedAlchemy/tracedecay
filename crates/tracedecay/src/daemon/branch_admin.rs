@@ -1345,7 +1345,7 @@ impl StoreAdministration {
         broker: &tracedecay_host_admission::SharedHostAdmissionBroker,
     ) {
         let is_user_sessions = broker_path.file_name().and_then(|name| name.to_str())
-            == Some(tracedecay_sessions::runtime::USER_SESSIONS_DB_FILENAME);
+            == Some(tracedecay_store::StoreFile::ProfileSessions.file_name());
         if !is_user_sessions {
             return;
         }
@@ -2195,7 +2195,7 @@ mod tests {
     async fn profile_replay_uses_installed_hermes_callback_to_commit_receipt() {
         let temp = tempfile::tempdir().unwrap();
         let profile_root = temp.path().join("profile");
-        let database_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let database_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         let (runtime, _) =
             tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&database_path)
                 .unwrap();
@@ -2267,7 +2267,7 @@ mod tests {
         // trips the fail-closed private-root validation.
         let profile_root = temp.path().join("profile");
         let profile_identity = profile_identity::load_or_create(&profile_root).unwrap();
-        let database_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let database_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         let (meta_path, bytes_before) = write_future_spool_metadata(&database_path);
         let administration = StoreAdministration::default().with_profile_identity(profile_identity);
 

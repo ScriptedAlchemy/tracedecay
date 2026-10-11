@@ -69,7 +69,7 @@ impl RegisteredGlobalDbRetirementHarnessV1 {
         let scope =
             tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, nonce, label)
                 .expect("daemon database scope");
-        let path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         let source_authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
             &path,
             "open registered global-db retirement test runtime",
@@ -217,7 +217,7 @@ impl RegisteredGlobalDbTestRuntime {
                 }
             })?;
         let (profile_registered, profile_owner) = open_registered_test_database_with_identity(
-            &tracedecay_sessions::runtime::user_sessions_db_path(profile_root),
+            &tracedecay_store::StoreFile::ProfileSessions.path(profile_root),
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
             RegisteredTestWriteAuthority::DaemonScoped,
             profile_identity.clone(),
@@ -407,7 +407,7 @@ impl RegisteredGlobalDbHarness {
             tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, nonce, label)
                 .expect("daemon database scope");
         let (registered, database) = open_registered_test_database_with(
-            &tracedecay_sessions::runtime::user_sessions_db_path(&profile_root),
+            &tracedecay_store::StoreFile::ProfileSessions.path(&profile_root),
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
             RegisteredTestWriteAuthority::DaemonScoped,
         )
@@ -680,7 +680,7 @@ impl HostAdmissionTestRuntimeV1 {
         )
         .await?;
         let (profile_registered, profile_registered_owner) = open_registered_test_database_with(
-            &tracedecay_sessions::runtime::user_sessions_db_path(profile_root),
+            &tracedecay_store::StoreFile::ProfileSessions.path(profile_root),
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
             RegisteredTestWriteAuthority::DaemonScoped,
         )

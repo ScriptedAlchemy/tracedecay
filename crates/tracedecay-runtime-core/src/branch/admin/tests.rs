@@ -27,7 +27,11 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     std::fs::write(project_root.join("fixture"), b"fixture").unwrap();
     run_git(&project_root, &["add", "fixture"]);
     run_git(&project_root, &["commit", "-m", "fixture"]);
-    std::fs::write(tracedecay_dir.join(crate::config::DB_FILENAME), b"main").unwrap();
+    std::fs::write(
+        tracedecay_dir.join(tracedecay_store::StoreFile::Project.file_name()),
+        b"main",
+    )
+    .unwrap();
     let mut meta = crate::branch_meta::BranchMeta::new("main");
     meta.add_branch("feature", "main");
     crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
@@ -69,7 +73,7 @@ fn add_sealed_single_store_branch(tracedecay_dir: &Path, branch: &str) {
 #[test]
 fn selection_is_read_only_and_commit_retires_metadata_only() {
     let (_temp, project_root, tracedecay_dir) = fixture();
-    let main_db = tracedecay_dir.join(crate::config::DB_FILENAME);
+    let main_db = tracedecay_dir.join(tracedecay_store::StoreFile::Project.file_name());
     let prepared = prepare_remove(&project_root, &tracedecay_dir);
 
     assert!(
@@ -144,7 +148,11 @@ fn branch_admin_never_selects_default_branch_for_removal() {
     .err()
     .expect("default branch removal must fail closed");
     assert!(error.to_string().contains("cannot remove default branch"));
-    assert!(tracedecay_dir.join(crate::config::DB_FILENAME).exists());
+    assert!(
+        tracedecay_dir
+            .join(tracedecay_store::StoreFile::Project.file_name())
+            .exists()
+    );
 }
 
 #[test]
@@ -194,7 +202,7 @@ fn remove_all_carries_exact_single_store_provenance_for_daemon_retirement() {
 #[test]
 fn gc_collects_dead_branch_metadata_but_keeps_the_project_store() {
     let (_temp, project_root, tracedecay_dir) = fixture();
-    let main_db = tracedecay_dir.join(crate::config::DB_FILENAME);
+    let main_db = tracedecay_dir.join(tracedecay_store::StoreFile::Project.file_name());
     run_git(&project_root, &["branch", "live"]);
     let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
     meta.add_branch("topic", "main");

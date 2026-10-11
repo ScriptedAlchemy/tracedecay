@@ -43,7 +43,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-code-index__+eval-helpers_-default_-full_-lang-markdown_-lite_-medium__dcb2a215757",
+    name = "tracedecay-code-index__+eval-helpers_-default_-full_-lang-markdown_-lite_-medium__d6e31cfe8d8",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_index",
@@ -52,7 +52,7 @@ rust_library(
         + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//tests:fixtures"],
     version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__bare__de7622026f6", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db__+eval-helpers__d73c9d40925", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__d8d20f92705"],
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__bare__de7622026f6", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db__+eval-helpers__d8cb99f9e70", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__d8d5fe178ba"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
     rustc_flags = perf_rustc_flags(2),
@@ -60,7 +60,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-code-index__-default_-full_-medium__d680b19e435",
+    name = "tracedecay-code-index__-default_-full_-medium__d157ace50ff",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_index",
@@ -77,7 +77,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-code-index__-default_-medium__d9192ff4790",
+    name = "tracedecay-code-index__-default_-medium__d49f1922d9e",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_index",
@@ -94,24 +94,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-code-index__bare__d2ee4798c96",
-    srcs = glob(["src/**/*.rs"]),
-    crate_root = "src/lib.rs",
-    crate_name = "tracedecay_code_index",
-    edition = crate_edition(),
-    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
-    version = "0.1.0",
-    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__cfg_2583ec52__d66eddaf54a", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db", "//crates/tracedecay-runtime-core:tracedecay-runtime-core"],
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    aliases = aliases(normal = True),
-    rustc_flags = perf_rustc_flags(2),
-    crate_features = [],
-)
-
-rust_library(
-    name = "tracedecay-code-index__bare__deee65f835b",
+    name = "tracedecay-code-index__bare__d5c0b3c3b82",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_index",
@@ -121,6 +104,23 @@ rust_library(
         + ["//tests:fixtures"],
     version = "0.1.0",
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__bare__de7622026f6", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db", "//crates/tracedecay-runtime-core:tracedecay-runtime-core"],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    aliases = aliases(normal = True),
+    rustc_flags = perf_rustc_flags(2),
+    crate_features = [],
+)
+
+rust_library(
+    name = "tracedecay-code-index__bare__d62904bfc88",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "tracedecay_code_index",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
+        + ["//tests:fixtures"],
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__cfg_2583ec52__d66eddaf54a", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-graph-db:tracedecay-graph-db", "//crates/tracedecay-runtime-core:tracedecay-runtime-core"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
     rustc_flags = perf_rustc_flags(2),

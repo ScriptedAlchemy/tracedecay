@@ -541,6 +541,15 @@ fn scan_materialized_page(
             budget,
         ));
     }
+    crate::runtime::shared::require_foreign_sqlite_path(&source.source_path).map_err(
+        |message| {
+            scan_error(
+                "open OpenCode page snapshot",
+                &source.source_path,
+                std::io::Error::other(message),
+            )
+        },
+    )?;
     let reader = tracedecay_rusqlite_runtime::open_verified_read_snapshot(&source.source_path)
         .map_err(|error| scan_error("open OpenCode page snapshot", &source.source_path, error))?;
     if reader.file_identity() != source_file_identity {

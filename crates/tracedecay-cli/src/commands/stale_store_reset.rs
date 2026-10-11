@@ -6,12 +6,11 @@ use tracedecay_global_db::profile_registry_maintenance::verify_store_path_absent
 use tracedecay_hooks::{
     PRE_LEDGER_PENDING_WORK_DIR, PROFILE_HOOK_ADMISSIONS_DIR, PROJECT_HOOK_ADMISSIONS_DIR,
 };
-use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
+use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::storage::{
-    SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, profile_sharded_data_root, read_store_manifest,
-    validate_project_id,
+    STORE_MANIFEST_FILENAME, profile_sharded_data_root, read_store_manifest, validate_project_id,
 };
-use tracedecay_sessions::runtime::USER_SESSIONS_DB_FILENAME;
+use tracedecay_store::StoreFile;
 
 use super::storage::{
     ProfileOfflineAuthority, join_outcome_and_restore, remove_fixed_profile_path,
@@ -190,7 +189,7 @@ fn print_project_registrations(profile_root: &Path) -> Result<()> {
 /// What a reset deletes inside a store's directory.
 enum StoreMembers {
     /// A database and every entry named after it.
-    DatabaseFamily(&'static str),
+    DatabaseFamily(StoreFile),
     /// These exact directories.
     Directories(&'static [&'static str]),
 }
@@ -208,15 +207,15 @@ fn store_location(
     Ok(match target {
         ResettableStoreV1::ProfileAuthority => (
             profile_root.to_path_buf(),
-            StoreMembers::DatabaseFamily(GLOBAL_DB_FILENAME),
+            StoreMembers::DatabaseFamily(StoreFile::Profile),
         ),
         ResettableStoreV1::ProfileSessions => (
             profile_root.to_path_buf(),
-            StoreMembers::DatabaseFamily(USER_SESSIONS_DB_FILENAME),
+            StoreMembers::DatabaseFamily(StoreFile::ProfileSessions),
         ),
         ResettableStoreV1::ProjectSessions { project_id } => (
             project_root(project_id)?,
-            StoreMembers::DatabaseFamily(SESSIONS_DB_FILENAME),
+            StoreMembers::DatabaseFamily(StoreFile::ProjectSessions),
         ),
         ResettableStoreV1::ProfileHookAdmissions => (
             profile_root.to_path_buf(),
@@ -229,13 +228,12 @@ fn store_location(
     })
 }
 
-/// Removes `database` and every entry named after it in `directory`: its
-/// SQLite sidecars and spools (`<name>.db…`), its host-admission directory
-/// (`.<name>.db…`), and its session relation graph (`<name>.grafeo…`).
-fn remove_store_family(directory: &Path, database: &str) -> Result<usize> {
-    let stem = database.strip_suffix(".db").unwrap_or(database);
-    let owned_prefix = format!("{stem}.");
-    let hidden_prefix = format!(".{database}.");
+/// Removes `store` and every entry named after it in `directory`: its
+/// sidecars and spools (`<file>…`), its host-admission directory
+/// (`.<file>…`), and its session relation graph (`<stem>.grafeo…`).
+fn remove_store_family(directory: &Path, store: StoreFile) -> Result<usize> {
+    let owned_prefix = format!("{}.", store.stem());
+    let hidden_prefix = format!(".{}.", store.file_name());
     let entries = std::fs::read_dir(directory).map_err(|error| TraceDecayError::Config {
         message: format!("failed to list '{}': {error}", directory.display()),
     })?;
@@ -265,52 +263,57 @@ mod tests {
     fn store_family_removal_keeps_every_other_store_in_the_directory() {
         let directory = tempfile::TempDir::new().expect("store directory");
         let root = directory.path();
+        let sessions = StoreFile::ProjectSessions.file_name();
+        let project = StoreFile::Project.file_name();
+        let global = StoreFile::Profile.file_name();
         for file in [
-            "sessions.db",
-            "sessions.db-wal",
-            "sessions.db-shm",
-            "sessions.grafeo",
-            "tracedecay.db",
-            "tracedecay.db-wal",
-            "tracedecay.grafeo",
-            "store_manifest.json",
-            "user-sessions.db",
-            "global.db",
-            "global.db-wal",
-            "global.db-shm",
-            "profile-identity.json",
+            sessions.to_owned(),
+            format!("{sessions}-wal"),
+            format!("{sessions}-shm"),
+            "sessions.grafeo".to_owned(),
+            project.to_owned(),
+            format!("{project}-wal"),
+            "tracedecay.grafeo".to_owned(),
+            "store_manifest.json".to_owned(),
+            StoreFile::ProfileSessions.file_name().to_owned(),
+            global.to_owned(),
+            format!("{global}-wal"),
+            format!("{global}-shm"),
+            "profile-identity.json".to_owned(),
         ] {
-            std::fs::write(root.join(file), file).expect("write store file");
+            std::fs::write(root.join(&file), &file).expect("write store file");
         }
         for dir in [
-            ".sessions.db.host-admission",
-            "sessions.db.delivery-settlement-spool-v1",
-            "code-index-v1",
+            format!(".{sessions}.host-admission"),
+            format!("{sessions}.delivery-settlement-spool-v1"),
+            "code-index-v1".to_owned(),
         ] {
-            std::fs::create_dir(root.join(dir)).expect("create store directory");
-            std::fs::write(root.join(dir).join("entry"), dir).expect("write store entry");
+            std::fs::create_dir(root.join(&dir)).expect("create store directory");
+            std::fs::write(root.join(&dir).join("entry"), &dir).expect("write store entry");
         }
 
-        assert_eq!(remove_store_family(root, "sessions.db").unwrap(), 6);
-        assert_eq!(remove_store_family(root, GLOBAL_DB_FILENAME).unwrap(), 3);
+        assert_eq!(
+            remove_store_family(root, StoreFile::ProjectSessions).unwrap(),
+            6
+        );
+        assert_eq!(remove_store_family(root, StoreFile::Profile).unwrap(), 3);
 
         let mut kept: Vec<String> = std::fs::read_dir(root)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         kept.sort();
-        assert_eq!(
-            kept,
-            [
-                "code-index-v1",
-                "profile-identity.json",
-                "store_manifest.json",
-                "tracedecay.db",
-                "tracedecay.db-wal",
-                "tracedecay.grafeo",
-                "user-sessions.db",
-            ]
-        );
+        let mut expected = vec![
+            "code-index-v1".to_owned(),
+            "profile-identity.json".to_owned(),
+            "store_manifest.json".to_owned(),
+            project.to_owned(),
+            format!("{project}-wal"),
+            "tracedecay.grafeo".to_owned(),
+            StoreFile::ProfileSessions.file_name().to_owned(),
+        ];
+        expected.sort();
+        assert_eq!(kept, expected);
     }
 
     #[test]

@@ -1287,7 +1287,7 @@ async fn search_session_messages_filters_by_message_timestamp() {
 async fn pre_marker_sessions_table_is_refused_and_parent_columns_round_trip() {
     let tmp = TempDir::new().unwrap();
     let legacy_root = tmp.path().join("legacy").join(".tracedecay");
-    let legacy_db = tracedecay_sessions::runtime::user_sessions_db_path(&legacy_root);
+    let legacy_db = tracedecay_store::StoreFile::ProfileSessions.path(&legacy_root);
     std::fs::create_dir_all(legacy_db.parent().unwrap()).unwrap();
 
     let conn = rusqlite::Connection::open(&legacy_db).unwrap();

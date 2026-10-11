@@ -711,6 +711,7 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
 /// Opens a Hermes `state.db` strictly read-only so the sweep can never write
 /// to (or create) another agent's live store.
 pub async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String> {
+    crate::runtime::shared::require_foreign_sqlite_path(path)?;
     let owned = path.to_path_buf();
     let opened = tokio::task::spawn_blocking(move || {
         tracedecay_rusqlite_runtime::open_immutable_reader(&owned)

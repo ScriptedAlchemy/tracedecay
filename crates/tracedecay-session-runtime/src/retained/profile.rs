@@ -394,7 +394,7 @@ mod tests {
             profile_identity.profile_id().clone(),
         );
         let serving_db =
-            tracedecay_sessions::runtime::user_sessions_db_path(profile_identity.profile_root());
+            tracedecay_store::StoreFile::ProfileSessions.path(profile_identity.profile_root());
         let serving =
             profile_session_retrieval_serving_identity(profile_identity, &shard, &serving_db)
                 .expect("profile serving identity");
@@ -630,7 +630,7 @@ mod tests {
             profile_retained_connection_authority(&profile_identity, &identity).unwrap();
         // A directory at the canonical database locator makes only session
         // storage unusable; the independently mounted profile memory remains valid.
-        let session_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let session_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         std::fs::create_dir_all(&session_path).unwrap();
         assert!(registry.profile_sessions().await.is_err());
         let acquisitions = AtomicUsize::new(0);

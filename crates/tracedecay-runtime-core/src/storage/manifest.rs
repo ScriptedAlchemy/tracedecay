@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
-    PrivateStoreIo, ProfileShardValidationError, SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME,
+    PrivateStoreIo, ProfileShardValidationError, STORE_MANIFEST_FILENAME,
     STORE_MANIFEST_SCHEMA_VERSION, StoreKind, StoreLayout, StoreManifest, ValidatedProfileShard,
     has_sqlite_database_header, profile_sharded_data_root,
 };
+use tracedecay_store::StoreFile;
 
 pub fn write_store_manifest(layout: &StoreLayout) -> Result<StoreManifest> {
     let path = layout
@@ -87,7 +88,7 @@ impl ValidatedProfileShard {
         require_regular_artifact(&manifest_path, RequiredArtifactKind::File)?;
         validate_profile_shard_manifest(project_id, &canonical_store_root, &manifest_path)?;
 
-        let sessions_db_path = store_root.join(SESSIONS_DB_FILENAME);
+        let sessions_db_path = StoreFile::ProjectSessions.path(&store_root).into_path_buf();
         require_regular_artifact(&sessions_db_path, RequiredArtifactKind::File)?;
         match has_sqlite_database_header(&sessions_db_path) {
             Ok(true) => {}
@@ -179,7 +180,7 @@ fn validate_profile_shard_manifest(
     if manifest.store_kind != StoreKind::CodeProject {
         return Err(invalid(Reason::ManifestStoreKindMismatch));
     }
-    if manifest.sessions_db_relpath != Path::new(SESSIONS_DB_FILENAME) {
+    if manifest.sessions_db_relpath != Path::new(StoreFile::ProjectSessions.file_name()) {
         return Err(invalid(Reason::ManifestSessionsDbPathMismatch));
     }
     let manifest_data_root = manifest

@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::config;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -142,7 +141,9 @@ pub(crate) fn has_repository_profile_store(profile_root: &Path, project_root: &P
 pub(crate) fn has_path_local_profile_store(profile_root: &Path, project_root: &Path) -> bool {
     let data_root =
         profile_sharded_data_root(profile_root, &path_local_profile_project_id(project_root));
-    data_root.join(config::DB_FILENAME).exists()
+    data_root
+        .join(tracedecay_store::StoreFile::Project.file_name())
+        .exists()
 }
 
 pub fn default_profile_sharded_layout(
@@ -215,7 +216,9 @@ pub fn resolve_persisted_layout(
     // Nothing in the working tree carries identity.
     let project_id = default_profile_project_id(project_root);
     let data_root = profile_sharded_data_root(profile_root, &project_id);
-    let store_exists = data_root.join(config::DB_FILENAME).exists()
+    let store_exists = data_root
+        .join(tracedecay_store::StoreFile::Project.file_name())
+        .exists()
         || data_root.join(STORE_MANIFEST_FILENAME).is_file();
     if store_exists {
         return profile_sharded_layout(project_root, profile_root, &project_id).map(Some);

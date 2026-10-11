@@ -464,7 +464,9 @@ async fn mount_production_composition_projects(
 ) -> Result<HashMap<PathBuf, Arc<crate::mcp::McpServer>>> {
     let client_identity = DaemonClientIdentity {
         profile_root: profile_root.to_path_buf(),
-        global_db_path: profile_root.join("global.db"),
+        global_db_path: tracedecay_store::StoreFile::Profile
+            .path(profile_root)
+            .into_path_buf(),
     };
     let mut servers = HashMap::new();
     for (index, project_root) in project_roots.into_iter().enumerate() {

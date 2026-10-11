@@ -6,7 +6,6 @@ use std::path::{Component, Path, PathBuf};
 use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, set_owner_private_file_mode};
 
-use crate::config;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[cfg(windows)]
@@ -14,9 +13,8 @@ use super::DURABLE_REMOVAL_TOMBSTONE_PREFIX;
 use super::{
     ActiveProjectContext, BRANCH_META_FILENAME, DurableAtomicWritePhase, GraphScopeId,
     PrivateStoreIo, ProjectIdentity, ProjectPath, QueryTarget, RESPONSE_HANDLES_DIRECTORY,
-    SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath, StoreKind,
-    StoreLayout, StoreManifest, inject_durable_atomic_write_fault,
-    inject_durable_namespace_sync_fault,
+    STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath, StoreKind, StoreLayout,
+    StoreManifest, inject_durable_atomic_write_fault, inject_durable_namespace_sync_fault,
 };
 
 impl StoreManifest {
@@ -870,9 +868,13 @@ impl StoreLayout {
         data_root: PathBuf,
         manifest_filename: Option<&str>,
     ) -> Self {
-        let graph_db_path = data_root.join(config::DB_FILENAME);
+        let graph_db_path = tracedecay_store::StoreFile::Project
+            .path(&data_root)
+            .into_path_buf();
         let branch_meta_path = data_root.join(BRANCH_META_FILENAME);
-        let sessions_db_path = data_root.join(SESSIONS_DB_FILENAME);
+        let sessions_db_path = tracedecay_store::StoreFile::ProjectSessions
+            .path(&data_root)
+            .into_path_buf();
         let response_handle_root = data_root.join(RESPONSE_HANDLES_DIRECTORY);
         let lcm_payload_root = data_root.join("lcm-payloads");
         let dashboard_root = data_root.join("dashboard");

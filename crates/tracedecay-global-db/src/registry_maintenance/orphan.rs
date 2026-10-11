@@ -1,5 +1,5 @@
 use super::*;
-use tracedecay_runtime_core::config::DB_FILENAME;
+use tracedecay_store::StoreFile;
 
 pub fn inspect_profile_store_orphans(
     profile_root: &Path,
@@ -333,7 +333,7 @@ fn reconstruct_graph_scopes(
             ));
         }
     };
-    let graph_db_path = branch_dir.join(DB_FILENAME);
+    let graph_db_path = StoreFile::Project.path(&branch_dir);
     if strip_profile_root(profile_root, &graph_db_path).is_none() {
         return invalid(format!(
             "project graph database '{}' is missing or escapes profile root",
@@ -424,11 +424,11 @@ mod tests {
             issues,
             vec![format!(
                 "project graph database '{}' is missing or escapes profile root",
-                data_root.join(DB_FILENAME).display()
+                StoreFile::Project.path(&data_root).display()
             )]
         );
 
-        fs::write(data_root.join(DB_FILENAME), b"graph").unwrap();
+        fs::write(StoreFile::Project.path(&data_root), b"graph").unwrap();
         let (default_branch, scopes, issues) =
             reconstruct_graph_scopes(&branch_meta_path, "store", "project", profile.path());
         assert_eq!(default_branch.as_deref(), Some("main"));

@@ -22,8 +22,12 @@ const MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_ENTRIES: usize = 4_096;
 const DOCTOR_TEXT_LIMIT: usize = 512;
 
 fn permits_synchronous_session_retention_backlog(database_path: &Path) -> bool {
-    ["", "-wal", "-shm"]
-        .into_iter()
+    std::iter::once("")
+        .chain(
+            tracedecay_store::StoreFile::SIDECAR_SUFFIXES
+                .iter()
+                .copied(),
+        )
         .try_fold(0_u64, |total, suffix| {
             let mut path = database_path.as_os_str().to_os_string();
             path.push(suffix);

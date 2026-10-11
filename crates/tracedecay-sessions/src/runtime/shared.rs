@@ -55,6 +55,30 @@ impl SqliteReadConn {
     }
 }
 
+/// Refuses a path under a TraceDecay data root, so the foreign `SQLite`
+/// adapter never opens a TraceDecay-owned store. A data root is a
+/// `.tracedecay` directory or any directory holding a profile identity.
+pub fn require_foreign_sqlite_path(path: &Path) -> Result<(), String> {
+    use tracedecay_runtime_core::config::TRACEDECAY_DIR;
+    use tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME;
+
+    let canonical =
+        tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(path);
+    for ancestor in canonical.ancestors().skip(1) {
+        if ancestor.file_name() == Some(std::ffi::OsStr::new(TRACEDECAY_DIR))
+            || ancestor.join(PROFILE_IDENTITY_FILENAME).is_file()
+        {
+            return Err(format!(
+                "'{}' is under the TraceDecay data root '{}'; foreign SQLite readers never open \
+                 TraceDecay stores",
+                path.display(),
+                ancestor.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Generic per-transcript backlog threshold for warning that automatic
 /// session transcript catch-up may not drain recall transcripts quickly enough.
 pub const SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES: u64 = 2 * 1024 * 1024;
@@ -860,6 +884,7 @@ mod tests {
     use super::ProjectRootMatcher;
     use super::ProjectRootMatcherCache;
     use super::path_identity_key;
+    use super::require_foreign_sqlite_path;
     use super::usage_counters_from;
 
     static MATCHER_CACHE_RESOLVER_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -1078,5 +1103,37 @@ mod tests {
         assert_eq!(usage["output_tokens"], 0);
         assert_eq!(usage["cache_read_input_tokens"], 456);
         assert_eq!(usage["total_tokens"], 456);
+    }
+
+    /// Defect caught: the foreign adapter opening a TraceDecay-owned store,
+    /// whether the data root is the default `.tracedecay` directory or a
+    /// relocated profile identified by its identity record.
+    #[test]
+    fn foreign_sqlite_paths_under_a_tracedecay_data_root_are_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let default_root = home.join(".tracedecay");
+        let relocated = home.join("relocated");
+        let shard = relocated.join("projects").join("proj_a");
+        std::fs::create_dir_all(&default_root).unwrap();
+        std::fs::create_dir_all(&shard).unwrap();
+        std::fs::write(
+            relocated.join(tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME),
+            b"{}",
+        )
+        .unwrap();
+
+        for owned in [
+            default_root.join("global.db"),
+            shard.join("sessions.db"),
+            relocated.join("missing").join("user-sessions.db"),
+        ] {
+            assert!(
+                require_foreign_sqlite_path(&owned).is_err(),
+                "{} must be refused",
+                owned.display()
+            );
+        }
+        assert!(require_foreign_sqlite_path(&home.join(".hermes").join("state.db")).is_ok());
     }
 }

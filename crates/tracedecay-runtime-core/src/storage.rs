@@ -19,7 +19,6 @@ pub const DAEMON_AUTHORITY_LOCK_FILE: &str = "daemon-authority.lock";
 /// and record beneath the profile root. On other platforms the authority
 /// state lives directly in the profile root.
 pub const DAEMON_AUTHORITY_DIRECTORY: &str = "daemon-authority";
-pub const SESSIONS_DB_FILENAME: &str = "sessions.db";
 pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
 /// Directory holding truncated tool responses: under an enrolled project's
 /// store shard, or directly under the profile root for any other checkout.
@@ -229,8 +228,11 @@ pub fn classify_project_storage(
 /// directory: the working-tree enrollment marker and the repo-local config and
 /// graph store. Current identity lives under `.git/` and every store lives in
 /// the profile, so nothing reads these.
-const RETIRED_CHECKOUT_LAYOUT_FILES: [&str; 3] =
-    ["enrollment.json", "config.json", config::DB_FILENAME];
+const RETIRED_CHECKOUT_LAYOUT_FILES: [&str; 3] = [
+    "enrollment.json",
+    "config.json",
+    tracedecay_store::StoreFile::Project.legacy_names()[0],
+];
 
 /// The checkout-local `.tracedecay/` directory when it still carries the
 /// retired layout. The profile root is never a checkout layout, even when a
@@ -332,7 +334,10 @@ pub fn classify_registry_storage_fields(
                 })
             },
         );
-        let status = if data_root.join(config::DB_FILENAME).exists() {
+        let status = if data_root
+            .join(tracedecay_store::StoreFile::Project.file_name())
+            .exists()
+        {
             ProjectStorageStatus::ProfileSharded
         } else if manifest_exists {
             ProjectStorageStatus::ManifestReconstructable
@@ -493,6 +498,7 @@ pub struct PrivateStoreIo;
 
 mod identity;
 mod layout;
+mod legacy_families;
 mod manifest;
 mod paths_and_io;
 mod profile_identity;
@@ -510,6 +516,7 @@ pub use layout::{
     resolve_persisted_layout,
 };
 pub(crate) use layout::{has_path_local_profile_store, has_repository_profile_store};
+pub(crate) use legacy_families::delete_legacy_store_families;
 pub use manifest::{read_store_manifest, write_store_manifest, write_store_manifest_to_path};
 pub use paths_and_io::{
     acquire_sidecar_lock_blocking, append_lock_path, reject_symlink_components,

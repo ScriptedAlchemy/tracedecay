@@ -240,7 +240,10 @@ async fn run_profile_observability_retention(
                 log_daemon_event(
                     "retention_observability_analytics",
                     &[
-                        ("store", "global.db".to_owned()),
+                        (
+                            "store",
+                            tracedecay_store::StoreFile::Profile.file_name().to_owned(),
+                        ),
                         ("expired_detail", receipt.expired_detail.to_string()),
                         ("expired_rollup", receipt.expired_rollup.to_string()),
                     ],

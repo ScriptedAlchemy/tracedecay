@@ -140,7 +140,7 @@ pub(super) async fn bind_authenticated_profile_identity(
         // Binding the connection to it lets every request on it answer the
         // typed refusal instead of closing without a frame.
         Err(error) if error.is_store_reset_required() => authority::canonical_identity_path(
-            &profile_root.join(tracedecay_runtime_core::config::GLOBAL_DB_FILENAME),
+            &profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
         )?,
         Err(error) => return Err(error),
     };

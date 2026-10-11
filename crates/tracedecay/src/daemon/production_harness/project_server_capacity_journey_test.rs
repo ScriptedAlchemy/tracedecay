@@ -131,7 +131,7 @@ async fn seed_project_sessions_pending_convergence(
         profile_root,
         project_id.as_str(),
     )
-    .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
+    .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     std::fs::create_dir_all(sessions_path.parent().expect("session database parent"))
         .expect("session database directory");
     tracedecay_global_db::register_registered_schema_installer();
@@ -571,7 +571,7 @@ async fn shut_down_composition_releases_its_session_stores_for_an_immediate_reop
     let stores = [
         harness.profile_root().join("global.db"),
         harness.profile_root().join("user-sessions.db"),
-        project_data_root.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME),
+        project_data_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
         project_data_root.join("tracedecay.db"),
     ];
     harness.shutdown().await;

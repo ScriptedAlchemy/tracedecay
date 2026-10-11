@@ -1257,7 +1257,7 @@ mod refused_store_invalidation_tests {
     fn seed_refused_store(profile_root: &Path, project_root: &Path) -> PathBuf {
         let data_root = store_data_root(profile_root, project_root);
         std::fs::create_dir_all(&data_root).unwrap();
-        let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
+        let db_path = data_root.join(tracedecay_store::StoreFile::Project.file_name());
         std::fs::write(&db_path, b"refused-store-stand-in").unwrap();
         db_path
     }

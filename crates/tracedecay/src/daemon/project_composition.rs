@@ -213,7 +213,7 @@ async fn release_capacity_retired_stores(stores: CapacityRetirementStores) -> Re
         .await?;
     let project_sessions_path = owner
         .store_root
-        .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     administration
         .git_index_transaction_services()
         .retire_project_database(&project_id, &project_sessions_path)

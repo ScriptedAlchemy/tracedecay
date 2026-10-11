@@ -1449,7 +1449,9 @@ pub async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
 }
 
 pub fn isolated_lcm_db_path(tmp: &TempDir) -> std::path::PathBuf {
-    tracedecay_sessions::runtime::user_sessions_db_path(&tmp.path().join(".tracedecay"))
+    tracedecay_store::StoreFile::ProfileSessions
+        .path(&tmp.path().join(".tracedecay"))
+        .into_path_buf()
 }
 
 /// Opaque retained profile-session runtime for integration fixtures.
@@ -1658,7 +1660,7 @@ impl LcmTestStore<'_> {
 
 pub async fn open_lcm_db(tmp: &TempDir) -> LcmTestRuntime {
     let profile_root = tmp.path().join(".tracedecay");
-    let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+    let db_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
     if !db_path.exists() {
         seed_lcm_db_from_template(&db_path).await;
     }

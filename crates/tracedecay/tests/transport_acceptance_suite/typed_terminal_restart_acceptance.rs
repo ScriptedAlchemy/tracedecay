@@ -110,7 +110,7 @@ fn make_store_reset_required(home: &Path, project: &Path) {
         &home.join(".tracedecay"),
         &tracedecay_runtime_core::storage::default_profile_project_id(project),
     );
-    let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
+    let db_path = data_root.join(tracedecay_store::StoreFile::Project.file_name());
     assert!(
         db_path.is_file(),
         "tracedecay init should have created the project store at {}",

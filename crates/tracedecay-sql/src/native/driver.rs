@@ -129,6 +129,13 @@ impl From<super::Error> for Error {
                 LimboError::Interrupt => ErrorKind::Interrupted,
                 LimboError::ReadOnly => ErrorKind::ReadOnly,
                 LimboError::SchemaUpdated | LimboError::SchemaConflict => ErrorKind::Schema,
+                // turso's exclusive per-process file lock has no typed refusal;
+                // its message is the only mark of another process's ownership.
+                LimboError::LockingError(message)
+                    if message.contains("locked by another process") =>
+                {
+                    ErrorKind::OwnedElsewhere
+                }
                 _ => ErrorKind::Other,
             },
             super::Error::InvalidOperation(_)

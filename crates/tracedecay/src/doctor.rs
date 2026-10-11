@@ -907,7 +907,7 @@ fn database_recovery_guidance(db_path: &Path) -> String {
     let mut graph_dirty = db_path.as_os_str().to_os_string();
     graph_dirty.push(".dirty");
     let graph_dirty = PathBuf::from(graph_dirty);
-    let sessions_path = data_root.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
+    let sessions_path = data_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name());
 
     format!(
         "First stop all TraceDecay daemon and MCP processes. No files were changed.\n\

@@ -6688,6 +6688,7 @@ dependencies = [
  "tracedecay-session-memory",
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",
+ "tracedecay-store",
  "tracedecay-store-runtime",
  "tracedecay-tool-catalog",
  "tracing",
@@ -7711,6 +7712,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tracedecay-domain",
+ "tracedecay-sql",
  "tracedecay-temporal-query",
  "tracing",
 ]

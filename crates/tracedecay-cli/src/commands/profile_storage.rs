@@ -241,7 +241,7 @@ fn reset_refused_project_graph_store(
 ) -> tracedecay_domain::errors::Result<ResetProjectGraphStoreOutcome> {
     let data_root =
         tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
-    let graph_db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
+    let graph_db_path = data_root.join(tracedecay_store::StoreFile::Project.file_name());
     let canonical_schema_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION;
     let nothing_refused = ResetProjectGraphStoreOutcome {
         data_root: data_root.clone(),
@@ -607,7 +607,7 @@ mod reset_project_store_tests {
     ) -> PathBuf {
         let data_root =
             tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
-        let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
+        let db_path = data_root.join(tracedecay_store::StoreFile::Project.file_name());
         write_graph_db_with_user_version(&db_path, version);
         db_path
     }
@@ -741,7 +741,7 @@ mod reset_project_store_tests {
             "proj_not_sqlite",
         );
         std::fs::create_dir_all(&data_root).unwrap();
-        let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
+        let db_path = data_root.join(tracedecay_store::StoreFile::Project.file_name());
         std::fs::write(&db_path, b"not a database").unwrap();
 
         let error =
@@ -776,7 +776,7 @@ mod reset_project_store_tests {
                     &profile_root,
                     "proj_absent"
                 )
-                .join(tracedecay_runtime_core::config::DB_FILENAME)
+                .join(tracedecay_store::StoreFile::Project.file_name())
                 .display()
             )
         );
@@ -814,7 +814,7 @@ mod reset_project_store_tests {
                     &profile_root,
                     "proj_absent"
                 )
-                .join(tracedecay_runtime_core::config::DB_FILENAME)
+                .join(tracedecay_store::StoreFile::Project.file_name())
                 .display()
             )
         );

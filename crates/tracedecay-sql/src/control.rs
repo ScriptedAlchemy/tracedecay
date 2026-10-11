@@ -21,6 +21,9 @@ pub enum ErrorKind {
     Denied,
     NoRows,
     Unsupported,
+    /// Another process holds the store's exclusive lock. The store is
+    /// unavailable to this process; it is not busy and retrying is futile.
+    OwnedElsewhere,
     Other,
 }
 

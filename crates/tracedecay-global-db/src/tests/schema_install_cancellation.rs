@@ -36,7 +36,9 @@ impl EmptyStore {
             "schema install cancellation",
         )
         .unwrap();
-        let path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let path = tracedecay_store::StoreFile::ProfileSessions
+            .path(&profile_root)
+            .into_path_buf();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::File::create(&path).unwrap();
         Self {

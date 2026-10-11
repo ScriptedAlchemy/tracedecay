@@ -81,6 +81,12 @@ fn inspect_database(
     if !budget.checkpoint() {
         return Ok((OpenedOpenCodeDatabase::Stopped, budget));
     }
+    if crate::runtime::shared::require_foreign_sqlite_path(path).is_err() {
+        return Ok((
+            OpenedOpenCodeDatabase::Refused(HostCoverageReason::DatabaseUnreadable),
+            budget,
+        ));
+    }
     let reader = match tracedecay_rusqlite_runtime::open_verified_read_snapshot(path) {
         Ok(reader) => reader,
         Err(error) => {

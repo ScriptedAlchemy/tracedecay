@@ -1220,7 +1220,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         let (runtime, _) =
             tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&db_path).unwrap();
         let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
@@ -1275,7 +1275,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         let (runtime, _) =
             tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&db_path).unwrap();
         let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
@@ -1305,7 +1305,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         let (runtime, _) =
             tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&db_path).unwrap();
         let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
@@ -1354,7 +1354,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         let (runtime, _) =
             tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&db_path).unwrap();
         let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
@@ -1384,7 +1384,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         let (runtime, _) =
             tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&db_path).unwrap();
         let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
@@ -1421,7 +1421,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         let (runtime, _) =
             tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&db_path).unwrap();
         let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
@@ -1453,7 +1453,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         let (runtime, _) =
             tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&db_path).unwrap();
         let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
@@ -1510,7 +1510,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         let (runtime, _) =
             tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&db_path).unwrap();
         let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
@@ -1583,7 +1583,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         let (runtime, _) =
             tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&db_path).unwrap();
         let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
@@ -1645,7 +1645,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
         let (runtime, _) =
             tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&db_path).unwrap();
         let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));

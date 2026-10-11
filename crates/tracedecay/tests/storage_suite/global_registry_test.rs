@@ -10,9 +10,10 @@ use tracedecay_global_db::{
 };
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::{
-    BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
-    StoreKind, StoreManifest, write_store_manifest_to_path,
+    BRANCH_META_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
+    read_store_manifest, write_store_manifest_to_path,
 };
+use tracedecay_store::StoreFile;
 
 static GLOBAL_REGISTRY_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
@@ -51,7 +52,7 @@ fn observation_store_upsert(
 fn observation_store_paths(profile_root: &Path, project_id: &str) -> (PathBuf, PathBuf, PathBuf) {
     let store_root = profile_root.join(format!("projects/{project_id}"));
     let manifest_path = store_root.join("store_manifest.json");
-    let database_path = store_root.join("sessions.db");
+    let database_path = StoreFile::ProjectSessions.path(&store_root).into_path_buf();
     (store_root, manifest_path, database_path)
 }
 
@@ -71,8 +72,8 @@ fn write_observation_store_manifest(
             storage_mode: StorageMode::ProfileSharded,
             project_root: project_root.to_path_buf(),
             data_root: paths.0.clone(),
-            graph_db_relpath: PathBuf::from("tracedecay.db"),
-            sessions_db_relpath: PathBuf::from(SESSIONS_DB_FILENAME),
+            graph_db_relpath: PathBuf::from(StoreFile::Project.file_name()),
+            sessions_db_relpath: PathBuf::from(StoreFile::ProjectSessions.file_name()),
             branch_meta_relpath: PathBuf::from(BRANCH_META_FILENAME),
             sessions_schema_digest: None,
         },
@@ -484,6 +485,73 @@ async fn observation_store_resolver_returns_canonical_registered_paths() {
         resolution.database_path(),
         database_path.canonicalize().unwrap()
     );
+    close_profile_runtime(db).await;
+}
+
+/// Defect caught: the native fresh start leaving a SQLite-era manifest that
+/// names `sessions.db`, so an existing project's store stops resolving once
+/// the daemon has deleted the legacy family; or the fresh start deleting
+/// too little (legacy files survive) or too much (an unrelated file goes).
+#[tokio::test]
+async fn an_existing_sqlite_era_project_resolves_after_the_native_fresh_start() {
+    let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    fs::create_dir_all(&project_root).unwrap();
+    let project_id = "proj_sqlite_era";
+    let native = StoreFile::Profile.file_name() != StoreFile::Profile.legacy_names()[0];
+    let (store_root, manifest_path, database_path) =
+        write_observation_store_manifest(&profile_root, &project_root, project_id);
+    let mut manifest = read_store_manifest(&manifest_path).unwrap();
+    manifest.graph_db_relpath = PathBuf::from(StoreFile::Project.legacy_names()[0]);
+    manifest.sessions_db_relpath = PathBuf::from(StoreFile::ProjectSessions.legacy_names()[0]);
+    write_store_manifest_to_path(&manifest_path, &manifest).unwrap();
+    let mut legacy = Vec::new();
+    if native {
+        for (root, store) in [
+            (&profile_root, StoreFile::Profile),
+            (&store_root, StoreFile::Project),
+            (&store_root, StoreFile::ProjectSessions),
+        ] {
+            for name in &store.legacy_names()[..2] {
+                legacy.push(root.join(name));
+            }
+        }
+    }
+    for path in &legacy {
+        fs::write(path, b"sqlite-era bytes").unwrap();
+    }
+    let unrelated = store_root.join("notes.db");
+    fs::write(&unrelated, b"keep").unwrap();
+
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .unwrap();
+    db.upsert_code_project(project_id, &project_root, None, None, Some("main"))
+        .await
+        .unwrap();
+    db.upsert_store_instance(observation_store_upsert(project_id, "store_era", Some(100)))
+        .await
+        .unwrap();
+    let (database, _) = crate::common::initialize_test_database(&database_path)
+        .await
+        .unwrap();
+    drop(database);
+
+    let resolution = db
+        .resolve_project_observation_store(&project_root)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resolution.database_path(),
+        database_path.canonicalize().unwrap()
+    );
+    let survivors: Vec<_> = legacy.iter().filter(|path| path.exists()).collect();
+    assert!(survivors.is_empty(), "legacy files survived: {survivors:?}");
+    assert!(StoreFile::Profile.path(&profile_root).is_file());
+    assert_eq!(fs::read(&unrelated).unwrap(), b"keep");
     close_profile_runtime(db).await;
 }
 

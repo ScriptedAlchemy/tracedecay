@@ -596,7 +596,7 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
     std::fs::create_dir_all(&dir).unwrap();
     {
         let connection =
-            rusqlite::Connection::open(dir.join(tracedecay_runtime_core::config::DB_FILENAME))
+            rusqlite::Connection::open(dir.join(tracedecay_store::StoreFile::Project.file_name()))
                 .unwrap();
         connection
             .execute_batch(
@@ -606,7 +606,7 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
             .unwrap();
     }
     filetime::set_file_mtime(
-        dir.join(tracedecay_runtime_core::config::DB_FILENAME),
+        dir.join(tracedecay_store::StoreFile::Project.file_name()),
         filetime::FileTime::from_unix_time(base - 100 * DAY, 0),
     )
     .unwrap();

@@ -2041,7 +2041,7 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     let lcm_profile = tracedecay_runtime_core::config::ProfileRoot::new(
         dir.path().join("retired-user-lcm-profile"),
     );
-    let sessions_db = tracedecay_sessions::runtime::user_sessions_db_path(lcm_profile.data_dir());
+    let sessions_db = tracedecay_store::StoreFile::ProfileSessions.path(lcm_profile.data_dir());
 
     let error = handle_tool_call_with_registry_options(
         &cg,

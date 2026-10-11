@@ -52,6 +52,13 @@ pub fn enter_daemon_database_scope(
             ));
         }
         None => {
+            // The elected daemon is the only process that may delete store
+            // files, so the native fresh start runs on its first scope entry.
+            if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Native {
+                crate::storage::delete_legacy_store_families(&profile_root).map_err(|error| {
+                    access_io_error("delete legacy SQLite store families", &profile_root, &error)
+                })?;
+            }
             scopes.insert(
                 profile_root.clone(),
                 DaemonScopeState {
