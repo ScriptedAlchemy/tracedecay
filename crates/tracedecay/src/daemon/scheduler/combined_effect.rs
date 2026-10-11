@@ -850,7 +850,9 @@ mod tests {
                     &project_root,
                     tracedecay_project::project::TraceDecayOpenOptions {
                         profile_root: Some(profile_root.clone()),
-                        global_db_path: Some(profile_root.join("global.db")),
+                        global_db_path: Some(
+                            profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+                        ),
                     },
                 )
                 .await

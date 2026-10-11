@@ -41,7 +41,7 @@ async fn project_context_returns_the_project_the_caller_named() {
     );
     let registry_path = runtime
         .profile_root_for_test()
-        .join("global.db")
+        .join(tracedecay_store::StoreFile::Profile.file_name())
         .canonicalize()
         .expect("registry path")
         .display()
@@ -92,7 +92,10 @@ async fn project_context_returns_the_project_the_caller_named() {
         .upsert_store_artifact(tracedecay_global_db::StoreArtifactUpsert {
             store_id: "store_alpha".to_string(),
             artifact_kind: "graph_db".to_string(),
-            relpath: "projects/proj_alpha/tracedecay.db".to_string(),
+            relpath: format!(
+                "projects/proj_alpha/{}",
+                tracedecay_store::StoreFile::Project.file_name()
+            ),
             size_bytes: Some(128),
             schema_version: Some("1".to_string()),
             updated_at: Some(1_800_000_003),
@@ -181,7 +184,7 @@ async fn project_context_returns_the_project_the_caller_named() {
             "artifacts": [{
                 "store_id": "store_alpha",
                 "artifact_kind": "graph_db",
-                "relpath": "projects/proj_alpha/tracedecay.db",
+                "relpath": format!("projects/proj_alpha/{}", tracedecay_store::StoreFile::Project.file_name()),
                 "size_bytes": 128,
                 "schema_version": "1",
                 "updated_at": 1_800_000_003,
@@ -280,7 +283,9 @@ async fn project_context_returns_the_project_the_caller_named() {
 async fn project_context_reports_a_broken_registry_read_as_a_tool_error() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
-    let registry_path = registry_dir.path().join("global.db");
+    let registry_path = registry_dir
+        .path()
+        .join(tracedecay_store::StoreFile::Profile.file_name());
     let runtime =
         tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project_scoped(
             registry_dir.path(),

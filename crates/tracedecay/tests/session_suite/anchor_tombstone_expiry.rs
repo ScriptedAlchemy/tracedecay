@@ -42,7 +42,9 @@ fn write_control() -> FactWriteControl {
 
 async fn make_store() -> (Database, TempDir) {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join("tracedecay.db");
+    let db_path = tmp
+        .path()
+        .join(tracedecay_store::StoreFile::Project.file_name());
     let db = open_graph_db_from_template(&db_path).await;
     (db, tmp)
 }

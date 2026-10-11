@@ -102,7 +102,7 @@ fn build_fixture() -> Fixture {
 
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
-        global_db_path: Some(profile_root.join("global.db")),
+        global_db_path: Some(profile_root.join(tracedecay_store::StoreFile::Profile.file_name())),
     };
 
     Fixture {
@@ -134,7 +134,7 @@ async fn observation_store_resolver_maps_primary_and_linked_worktree_to_same_sto
     let fx = build_fixture();
     let project_id = init_primary(&fx).await;
     let store_root = fx.profile_root.join(format!("projects/{project_id}"));
-    let database_path = store_root.join("sessions.db");
+    let database_path = store_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     if !database_path.exists() {
         let (database, _) = crate::common::initialize_test_database(&database_path)
             .await

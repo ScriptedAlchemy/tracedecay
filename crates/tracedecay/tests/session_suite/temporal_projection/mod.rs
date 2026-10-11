@@ -620,7 +620,9 @@ pub(crate) async fn rows(path: &std::path::Path, sql: &str) -> Vec<String> {
 
 pub(crate) async fn scalar_runtime(runtime: &HostAdmissionTestRuntimeV1, sql: &str) -> i64 {
     let snapshot = TempDir::new().unwrap();
-    let path = snapshot.path().join("sessions.db");
+    let path = snapshot
+        .path()
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     runtime
         .snapshot_session_database_for_test(HostAdmissionScope::Profile, &path)
         .await
@@ -630,7 +632,9 @@ pub(crate) async fn scalar_runtime(runtime: &HostAdmissionTestRuntimeV1, sql: &s
 
 pub(crate) async fn rows_runtime(runtime: &HostAdmissionTestRuntimeV1, sql: &str) -> Vec<String> {
     let snapshot = TempDir::new().unwrap();
-    let path = snapshot.path().join("sessions.db");
+    let path = snapshot
+        .path()
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     runtime
         .snapshot_session_database_for_test(HostAdmissionScope::Profile, &path)
         .await

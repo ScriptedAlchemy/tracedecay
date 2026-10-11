@@ -130,6 +130,8 @@ fn is_session_store_member(
     project_store: &Path,
     with_profile_store: bool,
 ) -> bool {
+    let host_admission =
+        |file: tracedecay_store::StoreFile| format!(".{}.host-admission", file.file_name());
     let name = relative.to_string_lossy();
     let in_project_sessions = relative.starts_with(project_store)
         && relative
@@ -138,12 +140,15 @@ fn is_session_store_member(
             .and_then(|rest| rest.components().next())
             .is_some_and(|first| {
                 let first = first.as_os_str().to_string_lossy();
-                first.starts_with("sessions.") || first == ".sessions.db.host-admission"
+                first.starts_with("sessions.")
+                    || first == host_admission(tracedecay_store::StoreFile::ProjectSessions)
             });
     in_project_sessions
         || (with_profile_store
             && (name.starts_with("user-sessions.")
-                || name.starts_with(".user-sessions.db.host-admission")))
+                || name.starts_with(&host_admission(
+                    tracedecay_store::StoreFile::ProfileSessions,
+                ))))
 }
 
 fn status(home: &Path, project: &Path) -> Value {
@@ -389,12 +394,16 @@ fn refused_session_stores_serve_code_until_their_scoped_reset(refusal: &SessionS
         .kill_and_wait()
         .expect("stop the daemon that wrote the profile");
 
-    (refusal.age)(&profile_root.join(&project_store).join("sessions.db"));
+    (refusal.age)(
+        &profile_root
+            .join(&project_store)
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+    );
     if refusal.ages_profile_store {
-        (refusal.age)(&profile_root.join("user-sessions.db"));
+        (refusal.age)(&profile_root.join(tracedecay_store::StoreFile::ProfileSessions.file_name()));
     }
     if refusal.ages_profile_authority {
-        (refusal.age)(&profile_root.join("global.db"));
+        (refusal.age)(&profile_root.join(tracedecay_store::StoreFile::Profile.file_name()));
     }
 
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
@@ -589,9 +598,13 @@ fn refused_session_stores_serve_code_until_their_scoped_reset(refusal: &SessionS
             is_session_store_member(relative, &project_store, refusal.ages_profile_store)
         });
     assert!(
-        refused_members.contains_key(&project_store.join("sessions.db"))
-            && (refused_members.contains_key(Path::new("user-sessions.db"))
-                || kept.contains_key(Path::new("user-sessions.db"))),
+        refused_members.contains_key(
+            &project_store.join(tracedecay_store::StoreFile::ProjectSessions.file_name())
+        ) && (refused_members.contains_key(Path::new(
+            tracedecay_store::StoreFile::ProfileSessions.file_name()
+        )) || kept.contains_key(Path::new(
+            tracedecay_store::StoreFile::ProfileSessions.file_name()
+        ))),
         "every session store existed before the reset: {refused_members:#?}"
     );
     for relative in refused_members.keys() {
@@ -841,7 +854,7 @@ fn doctor_names_a_live_refusal_informationally_and_drops_it_with_its_reset_store
         .join(".tracedecay")
         .join("projects")
         .join(&project_id)
-        .join("sessions.db");
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
 
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
     super::initialize_project(&home_path, &project_path, "refusal-census");

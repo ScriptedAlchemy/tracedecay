@@ -69,14 +69,19 @@ fn one_scoped_reset_clears_the_profile_authority_and_every_project_sessions_stor
         .kill_and_wait()
         .expect("stop the daemon that wrote the profile");
     assert_eq!(
-        give_registry_the_released_graph_scope_shape(&profile_root.join("global.db")),
+        give_registry_the_released_graph_scope_shape(
+            &profile_root.join(tracedecay_store::StoreFile::Profile.file_name())
+        ),
         2,
         "the profile authority keeps both graph scopes"
     );
     for id in &ids {
         assert_eq!(
             give_registry_the_released_graph_scope_shape(
-                &profile_root.join("projects").join(id).join("sessions.db")
+                &profile_root
+                    .join("projects")
+                    .join(id)
+                    .join(tracedecay_store::StoreFile::ProjectSessions.file_name())
             ),
             0,
             "a project sessions store records no graph scope"
@@ -112,19 +117,21 @@ fn one_scoped_reset_clears_the_profile_authority_and_every_project_sessions_stor
         .keys()
         .filter(|relative| !after_reset.contains_key(*relative))
         .collect();
-    let mut expected_removed = vec![
-        PathBuf::from("global.db"),
-        PathBuf::from("global.db-shm"),
-        PathBuf::from("global.db-wal"),
-    ];
+    let mut expected_removed =
+        super::live_store_family(Path::new(""), tracedecay_store::StoreFile::Profile);
+    let sessions = tracedecay_store::StoreFile::ProjectSessions;
     for id in &ids {
         let store = PathBuf::from("projects").join(id);
+        expected_removed.extend(super::live_store_family(&store, sessions));
         expected_removed.extend([
-            store.join(".sessions.db.host-admission/meta.json"),
-            store.join("sessions.db"),
-            store.join("sessions.db-shm"),
-            store.join("sessions.db-wal"),
-            store.join("sessions.db.delivery-settlement-spool-v1/writer.v1.lock"),
+            store.join(format!(
+                ".{}.host-admission/meta.json",
+                sessions.file_name()
+            )),
+            store.join(format!(
+                "{}.delivery-settlement-spool-v1/writer.v1.lock",
+                sessions.file_name()
+            )),
         ]);
     }
     expected_removed.sort();
@@ -151,7 +158,9 @@ fn one_scoped_reset_clears_the_profile_authority_and_every_project_sessions_stor
         "the scoped reset touched files outside the listed stores:\n{reset_output}"
     );
     for id in &ids {
-        let code_index = PathBuf::from("projects").join(id).join("tracedecay.db");
+        let code_index = PathBuf::from("projects")
+            .join(id)
+            .join(tracedecay_store::StoreFile::Project.file_name());
         assert!(
             after_reset.contains_key(&code_index),
             "{} must survive the reset",
@@ -238,13 +247,14 @@ fn previous_lcm_schema_profile_resets_its_session_stores_and_keeps_the_registry(
         .kill_and_wait()
         .expect("stop the daemon that wrote the profile");
     let mut released_stores = vec![
-        PathBuf::from("global.db"),
-        PathBuf::from("user-sessions.db"),
+        PathBuf::from(tracedecay_store::StoreFile::Profile.file_name()),
+        PathBuf::from(tracedecay_store::StoreFile::ProfileSessions.file_name()),
     ];
-    released_stores.extend(
-        ids.iter()
-            .map(|id| PathBuf::from("projects").join(id).join("sessions.db")),
-    );
+    released_stores.extend(ids.iter().map(|id| {
+        PathBuf::from("projects")
+            .join(id)
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name())
+    }));
     for store in &released_stores {
         let rewritten = tracedecay_sql::Connection::open(profile_root.join(store))
             .expect("open a registered store")
@@ -308,8 +318,8 @@ fn previous_lcm_schema_profile_resets_its_session_stores_and_keeps_the_registry(
         "the scoped reset deletes exactly the session stores:\n{reset_output}"
     );
     assert_eq!(
-        after_reset.get(Path::new("global.db")),
-        before_reset.get(Path::new("global.db")),
+        after_reset.get(Path::new(tracedecay_store::StoreFile::Profile.file_name())),
+        before_reset.get(Path::new(tracedecay_store::StoreFile::Profile.file_name())),
         "the profile authority stays byte-identical:\n{reset_output}"
     );
 
@@ -373,7 +383,10 @@ fn census_opens_only_project_sessions_stores_with_a_stale_admission_stamp() {
     for (_, _, id) in &projects[1..] {
         assert_eq!(
             give_registry_the_released_graph_scope_shape(
-                &profile_root.join("projects").join(id).join("sessions.db")
+                &profile_root
+                    .join("projects")
+                    .join(id)
+                    .join(tracedecay_store::StoreFile::ProjectSessions.file_name())
             ),
             0,
             "a project sessions store records no graph scope"

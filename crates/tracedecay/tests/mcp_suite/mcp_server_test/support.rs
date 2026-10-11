@@ -227,7 +227,7 @@ async fn setup_accounted_server_with_source(source: &str) -> AccountedServer {
     // A sibling of the profile root is the isolated transcript-source home
     // the test runtime requires, so the profile cannot be the temp root.
     let profile_root = profile_dir.path().join(".tracedecay");
-    let global_db_path = profile_root.join("global.db");
+    let global_db_path = profile_root.join(tracedecay_store::StoreFile::Profile.file_name());
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();

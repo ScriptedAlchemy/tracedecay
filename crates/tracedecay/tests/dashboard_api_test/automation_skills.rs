@@ -231,7 +231,9 @@ fn managed_skills_are_dashboard_controllable_with_direct_activation() {
         let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
-        let global_db_path = tmp_root.join("global").join("global.db");
+        let global_db_path = tmp_root
+            .join("global")
+            .join(tracedecay_store::StoreFile::Profile.file_name());
         let home = tmp_root.join("home");
         let profile_root = home.join(".tracedecay");
         std::fs::create_dir_all(&home).unwrap();
@@ -392,7 +394,9 @@ fn managed_skill_dashboard_api_applies_updates_immediately() {
         let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
-        let global_db_path = tmp_root.join("global").join("global.db");
+        let global_db_path = tmp_root
+            .join("global")
+            .join(tracedecay_store::StoreFile::Profile.file_name());
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let home = tmp_root.join("home");
         std::fs::create_dir_all(&home).unwrap();

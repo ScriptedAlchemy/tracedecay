@@ -12,7 +12,7 @@ use crate::common::canonical_existing_path;
 fn profile_options(profile_root: &Path) -> TraceDecayOpenOptions {
     TraceDecayOpenOptions {
         profile_root: Some(profile_root.to_path_buf()),
-        global_db_path: Some(profile_root.join("global.db")),
+        global_db_path: Some(profile_root.join(tracedecay_store::StoreFile::Profile.file_name())),
     }
 }
 
@@ -149,7 +149,10 @@ async fn fresh_profile_initialization_creates_the_final_v2_store() {
         .unwrap();
 
     assert_path_eq(&cg.store_layout().data_root, &shard_root);
-    assert_path_eq(cg.db_path(), shard_root.join("tracedecay.db"));
+    assert_path_eq(
+        cg.db_path(),
+        shard_root.join(tracedecay_store::StoreFile::Project.file_name()),
+    );
     assert!(cg.db_path().is_file());
     assert_eq!(
         schema_version(&cg.db_path()),
@@ -161,7 +164,10 @@ async fn fresh_profile_initialization_creates_the_final_v2_store() {
     );
     assert!(shard_root.join(STORE_MANIFEST_FILENAME).is_file());
     assert!(
-        !project.join(".tracedecay/tracedecay.db").exists(),
+        !project
+            .join(".tracedecay")
+            .join(tracedecay_store::StoreFile::Project.file_name())
+            .exists(),
         "profile-sharded init must not create a repo-local graph DB"
     );
 }
@@ -225,7 +231,7 @@ async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
     pin_fixture_repository_identity(&project, "proj_explicit").unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(client_profile.clone()),
-        global_db_path: Some(client_profile.join("global.db")),
+        global_db_path: Some(client_profile.join(tracedecay_store::StoreFile::Profile.file_name())),
     };
 
     assert!(
@@ -268,7 +274,7 @@ async fn trace_decay_options_global_db_path_implies_profile_root() {
     pin_fixture_repository_identity(&project, "proj_db_only").unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: None,
-        global_db_path: Some(client_profile.join("global.db")),
+        global_db_path: Some(client_profile.join(tracedecay_store::StoreFile::Profile.file_name())),
     };
 
     let cg = init_with_maintenance(&project, &client_profile, open_options.clone())
@@ -342,7 +348,7 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
         !home
             .join(".tracedecay/projects")
             .join(tracedecay_runtime_core::storage::default_profile_project_id(&renamed))
-            .join("tracedecay.db")
+            .join(tracedecay_store::StoreFile::Project.file_name())
             .exists(),
         "renamed checkout must not create a second path-hash profile shard"
     );
@@ -369,7 +375,7 @@ async fn persisted_repository_identity_survives_rename_while_serve_open_fails_cl
     crate::common::register_process_runtime_ports();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(client_profile.clone()),
-        global_db_path: Some(client_profile.join("global.db")),
+        global_db_path: Some(client_profile.join(tracedecay_store::StoreFile::Profile.file_name())),
     };
 
     let initialized = init_with_maintenance(&project, &client_profile, open_options.clone())
@@ -393,7 +399,7 @@ async fn persisted_repository_identity_survives_rename_while_serve_open_fails_cl
         !client_profile
             .join("projects")
             .join(tracedecay_runtime_core::storage::default_profile_project_id(&renamed))
-            .join("tracedecay.db")
+            .join(tracedecay_store::StoreFile::Project.file_name())
             .exists(),
         "serve must not create or require a second path-hash profile shard"
     );
@@ -419,7 +425,9 @@ async fn branch_open_rejects_a_mismatched_maintenance_profile() {
         "main",
         TraceDecayOpenOptions {
             profile_root: Some(requested_profile.clone()),
-            global_db_path: Some(requested_profile.join("global.db")),
+            global_db_path: Some(
+                requested_profile.join(tracedecay_store::StoreFile::Profile.file_name()),
+            ),
         },
         &lifecycle,
     )
@@ -502,7 +510,10 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
     .unwrap();
 
     assert_path_eq(&cg.store_layout().data_root, &shard_root);
-    assert_path_eq(cg.db_path(), shard_root.join("tracedecay.db"));
+    assert_path_eq(
+        cg.db_path(),
+        shard_root.join(tracedecay_store::StoreFile::Project.file_name()),
+    );
     assert_eq!(cg.active_branch(), Some("feature/profile"));
 }
 
@@ -535,7 +546,7 @@ async fn trace_decay_open_with_options_selects_branch_in_explicit_profile() {
     pin_fixture_repository_identity(&project, "proj_auto_branch").unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(client_profile.clone()),
-        global_db_path: Some(client_profile.join("global.db")),
+        global_db_path: Some(client_profile.join(tracedecay_store::StoreFile::Profile.file_name())),
     };
     let main = init_with_maintenance(&project, &client_profile, open_options.clone())
         .await
@@ -554,7 +565,10 @@ async fn trace_decay_open_with_options_selects_branch_in_explicit_profile() {
 
     assert_eq!(cg.store_layout().data_root, shard_root);
     assert_eq!(cg.active_branch(), Some("feature/client-profile"));
-    assert_eq!(cg.db_path(), shard_root.join("tracedecay.db"));
+    assert_eq!(
+        cg.db_path(),
+        shard_root.join(tracedecay_store::StoreFile::Project.file_name())
+    );
     assert!(cg.db_path().is_file());
     assert!(
         !daemon_home.join(".tracedecay").exists(),

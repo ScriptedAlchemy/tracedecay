@@ -371,14 +371,19 @@ mod tests {
     #[test]
     fn retention_backlog_budget_counts_database_wal_and_shm() {
         let temporary = tempfile::tempdir().expect("retention backlog budget");
-        let database = temporary.path().join("sessions.db");
+        let database = temporary
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
         std::fs::write(&database, b"small").expect("database fixture");
         assert!(permits_synchronous_session_retention_backlog(&database));
 
-        std::fs::File::create(temporary.path().join("sessions.db-wal"))
-            .expect("WAL fixture")
-            .set_len(MAX_SYNCHRONOUS_SCAN_BYTES + 1)
-            .expect("oversized WAL fixture");
+        std::fs::File::create(temporary.path().join(format!(
+            "{}-wal",
+            tracedecay_store::StoreFile::ProjectSessions.file_name()
+        )))
+        .expect("WAL fixture")
+        .set_len(MAX_SYNCHRONOUS_SCAN_BYTES + 1)
+        .expect("oversized WAL fixture");
         assert!(!permits_synchronous_session_retention_backlog(&database));
     }
 

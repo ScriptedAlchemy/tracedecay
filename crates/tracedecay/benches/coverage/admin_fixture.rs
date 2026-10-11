@@ -111,7 +111,7 @@ pub(crate) fn verify_admin_fixture(
             .ok_or("fixture isolation root is absent")?
             .join("profile");
         let store = profile.join("projects").join(project_id);
-        let database = store.join("tracedecay.db");
+        let database = store.join(tracedecay_store::StoreFile::Project.file_name());
         let branch = git(root, &["branch", "--show-current"])?;
         match tool {
             "tracedecay_active_project" => {
@@ -129,14 +129,14 @@ pub(crate) fn verify_admin_fixture(
             }
             "tracedecay_project_context" => {
                 check_project(&payload["project"], root, project_id)?;
-                if !same_path(&payload["registry_path"], &profile.join("global.db"))
-                    || !payload["aliases"].as_array().is_some_and(|aliases| {
-                        aliases.iter().any(|alias| {
-                            alias["project_id"] == project_id
-                                && same_path(&alias["alias_path"], root)
-                        })
+                if !same_path(
+                    &payload["registry_path"],
+                    &profile.join(tracedecay_store::StoreFile::Profile.file_name()),
+                ) || !payload["aliases"].as_array().is_some_and(|aliases| {
+                    aliases.iter().any(|alias| {
+                        alias["project_id"] == project_id && same_path(&alias["alias_path"], root)
                     })
-                {
+                }) {
                     return Err("project context omitted the actual fixture registry/alias".into());
                 }
             }
@@ -149,7 +149,10 @@ pub(crate) fn verify_admin_fixture(
                     .filter(|project| project["project_id"] == project_id)
                     .collect();
                 if matching.len() != 1
-                    || !same_path(&payload["registry_path"], &profile.join("global.db"))
+                    || !same_path(
+                        &payload["registry_path"],
+                        &profile.join(tracedecay_store::StoreFile::Profile.file_name()),
+                    )
                 {
                     return Err("registry listing omitted or duplicated the fixture project".into());
                 }

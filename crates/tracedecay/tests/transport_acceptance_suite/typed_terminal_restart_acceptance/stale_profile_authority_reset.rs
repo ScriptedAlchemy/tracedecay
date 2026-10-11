@@ -151,7 +151,9 @@ fn released_profile_authority_resets_alone_and_projects_register_again() {
         .kill_and_wait()
         .expect("stop the daemon that wrote the profile");
     assert_eq!(
-        give_registry_the_released_graph_scope_shape(&profile_root.join("global.db")),
+        give_registry_the_released_graph_scope_shape(
+            &profile_root.join(tracedecay_store::StoreFile::Profile.file_name())
+        ),
         1,
         "the registered project keeps its graph scope"
     );
@@ -199,11 +201,9 @@ fn released_profile_authority_resets_alone_and_projects_register_again() {
         .collect();
     assert_eq!(
         removed,
-        [
-            &PathBuf::from("global.db"),
-            &PathBuf::from("global.db-shm"),
-            &PathBuf::from("global.db-wal")
-        ],
+        super::live_store_family(Path::new(""), tracedecay_store::StoreFile::Profile)
+            .iter()
+            .collect::<Vec<_>>(),
         "the scoped reset deletes exactly the profile database:\n{reset_output}"
     );
     // The lifecycle lock records whichever command holds the profile lease;
@@ -225,9 +225,9 @@ fn released_profile_authority_resets_alone_and_projects_register_again() {
     );
     let project_store = PathBuf::from("projects").join(&project_id);
     for store in [
-        project_store.join("tracedecay.db"),
-        project_store.join("sessions.db"),
-        PathBuf::from("user-sessions.db"),
+        project_store.join(tracedecay_store::StoreFile::Project.file_name()),
+        project_store.join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        PathBuf::from(tracedecay_store::StoreFile::ProfileSessions.file_name()),
     ] {
         assert!(
             after_reset.contains_key(&store),

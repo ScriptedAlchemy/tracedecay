@@ -24,7 +24,9 @@ fn resolve_layout_defaults_to_profile_shard_without_marker_or_local_db() {
     );
     assert_eq!(
         layout.graph_db_path,
-        profile.join(format!("projects/{project_id}/tracedecay.db"))
+        profile
+            .join(format!("projects/{project_id}"))
+            .join(tracedecay_store::StoreFile::Project.file_name())
     );
 }
 

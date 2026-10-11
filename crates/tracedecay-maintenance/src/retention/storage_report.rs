@@ -1230,12 +1230,9 @@ mod tests {
         assert_eq!(total.state, ProfileTotalCoverageStateV1::Partial);
         assert_eq!(total.accounted_bytes, 550);
         assert_eq!(total.user_sessions_db_bytes, 50);
-        assert!(
-            total
-                .excluded_families
-                .iter()
-                .any(|family| family.contains("user-sessions.db"))
-        );
+        assert!(total.excluded_families.iter().any(|family| {
+            family.contains(tracedecay_store::StoreFile::ProfileSessions.file_name())
+        }));
     }
 
     #[test]
@@ -1685,7 +1682,11 @@ mod tests {
         seed_global_db(&profile_root, &[("proj_a", "/repos/a")]).await;
         seed_graph_db(&profile_root, "proj_a");
 
-        std::fs::write(profile_root.join("sessions.db"), vec![1u8; 2_048]).unwrap();
+        std::fs::write(
+            profile_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+            vec![1u8; 2_048],
+        )
+        .unwrap();
         let generations = profile_root
             .join("projects")
             .join("proj_a")
@@ -2013,9 +2014,14 @@ mod tests {
         let profile_root = tmp.path().join("profile");
         let data_root = profile_root.join("projects").join("proj_a");
         let scope = data_root.join("code-index-v1").join("a".repeat(64));
+        let project = tracedecay_store::StoreFile::Project.file_name();
+        let sessions = tracedecay_store::StoreFile::ProjectSessions.file_name();
+        let project_wal = format!("{project}-wal");
+        let sessions_wal = format!("{sessions}-wal");
+        let sessions_admission = format!(".{sessions}.host-admission/claim");
         for (relative, bytes) in [
-            ("tracedecay.db", 4_096),
-            ("tracedecay.db-wal", 100),
+            (project, 4_096),
+            (project_wal.as_str(), 100),
             ("tracedecay.sealed/digest/generation.grafeo", 3_000),
             (
                 "code-index-v1/code-text-artifacts-v1/text-artifact.bin",
@@ -2026,9 +2032,9 @@ mod tests {
                 300,
             ),
             ("tracedecay.graph-replay/generation.json", 40),
-            ("sessions.db", 900),
-            ("sessions.db-wal", 10),
-            (".sessions.db.host-admission/claim", 5),
+            (sessions, 900),
+            (sessions_wal.as_str(), 10),
+            (sessions_admission.as_str(), 5),
             ("hook-delivery-spool/claude/record", 7),
         ] {
             let path = data_root.join(relative);
@@ -2194,9 +2200,15 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_root = tmp.path().join("profile");
         std::fs::create_dir_all(profile_root.join("projects/proj_a")).unwrap();
-        std::fs::write(profile_root.join("global.db"), vec![0u8; 300]).unwrap();
         std::fs::write(
-            profile_root.join("projects/proj_a/tracedecay.db"),
+            profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+            vec![0u8; 300],
+        )
+        .unwrap();
+        std::fs::write(
+            profile_root
+                .join("projects/proj_a")
+                .join(tracedecay_store::StoreFile::Project.file_name()),
             vec![0u8; 700],
         )
         .unwrap();

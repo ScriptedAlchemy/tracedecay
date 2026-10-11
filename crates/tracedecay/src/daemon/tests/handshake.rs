@@ -115,7 +115,7 @@ fn handshake_defaults_optional_metadata_when_fields_are_absent() {
         "allow_init": false,
         "client_identity": {
             "profile_root": "/profiles/client",
-            "global_db_path": "/profiles/client/global.db"
+            "global_db_path": format!("/profiles/client/{}", tracedecay_store::StoreFile::Profile.file_name())
         }
     })
     .to_string();
@@ -757,7 +757,7 @@ async fn daemon_refreshes_once_only_after_generation_change() {
         enter_test_daemon_database_scope(&profile_root, "catalog refresh generation");
     let mut handshake = test_handshake_defaults();
     handshake.client_identity = DaemonClientIdentity {
-        global_db_path: profile_root.join("global.db"),
+        global_db_path: profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
         profile_root: profile_root.clone(),
     };
     handshake.client_instance_id = test_client_instance_id(4);
@@ -838,7 +838,7 @@ async fn initialized_ack_preserves_pending_catalog_refresh_notification() {
     prewarm_test_profile_runtime(&engine.store_administration).await;
     let mut handshake = test_handshake_defaults();
     handshake.client_identity = DaemonClientIdentity {
-        global_db_path: profile_root.join("global.db"),
+        global_db_path: profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
         profile_root,
     };
     handshake.client_instance_id = test_client_instance_id(5);

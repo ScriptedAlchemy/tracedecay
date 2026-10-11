@@ -79,7 +79,7 @@ async fn source_reads_reuse_the_cross_session_cache() {
     let profile_root = root.path().join(".tracedecay-test-profile");
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
-        global_db_path: Some(profile_root.join("global.db")),
+        global_db_path: Some(profile_root.join(tracedecay_store::StoreFile::Profile.file_name())),
     };
     let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &profile_root,

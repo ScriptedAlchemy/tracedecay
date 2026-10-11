@@ -156,7 +156,8 @@ async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profiles/shutdown-test"),
-            global_db_path: PathBuf::from("/profiles/shutdown-test/global.db"),
+            global_db_path: PathBuf::from("/profiles/shutdown-test")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("shutdown-test".to_string()),
             store_root: PathBuf::from("/stores/shutdown-test"),
             graph_db_path: PathBuf::from("/stores/shutdown-test/graph.db"),
@@ -198,7 +199,8 @@ async fn automation_shutdown_timeout_keeps_unfinished_task_tracked() {
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profiles/automation-shutdown-timeout-test"),
-            global_db_path: PathBuf::from("/profiles/automation-shutdown-timeout-test/global.db"),
+            global_db_path: PathBuf::from("/profiles/automation-shutdown-timeout-test")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("automation-shutdown-timeout-test".to_string()),
             store_root: PathBuf::from("/stores/automation-shutdown-timeout-test"),
             graph_db_path: PathBuf::from("/stores/automation-shutdown-timeout-test/graph.db"),
@@ -272,7 +274,8 @@ async fn retirement_reaper_shutdown_observes_a_reservation_release_after_snapsho
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profiles/reaper-release-race"),
-            global_db_path: PathBuf::from("/profiles/reaper-release-race/global.db"),
+            global_db_path: PathBuf::from("/profiles/reaper-release-race")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("reaper-release-race".to_owned()),
             store_root: PathBuf::from("/stores/reaper-release-race"),
             graph_db_path: PathBuf::from("/stores/reaper-release-race/graph.db"),
@@ -314,7 +317,8 @@ async fn automation_retirement_reserves_only_after_scheduler_lock_admission() {
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profiles/retirement-lock-admission"),
-            global_db_path: PathBuf::from("/profiles/retirement-lock-admission/global.db"),
+            global_db_path: PathBuf::from("/profiles/retirement-lock-admission")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("retirement-lock-admission".to_owned()),
             store_root: PathBuf::from("/stores/retirement-lock-admission"),
             graph_db_path: PathBuf::from("/stores/retirement-lock-admission/graph.db"),
@@ -368,9 +372,10 @@ async fn cancelled_contended_automation_retirement_remains_shutdown_owned() {
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profiles/automation-registration-cancel-test"),
-            global_db_path: PathBuf::from(
-                "/profiles/automation-registration-cancel-test/global.db",
-            ),
+            global_db_path: PathBuf::from(format!(
+                "/profiles/automation-registration-cancel-test/{}",
+                tracedecay_store::StoreFile::Profile.file_name()
+            )),
             project_id: Some("automation-registration-cancel-test".to_string()),
             store_root: PathBuf::from("/stores/automation-registration-cancel-test"),
             graph_db_path: PathBuf::from("/stores/automation-registration-cancel-test/old.db"),
@@ -526,7 +531,8 @@ async fn deletion_drain_retains_already_transferred_maintenance_reaper_until_ret
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profiles/deletion-reaper-test"),
-            global_db_path: PathBuf::from("/profiles/deletion-reaper-test/global.db"),
+            global_db_path: PathBuf::from("/profiles/deletion-reaper-test")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("deletion-reaper-test".to_owned()),
             store_root: PathBuf::from("/stores/deletion-reaper-test"),
             graph_db_path: PathBuf::from("/stores/deletion-reaper-test/graph.db"),
@@ -579,7 +585,8 @@ async fn project_reaper_settle_ignores_unrelated_pending_registration() {
     let unrelated = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profiles/unrelated-pending-reaper"),
-            global_db_path: PathBuf::from("/profiles/unrelated-pending-reaper/global.db"),
+            global_db_path: PathBuf::from("/profiles/unrelated-pending-reaper")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("proj_unrelated_pending_reaper".to_owned()),
             store_root: PathBuf::from("/stores/unrelated-pending-reaper"),
             graph_db_path: PathBuf::from("/stores/unrelated-pending-reaper/graph.db"),
@@ -642,9 +649,10 @@ async fn panicked_retired_task_releases_scheduler_registration() {
     let automation_key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profiles/panicked-automation-retirement-test"),
-            global_db_path: PathBuf::from(
-                "/profiles/panicked-automation-retirement-test/global.db",
-            ),
+            global_db_path: PathBuf::from(format!(
+                "/profiles/panicked-automation-retirement-test/{}",
+                tracedecay_store::StoreFile::Profile.file_name()
+            )),
             project_id: Some("panicked-automation-retirement-test".to_string()),
             store_root: PathBuf::from("/stores/panicked-automation-retirement-test"),
             graph_db_path: PathBuf::from("/stores/panicked-automation-retirement-test/graph.db"),
@@ -696,7 +704,8 @@ async fn scheduler_shutdown_does_not_wait_for_contended_administration_gate() {
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profiles/shutdown-gate-test"),
-            global_db_path: PathBuf::from("/profiles/shutdown-gate-test/global.db"),
+            global_db_path: PathBuf::from("/profiles/shutdown-gate-test")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("shutdown-gate-test".to_string()),
             store_root: PathBuf::from("/stores/shutdown-gate-test"),
             graph_db_path: PathBuf::from("/stores/shutdown-gate-test/graph.db"),

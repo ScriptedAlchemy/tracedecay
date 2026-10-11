@@ -813,7 +813,11 @@ pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
     apply_hermetic_child_env(command, &home);
     command
         .env(USER_DATA_DIR_ENV, home.join(".tracedecay"))
-        .env(GLOBAL_DB_PATH_ENV, home.join(".tracedecay/global.db"))
+        .env(
+            GLOBAL_DB_PATH_ENV,
+            home.join(".tracedecay")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
+        )
         // A child must never inherit a socket that reaches a daemon running
         // under another profile.
         .env(
@@ -1673,7 +1677,9 @@ pub async fn open_lcm_db(tmp: &TempDir) -> LcmTestRuntime {
 /// fixed cost on Windows. The first call in a process pays one real schema
 /// creation to build the template; every further store is a file copy.
 pub async fn write_empty_global_db_schema(db_path: &Path) {
-    let bytes = if db_path.file_name() == Some(OsStr::new("global.db")) {
+    let bytes = if db_path.file_name()
+        == Some(OsStr::new(tracedecay_store::StoreFile::Profile.file_name()))
+    {
         empty_global_db_template().await
     } else {
         empty_lcm_db_template().await

@@ -17,7 +17,9 @@ async fn resolved_project_store_helpers_route_profile_sharded_session_artifacts(
         resolve_layout(&project, profile.data_dir())
             .unwrap()
             .sessions_db_path,
-        profile_root.join("projects/proj_123/sessions.db"),
+        profile_root
+            .join("projects/proj_123")
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
     );
     assert_path_eq(
         resolve_layout(&project, profile.data_dir())
@@ -49,7 +51,8 @@ async fn hermes_profile_like_directory_uses_user_profile_shard() {
 
     let expected = home
         .join(".tracedecay")
-        .join(format!("projects/{project_id}/sessions.db"));
+        .join(format!("projects/{project_id}"))
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     assert_path_eq(
         resolve_layout(&hermes_home, profile.data_dir())
             .unwrap()

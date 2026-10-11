@@ -24,7 +24,9 @@ async fn open_project_composition(
         client_instance_id: instance.to_owned(),
         client_identity: DaemonClientIdentity {
             profile_root: harness.profile_root.clone(),
-            global_db_path: harness.profile_root.join("global.db"),
+            global_db_path: harness
+                .profile_root
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
         },
         scope_prefix: None,
         project_path: Some(project.to_path_buf()),
@@ -569,10 +571,14 @@ async fn shut_down_composition_releases_its_session_stores_for_an_immediate_reop
         .await
         .expect("project data root");
     let stores = [
-        harness.profile_root().join("global.db"),
-        harness.profile_root().join("user-sessions.db"),
+        harness
+            .profile_root()
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
+        harness
+            .profile_root()
+            .join(tracedecay_store::StoreFile::ProfileSessions.file_name()),
         project_data_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
-        project_data_root.join("tracedecay.db"),
+        project_data_root.join(tracedecay_store::StoreFile::Project.file_name()),
     ];
     harness.shutdown().await;
     let wal_bytes = stores
@@ -588,10 +594,20 @@ async fn shut_down_composition_releases_its_session_stores_for_an_immediate_reop
     assert_eq!(
         wal_bytes,
         [
-            ("global.db".into(), 0),
-            ("user-sessions.db".into(), 0),
-            ("sessions.db".into(), 0),
-            ("tracedecay.db".into(), 0),
+            (tracedecay_store::StoreFile::Profile.file_name().into(), 0),
+            (
+                tracedecay_store::StoreFile::ProfileSessions
+                    .file_name()
+                    .into(),
+                0
+            ),
+            (
+                tracedecay_store::StoreFile::ProjectSessions
+                    .file_name()
+                    .into(),
+                0
+            ),
+            (tracedecay_store::StoreFile::Project.file_name().into(), 0),
         ],
         "shutdown releases every store lease, so each writer truncates its WAL"
     );

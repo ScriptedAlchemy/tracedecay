@@ -385,7 +385,9 @@ async fn retained_recovery_project(
         &project_root,
         tracedecay_project::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
-            global_db_path: Some(profile_root.join("global.db")),
+            global_db_path: Some(
+                profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+            ),
         },
     )
     .await
@@ -848,7 +850,9 @@ async fn recovery_defers_unavailable_memory_without_blocking_external_or_termina
         &project_root,
         tracedecay_project::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
-            global_db_path: Some(profile_root.join("global.db")),
+            global_db_path: Some(
+                profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+            ),
         },
     )
     .await
@@ -905,7 +909,9 @@ async fn empty_pending_index_does_not_open_project_memory() {
         &project_root,
         tracedecay_project::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
-            global_db_path: Some(profile_root.join("global.db")),
+            global_db_path: Some(
+                profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+            ),
         },
     )
     .await
@@ -1017,7 +1023,9 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
         &project_root,
         tracedecay_project::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
-            global_db_path: Some(profile_root.join("global.db")),
+            global_db_path: Some(
+                profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+            ),
         },
     )
     .await

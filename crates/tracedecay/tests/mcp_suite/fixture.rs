@@ -183,7 +183,7 @@ impl SeedTargets {
         let global_db_path = options
             .global_db_path
             .clone()
-            .unwrap_or_else(|| profile_root.join("global.db"));
+            .unwrap_or_else(|| profile_root.join(tracedecay_store::StoreFile::Profile.file_name()));
         Some(Self {
             profile_root,
             global_db_path,
@@ -225,7 +225,10 @@ fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::
         if let Some(parent) = targets.global_db_path.parent() {
             PrivateStoreIo::create_dir_all(parent)?;
         }
-        copy_db_files(&src_home.join("global.db"), &targets.global_db_path)?;
+        copy_db_files(
+            &src_home.join(tracedecay_store::StoreFile::Profile.file_name()),
+            &targets.global_db_path,
+        )?;
     }
     Ok(())
 }
@@ -333,7 +336,7 @@ async fn build_template(dest: &Path) -> io::Result<()> {
     fs::create_dir_all(&project)?;
 
     let profile_root = root.join("home").join(".tracedecay");
-    let global_db_path = profile_root.join("global.db");
+    let global_db_path = profile_root.join(tracedecay_store::StoreFile::Profile.file_name());
     let options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
         global_db_path: Some(global_db_path.clone()),
@@ -606,7 +609,7 @@ async fn changing_a_schema_column_constant_does_not_reuse_the_template() {
         .join(EMPTY_FLAVOR)
         .join("home")
         .join(".tracedecay")
-        .join("global.db");
+        .join(tracedecay_store::StoreFile::Profile.file_name());
     let connection = Connection::open(&global_db).unwrap();
     let mut statement = connection
         .prepare("SELECT name FROM pragma_table_info('graph_scopes') ORDER BY cid")
@@ -670,7 +673,9 @@ async fn template_recorded_at_an_older_git_correlation_version_is_rebuilt() {
         &tmp_root.join("project"),
         TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
-            global_db_path: Some(profile_root.join("global.db")),
+            global_db_path: Some(
+                profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+            ),
         },
     )
     .await
@@ -730,7 +735,9 @@ async fn template_seed_opens_the_copied_store_for_the_requested_project() {
         &project,
         TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
-            global_db_path: Some(profile_root.join("global.db")),
+            global_db_path: Some(
+                profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+            ),
         },
     )
     .await
@@ -778,7 +785,9 @@ async fn template_seed_does_not_fall_back_when_the_destination_exists() {
         &project,
         TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
-            global_db_path: Some(profile_root.join("global.db")),
+            global_db_path: Some(
+                profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+            ),
         },
     )
     .await

@@ -45,7 +45,7 @@ pub async fn init_project_direct(home: &Path, project: &Path) {
     let profile_root = profile_root(home);
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
-        global_db_path: Some(profile_root.join("global.db")),
+        global_db_path: Some(profile_root.join(tracedecay_store::StoreFile::Profile.file_name())),
     };
     crate::fixture::init_project_from_template_with_options(project, open_options)
         .await

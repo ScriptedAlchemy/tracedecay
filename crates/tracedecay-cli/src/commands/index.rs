@@ -532,7 +532,7 @@ mod init_bootstrap_tests {
             allow_initialize_root_routing: false,
             client_identity: tracedecay_daemon_protocol::DaemonClientIdentity {
                 profile_root: profile_root.to_path_buf(),
-                global_db_path: profile_root.join("global.db"),
+                global_db_path: profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
             },
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             client_instance_id: "commands-init-test".to_string(),

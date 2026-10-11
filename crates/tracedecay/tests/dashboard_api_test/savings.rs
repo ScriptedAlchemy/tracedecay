@@ -367,7 +367,10 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
     )
     .expect("seed source file");
 
-    let global_db_path = tmp.path().join("global").join("global.db");
+    let global_db_path = tmp
+        .path()
+        .join("global")
+        .join(tracedecay_store::StoreFile::Profile.file_name());
     let profile_root = tmp.path().join("profile").join(".tracedecay");
     let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
 

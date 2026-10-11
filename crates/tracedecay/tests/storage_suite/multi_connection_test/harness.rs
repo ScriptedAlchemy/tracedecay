@@ -104,7 +104,8 @@ pub(super) fn init_project(home: &Path, project: &Path, socket_path: &Path) -> P
         .expect("tracedecay init should run");
     assert_command_success("tracedecay init", &output);
 
-    home.join(".tracedecay").join("global.db")
+    home.join(".tracedecay")
+        .join(tracedecay_store::StoreFile::Profile.file_name())
 }
 
 pub(super) fn assert_command_success(label: &str, output: &std::process::Output) {

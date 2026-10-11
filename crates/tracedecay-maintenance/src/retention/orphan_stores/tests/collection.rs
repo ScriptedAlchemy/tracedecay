@@ -896,7 +896,9 @@ mod durable_inventory {
             project_root: project_root.clone(),
             data_root: project_root,
             graph_db_relpath: PathBuf::from(graph_db_relpath),
-            sessions_db_relpath: PathBuf::from("sessions.db"),
+            sessions_db_relpath: PathBuf::from(
+                tracedecay_store::StoreFile::ProjectSessions.file_name(),
+            ),
             branch_meta_relpath: PathBuf::from(
                 tracedecay_runtime_core::storage::BRANCH_META_FILENAME,
             ),

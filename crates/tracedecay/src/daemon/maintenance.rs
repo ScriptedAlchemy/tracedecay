@@ -1628,9 +1628,12 @@ mod tests {
         retention.session_lcm.enabled = false;
         retention.observation.enabled = false;
         retention.orphan_store_gc_days = None;
-        retention
-            .store_soft_budgets_bytes
-            .insert("sessions.db".to_string(), 1);
+        retention.store_soft_budgets_bytes.insert(
+            tracedecay_store::StoreFile::ProjectSessions
+                .file_name()
+                .to_string(),
+            1,
+        );
 
         assert!(
             !super::retention_maintenance_enabled(&retention),

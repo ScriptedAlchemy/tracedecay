@@ -138,7 +138,7 @@ async fn routed_projects() -> RoutedProjects {
         .join(".tracedecay");
     let options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
-        global_db_path: Some(profile_root.join("global.db")),
+        global_db_path: Some(profile_root.join(tracedecay_store::StoreFile::Profile.file_name())),
     };
 
     // Both projects are real repositories BEFORE `TraceDecay::init` runs:

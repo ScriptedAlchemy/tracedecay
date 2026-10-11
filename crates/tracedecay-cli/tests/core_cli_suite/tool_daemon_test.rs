@@ -1476,7 +1476,7 @@ fn connect_initialized_project_client(home_path: &Path, project_path: &Path) -> 
         "allow_init": false,
         "client_identity": {
             "profile_root": home_path.join(".tracedecay"),
-            "global_db_path": home_path.join(".tracedecay/global.db")
+            "global_db_path": home_path.join(".tracedecay").join(tracedecay_store::StoreFile::Profile.file_name())
         }
     });
     writeln!(client, "{handshake}").expect("write daemon handshake");
@@ -2688,7 +2688,7 @@ fn daemon_project_handshake_uses_registered_remote_store_after_rename() {
         client_home_path
             .join(".tracedecay/projects")
             .join(&original_project_id)
-            .join("tracedecay.db")
+            .join(tracedecay_store::StoreFile::Project.file_name())
             .exists(),
         "original profile shard should remain the selected initialized store"
     );
@@ -2696,7 +2696,7 @@ fn daemon_project_handshake_uses_registered_remote_store_after_rename() {
         !client_home_path
             .join(".tracedecay/projects")
             .join(default_profile_project_id(&renamed_path))
-            .join("tracedecay.db")
+            .join(tracedecay_store::StoreFile::Project.file_name())
             .exists(),
         "daemon must not create a second path-hash profile shard for the renamed checkout"
     );
@@ -3731,7 +3731,10 @@ fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
 #[tokio::test]
 async fn daemon_reopens_retained_receipts_without_reset() {
     let home = TempDir::new().unwrap();
-    let db_path = home.path().join(".tracedecay/global.db");
+    let db_path = home
+        .path()
+        .join(".tracedecay")
+        .join(tracedecay_store::StoreFile::Profile.file_name());
     common::write_empty_global_db_schema(&db_path).await;
     {
         let db = tracedecay_sql::Connection::open(&db_path).unwrap();

@@ -198,8 +198,16 @@ fn native_prompts_reject_invalid_profile_identity_without_ingesting() {
         assert!(!output.status.success(), "{output:?}");
         assert!(output.stdout.is_empty(), "{output:?}");
         assert_eq!(std::fs::read(identity).unwrap(), b"{}");
-        assert!(!profile.join("global.db").exists());
-        assert!(!profile.join("sessions.db").exists());
+        assert!(
+            !profile
+                .join(tracedecay_store::StoreFile::Profile.file_name())
+                .exists()
+        );
+        assert!(
+            !profile
+                .join(tracedecay_store::StoreFile::ProjectSessions.file_name())
+                .exists()
+        );
     }
 }
 
@@ -514,9 +522,22 @@ fn native_hook_captures_only_bound_transport_spool_records() {
             "{hook} retained its lifecycle lease after exit"
         );
         drop(maintenance);
-        assert!(!home.join(".tracedecay/global.db").exists());
-        assert!(!data_root.join("tracedecay.db").exists());
-        assert!(!data_root.join("sessions.db").exists());
+        assert!(
+            !home
+                .join(".tracedecay")
+                .join(tracedecay_store::StoreFile::Profile.file_name())
+                .exists()
+        );
+        assert!(
+            !data_root
+                .join(tracedecay_store::StoreFile::Project.file_name())
+                .exists()
+        );
+        assert!(
+            !data_root
+                .join(tracedecay_store::StoreFile::ProjectSessions.file_name())
+                .exists()
+        );
         if hook == "hook-stop" {
             let deliveries = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
                 tracedecay_hooks::hook_delivery_receipt_spool_root(&data_root, host),

@@ -99,7 +99,9 @@ async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
 
 async fn table_counts(runtime: &HostAdmissionTestRuntimeV1) -> Vec<i64> {
     let snapshot = TempDir::new().unwrap();
-    let database_path = snapshot.path().join("sessions.db");
+    let database_path = snapshot
+        .path()
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     runtime
         .snapshot_session_database_for_test(HostAdmissionScope::Profile, &database_path)
         .await
@@ -118,7 +120,9 @@ async fn table_counts(runtime: &HostAdmissionTestRuntimeV1) -> Vec<i64> {
 
 async fn durable_text(runtime: &HostAdmissionTestRuntimeV1) -> Vec<String> {
     let snapshot = TempDir::new().unwrap();
-    let database_path = snapshot.path().join("sessions.db");
+    let database_path = snapshot
+        .path()
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     runtime
         .snapshot_session_database_for_test(HostAdmissionScope::Profile, &database_path)
         .await
