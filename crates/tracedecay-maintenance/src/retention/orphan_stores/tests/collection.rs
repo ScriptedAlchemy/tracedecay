@@ -591,10 +591,11 @@ async fn unregistered_collection_payload_fence_deadline_is_distinct() {
     assert!(data_root.join("bucket/payload.bin").is_file());
 }
 
-/// Seeds an unregistered `projects/<id>` store whose manifest names its graph
-/// database, with a `memory_facts` table holding `memory_rows` rows, aged to
-/// `mtime_secs`.
-fn seed_unregistered_manifest_store(data_root: &Path, memory_rows: usize, mtime_secs: i64) {
+/// Seeds an unregistered `projects/<id>` store under the compiled engine's
+/// project store name, with a `memory_facts` table holding `memory_rows`
+/// rows, aged to `mtime_secs`. With `manifest`, a store manifest names that
+/// database as the graph.
+fn seed_unregistered_store(data_root: &Path, manifest: bool, memory_rows: usize, mtime_secs: i64) {
     std::fs::create_dir_all(data_root).unwrap();
     let graph = tracedecay_store::StoreFile::Project.file_name();
     {
@@ -616,25 +617,29 @@ fn seed_unregistered_manifest_store(data_root: &Path, memory_rows: usize, mtime_
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
             .unwrap();
     }
-    let manifest = StoreManifest {
-        schema_version: STORE_MANIFEST_SCHEMA_VERSION,
-        project_id: None,
-        store_kind: StoreKind::CodeProject,
-        storage_mode: StorageMode::ProfileSharded,
-        project_root: PathBuf::from("/moved-away-repo"),
-        data_root: data_root.to_path_buf(),
-        graph_db_relpath: PathBuf::from(graph),
-        sessions_db_relpath: PathBuf::from(
-            tracedecay_store::StoreFile::ProjectSessions.file_name(),
-        ),
-        branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
-        sessions_schema_digest: None,
-    };
-    std::fs::write(
-        data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
-        serde_json::to_string_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
+    if manifest {
+        let manifest = StoreManifest {
+            schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+            project_id: None,
+            store_kind: StoreKind::CodeProject,
+            storage_mode: StorageMode::ProfileSharded,
+            project_root: PathBuf::from("/moved-away-repo"),
+            data_root: data_root.to_path_buf(),
+            graph_db_relpath: PathBuf::from(graph),
+            sessions_db_relpath: PathBuf::from(
+                tracedecay_store::StoreFile::ProjectSessions.file_name(),
+            ),
+            branch_meta_relpath: PathBuf::from(
+                tracedecay_runtime_core::storage::BRANCH_META_FILENAME,
+            ),
+            sessions_schema_digest: None,
+        };
+        std::fs::write(
+            data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
     for entry in std::fs::read_dir(data_root).unwrap() {
         filetime::set_file_mtime(
             entry.unwrap().path(),
@@ -650,6 +655,18 @@ fn seed_unregistered_manifest_store(data_root: &Path, memory_rows: usize, mtime_
 /// collected in the same sweep.
 #[tokio::test]
 async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
+    sweep_keeps_only_the_store_with_memory_rows(true).await;
+}
+
+/// A manifestless directory holding the compiled engine's own store file
+/// (`tracedecay.tdb` natively) is inspected, not refused as unrecognized
+/// payload: its memory rows protect it, and an empty memory table does not.
+#[tokio::test]
+async fn sweep_unregistered_stores_inspects_manifestless_engine_store_files() {
+    sweep_keeps_only_the_store_with_memory_rows(false).await;
+}
+
+async fn sweep_keeps_only_the_store_with_memory_rows(manifest: bool) {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
@@ -660,8 +677,8 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
     let empty = profile_root
         .join("projects")
         .join("proj_ghost_empty_memory");
-    seed_unregistered_manifest_store(&protected, 1, base - 100 * DAY);
-    seed_unregistered_manifest_store(&empty, 0, base - 100 * DAY);
+    seed_unregistered_store(&protected, manifest, 1, base - 100 * DAY);
+    seed_unregistered_store(&empty, manifest, 0, base - 100 * DAY);
 
     let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, true)
         .await
