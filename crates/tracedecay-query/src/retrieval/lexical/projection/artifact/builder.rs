@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
@@ -73,8 +73,6 @@ use crate::retrieval::lexical::LexicalFieldV1;
 
 use super::super::{CodeLexicalProjectionMetadataV1, normalized_search_text};
 
-const SQLITE_HEADER_HISTORY_OFFSETS: [u64; 3] = [24, 40, 92];
-const SEALED_HEADER_HISTORY: u32 = 1;
 const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, next_cursor \
      FROM source_page_cursors ORDER BY page_ordinal DESC LIMIT 1";
 const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -1385,7 +1383,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 )?,
             };
             verify_sealed_receipt_header(&receipt, &self.metadata_digest, &summary)?;
-            self.canonicalize_sealed_header()?;
+            self.seal_file()?;
             let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
             record_finalization_step(&step);
             return Ok(step);
@@ -1596,7 +1594,7 @@ impl CodeLexicalArtifactBuilderV1 {
         )?;
         checkpoint(control)?;
         commit_finalization_transaction(transaction)?;
-        self.canonicalize_sealed_header()?;
+        self.seal_file()?;
         let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
         record_finalization_step(&step);
         Ok(step)
@@ -1653,23 +1651,16 @@ impl CodeLexicalArtifactBuilderV1 {
         Ok(())
     }
 
-    /// SQLite's file change counter (header offset 24) and version-valid-for
-    /// number (offset 92) count commits, and its schema cookie (offset 40)
-    /// counts schema edits. One content staged through a different history
-    /// (a cold build, or a carried parent) differs only there. The native
-    /// engine keeps the first and last at their creation values and parses
-    /// its schema again when the cookie moves. Once sealed no connection
-    /// writes the file again, and all three are set to one value.
-    fn canonicalize_sealed_header(&self) -> Result<(), CodeLexicalArtifactErrorV1> {
+    /// Leave the sealed artifact as one durable file. Its header needs no
+    /// rewrite: the canonical rewrite starts a fresh file, so the commit and
+    /// schema counters SQLite keeps there (offsets 24, 40 and 92) count the
+    /// same commits for one content whatever history staged it. The native
+    /// engine never advances the commit counters, and rewriting its schema
+    /// cookie behind a live engine fails that engine's next statement.
+    fn seal_file(&self) -> Result<(), CodeLexicalArtifactErrorV1> {
         self.verify_path_binding()?;
         fold_journal(&self.connection, &self.path)?;
-        let mut file = &self.private_file;
-        for offset in SQLITE_HEADER_HISTORY_OFFSETS {
-            file.seek(SeekFrom::Start(offset))
-                .and_then(|_| file.write_all(&SEALED_HEADER_HISTORY.to_be_bytes()))
-                .map_err(private_staging_error)?;
-        }
-        file.sync_all().map_err(private_staging_error)
+        self.private_file.sync_all().map_err(private_staging_error)
     }
 
     #[tracing::instrument(name = "query.artifact.finalize", level = "trace", skip_all)]
