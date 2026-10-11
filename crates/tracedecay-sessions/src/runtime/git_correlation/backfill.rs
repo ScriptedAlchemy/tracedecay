@@ -988,7 +988,7 @@ const SESSION_ACTIVITY_PAGE_AFTER_SQL: &str = "SELECT touched.provider, touched.
      FROM git_history_session_change AS touched
      -- Native Turso otherwise seeks sessions by the provider prefix of
      -- idx_sessions_parent and reads every session of that provider.
-     JOIN sessions s INDEXED BY sqlite_autoindex_sessions_1
+     CROSS JOIN sessions s INDEXED BY sqlite_autoindex_sessions_1
        ON s.provider = touched.provider AND s.session_id = touched.session_id
      WHERE touched.sequence > ?1
      ORDER BY touched.sequence ASC
