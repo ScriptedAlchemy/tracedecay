@@ -1,9 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    AnchorProvenanceRelation, CanonicalObservationEnvelopeV1, CopyProofV1, DurableObservationV1,
+    AnchorProvenanceRelation, CanonicalObservationEnvelopeV1, CanonicalObservationIdV1,
+    CopyProofV1, DurableObservationV1,
     LogicalCopyRecordV1, MessageOccurrenceRecordV1, RetrievalAnchorRecord, SessionAuthorityClassV1,
     SessionId, TemporalAssertionKindV1, TemporalAssertionRecordV1, TemporalValidityV1, UtcMicros,
     derive_exact_observation_anchor_id,
@@ -19,8 +20,8 @@ use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_store::derive_canonical_projection;
 
 use super::super::query::{
-    PERSIST_OPERATION, encode_watermarks, frontier_i64, generation_i64, now_micros,
-    read_generation, read_observation, storage, storage_message,
+    PERSIST_OPERATION, encode_watermarks, frontier_i64, generation_i64, missing_observation,
+    now_micros, read_generation, read_observation, read_observations, storage, storage_message,
 };
 use super::super::rebuild::checkpoint_relation_rebuild_control;
 use super::materialize::*;
@@ -171,43 +172,108 @@ struct CanonicalOccurrenceProjection {
     outputs: Vec<SessionMessageProjection>,
 }
 
-async fn canonical_occurrence_projection(
+/// Loads every observation the batch's occurrences derive from in one paged
+/// `read_observations` pass instead of one query per source group. The map
+/// holds exactly the rows the equivalent per-id reads would return; a missing
+/// id surfaces through the same `missing_observation` error at the same point
+/// in the caller's iteration order.
+async fn load_output_counts(
     conn: &impl crate::handle::SessionTemporalExec,
-    batch: &SessionTemporalProjectionBatchV1,
-    occurrence: &MessageOccurrenceRecordV1,
-) -> SessionStoreResult<CanonicalOccurrenceProjection> {
-    let (source_sequence, observation) =
-        read_observation(conn, &occurrence.source_observation_id).await?;
-    if source_sequence > batch.watermarks().source_frontier() {
-        return Err(SessionStoreError::FrozenWatermarkMismatch);
+    session_id: &str,
+    observation_ids: &[String],
+) -> SessionStoreResult<HashMap<(String, i64), usize>> {
+    let mut counts = HashMap::new();
+    if observation_ids.is_empty() {
+        return Ok(counts);
     }
-    let mut authority_rows = conn
+    let ids_json = serde_json::to_string(observation_ids)
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let mut rows = conn
         .query(
-            "SELECT output_count FROM session_temporal_observation_effects
-             WHERE observation_id = ?1 AND observation_sequence = ?2
-               AND session_id = ?3 AND output_count > 0",
-            params![
-                occurrence.source_observation_id.as_str(),
-                frontier_i64(source_sequence, PERSIST_OPERATION)?,
-                batch.session_id().as_str(),
-            ],
+            "SELECT observation_id, observation_sequence, output_count
+             FROM session_temporal_observation_effects
+             WHERE session_id = ?1 AND output_count > 0
+               AND observation_id IN (SELECT value FROM json_each(?2))",
+            params![session_id, ids_json.as_str()],
         )
         .await
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let output_count = authority_rows
+    while let Some(row) = rows
         .next()
         .await
         .map_err(|error| storage(PERSIST_OPERATION, error))?
-        .ok_or_else(|| {
-            storage_message(
-                PERSIST_OPERATION,
-                "canonical observation has no atomically recorded temporal effect",
-            )
-        })?
-        .get::<i64>(0)
+    {
+        let observation_id: String = row
+            .get(0)
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        let sequence: i64 = row
+            .get(1)
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        let count: i64 = row
+            .get(2)
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        counts
+            .entry((observation_id, sequence))
+            .or_insert(usize::try_from(count).map_err(|error| storage(PERSIST_OPERATION, error))?);
+    }
+    Ok(counts)
+}
+
+/// Loads the anchor rows joined through `observation_retrieval_anchors` for
+/// every source observation in one query. Each source's expected anchor is
+/// still selected by exact `anchor_id` equality at apply time, so the row set
+/// each occurrence observes is identical to the per-occurrence join.
+async fn load_source_anchor_jsons(
+    conn: &impl crate::handle::SessionTemporalExec,
+    observation_ids: &[String],
+) -> SessionStoreResult<HashMap<String, Vec<(String, String)>>> {
+    let mut anchors: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    if observation_ids.is_empty() {
+        return Ok(anchors);
+    }
+    let ids_json = serde_json::to_string(observation_ids)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let output_count =
-        usize::try_from(output_count).map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let mut rows = conn
+        .query(
+            "SELECT link.observation_id, link.anchor_id, anchor.anchor_json
+             FROM observation_retrieval_anchors AS link
+             JOIN retrieval_anchors AS anchor ON anchor.anchor_id = link.anchor_id
+             WHERE link.observation_id IN (SELECT value FROM json_each(?1))",
+            params![ids_json.as_str()],
+        )
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?
+    {
+        let observation_id: String = row
+            .get(0)
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        let anchor_id: String = row
+            .get(1)
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        let anchor_json: String = row
+            .get(2)
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        anchors
+            .entry(observation_id)
+            .or_default()
+            .push((anchor_id, anchor_json));
+    }
+    Ok(anchors)
+}
+
+fn canonical_occurrence_projection(
+    batch: &SessionTemporalProjectionBatchV1,
+    source_sequence: u64,
+    observation: DurableObservationV1,
+    output_count: usize,
+) -> SessionStoreResult<CanonicalOccurrenceProjection> {
+    if source_sequence > batch.watermarks().source_frontier() {
+        return Err(SessionStoreError::FrozenWatermarkMismatch);
+    }
     let projection = derive_canonical_projection(&observation)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let envelope = observation_envelope(&observation)?;
@@ -241,12 +307,27 @@ pub(super) async fn persist_occurrences(
     control: &ExecutionControl,
 ) -> SessionStoreResult<()> {
     let mut occurrences_by_source = BTreeMap::<_, Vec<_>>::new();
+    let mut source_ids = Vec::new();
+    let mut seen_sources = BTreeSet::new();
     for occurrence in batch.occurrences() {
         occurrences_by_source
             .entry(occurrence.source_observation_id.as_str())
             .or_default()
             .push(occurrence);
+        if seen_sources.insert(occurrence.source_observation_id.as_str()) {
+            source_ids.push(occurrence.source_observation_id.clone());
+        }
     }
+    let observations = read_observations(conn, source_ids.as_slice()).await?;
+    let source_id_strings = source_ids
+        .iter()
+        .map(CanonicalObservationIdV1::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let session_key = batch.session_id().as_str();
+    let output_counts =
+        load_output_counts(conn, session_key, source_id_strings.as_slice()).await?;
+    let anchors = load_source_anchor_jsons(conn, source_id_strings.as_slice()).await?;
     let mut memo = EnsureMemo::default();
     for occurrences in occurrences_by_source.into_values() {
         checkpoint_relation_rebuild_control(control)?;
@@ -256,7 +337,42 @@ pub(super) async fn persist_occurrences(
                 "canonical occurrence source group is unexpectedly empty",
             )
         })?;
-        let canonical = canonical_occurrence_projection(conn, batch, first).await?;
+        let (source_sequence, observation) = observations
+            .get(first.source_observation_id.as_str())
+            .cloned()
+            .ok_or_else(|| missing_observation(&first.source_observation_id))?;
+        let output_count = output_counts
+            .get(&(
+                first.source_observation_id.as_str().to_string(),
+                frontier_i64(source_sequence, PERSIST_OPERATION)?,
+            ))
+            .copied()
+            .ok_or_else(|| {
+                storage_message(
+                    PERSIST_OPERATION,
+                    "canonical observation has no atomically recorded temporal effect",
+                )
+            })?;
+        let canonical =
+            canonical_occurrence_projection(batch, source_sequence, observation, output_count)?;
+        let expected_anchor = derive_exact_observation_anchor_id(
+            canonical.observation.scope(),
+            canonical.observation.observation_id(),
+        )
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        let anchor_json = anchors
+            .get(first.source_observation_id.as_str())
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|(anchor_id, _)| anchor_id == expected_anchor.as_str())
+            })
+            .map(|(_, anchor_json)| anchor_json.as_str())
+            .ok_or_else(|| {
+                storage_message(
+                    PERSIST_OPERATION,
+                    "canonical observation retrieval anchor is missing",
+                )
+            })?;
         for occurrence in occurrences {
             checkpoint_relation_rebuild_control(control)?;
             let ordinal = usize::try_from(occurrence.projection_output_ordinal.value())
@@ -267,7 +383,16 @@ pub(super) async fn persist_occurrences(
                     "canonical observation has no atomically recorded temporal effect output",
                 )
             })?;
-            persist_occurrence(conn, batch, occurrence, &canonical, output, &mut memo).await?;
+            persist_occurrence(
+                conn,
+                batch,
+                occurrence,
+                &canonical,
+                output,
+                anchor_json,
+                &mut memo,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -360,6 +485,7 @@ async fn persist_occurrence(
     occurrence: &MessageOccurrenceRecordV1,
     canonical: &CanonicalOccurrenceProjection,
     output: &SessionMessageProjection,
+    anchor_json: &str,
     memo: &mut EnsureMemo,
 ) -> SessionStoreResult<bool> {
     let envelope = &canonical.envelope;
@@ -374,8 +500,12 @@ async fn persist_occurrence(
             ),
         ));
     }
-    let (expected, copied_from_anchor_ids) =
-        canonical_occurrence(conn, &canonical.observation, envelope, output).await?;
+    let (expected, copied_from_anchor_ids) = canonical_occurrence_from_anchor(
+        &canonical.observation,
+        envelope,
+        output,
+        anchor_json,
+    )?;
     if occurrence != &expected {
         return Err(storage_message(
             PERSIST_OPERATION,
@@ -579,7 +709,6 @@ pub(super) async fn canonical_occurrence(
     MessageOccurrenceRecordV1,
     Vec<tracedecay_domain::RetrievalAnchorId>,
 )> {
-    let output_ordinal = output.output_ordinal();
     let expected_anchor =
         derive_exact_observation_anchor_id(observation.scope(), observation.observation_id())
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
@@ -608,8 +737,27 @@ pub(super) async fn canonical_occurrence(
         })?
         .get(0)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    canonical_occurrence_from_anchor(observation, envelope, output, &anchor_json)
+}
+
+/// The shared canonical-occurrence derivation over an already-loaded anchor
+/// record — the batch preload and the single-shot query path produce the same
+/// `anchor_json` row before this runs.
+fn canonical_occurrence_from_anchor(
+    observation: &tracedecay_domain::DurableObservationV1,
+    envelope: &CanonicalObservationEnvelopeV1,
+    output: &SessionMessageProjection,
+    anchor_json: &str,
+) -> SessionStoreResult<(
+    MessageOccurrenceRecordV1,
+    Vec<tracedecay_domain::RetrievalAnchorId>,
+)> {
+    let output_ordinal = output.output_ordinal();
+    let expected_anchor =
+        derive_exact_observation_anchor_id(observation.scope(), observation.observation_id())
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let anchor: RetrievalAnchorRecord =
-        serde_json::from_str(&anchor_json).map_err(|error| storage(PERSIST_OPERATION, error))?;
+        serde_json::from_str(anchor_json).map_err(|error| storage(PERSIST_OPERATION, error))?;
     if anchor.anchor_id() != &expected_anchor
         || !anchor
             .source_observations()
