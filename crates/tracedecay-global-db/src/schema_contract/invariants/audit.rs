@@ -1385,7 +1385,10 @@ async fn validate_projection_authority_suffix_pages(
     // durable skips; loading their observation, state and disposition with
     // separate SQL-channel requests made the exhaustive pass issue five
     // round-trips per row. The page query carries that state together so a
-    // common skip is validated without any per-row database request.
+    // common skip is validated without any per-row database request. Each
+    // correlated count reads `(SELECT ?1)`: Turso seeks only the bound prefix
+    // of a correlated key otherwise and scans the projector's rows
+    // (turso-bugs/correlated-subquery-bound-prefix-scan.md).
     let mut scan_cursor = coverage_start;
     let mut pages_audited = 0_i64;
     loop {
@@ -1394,16 +1397,16 @@ async fn validate_projection_authority_suffix_pages(
                 "SELECT observation.sequence, observation.observation_json,
                         observation.receipt_id,
                         (SELECT COUNT(*) FROM observation_projection_provenance
-                         WHERE projector_version = ?1
+                         WHERE projector_version = (SELECT ?1)
                            AND observation_id = observation.observation_id),
                         (SELECT COUNT(*) FROM observation_projection_dispositions
-                         WHERE projector_version = ?1
+                         WHERE projector_version = (SELECT ?1)
                            AND observation_id = observation.observation_id),
                         (SELECT COUNT(*) FROM observation_projection_aliases
-                         WHERE projector_version = ?1
+                         WHERE projector_version = (SELECT ?1)
                            AND observation_id = observation.observation_id),
                         (SELECT COUNT(*) FROM observation_workflow_facts
-                         WHERE projector_version = ?1
+                         WHERE projector_version = (SELECT ?1)
                            AND observation_id = observation.observation_id),
                         EXISTS(
                             SELECT 1 FROM projection_queue
