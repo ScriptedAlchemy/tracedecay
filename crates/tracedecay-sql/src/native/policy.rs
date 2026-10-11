@@ -359,19 +359,13 @@ fn is_allowed_exact_sql_pragma(name: &str, value: Option<&str>) -> bool {
         "wal_autocheckpoint",
     ];
     const SET_FLAG: &[&str] = &["foreign_keys", "defer_foreign_keys"];
-    const SET_COUNT: &[&str] = &[
-        "busy_timeout",
-        "incremental_vacuum",
-        "user_version",
-        "wal_autocheckpoint",
-    ];
+    const SET_COUNT: &[&str] = &["busy_timeout", "user_version", "wal_autocheckpoint"];
     let is = |candidate: &&str| name.eq_ignore_ascii_case(candidate);
     match value {
         _ if ARGUMENT_SAFE.iter().any(is) => true,
         None => NO_ARGUMENT_ONLY.iter().any(is) || is(&"shrink_memory"),
         Some(value) => {
-            (is(&"auto_vacuum") && (value.eq_ignore_ascii_case("incremental") || value == "2"))
-                || (SET_FLAG.iter().any(is) && (value.eq_ignore_ascii_case("on") || value == "1"))
+            (SET_FLAG.iter().any(is) && (value.eq_ignore_ascii_case("on") || value == "1"))
                 || (SET_COUNT.iter().any(is) && value.parse::<u32>().is_ok())
         }
     }
