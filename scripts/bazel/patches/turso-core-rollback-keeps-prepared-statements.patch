@@ -1,0 +1,65 @@
+--- a/.tmp_git_root/core/connection.rs
++++ b/.tmp_git_root/core/connection.rs
+@@ -5038,13 +5038,21 @@
+             if wal_indices.is_empty() {
+                 return;
+             }
+-            {
++            // Only a discarded staged schema can leave a prepared statement
++            // stale. The temp database counts as attached here, so bumping
++            // unconditionally made every ROLLBACK on a connection with temp
++            // tables recompile all of its prepared statements.
++            let discarded_schema = {
+                 let mut schemas = self.database_schemas().write();
++                let mut discarded = false;
+                 for &i in &wal_indices {
+-                    schemas.remove(&pagers[i].0);
++                    discarded |= schemas.remove(&pagers[i].0).is_some();
+                 }
++                discarded
++            };
++            if discarded_schema {
++                self.bump_prepare_context_generation();
+             }
+-            self.bump_prepare_context_generation();
+             for &i in &wal_indices {
+                 pagers[i].1.rollback_attached();
+             }
+--- a/vdbe/execute.rs
++++ b/vdbe/execute.rs
+@@ -5666,6 +5666,35 @@
+             // schema including the sequences map, so the restore is
+             // consistent across tables / indexes / sequences without any
+             // I/O.
++            //
++            // Schemas are copy-on-write and the frame holds a reference to
++            // each, so a schema no DDL touched since the savepoint is still
++            // the snapshot itself. Restoring it would change nothing, and the
++            // generation bump would make every prepared statement on the
++            // connection recompile after each ROLLBACK TO.
++            let frame_info = frame_info.filter(|info| {
++                let main_changed =
++                    !Arc::ptr_eq(&*conn.schema.read(), &info.main_schema_snapshot);
++                let temp_changed = match (
++                    conn.temp.database.read().as_ref(),
++                    &info.temp_schema_snapshot,
++                ) {
++                    (None, _) => false,
++                    (Some(temp_db), Some(snap)) => {
++                        !Arc::ptr_eq(&*temp_db.db.schema.lock(), snap)
++                    }
++                    (Some(_), None) => true,
++                };
++                let staged = conn.database_schemas().read();
++                let staged_changed = staged.len() != info.staged_schema_snapshot.len()
++                    || staged.iter().any(|(db_id, schema)| {
++                        !info
++                            .staged_schema_snapshot
++                            .get(db_id)
++                            .is_some_and(|snap| Arc::ptr_eq(schema, snap))
++                    });
++                main_changed || temp_changed || staged_changed
++            });
+             if let Some(info) = frame_info {
+                 *conn.schema.write() = info.main_schema_snapshot;
+                 if let Some(temp_db) = conn.temp.database.read().as_ref() {

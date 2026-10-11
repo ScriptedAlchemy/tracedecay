@@ -59,14 +59,17 @@ crate.annotation(
     version = "0.45.0",
 )
 
-# Native FTS builds one Tantivy segment per statement flush with term tables
-# sized for a 64 MiB budget, so each one-row INSERT into an FTS-indexed table
-# allocated and scanned megabytes
-# (benchmark_data/storage-concurrency/turso-bugs/fts-flush-sizes-tables-by-full-budget.md).
+# Turso fixes carried until upstream takes them; each one has a repro and its
+# measured effect under benchmark_data/storage-concurrency/turso-bugs/.
 crate.annotation(
     crate = "turso_core",
     patch_args = ["-p1"],
-    patches = ["//scripts:bazel/patches/turso-core-fts-segment-budget.patch"],
+    patch_tool = "patch",
+    patches = [
+        "//scripts:bazel/patches/turso-core-fts-segment-budget.patch",
+        "//scripts:bazel/patches/turso-core-rollback-keeps-prepared-statements.patch",
+    ],
+    version = "0.8.0",
 )
 
 # .cargo/config.toml's [env] LIBSQLITE3_FLAGS, which Cargo hands every build

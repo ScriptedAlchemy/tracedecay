@@ -1122,4 +1122,84 @@ mod driver {
             );
         }
     }
+
+    /// Catches recompiling every statement on each request: exact SQL
+    /// re-runs `CREATE TEMP TABLE IF NOT EXISTS` per request, and readers
+    /// end each read with ROLLBACK. A driver that empties its cache after
+    /// DDL that changed nothing, or an engine that invalidates every program
+    /// after a ROLLBACK or ROLLBACK TO that undid no DDL, compiles again. A
+    /// rollback that did undo DDL must still leave no stale program.
+    #[test]
+    fn programs_survive_unchanged_schema_and_rollbacks() {
+        use crate::StatementControl;
+
+        let (_directory, _path, connection) = open();
+        connection.set_capability(Capability::Maintenance).unwrap();
+        connection
+            .execute_batch("CREATE TABLE t(a); CREATE TEMP TABLE scratch(x)")
+            .unwrap();
+        let cached_insert_compiles = || {
+            let before = connection.compiled_statements();
+            connection
+                .prepare_cached("INSERT INTO t VALUES (1)")
+                .unwrap()
+                .execute([])
+                .unwrap();
+            connection.compiled_statements() - before
+        };
+        assert_eq!(cached_insert_compiles(), 1);
+        let wide = |held: &mut crate::Statement<'_>| {
+            held.query_row([], |row| Ok(row.get_ref(1).is_ok()))
+                .unwrap()
+        };
+        let mut held = connection.prepare("SELECT * FROM t").unwrap();
+        assert!(!wide(&mut held));
+        held.take_counters();
+        for sql in [
+            "CREATE TEMP TABLE IF NOT EXISTS scratch(x)",
+            "CREATE TABLE IF NOT EXISTS t(a)",
+            "BEGIN; INSERT INTO t VALUES (2); ROLLBACK",
+            "BEGIN; SELECT count(*) FROM t; ROLLBACK",
+            "BEGIN; INSERT INTO temp.scratch VALUES (2); ROLLBACK",
+            "BEGIN; SAVEPOINT s; INSERT INTO t VALUES (2); ROLLBACK TO s; RELEASE s; COMMIT",
+        ] {
+            connection.execute_batch(sql).unwrap();
+            assert_eq!(cached_insert_compiles(), 0, "{sql} emptied the cache");
+            assert!(!wide(&mut held));
+            assert_eq!(
+                held.take_counters().reprepares,
+                0,
+                "{sql} invalidated a held program"
+            );
+        }
+
+        connection
+            .execute_batch(
+                "BEGIN; SAVEPOINT s; DROP TABLE t; CREATE TABLE t(a, b); \
+                 INSERT INTO t VALUES (1, 2); ROLLBACK TO s; RELEASE s; COMMIT",
+            )
+            .unwrap();
+        assert!(
+            !wide(&mut held),
+            "ROLLBACK TO left the dropped schema in place"
+        );
+        connection
+            .execute_batch("INSERT INTO temp.scratch VALUES (1)")
+            .unwrap();
+        let temp_wide = || {
+            wide(
+                &mut connection
+                    .prepare_cached("SELECT * FROM temp.scratch")
+                    .unwrap(),
+            )
+        };
+        assert!(!temp_wide());
+        connection
+            .execute_batch(
+                "BEGIN; DROP TABLE temp.scratch; CREATE TEMP TABLE scratch(x, y); \
+                 INSERT INTO temp.scratch VALUES (1, 2); COMMIT",
+            )
+            .unwrap();
+        assert!(temp_wide(), "the cached program saw the old temp schema");
+    }
 }
