@@ -1154,8 +1154,7 @@ fn aggregate_worker_memory_releases(
             Err(error) => {
                 return Err(ExactSqlError::Sqlite {
                     operation: "release reader connection memory",
-                    code: None,
-                    extended_code: None,
+                    kind: tracedecay_sql::ErrorKind::Other,
                     message: format!(
                         "released {released} of {total} reader connections before a worker \
                          release failed: {error}"

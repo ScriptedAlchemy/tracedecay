@@ -251,7 +251,7 @@ mod tests {
         connection
             .execute_batch(
                 "CREATE TABLE remote_writer_fences (
-                    authority_key TEXT PRIMARY KEY,
+                    authority_key TEXT NOT NULL PRIMARY KEY,
                     writer_fence_json TEXT NOT NULL CHECK(json_valid(writer_fence_json)),
                     frontier_sequence INTEGER NOT NULL CHECK(frontier_sequence >= 0),
                     updated_at INTEGER NOT NULL

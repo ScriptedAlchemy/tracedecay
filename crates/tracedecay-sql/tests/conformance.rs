@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use tracedecay_sql::{
     Capability, CheckpointMode, Connection, ConnectionControl, EnginePolicy, Error, ErrorExt,
-    ErrorKind, OptionalExtension, Result, StatementControl, StatementCounters, TransactionBehavior,
-    TransactionControl, params, params_from_iter,
+    ErrorKind, OptionalExtension, Result, StatementControl, StatementCounters, Transaction,
+    TransactionBehavior, TransactionControl, params, params_from_iter,
     types::{FromSql, Value, ValueRef},
 };
 
@@ -41,6 +41,8 @@ conformance!(
     engine_policy_never_waits_on_a_busy_store,
     damaged_pages_are_classified_corrupt,
     statements_report_columns_and_conversions_carry_into_errors,
+    unchecked_transactions_commit_or_roll_back_through_a_shared_borrow,
+    close_rolls_back_and_path_names_the_store,
 );
 
 mod cases {
@@ -643,6 +645,7 @@ mod cases {
         let connection = Connection::open_in_memory()?;
         let statement = connection.prepare("SELECT 1 AS a, 2 AS b")?;
         assert_eq!(statement.column_count(), 2);
+        assert_eq!(statement.column_names(), ["a", "b"]);
         assert!(matches!(
             narrow(ValueRef::Integer(300)),
             Err(Error::IntegralValueOutOfRange(_, 300))
@@ -651,6 +654,44 @@ mod cases {
             narrow(ValueRef::Text(b"x")),
             Err(Error::FromSqlConversionFailure(..))
         ));
+        Ok(())
+    }
+
+    pub(super) fn unchecked_transactions_commit_or_roll_back_through_a_shared_borrow() -> Result<()>
+    {
+        let connection = Connection::open_in_memory()?;
+        items(&connection)?;
+        let committed = Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)?;
+        committed.execute("INSERT INTO items (name) VALUES ('kept')", [])?;
+        committed.commit()?;
+        let dropped = Transaction::new_unchecked(&connection, TransactionBehavior::Deferred)?;
+        dropped.execute("INSERT INTO items (name) VALUES ('dropped')", [])?;
+        assert!(
+            !connection.is_autocommit(),
+            "the shared borrow opened a transaction"
+        );
+        drop(dropped);
+        assert!(connection.is_autocommit());
+        assert_eq!(names(&connection)?, ["kept"]);
+        Ok(())
+    }
+
+    pub(super) fn close_rolls_back_and_path_names_the_store() -> Result<()> {
+        let (_directory, path, connection) = file_database();
+        items(&connection)?;
+        let reported = std::fs::canonicalize(connection.path().expect("a file store has a path"))
+            .expect("the reported path exists");
+        assert_eq!(
+            reported,
+            std::fs::canonicalize(&path).expect("store exists")
+        );
+        connection.execute_batch("BEGIN; INSERT INTO items (name) VALUES ('open');")?;
+        connection.close().map_err(|(_, error)| error)?;
+        let reopened = Connection::open(&path)?;
+        assert!(
+            names(&reopened)?.is_empty(),
+            "close rolled back the open write"
+        );
         Ok(())
     }
 }

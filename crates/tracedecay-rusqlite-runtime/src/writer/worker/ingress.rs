@@ -173,13 +173,15 @@ pub(super) fn enqueue(
         return reject_duplicate(item, operation_id, telemetry);
     }
     if let Some(hub) = inflight.get(&operation_id) {
-        if !hub.matches(&item) {
-            return reject_duplicate(item, operation_id, telemetry);
-        }
         if hub.can_attach(&item) {
             hub.attach_request(item);
             telemetry.released(1, admission_bytes);
             return true;
+        }
+        // A settled execution is no longer in flight: its receipt decides
+        // the conflict once this request runs.
+        if !hub.matches(&item) && !hub.is_settled() {
+            return reject_duplicate(item, operation_id, telemetry);
         }
     }
     if let Err(item) = queue.push(item) {

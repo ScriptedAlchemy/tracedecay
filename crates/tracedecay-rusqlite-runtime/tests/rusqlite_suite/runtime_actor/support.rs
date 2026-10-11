@@ -2,11 +2,11 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
-use rusqlite::{Connection, Savepoint};
 use tempfile::TempDir;
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
 };
+use tracedecay_sql::{Connection, Savepoint};
 use tracedecay_store::{
     AdmissionConfigV1, LocatorDigest, OperationPriorityV1, RepositoryOperationEnvelopeV1,
     RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1, RuntimeCancellationIdentityV1,
@@ -161,7 +161,7 @@ impl StorageOperationExecutor for MarkerExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         savepoint.execute_batch(&format!(
             "CREATE TABLE IF NOT EXISTS {MARKER_TABLE} (value INTEGER NOT NULL)"
         ))?;

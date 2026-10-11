@@ -20,7 +20,7 @@ use tracedecay_store::{
     StorageRuntimeErrorV1, UnavailableReasonV1,
 };
 
-use crate::connection::{self, ConnectionMode, OpenedDatabaseFile};
+use crate::connection::{self, ConnectionMode};
 use crate::exact_sql::{ExactSqlError, ExactSqlRows, ExactSqlStatement, execute_query};
 use crate::telemetry::{ReaderAdmissionRecorder, take_observed_vm};
 
@@ -425,8 +425,8 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
                 let _ = started.send(Err(error));
                 return;
             }
-            let opened_file_identity = match OpenedDatabaseFile::pin(&worker_open_path) {
-                Ok(opened) => opened.identity(),
+            let opened_file_identity = match connection::current_identity(&worker_open_path) {
+                Ok(identity) => identity,
                 Err(error) => {
                     let _ = started.send(Err(ReaderStartError::OpenedDatabaseIdentity(error)));
                     return;

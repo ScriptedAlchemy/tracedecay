@@ -1241,11 +1241,9 @@ fn materialize_rows(
 }
 
 fn sqlite_error(operation: &'static str, error: tracedecay_sql::Error) -> ExactSqlError {
-    let (code, extended_code) = error.sqlite_codes().unzip();
     ExactSqlError::Sqlite {
         operation,
-        code,
-        extended_code,
+        kind: error.kind(),
         message: error.to_string(),
     }
 }

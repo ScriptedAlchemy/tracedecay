@@ -435,13 +435,11 @@ pub(super) fn rollback_failed_after(
     match rollback {
         ExactSqlError::Sqlite {
             operation,
-            code,
-            extended_code,
+            kind,
             message,
         } => ExactSqlError::Sqlite {
             operation,
-            code,
-            extended_code,
+            kind,
             message: format!("{message}; rolling back after: {write}"),
         },
         rollback => rollback,

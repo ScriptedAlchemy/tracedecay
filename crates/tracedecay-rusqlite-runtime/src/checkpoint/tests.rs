@@ -390,7 +390,6 @@ fn rusqlite_driver_samples_and_checkpoints_its_owned_writer_connection() {
         .unwrap();
     let mut driver = RusqliteCheckpointDriver::new(connection);
 
-    driver.disable_auto_checkpoint().unwrap();
     let sample = driver.sample_wal().unwrap();
     let report = driver.checkpoint(CheckpointMode::Passive).unwrap();
 
