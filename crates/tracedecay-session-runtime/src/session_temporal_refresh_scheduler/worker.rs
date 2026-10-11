@@ -35,7 +35,9 @@ use tracedecay_session_temporal_store::{
 const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
 
 fn history_allows_summary_convergence(outcome: Option<SessionHistoricalIngestOutcome>) -> bool {
-    !outcome.is_some_and(SessionHistoricalIngestOutcome::needs_another_pass)
+    !outcome
+        .as_ref()
+        .is_some_and(SessionHistoricalIngestOutcome::needs_another_pass)
 }
 
 /// Consecutive history-priority passes after which the one-shot
@@ -262,8 +264,8 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 projection_requested = true;
                 state.pass_count.fetch_add(1, Ordering::AcqRel);
             }
-            if let Some(outcome) = history_outcome {
-                state.record_history_outcome(outcome);
+            if let Some(outcome) = &history_outcome {
+                state.record_history_outcome(outcome.clone());
             }
             if matches!(
                 history_outcome,
@@ -272,7 +274,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             {
                 return;
             }
-            match history_outcome {
+            match &history_outcome {
                 Some(SessionHistoricalIngestOutcome::Retryable { reason_code, .. }) => {
                     tracing::debug!(
                         reason_code,
@@ -293,6 +295,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 history_outcome,
                 Some(SessionHistoricalIngestOutcome::Complete)
             ) || history_outcome
+                .as_ref()
                 .is_some_and(SessionHistoricalIngestOutcome::made_progress);
             let report = if projection_requested
                 || state.has_requests()
@@ -324,7 +327,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     made_progress: true,
                 })
             } else {
-                history_outcome
+                history_outcome.clone()
             };
             let convergence_admission =
                 lcm_convergence_admission(convergence_outcome, &mut history_priority_passes);
@@ -460,7 +463,9 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 || report.completed > 0
                 || report.failed > 0
                 || report.cancelled > 0
-                || history_outcome.is_some_and(SessionHistoricalIngestOutcome::made_progress)
+                || history_outcome
+                    .as_ref()
+                    .is_some_and(SessionHistoricalIngestOutcome::made_progress)
                 || summary_convergence_made_progress;
             if let Some(backlog) = report.backlog {
                 state.record_pass(
@@ -623,7 +628,7 @@ async fn session_history_refresh(
             let Ok(_permit) = admission.try_acquire() else {
                 return (
                     SessionHistoricalIngestOutcome::Retryable {
-                        reason_code: HISTORY_ADMISSION_SATURATED_REASON,
+                        reason_code: HISTORY_ADMISSION_SATURATED_REASON.to_owned(),
                         made_progress: false,
                     },
                     Some(HistoryRelease::Admission),
@@ -637,7 +642,7 @@ async fn session_history_refresh(
         }
         None => (
             SessionHistoricalIngestOutcome::Blocked {
-                reason_code: "history_ingestor_missing",
+                reason_code: "history_ingestor_missing".to_owned(),
                 made_progress: false,
             },
             None,
@@ -1439,7 +1444,7 @@ mod tests {
         );
         assert_eq!(
             history_continuation(Some(SessionHistoricalIngestOutcome::Retryable {
-                reason_code: "ingest_pass_backpressured",
+                reason_code: "ingest_pass_backpressured".to_owned(),
                 made_progress: true,
             })),
             HistoryContinuation::Immediate,
@@ -1447,7 +1452,7 @@ mod tests {
         );
         assert_eq!(
             history_continuation(Some(SessionHistoricalIngestOutcome::Retryable {
-                reason_code: "history_admission_saturated",
+                reason_code: "history_admission_saturated".to_owned(),
                 made_progress: false,
             })),
             HistoryContinuation::AwaitRelease
@@ -1549,7 +1554,7 @@ mod tests {
         )));
         assert!(!history_allows_summary_convergence(Some(
             SessionHistoricalIngestOutcome::Retryable {
-                reason_code: "provider_busy",
+                reason_code: "provider_busy".to_owned(),
                 made_progress: false,
             },
         )));
@@ -1558,7 +1563,7 @@ mod tests {
         )));
         assert!(history_allows_summary_convergence(Some(
             SessionHistoricalIngestOutcome::Blocked {
-                reason_code: "invalid_observation_contract",
+                reason_code: "invalid_observation_contract".to_owned(),
                 made_progress: false,
             },
         )));
@@ -1610,7 +1615,8 @@ mod tests {
                 "a perpetually pending history lane starved the range rewrite for \
                  {passes} passes"
             );
-            let admission = lcm_convergence_admission(pending, &mut history_priority_passes);
+            let admission =
+                lcm_convergence_admission(pending.clone(), &mut history_priority_passes);
             assert_ne!(
                 admission,
                 LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full),

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+* **session:** name each provider's historical ingest blocker instead of the first retryable failure in rotation ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))
+* **session:** classify SQLITE_CORRUPT / SQLITE_NOTADB as blocked `projection_store_corrupt` instead of retrying a malformed page ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))
+* **session:** log the source chain on projection drain warnings so the journal names the real stall ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))
+
 ## [1.0.0-beta.83](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.82...v1.0.0-beta.83) (2026-10-11)
 
 

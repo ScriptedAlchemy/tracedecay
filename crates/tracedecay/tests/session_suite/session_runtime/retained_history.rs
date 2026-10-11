@@ -183,7 +183,7 @@ impl SessionHistoricalIngestor for HealthyProvidersWithBlockedCursorIngestor {
                 .admit_healthy_provider("codex", "session.healthy.codex")
                 .await;
             SessionHistoricalIngestOutcome::Blocked {
-                reason_code: "observation_cursor_advance_collision",
+                reason_code: "observation_cursor_advance_collision".to_owned(),
                 made_progress: claude_progress || codex_progress,
             }
         })
@@ -308,7 +308,7 @@ impl SessionHistoricalIngestor for BlockThirdHistoricalIngestor {
                     self.third_entered.store(true, Ordering::Release);
                     self.release_third.notified().await;
                     SessionHistoricalIngestOutcome::Blocked {
-                        reason_code: "fixture_complete",
+                        reason_code: "fixture_complete".to_owned(),
                         made_progress: false,
                     }
                 }
@@ -331,7 +331,7 @@ impl SessionHistoricalIngestor for RetryThenBlockHistoricalIngestor {
             let pass = self.passes.fetch_add(1, Ordering::AcqRel);
             if pass == 0 {
                 return SessionHistoricalIngestOutcome::Retryable {
-                    reason_code: "provider_busy",
+                    reason_code: "provider_busy".to_owned(),
                     made_progress: false,
                 };
             }
@@ -561,7 +561,7 @@ async fn blocked_history_is_not_rewoken_by_ensure() {
     let authority = profile_authority(&temp, "history-blocked-rewake").await;
     let ingestor = Arc::new(ScriptedHistoricalIngestor::new([
         SessionHistoricalIngestOutcome::Blocked {
-            reason_code: "transcript_source_contract_invalid",
+            reason_code: "transcript_source_contract_invalid".to_owned(),
             made_progress: false,
         },
         SessionHistoricalIngestOutcome::Complete,

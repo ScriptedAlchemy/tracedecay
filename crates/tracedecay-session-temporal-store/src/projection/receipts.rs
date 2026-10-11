@@ -380,10 +380,7 @@ pub async fn request_session_temporal_reset(
         params![observation_id],
     )
     .await
-    .map_err(|error| ProjectionStoreError::Storage {
-        operation: "request session temporal reset",
-        source: Box::new(error),
-    })?;
+    .map_err(|error| ProjectionStoreError::storage("request session temporal reset", error))?;
     Ok(())
 }
 
@@ -451,9 +448,8 @@ pub async fn record_canonical_observation_effect(
             ],
         )
         .await
-        .map_err(|error| ProjectionStoreError::Storage {
-            operation: "record canonical temporal observation effect",
-            source: Box::new(error),
+        .map_err(|error| {
+            ProjectionStoreError::storage("record canonical temporal observation effect", error)
         })?;
     // `ON CONFLICT(observation_id) DO NOTHING` reports one changed row when the
     // effect was newly written and zero when the primary key already held one.
@@ -473,44 +469,32 @@ pub async fn record_canonical_observation_effect(
             params![observation.observation_id().as_str()],
         )
         .await
-        .map_err(|error| ProjectionStoreError::Storage {
-            operation: "verify canonical temporal observation effect",
-            source: Box::new(error),
+        .map_err(|error| {
+            ProjectionStoreError::storage("verify canonical temporal observation effect", error)
         })?;
     let row = rows
         .next()
         .await
-        .map_err(|error| ProjectionStoreError::Storage {
-            operation: "verify canonical temporal observation effect",
-            source: Box::new(error),
+        .map_err(|error| {
+            ProjectionStoreError::storage("verify canonical temporal observation effect", error)
         })?
         .ok_or(ProjectionStoreError::ProvenanceCollision)?;
     let actual = (
-        row.get::<i64>(0)
-            .map_err(|error| ProjectionStoreError::Storage {
-                operation: "verify canonical temporal observation effect",
-                source: Box::new(error),
-            })?,
-        row.get::<String>(1)
-            .map_err(|error| ProjectionStoreError::Storage {
-                operation: "verify canonical temporal observation effect",
-                source: Box::new(error),
-            })?,
-        row.get::<String>(2)
-            .map_err(|error| ProjectionStoreError::Storage {
-                operation: "verify canonical temporal observation effect",
-                source: Box::new(error),
-            })?,
-        row.get::<String>(3)
-            .map_err(|error| ProjectionStoreError::Storage {
-                operation: "verify canonical temporal observation effect",
-                source: Box::new(error),
-            })?,
-        row.get::<i64>(4)
-            .map_err(|error| ProjectionStoreError::Storage {
-                operation: "verify canonical temporal observation effect",
-                source: Box::new(error),
-            })?,
+        row.get::<i64>(0).map_err(|error| {
+            ProjectionStoreError::storage("verify canonical temporal observation effect", error)
+        })?,
+        row.get::<String>(1).map_err(|error| {
+            ProjectionStoreError::storage("verify canonical temporal observation effect", error)
+        })?,
+        row.get::<String>(2).map_err(|error| {
+            ProjectionStoreError::storage("verify canonical temporal observation effect", error)
+        })?,
+        row.get::<String>(3).map_err(|error| {
+            ProjectionStoreError::storage("verify canonical temporal observation effect", error)
+        })?,
+        row.get::<i64>(4).map_err(|error| {
+            ProjectionStoreError::storage("verify canonical temporal observation effect", error)
+        })?,
     );
     let expected = (
         sequence,
