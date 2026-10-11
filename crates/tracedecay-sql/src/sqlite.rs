@@ -1,5 +1,5 @@
 //! The SQLite arm: rusqlite's types plus the control surface as extension
-//! traits. The flip unit deletes this module together with the engine flag.
+//! traits.
 
 use std::{
     ffi::CString,
@@ -152,8 +152,6 @@ fn authorize_writer(context: AuthContext<'_>) -> Authorization {
     authorize(Capability::Writer, &context.action)
 }
 
-/// Schema-introspection and integrity pragmas that cannot mutate the database,
-/// file, or connection configuration.
 fn is_read_only_introspection_pragma(name: &str) -> bool {
     [
         "collation_list",

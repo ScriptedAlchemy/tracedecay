@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Fail, listing each site, when owned code still names rusqlite. Only the
-# driver's SQLite arm, the foreign session-host readers and (until U17) the
-# lexical projection artifact may. Pass paths to check one unit's scope;
-# the default is every crate.
+# driver's SQLite arm, the foreign session-host readers, and the lexical
+# projection artifact may. Pass paths to limit the check. The default is
+# every crate.
 #
 # Usage: scripts/storage/sql-postcondition.sh [PATH...]
 set -euo pipefail

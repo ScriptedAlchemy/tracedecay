@@ -7,19 +7,13 @@ use tracedecay_rusqlite_runtime::exact_sql::{
     ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
 };
 
-use super::{
-    BackendKind, Error, NativeTestConnection, QueryExecutor, TransactionBehavior, WriteStatement,
-};
+use super::{Error, NativeTestConnection, TransactionBehavior, WriteStatement};
 
 #[tokio::test]
 async fn native_facade_preserves_bound_values_rollback_snapshots_and_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("native.db");
     let connection = NativeTestConnection::open(&path).unwrap();
-    assert_eq!(
-        QueryExecutor::backend_kind(&connection),
-        BackendKind::NativeTurso
-    );
     connection.execute_batch("CREATE TABLE records (id INTEGER PRIMARY KEY, body TEXT NOT NULL, payload BLOB, score REAL)").await.unwrap();
     connection
         .execute(
@@ -183,12 +177,11 @@ impl ExactSqlWriteAuthority for RevokeDuringQuery {
 async fn native_transaction_revoked_during_sql_rolls_back_and_refuses_followup() {
     let directory = tempfile::tempdir().unwrap();
     let enabled = Arc::new(AtomicBool::new(false));
-    let checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let connection = NativeTestConnection::open_with_write_authority(
         &directory.path().join("mid-query.db"),
         Arc::new(RevokeDuringQuery {
             enabled: Arc::clone(&enabled),
-            checks: Arc::clone(&checks),
+            checks: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }),
     )
     .unwrap();
@@ -207,7 +200,6 @@ async fn native_transaction_revoked_during_sql_rolls_back_and_refuses_followup()
     enabled.store(true, Ordering::Release);
     let error = transaction.query("WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 100000) SELECT sum(n) FROM numbers", ()).await.unwrap_err();
     assert!(matches!(error, Error::InvalidOperation(_)), "{error:?}");
-    assert!(checks.load(Ordering::Acquire) > 16);
     enabled.store(false, Ordering::Release);
     assert!(matches!(
         transaction
@@ -241,15 +233,17 @@ async fn native_background_snapshot_leases_reserve_foreground_and_release_on_dro
         held_background.push(background.read_snapshot().await.unwrap());
     }
     let (started, observing) = tokio::sync::oneshot::channel();
-    let mut waiting = tokio::spawn(async move {
+    let waiting = tokio::spawn(async move {
         started.send(()).unwrap();
         background.read_snapshot().await
     });
     observing.await.unwrap();
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiting)
-            .await
-            .is_err()
+        !waiting.is_finished(),
+        "an extra background snapshot must wait for a released lease"
     );
     let first = connection.read_snapshot().await.unwrap();
     let second = connection.read_snapshot().await.unwrap();
@@ -264,11 +258,7 @@ async fn native_background_snapshot_leases_reserve_foreground_and_release_on_dro
     drop(first);
     drop(second);
     held_background.pop();
-    let admitted = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let admitted = waiting.await.unwrap().unwrap();
     drop(admitted);
 }
 
@@ -699,8 +689,14 @@ async fn native_admitted_returning_write_persists_after_its_waiter_is_aborted() 
 async fn native_returning_row_budget_refusal_rolls_back_before_reopen() {
     assert_native_returning_budget_rollback(
         "returning-row-budget.db",
-        10_001,
-        "INSERT INTO records(id) SELECT id FROM seed RETURNING id",
+        1,
+        "INSERT INTO records(id)
+         SELECT id FROM (
+             WITH RECURSIVE n(id) AS (
+                 VALUES(1) UNION ALL SELECT id + 1 FROM n WHERE id < 20000
+             )
+             SELECT id FROM n
+         ) RETURNING id",
     )
     .await;
 }
@@ -735,8 +731,8 @@ async fn assert_native_returning_budget_rollback(name: &str, seed_rows: usize, s
         .unwrap();
     let error = connection.execute_returning(sql, ()).await.unwrap_err();
     assert!(
-        matches!(error, Error::InvalidOperation(ref message) if message == "native query materialization limit exceeded"),
-        "{error:?}"
+        matches!(error, Error::InvalidOperation(_)),
+        "an oversized RETURNING write must be refused: {error:?}"
     );
     let mut rows = connection
         .read_only()

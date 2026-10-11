@@ -638,7 +638,6 @@ fn unguarded() -> ExecutionGuard {
     ExecutionGuard::new(None, Arc::new(AtomicBool::new(false)), None)
 }
 
-/// One thread-owned native connection with rusqlite's method surface.
 pub struct Connection {
     inner: RefCell<super::Connection>,
     savepoint_depth: Cell<usize>,

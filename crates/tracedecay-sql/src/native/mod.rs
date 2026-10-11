@@ -1,7 +1,7 @@
 //! Native Turso connections with actor-owned transaction control and execution
-//! guards. Compiled on both engines while `tracedecay-runtime-core`'s
-//! `engine::native` facade still drives it; the rusqlite-shaped `driver` over it
-//! is the crate's public surface under `--config=native`.
+//! guards. Compiled on both engines because `tracedecay-runtime-core`'s
+//! `engine::native` facade drives this module. `driver` is the crate's public
+//! surface under `--config=native`.
 mod connection;
 #[cfg(td_engine = "native")]
 pub(crate) mod driver;
