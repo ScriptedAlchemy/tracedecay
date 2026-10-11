@@ -7,7 +7,7 @@
 use std::error::Error;
 use std::fmt;
 
-use rusqlite::types::{Value, ValueRef};
+use tracedecay_sql::types::{Value, ValueRef};
 
 use super::{CELL_ALLOCATION_OVERHEAD, MAX_REQUEST_BYTES, MAX_SQL_BYTES, MAX_SQL_PARAMETERS};
 

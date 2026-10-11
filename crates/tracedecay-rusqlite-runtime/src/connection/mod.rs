@@ -1,31 +1,15 @@
-#[cfg(unix)]
-use std::ffi::CString;
 use std::{
     fmt,
     fs::{File, OpenOptions},
     io,
-    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
-use rusqlite::{
-    Connection, OpenFlags, Transaction,
-    config::DbConfig,
-    hooks::{AuthAction, AuthContext, Authorization},
-    limits::Limit,
-};
 use sha2::{Digest, Sha256};
+use tracedecay_sql::{
+    Capability, Connection, ConnectionControl, EnginePolicy, OpenFlags, file_identity,
+};
 use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
-
-const PROGRESS_INTERVAL_OPS: i32 = 1_000;
-
-/// Writer and reader connections are single-threaded actors, so rusqlite's
-/// per-connection statement cache is the reuse path for exact-SQL execute
-/// and query. Sixteen (the rusqlite default) is too small for the distinct
-/// statements a store issues; 128 covers the repeated catalog without
-/// holding an unbounded compile cache.
-const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 128;
 
 /// WAL bytes this runtime keeps allocated across a checkpoint that resets the
 /// log.
@@ -87,7 +71,7 @@ impl OpenedDatabaseFile {
         if !metadata.is_file() {
             return Err(OpenedDatabaseFileError::NotFile);
         }
-        let identity = opened_file_identity(&file)?;
+        let identity = identity_of(&file)?;
         Ok(Self { file, identity })
     }
 
@@ -179,7 +163,7 @@ impl OpenedDatabaseFile {
 
     pub(crate) fn verify_current_path(&self, path: &Path) -> Result<(), OpenedDatabaseFileError> {
         let current = File::open(path).map_err(|_| OpenedDatabaseFileError::Open)?;
-        if opened_file_identity(&current)? != self.identity {
+        if identity_of(&current)? != self.identity {
             return Err(OpenedDatabaseFileError::Replaced);
         }
         let _ = &self.file;
@@ -192,10 +176,14 @@ impl OpenedDatabaseFile {
         canonical_path: &Path,
     ) -> Result<(), OpenedDatabaseFileError> {
         // Check the pathname identity first. If it changes during this stat,
-        // HAS_MOVED below still observes the SQLite handle's different inode.
+        // the engine's moved-file check below still observes the handle's
+        // different inode.
         self.verify_current_path(canonical_path)?;
         #[cfg(unix)]
-        if sqlite_connection_has_moved(_connection)? {
+        if _connection
+            .file_has_moved()
+            .map_err(|_| OpenedDatabaseFileError::Inspect)?
+        {
             return Err(OpenedDatabaseFileError::Replaced);
         }
         #[cfg(unix)]
@@ -308,112 +296,36 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     value.into()
 }
 
-#[cfg(unix)]
-fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = file
-        .metadata()
-        .map_err(|_| OpenedDatabaseFileError::Inspect)?;
+/// The open file's engine identity folded to the nonzero `u64` attachments
+/// retain.
+fn identity_of(file: &File) -> Result<u64, OpenedDatabaseFileError> {
+    #[cfg(windows)]
+    let unidentified = OpenedDatabaseFileError::Identify;
+    #[cfg(not(windows))]
+    let unidentified = OpenedDatabaseFileError::Inspect;
+    let identity = file_identity(file).map_err(|_| unidentified)?;
     let mut hasher = Sha256::new();
-    hasher.update(metadata.dev().to_le_bytes());
-    hasher.update(metadata.ino().to_le_bytes());
+    hasher.update(identity.volume.to_le_bytes());
+    hasher.update(identity.file.to_le_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     Ok(u64::from_le_bytes(bytes).max(1))
-}
-
-#[cfg(unix)]
-fn sqlite_connection_has_moved(connection: &Connection) -> Result<bool, OpenedDatabaseFileError> {
-    let database_name = CString::new("main").expect("static SQLite database name");
-    let mut moved = 0_i32;
-    // SAFETY: `connection` owns a live SQLite handle, `database_name` is a
-    // NUL-terminated database name, and `moved` is writable storage for the
-    // integer required by SQLITE_FCNTL_HAS_MOVED.
-    let result = unsafe {
-        rusqlite::ffi::sqlite3_file_control(
-            connection.handle(),
-            database_name.as_ptr(),
-            rusqlite::ffi::SQLITE_FCNTL_HAS_MOVED,
-            (&mut moved as *mut i32).cast(),
-        )
-    };
-    match result {
-        rusqlite::ffi::SQLITE_OK => Ok(moved != 0),
-        // VFS implementations predating HAS_MOVED report NOTFOUND. The
-        // pinned dev/inode check remains authoritative in that case.
-        rusqlite::ffi::SQLITE_NOTFOUND => Ok(false),
-        _ => Err(OpenedDatabaseFileError::Inspect),
-    }
-}
-
-#[cfg(windows)]
-fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
-    use std::mem::MaybeUninit;
-    use std::os::windows::io::AsRawHandle;
-
-    let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
-    // SAFETY: `file` owns a valid Windows file handle and `information` is
-    // writable storage for the API's complete output structure.
-    let succeeded =
-        unsafe { get_file_information_by_handle(file.as_raw_handle(), information.as_mut_ptr()) };
-    if succeeded == 0 {
-        return Err(OpenedDatabaseFileError::Identify);
-    }
-    // SAFETY: A nonzero API result initializes every output field.
-    let information = unsafe { information.assume_init() };
-    let mut hasher = Sha256::new();
-    hasher.update(b"windows-file-id");
-    hasher.update(information.volume_serial_number.to_le_bytes());
-    hasher.update(
-        ((u64::from(information.file_index_high) << 32) | u64::from(information.file_index_low))
-            .to_le_bytes(),
-    );
-    let digest = hasher.finalize();
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    Ok(u64::from_le_bytes(bytes).max(1))
-}
-
-#[cfg(windows)]
-#[repr(C)]
-struct ByHandleFileInformation {
-    _file_attributes: u32,
-    _creation_time_low_date_time: u32,
-    _creation_time_high_date_time: u32,
-    _last_access_time_low_date_time: u32,
-    _last_access_time_high_date_time: u32,
-    _last_write_time_low_date_time: u32,
-    _last_write_time_high_date_time: u32,
-    volume_serial_number: u32,
-    _file_size_high: u32,
-    _file_size_low: u32,
-    _number_of_links: u32,
-    file_index_high: u32,
-    file_index_low: u32,
-}
-
-#[cfg(windows)]
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    #[link_name = "GetFileInformationByHandle"]
-    fn get_file_information_by_handle(
-        file: *mut std::ffi::c_void,
-        information: *mut ByHandleFileInformation,
-    ) -> i32;
-}
-
-#[cfg(not(any(unix, windows)))]
-fn opened_file_identity(_file: &File) -> Result<u64, OpenedDatabaseFileError> {
-    Err(OpenedDatabaseFileError::Unsupported)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConnectionMode {
     Writer,
     Reader,
-    Maintenance,
+}
+
+impl ConnectionMode {
+    const fn capability(self) -> Capability {
+        match self {
+            Self::Writer => Capability::Writer,
+            Self::Reader => Capability::Reader,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -425,7 +337,7 @@ pub(crate) enum WriterOpenError {
 #[derive(Debug)]
 pub struct ConnectionPolicyError {
     stage: &'static str,
-    source: rusqlite::Error,
+    source: tracedecay_sql::Error,
 }
 
 impl ConnectionPolicyError {
@@ -624,9 +536,7 @@ fn open_raw(
             let path = sqlite_host_path(path);
             let flags = match mode {
                 ConnectionMode::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY,
-                ConnectionMode::Writer | ConnectionMode::Maintenance => {
-                    OpenFlags::SQLITE_OPEN_READ_WRITE
-                }
+                ConnectionMode::Writer => OpenFlags::SQLITE_OPEN_READ_WRITE,
             } | OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
             let connection = Connection::open_with_flags(&path, flags)
@@ -649,11 +559,7 @@ fn finish_open(
     {
         let _span = tracing::trace_span!("rusqlite.connection.configure").entered();
         {
-            apply_pragmas(&connection, mode, fresh_writer)?;
-            assert_compile_options(&connection)?;
-            apply_limits(&connection)?;
-            connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
-            install_authorizer(&connection, mode)?;
+            apply_policy(&connection, mode, fresh_writer)?;
             Ok(connection)
         }
     }
@@ -697,11 +603,7 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
                 | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
             let connection =
                 Connection::open_with_flags(uri, flags).map_err(|source| policy("open", source))?;
-            apply_pragmas(&connection, ConnectionMode::Reader, false)?;
-            assert_compile_options(&connection)?;
-            apply_limits(&connection)?;
-            connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
-            install_authorizer(&connection, ConnectionMode::Reader)?;
+            apply_policy(&connection, ConnectionMode::Reader, false)?;
             Ok(connection)
         }
     }
@@ -747,7 +649,7 @@ fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {
         .to_str()
         .ok_or_else(|| ConnectionPolicyError {
             stage: "immutable uri",
-            source: rusqlite::Error::InvalidPath(path.to_path_buf()),
+            source: tracedecay_sql::Error::InvalidPath(path.to_path_buf()),
         })?
         .as_bytes();
 
@@ -768,24 +670,19 @@ fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {
     Ok(format!("file:{encoded}?immutable=1&mode=ro"))
 }
 
-fn apply_pragmas(
+/// Engine policy first, so no later pragma waits on a lock; then the mode's
+/// pragmas, verified; then the mode's capability.
+fn apply_policy(
     connection: &Connection,
     mode: ConnectionMode,
     fresh_writer: bool,
 ) -> Result<(), ConnectionPolicyError> {
-    // SQLite must never wait past the runtime's own queue/deadline authority.
     connection
-        .busy_timeout(Duration::ZERO)
-        .map_err(|source| policy("busy timeout", source))?;
-    connection
-        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
-        .map_err(|source| policy("checkpoint-on-close", source))?;
+        .apply_engine_policy()
+        .map_err(|source| policy("engine policy", source))?;
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|source| policy("foreign keys", source))?;
-    connection
-        .pragma_update(None, "trusted_schema", false)
-        .map_err(|source| policy("trusted schema", source))?;
 
     if mode == ConnectionMode::Writer {
         if fresh_writer {
@@ -804,34 +701,19 @@ fn apply_pragmas(
             .pragma_update(None, "synchronous", "NORMAL")
             .map_err(|source| policy("synchronous mode", source))?;
     }
-    // Applied after the journal mode is settled, on every lane that can reset
-    // the log: the writer owns scheduled checkpoints, maintenance owns the
-    // offline RESTART/TRUNCATE path. Readers never reset a log, so bounding
-    // one there would be inert.
-    if mode == ConnectionMode::Writer || mode == ConnectionMode::Maintenance {
-        connection
+    // Applied after the journal mode is settled, on the writer: it owns every
+    // checkpoint. Readers never reset a log, so bounding one there would be
+    // inert.
+    match mode {
+        ConnectionMode::Writer => connection
             .pragma_update(None, "journal_size_limit", RETAINED_WAL_BYTES)
-            .map_err(|source| policy("retained WAL bytes", source))?;
-    }
-    if mode == ConnectionMode::Reader {
-        connection
+            .map_err(|source| policy("retained WAL bytes", source))?,
+        ConnectionMode::Reader => connection
             .pragma_update(None, "query_only", true)
-            .map_err(|source| policy("query-only reader", source))?;
+            .map_err(|source| policy("query-only reader", source))?,
     }
 
     verify_pragma_i64(connection, "foreign_keys", 1)?;
-    verify_pragma_i64(connection, "trusted_schema", 0)?;
-    if !connection
-        .db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE)
-        .map_err(|source| policy("checkpoint-on-close verification", source))?
-    {
-        return Err(policy(
-            "checkpoint-on-close verification",
-            rusqlite::Error::InvalidParameterName(
-                "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE=false, expected true".to_owned(),
-            ),
-        ));
-    }
     match mode {
         ConnectionMode::Writer => {
             verify_pragma_text(connection, "journal_mode", "wal")?;
@@ -840,11 +722,10 @@ fn apply_pragmas(
             verify_pragma_i64(connection, "journal_size_limit", RETAINED_WAL_BYTES)?;
         }
         ConnectionMode::Reader => verify_pragma_i64(connection, "query_only", 1)?,
-        ConnectionMode::Maintenance => {
-            verify_pragma_i64(connection, "journal_size_limit", RETAINED_WAL_BYTES)?;
-        }
     }
-    Ok(())
+    connection
+        .set_capability(mode.capability())
+        .map_err(|source| policy("capability", source))
 }
 
 /// Levels a point lookup reads in one store B-tree. The narrowest interior
@@ -909,13 +790,10 @@ impl WriterPageCache {
             .max(self.floor_pages);
         // Writer SQL may never resize the cache; only this policy may.
         connection
-            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
-            .map_err(|source| policy("page cache authorizer", source))?;
-        let resized = connection.pragma_update(None, "cache_size", pages);
-        connection
-            .authorizer(Some(authorize_writer))
-            .map_err(|source| policy("restore writer authorizer", source))?;
-        resized.map_err(|source| policy("page cache size", source))?;
+            .with_capability(Capability::Maintenance, Capability::Writer, |connection| {
+                connection.pragma_update(None, "cache_size", pages)
+            })
+            .map_err(|source| policy("page cache size", source))?;
         self.fitted_schema_version = Some(schema_version);
         Ok(())
     }
@@ -932,7 +810,9 @@ fn verify_pragma_i64(
     if actual != expected {
         return Err(policy(
             "pragma verification",
-            rusqlite::Error::InvalidParameterName(format!("{name}={actual}, expected {expected}")),
+            tracedecay_sql::Error::InvalidParameterName(format!(
+                "{name}={actual}, expected {expected}"
+            )),
         ));
     }
     Ok(())
@@ -949,229 +829,15 @@ fn verify_pragma_text(
     if !actual.eq_ignore_ascii_case(expected) {
         return Err(policy(
             "pragma verification",
-            rusqlite::Error::InvalidParameterName(format!("{name}={actual}, expected {expected}")),
+            tracedecay_sql::Error::InvalidParameterName(format!(
+                "{name}={actual}, expected {expected}"
+            )),
         ));
     }
     Ok(())
 }
 
-fn assert_compile_options(connection: &Connection) -> Result<(), ConnectionPolicyError> {
-    let mut statement = connection
-        .prepare("PRAGMA compile_options")
-        .map_err(|source| policy("compile options", source))?;
-    let options = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|source| policy("compile options", source))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|source| policy("compile options", source))?;
-    for required in ["ENABLE_FTS5", "THREADSAFE=1"] {
-        if !options.iter().any(|option| option == required) {
-            return Err(policy(
-                "compile options",
-                rusqlite::Error::InvalidParameterName(format!("missing {required}")),
-            ));
-        }
-    }
-    if options.iter().any(|option| option == "OMIT_FOREIGN_KEY") {
-        return Err(policy(
-            "compile options",
-            rusqlite::Error::InvalidParameterName("OMIT_FOREIGN_KEY is unsupported".to_owned()),
-        ));
-    }
-    Ok(())
-}
-
-fn apply_limits(connection: &Connection) -> Result<(), ConnectionPolicyError> {
-    for (limit, value) in [
-        (Limit::SQLITE_LIMIT_LENGTH, 64 * 1024 * 1024),
-        (Limit::SQLITE_LIMIT_SQL_LENGTH, 1024 * 1024),
-        (Limit::SQLITE_LIMIT_COLUMN, 2_000),
-        (Limit::SQLITE_LIMIT_EXPR_DEPTH, 100),
-        (Limit::SQLITE_LIMIT_COMPOUND_SELECT, 100),
-        (Limit::SQLITE_LIMIT_VDBE_OP, 25_000_000),
-        (Limit::SQLITE_LIMIT_FUNCTION_ARG, 100),
-        (Limit::SQLITE_LIMIT_ATTACHED, 0),
-        (Limit::SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 50_000),
-        (Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 32_766),
-        (Limit::SQLITE_LIMIT_TRIGGER_DEPTH, 32),
-        (Limit::SQLITE_LIMIT_WORKER_THREADS, 0),
-    ] {
-        connection
-            .set_limit(limit, value)
-            .map_err(|source| policy("runtime limits", source))?;
-    }
-    Ok(())
-}
-
-fn install_authorizer(
-    connection: &Connection,
-    mode: ConnectionMode,
-) -> Result<(), ConnectionPolicyError> {
-    let result = match mode {
-        ConnectionMode::Writer => connection.authorizer(Some(authorize_writer)),
-        ConnectionMode::Reader => connection.authorizer(Some(authorize_reader)),
-        ConnectionMode::Maintenance => connection.authorizer(Some(authorize_maintenance)),
-    };
-    result.map_err(|source| policy("authorizer", source))
-}
-
-pub(crate) fn authorize_writer(context: AuthContext<'_>) -> Authorization {
-    authorize(ConnectionMode::Writer, context)
-}
-
-pub(crate) fn authorize_reader(context: AuthContext<'_>) -> Authorization {
-    authorize(ConnectionMode::Reader, context)
-}
-
-fn authorize_maintenance(context: AuthContext<'_>) -> Authorization {
-    if matches!(
-        context.action,
-        AuthAction::Attach { .. }
-            | AuthAction::Detach { .. }
-            | AuthAction::Unknown {
-                code: rusqlite::ffi::SQLITE_ATTACH,
-                ..
-            }
-    ) {
-        Authorization::Deny
-    } else {
-        Authorization::Allow
-    }
-}
-
-/// Schema-introspection and integrity-diagnostic pragmas that cannot mutate the
-/// database, file, or connection configuration. These stay available even to
-/// read-only lanes (for example the immutable Doctor health reader) so health
-/// and shape audits work without opening a writable connection.
-fn is_read_only_introspection_pragma(pragma_name: &str) -> bool {
-    const READ_ONLY_INTROSPECTION_PRAGMAS: &[&str] = &[
-        "collation_list",
-        "database_list",
-        "foreign_key_check",
-        "foreign_key_list",
-        "function_list",
-        "index_info",
-        "index_list",
-        "index_xinfo",
-        "integrity_check",
-        "module_list",
-        "pragma_list",
-        "quick_check",
-        "table_info",
-        "table_list",
-        "table_xinfo",
-    ];
-    READ_ONLY_INTROSPECTION_PRAGMAS
-        .iter()
-        .any(|candidate| pragma_name.eq_ignore_ascii_case(candidate))
-}
-
-fn is_safe_writer_pragma(pragma_name: &str, pragma_value: &str) -> bool {
-    pragma_name.eq_ignore_ascii_case("busy_timeout")
-        || pragma_name.eq_ignore_ascii_case("incremental_vacuum")
-        || pragma_name.eq_ignore_ascii_case("wal_autocheckpoint")
-        || pragma_name.eq_ignore_ascii_case("wal_checkpoint")
-        || (pragma_name.eq_ignore_ascii_case("auto_vacuum")
-            && (pragma_value.eq_ignore_ascii_case("incremental") || pragma_value == "2"))
-}
-
-fn authorize(mode: ConnectionMode, context: AuthContext<'_>) -> Authorization {
-    if mode == ConnectionMode::Maintenance {
-        return Authorization::Allow;
-    }
-    // Writer-mode CREATE TABLE/INDEX remains available for the closed
-    // executor's idempotent ledger bootstrap. Destructive, temporary, virtual,
-    // or other schema changes require the explicit Maintenance mode above.
-    let denied = matches!(
-        context.action,
-        AuthAction::Attach { .. }
-            | AuthAction::Detach { .. }
-            | AuthAction::CreateTempIndex { .. }
-            | AuthAction::CreateTempTable { .. }
-            | AuthAction::CreateTempTrigger { .. }
-            | AuthAction::CreateTempView { .. }
-            | AuthAction::CreateTrigger { .. }
-            | AuthAction::CreateView { .. }
-            | AuthAction::DropIndex { .. }
-            | AuthAction::DropTable { .. }
-            | AuthAction::DropTempIndex { .. }
-            | AuthAction::DropTempTable { .. }
-            | AuthAction::DropTempTrigger { .. }
-            | AuthAction::DropTempView { .. }
-            | AuthAction::DropTrigger { .. }
-            | AuthAction::DropView { .. }
-            | AuthAction::AlterTable { .. }
-            | AuthAction::Analyze { .. }
-            | AuthAction::CreateVtable { .. }
-            | AuthAction::DropVtable { .. }
-            | AuthAction::Unknown { .. }
-    ) || matches!(context.action, AuthAction::Function { function_name } if function_name.eq_ignore_ascii_case("load_extension"))
-        || matches!(
-            context.action,
-            AuthAction::Pragma {
-                pragma_name,
-                pragma_value: Some(pragma_value),
-            }
-            if !is_read_only_introspection_pragma(pragma_name)
-                && (mode != ConnectionMode::Writer
-                    || !is_safe_writer_pragma(pragma_name, pragma_value))
-        )
-        || (mode == ConnectionMode::Reader
-            && matches!(
-                context.action,
-                AuthAction::Insert { .. } | AuthAction::Update { .. } | AuthAction::Delete { .. }
-            ));
-    if denied {
-        Authorization::Deny
-    } else {
-        Authorization::Allow
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn with_progress_cancellation<T, C, F>(
-    connection: &mut Connection,
-    should_cancel: C,
-    operation: F,
-) -> rusqlite::Result<T>
-where
-    C: FnMut() -> bool + Send + 'static,
-    F: FnOnce(&mut Connection) -> T,
-{
-    connection.progress_handler(PROGRESS_INTERVAL_OPS, Some(should_cancel))?;
-    let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
-    let clear = connection.progress_handler(PROGRESS_INTERVAL_OPS, None::<fn() -> bool>);
-    match result {
-        Ok(value) => {
-            clear?;
-            Ok(value)
-        }
-        Err(payload) => resume_unwind(payload),
-    }
-}
-
-pub(crate) fn with_transaction_progress_cancellation<'connection, T, C, F>(
-    transaction: &mut Transaction<'connection>,
-    should_cancel: C,
-    operation: F,
-) -> rusqlite::Result<T>
-where
-    C: FnMut() -> bool + Send + 'static,
-    F: FnOnce(&mut Transaction<'connection>) -> T,
-{
-    transaction.progress_handler(PROGRESS_INTERVAL_OPS, Some(should_cancel))?;
-    let result = catch_unwind(AssertUnwindSafe(|| operation(transaction)));
-    let clear = transaction.progress_handler(PROGRESS_INTERVAL_OPS, None::<fn() -> bool>);
-    match result {
-        Ok(value) => {
-            clear?;
-            Ok(value)
-        }
-        Err(payload) => resume_unwind(payload),
-    }
-}
-
-fn policy(stage: &'static str, source: rusqlite::Error) -> ConnectionPolicyError {
+fn policy(stage: &'static str, source: tracedecay_sql::Error) -> ConnectionPolicyError {
     ConnectionPolicyError { stage, source }
 }
 

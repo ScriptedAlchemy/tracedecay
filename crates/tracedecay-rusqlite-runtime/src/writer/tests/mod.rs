@@ -8,11 +8,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, Savepoint};
 use tracedecay_domain::{
     FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1,
     FactLineageEventV1, FactOwnerV1, PayloadAccessState, ProjectId, ProvenanceId, UtcMicros,
 };
+use tracedecay_sql::{Connection, Savepoint};
 use tracedecay_store::{
     AdmissionConfigV1, AnchorDispositionReasonClassV1, AnchorDispositionStateV1, FactWriteBatch,
     LocatorDigest, RepositoryOperationEnvelopeV1, RepositoryWritePayloadV1,
@@ -140,7 +140,7 @@ impl StorageOperationExecutor for LongRunningPersistence {
         &mut self,
         savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         savepoint.query_row(
             "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT sum(x) FROM n",
             [],
@@ -155,7 +155,7 @@ impl StorageOperationExecutor for CancellingFirstRequestPersistence {
         &mut self,
         savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         savepoint.execute_batch(
             "CREATE TABLE IF NOT EXISTS cancellation_batch (value INTEGER NOT NULL)",
         )?;
@@ -170,7 +170,7 @@ impl StorageOperationExecutor for CancellingFirstRequestPersistence {
             )?;
         }
         let sequence = i64::try_from(self.sequence)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            .map_err(|error| tracedecay_sql::Error::ToSqlConversionFailure(Box::new(error)))?;
         savepoint.execute(
             "INSERT INTO cancellation_batch(value) VALUES (?1)",
             [sequence],
@@ -184,7 +184,7 @@ impl StorageOperationExecutor for RevokingPersistence {
         &mut self,
         savepoint: &Savepoint<'_>,
         payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         self.inner.execute(savepoint, payload)?;
         self.allowed.store(false, Ordering::SeqCst);
         Ok(())
@@ -196,7 +196,7 @@ impl StorageOperationExecutor for TestPersistence {
         &mut self,
         savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         savepoint
             .execute_batch("CREATE TABLE IF NOT EXISTS writer_test (value INTEGER NOT NULL)")?;
         savepoint.execute("INSERT INTO writer_test(value) VALUES (1)", [])?;
@@ -210,19 +210,19 @@ impl StorageOperationExecutor for BlockingPersistence {
         &mut self,
         savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         self.sequence += 1;
         self.entered
             .send(self.sequence)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            .map_err(|error| tracedecay_sql::Error::ToSqlConversionFailure(Box::new(error)))?;
         self.release
             .recv()
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            .map_err(|error| tracedecay_sql::Error::ToSqlConversionFailure(Box::new(error)))?;
         savepoint.execute_batch(
             "CREATE TABLE IF NOT EXISTS maintenance_order (value INTEGER NOT NULL)",
         )?;
         let sequence = i64::try_from(self.sequence)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            .map_err(|error| tracedecay_sql::Error::ToSqlConversionFailure(Box::new(error)))?;
         savepoint.execute(
             "INSERT INTO maintenance_order(value) VALUES (?1)",
             [sequence],
@@ -479,7 +479,7 @@ fn competing_write_authority_fails_instead_of_reporting_retryable_saturation() {
     let writer = start(&database, &blocked, Arc::clone(&applied));
     let mut competing = Connection::open(&database.0).unwrap();
     let transaction = competing
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .transaction_with_behavior(tracedecay_sql::TransactionBehavior::Immediate)
         .unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -508,6 +508,67 @@ fn competing_write_authority_fails_instead_of_reporting_retryable_saturation() {
         RuntimeSubmitOutcomeV1::Committed { .. }
     ));
     assert_eq!(applied.load(Ordering::SeqCst), 1);
+    writer.shutdown_and_join().unwrap();
+}
+
+/// Leaves a deferred foreign-key violation for COMMIT to refuse.
+struct DeferredViolationPersistence;
+
+impl StorageOperationExecutor for DeferredViolationPersistence {
+    fn execute(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        _payload: &RepositoryWritePayloadV1,
+    ) -> tracedecay_sql::Result<()> {
+        savepoint.execute_batch(
+            "CREATE TABLE IF NOT EXISTS commit_parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE IF NOT EXISTS commit_child (
+                 id INTEGER PRIMARY KEY,
+                 parent_id INTEGER NOT NULL
+                     REFERENCES commit_parent(id) DEFERRABLE INITIALLY DEFERRED
+             );
+             INSERT INTO commit_child(id, parent_id) VALUES (1, 9);",
+        )
+    }
+}
+
+/// Fails if an error from a stepped COMMIT is reported as anything that
+/// claims to know the outcome: saturation, or a plain failure a caller would
+/// not resolve through the receipt ledger.
+#[test]
+fn commit_failure_is_reported_as_unknown_outcome() {
+    let database = TestDatabase::new();
+    let refused = request(metadata(
+        "operation.writer.commit-refused",
+        "key.writer.commit-refused",
+        'd',
+    ));
+    let writer = start_with_executor(&database, &refused, DeferredViolationPersistence);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    let failure = runtime
+        .block_on(writer.submit(refused.clone(), Arc::new(Probe::new(&refused, None))))
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            &failure,
+            WriterActorError::StorageFailure(StorageRuntimeErrorV1::Infrastructure { operation })
+                if operation.contains("outcome is unknown")
+        ),
+        "{failure:?}"
+    );
+    let opened = Connection::open(&database.0).unwrap();
+    let tables: i64 = opened
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name = 'commit_child'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0, "the refused commit left no table behind");
     writer.shutdown_and_join().unwrap();
 }
 
@@ -681,7 +742,7 @@ impl StorageOperationExecutor for RejectingFirstWrite {
         &mut self,
         savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         savepoint.execute_batch("CREATE TABLE rejected_write(value INTEGER CHECK(value > 0))")?;
         let value = self.attempts;
         self.attempts += 1;

@@ -43,7 +43,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-runtime-core__d8d20f92705",
+    name = "tracedecay-runtime-core__db095740321",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_runtime_core",

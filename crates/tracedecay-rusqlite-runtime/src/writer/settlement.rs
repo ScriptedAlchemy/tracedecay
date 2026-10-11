@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use rusqlite::ErrorCode;
+use tracedecay_sql::{ErrorExt, ErrorKind};
 use tracedecay_store::{
     RuntimeCancellationStageV1, RuntimeInterruptionV1, RuntimeRequestProbeV1,
     RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, SaturationScopeV1,
@@ -18,6 +18,10 @@ const RETRY_AFTER_BUSY_MS: u64 = 1;
 #[derive(Clone)]
 pub(super) enum DriverFailure {
     Busy,
+    /// COMMIT was stepped and then failed, so the batch may be durable. Only
+    /// the receipt ledger can say which; a resubmission with the same
+    /// idempotency key reads it.
+    CommitUnknown,
     Error(StorageRuntimeErrorV1),
 }
 
@@ -28,6 +32,7 @@ impl DriverFailure {
                 "canonical SQLite writer for {:?} encountered a competing write authority",
                 request.binding().shard_id
             ))),
+            Self::CommitUnknown => Err(infrastructure(COMMIT_UNKNOWN)),
             Self::Error(error) => Err(error.clone()),
         }
     }
@@ -37,15 +42,20 @@ impl DriverFailure {
             Self::Busy => infrastructure(
                 "canonical SQLite writer encountered a competing write authority during rollback",
             ),
+            Self::CommitUnknown => infrastructure(COMMIT_UNKNOWN),
             Self::Error(error) => error,
         }
     }
 }
 
-pub(super) fn driver_failure(error: rusqlite::Error, operation: &'static str) -> DriverFailure {
-    if matches!(error, rusqlite::Error::SqliteFailure(ref failure, _)
-        if matches!(failure.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked))
-    {
+const COMMIT_UNKNOWN: &str = "writer transaction commit failed after it was issued; its outcome \
+                              is unknown until a resubmission reads the receipt ledger";
+
+pub(super) fn driver_failure(
+    error: tracedecay_sql::Error,
+    operation: &'static str,
+) -> DriverFailure {
+    if error.kind() == ErrorKind::Busy {
         DriverFailure::Busy
     } else {
         DriverFailure::Error(infrastructure(operation))
