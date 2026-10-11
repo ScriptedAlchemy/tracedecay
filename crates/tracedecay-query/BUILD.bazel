@@ -201,6 +201,7 @@ rust_test(
 
 rust_test(
     name = "index_bench_workload",
+    size = "large",
     srcs = glob(["tests/**/*.rs"], exclude = ["tests/fixtures/**"]),
     crate_root = "tests/index_bench_workload.rs",
     edition = crate_edition(),
@@ -211,7 +212,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["production", "test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//benchmark_data:index-bench"],
     rustc_env = {"CARGO_BIN_EXE_tracedecay-index-bench": "$(rootpath :tracedecay-index-bench__test)"},
     runfiles_env = {"CARGO_BIN_EXE_tracedecay-index-bench": "//crates/tracedecay-query:tracedecay-index-bench__test"},
 )

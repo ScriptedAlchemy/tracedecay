@@ -270,6 +270,9 @@ impl ApplicationSurfaceRequest {
         if let Self::GraphTool(_) = self {
             return operation.is_graph_tool() || operation.is_profile_registry_read();
         }
+        if let Self::Primitive(request) = self {
+            return request.surface_operation() == Some(operation);
+        }
         matches!(
             (self, operation),
             (
@@ -370,54 +373,6 @@ impl ApplicationSurfaceRequest {
                 | (
                     Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::Callers(_)),
                     ApplicationSurfaceOperation::CodeCallers
-                )
-                | (
-                    Self::Primitive(PrimitiveRequest::SessionLookup(_)),
-                    ApplicationSurfaceOperation::SessionLookup
-                )
-                | (
-                    Self::Primitive(PrimitiveRequest::QualifiedName(_)),
-                    ApplicationSurfaceOperation::QualifiedName
-                )
-                | (
-                    Self::Primitive(PrimitiveRequest::CallChain(_)),
-                    ApplicationSurfaceOperation::CallChain
-                )
-                | (
-                    Self::Primitive(PrimitiveRequest::FileDependents(_)),
-                    ApplicationSurfaceOperation::FileDependents
-                )
-                | (
-                    Self::Primitive(PrimitiveRequest::SourceLines(_)),
-                    ApplicationSurfaceOperation::SourceLines
-                )
-                | (
-                    Self::Primitive(PrimitiveRequest::SourceBody(_)),
-                    ApplicationSurfaceOperation::SourceBody
-                )
-                | (
-                    Self::Primitive(PrimitiveRequest::SourceOutline(_)),
-                    ApplicationSurfaceOperation::SourceOutline
-                )
-                | (
-                    Self::Primitive(PrimitiveRequest::ModuleApi(_)),
-                    ApplicationSurfaceOperation::ModuleApi
-                )
-                | (
-                    Self::Primitive(PrimitiveRequest::HealthRead(_)),
-                    ApplicationSurfaceOperation::HealthRead
-                )
-                | (
-                    Self::Primitive(PrimitiveRequest::HealthDelta(_)),
-                    ApplicationSurfaceOperation::HealthDelta
-                )
-                | (
-                    Self::Primitive(PrimitiveRequest::StorageStatus(_)),
-                    ApplicationSurfaceOperation::StorageStatus
-                )
-                | (
-                    Self::Primitive(PrimitiveRequest::DiagnosticsRead(_)),
-                    ApplicationSurfaceOperation::DiagnosticsRead
                 )
                 | (
                     Self::ObservatoryRead(_),

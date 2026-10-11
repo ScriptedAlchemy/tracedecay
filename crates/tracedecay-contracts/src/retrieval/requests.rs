@@ -7,10 +7,13 @@ use tracedecay_domain::{
     ManifestDigest, RetrievalAnchorId, SessionId, SourceSpan, SymbolOccurrenceId, TemporalModeV1,
     TestAttributionEvidenceClassV1, UtcMicros,
 };
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::error::ApplicationContractError;
+use crate::feedback::feedback_surface_operation;
 use crate::handlers::ApplicationOperation;
 use crate::result::OpaqueCursor;
+use crate::retrieval::catalog::primitive_read_operation;
 use crate::retrieval::grep_analysis::{AstGrepRequestV1, DependencyDepthRequestV1, GrepRequestV1};
 use crate::retrieval::source_read::SourceReadPrimitiveRequest;
 use crate::retrieval::symbol_graph::{
@@ -512,6 +515,60 @@ pub enum PrimitiveRequest {
     StorageStatus(StorageStatusPrimitiveRequest),
     DiagnosticsRead(DiagnosticsPrimitiveRequest),
     RecentTestResults(PageRequest),
+}
+
+impl PrimitiveRequest {
+    /// The canonical owner for an issued primitive body. Raw-only bodies have
+    /// no callable owner and cannot borrow another operation's admission.
+    pub const fn surface_operation(&self) -> Option<ApplicationSurfaceOperation> {
+        Some(match self {
+            Self::SymbolSearch(_) => ApplicationSurfaceOperation::CodeSymbolSearch,
+            Self::SignatureSearch(_) => ApplicationSurfaceOperation::CodeSignatureSearch,
+            Self::Implementations(_) => ApplicationSurfaceOperation::CodeImplementations,
+            Self::TypeHierarchy(_) => ApplicationSurfaceOperation::CodeTypeHierarchy,
+            Self::Callers(_) => ApplicationSurfaceOperation::CodeCallers,
+            Self::Impact(_) => ApplicationSurfaceOperation::FeedbackImpact,
+            Self::AffectedFileTests(_) => ApplicationSurfaceOperation::AffectedTests,
+            Self::RecentTestResults(_) => ApplicationSurfaceOperation::TestResults,
+            Self::SessionLookup(_) => ApplicationSurfaceOperation::SessionLookup,
+            Self::QualifiedName(_) => ApplicationSurfaceOperation::QualifiedName,
+            Self::CallChain(_) => ApplicationSurfaceOperation::CallChain,
+            Self::FileDependents(_) => ApplicationSurfaceOperation::FileDependents,
+            Self::SourceLines(_) => ApplicationSurfaceOperation::SourceLines,
+            Self::SourceBody(_) => ApplicationSurfaceOperation::SourceBody,
+            Self::SourceOutline(_) => ApplicationSurfaceOperation::SourceOutline,
+            Self::ModuleApi(_) => ApplicationSurfaceOperation::ModuleApi,
+            Self::HealthRead(_) => ApplicationSurfaceOperation::HealthRead,
+            Self::HealthDelta(_) => ApplicationSurfaceOperation::HealthDelta,
+            Self::StorageStatus(_) => ApplicationSurfaceOperation::StorageStatus,
+            Self::DiagnosticsRead(_) => ApplicationSurfaceOperation::DiagnosticsRead,
+            Self::ExactSymbol(_)
+            | Self::Callees(_)
+            | Self::SourceRead(_)
+            | Self::TestMap(_)
+            | Self::LexicalGrep(_)
+            | Self::AstGrep(_)
+            | Self::DependencyDepth(_) => return None,
+        })
+    }
+
+    /// Resolve the complete capability, use case, and result identity from
+    /// the same catalog authorities used by the surface adapters.
+    pub fn application_operation(
+        &self,
+    ) -> Result<Option<ApplicationOperation>, ApplicationContractError> {
+        let Some(operation) = self.surface_operation() else {
+            return Ok(None);
+        };
+        match operation {
+            ApplicationSurfaceOperation::FeedbackImpact
+            | ApplicationSurfaceOperation::AffectedTests
+            | ApplicationSurfaceOperation::TestResults => {
+                feedback_surface_operation(operation.as_str())
+            }
+            _ => primitive_read_operation(operation.as_str()),
+        }
+    }
 }
 
 /// One catalog operation plus its closed typed primitive request.

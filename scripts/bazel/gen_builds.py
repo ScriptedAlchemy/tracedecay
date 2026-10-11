@@ -127,6 +127,9 @@ TEST_DATA = {
     ("tracedecay-code-index", "unit_test"): [
         "crates/tracedecay-code-extraction/fixtures/sample.astro",
     ],
+    ("tracedecay-query", "index_bench_workload"): [
+        "benchmark_data/index-bench/README.md",
+    ],
     ("tracedecay-private-fs", "unit_test"): [":Cargo.toml"],
     ("tracedecay-store-runtime", "unit_test"): [
         "crates/tracedecay-code-index/tests/fixtures/partitioned_pre_paging/manifest.json",

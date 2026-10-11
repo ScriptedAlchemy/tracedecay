@@ -1,6 +1,8 @@
 #![cfg(unix)]
 
+use std::collections::BTreeSet;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 
 use tempfile::TempDir;
@@ -9,7 +11,7 @@ use tracedecay_contracts::{
     ApplicationProblemKind, CancellationContext, Deadline, ProblemTerminality, RetryDirective,
     WorkGraphReadRequestV1, WorkProductSelectionScopeV1,
 };
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{ActorId, ProjectId, RepositoryId, UtcMicros, WorktreeId};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::{
@@ -20,8 +22,13 @@ use crate::daemon::{
     DaemonEngine, DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationRequest,
     execute_daemon_invocation,
 };
-use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
-use tracedecay_contracts::retrieval::PrimitiveRequest;
+use tracedecay_application::primitives::{PrimitiveProjectRuntime, StorageStatusPrimitiveRequest};
+use tracedecay_contracts::retrieval::catalog::primitive_read_operation;
+use tracedecay_contracts::retrieval::{PrimitiveInvocation, PrimitiveRequest};
+use tracedecay_contracts::{
+    CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestContext, RequestId,
+    ResolvedScope,
+};
 use tracedecay_contracts::{ConfigurationListRequestV1, ConfigurationWireRequestV1};
 use tracedecay_daemon_protocol::WorkApplicationInvocationV1;
 use tracedecay_daemon_service::{
@@ -139,7 +146,8 @@ fn assert_primitive_routes_mounted<'a>(
                 observed_at,
                 deadline,
                 cancellation,
-            ),
+            )
+            .expect("valid primitive request"),
         )
         .await;
         assert!(
@@ -261,6 +269,165 @@ async fn assert_mounted_invocations(engine: &DaemonEngine, handshake: &DaemonHan
 }
 
 #[tokio::test]
+async fn primitive_identity_is_refused_before_daemon_and_application_owners() {
+    let (_temp, _database_scope, engine, handshake) =
+        committed_fixture("primitive-invocation-identity").await;
+    let now = tracedecay_contracts::clock::now_micros();
+    let deadline = Deadline::new(UtcMicros(now.0 + 30_000_000)).expect("deadline");
+    let cancellation =
+        CancellationContext::active("cancel.primitive-identity").expect("cancellation");
+    assert_primitive_routes_mounted(
+        &engine,
+        &handshake,
+        now,
+        deadline.clone(),
+        cancellation.clone(),
+    )
+    .await;
+    let frame = DaemonInvocationRequest::primitive(
+        "request.primitive-identity",
+        ApplicationSurfaceOperation::StorageStatus,
+        PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
+            include_details: true,
+        }),
+        now,
+        deadline.clone(),
+        cancellation.clone(),
+    )
+    .expect("matching frame");
+    let mut wire = serde_json::to_value(frame).expect("serialize frame");
+    wire["surface_operation"] = serde_json::json!("source_lines");
+    let malformed = serde_json::from_value(wire).expect("deserialize malformed pair");
+    let response = execute_daemon_invocation(&engine, &handshake, malformed).await;
+    assert!(
+        matches!(
+            response.outcome,
+            DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::InvalidRequest
+            }
+        ),
+        "{response:?}"
+    );
+
+    let root = Path::new(handshake.project_path.as_deref().expect("project root"));
+    let dispatch = engine
+        .invocation
+        .service
+        .project_runtimes
+        .read(root, PrimitiveProjectRuntime::dispatch)
+        .await
+        .expect("mounted primitive dispatcher");
+    let operation = primitive_read_operation("source_lines")
+        .expect("catalog")
+        .expect("source-lines operation");
+    let foreign_scope = ResolvedScope::new(
+        ProjectId::new("project.foreign-primitive").expect("project"),
+        RepositoryId::new("repository.foreign-primitive").expect("repository"),
+        WorktreeId::new("worktree.foreign-primitive").expect("worktree"),
+        None,
+    )
+    .expect("scope");
+    let actor = ActorId::new("actor.primitive-identity").expect("actor");
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.primitive-identity").expect("grant"),
+        1,
+        foreign_scope.scope_digest.clone(),
+        actor.clone(),
+        now,
+        deadline.expires_at,
+        foreign_scope.clone(),
+        BTreeSet::from([operation.capability_id().clone()]),
+        BTreeSet::from([operation.use_case_id().clone()]),
+        DisclosureClass::Evidence,
+    )
+    .expect("fixture grant");
+    let context = RequestContext::new(
+        actor,
+        foreign_scope,
+        grant,
+        RequestId::new("request.application-primitive-identity").expect("request"),
+        deadline.clone(),
+        cancellation.clone(),
+    )
+    .expect("context");
+    let mismatch = dispatch
+        .dispatch(
+            PrimitiveInvocation {
+                operation,
+                request: PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
+                    include_details: true,
+                }),
+            },
+            context.clone(),
+            now,
+        )
+        .await
+        .expect("application result")
+        .expect_err("operation/body mismatch");
+    assert_eq!(
+        mismatch.problem.kind(),
+        ApplicationProblemKind::InvalidRequest
+    );
+    let matching = dispatch
+        .dispatch(
+            PrimitiveInvocation {
+                operation: primitive_read_operation("storage_status")
+                    .expect("catalog")
+                    .expect("storage operation"),
+                request: PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
+                    include_details: true,
+                }),
+            },
+            context,
+            now,
+        )
+        .await
+        .expect("application result")
+        .expect_err("foreign scope");
+    assert_eq!(
+        matching.problem.kind(),
+        ApplicationProblemKind::NotFoundOrNotAuthorized
+    );
+
+    drop(dispatch);
+
+    for (label, deadline, cancellation, expected) in [
+        (
+            "cancelled",
+            deadline,
+            CancellationContext::cancelled("cancel.primitive-identity.cancelled", now)
+                .expect("cancelled"),
+            ApplicationProblemKind::Cancelled,
+        ),
+        (
+            "expired",
+            Deadline::new(UtcMicros(now.0 - 1)).expect("expired deadline"),
+            cancellation,
+            ApplicationProblemKind::TimedOut,
+        ),
+    ] {
+        let request = DaemonInvocationRequest::primitive(
+            format!("request.primitive-identity.{label}"),
+            ApplicationSurfaceOperation::StorageStatus,
+            PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
+                include_details: false,
+            }),
+            now,
+            deadline,
+            cancellation,
+        )
+        .expect("matching controls");
+        let response = execute_daemon_invocation(&engine, &handshake, request).await;
+        assert!(
+            matches!(response.outcome, DaemonInvocationOutcome::ApplicationProblem {ref problem} if problem.kind() == expected),
+            "{response:?}"
+        );
+    }
+    let shutdown = engine.shutdown_all().await;
+    assert!(shutdown.project_servers.is_clean(), "{shutdown:?}");
+}
+
+#[tokio::test]
 async fn committed_project_alias_invokes_mounted_primitive_and_shuts_down_cleanly() {
     let (_temp, _database_scope, engine, handshake) =
         committed_fixture("committed-project-invocation-owners").await;
@@ -324,7 +491,8 @@ async fn primitive_read_with_a_saturated_configuration_store_is_unavailable_not_
                 .expect("daemon invocation deadline"),
             CancellationContext::active("cancel.saturated-configuration")
                 .expect("daemon invocation cancellation"),
-        ),
+        )
+        .expect("valid primitive request"),
     )
     .await;
     let DaemonInvocationOutcome::ApplicationProblem { problem } = &response.outcome else {
@@ -359,7 +527,8 @@ async fn primitive_read_with_a_saturated_configuration_store_is_unavailable_not_
                 .expect("daemon invocation deadline"),
             CancellationContext::active("cancel.saturated-configuration.released")
                 .expect("daemon invocation cancellation"),
-        ),
+        )
+        .expect("valid primitive request"),
     )
     .await;
     assert!(

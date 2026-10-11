@@ -1209,98 +1209,49 @@ impl DaemonInvocationRequest {
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
-    ) -> Self {
-        let payload = match (operation, request) {
-            (ApplicationSurfaceOperation::FeedbackImpact, PrimitiveRequest::Impact(request)) => {
-                DaemonInvocationPayload::PrimitiveImpact {
+    ) -> Result<Self, DaemonInvocationProblem> {
+        if request.surface_operation() != Some(operation) {
+            return Err(DaemonInvocationProblem::InvalidRequest);
+        }
+        let payload = match request {
+            PrimitiveRequest::Impact(request) => DaemonInvocationPayload::PrimitiveImpact {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+            PrimitiveRequest::AffectedFileTests(request) => {
+                DaemonInvocationPayload::PrimitiveAffectedTests {
                     request,
                     observed_at,
                     deadline,
                     cancellation,
                 }
             }
-            (
-                ApplicationSurfaceOperation::AffectedTests,
-                PrimitiveRequest::AffectedFileTests(request),
-            ) => DaemonInvocationPayload::PrimitiveAffectedTests {
-                request,
-                observed_at,
-                deadline,
-                cancellation,
-            },
-            (
-                ApplicationSurfaceOperation::TestResults,
-                PrimitiveRequest::RecentTestResults(page),
-            ) => DaemonInvocationPayload::PrimitiveTestResults {
-                page,
-                observed_at,
-                deadline,
-                cancellation,
-            },
-            (
-                surface_operation @ ApplicationSurfaceOperation::SessionLookup,
-                request @ PrimitiveRequest::SessionLookup(_),
-            )
-            | (
-                surface_operation @ ApplicationSurfaceOperation::QualifiedName,
-                request @ PrimitiveRequest::QualifiedName(_),
-            )
-            | (
-                surface_operation @ ApplicationSurfaceOperation::CallChain,
-                request @ PrimitiveRequest::CallChain(_),
-            )
-            | (
-                surface_operation @ ApplicationSurfaceOperation::FileDependents,
-                request @ PrimitiveRequest::FileDependents(_),
-            )
-            | (
-                surface_operation @ ApplicationSurfaceOperation::SourceLines,
-                request @ PrimitiveRequest::SourceLines(_),
-            )
-            | (
-                surface_operation @ ApplicationSurfaceOperation::SourceBody,
-                request @ PrimitiveRequest::SourceBody(_),
-            )
-            | (
-                surface_operation @ ApplicationSurfaceOperation::SourceOutline,
-                request @ PrimitiveRequest::SourceOutline(_),
-            )
-            | (
-                surface_operation @ ApplicationSurfaceOperation::ModuleApi,
-                request @ PrimitiveRequest::ModuleApi(_),
-            )
-            | (
-                surface_operation @ ApplicationSurfaceOperation::HealthRead,
-                request @ PrimitiveRequest::HealthRead(_),
-            )
-            | (
-                surface_operation @ ApplicationSurfaceOperation::HealthDelta,
-                request @ PrimitiveRequest::HealthDelta(_),
-            )
-            | (
-                surface_operation @ ApplicationSurfaceOperation::StorageStatus,
-                request @ PrimitiveRequest::StorageStatus(_),
-            )
-            | (
-                surface_operation @ ApplicationSurfaceOperation::DiagnosticsRead,
-                request @ PrimitiveRequest::DiagnosticsRead(_),
-            ) => DaemonInvocationPayload::PrimitiveRead {
-                surface_operation,
+            PrimitiveRequest::RecentTestResults(page) => {
+                DaemonInvocationPayload::PrimitiveTestResults {
+                    page,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                }
+            }
+            request => DaemonInvocationPayload::PrimitiveRead {
+                surface_operation: operation,
                 request,
                 resolved_scope: None,
                 observed_at,
                 deadline,
                 cancellation,
             },
-            _ => unreachable!("surface operation and primitive request must match"),
         };
-        Self {
+        Ok(Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
             revision: DAEMON_INVOCATION_REVISION,
             request_id: request_id.into(),
             delivery_route: None,
             payload,
-        }
+        })
     }
 
     /// A configuration request, routed to the profile's configuration store
@@ -2245,12 +2196,6 @@ impl DaemonInvocationRequest {
                 cancellation,
                 ..
             }
-            | DaemonInvocationPayload::PrimitiveRead {
-                observed_at,
-                deadline,
-                cancellation,
-                ..
-            }
             | DaemonInvocationPayload::WorkApplication {
                 observed_at,
                 deadline,
@@ -2288,6 +2233,20 @@ impl DaemonInvocationRequest {
                 ..
             } => {
                 if !valid_observation_window(observed_at, deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::PrimitiveRead {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation)
+                    || request.surface_operation() != Some(*surface_operation)
+                {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }
@@ -2860,6 +2819,306 @@ mod wire_input_fail_closed_tests {
         let request = git_status_read(ApplicationSurfaceOperation::GitStatus);
         assert_eq!(request.validate(), Ok(()));
         assert_eq!(request.operation(), DaemonInvocationOperation::GitStatus);
+    }
+
+    #[test]
+    fn issued_primitive_pairs_preserve_their_wire_owner() {
+        let meta = serde_json::json!({
+            "temporal": {"kind": "current"}, "page": {"page_size": 10, "cursor": null},
+            "projection": "evidence", "order": "source_position"
+        });
+        let scope =
+            serde_json::to_value(tracedecay_contracts::retrieval::SymbolGraphScope::default())
+                .expect("symbol scope");
+        for (operation, primitive, body) in [
+            (
+                ApplicationSurfaceOperation::SessionLookup,
+                "session_lookup",
+                serde_json::json!({"session_id":"session.pair", "meta":meta}),
+            ),
+            (
+                ApplicationSurfaceOperation::QualifiedName,
+                "qualified_name",
+                serde_json::json!({"qualified_name":"module::item", "page":{"page_size":10}}),
+            ),
+            (
+                ApplicationSurfaceOperation::CallChain,
+                "call_chain",
+                serde_json::json!({"from_node_id":"node.from", "to_node_id":"node.to", "maximum_depth":3}),
+            ),
+            (
+                ApplicationSurfaceOperation::FileDependents,
+                "file_dependents",
+                serde_json::json!({"file":"src/lib.rs"}),
+            ),
+            (
+                ApplicationSurfaceOperation::SourceLines,
+                "source_lines",
+                serde_json::json!({"file":"file.pair", "span":{"start_byte":0,"end_byte":1}, "meta":meta}),
+            ),
+            (
+                ApplicationSurfaceOperation::SourceBody,
+                "source_body",
+                serde_json::json!({"node_id":"node.pair"}),
+            ),
+            (
+                ApplicationSurfaceOperation::SourceOutline,
+                "source_outline",
+                serde_json::json!({"file":"src/lib.rs"}),
+            ),
+            (
+                ApplicationSurfaceOperation::ModuleApi,
+                "module_api",
+                serde_json::json!({"path":"src"}),
+            ),
+            (
+                ApplicationSurfaceOperation::HealthRead,
+                "health_read",
+                serde_json::json!({}),
+            ),
+            (
+                ApplicationSurfaceOperation::HealthDelta,
+                "health_delta",
+                serde_json::json!({"meta":meta}),
+            ),
+            (
+                ApplicationSurfaceOperation::StorageStatus,
+                "storage_status",
+                serde_json::json!({"include_details":true}),
+            ),
+            (
+                ApplicationSurfaceOperation::DiagnosticsRead,
+                "diagnostics_read",
+                serde_json::json!({"scope":"workspace", "maximum_diagnostics":10}),
+            ),
+            (
+                ApplicationSurfaceOperation::FeedbackImpact,
+                "impact",
+                serde_json::json!({"node_id":"node.pair", "maximum_depth":3, "scope":scope, "meta":meta}),
+            ),
+            (
+                ApplicationSurfaceOperation::AffectedTests,
+                "affected_file_tests",
+                serde_json::json!({"files":["src/lib.rs"], "maximum_depth":3, "filter":null, "meta":meta}),
+            ),
+            (
+                ApplicationSurfaceOperation::TestResults,
+                "recent_test_results",
+                serde_json::json!({"page_size":10}),
+            ),
+        ] {
+            let request: tracedecay_contracts::retrieval::PrimitiveRequest =
+                serde_json::from_value(serde_json::json!({"primitive":primitive,"request":body}))
+                    .expect("issued body");
+            assert_eq!(request.surface_operation(), Some(operation));
+            assert!(
+                request
+                    .application_operation()
+                    .expect("canonical operation")
+                    .is_some()
+            );
+            let frame = DaemonInvocationRequest::primitive(
+                "request.pair",
+                operation,
+                request,
+                UtcMicros(1),
+                deadline(),
+                cancellation(),
+            )
+            .expect("matching pair");
+            let mut wire = serde_json::to_value(frame).expect("wire frame");
+            let roundtrip: DaemonInvocationRequest =
+                serde_json::from_value(wire.clone()).expect("wire roundtrip");
+            assert_eq!(roundtrip.validate(), Ok(()), "{operation:?}");
+            if wire.get("surface_operation").is_some() {
+                wire["surface_operation"] =
+                    serde_json::json!(if operation == ApplicationSurfaceOperation::StorageStatus {
+                        "source_lines"
+                    } else {
+                        "storage_status"
+                    });
+                let foreign: DaemonInvocationRequest =
+                    serde_json::from_value(wire).expect("foreign label frame");
+                assert_eq!(
+                    foreign.validate(),
+                    Err(DaemonInvocationProblem::InvalidRequest),
+                    "{operation:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn code_primitive_conversion_keeps_the_canonical_owner() {
+        let scope =
+            serde_json::to_value(tracedecay_contracts::retrieval::SymbolGraphScope::default())
+                .expect("scope");
+        let meta = serde_json::to_value(tracedecay_contracts::CallableCodeSurfaceMeta::default())
+            .expect("meta");
+        for (operation, body) in [
+            (
+                ApplicationSurfaceOperation::CodeSymbolSearch,
+                serde_json::json!({"query":"item", "scope":scope, "meta":meta, "lazy_index_ignored_dependencies":false}),
+            ),
+            (
+                ApplicationSurfaceOperation::CodeSignatureSearch,
+                serde_json::json!({"returns":"String"}),
+            ),
+            (
+                ApplicationSurfaceOperation::CodeImplementations,
+                serde_json::json!({"selector":{"selector":"trait", "name":"Display"}}),
+            ),
+            (
+                ApplicationSurfaceOperation::CodeTypeHierarchy,
+                serde_json::json!({"node_id":"node.pair"}),
+            ),
+            (
+                ApplicationSurfaceOperation::CodeCallers,
+                serde_json::json!({"node_id":"node.pair"}),
+            ),
+        ] {
+            let crate::application_surface::ApplicationSurfaceRequest::PrimitiveCode(request) =
+                crate::application_surface::parse_application_surface_request(operation, body)
+                    .expect("surface request")
+            else {
+                panic!("code primitive");
+            };
+            let request_copy =
+                serde_json::from_value(serde_json::to_value(&request).expect("code body"))
+                    .expect("typed code body");
+            let primitive = tracedecay_contracts::primitive_code_into_primitive(
+                request_copy,
+                tracedecay_domain::SanitizerRevision::new("sanitizer.pair").expect("sanitizer"),
+                tracedecay_domain::QueryNormalizationRevision::new("normalization.pair")
+                    .expect("normalization"),
+                tracedecay_contracts::PageRequest::first(10).expect("page"),
+            )
+            .expect("primitive conversion");
+            assert_eq!(primitive.surface_operation(), Some(operation));
+            assert!(
+                primitive
+                    .application_operation()
+                    .expect("application operation")
+                    .is_some()
+            );
+            let frame = DaemonInvocationRequest::primitive_code(
+                "request.code-pair",
+                operation,
+                request,
+                tracedecay_contracts::PageRequest::first(10).expect("page"),
+                UtcMicros(1),
+                deadline(),
+                cancellation(),
+            );
+            assert_eq!(frame.validate(), Ok(()));
+            let mut wire = serde_json::to_value(frame).expect("code frame");
+            wire["surface_operation"] = serde_json::json!("storage_status");
+            let foreign: DaemonInvocationRequest =
+                serde_json::from_value(wire).expect("foreign code frame");
+            assert_eq!(
+                foreign.validate(),
+                Err(DaemonInvocationProblem::InvalidRequest)
+            );
+        }
+    }
+
+    #[test]
+    fn raw_only_primitive_bodies_cannot_borrow_an_issued_owner() {
+        let meta = serde_json::json!({"temporal":{"kind":"current"}, "page":{"page_size":10}, "projection":"evidence", "order":"source_position"});
+        let window = serde_json::json!({"limit":10});
+        for (primitive, body) in [
+            (
+                "source_read",
+                serde_json::json!({"file":"src/lib.rs", "mode":"full", "include_symbols":false, "meta":meta}),
+            ),
+            (
+                "lexical_grep",
+                serde_json::json!({"pattern":"item", "fixed_strings":true, "case_sensitive":true, "context_lines":0, "window":window}),
+            ),
+            (
+                "ast_grep",
+                serde_json::json!({"pattern":"item", "window":window}),
+            ),
+            ("dependency_depth", serde_json::json!({"window":window})),
+        ] {
+            let request: tracedecay_contracts::retrieval::PrimitiveRequest =
+                serde_json::from_value(serde_json::json!({"primitive":primitive, "request":body}))
+                    .expect("raw body");
+            assert_eq!(request.surface_operation(), None);
+            assert!(
+                request
+                    .application_operation()
+                    .expect("unissued operation")
+                    .is_none()
+            );
+            let frame = DaemonInvocationRequest {
+                protocol: super::DAEMON_INVOCATION_PROTOCOL.to_owned(),
+                revision: super::DAEMON_INVOCATION_REVISION,
+                request_id: "request.raw-only".to_owned(),
+                delivery_route: None,
+                payload: DaemonInvocationPayload::PrimitiveRead {
+                    surface_operation: ApplicationSurfaceOperation::SourceLines,
+                    request,
+                    resolved_scope: None,
+                    observed_at: UtcMicros(1),
+                    deadline: deadline(),
+                    cancellation: cancellation(),
+                },
+            };
+            let roundtrip: DaemonInvocationRequest =
+                serde_json::from_value(serde_json::to_value(frame).expect("raw frame"))
+                    .expect("raw roundtrip");
+            assert_eq!(
+                roundtrip.validate(),
+                Err(DaemonInvocationProblem::InvalidRequest)
+            );
+        }
+    }
+
+    #[test]
+    fn primitive_constructor_refuses_foreign_owners_without_panicking() {
+        let request = tracedecay_contracts::retrieval::PrimitiveRequest::StorageStatus(
+            tracedecay_contracts::retrieval::StorageStatusPrimitiveRequest {
+                include_details: true,
+            },
+        );
+        assert!(matches!(
+            DaemonInvocationRequest::primitive(
+                "request.foreign-constructor",
+                ApplicationSurfaceOperation::SourceLines,
+                request,
+                UtcMicros(1),
+                deadline(),
+                cancellation()
+            ),
+            Err(DaemonInvocationProblem::InvalidRequest)
+        ));
+    }
+
+    #[test]
+    fn deserialized_primitive_body_rejects_a_foreign_operation() {
+        let request = DaemonInvocationRequest::primitive(
+            "request.primitive-wire-identity",
+            ApplicationSurfaceOperation::StorageStatus,
+            tracedecay_contracts::retrieval::PrimitiveRequest::StorageStatus(
+                tracedecay_contracts::retrieval::StorageStatusPrimitiveRequest {
+                    include_details: true,
+                },
+            ),
+            UtcMicros(1),
+            deadline(),
+            cancellation(),
+        )
+        .expect("valid primitive request");
+        assert_eq!(request.validate(), Ok(()));
+        let mut wire = serde_json::to_value(request).expect("serialize primitive frame");
+        wire["surface_operation"] = serde_json::json!("source_lines");
+        let malformed: DaemonInvocationRequest =
+            serde_json::from_value(wire).expect("deserialize structurally valid frame");
+        assert_eq!(
+            malformed.validate(),
+            Err(DaemonInvocationProblem::InvalidRequest)
+        );
     }
 
     #[test]
