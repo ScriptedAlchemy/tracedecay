@@ -37,8 +37,9 @@ const OBSERVATION_TABLES: &[&str] = &[
     "observation_projection_provenance",
     "observation_projection_checkpoints",
     "sessions",
+    // The message search index reads its rows and text from this table on
+    // both engines; `session_message_search_count` covers what it matches.
     "lcm_raw_messages",
-    "lcm_raw_messages_fts",
 ];
 
 fn source(session_id: &str) -> ObservationSourceIdentityV1 {
@@ -132,9 +133,7 @@ async fn durable_text(runtime: &HostAdmissionTestRuntimeV1) -> Vec<String> {
              UNION ALL SELECT provider || message_id || session_id || role ||
                  COALESCE(content, placeholder_text, '') ||
                  COALESCE(kind, '') || COALESCE(model, '') || COALESCE(tool_names, '') ||
-                 COALESCE(metadata_json, '') FROM lcm_raw_messages
-             UNION ALL SELECT index_text || role || COALESCE(kind, '') || COALESCE(model, '') ||
-                 COALESCE(tool_names, '') FROM lcm_raw_messages_fts",
+                 COALESCE(metadata_json, '') || COALESCE(index_text, '') FROM lcm_raw_messages",
         )
         .await
         .unwrap()
