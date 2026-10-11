@@ -23,7 +23,6 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::project_code_graph_projection_read_port;
 use crate::code_index_scheduler::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1};
-use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const PROJECT_ID: &str = "project.project-open-code-graph-scope";
 
@@ -58,7 +57,6 @@ impl Fixture {
             .mount_worktree(project_id(), root.path(), store.path().to_path_buf())
             .await
             .expect("mount code-index scheduler");
-        wait_for_initial_generation(&registry, root.path()).await;
         let latest = wait_for_ready_root_generation(&registry, root.path()).await;
         let generation = latest.generation();
         let snapshot = generation.snapshot();
@@ -313,29 +311,12 @@ fn request_context(scope: ResolvedScope, suffix: &str) -> RequestContext {
     .expect("request context")
 }
 
-async fn wait_for_initial_generation(registry: &CodeIndexSchedulerRegistryV1, project_root: &Path) {
-    if registry.latest_generation_id(project_root).await.is_some() {
-        return;
-    }
-    let canonical_root = canonical_existing_identity(project_root).expect("canonical fixture root");
-    let mut publications = registry.subscribe_generation_publications();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let event = publications.recv().await.expect("generation publication");
-            if event.project_root == canonical_root {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("initial generation publication");
-}
-
-/// The publication event races the serving swap that seats the generation
-/// behind the root-scope ready gate, so poll the exact gate the port uses.
-/// The fresh ladder itself abstains until the graph-bearing generation is
-/// seated (the lightweight text owner publishes first), so it is polled
-/// bounded exactly like the decoded gate below it.
+/// Poll seats, never the publication broadcast. The worker announces a
+/// generation before any seat installs it, so a wait that checks the seat and
+/// then subscribes misses the one broadcast whenever it lands in that window.
+/// The fresh ladder abstains until the graph-bearing generation is seated
+/// (the lightweight text owner publishes first), and the decoded root-scope
+/// gate the port uses can trail it, so both are polled.
 async fn wait_for_ready_root_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
