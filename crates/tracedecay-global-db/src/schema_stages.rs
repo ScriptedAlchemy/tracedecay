@@ -15,7 +15,8 @@ use tracedecay_runtime_core::{
     cancellation::CancellationToken,
     db::{
         Database, DatabaseWriteTransaction,
-        engine::{self, Executor, IntoParams, QueryExecutor, Rows},
+        engine::{self, BackendKind, Executor, IntoParams, QueryExecutor, Rows},
+        native_search::normalize_schema_sql,
     },
     ports::registered_schema::{
         RegisteredSchemaInstallationTransactionV1, RegisteredSchemaInstallationV1,
@@ -1364,6 +1365,12 @@ async fn inspect_workflow_schema_for_admission(
         return Ok(Ok(WorkflowSchemaAdmission::Create));
     }
 
+    // Turso stores DDL re-rendered from its parse tree; SQLite stores the text
+    // as written.
+    let stored_form = |sql: &str| match conn.backend_kind() {
+        BackendKind::Sqlite => sql.to_owned(),
+        BackendKind::NativeTurso => normalize_schema_sql(sql),
+    };
     let actual_workflow_tables = tables
         .iter()
         .filter(|(object_type, name, _)| {
@@ -1372,11 +1379,11 @@ async fn inspect_workflow_schema_for_admission(
                     .iter()
                     .any(|contract| contract.name == name.as_str())
         })
-        .map(|(_, name, sql)| (name.as_str(), sql.as_deref()))
+        .map(|(_, name, sql)| (name.as_str(), sql.as_deref().map(stored_form)))
         .collect::<Vec<_>>();
     let expected_workflow_tables = WORKFLOW_TABLE_CONTRACTS_V1
         .iter()
-        .map(|contract| (contract.name, Some(contract.sql)))
+        .map(|contract| (contract.name, Some(stored_form(contract.sql))))
         .collect::<Vec<_>>();
     if actual_workflow_tables != expected_workflow_tables {
         return Ok(Err(workflow_schema_refusal(
@@ -1532,15 +1539,17 @@ mod tests {
         let path = directory.path().join("registered.db");
         for fresh in [true, false] {
             let connection = NativeTestConnection::open(&path).expect("open native store");
-            let super::RegisteredSchemaAdmission::Admissible(classification) =
-                super::classify_registered_schema_admission(
-                    &*connection,
-                    &tracedecay_store::StoreShardScopeV1::ProfileSessions,
-                )
-                .await
-                .expect("classify native registered schema")
-            else {
-                panic!("native registered schema refused a session authority");
+            let classification = match super::classify_registered_schema_admission(
+                &*connection,
+                &tracedecay_store::StoreShardScopeV1::ProfileSessions,
+            )
+            .await
+            .expect("classify native registered schema")
+            {
+                super::RegisteredSchemaAdmission::Admissible(classification) => classification,
+                super::RegisteredSchemaAdmission::SessionAuthorityRefused(refused) => {
+                    panic!("native registered schema refused a session authority: {refused:?}")
+                }
             };
             assert_eq!(classification.configuration_fresh.is_some(), fresh);
             assert_eq!(
