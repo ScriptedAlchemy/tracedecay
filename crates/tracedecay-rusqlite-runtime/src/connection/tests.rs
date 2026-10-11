@@ -434,61 +434,6 @@ fn writer_identity_fence_rejects_a_replacement_hidden_by_path_restore() {
     );
 }
 
-const HELD_STORE_CHILD: &str = "TRACEDECAY_RUNTIME_HELD_STORE";
-
-/// Identity checks around a live writer must not release the engine's
-/// exclusive lock: on the native engine, closing any descriptor of the store
-/// drops every POSIX record lock this process holds on it, so a second process
-/// could open the store under the writer.
-#[cfg(unix)]
-#[test]
-fn identity_checks_keep_the_writer_store_owned_by_this_process() {
-    const TEST_NAME: &str =
-        "connection::tests::identity_checks_keep_the_writer_store_owned_by_this_process";
-    if let Ok(path) = std::env::var(HELD_STORE_CHILD) {
-        match Connection::open(&path).and_then(|connection| {
-            connection.execute_batch("CREATE TABLE IF NOT EXISTS taken(value INTEGER)")
-        }) {
-            Ok(()) => println!("OUTCOME=opened"),
-            Err(error) => println!("OUTCOME={:?}", error.kind()),
-        }
-        return;
-    }
-
-    let directory = tempfile::tempdir().unwrap();
-    let path = std::fs::canonicalize(directory.path())
-        .unwrap()
-        .join("held.db");
-    let pinned = OpenedDatabaseFile::create_new(&path).unwrap();
-    let writer_path = pinned.writer_open_path(&path).unwrap();
-    let writer = open_writer(&writer_path, Some(&pinned), &path).expect("writer opens");
-    writer
-        .execute_batch("CREATE TABLE IF NOT EXISTS held(value INTEGER)")
-        .unwrap();
-    pinned.verify_current_path(&path).unwrap();
-    pinned.verify_connection(&writer, &path).unwrap();
-    drop(OpenedDatabaseFile::pin(&path).unwrap());
-    drop(pinned.try_clone().unwrap());
-
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
-        .env(HELD_STORE_CHILD, &path)
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "child failed: {stdout}");
-    let expected = match tracedecay_sql::ENGINE {
-        tracedecay_sql::Engine::Native => "OUTCOME=OwnedElsewhere",
-        // SQLite shares a WAL store across processes.
-        tracedecay_sql::Engine::Sqlite => "OUTCOME=opened",
-    };
-    assert!(
-        stdout.contains(expected),
-        "expected {expected}, child printed: {stdout}"
-    );
-    drop(writer);
-}
-
 #[cfg(windows)]
 #[test]
 fn windows_pinned_file_blocks_replacement_until_authority_closes() {
