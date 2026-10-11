@@ -435,7 +435,7 @@ fn output_owner_lookup_sql(select_expr: &str, ordering: &str) -> String {
         "(
                     SELECT {select_expr}
                     FROM observation_projection_provenance AS provenance
-                         INDEXED BY idx_observation_projection_provenance_output
+                         INDEXED BY idx_observation_projection_provenance_global_output
                     JOIN observations AS observation
                       ON observation.observation_id = provenance.observation_id
                     WHERE provenance.projector_version = groups.projector_version
@@ -1126,7 +1126,7 @@ fn output_authority_batch_sql() -> String {
                    COUNT(*) AS owner_count
             FROM json_each(?2) AS requested
             CROSS JOIN observation_projection_provenance AS provenance
-              INDEXED BY idx_observation_projection_provenance_output
+              INDEXED BY idx_observation_projection_provenance_global_output
             WHERE provenance.projector_version = ?1
               AND provenance.output_provider =
                     json_extract(requested.value, '$.provider')

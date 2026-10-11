@@ -311,11 +311,11 @@ const OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL: &str =
     include_str!("projection_binding_triggers.sql");
 
 /// Historical-data indexes the schema contract requires on the projection
-/// authority.
+/// authority. Output lookups seek the output-leading index; no secondary
+/// index leads with `projector_version`, so Turso cannot prefer one over the
+/// primary key for observation lookups
+/// (`turso-bugs/secondary-index-loses-to-primary-key-prefix.md`).
 pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
-    "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_output
-     ON observation_projection_provenance
-        (projector_version, output_provider, output_message_id);",
     "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_global_output
      ON observation_projection_provenance
         (output_provider, output_message_id, projector_version);",
@@ -679,8 +679,7 @@ mod tests {
         drop(open_registered_schema(&path).await.unwrap());
         let conn = TestConnection::open(&path);
         conn.execute_batch(
-            "DROP INDEX idx_observation_projection_provenance_output;
-             DROP INDEX idx_observation_projection_provenance_global_output;
+            "DROP INDEX idx_observation_projection_provenance_global_output;
              DROP INDEX idx_observation_workflow_facts_query;
              DROP INDEX idx_observation_workflow_facts_item;
              DROP INDEX idx_projection_rebuild_provenance_output;
@@ -705,7 +704,6 @@ mod tests {
             .query(
                 "SELECT name FROM sqlite_schema
                  WHERE name IN (
-                    'idx_observation_projection_provenance_output',
                     'idx_observation_projection_provenance_global_output',
                     'idx_observation_workflow_facts_query',
                     'idx_observation_workflow_facts_item',
