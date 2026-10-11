@@ -5,7 +5,6 @@ use std::collections::BTreeSet;
 use crate::memory::entities::normalize_entity;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::Value;
 use tracedecay_runtime_core::db::{Database, DatabaseMemoryTransaction as Transaction};
 
@@ -630,34 +629,36 @@ async fn project_memory_update_retrieval_projection_tx(
     debug_assert!(!fact_ids.is_empty());
     let key = OwnerKey::new(owner)?;
     let recall = i64::from(recall);
-    let mut values = vec![
-        Value::Integer(recall),
-        Value::Integer(timestamp.0),
+    let requested = serde_json::to_string(&fact_ids.iter().map(FactId::as_str).collect::<Vec<_>>())
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    let values = vec![
         Value::Integer(recall),
         Value::Integer(timestamp.0),
         Value::Text(key.kind.to_string()),
         Value::Text(key.project_id.clone()),
+        Value::Text(requested),
     ];
-    values.extend(
-        fact_ids
-            .iter()
-            .map(|fact_id| Value::Text(fact_id.as_str().to_owned())),
-    );
-    let sql = format!(
-        "UPDATE memory_v2_current_facts SET
+    // Rows are picked by rowid through a primary-key seek per requested id:
+    // native Turso never seeks `fact_id IN (...)` and scans the owner instead.
+    let sql = "UPDATE memory_v2_current_facts SET
                 retrieval_count = retrieval_count + 1,
-                access_count = access_count + ?,
-                last_retrieved_at = ?,
-                last_recalled_at = CASE WHEN ? = 1 THEN ? ELSE last_recalled_at END
-             WHERE owner_kind = ?
-               AND project_id = ?
-               AND payload_access = 'eligible'
-               AND active_assertion_id IS NOT NULL
-               AND fact_id IN ({})",
-        build_qmark_placeholders(fact_ids.len())
-    );
+                access_count = access_count + ?1,
+                last_retrieved_at = ?2,
+                last_recalled_at = CASE WHEN ?1 = 1 THEN ?2 ELSE last_recalled_at END
+             WHERE rowid IN (
+                 SELECT current_facts.rowid
+                 FROM (
+                     SELECT DISTINCT CAST(value AS TEXT) AS fact_id FROM json_each(?5)
+                 ) AS requested
+                 CROSS JOIN memory_v2_current_facts AS current_facts
+                   ON current_facts.fact_id = requested.fact_id
+                 WHERE current_facts.owner_kind = ?3
+                   AND current_facts.project_id = ?4
+                   AND current_facts.payload_access = 'eligible'
+                   AND current_facts.active_assertion_id IS NOT NULL
+             )";
     let changed = transaction
-        .execute(&sql, values)
+        .execute(sql, values)
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     if changed != fact_ids.len() as u64 {
