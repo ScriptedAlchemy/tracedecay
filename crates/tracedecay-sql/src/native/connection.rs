@@ -57,7 +57,9 @@ impl From<Access> for Capability {
     fn from(access: Access) -> Self {
         match access {
             Access::Reader => Self::Reader,
-            Access::Writer => Self::Writer,
+            // The facade installs schema, triggers and views included, through
+            // its writer, so it keeps the maintenance verdict until it is gone.
+            Access::Writer => Self::Maintenance,
         }
     }
 }
@@ -856,6 +858,10 @@ impl Connection {
 
     pub fn rollback(&mut self) -> Result<()> {
         self.rollback_transaction()
+    }
+
+    pub fn checkpoint(&mut self, guard: &ExecutionGuard) -> Result<Rows> {
+        self.query("PRAGMA wal_checkpoint(TRUNCATE)", &[], guard)
     }
 
     fn guarded<T>(
