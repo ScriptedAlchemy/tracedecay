@@ -57,7 +57,11 @@ const BEGIN_BUSY_RETRY_PAUSE: Duration = Duration::from_millis(1);
 /// contended or cancelled begin cannot pin the sole writer for that whole
 /// window. Sized as the prior 64-attempt budget once each attempt sleeps 1ms
 /// (the yield-only budget burned out in ~50µs under CI).
-const EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT: Duration = Duration::from_millis(64);
+pub(super) const EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT: Duration = Duration::from_millis(64);
+const _: () = assert!(
+    EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT.as_nanos() < EXACT_SQL_TRANSACTION_IDLE_LIMIT.as_nanos() / 2,
+    "the write-lock acquire bound must stay well below the transaction idle lease"
+);
 
 /// Takes SQLite's write lock on the worker thread, retrying while it is busy.
 ///
@@ -88,12 +92,18 @@ pub(super) fn begin_transaction_with_busy_retry<'connection>(
     }
 }
 
+/// Retries `begin` while `SQLite` reports the write lock busy, until the
+/// exact SQL clock reaches [`EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT`] or shutdown
+/// or cancellation is requested.
+///
+/// The deadline is checked between attempts, so it cannot shorten one
+/// `begin` call that blocks in the kernel.
 pub(super) fn retry_busy_begin<T>(
     mut begin: impl FnMut() -> rusqlite::Result<T>,
     shutdown_requested: &AtomicBool,
     mut cancelled: impl FnMut() -> bool,
 ) -> rusqlite::Result<T> {
-    let deadline = Instant::now() + EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT;
+    let deadline = clock::now() + EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT;
     let mut original_busy_error = None;
     loop {
         if (shutdown_requested.load(Ordering::Acquire) || cancelled())
@@ -113,7 +123,7 @@ pub(super) fn retry_busy_begin<T>(
             Err(error) if sqlite_busy_or_locked(&error) => {
                 let exhausted = shutdown_requested.load(Ordering::Acquire)
                     || cancelled()
-                    || Instant::now() >= deadline;
+                    || clock::now() >= deadline;
                 match original_busy_error.take() {
                     Some(original) if exhausted => return Err(original),
                     Some(original) => original_busy_error = Some(original),
