@@ -94,8 +94,13 @@ fn capability_verdicts_match_the_sqlite_authorizers() {
         ),
         (
             "PRAGMA auto_vacuum = 'incremental'",
-            &[Writer, Maintenance],
-            &[Reader],
+            &[Maintenance],
+            &[Reader, Writer],
+        ),
+        (
+            "PRAGMA incremental_vacuum(8)",
+            &[Maintenance],
+            &[Reader, Writer],
         ),
         ("PRAGMA query_only = OFF", &[Maintenance], &[Reader, Writer]),
         (
@@ -129,6 +134,82 @@ fn capability_verdicts_match_the_sqlite_authorizers() {
             .is_err_and(|error| error.contains("secure deletion")),
         "secure delete is refused, never silently accepted"
     );
+}
+
+/// Catches exact SQL capabilities that diverge from the SQLite arm: caller
+/// SQL ending or nesting the runtime's transaction, savepoints without a
+/// lease, a read scope that writes, or a pragma outside the exact SQL
+/// allowlist.
+#[test]
+fn exact_sql_capabilities_match_the_sqlite_authorizer() {
+    let (_directory, database) = database();
+    let mut connection = database.connect(Access::Writer).unwrap();
+    let guard = execution_guard();
+    connection
+        .execute("CREATE TABLE t(x)", &[], &guard)
+        .unwrap();
+    let denied_control = |connection: &mut Connection, sql: &str| {
+        assert!(
+            matches!(
+                connection.execute(sql, &[], &guard),
+                Err(Error::TransactionControlDenied)
+            ),
+            "{sql} must be denied as transaction control"
+        );
+    };
+
+    connection.set_capability(Capability::ExactSql { savepoints: false });
+    denied_control(&mut connection, "BEGIN");
+    denied_control(&mut connection, "SAVEPOINT s");
+    assert!(connection.is_autocommit());
+    connection
+        .execute("CREATE TEMP TABLE scratch(x)", &[], &guard)
+        .unwrap();
+    connection
+        .execute("INSERT INTO t VALUES (1)", &[], &guard)
+        .unwrap();
+    connection
+        .execute("PRAGMA user_version = 7", &[], &guard)
+        .unwrap();
+    assert!(matches!(
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)", &[], &guard),
+        Err(Error::Denied(_))
+    ));
+    assert!(matches!(
+        connection.execute(
+            "CREATE TEMP TRIGGER g AFTER INSERT ON t BEGIN SELECT 1; END",
+            &[],
+            &guard
+        ),
+        Err(Error::Denied(_))
+    ));
+
+    connection.set_capability(Capability::ExactSql { savepoints: true });
+    connection.execute("SAVEPOINT s", &[], &guard).unwrap();
+    connection
+        .execute("INSERT INTO t VALUES (2)", &[], &guard)
+        .unwrap();
+    connection.execute("ROLLBACK TO s", &[], &guard).unwrap();
+    connection.execute("RELEASE s", &[], &guard).unwrap();
+    denied_control(&mut connection, "BEGIN");
+    assert!(connection.is_autocommit());
+
+    connection.set_capability(Capability::ExactSqlRead);
+    assert!(matches!(
+        connection.execute("INSERT INTO t VALUES (3)", &[], &guard),
+        Err(Error::Denied(_))
+    ));
+    denied_control(&mut connection, "SAVEPOINT r");
+
+    connection.set_capability(Capability::Writer);
+    let rows = connection
+        .query("SELECT x FROM t ORDER BY x", &[], &guard)
+        .unwrap();
+    assert_eq!(rows.values, vec![vec![Value::Integer(1)]]);
+    let version = connection
+        .query("PRAGMA user_version", &[], &guard)
+        .unwrap();
+    assert_eq!(version.values, vec![vec![Value::Integer(7)]]);
 }
 
 /// Catches a dialect that resolves extension loading or a catalog object

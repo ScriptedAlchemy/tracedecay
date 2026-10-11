@@ -367,6 +367,7 @@ impl Database {
             inner,
             guard,
             capability: Cell::new(capability),
+            transaction_control_denied: Cell::new(false),
             read_only,
             cache: RefCell::default(),
             database: self.clone(),
@@ -480,16 +481,32 @@ pub struct Connection {
     inner: Arc<turso_core::Connection>,
     guard: Arc<GuardSlot>,
     capability: Cell<Capability>,
+    /// Set when a statement was refused as transaction control, so a
+    /// capability scope fails even if its operation swallowed the error.
+    transaction_control_denied: Cell<bool>,
     read_only: bool,
     cache: RefCell<HashMap<(Capability, String), (turso_core::Statement, bool)>>,
     database: Database,
 }
 
 impl Connection {
+    fn authorize(&self, command: &Cmd, capability: Capability) -> Result<()> {
+        let verdict = policy::authorize(command, capability);
+        if matches!(verdict, Err(Error::TransactionControlDenied)) {
+            self.transaction_control_denied.set(true);
+        }
+        verdict
+    }
+
+    pub(crate) fn take_transaction_control_denied(&self) -> bool {
+        self.transaction_control_denied.replace(false)
+    }
+
     pub(crate) fn set_capability(&self, capability: Capability) {
         self.capability.set(capability);
-        self.inner
-            .set_query_only(self.read_only || capability == Capability::Reader);
+        self.inner.set_query_only(
+            self.read_only || matches!(capability, Capability::Reader | Capability::ExactSqlRead),
+        );
     }
 
     pub(crate) fn capability(&self) -> Capability {
@@ -540,7 +557,7 @@ impl Connection {
         }
         validate_request(sql, &[])?;
         let command = parse_single(sql)?;
-        policy::authorize(&command, capability)?;
+        self.authorize(&command, capability)?;
         let ddl = policy::is_ddl(&command);
         let statement = self.compile(command, sql)?;
         Ok(Prepared {
@@ -578,7 +595,7 @@ impl Connection {
     pub(crate) fn admit(&self, prepared: &mut Prepared) -> Result<()> {
         let capability = self.capability();
         if prepared.capability != capability {
-            policy::authorize(&parse_single(&prepared.sql)?, capability)?;
+            self.authorize(&parse_single(&prepared.sql)?, capability)?;
             prepared.capability = capability;
         }
         prepared.statement.reset()?;
@@ -653,7 +670,7 @@ impl Connection {
         let statements = parse_batch(sql)?;
         let capability = self.capability();
         for (command, _) in &statements {
-            policy::authorize(command, capability)?;
+            self.authorize(command, capability)?;
         }
         for (command, input) in statements {
             let ddl = policy::is_ddl(&command);

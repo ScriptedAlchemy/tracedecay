@@ -28,6 +28,7 @@ conformance!(
     constraint_is_classified,
     busy_is_classified,
     capability_scope_denies_and_restores,
+    exact_sql_scope_fails_on_swallowed_transaction_control,
     guard_scope_interrupts_running_statement,
     page_stats_and_checkpoint_report_the_file,
 );
@@ -277,6 +278,32 @@ mod cases {
         assert_eq!(trigger.kind(), ErrorKind::Denied, "{trigger}");
         connection.execute("INSERT INTO items (name) VALUES ('restored')", [])?;
         assert_eq!(names(&connection)?, ["restored"]);
+        Ok(())
+    }
+
+    /// Catches an exact SQL scope that succeeds after its operation swallowed a
+    /// transaction-control denial, or a denial that leaks into the next scope.
+    pub(super) fn exact_sql_scope_fails_on_swallowed_transaction_control() -> Result<()> {
+        let connection = Connection::open_in_memory()?;
+        items(&connection)?;
+        connection.set_capability(Capability::Writer)?;
+        let exact_sql = Capability::ExactSql { savepoints: false };
+        let swallowed = connection
+            .with_capability(exact_sql, Capability::Writer, |scoped| {
+                let _ = scoped.execute_batch("BEGIN");
+                scoped.execute("INSERT INTO items (name) VALUES ('scoped')", [])
+            })
+            .expect_err("a denied BEGIN fails the scope");
+        assert_eq!(
+            swallowed.kind(),
+            ErrorKind::TransactionControlDenied,
+            "{swallowed}"
+        );
+        assert!(connection.is_autocommit(), "the denied BEGIN never ran");
+        connection.with_capability(exact_sql, Capability::Writer, |scoped| {
+            scoped.execute("INSERT INTO items (name) VALUES ('clean')", [])
+        })?;
+        assert_eq!(names(&connection)?, ["scoped", "clean"]);
         Ok(())
     }
 

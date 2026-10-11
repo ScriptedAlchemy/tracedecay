@@ -129,6 +129,7 @@ impl From<super::Error> for Error {
             | super::Error::DeadlineExceeded
             | super::Error::Authority(_) => ErrorKind::Interrupted,
             super::Error::Denied(_) => ErrorKind::Denied,
+            super::Error::TransactionControlDenied => ErrorKind::TransactionControlDenied,
             super::Error::Unsupported(_) => ErrorKind::Unsupported,
             super::Error::Engine(engine) => match engine {
                 LimboError::Constraint(_)
@@ -816,14 +817,19 @@ impl ConnectionControl for Connection {
         base: Capability,
         operation: impl FnOnce(&Self) -> Result<T>,
     ) -> Result<T> {
+        self.core.take_transaction_control_denied();
         self.core.set_capability(scoped);
         let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
         self.core.clear_cache();
         self.core.set_capability(base);
-        match result {
+        let result = match result {
             Ok(result) => result,
             Err(payload) => resume_unwind(payload),
+        };
+        if self.core.take_transaction_control_denied() {
+            return Err(super::Error::TransactionControlDenied.into());
         }
+        result
     }
 
     fn guard_scope<T>(
@@ -846,6 +852,14 @@ impl ConnectionControl for Connection {
 
     fn checkpoint(&self, mode: CheckpointMode) -> Result<CheckpointOutcome> {
         let mode = match mode {
+            // Turso has no non-copying WAL probe that reports backfilled
+            // frames, so the frame counts NOOP promises cannot be produced.
+            CheckpointMode::Noop => {
+                return Err(super::Error::Unsupported(
+                    "native Turso has no NOOP checkpoint".to_owned(),
+                )
+                .into());
+            }
             CheckpointMode::Passive => "PASSIVE",
             CheckpointMode::Full => "FULL",
             CheckpointMode::Restart => "RESTART",

@@ -4,7 +4,7 @@ use turso_core::{Dialect, Func, LimboError, SqliteDialect};
 use turso_parser::ast::{Cmd, Name, PragmaBody, QualifiedName, Stmt};
 
 use super::{Error, Result};
-use crate::Capability;
+use crate::{Capability, control::is_allowed_exact_sql_pragma};
 
 /// Prefix of the parse error a denied function resolution raises; the
 /// connection maps it to [`Error::Denied`].
@@ -142,9 +142,10 @@ pub(crate) fn is_ddl(command: &Cmd) -> bool {
 /// capability, mirroring the SQLite arm's authorizers. `EXPLAIN` is judged by
 /// the statement it explains.
 pub(crate) fn authorize(command: &Cmd, capability: Capability) -> Result<()> {
-    use Capability::{Maintenance, Reader, Writer};
+    use Capability::{ExactSql, ExactSqlRead, Maintenance, Reader, Writer};
 
     let temp = |name: &QualifiedName| is_temp(name.db_name.as_ref());
+    let read_only = matches!(capability, Reader | ExactSqlRead);
     let allowed = match statement(command) {
         Stmt::Select(_) => true,
         Stmt::Pragma { name, body } => {
@@ -152,23 +153,33 @@ pub(crate) fn authorize(command: &Cmd, capability: Capability) -> Result<()> {
         }
         Stmt::Begin { .. }
         | Stmt::Commit { .. }
-        | Stmt::Rollback { .. }
-        | Stmt::Savepoint { .. }
-        | Stmt::Release { .. } => true,
-        Stmt::Insert { .. } | Stmt::Delete { .. } | Stmt::Update(_) => capability != Reader,
+        | Stmt::Rollback {
+            savepoint_name: None,
+            ..
+        } => {
+            return transaction_control(matches!(capability, Reader | Writer | Maintenance));
+        }
+        Stmt::Rollback { .. } | Stmt::Savepoint { .. } | Stmt::Release { .. } => {
+            return transaction_control(match capability {
+                Reader | Writer | Maintenance => true,
+                ExactSql { savepoints } => savepoints,
+                ExactSqlRead => false,
+            });
+        }
+        Stmt::Insert { .. } | Stmt::Delete { .. } | Stmt::Update(_) => !read_only,
         Stmt::CreateTable {
             temporary,
             tbl_name,
             ..
         } => match capability {
-            Reader => false,
+            Reader | ExactSqlRead => false,
             Writer => !temporary && !temp(tbl_name),
-            Maintenance => true,
+            ExactSql { .. } | Maintenance => true,
         },
         Stmt::CreateIndex { idx_name, .. } => match capability {
-            Reader => false,
+            Reader | ExactSqlRead => false,
             Writer => !temp(idx_name),
-            Maintenance => true,
+            ExactSql { .. } | Maintenance => true,
         },
         // A temporary trigger can fire on a durable table outside the
         // canonical trigger contract, so no capability may create one.
@@ -194,7 +205,7 @@ pub(crate) fn authorize(command: &Cmd, capability: Capability) -> Result<()> {
         | Stmt::DropIndex { .. }
         | Stmt::DropTable { .. }
         | Stmt::Optimize { .. } => durable_schema(capability),
-        Stmt::Reindex { .. } => capability != Reader,
+        Stmt::Reindex { .. } => !read_only,
         // Attachment, in-place VACUUM and the engine's non-SQLite object
         // kinds have no owned-store caller under any capability.
         Stmt::Attach { .. }
@@ -217,12 +228,22 @@ pub(crate) fn authorize(command: &Cmd, capability: Capability) -> Result<()> {
     }
 }
 
+/// Transaction control and savepoints are judged before anything else so a
+/// denial reports [`Error::TransactionControlDenied`], as on the SQLite arm.
+fn transaction_control(allowed: bool) -> Result<()> {
+    if allowed {
+        Ok(())
+    } else {
+        Err(Error::TransactionControlDenied)
+    }
+}
+
 /// Triggers, views, drops and other schema surgery beyond the ledger
 /// bootstrap's `CREATE TABLE`/`CREATE INDEX`.
 fn durable_schema(capability: Capability) -> bool {
     match capability {
-        Capability::Reader | Capability::Writer => false,
-        Capability::Maintenance => true,
+        Capability::Reader | Capability::ExactSqlRead | Capability::Writer => false,
+        Capability::ExactSql { .. } | Capability::Maintenance => true,
     }
 }
 
@@ -259,14 +280,19 @@ fn authorize_pragma(name: &str, body: Option<&PragmaBody>, capability: Capabilit
             "native Turso does not implement secure deletion".to_owned(),
         ));
     }
-    let allowed = match body {
-        None => true,
-        Some(PragmaBody::Equals(value) | PragmaBody::Call(value)) => {
-            let value = value.to_string();
-            let value = value.trim_matches(|c| c == '\'' || c == '"');
+    let value = body.map(|(PragmaBody::Equals(value) | PragmaBody::Call(value))| {
+        value
+            .to_string()
+            .trim_matches(|c| c == '\'' || c == '"')
+            .to_owned()
+    });
+    let allowed = match (capability, value) {
+        (Capability::ExactSql { .. }, value) => is_allowed_exact_sql_pragma(name, value.as_deref()),
+        (_, None) => true,
+        (capability, Some(_)) => {
             capability == Capability::Maintenance
                 || INTROSPECTION.iter().any(is)
-                || (capability == Capability::Writer && is_safe_writer_pragma(name, value))
+                || (capability == Capability::Writer && is_safe_writer_pragma(name))
         }
     };
     if allowed {
@@ -278,15 +304,8 @@ fn authorize_pragma(name: &str, body: Option<&PragmaBody>, capability: Capabilit
     }
 }
 
-fn is_safe_writer_pragma(name: &str, value: &str) -> bool {
-    [
-        "busy_timeout",
-        "incremental_vacuum",
-        "wal_autocheckpoint",
-        "wal_checkpoint",
-    ]
-    .iter()
-    .any(|candidate| name.eq_ignore_ascii_case(candidate))
-        || (name.eq_ignore_ascii_case("auto_vacuum")
-            && (value.eq_ignore_ascii_case("incremental") || value == "2"))
+fn is_safe_writer_pragma(name: &str) -> bool {
+    ["busy_timeout", "wal_autocheckpoint", "wal_checkpoint"]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }

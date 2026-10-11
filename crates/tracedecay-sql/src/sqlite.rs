@@ -26,7 +26,7 @@ use rusqlite::{
 use crate::{
     Capability, CheckpointMode, CheckpointOutcome, ConnectionControl, Engine, EnginePolicy,
     ErrorExt, ErrorKind, PROGRESS_INTERVAL_OPS, PageStats, StatementControl, StatementCounters,
-    TransactionControl,
+    TransactionControl, control::is_allowed_exact_sql_pragma,
 };
 
 pub const ENGINE: Engine = Engine::Sqlite;
@@ -421,76 +421,6 @@ fn authorize_exact_sql_writer(action: &AuthAction<'_>) -> bool {
             if !is_allowed_exact_sql_pragma(pragma_name, *pragma_value)
         );
     !denied
-}
-
-fn is_allowed_exact_sql_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
-    is_exact_sql_read_pragma(pragma_name, pragma_value)
-        || (pragma_value.is_none() && pragma_name.eq_ignore_ascii_case("shrink_memory"))
-        || pragma_value.is_some_and(|value| {
-            (pragma_name.eq_ignore_ascii_case("foreign_keys")
-                && (value.eq_ignore_ascii_case("on") || value == "1"))
-                || (pragma_name.eq_ignore_ascii_case("defer_foreign_keys")
-                    && (value.eq_ignore_ascii_case("on") || value == "1"))
-                || (pragma_name.eq_ignore_ascii_case("busy_timeout")
-                    && value.parse::<u32>().is_ok())
-                || (pragma_name.eq_ignore_ascii_case("secure_delete")
-                    && (value.eq_ignore_ascii_case("on") || value == "1"))
-                || (pragma_name.eq_ignore_ascii_case("user_version")
-                    && value.parse::<u32>().is_ok())
-                || (pragma_name.eq_ignore_ascii_case("wal_autocheckpoint")
-                    && value.parse::<u32>().is_ok())
-        })
-}
-
-fn is_exact_sql_read_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
-    const ARGUMENT_SAFE: &[&str] = &[
-        "foreign_key_check",
-        "foreign_key_list",
-        "index_info",
-        "index_list",
-        "index_xinfo",
-        "integrity_check",
-        "quick_check",
-        "table_info",
-        "table_list",
-        "table_xinfo",
-    ];
-    const NO_ARGUMENT_ONLY: &[&str] = &[
-        "application_id",
-        "auto_vacuum",
-        "busy_timeout",
-        "cache_size",
-        "collation_list",
-        "compile_options",
-        "data_version",
-        "database_list",
-        "defer_foreign_keys",
-        "foreign_keys",
-        "freelist_count",
-        "function_list",
-        "journal_mode",
-        "mmap_size",
-        "module_list",
-        "page_count",
-        "page_size",
-        "pragma_list",
-        "query_only",
-        "recursive_triggers",
-        "schema_version",
-        "secure_delete",
-        "synchronous",
-        "temp_store",
-        "user_version",
-        "wal_autocheckpoint",
-    ];
-
-    ARGUMENT_SAFE
-        .iter()
-        .any(|candidate| pragma_name.eq_ignore_ascii_case(candidate))
-        || (pragma_value.is_none()
-            && NO_ARGUMENT_ONLY
-                .iter()
-                .any(|candidate| pragma_name.eq_ignore_ascii_case(candidate)))
 }
 
 #[cfg(test)]
