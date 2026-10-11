@@ -312,7 +312,7 @@
   "memory_v2_assertion_payload_digests": {
     "type": "table",
     "table": "memory_v2_assertion_payload_digests",
-    "sql": "CREATE TABLE memory_v2_assertion_payload_digests (payload_rowid INTEGER PRIMARY KEY, assertion_id TEXT NOT NULL, fact_id TEXT NOT NULL, owner_kind TEXT NOT NULL, project_id TEXT NOT NULL, content_digest TEXT NOT NULL CHECK (length(content_digest) = 71 AND content_digest LIKE 'sha256:%'), UNIQUE (assertion_id, fact_id, owner_kind, project_id), FOREIGN KEY (payload_rowid) REFERENCES memory_v2_assertion_payloads (rowid))"
+    "sql": "CREATE TABLE memory_v2_assertion_payload_digests (payload_rowid INTEGER PRIMARY KEY, assertion_id TEXT NOT NULL, fact_id TEXT NOT NULL, owner_kind TEXT NOT NULL, project_id TEXT NOT NULL, content_digest TEXT NOT NULL CHECK (length(content_digest) = 71 AND content_digest LIKE 'sha256:%'), UNIQUE (assertion_id, fact_id, owner_kind, project_id), FOREIGN KEY (assertion_id, fact_id, owner_kind, project_id) REFERENCES memory_v2_assertion_payloads (assertion_id, fact_id, owner_kind, project_id))"
   },
   "memory_v2_assertion_payload_digests_lookup": {
     "type": "index",

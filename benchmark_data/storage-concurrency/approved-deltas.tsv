@@ -1,2 +1,6 @@
 target	test	category	evidence
 //crates/tracedecay-global-db:unit_test	schema_portability_tests::every_registered_store_installs_only_engine_portable_shapes	secure-delete	native refuses PRAGMA secure_delete (no page scrubbing); SQLite still reads 0
+//crates/tracedecay-session-temporal-store:unit_test	retrieval::tests::candidate_queries_return_live_rows_and_use_schema_indexes	sqlite-introspection-removed	EXPLAIN QUERY PLAN assertions run where SQLite plans; native asserts the same returned rows through its own query arms
+//crates/tracedecay-session-temporal-store:unit_test	retrieval::tests::summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans	sqlite-introspection-removed	EXPLAIN QUERY PLAN assertions run where SQLite plans; native asserts the same returned rows through its own query arms
+//crates/tracedecay-lcm:unit_test	schema::tests::raw_fts_currency_requires_table_and_every_trigger_contract	fts-shape	native has no FTS5 sync triggers; the native branch drops and drifts the USING fts index definition instead
+//crates/tracedecay:session_suite	transcript_store	fts-shape	global-db harness transcript_store_counts_for_test counts indexed rows as the table's rows on native, whose index covers every row

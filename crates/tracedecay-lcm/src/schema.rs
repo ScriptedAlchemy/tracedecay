@@ -70,17 +70,15 @@ const MIGRATION_NAME: &str = "lcm";
 /// that relies on it: SQLite substitutes a partial index only when its query
 /// terms structurally imply the index's WHERE clause. The status predicates
 /// live in [`super::query`]; the raw direct-user candidate predicate lives in
-/// [`super::query::grep`]. Turso evaluates a partial-index predicate without
-/// short-circuiting `AND`, so `json_type` sits behind a `CASE` that never
-/// hands it metadata that is not JSON
+/// [`super::query::grep`]. Turso evaluates a partial-index predicate on every
+/// insert and update without short-circuiting, so the lossy-ingest predicate
+/// is a JSON-free `LIKE` prefilter and the queries apply the exact JSON test
+/// to the indexed rows
 /// (`benchmark_data/storage-concurrency/turso-bugs/partial-index-and-short-circuit.md`).
 pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_lcm_raw_lossy_ingest
          ON lcm_raw_messages(provider, session_id)
-         WHERE metadata_json IS NOT NULL
-           AND json_valid(metadata_json)
-           AND CASE WHEN json_valid(metadata_json)
-               THEN json_type(metadata_json, '$.ingest_protection.lossy') END = 'true';",
+         WHERE metadata_json LIKE '%\"lossy\"%';",
     // Raw LIKE retrieval must retain infix and lossless-content semantics, so
     // FTS cannot be its candidate authority. Direct-user retrieval instead
     // admits the complete `role = 'user'` superset through this narrow index,
@@ -786,6 +784,35 @@ mod tests {
             .ok_or_else(|| "initial raw FTS rebuild failed".to_string())?;
         assert_eq!(raw_fts_structure_is_current(&*conn).await, Some(true));
 
+        if conn.backend_kind() == BackendKind::NativeTurso {
+            // The native index keeps itself current; its definition is the
+            // whole contract.
+            conn.execute_batch(
+                "DROP INDEX lcm_raw_messages_fts;
+                 CREATE INDEX lcm_raw_messages_fts ON lcm_raw_messages USING fts (index_text);",
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            assert_eq!(
+                raw_fts_structure_is_current(&*conn).await,
+                Some(false),
+                "a raw FTS index missing columns was accepted as current"
+            );
+            rebuild_raw_fts(&*conn)
+                .await
+                .ok_or_else(|| "raw FTS rebuild failed after drift".to_string())?;
+            assert_eq!(raw_fts_structure_is_current(&*conn).await, Some(true));
+            conn.execute_batch("DROP INDEX lcm_raw_messages_fts")
+                .await
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                raw_fts_structure_is_current(&*conn).await,
+                Some(false),
+                "missing raw FTS index was accepted as current"
+            );
+            return Ok(());
+        }
+
         for trigger in [
             "lcm_raw_messages_fts_insert",
             "lcm_raw_messages_fts_delete",
@@ -915,10 +942,10 @@ mod tests {
             );
             INSERT INTO session_schema_migrations(name, version, applied_at)
             VALUES ('lcm', 6, 123);
-            CREATE VIRTUAL TABLE lcm_lifecycle_state USING fts5(
-                provider,
-                conversation_id,
-                current_session_id
+            CREATE TABLE lcm_lifecycle_state (
+                provider TEXT,
+                conversation_id TEXT,
+                current_session_id TEXT
             );",
         )
         .await

@@ -336,21 +336,6 @@ impl RegisteredTemporalHarness {
         matches
     }
 
-    pub(super) async fn count(&self, sql: &str) -> i64 {
-        let snapshot = self
-            .registered
-            .read_snapshot()
-            .await
-            .expect("registered read snapshot");
-        let mut rows = snapshot.query(sql, ()).await.expect("count query");
-        rows.next()
-            .await
-            .expect("count row")
-            .expect("count result")
-            .get(0)
-            .expect("count value")
-    }
-
     pub(super) async fn raw_store_id(&self, message_id: &str) -> i64 {
         let snapshot = self
             .registered

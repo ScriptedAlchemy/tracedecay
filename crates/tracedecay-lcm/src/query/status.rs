@@ -213,8 +213,7 @@ fn status_counts_query(provider: &str, session_id: Option<&str>) -> (String, Vec
                WHERE current_frontier_store_id IS NOT NULL{lifecycle_and}),
              (SELECT COUNT(*)
                 FROM lcm_raw_messages
-               WHERE metadata_json IS NOT NULL
-                 AND json_valid(metadata_json)
+               WHERE metadata_json LIKE '%\"lossy\"%'
                  AND CASE WHEN json_valid(metadata_json)
                      THEN json_type(metadata_json, '$.ingest_protection.lossy') END = 'true'\
                  {content_and}),
@@ -1823,8 +1822,7 @@ mod tests {
                  (SELECT COUNT(*) FROM lcm_raw_messages
                    WHERE (?1 = 'all' OR provider = ?1)
                      AND (?2 IS NULL OR session_id = ?2)
-                     AND metadata_json IS NOT NULL
-                     AND json_valid(metadata_json)
+                     AND metadata_json LIKE '%\"lossy\"%'
                      AND CASE WHEN json_valid(metadata_json)
                          THEN json_type(metadata_json, '$.ingest_protection.lossy') END = 'true')";
         let (sargable_sql, sargable_values) = status_counts_query("all", None);

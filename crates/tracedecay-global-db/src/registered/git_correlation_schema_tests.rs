@@ -25,13 +25,21 @@ async fn an_older_git_correlation_schema_is_refused_without_mutation() {
             .unwrap(),
     );
     let previous = GIT_CORRELATION_SCHEMA_VERSION - 1;
-    tracedecay_sql::Connection::open(&database_path)
-        .unwrap()
+    let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
+    connection
         .execute(
             "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'git_correlation'",
             [previous],
         )
         .unwrap();
+    // The main file holds every commit only once the log is copied back; the
+    // native engine does not checkpoint when a connection closes.
+    tracedecay_sql::ConnectionControl::checkpoint(
+        &connection,
+        tracedecay_sql::CheckpointMode::Truncate,
+    )
+    .unwrap();
+    drop(connection);
     let before = fs::read(&database_path).unwrap();
 
     let (lease, owner) = open_registered_test_database_fixture(&database_path, scope())

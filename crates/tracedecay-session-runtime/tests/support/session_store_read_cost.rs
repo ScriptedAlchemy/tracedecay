@@ -402,7 +402,7 @@ pub async fn probe_drain_after_wal_restart(
     timestamp: i64,
 ) -> u64 {
     let (project, scope) = (fixture.project.as_path(), fixture.scope());
-    let wal = session_store_path(fixture).with_extension("db-wal");
+    let wal = wal_path(&session_store_path(fixture));
     let sequence = wal_checkpoint_sequence(&wal);
     let mut restarted = false;
     for _ in 0..DRAIN_WINDOW {
@@ -560,8 +560,15 @@ pub fn session_store_path(fixture: &DrainFixture) -> PathBuf {
     stores.pop().unwrap()
 }
 
-/// The WAL header's checkpoint sequence, which SQLite advances each time the
-/// writer restarts the log from its head after a complete checkpoint.
+/// The store's write-ahead log, `<main file>-wal` on both engines.
+pub fn wal_path(store: &Path) -> PathBuf {
+    let mut name = store.file_name().unwrap().to_os_string();
+    name.push("-wal");
+    store.with_file_name(name)
+}
+
+/// The WAL header's checkpoint sequence, which the engine advances each time
+/// the writer restarts the log from its head after a complete checkpoint.
 pub fn wal_checkpoint_sequence(wal: &Path) -> u32 {
     let mut header = [0; 16];
     std::fs::File::open(wal)
@@ -572,19 +579,33 @@ pub fn wal_checkpoint_sequence(wal: &Path) -> u32 {
 }
 
 /// The writer's position in the log: the checkpoint sequence of the log
-/// generation and the last valid frame (`mxFrame` of the `-shm` wal-index
-/// header).
+/// generation and the last valid frame.
 #[derive(Clone, Copy)]
 pub struct WalMark {
     pub sequence: u32,
     pub max_frame: u32,
 }
 
+/// Valid frames are the leading run whose salts match the log header's: a
+/// restart writes new salts, so frames left from an earlier generation stop
+/// the run. This reads the log itself, which both engines write in the SQLite
+/// WAL format, rather than SQLite's `-shm` index, which the native engine
+/// does not keep.
 pub fn wal_mark(store: &Path) -> WalMark {
-    let shm = std::fs::read(store.with_extension("db-shm")).unwrap();
+    let log = std::fs::read(wal_path(store)).unwrap();
+    let field = |offset: usize| u32::from_be_bytes(log[offset..offset + 4].try_into().unwrap());
+    let frame_size = 24 + field(8) as usize;
+    let mut max_frame = 0;
+    while 32 + (max_frame + 1) * frame_size <= log.len() {
+        let frame = 32 + max_frame * frame_size;
+        if field(frame + 8) != field(16) || field(frame + 12) != field(20) {
+            break;
+        }
+        max_frame += 1;
+    }
     WalMark {
-        sequence: wal_checkpoint_sequence(&store.with_extension("db-wal")),
-        max_frame: u32::from_ne_bytes(shm[16..20].try_into().unwrap()),
+        sequence: field(12),
+        max_frame: u32::try_from(max_frame).unwrap(),
     }
 }
 
@@ -596,7 +617,7 @@ pub fn wal_commits(store: &Path, from: WalMark, to: WalMark) -> Option<usize> {
     if from.sequence != to.sequence || to.max_frame < from.max_frame {
         return None;
     }
-    let wal = std::fs::File::open(store.with_extension("db-wal")).unwrap();
+    let wal = std::fs::File::open(wal_path(store)).unwrap();
     let mut header = [0; 32];
     let sequence = |header: &[u8; 32]| u32::from_be_bytes(header[12..16].try_into().unwrap());
     wal.read_exact_at(&mut header, 0).ok()?;
@@ -644,23 +665,69 @@ pub async fn project_history_pass(
 }
 
 /// Levels of every B-tree in the fixture's project session store: the pages
-/// one point lookup in that tree reads on a cold reader.
+/// one point lookup in that tree reads on a cold reader. Both engines write
+/// the SQLite file format, so the trees are walked in the committed page
+/// images (the main file overlaid with the log's valid frames) rather than
+/// through SQLite's `dbstat`, which the native engine does not have. A B-tree
+/// is balanced, so its leftmost path has every level.
 pub fn session_store_tree_depths(fixture: &DrainFixture) -> BTreeMap<String, u32> {
+    let store = session_store_path(fixture);
     let connection = tracedecay_sql::Connection::open_with_flags(
-        session_store_path(fixture),
+        &store,
         tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
-    let mut statement = connection
-        .prepare(
-            "SELECT name, max(length(path) - length(replace(path, '/', ''))) \
-             FROM dbstat WHERE pagetype != 'overflow' GROUP BY name",
-        )
-        .unwrap();
-    statement
+    let roots: Vec<(String, u32)> = connection
+        .prepare("SELECT name, rootpage FROM sqlite_schema WHERE rootpage > 0")
+        .unwrap()
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
         .map(Result::unwrap)
+        .collect();
+    drop(connection);
+
+    let main = std::fs::read(&store).unwrap();
+    let page_size = match u16::from_be_bytes(main[16..18].try_into().unwrap()) {
+        1 => 65_536,
+        size => usize::from(size),
+    };
+    let mut pages: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+    let log = std::fs::read(wal_path(&store)).unwrap_or_default();
+    let mark = if log.len() >= 32 {
+        wal_mark(&store).max_frame
+    } else {
+        0
+    };
+    for frame in 0..mark as usize {
+        let start = 32 + frame * (24 + page_size);
+        let number = u32::from_be_bytes(log[start..start + 4].try_into().unwrap());
+        pages.insert(number, log[start + 24..start + 24 + page_size].to_vec());
+    }
+    let page = |number: u32| -> &[u8] {
+        pages.get(&number).map_or_else(
+            || &main[(number as usize - 1) * page_size..number as usize * page_size],
+            Vec::as_slice,
+        )
+    };
+    roots
+        .into_iter()
+        .map(|(name, root)| {
+            let (mut number, mut depth) = (root, 1);
+            loop {
+                let image = page(number);
+                let header = if number == 1 { 100 } else { 0 };
+                // 0x02 and 0x05 are interior index and table pages; their
+                // first cell starts with its left child's page number.
+                if !matches!(image[header], 0x02 | 0x05) {
+                    break (name, depth);
+                }
+                let cell = usize::from(u16::from_be_bytes(
+                    image[header + 12..header + 14].try_into().unwrap(),
+                ));
+                number = u32::from_be_bytes(image[cell..cell + 4].try_into().unwrap());
+                depth += 1;
+            }
+        })
         .collect()
 }
 

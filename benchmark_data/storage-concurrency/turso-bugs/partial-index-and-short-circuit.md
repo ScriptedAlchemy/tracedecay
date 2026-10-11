@@ -23,9 +23,16 @@ Seen through `tracedecay-lcm` `gc::tests::*` under `--config=native`: every raw
 message whose `metadata_json` holds a placeholder that is not JSON failed to
 insert because of `idx_lcm_raw_lossy_ingest`.
 
+A `CASE WHEN json_valid(...) THEN json_type(...) END` guard fixed the INSERT
+but not the UPDATE that rewrites a placeholder row
+(`gc::tests::delete_tombstones_only_the_owner_row`), so the guard is not a
+complete workaround.
+
 ## Workaround
 
-The raising term sits behind `CASE WHEN json_valid(metadata_json) THEN ... END`,
-which Turso evaluates lazily. The index predicate and the three query terms
-that rely on it (`tracedecay-lcm` `query/status.rs` and the global-db schema
-contract test) carry the same text, as SQLite partial-index substitution needs.
+`idx_lcm_raw_lossy_ingest` indexes `WHERE metadata_json LIKE '%"lossy"%'`, a
+predicate that cannot raise. The queries that rely on it carry that same term,
+as SQLite partial-index substitution needs, and apply the exact
+`json_type(... '$.ingest_protection.lossy') = 'true'` test behind a
+`json_valid` guard to the indexed rows only (`tracedecay-lcm` `query/status.rs`
+and the global-db schema contract test).

@@ -156,8 +156,7 @@ async fn short_lived_attach_convergence_rebuilds_queryable_lcm_status_indexes() 
             "SELECT COUNT(*)
              FROM lcm_raw_messages INDEXED BY idx_lcm_raw_lossy_ingest
              WHERE provider = ?1 AND session_id = ?2
-               AND metadata_json IS NOT NULL
-               AND json_valid(metadata_json)
+               AND metadata_json LIKE '%\"lossy\"%'
                AND CASE WHEN json_valid(metadata_json)
                    THEN json_type(metadata_json, '$.ingest_protection.lossy') END = 'true'",
         ),
