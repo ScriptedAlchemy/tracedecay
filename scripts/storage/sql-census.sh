@@ -68,7 +68,7 @@ census)
   ;;
 gaps)
   "$bazel" test --config=native --nozip_undeclared_test_outputs "$@" "$parity" \
-    --test_filter=every_census_statement_prepares_under_its_capability >/dev/null 2>&1 || true
+    --test_filter=every_census_statement_runs_under_its_capability >/dev/null 2>&1 || true
   copy_output "$parity" known_native_gaps.tsv
   "$bazel" test --config=native "$@" "$parity"
   ;;

@@ -5,8 +5,9 @@
 //!   `policy-fixture.sql`.
 //! - `census.tsv` holds every distinct statement the owned-store suites ran on
 //!   SQLite, with the capability it ran under. Its `sqlite_replay` column says
-//!   whether SQLite prepares the statement on the census's own replayed DDL;
-//!   `missing` rows name objects that union lost, so they are not native gaps.
+//!   how far SQLite gets with the statement on the census's own replayed DDL,
+//!   NULL bound to every parameter: `runs`, `prepares` (stepping fails), or
+//!   `missing` (it names objects that union lost, so it is not a native gap).
 //! - `known_native_gaps.tsv` lists the native gate's current failures by
 //!   capability and statement (`*` names the capability itself). U12 drives it
 //!   to empty.
@@ -15,9 +16,14 @@
 //! compares against a file writes the observed version to
 //! `$TEST_UNDECLARED_OUTPUTS_DIR` under the same name.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
 
-use tracedecay_sql::{Capability, Connection, ConnectionControl};
+use tracedecay_sql::{
+    Capability, Connection, ConnectionControl, Error, Statement, params_from_iter, types::Value,
+};
 
 const CAPABILITIES: [&str; 5] = [
     "reader",
@@ -32,11 +38,30 @@ const CENSUS: &str = include_str!("testdata/census.tsv");
 const CENSUS_HEADER: [&str; 3] = ["capability", "sql", "sqlite_replay"];
 const KNOWN_NATIVE_GAPS: &str = include_str!("testdata/known_native_gaps.tsv");
 const CAPABILITY_ITSELF: &str = "*";
+const STATEMENT_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How far a statement gets on a store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Reach {
+    Missing,
+    Prepares,
+    Runs,
+}
+
+impl Reach {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Prepares => "prepares",
+            Self::Runs => "runs",
+        }
+    }
+}
 
 struct CensusRow {
     capability: String,
     sql: String,
-    replays: bool,
+    sqlite: Reach,
 }
 
 fn unescape(field: &str) -> String {
@@ -98,15 +123,14 @@ fn census() -> Vec<CensusRow> {
         .into_iter()
         .map(|row| {
             let [capability, sql, replay]: [String; 3] = row.try_into().unwrap();
-            let replays = match replay.as_str() {
-                "ok" => true,
-                "missing" => false,
-                other => panic!("census.tsv sqlite_replay {other:?} for {sql:?}"),
-            };
+            let sqlite = [Reach::Missing, Reach::Prepares, Reach::Runs]
+                .into_iter()
+                .find(|reach| reach.name() == replay)
+                .unwrap_or_else(|| panic!("census.tsv sqlite_replay {replay:?} for {sql:?}"));
             CensusRow {
                 capability,
                 sql,
-                replays,
+                sqlite,
             }
         })
         .collect()
@@ -142,13 +166,21 @@ fn is_schema(sql: &str) -> bool {
         || (upper.starts_with("ALTER TABLE ") && upper.contains(" ADD "))
 }
 
+fn is_transaction_control(sql: &str) -> bool {
+    let keyword = sql
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(';')
+        .to_ascii_uppercase();
+    ["BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"].contains(&keyword.as_str())
+}
+
 /// A fresh in-memory store with `ddl` installed until no statement makes
 /// progress, so the order of the suites' stage installs does not matter.
 fn replayed_store(ddl: &[&str]) -> Connection {
     let connection = Connection::open_in_memory().unwrap();
-    // The native arm cannot install capabilities yet; its capability gap rows
-    // report that, and the connection's default access installs the schema.
-    let _ = connection.set_capability(Capability::Maintenance);
+    connection.set_capability(Capability::Maintenance).unwrap();
     let mut pending = ddl.to_vec();
     loop {
         let before = pending.len();
@@ -170,6 +202,70 @@ fn census_ddl(census: &[CensusRow]) -> Vec<&str> {
         .collect();
     ddl.sort_by_key(|sql| std::cmp::Reverse(sql.len()));
     ddl
+}
+
+fn drain(
+    statement: &mut Statement<'_>,
+    parameters: usize,
+    value: Value,
+) -> tracedecay_sql::Result<()> {
+    let mut rows = statement.query(params_from_iter(std::iter::repeat_n(value, parameters)))?;
+    while rows.next()?.is_some() {}
+    Ok(())
+}
+
+/// Prepares `sql` and steps it to completion under whatever capability
+/// `connection` holds, with NULL and then 1 bound to every parameter. A
+/// statement that outlives `STATEMENT_DEADLINE` is interrupted and counts as
+/// prepared.
+fn attempt(connection: &Connection, sql: &str) -> (Reach, Option<String>) {
+    let mut statement = match connection.prepare(sql) {
+        Ok(statement) => statement,
+        Err(error) => return (Reach::Missing, Some(error.to_string())),
+    };
+    let deadline = Instant::now() + STATEMENT_DEADLINE;
+    let ran = connection
+        .guard_scope(
+            move || Instant::now() > deadline,
+            |_| {
+                let parameters = match drain(&mut statement, 0, Value::Null) {
+                    Err(Error::InvalidParameterCount(_, expected)) => expected,
+                    ran => return ran,
+                };
+                drain(&mut statement, parameters, Value::Null)
+                    .or_else(|_| drain(&mut statement, parameters, Value::Integer(1)))
+            },
+        )
+        .and_then(|ran| ran);
+    match ran {
+        Ok(()) => (Reach::Runs, None),
+        Err(error) => (Reach::Prepares, Some(error.to_string())),
+    }
+}
+
+/// `attempt` under `capability`, then rolled back so the next statement sees
+/// the replayed store. Transaction control runs bare because it cannot nest.
+fn isolated(
+    connection: &Connection,
+    capability: Option<Capability>,
+    sql: &str,
+) -> (Reach, Option<String>) {
+    if !is_transaction_control(sql)
+        && let Err(error) = connection.execute_batch("BEGIN")
+    {
+        return (Reach::Missing, Some(format!("isolating BEGIN: {error}")));
+    }
+    if let Some(capability) = capability {
+        connection.set_capability(capability).unwrap();
+    }
+    let outcome = attempt(connection, sql);
+    connection.set_capability(Capability::Maintenance).unwrap();
+    if !connection.is_autocommit()
+        && let Err(error) = connection.execute_batch("ROLLBACK")
+    {
+        return (Reach::Missing, Some(format!("isolating ROLLBACK: {error}")));
+    }
+    outcome
 }
 
 #[test]
@@ -227,10 +323,14 @@ fn census_is_well_formed() {
         keys.windows(2).all(|pair| pair[0] < pair[1]),
         "census.tsv must be sorted and unique by capability and statement"
     );
-    assert!(
-        census.iter().any(|row| row.replays),
-        "no census statement prepares on its replayed schema"
-    );
+    for capability in CAPABILITIES {
+        assert!(
+            census
+                .iter()
+                .any(|row| row.capability == capability && row.sqlite == Reach::Runs),
+            "no {capability} census statement runs on its replayed schema"
+        );
+    }
 }
 
 #[test]
@@ -252,7 +352,8 @@ fn known_native_gaps_name_census_rows() {
 }
 
 /// The `sqlite_replay` column is a function of `census.tsv` alone, recomputed
-/// here on SQLite. A census edited without recomputing it fails.
+/// here on SQLite without an authorizer. A census edited without recomputing
+/// it fails.
 #[cfg(not(td_engine = "native"))]
 #[test]
 fn census_sqlite_replay_column_is_current() {
@@ -262,15 +363,21 @@ fn census_sqlite_replay_column_is_current() {
     observed.push('\n');
     let mut stale = Vec::new();
     for row in &census {
-        let replays = store.prepare(&row.sql).is_ok();
-        if replays != row.replays {
-            stale.push(format!("{}\t{}", row.capability, row.sql));
+        let (reach, _) = isolated(&store, None, &row.sql);
+        if reach != row.sqlite {
+            stale.push(format!(
+                "{}\t{}\t{} -> {}",
+                row.capability,
+                row.sql,
+                row.sqlite.name(),
+                reach.name()
+            ));
         }
         observed.push_str(&format!(
             "{}\t{}\t{}\n",
             row.capability,
             escape(&row.sql),
-            if replays { "ok" } else { "missing" }
+            reach.name()
         ));
     }
     write_observed("census.tsv", &observed);
@@ -286,13 +393,14 @@ fn census_sqlite_replay_column_is_current() {
 mod native {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use tracedecay_sql::{Capability, Connection, ConnectionControl};
+    use tracedecay_sql::{Capability, Connection, ConnectionControl, types::Value};
 
     use super::{
-        CAPABILITIES, CAPABILITY_ITSELF, POLICY_FIXTURE, census, census_ddl, escape,
-        known_native_gaps, policy, replayed_store, write_observed,
+        CAPABILITIES, CAPABILITY_ITSELF, POLICY_FIXTURE, Reach, attempt, census, census_ddl,
+        escape, isolated, known_native_gaps, policy, replayed_store, write_observed,
     };
 
+    /// The native capability a census or policy capability enters, if any.
     fn capability(name: &str) -> Option<Capability> {
         match name {
             "reader" => Some(Capability::Reader),
@@ -302,72 +410,147 @@ mod native {
         }
     }
 
-    fn enter(connection: &Connection, name: &str) -> Result<(), String> {
-        let capability =
-            capability(name).ok_or_else(|| format!("no native capability for {name}"))?;
-        connection
-            .set_capability(capability)
-            .map_err(|error| error.to_string())
+    /// Everything a statement on the policy fixture could change: schema, rows
+    /// of every fixture table, attached databases and the settable pragmas.
+    const STATE: [(&str, usize); 31] = [
+        (
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name",
+            4,
+        ),
+        (
+            "SELECT type, name, tbl_name, sql FROM sqlite_temp_schema ORDER BY type, name",
+            4,
+        ),
+        ("SELECT id, a, b FROM t ORDER BY id", 3),
+        ("SELECT id, t_id FROM u ORDER BY id", 2),
+        ("SELECT rowid, body FROM f ORDER BY rowid", 2),
+        ("SELECT x FROM tf ORDER BY x", 1),
+        ("PRAGMA database_list", 3),
+        ("PRAGMA application_id", 1),
+        ("PRAGMA auto_vacuum", 1),
+        ("PRAGMA busy_timeout", 1),
+        ("PRAGMA cache_size", 1),
+        ("PRAGMA cell_size_check", 1),
+        ("PRAGMA defer_foreign_keys", 1),
+        ("PRAGMA foreign_keys", 1),
+        ("PRAGMA ignore_check_constraints", 1),
+        ("PRAGMA journal_mode", 1),
+        ("PRAGMA journal_size_limit", 1),
+        ("PRAGMA locking_mode", 1),
+        ("PRAGMA mmap_size", 1),
+        ("PRAGMA page_size", 1),
+        ("PRAGMA query_only", 1),
+        ("PRAGMA recursive_triggers", 1),
+        ("PRAGMA schema_version", 1),
+        ("PRAGMA secure_delete", 1),
+        ("PRAGMA synchronous", 1),
+        ("PRAGMA temp_store", 1),
+        ("PRAGMA threads", 1),
+        ("PRAGMA trusted_schema", 1),
+        ("PRAGMA user_version", 1),
+        ("PRAGMA wal_autocheckpoint", 1),
+        ("PRAGMA writable_schema", 1),
+    ];
+
+    fn state(connection: &Connection) -> Vec<String> {
+        STATE
+            .iter()
+            .map(|&(sql, columns)| {
+                let read = || -> tracedecay_sql::Result<String> {
+                    let mut statement = connection.prepare(sql)?;
+                    let mut rows = statement.query([])?;
+                    let mut rendered = String::new();
+                    while let Some(row) = rows.next()? {
+                        for column in 0..columns {
+                            rendered.push_str(&format!("{:?} ", row.get::<_, Value>(column)?));
+                        }
+                        rendered.push('\n');
+                    }
+                    Ok(rendered)
+                };
+                format!("{sql}: {:?}", read().map_err(|error| error.to_string()))
+            })
+            .collect()
     }
 
-    fn reason(error: impl ToString) -> String {
-        escape(&error.to_string().chars().take(200).collect::<String>())
-    }
-
-    /// Zero tolerance: no statement SQLite refused under a capability may
-    /// prepare natively under it.
-    #[test]
-    fn every_sqlite_denial_stays_denied() {
+    fn fixture() -> Connection {
         let fixture: Vec<&str> = POLICY_FIXTURE
             .split(";\n")
             .filter(|sql| !sql.trim().is_empty())
             .collect();
-        let connection = replayed_store(&fixture);
+        replayed_store(&fixture)
+    }
+
+    /// Zero tolerance: a statement SQLite refused under a capability is
+    /// refused natively under it and leaves the store as it was.
+    #[test]
+    fn every_sqlite_denial_stays_denied_and_has_no_effect() {
+        let untouched = state(&fixture());
         let mut violations = Vec::new();
         for (verdicts, sql) in policy() {
             for (name, verdict) in CAPABILITIES.iter().zip(&verdicts) {
                 // A capability the native arm cannot enter is a listed gap.
-                if verdict == "allow" || enter(&connection, name).is_err() {
+                let Some(capability) = capability(name).filter(|_| verdict != "allow") else {
                     continue;
+                };
+                let store = fixture();
+                store.set_capability(capability).unwrap();
+                let (reach, _) = attempt(&store, &sql);
+                store.set_capability(Capability::Maintenance).unwrap();
+                if reach == Reach::Runs {
+                    violations.push(format!("{name}: SQLite {verdict}, native runs: {sql}"));
                 }
-                if connection.prepare(&sql).is_ok() {
-                    violations.push(format!("{name}: SQLite {verdict}, native allow: {sql}"));
+                let after = state(&store);
+                for (before, after) in untouched.iter().zip(&after) {
+                    if before != after {
+                        violations.push(format!(
+                            "{name}: SQLite {verdict}, native changed the store: {sql}\n  before {before}\n  after  {after}"
+                        ));
+                    }
                 }
             }
         }
         assert!(
             violations.is_empty(),
-            "native allows statements SQLite refused:\n{}",
+            "native lets through statements SQLite refused:\n{}",
             violations.join("\n")
         );
     }
 
+    /// Every census statement gets as far natively, under its capability, as
+    /// it did on SQLite: one that ran there runs here.
     #[test]
-    fn every_census_statement_prepares_under_its_capability() {
+    fn every_census_statement_runs_under_its_capability() {
         let census = census();
-        let ddl = census_ddl(&census);
-        let guarded = replayed_store(&ddl);
-        let fallback = replayed_store(&ddl);
+        let store = replayed_store(&census_ddl(&census));
 
         let mut failing: BTreeMap<(String, String), String> = BTreeMap::new();
-        let mut unsupported = BTreeSet::new();
         for name in CAPABILITIES {
-            if let Err(why) = enter(&guarded, name) {
-                unsupported.insert(name);
-                failing.insert((name.to_owned(), CAPABILITY_ITSELF.to_owned()), reason(why));
+            if capability(name).is_none() {
+                failing.insert(
+                    (name.to_owned(), CAPABILITY_ITSELF.to_owned()),
+                    format!("no native capability for {name}"),
+                );
             }
         }
-        for row in census.iter().filter(|row| row.replays) {
+        for row in census.iter().filter(|row| row.sqlite > Reach::Missing) {
             // Without its capability the statement still runs on the default
             // access, so SQL gaps surface before the capability lands.
-            let prepared = if unsupported.contains(row.capability.as_str()) {
-                fallback.prepare(&row.sql).map(drop)
-            } else {
-                enter(&guarded, &row.capability).unwrap();
-                guarded.prepare(&row.sql).map(drop)
-            };
-            if let Err(error) = prepared {
-                failing.insert((row.capability.clone(), row.sql.clone()), reason(error));
+            let (reach, error) = isolated(&store, capability(&row.capability), &row.sql);
+            if reach < row.sqlite {
+                let why = error
+                    .unwrap_or_default()
+                    .chars()
+                    .take(200)
+                    .collect::<String>();
+                failing.insert(
+                    (row.capability.clone(), row.sql.clone()),
+                    escape(&format!(
+                        "SQLite {}, native {}: {why}",
+                        row.sqlite.name(),
+                        reach.name()
+                    )),
+                );
             }
         }
 
