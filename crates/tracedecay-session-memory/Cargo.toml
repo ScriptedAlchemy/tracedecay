@@ -16,7 +16,6 @@ default = []
 test-transport = ["tracedecay-runtime-core/test-transport"]
 
 [dependencies]
-amari-holographic = "0.23.0"
 hex = "0.4"
 regex = "1.12.3"
 memmap2 = "0.9"
@@ -52,3 +51,4 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", 
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 tracedecay-lcm = { path = "../tracedecay-lcm", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
+tracedecay-sql = { path = "../tracedecay-sql" }

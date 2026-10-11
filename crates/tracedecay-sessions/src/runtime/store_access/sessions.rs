@@ -95,8 +95,11 @@ fn descending_timestamp(left: Option<i64>, right: Option<i64>) -> std::cmp::Orde
         (None, None) => std::cmp::Ordering::Equal,
     }
 }
+/// Names its index: Turso otherwise picks another `(provider, session_id)`
+/// index and sorts the whole session for each page
+/// (`turso-bugs/secondary-index-loses-to-primary-key-prefix.md`).
 pub const SESSION_MESSAGES_AFTER_SQL: &str = "SELECT timestamp, ordinal, kind, tool_names, metadata_json \
-                 FROM lcm_raw_messages \
+                 FROM lcm_raw_messages INDEXED BY idx_lcm_raw_session_activity \
                  WHERE provider = ?1 AND session_id = ?2 \
                    AND timestamp IS NOT NULL AND timestamp >= ?3 \
                  ORDER BY timestamp, ordinal, message_id \

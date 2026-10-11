@@ -1473,7 +1473,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
         triggers: &[],
         audit_query: Some(
             "SELECT 1 FROM observation_projection_checkpoints
-             WHERE last_sequence > (SELECT COALESCE(MAX(sequence), 0) FROM observations)
+             WHERE last_sequence > COALESCE((SELECT MAX(sequence) FROM observations), 0)
              LIMIT 1",
         ),
         violation: "projection checkpoint exceeds the committed observation frontier",

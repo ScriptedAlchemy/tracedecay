@@ -1,11 +1,10 @@
 use std::collections::VecDeque;
 
 use super::{
-    ClientFrameAdmission, DaemonLspProtocolSession, DaemonLspSessionTransport,
-    DiagnosticSnapshotPort, FeedbackCyclePort, FramePoll, FrameSend, Infallible, LspFrame,
+    DaemonLspProtocolSession, DiagnosticSnapshotPort, FeedbackCyclePort, LspFrame,
     LspRequestFailure, LspRequestId, MAX_LSP_FRAME_BYTES, MAX_PUBLICATION_BYTES,
     MAX_QUEUED_OUTBOUND_BYTES, MAX_QUEUED_OUTBOUND_MESSAGES, PublicationAdmission, RpcFailure,
-    SemanticProviderPort, SessionLifecycle, Value, error_response, request_id,
+    SemanticProviderPort, Value, error_response, request_id,
 };
 
 const MIN_CLIENT_FRAME_OUTBOUND_RESERVE: usize = MAX_PUBLICATION_BYTES;
@@ -36,86 +35,6 @@ pub(super) struct OutboundController {
     pub(super) queue: VecDeque<QueuedFrame>,
     pub(super) in_flight: bool,
     pub(super) queued_bytes: usize,
-}
-
-/// Concrete bridge-facing adapter for one typed daemon session actor. It
-/// parses each client payload through [`DaemonLspProtocolSession`] and exposes
-/// only queued LSP frames back to the bridge; it cannot become a raw daemon
-/// socket tunnel.
-pub struct DaemonLspProtocolTransport<P, S, D>
-where
-    P: FeedbackCyclePort,
-    S: SemanticProviderPort,
-    D: DiagnosticSnapshotPort,
-{
-    session: DaemonLspProtocolSession<P, S, D>,
-    now_ms: u64,
-}
-
-impl<P, S, D> DaemonLspProtocolTransport<P, S, D>
-where
-    P: FeedbackCyclePort,
-    S: SemanticProviderPort,
-    D: DiagnosticSnapshotPort,
-{
-    pub fn new(session: DaemonLspProtocolSession<P, S, D>) -> Self {
-        Self { session, now_ms: 0 }
-    }
-
-    pub fn set_now_ms(&mut self, now_ms: u64) {
-        self.now_ms = now_ms;
-    }
-
-    pub fn session(&self) -> &DaemonLspProtocolSession<P, S, D> {
-        &self.session
-    }
-
-    pub fn session_mut(&mut self) -> &mut DaemonLspProtocolSession<P, S, D> {
-        &mut self.session
-    }
-
-    pub fn into_inner(self) -> DaemonLspProtocolSession<P, S, D> {
-        self.session
-    }
-}
-
-impl<P, S, D> DaemonLspSessionTransport for DaemonLspProtocolTransport<P, S, D>
-where
-    P: FeedbackCyclePort,
-    S: SemanticProviderPort,
-    D: DiagnosticSnapshotPort,
-{
-    type Error = Infallible;
-
-    fn try_send_client_frame(&mut self, frame: &[u8]) -> Result<FrameSend, Self::Error> {
-        Ok(
-            match self.session.try_handle_client_payload(frame, self.now_ms) {
-                ClientFrameAdmission::Consumed(dispatch) if dispatch.closed => FrameSend::Closed,
-                ClientFrameAdmission::Consumed(_) => FrameSend::Sent,
-                ClientFrameAdmission::Backpressured => FrameSend::Backpressured,
-                ClientFrameAdmission::Closed => FrameSend::Closed,
-            },
-        )
-    }
-
-    fn poll_daemon_frame(&mut self) -> Result<FramePoll, Self::Error> {
-        if let Some(frame) = self.session.poll_outbound() {
-            return Ok(FramePoll::Frame(frame.to_vec()));
-        }
-        if matches!(
-            self.session.lifecycle(),
-            SessionLifecycle::Exited | SessionLifecycle::Expired
-        ) {
-            Ok(FramePoll::Closed)
-        } else {
-            Ok(FramePoll::Pending)
-        }
-    }
-
-    fn acknowledge_daemon_frame(&mut self) -> Result<(), Self::Error> {
-        self.session.acknowledge_outbound();
-        Ok(())
-    }
 }
 
 impl<P, S, D> DaemonLspProtocolSession<P, S, D>

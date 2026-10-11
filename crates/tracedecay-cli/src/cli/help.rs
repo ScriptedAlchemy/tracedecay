@@ -315,25 +315,24 @@ pub(crate) const SERVE_LONG_ABOUT: &str = "\
 Runs the MCP server on stdin/stdout for a single client. This is the command \
 agent hosts execute from their MCP configuration, you rarely run it by hand \
 except to debug the protocol. For ad-hoc tool calls from a shell, use \
-`tracedecay tool` instead; both dispatch the same tool registry. Default \
-`tools/list` is a core set plus `tracedecay_tool_search` (no stubs). Search \
-ranks an exact name first, loads matches into the session list, announces \
-`notifications/tools/list_changed`, and returns full schemas in the result \
-text. Every tool answers a direct `tools/call` by name. \
-`--claude-code-tool-search` (or TRACEDECAY_MCP_CLAUDE_CODE_TOOL_SEARCH=1) \
-serves the full catalog with `_meta[\"anthropic/alwaysLoad\"]` on the core \
-tools so Claude Code's native tool search can defer the rest, and replaces \
-initialize instructions with a short tool-category guide. Drop that flag \
-when using ANTHROPIC_BASE_URL proxies, Foundry, or \
-CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, which disable Claude Code's native \
-tool search.";
+`tracedecay tool` instead; both dispatch the same tool registry. `tools/list` \
+names every tool but carries full schemas only for the always-loaded set; \
+the rest are stubs with a short description and an open schema. Calling a \
+stub works and lists its full schema from then on. `--full-tool-list` lists \
+every schema, for hosts that defer tool schemas themselves. With \
+TRACEDECAY_MCP_REPEAT_READ_POINTERS=1, a repeated identical source, context, \
+or file-listing read whose answer is unchanged returns a short pointer to \
+the earlier result, and repeating the call once more returns it in full. \
+Set it only for hosts that give each agent its own connection, as the Codex \
+install does.";
 
 pub(crate) const SERVE_AFTER_HELP: &str = "\
 Examples:
   tracedecay serve                               Stdio MCP server for the cwd project
   tracedecay serve --path /path/to/repo          Pin the project explicitly
   tracedecay serve --timings                     Annotate responses with handler time
-  tracedecay serve --claude-code-tool-search     Full list + alwaysLoad (Claude Code plugin)
+  tracedecay serve --full-tool-list              Every tool with its full schema
+
 Related: tracedecay tool (same tools from the shell), tracedecay install
 (writes this command into agent MCP config), tracedecay daemon.";
 

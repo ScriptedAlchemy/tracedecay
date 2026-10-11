@@ -10,6 +10,7 @@ import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useScope } from '../../../data/scope/store.ts';
+import { applicationProblem, applicationSuccess } from '../../../test/applicationEnvelope.ts';
 import { workGraphRead, type WorkGraphVersionSpec } from '../../../test/workGraphFixture.ts';
 import { WorkPage } from '../WorkPage.tsx';
 
@@ -30,17 +31,8 @@ function serve() {
     vi.fn(async (url: string) => {
       const views = String(url).includes('/work/views');
       const body = views
-        ? {
-            kind: 'success',
-            value: {
-              binding_id: 'binding.http.work.views',
-              contract: { schema_id: 'schema.work.result', schema_revision: 1 },
-              request_id: 'request-1',
-              scope: { project_id: 'p', repository_id: 'r', worktree_id: 'w', reference: null, scope_digest: 'sha256:scope' },
-              outcome: { outcome: 'evidence', value: { payload } },
-            },
-          }
-        : { kind: 'problem', value: { problem: {} } };
+        ? applicationSuccess('operation.work.views', payload)
+        : applicationProblem('unavailable');
       return new Response(JSON.stringify(body), { status: views ? 200 : 503, headers: { 'content-type': 'application/json' } });
     }),
   );

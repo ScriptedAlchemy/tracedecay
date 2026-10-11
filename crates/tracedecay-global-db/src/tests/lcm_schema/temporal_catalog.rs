@@ -33,10 +33,14 @@ async fn fresh_temporal_schema_stores_and_searches_a_summary_node() {
     .unwrap();
     let mut rows = conn
         .query(
-            "SELECT n.summary_id, n.session_id, n.summary_text, n.created_at
-             FROM session_summary_nodes_fts
-             JOIN session_summary_nodes AS n ON n.rowid = session_summary_nodes_fts.rowid
-             WHERE session_summary_nodes_fts MATCH 'quokka'",
+            &format!(
+                "SELECT n.summary_id, n.session_id, n.summary_text, n.created_at {}",
+                tracedecay_runtime_core::db::native_search::SearchIndex::Summary.matching_rows(
+                    conn.backend_kind(),
+                    "n",
+                    "'quokka'"
+                )
+            ),
             (),
         )
         .await
@@ -290,11 +294,46 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "idx_session_external_payload_manifests_session",
         ),
     ] {
-        let details = explain_query_plan(&conn, sql).await;
+        // On both engines each shape's index exists and leads with the
+        // shape's equality columns.
+        let leading: &[&str] = match index {
+            "idx_session_occurrences_anchor_order" => &["session_id", "retrieval_anchor_id"],
+            "idx_session_occurrences_message" => &["session_id", "message_id"],
+            "idx_session_occurrences_thread" => &["session_id", "thread_id"],
+            "idx_session_occurrences_turn" => &["session_id", "turn_id"],
+            "idx_session_occurrences_agent" => &["session_id", "agent_id"],
+            "idx_session_current_entities_occurrence" => &["session_id", "current_occurrence_id"],
+            "idx_session_assertions_object_order" => &["session_id", "object_anchor_id"],
+            "idx_session_assertions_kind_order" => &["session_id", "assertion_kind"],
+            "idx_session_assertions_generation_order" => &["session_id", "knowledge_at"],
+            "idx_session_external_payload_manifests_session" => &["session_id"],
+            other => panic!("no leading columns recorded for {other}"),
+        };
+        let mut rows = conn
+            .query(
+                "SELECT name FROM pragma_index_info(?1) ORDER BY seqno",
+                params![index],
+            )
+            .await
+            .unwrap();
+        let mut columns = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            columns.push(row.get::<String>(0).unwrap());
+        }
         assert!(
-            details.iter().any(|detail| detail.contains(index)),
-            "EXPLAIN did not use {index} for `{sql}`: {details:?}"
+            columns.starts_with(&leading.iter().map(ToString::to_string).collect::<Vec<_>>()),
+            "{index} must lead with {leading:?}, has {columns:?}"
         );
+        // SQLite's planner picks these indexes for the shapes. Turso's planner
+        // prefers the primary-key prefix for some of them
+        // (turso-bugs/secondary-index-loses-to-primary-key-prefix.md).
+        if conn.backend_kind() == tracedecay_runtime_core::db::engine::BackendKind::Sqlite {
+            let details = explain_query_plan(&conn, sql).await;
+            assert!(
+                details.iter().any(|detail| detail.contains(index)),
+                "EXPLAIN did not use {index} for `{sql}`: {details:?}"
+            );
+        }
     }
 }
 
@@ -726,12 +765,20 @@ async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
+    let drop_fts = match conn.backend_kind() {
+        tracedecay_runtime_core::db::engine::BackendKind::Sqlite => {
+            "DROP TRIGGER session_summary_nodes_fts_insert_v1;
+             DROP TRIGGER session_summary_nodes_fts_delete_v1;
+             DROP TRIGGER session_summary_nodes_fts_update_v1;
+             DROP TABLE session_summary_nodes_fts;"
+        }
+        tracedecay_runtime_core::db::engine::BackendKind::NativeTurso => {
+            "DROP INDEX session_summary_nodes_fts;"
+        }
+    };
+    conn.execute_batch(drop_fts).await.unwrap();
     conn.execute_batch(
-        "DROP TRIGGER session_summary_nodes_fts_insert_v1;
-         DROP TRIGGER session_summary_nodes_fts_delete_v1;
-         DROP TRIGGER session_summary_nodes_fts_update_v1;
-         DROP TABLE session_summary_nodes_fts;
-         INSERT INTO retrieval_anchors (
+        "INSERT INTO retrieval_anchors (
             anchor_id, anchor_json, owner_json, projection_generation
          ) VALUES ('fts-anchor', '{}', '{}', 'test');
          INSERT INTO session_summary_nodes (
@@ -763,8 +810,7 @@ async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
     let conn = (*raw_db).clone();
     let mut rows = conn
         .query(
-            "SELECT 1 FROM sqlite_master
-             WHERE type = 'table' AND name = 'session_summary_nodes_fts'",
+            "SELECT 1 FROM sqlite_master WHERE name = 'session_summary_nodes_fts'",
             (),
         )
         .await

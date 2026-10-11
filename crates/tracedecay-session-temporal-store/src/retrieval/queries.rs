@@ -786,36 +786,64 @@ pub(super) fn root_occurrence_fts_count_query(backend: BackendKind) -> &'static 
 // after one keyset page instead of joining every generation to every
 // occurrence and sorting the project. `ROOT_TIME_CANDIDATE_QUERY` keeps the
 // generation-first shape because its window already bounds that join.
-pub(super) const ROOT_SCOPE_CANDIDATE_QUERY: &str = concat!(
-    "
-    SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
-           o.message_id, o.turn_id, o.session_id, o.role,
-           authority_session.provider, frozen.generation
+//
+// The page order mixes directions (knowledge_at DESC, then ids ASC), which no
+// single index scan yields; native Turso then sorts every visible occurrence.
+// `page_floor` walks the index in knowledge_at order alone to the page's last
+// timestamp, and the page sorts only the rows at or above it (ties included).
+// CROSS JOIN keeps the occurrence index as the outer loop on both engines, and
+// the anchor lookup is pinned because native otherwise builds an ephemeral
+// index over every anchor per statement.
+macro_rules! root_scope_candidate_source {
+    () => {
+        concat!(
+            "
     FROM session_occurrences AS o
     INDEXED BY idx_session_occurrences_root_generation_order
-    JOIN session_temporal_generations AS frozen
+    CROSS JOIN session_temporal_generations AS frozen
       ON frozen.session_id = o.session_id
      AND frozen.state = 'active'
      AND +o.generation <= frozen.generation
-    JOIN retrieval_anchors AS authority_anchor
+    CROSS JOIN retrieval_anchors AS authority_anchor
+    INDEXED BY idx_retrieval_anchors_owner
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
-    JOIN sessions AS authority_session
+    CROSS JOIN sessions AS authority_session
       ON authority_session.session_id = o.session_id
      AND authority_session.provider = o.source_provider
      AND authority_session.project_key = ?1
     WHERE ",
-    anchor_owner_authority_predicate!(),
-    "
+            anchor_owner_authority_predicate!(),
+            "
       AND (?2 IS NULL OR o.source_provider = ?2)
       ",
-    occurrence_root_keyset!("?3", "?4", "?5"),
-    "
+            occurrence_root_keyset!("?3", "?4", "?5"),
+            "
       ",
-    occurrence_row_length_bounds!("?6", "?7", "?8", "?9", "authority_session.provider"),
-    "
+            occurrence_row_length_bounds!("?6", "?7", "?8", "?9", "authority_session.provider"),
+            "
       ",
-    root_occurrence_cursor_bound!("?10"),
+            root_occurrence_cursor_bound!("?10")
+        )
+    };
+}
+
+pub(super) const ROOT_SCOPE_CANDIDATE_QUERY: &str = concat!(
     "
+    WITH page_floor(knowledge_at) AS (
+        SELECT o.knowledge_at",
+    root_scope_candidate_source!(),
+    "
+        ORDER BY o.knowledge_at DESC
+        LIMIT 1 OFFSET ?11 - 1
+    )
+    SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
+           o.message_id, o.turn_id, o.session_id, o.role,
+           authority_session.provider, frozen.generation",
+    root_scope_candidate_source!(),
+    "
+      AND o.knowledge_at >= COALESCE(
+          (SELECT knowledge_at FROM page_floor), -9223372036854775808
+      )
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?11"
 );

@@ -47,7 +47,8 @@ only relocated: the request boundary is
 `crates/tracedecay-lsp/src/gateway.rs` (one already-admitted root, delegating
 post-edit work to the feedback-cycle application boundary; it opens no store,
 supervises no analyzer, and implements no host-specific transport); the
-transport-only stdio bridge is `crates/tracedecay-lsp/src/bridge.rs`; and the
+transport-only stdio bridge is `crates/tracedecay-cli/src/lsp_cmd.rs` over the
+strict framing in `crates/tracedecay-lsp/src/framing.rs`; and the
 bounded custom projections carried beside standard LSP methods are
 `crates/tracedecay-lsp/src/context.rs`, a read-only port for one
 already-authorized single-root session. The analyzer broker/adapters under

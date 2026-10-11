@@ -10,8 +10,11 @@ from typing import Any
 
 import yaml
 
-WORKFLOW_PATH = Path(__file__).resolve().parents[1] / ".github/workflows/release.yml"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW_PATH = REPOSITORY_ROOT / ".github/workflows/release.yml"
 SHA_RE = re.compile(r"^[^@]+@[0-9a-f]{40}(\s*#.*)?$")
+LOCAL_HELPER_RE = re.compile(r"^\./\.github/actions/[A-Za-z0-9_-]+$")
+SOURCE_SHA_REF = "${{ needs.validate-release.outputs.source_sha }}"
 REPO_GUARD = "github.repository == 'ScriptedAlchemy/tracedecay'"
 VALIDATE_JOB = "validate-release"
 VERIFY_JOB = "verify-release"
@@ -55,11 +58,48 @@ def assert_repository_guard(name: str, job: dict[str, Any]) -> None:
         fail(f"'{name}' must have exact guard {REPO_GUARD!r}, found {condition!r}")
 
 
-def assert_actions_pinned(name: str, job: dict[str, Any]) -> None:
-    for step in job_steps(job):
+def resolve_local_helpers(
+    steps: list[dict[str, Any]], helper: str | None = None
+) -> list[dict[str, Any]]:
+    """Inline reviewed composite helpers so their steps face the build policy.
+
+    A local helper runs from the job's checkout, so it is only as immutable as
+    that checkout; assert_immutable_checkout pins it to the validated source.
+    """
+    resolved: list[dict[str, Any]] = []
+    for step in steps:
         uses = step.get("uses")
-        if isinstance(uses, str) and not SHA_RE.fullmatch(uses):
-            fail(f"'{name}' uses unpinned action {uses!r}")
+        if not (isinstance(uses, str) and uses.startswith("./")):
+            if isinstance(uses, str) and not SHA_RE.fullmatch(uses):
+                via = f" helper {helper!r}" if helper else ""
+                fail(f"'{BUILD_JOB}'{via} uses unpinned action {uses!r}")
+            resolved.append(step)
+            continue
+        if not LOCAL_HELPER_RE.fullmatch(uses):
+            fail(f"'{BUILD_JOB}' helper {uses!r} must be a directory under ./.github/actions")
+        action = yaml.safe_load(
+            (REPOSITORY_ROOT / uses / "action.yml").read_text(encoding="utf-8")
+        )
+        runs = action.get("runs") if isinstance(action, dict) else None
+        if not isinstance(runs, dict) or runs.get("using") != "composite":
+            fail(f"'{BUILD_JOB}' helper {uses!r} must be a composite action")
+        helper_steps = [s for s in runs.get("steps", []) if isinstance(s, dict)]
+        resolved.extend(resolve_local_helpers(helper_steps, uses))
+    return resolved
+
+
+def assert_immutable_checkout(steps: list[dict[str, Any]]) -> None:
+    checkouts = [
+        index
+        for index, step in enumerate(steps)
+        if str(step.get("uses", "")).startswith("actions/checkout@")
+    ]
+    checkout = steps[0].get("with", {}) if checkouts == [0] else {}
+    if checkout != {"ref": SOURCE_SHA_REF, "persist-credentials": False}:
+        fail(
+            f"'{BUILD_JOB}' must first and only check out the validated source "
+            "SHA without persisted credentials"
+        )
 
 
 def assert_master_dispatch_trigger(workflow: dict[str, Any]) -> None:
@@ -86,7 +126,11 @@ def assert_build_job(job: dict[str, Any]) -> None:
     if "environment" in job:
         fail(f"'{BUILD_JOB}' must not hold protected-environment authority")
 
-    steps = job_steps(job)
+    steps = resolve_local_helpers(job_steps(job))
+    assert_immutable_checkout(steps)
+    policy_text = f"{job}{steps}"
+    if "secrets." in policy_text or "github.token" in policy_text:
+        fail(f"'{BUILD_JOB}' must not receive repository credentials")
     for required in (
         "npm install -g npm@12.0.2",
         "pnpm install --frozen-lockfile",
@@ -182,6 +226,8 @@ def assert_publish_job(job: dict[str, Any]) -> None:
 
     for step in steps:
         uses = step.get("uses")
+        if isinstance(uses, str) and not SHA_RE.fullmatch(uses):
+            fail(f"'{PUBLISH_JOB}' uses unpinned action {uses!r}")
         if isinstance(uses, str) and not uses.startswith(
             ("actions/download-artifact@", "actions/setup-node@")
         ):
@@ -225,7 +271,6 @@ def main() -> None:
 
     for name, job in ((BUILD_JOB, build), (PUBLISH_JOB, publish)):
         assert_repository_guard(name, job)
-        assert_actions_pinned(name, job)
     assert_build_job(build)
     assert_publish_job(publish)
 

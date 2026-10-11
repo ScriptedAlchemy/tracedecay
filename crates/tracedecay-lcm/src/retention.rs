@@ -696,7 +696,7 @@ impl RetentionCursor {
             None => {
                 util::fetch_i64(
                     conn,
-                    "SELECT COALESCE(MAX(rowid), 0) FROM session_summary_sources",
+                    "SELECT COALESCE((SELECT MAX(rowid) FROM session_summary_sources), 0)",
                     (),
                     "summary source watermark",
                 )

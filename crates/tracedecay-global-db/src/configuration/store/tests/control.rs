@@ -19,9 +19,9 @@ use crate::configuration::resolver::{registry_default_candidate, resolve_configu
 use std::collections::BTreeSet;
 use tracedecay_domain::configuration::{
     AccessRuleId, AuthorityRef, ConfigurationLayerIdV1, ConfigurationMutationOperationV1,
-    ConfigurationValueV1, DIAGNOSTICS_PREWARM_SETTING_KEY, ProtectedApplyRequest, ProtectedChange,
-    RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeAccessRule, ScopeAccessSubjectV1,
-    ScopeControlOperationV1, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
+    ConfigurationValueV1, ProtectedApplyRequest, ProtectedChange, RollbackModeV1, RuleEffect,
+    SOURCE_BINDINGS_SETTING_KEY, ScopeAccessRule, ScopeAccessSubjectV1, ScopeControlOperationV1,
+    ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_domain::research::CapabilityId;
 use tracedecay_domain::{
@@ -34,14 +34,14 @@ use tracedecay_store::configuration::ConfigurationProtectedOperationV1;
 fn direct_unset_restores_the_registry_default_and_its_provenance() {
     let registry = ConfigurationRegistry::core().unwrap();
     let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
-    let key = SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap();
+    let key = SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).unwrap();
     let set_revision = id("configuration.revision.set");
     let set = apply_direct_mutation_to_snapshot(
         &current,
         &DirectConfigurationMutation::Set {
             layer: direct_project_layer(),
             key: key.clone(),
-            value: Box::new(ConfigurationValueV1::Boolean(true)),
+            value: Box::new(ConfigurationValueV1::Boolean(false)),
         },
         &set_revision,
         &registry,
@@ -132,15 +132,15 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
     );
     let mutation = DirectConfigurationMutation::Set {
         layer: direct_project_layer(),
-        key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: Box::new(ConfigurationValueV1::Boolean(true)),
+        key: SettingKey::new("telemetry.timings.v1").unwrap(),
+        value: Box::new(ConfigurationValueV1::Boolean(false)),
     };
     let foreign_target = DirectConfigurationMutation::Set {
         layer: ConfigurationLayerIdV1::Project {
             project_id: id("project.foreign.fixture"),
         },
-        key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: Box::new(ConfigurationValueV1::Boolean(true)),
+        key: SettingKey::new("telemetry.timings.v1").unwrap(),
+        value: Box::new(ConfigurationValueV1::Boolean(false)),
     };
     assert_eq!(
         store
@@ -163,8 +163,8 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
 
     let conflicting = DirectConfigurationMutation::Set {
         layer: direct_project_layer(),
-        key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: Box::new(ConfigurationValueV1::Boolean(false)),
+        key: SettingKey::new("telemetry.timings.v1").unwrap(),
+        value: Box::new(ConfigurationValueV1::Boolean(true)),
     };
     assert_eq!(
         store
@@ -203,8 +203,8 @@ async fn owned_global_control_adapter_preserves_cas_while_daemon_scope_is_active
     );
     let mutation = DirectConfigurationMutation::Set {
         layer: direct_project_layer(),
-        key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: Box::new(ConfigurationValueV1::Boolean(true)),
+        key: SettingKey::new("telemetry.timings.v1").unwrap(),
+        value: Box::new(ConfigurationValueV1::Boolean(false)),
     };
     let receipt = store
         .commit_direct(&authority, &mutation, &root.revision_id)
@@ -225,8 +225,8 @@ async fn owned_global_control_adapter_preserves_cas_while_daemon_scope_is_active
                 &authority,
                 &DirectConfigurationMutation::Set {
                     layer: direct_project_layer(),
-                    key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-                    value: Box::new(ConfigurationValueV1::Boolean(false)),
+                    key: SettingKey::new("telemetry.timings.v1").unwrap(),
+                    value: Box::new(ConfigurationValueV1::Boolean(true)),
                 },
                 &root.revision_id,
             )
@@ -249,8 +249,8 @@ async fn owned_global_control_adapter_rejects_writes_after_daemon_scope_ends() {
     );
     let mutation = DirectConfigurationMutation::Set {
         layer: direct_project_layer(),
-        key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
-        value: Box::new(ConfigurationValueV1::Boolean(true)),
+        key: SettingKey::new("telemetry.timings.v1").unwrap(),
+        value: Box::new(ConfigurationValueV1::Boolean(false)),
     };
 
     assert_eq!(
@@ -533,8 +533,8 @@ async fn configuration_audit_cursor_pages_only_the_request_that_minted_it() {
             ),
             &DirectConfigurationMutation::Set {
                 layer: direct_project_layer(),
-                key: SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
-                value: Box::new(ConfigurationValueV1::Boolean(true)),
+                key: SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).unwrap(),
+                value: Box::new(ConfigurationValueV1::Boolean(false)),
             },
             &root.revision_id,
         )
@@ -549,8 +549,8 @@ async fn configuration_audit_cursor_pages_only_the_request_that_minted_it() {
             ),
             &DirectConfigurationMutation::Set {
                 layer: direct_project_layer(),
-                key: SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
-                value: Box::new(ConfigurationValueV1::Boolean(false)),
+                key: SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).unwrap(),
+                value: Box::new(ConfigurationValueV1::Boolean(true)),
             },
             &first.result_revision_id,
         )

@@ -1807,13 +1807,6 @@ pub(super) const INDEXES: &[Index] = &[
     },
     Index {
         table: "observation_projection_provenance",
-        name: Some("idx_observation_projection_provenance_output"),
-        unique: false,
-        origin: "c",
-        columns: &["projector_version", "output_provider", "output_message_id"],
-    },
-    Index {
-        table: "observation_projection_provenance",
         name: Some("idx_observation_projection_provenance_global_output"),
         unique: false,
         origin: "c",

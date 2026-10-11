@@ -5,7 +5,7 @@ use tracedecay_privacy::{
     MEMORY_FACT_SANITIZER_VERSION_V1, MemoryFactSanitizationV1, sanitize_memory_fact_payload,
 };
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
-use tracedecay_runtime_core::db::engine::{BackendKind, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_PRIVACY_PURGE_PAYLOADS,
     ProjectMemoryPrivacyPurgeCursorV1, ProjectMemoryPrivacyPurgeReceiptV1,
@@ -101,6 +101,55 @@ pub(super) async fn purge_superseded_payloads_for_fact_tx(
     Ok(())
 }
 
+const OWNER_SUPERSEDED_PAYLOADS_SQL: &str = "SELECT payloads.assertion_id, payloads.fact_id,
+            assertions.payload_reference_json, payloads.payload_json
+     FROM memory_v2_assertion_payloads AS payloads
+     JOIN memory_v2_assertions AS assertions
+       ON assertions.assertion_id = payloads.assertion_id
+      AND assertions.fact_id = payloads.fact_id
+      AND assertions.owner_kind = payloads.owner_kind
+      AND assertions.project_id = payloads.project_id
+     WHERE payloads.owner_kind = ?1 AND payloads.project_id = ?2
+       AND (?3 IS NULL OR payloads.fact_id = ?3)
+       AND (
+           ?5 IS NULL OR payloads.fact_id > ?5 OR
+           (payloads.fact_id = ?5 AND payloads.assertion_id > ?6)
+       )
+       AND EXISTS (
+           SELECT 1 FROM memory_v2_assertion_supersession AS supersession
+           WHERE supersession.superseded_assertion_id = payloads.assertion_id
+             AND supersession.fact_id = payloads.fact_id
+             AND supersession.owner_kind = payloads.owner_kind
+             AND supersession.project_id = payloads.project_id
+             AND (?4 IS NULL OR supersession.assertion_id = ?4)
+       )
+     ORDER BY payloads.fact_id, payloads.assertion_id
+     LIMIT ?7";
+
+const FACT_SUPERSEDED_PAYLOADS_SQL: &str = "SELECT payloads.assertion_id, payloads.fact_id,
+            assertions.payload_reference_json, payloads.payload_json
+     FROM memory_v2_assertion_supersession AS supersession
+     CROSS JOIN memory_v2_assertion_payloads AS payloads
+       ON payloads.assertion_id = supersession.superseded_assertion_id
+      AND payloads.fact_id = supersession.fact_id
+      AND payloads.owner_kind = supersession.owner_kind
+      AND payloads.project_id = supersession.project_id
+     CROSS JOIN memory_v2_assertions AS assertions
+       ON assertions.assertion_id = payloads.assertion_id
+      AND assertions.fact_id = payloads.fact_id
+      AND assertions.owner_kind = payloads.owner_kind
+      AND assertions.project_id = payloads.project_id
+     WHERE supersession.assertion_id = ?4
+       AND supersession.fact_id = ?3
+       AND supersession.owner_kind = ?1
+       AND supersession.project_id = ?2
+       AND (
+           ?5 IS NULL OR payloads.fact_id > ?5 OR
+           (payloads.fact_id = ?5 AND payloads.assertion_id > ?6)
+       )
+     ORDER BY payloads.fact_id, payloads.assertion_id
+     LIMIT ?7";
+
 async fn load_superseded_payloads(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -109,32 +158,15 @@ async fn load_superseded_payloads(
     after: Option<&ProjectMemoryPrivacyPurgeCursorV1>,
     limit: usize,
 ) -> FactStoreResult<Vec<SupersededPayload>> {
+    // One fact's purge reads the superseding assertion's supersession rows
+    // through their key; the owner sweep pages every superseded payload.
+    let sql = match (fact_id, superseding_assertion_id) {
+        (Some(_), Some(_)) => FACT_SUPERSEDED_PAYLOADS_SQL,
+        _ => OWNER_SUPERSEDED_PAYLOADS_SQL,
+    };
     let mut rows = transaction
         .query(
-            "SELECT payloads.assertion_id, payloads.fact_id,
-                    assertions.payload_reference_json, payloads.payload_json
-             FROM memory_v2_assertion_payloads AS payloads
-             JOIN memory_v2_assertions AS assertions
-               ON assertions.assertion_id = payloads.assertion_id
-              AND assertions.fact_id = payloads.fact_id
-              AND assertions.owner_kind = payloads.owner_kind
-              AND assertions.project_id = payloads.project_id
-             WHERE payloads.owner_kind = ?1 AND payloads.project_id = ?2
-               AND (?3 IS NULL OR payloads.fact_id = ?3)
-               AND (
-                   ?5 IS NULL OR payloads.fact_id > ?5 OR
-                   (payloads.fact_id = ?5 AND payloads.assertion_id > ?6)
-               )
-               AND EXISTS (
-                   SELECT 1 FROM memory_v2_assertion_supersession AS supersession
-                   WHERE supersession.superseded_assertion_id = payloads.assertion_id
-                     AND supersession.fact_id = payloads.fact_id
-                     AND supersession.owner_kind = payloads.owner_kind
-                     AND supersession.project_id = payloads.project_id
-                     AND (?4 IS NULL OR supersession.assertion_id = ?4)
-               )
-             ORDER BY payloads.fact_id, payloads.assertion_id
-             LIMIT ?7",
+            sql,
             params![
                 owner.kind,
                 owner.project_id.as_str(),
@@ -204,12 +236,6 @@ async fn purge_candidates(
         return Ok(0);
     }
 
-    if transaction.backend_kind() == BackendKind::Sqlite {
-        transaction
-            .execute_batch("PRAGMA secure_delete = ON;")
-            .await
-            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    }
     for candidate in &flagged {
         record_purge_receipt(transaction, owner, candidate).await?;
         let changed = transaction

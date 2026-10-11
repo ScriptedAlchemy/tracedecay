@@ -59,30 +59,16 @@ fn writer_actor_allows_only_product_schema_pragmas() {
             .execute_batch(pragma.to_owned())
             .unwrap_or_else(|error| panic!("{pragma} must remain available: {error}"));
     }
-    // The native engine has no secure deletion; accepting the pragma would
-    // fabricate a privacy guarantee.
-    let secure_delete = channel.execute_batch("PRAGMA secure_delete = ON".to_owned());
-    match tracedecay_sql::ENGINE {
-        tracedecay_sql::Engine::Sqlite => {
-            secure_delete.expect("PRAGMA secure_delete = ON must remain available");
-        }
-        tracedecay_sql::Engine::Native => assert!(
-            matches!(
-                secure_delete,
-                Err(ExactSqlError::Sqlite {
-                    kind: ErrorKind::Unsupported,
-                    ..
-                })
-            ),
-            "{secure_delete:?}"
-        ),
-    }
+    // Deletion is logical on both engines; accepting secure_delete would
+    // promise page scrubbing the native engine never performs.
     for pragma in [
         "PRAGMA auto_vacuum = INCREMENTAL",
         "PRAGMA auto_vacuum = NONE",
         "PRAGMA incremental_vacuum(8)",
         "PRAGMA foreign_keys = OFF",
+        "PRAGMA secure_delete = ON",
         "PRAGMA secure_delete = OFF",
+        "PRAGMA secure_delete",
         "PRAGMA writable_schema = ON",
     ] {
         let error = channel.execute_batch(pragma.to_owned()).unwrap_err();
@@ -94,8 +80,8 @@ fn writer_actor_allows_only_product_schema_pragmas() {
 }
 
 /// The projection output-state cache is derived, per-connection scratch
-/// rebuilt from `observation_projection_provenance` whenever
-/// `PRAGMA data_version` moves. It must be able to exist on this channel;
+/// rebuilt from `observation_projection_provenance` whenever another
+/// connection moves the provenance high-water mark. It must be able to exist on this channel;
 /// denying it made every projection rebuild fail.
 #[test]
 fn writer_actor_allows_temp_tables_and_indexes_but_not_temp_triggers_or_views() {

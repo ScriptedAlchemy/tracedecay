@@ -343,16 +343,16 @@ mod tests {
     #[test]
     fn live_setting_transition_does_not_require_daemon_restart() {
         use tracedecay_domain::configuration::{
-            ConfigurationValueV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
+            ConfigurationValueV1, TELEMETRY_TIMINGS_SETTING_KEY,
         };
 
         let observed = resolved_snapshot(
-            DIAGNOSTICS_PREWARM_SETTING_KEY,
-            ConfigurationValueV1::Boolean(false),
+            TELEMETRY_TIMINGS_SETTING_KEY,
+            ConfigurationValueV1::Boolean(true),
         );
         let desired = resolved_snapshot(
-            DIAGNOSTICS_PREWARM_SETTING_KEY,
-            ConfigurationValueV1::Boolean(true),
+            TELEMETRY_TIMINGS_SETTING_KEY,
+            ConfigurationValueV1::Boolean(false),
         );
 
         assert!(!requires_daemon_restart(&observed, &desired).unwrap());
@@ -382,7 +382,7 @@ mod tests {
     fn live_change_does_not_erase_pending_restart_against_durable_observation() {
         use tracedecay_domain::WorkExecutableReference;
         use tracedecay_domain::configuration::{
-            ConfigurationValueV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
+            ConfigurationValueV1, TELEMETRY_TIMINGS_SETTING_KEY,
             WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1,
             WorkExecutableCapabilityV1,
         };
@@ -409,8 +409,8 @@ mod tests {
                 ConfigurationValueV1::WorkExecutableBindings(vec![binding.clone()]),
             ),
             (
-                DIAGNOSTICS_PREWARM_SETTING_KEY,
-                ConfigurationValueV1::Boolean(false),
+                TELEMETRY_TIMINGS_SETTING_KEY,
+                ConfigurationValueV1::Boolean(true),
             ),
         ]);
         let advanced = resolved_snapshot_entries(vec![
@@ -419,8 +419,8 @@ mod tests {
                 ConfigurationValueV1::WorkExecutableBindings(vec![binding]),
             ),
             (
-                DIAGNOSTICS_PREWARM_SETTING_KEY,
-                ConfigurationValueV1::Boolean(true),
+                TELEMETRY_TIMINGS_SETTING_KEY,
+                ConfigurationValueV1::Boolean(false),
             ),
         ]);
 

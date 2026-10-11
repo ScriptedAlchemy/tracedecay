@@ -6,10 +6,10 @@
 //! This test publishes one real compiler diagnostic, then reads it back and
 //! checks that other handles are refused rather than returned as an empty page.
 
-use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
+use std::{env, fs};
 
 use serde_json::{Value, json};
 
@@ -202,26 +202,8 @@ fn compiler_failure(project: &Path) -> String {
         .expect("project parent")
         .join("compiler-out");
     fs::create_dir_all(&output_dir).expect("compiler output directory");
-    // `rustup` selects the toolchain from the working directory. The fixture
-    // project lives outside the repository, so a bare `rustc` there is the
-    // default toolchain (edition 2021) and never emits E0425. Resolve the
-    // compiler from the repository root first, then compile in the project.
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root");
-    let resolved = Command::new("rustup")
-        .args(["which", "rustc"])
-        .current_dir(workspace)
-        .output()
-        .expect("resolve rustc");
-    let rustc_path = String::from_utf8(resolved.stdout).expect("rustc path");
-    assert!(
-        resolved.status.success(),
-        "rustup which rustc failed: {}",
-        String::from_utf8_lossy(&resolved.stderr)
-    );
-    let output = Command::new(rustc_path.trim())
+    let rustc = env::var_os("RUSTC").expect("Bazel supplies its declared Rust compiler");
+    let output = Command::new(rustc)
         .current_dir(project)
         .args([
             "--crate-type=lib",

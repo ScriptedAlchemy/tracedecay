@@ -25,7 +25,7 @@ pub(crate) use scope::resolve_project_scope;
 pub(crate) use settings::{
     canonical_upload_enabled, current_configuration_revision, current_project_setting,
     handle_upload_counter, mutate_project_configuration, project_configuration_set,
-    report_configuration_receipt,
+    repeated_query_hints_enabled, report_configuration_receipt,
 };
 pub(crate) use stale_store_reset::handle_wipe_stale;
 pub(crate) use storage::{

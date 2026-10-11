@@ -2,11 +2,11 @@
 
 use serde_json::Value;
 
-use super::{def, def_always_load, def_rw};
+use super::{def, def_rw};
 use crate::ToolDefinition;
 
 pub(super) fn def_status(input_schema: Value) -> ToolDefinition {
-    def_always_load(
+    def(
         "tracedecay_status",
         "Graph Status",
         "Return a compact summary of the code graph (counts and freshness). Full branch diagnostics are opt-in.",
@@ -15,7 +15,7 @@ pub(super) fn def_status(input_schema: Value) -> ToolDefinition {
 }
 
 pub(super) fn def_active_project(input_schema: Value) -> ToolDefinition {
-    def_always_load(
+    def(
         "tracedecay_active_project",
         "Active Project",
         "Return the resolved active project context for this MCP session, including project ID, project root, scope prefix, branch identity, and the active project store paths. Use this instead of guessing from repo-local marker files or hardcoded DB paths.",

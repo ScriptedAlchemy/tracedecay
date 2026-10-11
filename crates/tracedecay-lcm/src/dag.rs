@@ -693,7 +693,7 @@ mod lineage_tests {
 
     use super::*;
     use crate::schema;
-    use crate::test_support::{self, sqlite_vm_steps};
+    use crate::test_support::{self, vm_steps};
 
     const PROVIDER: &str = "cursor";
 
@@ -933,7 +933,7 @@ mod lineage_tests {
 
     #[tokio::test]
     async fn shared_descendants_are_visited_once_per_root() {
-        let mut vm_steps = BTreeMap::new();
+        let mut steps_by_layers = BTreeMap::new();
         for layers in [4_usize, 12] {
             let session_id = format!("lattice-{layers}");
             let (temp, conn) = lineage_store(&session_id).await;
@@ -950,7 +950,7 @@ mod lineage_tests {
                 rows, distinct_descendants,
                 "{layers} layers: the lineage walk must materialize one row per distinct descendant, not one per route"
             );
-            let steps = sqlite_vm_steps(
+            let steps = vm_steps(
                 &temp.path().join("sessions.db"),
                 &uncondensed_summary_nodes_sql(),
                 &[
@@ -959,16 +959,16 @@ mod lineage_tests {
                 ],
             );
             println!(
-                "lineage lattice: {layers} layers, {} summary nodes, {rows} lineage rows, {steps} SQLite VM steps",
+                "lineage lattice: {layers} layers, {} summary nodes, {rows} lineage rows, {steps} VM steps",
                 nodes.len()
             );
-            vm_steps.insert(layers, steps);
+            steps_by_layers.insert(layers, steps);
         }
         // Tripling the reachable graph (9 -> 25 nodes) must cost roughly
         // three times the VM work; path enumeration would cost ~250x.
         assert!(
-            vm_steps[&12] <= vm_steps[&4] * 8,
-            "lineage VM work grew super-linearly: {vm_steps:?}"
+            steps_by_layers[&12] <= steps_by_layers[&4] * 8,
+            "lineage VM work grew super-linearly: {steps_by_layers:?}"
         );
     }
 

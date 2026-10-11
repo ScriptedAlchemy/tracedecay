@@ -100,33 +100,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c880a97d28a3681c0267bd29cff89621202715b065127cd445fa0f0fe0aa2880"
 
 [[package]]
-name = "amari-core"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4604466370c01bb3453e1fa51a67477727770fbb77898c9dc04b7c974a7e0bbf"
-dependencies = [
- "approx",
- "bytemuck",
- "dashu-float",
- "num-traits",
- "thiserror",
-]
-
-[[package]]
-name = "amari-holographic"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50c6910ba152183755dc13859932c57c5942ab1d3533939315a93b32b289f953"
-dependencies = [
- "amari-core",
- "fastrand",
- "num-traits",
- "rand 0.10.3",
- "rand_chacha 0.10.0",
- "thiserror",
-]
-
-[[package]]
 name = "ambient-authority"
 version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -228,15 +201,6 @@ dependencies = [
  "keyring-core",
  "log",
  "security-framework",
-]
-
-[[package]]
-name = "approx"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]
@@ -1380,37 +1344,6 @@ dependencies = [
  "lock_api",
  "once_cell",
  "parking_lot_core",
-]
-
-[[package]]
-name = "dashu-base"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "993b95dc1b248e3f5747dcb017a41d6e75853a2e5ee4504f7d537c5b8dffdae4"
-
-[[package]]
-name = "dashu-float"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "779046eff25a959dd58c8d876dc9673ef2eaebd184fadf7313e27f73a10dd9bd"
-dependencies = [
- "dashu-base",
- "dashu-int",
- "rustversion",
- "static_assertions",
-]
-
-[[package]]
-name = "dashu-int"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49c05a0d5cb0b39fcc87c46432fdac24b90dce239857c7f6b798be4ffc3c42c6"
-dependencies = [
- "cfg-if",
- "dashu-base",
- "num-modular",
- "rustversion",
- "static_assertions",
 ]
 
 [[package]]
@@ -4236,12 +4169,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num-modular"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd8e500409e6cd603b03e477c26a6caecdc27ac58979a53e881c75eafc079f44"
-
-[[package]]
 name = "num-rational"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4709,16 +4636,6 @@ checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
 dependencies = [
  "ppv-lite86",
  "rand_core 0.9.5",
-]
-
-[[package]]
-name = "rand_chacha"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e6af7f3e25ded52c41df4e0b1af2d047e45896c2f3281792ed68a1c243daedb"
-dependencies = [
- "ppv-lite86",
- "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -7538,7 +7455,6 @@ dependencies = [
 name = "tracedecay-session-memory"
 version = "0.1.0"
 dependencies = [
- "amari-holographic",
  "hex",
  "memmap2",
  "regex",
@@ -7562,6 +7478,7 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",
+ "tracedecay-sql",
  "tracedecay-store",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
@@ -7611,6 +7528,7 @@ dependencies = [
 name = "tracedecay-session-temporal-store"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "getrandom 0.2.17",
  "hex",
  "serde",
@@ -7628,6 +7546,7 @@ dependencies = [
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-sessions",
+ "tracedecay-sql",
  "tracedecay-store",
  "tracedecay-temporal-query",
  "tracing",

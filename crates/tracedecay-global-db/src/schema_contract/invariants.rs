@@ -687,21 +687,104 @@ async fn foreign_key_audit_next_table(
     Ok(Some(table))
 }
 
+fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Whether any row of `table` names a parent key no parent row holds, for
+/// every foreign key `table` declares. A key with a NULL column is not
+/// checked, as `PRAGMA foreign_key_check` does not check it. Built from the
+/// declared keys so it runs on both engines; the native engine has no
+/// `pragma_foreign_key_check`.
 async fn foreign_key_table_violates(
     conn: &impl QueryExecutor,
     table: &str,
 ) -> tracedecay_domain::errors::Result<bool> {
     let mut rows = conn
         .query(
-            "SELECT 1 FROM pragma_foreign_key_check(?1) LIMIT 1",
+            "SELECT id, \"table\", \"from\", \"to\" FROM pragma_foreign_key_list(?1)
+             ORDER BY id, seq",
             (table,),
         )
         .await
         .map_err(audit_read_error)?;
-    rows.next()
+    let mut keys: Vec<(i64, String, Vec<(String, Option<String>)>)> = Vec::new();
+    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
+        let id = row.get::<i64>(0).map_err(audit_read_error)?;
+        let parent = row.get::<String>(1).map_err(audit_read_error)?;
+        // An implicit primary-key reference reports `to` as NULL on SQLite
+        // and as an empty name on the native engine.
+        let column = (
+            row.get::<String>(2).map_err(audit_read_error)?,
+            row.get::<Option<String>>(3)
+                .map_err(audit_read_error)?
+                .filter(|to| !to.is_empty()),
+        );
+        match keys.last_mut() {
+            Some((last, _, columns)) if *last == id => columns.push(column),
+            _ => keys.push((id, parent, vec![column])),
+        }
+    }
+    drop(rows);
+
+    for (_, parent, columns) in keys {
+        let parent_columns = if columns.iter().any(|(_, to)| to.is_none()) {
+            parent_primary_key(conn, &parent).await?
+        } else {
+            columns.iter().filter_map(|(_, to)| to.clone()).collect()
+        };
+        if parent_columns.len() != columns.len() {
+            return Err(authority_violation(format!(
+                "foreign key from {table} to {parent} names no matching parent key"
+            )));
+        }
+        let child_present = columns
+            .iter()
+            .map(|(from, _)| format!("child.{} IS NOT NULL", quote_identifier(from)))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let matched = columns
+            .iter()
+            .zip(&parent_columns)
+            .map(|((from, _), to)| {
+                format!(
+                    "parent.{} = child.{}",
+                    quote_identifier(to),
+                    quote_identifier(from)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let sql = format!(
+            "SELECT 1 FROM {} AS child WHERE {child_present}
+               AND NOT EXISTS (SELECT 1 FROM {} AS parent WHERE {matched})
+             LIMIT 1",
+            quote_identifier(table),
+            quote_identifier(&parent)
+        );
+        if query_has_rows(conn, &sql).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn parent_primary_key(
+    conn: &impl QueryExecutor,
+    parent: &str,
+) -> tracedecay_domain::errors::Result<Vec<String>> {
+    let mut rows = conn
+        .query(
+            "SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk",
+            (parent,),
+        )
         .await
-        .map(|row| row.is_some())
-        .map_err(audit_read_error)
+        .map_err(audit_read_error)?;
+    let mut columns = Vec::new();
+    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
+        columns.push(row.get::<String>(0).map_err(audit_read_error)?);
+    }
+    Ok(columns)
 }
 
 async fn record_foreign_key_audit_table(
@@ -754,14 +837,7 @@ async fn foreign_key_violation_exists_read_only(
     drop(rows);
 
     for table in tables {
-        let mut rows = conn
-            .query(
-                "SELECT 1 FROM pragma_foreign_key_check(?1) LIMIT 1",
-                (table,),
-            )
-            .await
-            .map_err(audit_read_error)?;
-        if rows.next().await.map_err(audit_read_error)?.is_some() {
+        if foreign_key_table_violates(conn, &table).await? {
             return Ok(true);
         }
     }
@@ -1166,6 +1242,63 @@ mod tests {
             foreign_key_violation_exists_read_only(&connection)
                 .await
                 .unwrap()
+        );
+    }
+
+    async fn foreign_key_violation_with(rows: &str) -> bool {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "PRAGMA foreign_keys = OFF;
+                 CREATE TABLE parent (id TEXT NOT NULL PRIMARY KEY, owner TEXT NOT NULL);
+                 CREATE UNIQUE INDEX parent_owner ON parent(id, owner);
+                 CREATE TABLE child (
+                    id INTEGER PRIMARY KEY,
+                    parent_id TEXT,
+                    owner TEXT,
+                    FOREIGN KEY(parent_id, owner) REFERENCES parent(id, owner)
+                 );
+                 CREATE TABLE implicit_child (
+                    id INTEGER PRIMARY KEY,
+                    parent_id TEXT REFERENCES parent
+                 );
+                 INSERT INTO parent(id, owner) VALUES ('a', 'x'), ('b', 'y');
+                 INSERT INTO child(id, parent_id, owner)
+                 VALUES (1, 'a', 'x'), (2, NULL, 'z'), (3, 'b', NULL);
+                 INSERT INTO implicit_child(id, parent_id) VALUES (1, 'b');
+                 {rows}"
+            ))
+            .unwrap();
+        drop(connection);
+        foreign_key_violation_exists_read_only(&TestConnection::open(&database_path))
+            .await
+            .unwrap()
+    }
+
+    /// Catches an audit that counts a key with a NULL column as an orphan,
+    /// matches composite key columns one at a time, or resolves an implicit
+    /// primary-key reference to anything but the parent's primary key.
+    #[tokio::test]
+    async fn foreign_key_audit_matches_whole_keys_and_skips_null_columns() {
+        assert!(
+            !foreign_key_violation_with("").await,
+            "every key either matches a parent row or has a NULL column"
+        );
+        assert!(
+            foreign_key_violation_with(
+                "INSERT INTO child(id, parent_id, owner) VALUES (4, 'a', 'y');"
+            )
+            .await,
+            "('a', 'y') matches no parent row, though each column matches some row"
+        );
+        assert!(
+            foreign_key_violation_with(
+                "INSERT INTO implicit_child(id, parent_id) VALUES (2, 'missing');"
+            )
+            .await,
+            "an implicit primary-key reference to a missing parent is a violation"
         );
     }
 

@@ -66,10 +66,7 @@ pub fn native_final_schema_objects()
 
 /// The inventory of the owned-store engine compiled into this binary.
 fn compiled_engine_inventory() -> Result<&'static SchemaInventory> {
-    expected_inventory(match tracedecay_sql::ENGINE {
-        tracedecay_sql::Engine::Sqlite => BackendKind::Sqlite,
-        tracedecay_sql::Engine::Native => BackendKind::NativeTurso,
-    })
+    expected_inventory(BackendKind::EXACT_SQL)
 }
 
 fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> {

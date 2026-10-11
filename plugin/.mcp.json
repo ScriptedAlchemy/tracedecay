@@ -5,7 +5,7 @@
       "command": "tracedecay",
       "args": [
         "serve",
-        "--claude-code-tool-search"
+        "--full-tool-list"
       ]
     }
   }

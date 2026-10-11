@@ -62,10 +62,10 @@ pub struct SessionTemporalCursorKeyProvider {
     authenticators: Vec<(SignedCursorKeyRefV1, InMemoryCursorAuthenticator)>,
 }
 
-pub(super) async fn ensure_active_session_cursor_key_in_transaction(
-    transaction: &impl crate::handle::SessionTemporalExec,
-) -> SessionStoreResult<SignedCursorKeyRefV1> {
-    let mut active_rows = transaction
+pub(super) async fn read_active_session_cursor_key(
+    connection: &impl crate::handle::SessionTemporalQuery,
+) -> SessionStoreResult<Option<SignedCursorKeyRefV1>> {
+    let mut active_rows = connection
         .query(
             "SELECT key_id, key_version, key_material, COUNT(*) OVER ()
              FROM session_query_cursor_keys
@@ -113,14 +113,23 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
             }
         })?;
         drop(active_rows);
-        return Ok(key);
+        return Ok(Some(key));
     }
     drop(active_rows);
+    Ok(None)
+}
+
+pub(super) async fn ensure_active_session_cursor_key_in_transaction(
+    transaction: &impl crate::handle::SessionTemporalExec,
+) -> SessionStoreResult<SignedCursorKeyRefV1> {
+    if let Some(key) = read_active_session_cursor_key(transaction).await? {
+        return Ok(key);
+    }
 
     let mut history_rows = transaction
         .query(
-            "SELECT COALESCE(MAX(key_version), 0), COALESCE(MAX(created_at), 0)
-             FROM session_query_cursor_keys",
+            "SELECT COALESCE((SELECT MAX(key_version) FROM session_query_cursor_keys), 0),
+                    COALESCE((SELECT MAX(created_at) FROM session_query_cursor_keys), 0)",
             (),
         )
         .await

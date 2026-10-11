@@ -222,7 +222,9 @@ async fn implementations_returns_literal_bodies_for_trait_interface_and_method()
         .unwrap_or_else(|| panic!("markdown implementations text: {markdown}"));
     assert!(
         markdown.contains("src/lib.rs::Solid (impl) src/lib.rs:7")
-            && markdown.contains("|         \"solid\""),
+            && markdown.contains(
+                "```text\nimpl Widget for Solid {\n    fn paint(&self) -> &'static str {\n        \"solid\"\n    }\n}\n```"
+            ),
         "markdown carries each match and its body: {markdown}"
     );
 

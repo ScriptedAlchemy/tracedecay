@@ -202,6 +202,7 @@ jobs:
           bash tests/install_script_test.sh
           bash tests/release_pr_integrity_test.sh
           bash tests/dashboard_bundle_check_test.sh
+          bash tests/dashboard_digests_check_test.sh
 
       - uses: ./.github/actions/setup-bazel
         with:

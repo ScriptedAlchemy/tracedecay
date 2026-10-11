@@ -18,11 +18,21 @@
  * page clock, so its captures are pixel-stable between runs.
  */
 import { topologyMeasurement, topologyMetricsModel } from '../../src/test/workTopologyMetricsFixture.ts';
+import { applicationSuccess } from '../../src/test/applicationEnvelope.ts';
+import type { ApplicationHttpOperationId } from '../../src/contracts/application.ts';
 
 const nowMs = Number(globalThis.process?.env?.['TD_FIXTURE_NOW_MS']) || Date.now();
 const nowSecs = Math.floor(nowMs / 1000);
 const nowMicros = nowMs * 1000;
 const DAY = 86_400;
+
+const STORY_SCOPE = {
+  project_id: 'project.tracedecay',
+  repository_id: 'repository.tracedecay',
+  worktree_id: 'worktree.primary',
+  reference: null,
+  scope_digest: 'sha256:e174c69787e410a452c13540b131bf291d25017a21e37aebf7f26eeb8e77fbe5',
+};
 
 const PLAN26_OBSERVATORY_METRICS = [
   'adoption_eligible',
@@ -1804,7 +1814,6 @@ function savingsPayload(): Record<string, unknown> {
       offline: true,
       model_count: 214,
     },
-    costs: costsReadModel(),
   };
 }
 
@@ -2039,107 +2048,6 @@ function savingsModelsPayload(range: string): Record<string, unknown> {
       by_provider: byProvider,
       by_provider_day: byProviderDay,
     },
-  };
-}
-
-/** The canonical Costs projection embedded by `savings_api::overview`.
- * Savings and exact project provider usage come from separate retained stores;
- * the composite read reuses one provider aggregate for every sibling panel. */
-function costsReadModel(): Record<string, unknown> {
-  const observedAtMicros = nowMicros;
-  const horizon = { since_micros: 0, until_micros: observedAtMicros };
-  const accountingWatermark = 'provider-usage:57704';
-  const savingsWatermark = 'savings:1784052117';
-  const known = (eligible: number) => ({
-    eligible,
-    observed: eligible,
-    completed: eligible,
-    censored: 0,
-    unknown: 0,
-    excluded: 0,
-    state: 'known',
-  });
-  const measurement = (
-    metric: string,
-    value: number | null,
-    unit: string,
-    denominator: string,
-    coverage: Record<string, unknown>,
-    source: string,
-    sourceRevision: string,
-    watermark: string,
-    unavailableReason: string | null,
-  ) => ({
-    descriptor_revision: 'provider-costs.v1',
-    metric,
-    value,
-    unit,
-    denominator,
-    denominator_value: coverage['eligible'],
-    coverage,
-    evidence_class: 'measurement',
-    provenance: {
-      source,
-      source_revision: sourceRevision,
-      projector_revision: 'costs-projector.v1',
-      watermark,
-    },
-    cohort: { descriptor_revision: `${denominator}.v1`, eligible_population: denominator },
-    temporal: { horizon, baseline_watermark: null, delta: null },
-    uncertainty:
-      value === null
-        ? { lower: null, upper: null, reason: unavailableReason }
-        : { lower: value, upper: value, reason: null },
-    calibration: null,
-    unavailable_reason: unavailableReason,
-  });
-  return {
-    authorized_scope_ref: 'all',
-    horizon,
-    watermark: `${accountingWatermark};${savingsWatermark}`,
-    observed_at_micros: observedAtMicros,
-    // The mounted route has no project scope for the latency projector, so
-    // its canonical latency cohort is unknown and the composite is not current.
-    current: false,
-    usage: [
-      measurement(
-        'provider_tokens',
-        683_965_063,
-        'tokens',
-        'provider_usage_observations',
-        known(57_704),
-        'provider_usage_observation',
-        'provider-usage-observation.v1',
-        accountingWatermark,
-        null,
-      ),
-      measurement(
-        'saved_tokens',
-        4_902_796_408,
-        'tokens',
-        'eligible_savings_calls',
-        known(147_230),
-        'savings_ledger',
-        'savings-ledger.v1',
-        savingsWatermark,
-        null,
-      ),
-    ],
-    estimated_cost: [
-      measurement(
-        'provider_cost',
-        8148.9744974,
-        'usd',
-        'priced_provider_usage_observations',
-        known(57_704),
-        'provider_usage_observation',
-        'provider-usage-observation.v1',
-        accountingWatermark,
-        null,
-      ),
-    ],
-    latency: [unavailableProviderLatency(horizon)],
-    pricing_revision: 'sha256:fixture-pricing',
   };
 }
 
@@ -2715,7 +2623,7 @@ function automationOutcomesPayload(): Record<string, unknown> {
 /** `FactStoreCurateResultV1`: the admitted run's receipt; its terminal is the
  * run-ledger row for `run_id`. */
 function automaticCuratorReceiptPayload(): Record<string, unknown> {
-  return applicationEnvelope({
+  return curatorReceiptEnvelope({
     binding: 'binding.http.fact_store_curate.v1',
     schema: 'schema.application.retained.fact-store-curate.result',
     request: 'request.story.fact-store-curate',
@@ -4762,32 +4670,26 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/code-index/freshness': CODE_INDEX_FRESHNESS_FIXTURES.ready_absent,
   '/api/plugins/code-diagnostics': codeDiagnosticsSnapshot(),
   '/api/remote/status': remoteOperationalStatusEnvelope(),
-  // Work. The two mounted read routes. Unlike every other fixture here these
-  // are wrapped in the application's `HttpJsonEnvelope` rather than
-  // `DashboardEnvelopeV1`, because `mod.rs` nests the Work routes straight
-  // onto the application router. See `workApi.ts`, which walks that wrapper.
   // The work-product graph read. Serves the Work projections and the Agents
   // workspace's handoff frontier and attempt failures.
-  '/api/work/views': workEnvelope(workGraphViewsPayload()),
-  // The Workflows workspace's standing read (`operation.workflow.
-  // list_definitions`), through the same application envelope walker.
-  '/api/application/workflow/list-definitions': workEnvelope(workflowDefinitionsPayload()),
+  '/api/work/views': workEnvelope('operation.work.views', workGraphViewsPayload()),
+  '/api/application/workflow/list-definitions': workEnvelope('operation.workflow.list_definitions', workflowDefinitionsPayload()),
   // The selected identity's version track (`operation.workflow.
   // definition_history`). Fixtures resolve by path alone, so this answers the
   // `workflow.review-sweep` track whichever identity the page asks for; the
   // page marks rows naming another identity as ambiguous rather than folding
   // them in.
-  '/api/application/workflow/definition-history': workEnvelope(workflowHistoryPayload()),
+  '/api/application/workflow/definition-history': workEnvelope('operation.workflow.definition_history', workflowHistoryPayload()),
   // One exact run (`operation.workflow.get_run`) pinned to review-sweep v3,
   // mid-flight: the journal carries admission and the first two steps so the
   // lookup renders an elapsed figure, never a duration.
-  '/api/application/workflow/get-run': workEnvelope(workflowRunPayload()),
+  '/api/application/workflow/get-run': workEnvelope('operation.workflow.get_run', workflowRunPayload()),
   // Agents token frontier (`operation.handoff.list_task_handoffs`). Same
   // application envelope as Work/Workflow reads; payload is the generated
   // `ListTaskHandoffsResultV1`.
-  '/api/application/handoff/list-task': workEnvelope(listTaskHandoffsPayload()),
-  '/api/work/topology-metrics': workEnvelope(workTopologyMetricsPayload()),
-  '/api/feedback/proximity': workEnvelope(feedbackProximityPayload()),
+  '/api/application/handoff/list-task': workEnvelope('operation.handoff.list_task_handoffs', listTaskHandoffsPayload()),
+  '/api/work/topology-metrics': workEnvelope('operation.work.topology_metrics', workTopologyMetricsPayload()),
+  '/api/feedback/proximity': workEnvelope('operation.application.feedback_proximity', feedbackProximityPayload()),
 };
 
 /** Two registered workflow definitions with real step graphs, so the audited
@@ -5102,25 +5004,7 @@ function listTaskHandoffsPayload(): Record<string, unknown> {
   };
 }
 
-/* ==========================================================================
- * Work product graph (`/api/work/views`).
- *
- * The Work routes are the one family on this dashboard that does not answer
- * with `DashboardEnvelopeV1`. `src/dashboard/mod.rs` nests them onto the
- * application router, so they carry the application's own `HttpJsonEnvelope`,
- * a `kind`/`value` union whose outcome packet holds the generated contract
- * under `payload`. `workApi.ts` walks exactly that structure and hands what it
- * finds to the generated schema, so a fixture that wrapped the payload any
- * other way would be refused as `unsupported_schema` and the audit would
- * screenshot a boundary plate for a surface that works.
- * ========================================================================== */
-
-/** The application envelope, in the shape `workPayload()` walks. */
-/** The application `HttpJsonEnvelope` success around one payload. Reads
- * answer as evidence; commands as effects. Both put the contract in the same
- * place, which is why `workApi.ts` checks the tag for presence and does not
- * branch on it. */
-function applicationEnvelope(spec: {
+function curatorReceiptEnvelope(spec: {
   binding: string;
   schema: string;
   request: string;
@@ -5133,26 +5017,19 @@ function applicationEnvelope(spec: {
       binding_id: spec.binding,
       contract: { schema_id: spec.schema, schema_revision: 1 },
       request_id: spec.request,
-      scope: {
-        project_id: 'project.tracedecay',
-        repository_id: 'repository.tracedecay',
-        worktree_id: 'worktree.primary',
-        reference: null,
-        scope_digest:
-          'sha256:e174c69787e410a452c13540b131bf291d25017a21e37aebf7f26eeb8e77fbe5',
-      },
+      scope: STORY_SCOPE,
       outcome: { outcome: spec.outcome, value: { payload: spec.payload } },
     },
   };
 }
 
-function workEnvelope(payload: unknown): Record<string, unknown> {
-  return applicationEnvelope({
-    binding: 'binding.http.work.fixture',
-    schema: 'schema.work.fixture.result',
-    request: 'request.work.fixture',
-    outcome: 'evidence',
-    payload,
+function workEnvelope(
+  operation: ApplicationHttpOperationId,
+  payload: unknown,
+): Record<string, unknown> {
+  return applicationSuccess(operation, payload, {
+    scope: STORY_SCOPE,
+    requestId: `request.story.${operation}`,
   });
 }
 

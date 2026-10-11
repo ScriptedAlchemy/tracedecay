@@ -426,6 +426,121 @@ async fn tracedecay_context_withholds_code_that_drifted_after_indexing() {
 }
 
 #[tokio::test]
+async fn tracedecay_context_binds_same_name_declarations_to_their_own_code() {
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).expect("ledger src dir");
+        fs::write(
+            project.join("src/lib.rs"),
+            concat!(
+                "pub struct Ledger;\n\n",
+                "impl Ledger {\n    pub fn alpha() -> u32 {\n        1\n    }\n}\n\n",
+                "impl Ledger {\n    pub fn beta() -> u32 {\n        2\n    }\n}\n\n",
+                "impl Ledger {\n    pub fn gamma() -> u32 {\n        3\n    }\n}\n\n",
+                "impl Ledger {\n    pub fn delta() -> u32 {\n        4\n    }\n}\n",
+            ),
+        )
+        .expect("ledger lib.rs");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("ledger context server");
+    warm_code_index_search(&server, "Ledger").await;
+
+    let payload = context_json(
+        &server,
+        json!({
+            "task": "Ledger",
+            "include_code": true,
+            "max_code_blocks": 10
+        }),
+    )
+    .await;
+    let blocks = payload["code"].as_array().expect("code blocks");
+    let impl_blocks = blocks
+        .iter()
+        .filter(|block| {
+            block["code"]
+                .as_str()
+                .is_some_and(|code| code.starts_with("impl Ledger"))
+        })
+        .count();
+    assert_eq!(impl_blocks, 4, "{payload}");
+    for block in blocks {
+        let symbol = payload["symbols"]
+            .as_array()
+            .expect("symbols")
+            .iter()
+            .find(|symbol| symbol["node_id"] == block["node_id"])
+            .unwrap_or_else(|| panic!("code block names no listed symbol: {payload}"));
+        assert_eq!(
+            (&block["start_line"], &block["end_line"]),
+            (&symbol["start_line"], &symbol["end_line"]),
+            "code block serves another declaration than its node: {payload}"
+        );
+    }
+
+    fixture.harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn tracedecay_context_withholds_partial_windows_of_oversized_declarations() {
+    let statements = 4_000;
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).expect("oversized src dir");
+        let body: String = (0..statements)
+            .map(|index| format!("    let value_{index} = {index};\n"))
+            .collect();
+        fs::write(
+            project.join("src/lib.rs"),
+            format!("pub fn sprawling() -> u32 {{\n{body}    0\n}}\n"),
+        )
+        .expect("oversized lib.rs");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("oversized context server");
+    warm_code_index_search(&server, "sprawling").await;
+    let request = json!({
+        "task": "sprawling",
+        "max_nodes": 1,
+        "include_code": true,
+        "max_code_blocks": 1
+    });
+
+    let payload = context_json(&server, request.clone()).await;
+    assert_eq!(payload["code"], json!([]), "{payload}");
+    let end_line = statements + 3;
+    assert_eq!(
+        payload["oversized_symbols"]
+            .as_array()
+            .map(|symbols| symbols
+                .iter()
+                .map(|symbol| json!([symbol["name"], symbol["start_line"], symbol["end_line"]]))
+                .collect::<Vec<_>>()),
+        Some(vec![json!(["sprawling", 1, end_line])]),
+        "{payload}"
+    );
+
+    let mut markdown_request = request;
+    markdown_request["format"] = json!("markdown");
+    let markdown = context_text(&server, markdown_request).await;
+    require_line(
+        &markdown,
+        &format!(
+            "- **sprawling** (function), src/lib.rs:1-{end_line} is larger than one code block; \
+             read it with `tracedecay_source_body` or list its members with \
+             `tracedecay_source_outline`."
+        ),
+    );
+
+    fixture.harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn context_preserves_single_name_and_multiword_prose_routing() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).expect("routing source directory");

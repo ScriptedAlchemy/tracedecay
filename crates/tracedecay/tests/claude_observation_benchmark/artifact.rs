@@ -870,7 +870,7 @@ pub(super) fn repository_root() -> PathBuf {
         return PathBuf::from(root);
     }
     PathBuf::from(
-        std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into()),
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("runner exports CARGO_MANIFEST_DIR"),
     )
     .parent()
     .and_then(Path::parent)

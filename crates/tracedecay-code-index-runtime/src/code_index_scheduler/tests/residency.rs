@@ -25,8 +25,8 @@ use super::{
     ALPHA_LIB_V1, CodeIndexSchedulerRegistryV1, GitFixture, SERVING_SEAT_FAILURE_CEILING,
     core_search_request, git, install_verified_graph_store_on_text,
     install_warming_graph_store_on_text, mounted_core_query_worktree_at,
-    mounted_core_query_worktree_in, mounted_text_query_worktree_at, test_project_id,
-    wait_for_generation_change, wait_for_live_complete_generation,
+    mounted_core_query_worktree_in, mounted_text_query_worktree_at, ranked_symbol_names,
+    ranks_symbol, test_project_id, wait_for_generation_change, wait_for_live_complete_generation,
     wait_for_queryable_text_generation, wait_for_settled_owner, wait_for_worker_phase,
     wait_until_serving_seat, with_untouched_fillers,
 };
@@ -78,6 +78,32 @@ fn rows(report: &ResidentOwnersReportV1) -> Vec<(ResidentOwnerKindV1, String, bo
         .collect()
 }
 
+async fn wait_for_no_decoded_generation(owners: &ResidentOwnersV1, awaited: &str) {
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        let report = owners.report(Instant::now());
+        if decoded_kinds(&report).is_empty() {
+            return;
+        }
+        assert!(Instant::now() <= deadline, "{awaited}: {report:?}");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn reseat(
+    registry: &CodeIndexSchedulerRegistryV1,
+    root: &Path,
+    seated: &super::super::LatestCompleteCodeIndexV1,
+) {
+    let mounted = registry.mounted.lock().await;
+    *mounted
+        .get(root)
+        .expect("mounted worktree")
+        .serving_generation
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(seated.clone());
+}
+
 /// Issue #3328: after the worker parks, the seated decode is a third copy of
 /// the generation the text artifact and catalog already serve. Drop it
 /// without waiting out the idle window; search must keep the same answers
@@ -94,23 +120,14 @@ async fn a_parked_worktree_releases_its_decode_and_search_still_answers() {
     )
     .await;
 
-    let parked = owners.report(Instant::now());
-    assert_eq!(
-        decoded_kinds(&parked),
-        [],
-        "a parked worktree must not keep a seated decode: {parked:?}"
-    );
+    wait_for_no_decoded_generation(&owners, "a parked worktree must not keep a seated decode")
+        .await;
 
     let without_decode = registry
         .execute_query_search(&scope, core_search_request("park_release_target"))
         .await
         .expect("search serves from the text seat after the decode is released");
     assert!(!without_decode.served_stale);
-    let anchors = search_anchors(&without_decode);
-    assert!(
-        !anchors.is_empty(),
-        "search must still rank the parked generation: {anchors:?}"
-    );
     assert_eq!(
         decoded_kinds(&owners.report(Instant::now())),
         [],
@@ -121,12 +138,20 @@ async fn a_parked_worktree_releases_its_decode_and_search_still_answers() {
         registry.request_complete_generation(fixture.path()).await,
         "complete-generation demand reaches the mounted worktree"
     );
-    let _seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let without_decode_names = ranked_symbol_names(&without_decode, &seated);
+    assert!(
+        ranks_symbol(&without_decode_names, "park_release_target"),
+        "search must still rank park_release_target after park: {without_decode_names:?}"
+    );
     let with_decode = registry
         .execute_query_search(&scope, core_search_request("park_release_target"))
         .await
         .expect("search still answers after a demanded decode");
-    assert_eq!(search_anchors(&with_decode), anchors);
+    assert_eq!(
+        search_anchors(&with_decode),
+        search_anchors(&without_decode)
+    );
 
     registry.shutdown().await;
 }
@@ -383,19 +408,6 @@ async fn a_parked_worktree_keeps_its_decode_while_the_text_owner_warms() {
     owners.release_idle(Instant::now() + IDLE_WINDOW);
 
     let mut seats = registry.subscribe_serving_seats();
-    async fn reseat(
-        registry: &CodeIndexSchedulerRegistryV1,
-        root: &Path,
-        seated: &super::super::LatestCompleteCodeIndexV1,
-    ) {
-        let mounted = registry.mounted.lock().await;
-        *mounted
-            .get(root)
-            .expect("mounted worktree")
-            .serving_generation
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(seated.clone());
-    }
     async fn install_text(
         registry: &CodeIndexSchedulerRegistryV1,
         root: &Path,
@@ -419,7 +431,6 @@ async fn a_parked_worktree_keeps_its_decode_while_the_text_owner_warms() {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_some()
     }
-
     // A ready text owner lets the take proceed and publishes the seat write
     // on the registry-wide counter every subscriber watches.
     reseat(&registry, &root, &seated).await;
@@ -493,6 +504,68 @@ async fn a_parked_worktree_keeps_its_decode_while_the_text_owner_warms() {
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_worktree_releases_its_decode_once_a_running_pass_settles() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn park_pass_target() -> u32 { 7 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let (registry, scope) = mounted_text_query_worktree_at(
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
+        fixture.path(),
+        store.path().to_path_buf(),
+    )
+    .await;
+    let root = canonical_existing_identity(fixture.path()).expect("canonical root");
+    assert!(registry.request_complete_generation(fixture.path()).await);
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    owners.release_idle(Instant::now() + IDLE_WINDOW);
+
+    let pass = registry
+        .hold_reconcile_pass_for_test(fixture.path())
+        .await
+        .expect("mounted worktree");
+    reseat(&registry, &root, &seated).await;
+    registry
+        .release_decode_when_parked_for_test(fixture.path())
+        .await;
+    let while_held = registry
+        .execute_query_search(&scope, core_search_request("park_pass_target"))
+        .await
+        .expect("search still answers while the pass holds the decode");
+    assert!(!while_held.served_stale);
+    let while_held_names = ranked_symbol_names(&while_held, &seated);
+    assert!(
+        ranks_symbol(&while_held_names, "park_pass_target"),
+        "a running pass keeps park_pass_target searchable: {while_held_names:?}"
+    );
+    assert!(
+        !decoded_kinds(&owners.report(Instant::now())).is_empty(),
+        "a running pass keeps the seated decode"
+    );
+
+    drop(pass);
+    wait_for_no_decoded_generation(
+        &owners,
+        "a settled pass frees the parked decode without a wake",
+    )
+    .await;
+
+    let after = registry
+        .execute_query_search(&scope, core_search_request("park_pass_target"))
+        .await
+        .expect("search still answers after the pass settles");
+    assert!(!after.served_stale);
+    assert_eq!(search_anchors(&after), search_anchors(&while_held));
+    assert_eq!(
+        decoded_kinds(&owners.report(Instant::now())),
+        [],
+        "search must not re-pin the seated decode"
+    );
 
     registry.shutdown().await;
 }
@@ -715,28 +788,47 @@ async fn eight_parked_worktrees_keep_no_decoded_generations() {
         scopes.push(scope);
     }
 
-    assert_eq!(
-        decoded_kinds(&owners.report(Instant::now())),
-        [],
-        "eight parked worktrees must not retain eight seated decodes"
-    );
+    wait_for_no_decoded_generation(
+        &owners,
+        "eight parked worktrees must not retain eight seated decodes",
+    )
+    .await;
 
+    let mut found = Vec::new();
     for (ordinal, (fixture, scope)) in fixtures.iter().zip(&scopes).enumerate() {
-        let found = registry
+        let search = registry
             .execute_query_search(scope, core_search_request(&format!("symbol_{ordinal}")))
             .await
             .expect("each parked worktree still answers search");
-        assert!(!found.served_stale, "{}", fixture.path().display());
-        assert!(
-            !search_anchors(&found).is_empty(),
-            "symbol_{ordinal} must remain searchable after park"
+        assert!(!search.served_stale, "{}", fixture.path().display());
+        let text = registry
+            .latest_text_serving_for_root(fixture.path())
+            .await
+            .expect("parked text owner");
+        assert_eq!(
+            search.generation.as_str(),
+            text.metadata().manifest().generation_id.as_str(),
+            "parked search must serve this worktree's text generation"
         );
+        found.push(search);
     }
     assert_eq!(
         decoded_kinds(&owners.report(Instant::now())),
         [],
         "search across the eight worktrees must not re-pin their decodes"
     );
+    for (ordinal, (fixture, search)) in fixtures.iter().zip(&found).enumerate() {
+        assert!(
+            registry.request_complete_generation(fixture.path()).await,
+            "complete-generation demand reaches parked worktree {ordinal}"
+        );
+        let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+        let names = ranked_symbol_names(search, &seated);
+        assert!(
+            ranks_symbol(&names, &format!("symbol_{ordinal}")),
+            "symbol_{ordinal} must remain searchable after park: {names:?}"
+        );
+    }
 
     registry.shutdown().await;
 }

@@ -1219,6 +1219,48 @@ describe("TraceDecayClient generated operation bindings", () => {
     );
   });
 
+  it("accepts the deadline observation of a non-cancellable effect that timed out", () => {
+    const descriptor = OPERATIONS.find(
+      (operation) => operation.operation === "workflow_activate_definition",
+    );
+    expect(descriptor?.cancellation).toEqual({ mode: "not_cancellable" });
+    const response = successEnvelope({});
+    response.value.binding_id = "binding.http.workflow.activate_definition";
+    response.value.contract = {
+      schema_id: "schema.workflow.activate_definition.result",
+      schema_revision: 1,
+    };
+    const effect = (termination: string) =>
+      ({
+        outcome: "effect",
+        value: {
+          effect_id: "effect.workflow.sdk",
+          effect_class: "administrative",
+          idempotency_key: "workflow.idempotency.sdk",
+          authority: {},
+          expected_state: "workflow.revision.sdk",
+          reconciliation: "required",
+          receipt: {},
+          payload: null,
+          execution: {
+            ...structuredClone(RECEIPT),
+            cancellation: { stage: "before_effect", observed_at: 2 },
+            termination,
+          },
+        },
+      }) as unknown as typeof response.value.outcome;
+
+    response.value.outcome = effect("timed_out");
+    expect(descriptor?.decodeSuccess(response.value).outcome.value.execution.termination).toBe(
+      "timed_out",
+    );
+
+    response.value.outcome = effect("failed");
+    expect(() => descriptor?.decodeSuccess(response.value)).toThrow(
+      /non-cancellable operation returned cancellation evidence/,
+    );
+  });
+
 });
 
 describe("TraceDecayClient transport envelopes", () => {

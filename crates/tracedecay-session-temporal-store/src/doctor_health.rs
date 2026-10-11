@@ -1536,12 +1536,16 @@ mod probe_tests {
             findings,
             vec![finding(SessionTemporalHealthFindingKind::MissingAnchor, 0)]
         );
-        assert_eq!(
-            partial_reasons,
-            BTreeSet::from([
-                "missing_anchor: SQLite prepare query failed: no such table: main.locked_summary_rows"
-                    .to_owned()
-            ])
+        // The engines word the failure differently; the reason must name the
+        // probe and the table it could not read.
+        assert!(
+            partial_reasons.len() == 1
+                && partial_reasons.iter().all(|reason| {
+                    reason.starts_with("missing_anchor: ")
+                        && reason.contains("no such table")
+                        && reason.contains("locked_summary_rows")
+                }),
+            "{partial_reasons:?}"
         );
     }
 }

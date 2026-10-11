@@ -5,16 +5,13 @@
 #                          statement already listed (add rows to extend it)
 #   census.tsv             every distinct statement the owned-store suites ran,
 #                          with its capability
-#   known_native_gaps.tsv  the native gate's current failures (`gaps`)
 #
-# Usage: scripts/storage/sql-census.sh [census|gaps] [bazel test flags...]
+# Usage: scripts/storage/sql-census.sh [bazel test flags...]
 # BAZEL names the bazel wrapper (default: bazel).
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 bazel=${BAZEL:-bazel}
-mode=${1:-census}
-[ "$#" -gt 0 ] && shift
 testdata=crates/tracedecay-sql/tests/testdata
 testlogs=$("$bazel" info bazel-testlogs 2>/dev/null)
 
@@ -34,47 +31,33 @@ copy_output() { # copy_output TARGET FILE
 }
 
 parity=//crates/tracedecay-sql:policy_parity
+census_targets=(
+  //crates/tracedecay-rusqlite-runtime/...
+  //crates/tracedecay-global-db/...
+  //crates/tracedecay-runtime-core/...
+  //crates/tracedecay-lcm/...
+  //crates/tracedecay-session-memory/...
+  //crates/tracedecay-session-temporal-store/...
+  //crates/tracedecay-sessions/...
+  //crates/tracedecay-query/...
+  //crates/tracedecay:storage_suite
+)
+status=0
+"$bazel" test --test_env=TD_SQL_CENSUS=1 \
+  --nozip_undeclared_test_outputs --keep_going "$@" "${census_targets[@]}" || status=$?
+[ "$status" -eq 0 ] || echo "sql-census: some census suites failed (exit $status); their statements up to the failure are kept" >&2
 
-case $mode in
-census)
-  census_targets=(
-    //crates/tracedecay-rusqlite-runtime/...
-    //crates/tracedecay-global-db/...
-    //crates/tracedecay-runtime-core/...
-    //crates/tracedecay-lcm/...
-    //crates/tracedecay-session-memory/...
-    //crates/tracedecay-session-temporal-store/...
-    //crates/tracedecay-sessions/...
-    //crates/tracedecay-query/...
-    //crates/tracedecay:storage_suite
-  )
-  status=0
-  "$bazel" test --test_env=TD_SQL_CENSUS=1 \
-    --nozip_undeclared_test_outputs --keep_going "$@" "${census_targets[@]}" || status=$?
-  [ "$status" -eq 0 ] || echo "sql-census: some census suites failed (exit $status); their statements up to the failure are kept" >&2
-
-  # Every tests/outputs dir under the census packages, then the sqlite_replay
-  # column and the policy verdicts, which the default-engine parity test
-  # computes.
-  dirs=$("$bazel" query "tests(set(${census_targets[*]}))" 2>/dev/null | while read -r target; do outputs "$target"; done)
-  {
-    printf 'capability\tsql\tsqlite_replay\n'
-    for dir in $dirs; do cat "$dir"/sql-census-*.tsv 2>/dev/null || true; done |
-      LC_ALL=C sort -u | sed 's/$/\tmissing/'
-  } >"$testdata/census.tsv"
-  "$bazel" test --nozip_undeclared_test_outputs "$@" "$parity" >/dev/null 2>&1 || true
-  copy_output "$parity" census.tsv
-  copy_output "$parity" policy.tsv
-  "$bazel" test "$@" "$parity"
-  ;;
-gaps)
-  "$bazel" test --config=native --nozip_undeclared_test_outputs "$@" "$parity" >/dev/null 2>&1 || true
-  copy_output "$parity" known_native_gaps.tsv
-  "$bazel" test --config=native "$@" "$parity"
-  ;;
-*)
-  echo "usage: $0 [census|gaps] [bazel test flags...]" >&2
-  exit 2
-  ;;
-esac
+# Every tests/outputs dir under the census packages, then the sqlite_replay
+# column and the policy verdicts, which the default-engine parity test
+# computes.
+dirs=$("$bazel" query "tests(set(${census_targets[*]}))" 2>/dev/null | while read -r target; do outputs "$target"; done)
+{
+  printf 'capability\tsql\tsqlite_replay\n'
+  for dir in $dirs; do cat "$dir"/sql-census-*.tsv 2>/dev/null || true; done |
+    LC_ALL=C sort -u | sed 's/$/\tmissing/'
+} >"$testdata/census.tsv"
+"$bazel" test --nozip_undeclared_test_outputs "$@" "$parity" >/dev/null 2>&1 || true
+copy_output "$parity" census.tsv
+copy_output "$parity" policy.tsv
+"$bazel" test "$@" "$parity"
 wc -l "$testdata"/*.tsv

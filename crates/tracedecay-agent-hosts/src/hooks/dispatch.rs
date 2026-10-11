@@ -152,13 +152,17 @@ pub fn publish_daemon_bindings(
         // first live callback initializes the shared host spool while holding
         // its writer lease, and sibling callbacks can exhaust their bounded
         // admission waits behind that cold filesystem work. A live callback
-        // already appending to a prepared spool is a legitimate peer writer,
-        // so publication waits the same bounded budget instead of failing.
+        // already appending to a prepared spool is a legitimate peer writer.
+        // Publication is not bound by the hook's synchronous budget, so like
+        // the replay drain it waits out that writer for at most its lease. A
+        // callback descheduled on a loaded host can hold the lease past the
+        // hook budget, and failing here fails the project open.
+        let config = tracedecay_hooks::HookSpoolConfigV1::stock(*host);
         let (capture, _) = tracedecay_hooks::HookSpoolV1::open_within(
             tracedecay_hooks::hook_v2_spool_root(&layout.data_root, *host),
-            tracedecay_hooks::HookSpoolConfigV1::stock(*host),
+            config,
             now,
-            tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+            config.writer_lease(),
         )
         .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(

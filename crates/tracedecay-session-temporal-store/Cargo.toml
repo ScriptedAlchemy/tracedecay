@@ -11,6 +11,7 @@ include = ["/src/**"]
 [features]
 # Exposes package-owned fixture constructors to dependent package tests only.
 test-helpers = [
+    "dep:futures-util",
     "tracedecay-graph-db/test-helpers",
     "tracedecay-runtime-core/test-helpers",
     "tracedecay-sessions/test-helpers",
@@ -22,6 +23,7 @@ test-transport = [
 ]
 
 [dependencies]
+futures-util = { version = "0.3.33", optional = true }
 getrandom = "0.2"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -43,6 +45,7 @@ tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 
 [dev-dependencies]
+futures-util = "0.3.33"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time", "test-util"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
@@ -51,4 +54,5 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpe
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", features = ["test-helpers"] }
+tracedecay-sql = { path = "../tracedecay-sql" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", features = ["test-helpers"] }

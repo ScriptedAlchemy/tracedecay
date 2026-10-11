@@ -5,6 +5,7 @@ use tracedecay_store::SessionRecord;
 const PROVIDER: &str = "claude";
 const TARGET_SESSION: &str = "target";
 const TOTAL_ROWS: i64 = 200_000;
+const SEED_CHUNK_ROWS: usize = 10_000;
 const PAGE_SIZE: usize = 512;
 
 fn session(session_id: &str) -> SessionRecord {
@@ -37,12 +38,15 @@ async fn seed_fixture(profile: &tempfile::TempDir) -> RegisteredGlobalDbTestRunt
         .begin_write_transaction()
         .await
         .expect("begin seed transaction");
-    transaction
-        .execute_batch(&format!(
-            "WITH RECURSIVE rows(value) AS (
-                 SELECT 0
+    // Each statement stays under the per-statement VM-operation budget.
+    for first in (0..TOTAL_ROWS).step_by(SEED_CHUNK_ROWS) {
+        let last = (first + SEED_CHUNK_ROWS as i64).min(TOTAL_ROWS) - 1;
+        transaction
+            .execute_batch(&format!(
+                "WITH RECURSIVE rows(value) AS (
+                 SELECT {first}
                  UNION ALL
-                 SELECT value + 1 FROM rows WHERE value < {}
+                 SELECT value + 1 FROM rows WHERE value < {last}
              )
              INSERT INTO lcm_raw_messages(
                  provider, message_id, session_id, role, timestamp, ordinal, content,
@@ -65,11 +69,11 @@ async fn seed_fixture(profile: &tempfile::TempDir) -> RegisteredGlobalDbTestRunt
                  NULL,
                  'hash',
                  'inline'
-             FROM rows;",
-            TOTAL_ROWS - 1
-        ))
-        .await
-        .expect("seed interleaved session activity");
+             FROM rows;"
+            ))
+            .await
+            .expect("seed interleaved session activity");
+    }
     transaction.commit().await.expect("commit seed rows");
     runtime
 }

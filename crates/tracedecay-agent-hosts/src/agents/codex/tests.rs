@@ -67,6 +67,11 @@ fn codex_plugin_mcp_pins_explorer_binary_and_plugin_relative_adapter() {
             "Codex does not expand ${{PLUGIN_ROOT}}; the adapter path must be plugin-relative"
         );
         assert_eq!(value["mcpServers"]["graph"]["command"], json!(bin));
+        assert_eq!(
+            value["mcpServers"]["graph"]["env"],
+            json!({ "TRACEDECAY_MCP_REPEAT_READ_POINTERS": "1" }),
+            "Codex runs one serve per thread, so repeat-read pointers are on"
+        );
     }
 }
 

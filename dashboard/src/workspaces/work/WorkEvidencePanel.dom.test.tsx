@@ -7,6 +7,7 @@ import { WorkGraphReadV1Schema, type WorkGraphReadV1 } from '../../contracts/gen
 import { workGraphRead } from '../../test/workGraphFixture.ts';
 import type { WorkResult } from './workApi.ts';
 import { WorkEvidencePanel } from './WorkEvidencePanel.tsx';
+import { applicationSuccess } from '../../test/applicationEnvelope.ts';
 
 const VERSION = {
   event_sequence: 12,
@@ -111,22 +112,6 @@ function payload(withContinuation: boolean) {
   };
 }
 
-function envelope(value: unknown) {
-  return {
-    kind: 'success',
-    value: {
-      scope: {
-        project_id: 'project.work',
-        repository_id: 'repository.work',
-        worktree_id: 'worktree.work',
-        reference: null,
-        scope_digest: 'sha256:scope',
-      },
-      outcome: { outcome: 'evidence', value: { payload: value } },
-    },
-  };
-}
-
 afterEach(() => vi.unstubAllGlobals());
 
 describe('selected task evidence', () => {
@@ -136,7 +121,7 @@ describe('selected task evidence', () => {
       'fetch',
       vi.fn(async (_url: string, init?: RequestInit) => {
         requests.push(JSON.parse(String(init?.body)));
-        return new Response(JSON.stringify(envelope(payload(requests.length === 1))), {
+        return new Response(JSON.stringify(applicationSuccess('operation.work.retrieve_evidence', payload(requests.length === 1))), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
@@ -187,7 +172,7 @@ describe('selected task evidence', () => {
       'fetch',
       vi.fn(async (_url: string, init?: RequestInit) => {
         requests.push(JSON.parse(String(init?.body)));
-        return new Response(JSON.stringify(envelope(payload(false))), {
+        return new Response(JSON.stringify(applicationSuccess('operation.work.retrieve_evidence', payload(false))), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });

@@ -227,9 +227,9 @@ mod runtime_configuration_cutover {
         ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationMutationEffectV1,
         ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
         ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationValueV1,
-        DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
-        INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, SOURCE_BINDINGS_SETTING_KEY,
-        SYNC_AUTO_WATCH_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
+        INDEX_EXCLUDE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+        SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY, ScopeSourceBinding, SettingKey,
+        SourceBindingId, SourceKindV1, TELEMETRY_TIMINGS_SETTING_KEY,
     };
     use tracedecay_domain::{AccessPolicyDigest, ActorId, ProjectId, UtcMicros};
 
@@ -464,8 +464,8 @@ mod runtime_configuration_cutover {
             layer: ConfigurationLayerIdV1::Project {
                 project_id: project_id.clone(),
             },
-            key: SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
-            value: Box::new(ConfigurationValueV1::Boolean(true)),
+            key: SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).unwrap(),
+            value: Box::new(ConfigurationValueV1::Boolean(false)),
         };
         let authority = ConfigurationMutationAuthority {
             receipt: ConfigurationMutationGrantReceiptV1::issue(
@@ -501,8 +501,8 @@ mod runtime_configuration_cutover {
         let current = runtime.client().current().await.unwrap();
         assert_eq!(current.revision_id(), &receipt.result_revision_id);
         assert_ne!(current.revision_id(), startup.revision_id());
-        assert!(!startup.config().diagnostics_prewarm);
-        assert!(current.config().diagnostics_prewarm);
+        assert!(startup.config().telemetry.timings);
+        assert!(!current.config().telemetry.timings);
         assert_eq!(runtime.configuration_target(), current.target());
     }
 
@@ -645,7 +645,7 @@ mod runtime_configuration_cutover {
         .into_parts();
         let (runtime, startup) =
             ProjectConfigurationRuntime::open(opened).expect("open project configuration runtime");
-        assert!(!config.diagnostics_prewarm);
+        assert!(config.telemetry.timings);
         assert_eq!(config.max_file_size, startup.config().max_file_size);
 
         let cached_reads = || {
@@ -666,7 +666,7 @@ mod runtime_configuration_cutover {
         );
         assert_eq!(dashboard_pin.config(), startup.config());
         assert_eq!(root_pin.revision_id(), startup.revision_id());
-        assert!(!root_pin.config().diagnostics_prewarm);
+        assert!(root_pin.config().telemetry.timings);
         assert_eq!(
             root_pin.config().sync.auto_watch,
             SyncConfig::default().auto_watch,
@@ -677,8 +677,8 @@ mod runtime_configuration_cutover {
             layer: ConfigurationLayerIdV1::Project {
                 project_id: project_id.clone(),
             },
-            key: SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
-            value: Box::new(ConfigurationValueV1::Boolean(true)),
+            key: SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).unwrap(),
+            value: Box::new(ConfigurationValueV1::Boolean(false)),
         };
         let authority = ConfigurationMutationAuthority {
             receipt: ConfigurationMutationGrantReceiptV1::issue(
@@ -716,15 +716,15 @@ mod runtime_configuration_cutover {
             .await
             .expect("read the committed revision");
         assert_eq!(current.revision_id(), &receipt.result_revision_id);
-        assert!(current.config().diagnostics_prewarm);
+        assert!(!current.config().telemetry.timings);
         tracedecay_configuration::config::publish_pinned_runtime_configuration(current)
             .expect("publish the committed revision to the runtime cache");
 
         let (root_pin, dashboard_pin) = cached_reads();
         assert_eq!(dashboard_pin.revision_id(), &receipt.result_revision_id);
-        assert!(dashboard_pin.config().diagnostics_prewarm);
+        assert!(!dashboard_pin.config().telemetry.timings);
         assert_eq!(root_pin.revision_id(), &receipt.result_revision_id);
-        assert!(root_pin.config().diagnostics_prewarm);
+        assert!(!root_pin.config().telemetry.timings);
         assert_eq!(
             root_pin.config().sync.auto_watch,
             SyncConfig::default().auto_watch,

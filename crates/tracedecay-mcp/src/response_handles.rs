@@ -17,10 +17,10 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 // `tracedecay_session_memory::response_handles`. This module wraps it with the
 // MCP telemetry counters and re-exports the record types so MCP callers import
 // the authority and its telemetry-wrapped operations from one path.
+pub use tracedecay_mcp_catalog::RESPONSE_RETRIEVE_TOOL;
 pub use tracedecay_session_memory::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, ResponseHandleError, ResponseHandleLookup, ResponseHandleRecord,
 };
-pub const RESPONSE_RETRIEVE_TOOL: &str = "tracedecay_retrieve";
 
 #[derive(Default)]
 struct ResponseHandleTelemetry {

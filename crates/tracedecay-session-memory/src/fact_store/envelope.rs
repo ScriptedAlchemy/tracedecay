@@ -64,6 +64,7 @@ pub(super) async fn project_memory_lookup_operation_receipt_tx(
         .query(
             "SELECT operation_kind, request_digest, fact_id, event_id, receipt_json
              FROM memory_v2_operation_receipts
+             INDEXED BY sqlite_autoindex_memory_v2_operation_receipts_1
              WHERE owner_kind = ?1
                AND project_id = ?2
                AND operation_id = ?3

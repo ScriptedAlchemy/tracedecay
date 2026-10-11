@@ -21,10 +21,7 @@ use crate::{
     typescript_module_resolution::reader,
 };
 
-const FIXTURE_ROOT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../tracedecay-code-extraction/fixtures/go-satisfaction"
-);
+const FIXTURE_ROOT: &str = "../tracedecay-code-extraction/fixtures/go-satisfaction";
 
 fn published() -> Arc<CodeIndexPublishedGenerationV1> {
     publish_fixture_tree(Path::new(FIXTURE_ROOT), "go-satisfaction")

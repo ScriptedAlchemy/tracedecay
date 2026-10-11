@@ -110,8 +110,8 @@ pub use doctor_health::{
 };
 pub use projection::{record_canonical_observation_effect, request_session_temporal_reset};
 pub use refresh::{
-    SessionRefreshBeginBatchOutcomeV1, SessionRefreshBeginPlanV1, SessionRefreshRecoveryV1,
-    SessionRefreshRestartStateV1,
+    SessionRefreshBeginBatchItemV1, SessionRefreshBeginBatchOutcomeV1, SessionRefreshBeginPlanV1,
+    SessionRefreshCompletionStage, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
 };
 pub use store::SessionTemporalStore;
 

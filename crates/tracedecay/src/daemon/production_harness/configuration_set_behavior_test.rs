@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use super::ProductionProjectCompositionHarnessV1;
 use super::journey_test_support::tool_answer;
 
-const SETTING_KEY: &str = "diagnostics.prewarm.v1";
+const SETTING_KEY: &str = "telemetry.timings.v1";
 const ACCEPTED_KEY: &str = "configuration.idempotency.mcp-configuration-set";
 
 fn initialize_project(project: &Path) {
@@ -286,7 +286,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
     assert_eq!(setting_payload(&before)["key"], SETTING_KEY);
     assert_eq!(
         setting_payload(&before)["effective_value"],
-        boolean_value(false)
+        boolean_value(true)
     );
     let project_id = before.payload["scope"]["project_id"]
         .as_str()
@@ -297,7 +297,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
     let accepted = set_arguments(
         layer.clone(),
         SETTING_KEY,
-        boolean_value(true),
+        boolean_value(false),
         &initial_revision,
         ACCEPTED_KEY,
     );
@@ -312,7 +312,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
     let committed_revision = assert_completed_effect(&written, ACCEPTED_KEY, &initial_revision);
     assert_read_is(
         &read_setting(&harness, &project).await,
-        true,
+        false,
         &committed_revision,
     );
 
@@ -336,7 +336,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
     );
     assert_read_is(
         &read_setting(&harness, &project).await,
-        true,
+        false,
         &committed_revision,
     );
 
@@ -347,7 +347,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
         set_arguments(
             layer.clone(),
             SETTING_KEY,
-            boolean_value(false),
+            boolean_value(true),
             &committed_revision,
             ACCEPTED_KEY,
         ),
@@ -356,7 +356,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
     assert_conflict(&same_key_changed_value);
     assert_read_is(
         &read_setting(&harness, &project).await,
-        true,
+        false,
         &committed_revision,
     );
 
@@ -367,7 +367,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
         set_arguments(
             layer.clone(),
             SETTING_KEY,
-            boolean_value(false),
+            boolean_value(true),
             &initial_revision,
             "configuration.idempotency.mcp-configuration-set-stale",
         ),
@@ -376,7 +376,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
     assert_conflict(&stale_revision);
     assert_read_is(
         &read_setting(&harness, &project).await,
-        true,
+        false,
         &committed_revision,
     );
 
@@ -387,7 +387,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
         set_arguments(
             layer.clone(),
             SETTING_KEY,
-            boolean_value(false),
+            boolean_value(true),
             &committed_revision,
             "configuration.idempotency.mcp-configuration-set-clear",
         ),
@@ -401,7 +401,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
     assert_ne!(cleared_revision, committed_revision);
     assert_read_is(
         &read_setting(&harness, &project).await,
-        false,
+        true,
         &cleared_revision,
     );
 
@@ -412,7 +412,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
         set_arguments(
             json!({"kind": "default"}),
             SETTING_KEY,
-            boolean_value(true),
+            boolean_value(false),
             &cleared_revision,
             "configuration.idempotency.mcp-configuration-set-wrong-layer",
         ),
@@ -468,7 +468,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
     );
     assert_read_is(
         &read_setting(&harness, &project).await,
-        false,
+        true,
         &cleared_revision,
     );
 
@@ -479,7 +479,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
         set_arguments(
             layer.clone(),
             "not.a.setting",
-            boolean_value(true),
+            boolean_value(false),
             &cleared_revision,
             "configuration.idempotency.mcp-configuration-set-unknown-key",
         ),
@@ -491,7 +491,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
     );
     assert_read_is(
         &read_setting(&harness, &project).await,
-        false,
+        true,
         &cleared_revision,
     );
 
@@ -510,11 +510,11 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
     .await;
     assert_invalid_request(
         &wrong_kind,
-        "The configuration request is invalid: setting value kind does not match diagnostics.prewarm.v1: expected Boolean, got Unsigned",
+        "The configuration request is invalid: setting value kind does not match telemetry.timings.v1: expected Boolean, got Unsigned",
     );
     assert_read_is(
         &read_setting(&harness, &project).await,
-        false,
+        true,
         &cleared_revision,
     );
 
@@ -525,7 +525,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
             json!({
                 "layer": project_layer(&project_id),
                 "key": SETTING_KEY,
-                "value": boolean_value(true),
+                "value": boolean_value(false),
                 "idempotency_key": "configuration.idempotency.mcp-configuration-set-malformed",
                 "format": "json",
             }),
@@ -548,7 +548,7 @@ async fn configuration_set_over_mcp_persists_the_boolean_replays_and_refuses_con
     assert_eq!(problem["retryable"], false);
     assert_read_is(
         &read_setting(&harness, &project).await,
-        false,
+        true,
         &cleared_revision,
     );
 

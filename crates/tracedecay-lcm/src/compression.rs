@@ -2493,9 +2493,11 @@ async fn next_ordinal(
 ) -> Result<i64, LcmError> {
     let mut rows = conn
         .query(
-            "SELECT COALESCE(MAX(ordinal), 0)
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND session_id = ?2",
+            "SELECT COALESCE((
+                SELECT MAX(ordinal)
+                FROM lcm_raw_messages
+                WHERE provider = ?1 AND session_id = ?2
+             ), 0)",
             params![provider, session_id],
         )
         .await?;

@@ -89,21 +89,37 @@ fn def_rw(name: &str, title: &str, description: &str, input_schema: Value) -> To
     }
 }
 
-/// Build a `ToolDefinition` with `readOnlyHint` AND `anthropic/alwaysLoad`.
-fn def_always_load(
-    name: &str,
-    title: &str,
-    description: &str,
-    input_schema: Value,
-) -> ToolDefinition {
-    ToolDefinition {
-        name: name.to_string(),
-        description: description.to_string(),
-        input_schema,
-        annotations: Some(read_only(title)),
-        meta: Some(json!({ "anthropic/alwaysLoad": true })),
-    }
-}
+/// `_meta` flag that keeps a tool's full schema loaded in hosts that defer the
+/// rest of the catalog, and that names the tools default `tracedecay serve`
+/// lists with full schemas rather than as stubs.
+pub const ALWAYS_LOAD_META: &str = "anthropic/alwaysLoad";
+
+/// The tool every truncated response tells the agent to call.
+pub const RESPONSE_RETRIEVE_TOOL: &str = "tracedecay_retrieve";
+
+/// The always-loaded tools: every tool with at least 100 recorded calls across
+/// local Claude Code and Codex transcripts (October 2026), the project and
+/// graph status reads, and [`RESPONSE_RETRIEVE_TOOL`].
+const ALWAYS_LOADED_TOOL_NAMES: &[&str] = &[
+    "tracedecay_active_project",
+    "tracedecay_callers",
+    "tracedecay_context",
+    "tracedecay_diff_context",
+    "tracedecay_fact_store_search",
+    "tracedecay_files",
+    "tracedecay_grep",
+    "tracedecay_lcm_grep",
+    "tracedecay_message_search",
+    "tracedecay_node",
+    RESPONSE_RETRIEVE_TOOL,
+    "tracedecay_search",
+    "tracedecay_source_body",
+    "tracedecay_source_lines",
+    "tracedecay_source_outline",
+    "tracedecay_status",
+    "tracedecay_storage_status",
+    "tracedecay_test_map",
+];
 
 fn object_schema(properties: Value) -> Value {
     let mut schema = json!({ "type": "object" });
@@ -293,6 +309,7 @@ fn build_search_cli_definition() -> Result<ToolDefinition, McpCatalogError> {
     ))
     .map_err(|error| McpCatalogError::Initialization(error.to_string()))?;
     let mut definition = def_search(canonical);
+    mark_if_always_loaded(&mut definition);
     project_input_schema(&mut definition.input_schema);
     let mut definitions = vec![definition];
     add_format_property(&mut definitions)?;
@@ -449,7 +466,28 @@ fn build_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     add_registered_project_selector_properties(&mut definitions);
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions)?;
+    mark_always_loaded(&mut definitions)?;
     Ok(definitions)
+}
+
+fn mark_always_loaded(definitions: &mut [ToolDefinition]) -> Result<(), McpCatalogError> {
+    if let Some(name) = ALWAYS_LOADED_TOOL_NAMES.iter().find(|name| {
+        definitions
+            .iter()
+            .all(|definition| definition.name != **name)
+    }) {
+        return Err(McpCatalogError::Initialization(format!(
+            "always-loaded tool {name} is not in the catalog"
+        )));
+    }
+    definitions.iter_mut().for_each(mark_if_always_loaded);
+    Ok(())
+}
+
+fn mark_if_always_loaded(definition: &mut ToolDefinition) {
+    if ALWAYS_LOADED_TOOL_NAMES.contains(&definition.name.as_str()) {
+        definition.meta = Some(json!({ ALWAYS_LOAD_META: true }));
+    }
 }
 
 pub(super) struct FamilyOperation {

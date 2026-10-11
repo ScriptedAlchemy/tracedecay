@@ -136,7 +136,7 @@ async fn resolve_materialized_occurrences(
                ON observation.observation_id = occurrence.source_observation_id
              WHERE occurrence.session_id = ?1
                AND +occurrence.generation <= ?2
-               AND occurrence.message_id IN (SELECT value FROM json_each(?3))
+               AND occurrence.message_id IN (SELECT CAST(value AS TEXT) FROM json_each(?3))
              ORDER BY occurrence.message_id, occurrence.retrieval_anchor_id",
             params![session_id, generation, encoded_ids],
         )
