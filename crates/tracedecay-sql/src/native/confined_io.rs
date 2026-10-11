@@ -76,33 +76,65 @@ impl ConfinedIo {
         }
     }
 
-    #[cfg_attr(not(td_engine = "native"), allow(dead_code))]
-    pub(crate) fn main(&self) -> &str {
-        &self.main
-    }
-
-    /// Fails when the main pathname no longer names the held file.
-    pub(crate) fn verify(&self) -> Result<()> {
-        if self.has_moved()? {
-            return Err(Error::Denied(
-                "native database pathname no longer identifies the held file".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn has_moved(&self) -> Result<bool> {
-        match path_identity(&self.main) {
-            Ok(identity) => Ok(identity != self.identity),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
-            Err(error) => Err(Error::InvalidOperation(format!(
-                "inspect native database path: {error}"
-            ))),
-        }
+    /// Fails when the pathname the engine opened no longer names the held
+    /// file, so the engine never opens its main file through a swapped name.
+    fn verify(&self) -> Result<()> {
+        verify_names(&self.main, self.identity)
     }
 
     fn held(&self) -> std::sync::MutexGuard<'_, Vec<File>> {
         self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// One handle's pathname, bound to the file it named when the handle opened.
+/// An engine is shared by every in-process name of its file, so each handle
+/// checks its own name: a handle on a name renamed away is refused, while a
+/// handle opened under the file's current name keeps serving.
+#[derive(Clone)]
+pub(crate) struct Fence {
+    name: Arc<str>,
+    identity: FileIdentity,
+}
+
+impl Fence {
+    pub(crate) fn new(name: &str, identity: FileIdentity) -> Self {
+        Self {
+            name: name.into(),
+            identity,
+        }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Fails when this handle's pathname no longer names the held file.
+    pub(crate) fn verify(&self) -> Result<()> {
+        verify_names(&self.name, self.identity)
+    }
+
+    pub(crate) fn has_moved(&self) -> Result<bool> {
+        has_moved(&self.name, self.identity)
+    }
+}
+
+fn verify_names(path: &str, identity: FileIdentity) -> Result<()> {
+    if has_moved(path, identity)? {
+        return Err(Error::Denied(
+            "native database pathname no longer identifies the held file".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn has_moved(path: &str, identity: FileIdentity) -> Result<bool> {
+    match path_identity(path) {
+        Ok(current) => Ok(current != identity),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(Error::InvalidOperation(format!(
+            "inspect native database path: {error}"
+        ))),
     }
 }
 

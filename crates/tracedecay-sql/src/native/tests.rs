@@ -717,6 +717,53 @@ fn identity_fence_rejects_replacement_and_unlink_recreate() {
     ));
 }
 
+/// Catches an engine fenced on the first name it was opened by: a handle on
+/// that name outlives a rename, the file is reopened under its new name, and
+/// every statement on the new handle is refused because the old name is gone.
+/// The renamed-away handle and a replaced name must still be refused.
+#[test]
+fn identity_fence_follows_each_handles_own_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let staging = directory.path().join("staging.tdb");
+    let published = directory.path().join("published.tdb");
+    let guard = execution_guard();
+    let outliving = Database::open(&staging).unwrap();
+    outliving
+        .connect(Access::Writer)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE entries(body TEXT); INSERT INTO entries VALUES('staged');",
+            &guard,
+        )
+        .unwrap();
+    std::fs::rename(&staging, &published).unwrap();
+
+    let reopened = Database::open(&published).unwrap();
+    let mut reader = reopened.connect(Access::Reader).unwrap();
+    assert_eq!(
+        reader
+            .query("SELECT body FROM entries", &[], &guard)
+            .unwrap()
+            .values,
+        vec![vec![Value::Text("staged".to_owned())]],
+        "the handle opened under the file's current name must serve it"
+    );
+    assert!(
+        matches!(outliving.connect(Access::Reader), Err(Error::Denied(_))),
+        "the handle whose name was renamed away must be refused"
+    );
+
+    std::fs::rename(&published, directory.path().join("retired.tdb")).unwrap();
+    std::fs::write(&published, b"replacement").unwrap();
+    assert!(
+        matches!(
+            reader.query("SELECT body FROM entries", &[], &guard),
+            Err(Error::Denied(_))
+        ),
+        "a handle whose name now names another file must be refused"
+    );
+}
+
 /// (voluntary context switches, CPU clock ticks) of the calling thread.
 #[cfg(target_os = "linux")]
 fn thread_scheduling() -> (u64, u64) {

@@ -16,7 +16,7 @@ use turso_parser::ast::Cmd;
 
 use super::{
     Error, Result, Rows, Value,
-    confined_io::{self, ConfinedIo},
+    confined_io::{self, ConfinedIo, Fence},
     policy,
 };
 use crate::{Capability, FileIdentity, PROGRESS_INTERVAL_OPS};
@@ -185,7 +185,7 @@ impl ExecutionGuard {
 /// Scopes stack; every guard on the stack is checked.
 struct GuardSlot {
     state: Mutex<SlotState>,
-    confined: Option<Arc<ConfinedIo>>,
+    fence: Option<Fence>,
 }
 
 #[derive(Default)]
@@ -221,7 +221,7 @@ impl GuardSlot {
             state.guards.clone()
         };
         guards.iter().try_for_each(verify)?;
-        self.confined.as_ref().map_or(Ok(()), |io| io.verify())
+        self.fence.as_ref().map_or(Ok(()), Fence::verify)
     }
 
     /// Admits a statement about to start: its budget restarts and the guards
@@ -274,6 +274,8 @@ impl GuardSlot {
 #[derive(Clone)]
 pub struct Database {
     shared: Arc<Shared>,
+    /// The name this handle opened; `None` in memory.
+    fence: Option<Fence>,
 }
 
 struct Shared {
@@ -335,7 +337,7 @@ impl Database {
             let mut live = lock(&slot.live);
             if let Some(shared) = live.upgrade() {
                 drop(live);
-                return Self { shared }.shared_for(writable);
+                return Self::share(shared, text, identity, writable);
             }
             let (file, held) = open()?;
             if held == identity {
@@ -352,9 +354,32 @@ impl Database {
             // ponytail: the path was renamed onto a live store between stat
             // and open. Closing this descriptor would drop that store's lock.
             std::mem::forget(file);
-            return Self { shared }.shared_for(writable);
+            return Self::share(shared, text, identity, writable);
         }
         Self::start(&slot, &mut live, file, identity, text, writable)
+    }
+
+    /// A new handle on a live engine, fenced on the name it was opened by.
+    fn share(
+        shared: Arc<Shared>,
+        text: &str,
+        identity: FileIdentity,
+        writable: bool,
+    ) -> Result<Self> {
+        let read_only = shared
+            .engine
+            .as_ref()
+            .and_then(|engine| engine.confined.as_ref())
+            .is_some_and(|io| io.is_read_only());
+        if writable && read_only {
+            return Err(Error::InvalidOperation(
+                "native database is open read-only in this process".to_owned(),
+            ));
+        }
+        Ok(Self {
+            shared,
+            fence: Some(Fence::new(text, identity)),
+        })
     }
 
     /// Starts the engine for a file no instance in this process holds, under
@@ -389,25 +414,12 @@ impl Database {
                 }),
                 checkpointed: Mutex::default(),
             }),
+            fence: Some(Fence::new(text, identity)),
         };
         database.admit_format(header)?;
         let _ = database.shared.slot.set(Arc::clone(slot));
         *live = Arc::downgrade(&database.shared);
         Ok(database)
-    }
-
-    fn shared_for(self, writable: bool) -> Result<Self> {
-        let read_only = self
-            .engine()
-            .confined
-            .as_ref()
-            .is_some_and(|io| io.is_read_only());
-        if writable && read_only {
-            return Err(Error::InvalidOperation(
-                "native database is open read-only in this process".to_owned(),
-            ));
-        }
-        Ok(self)
     }
 
     fn open_memory() -> Result<Self> {
@@ -427,6 +439,7 @@ impl Database {
                 }),
                 checkpointed: Mutex::default(),
             }),
+            fence: None,
         })
     }
 
@@ -464,16 +477,13 @@ impl Database {
             .expect("the engine lives until the last handle drops")
     }
 
-    /// The canonical path of a file store; `None` in memory.
+    /// The canonical path this handle opened; `None` in memory.
     pub(crate) fn path(&self) -> Option<&str> {
-        self.engine().confined.as_ref().map(|io| io.main())
+        self.fence.as_ref().map(Fence::name)
     }
 
     pub(crate) fn file_has_moved(&self) -> Result<bool> {
-        self.engine()
-            .confined
-            .as_ref()
-            .map_or(Ok(false), |io| io.has_moved())
+        self.fence.as_ref().map_or(Ok(false), Fence::has_moved)
     }
 
     pub fn connect(&self, access: Access) -> Result<Connection> {
@@ -486,8 +496,8 @@ impl Database {
         read_only: bool,
     ) -> Result<Connection> {
         let engine = self.engine();
-        if let Some(confined) = &engine.confined {
-            confined.verify()?;
+        if let Some(fence) = &self.fence {
+            fence.verify()?;
         }
         let inner = engine.database.connect()?;
         inner.set_foreign_keys_enabled(true);
@@ -502,7 +512,7 @@ impl Database {
         inner.set_temp_store(turso_core::TempStore::Memory);
         let guard = Arc::new(GuardSlot {
             state: Mutex::default(),
-            confined: engine.confined.clone(),
+            fence: self.fence.clone(),
         });
         let progress = Arc::clone(&guard);
         inner.set_progress_handler(

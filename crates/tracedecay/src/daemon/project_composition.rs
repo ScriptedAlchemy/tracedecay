@@ -6,7 +6,9 @@
 
 use super::*;
 #[cfg(any(test, feature = "test-helpers"))]
-use crate::test_support::hold_after_core_publish_for_test;
+use crate::test_support::{
+    hold_after_core_publish_for_test, hold_after_independent_owners_for_test,
+};
 use tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner;
 use tracedecay_agent_hosts::hooks::hook_project_id_for_layout;
 use tracedecay_code_index_runtime::code_index_scheduler;
@@ -401,7 +403,7 @@ pub(super) async fn production_project_server(
     let (resolved, inserted) = match composed {
         Ok(composed) => composed,
         Err(error) => {
-            inputs.retire_failed_open_scout_owner(&opened.cg).await;
+            inputs.retire_failed_open_process_owners(&opened.cg).await;
             return Err(error);
         }
     };
@@ -636,12 +638,19 @@ impl ProjectOpenInputs<'_> {
         log_project_open_phase(self.canonical_project_path, phase, detail, since);
     }
 
-    /// Opening the graph started the process-global Context Scout owner, which
-    /// holds that graph's `Database`. A failed open leaves no server to retire
-    /// it, and while registered its lease keeps the store runtime from ever
-    /// closing, so its WAL is never truncated. An owner that another published
-    /// server over the same database still serves stays registered.
-    async fn retire_failed_open_scout_owner(&self, cg: &tracedecay_project::project::TraceDecay) {
+    /// A failed open leaves no published server for teardown to find, so it
+    /// releases the process-global owners it started itself: the Context Scout
+    /// owner holding the graph's `Database` (started by the graph open) and
+    /// the Hook V2 replay consumer holding the project session store lease
+    /// (started by production owner registration). While either stays
+    /// registered its lease keeps the store runtime from ever closing, so its
+    /// WAL is never truncated. Owners that another published server over the
+    /// same database still serves stay registered. Both releases are no-ops
+    /// when nothing is registered.
+    async fn retire_failed_open_process_owners(
+        &self,
+        cg: &tracedecay_project::project::TraceDecay,
+    ) {
         let graph_db_path = cg.db().canonical_database_path();
         let served = self
             .store_administration
@@ -651,7 +660,14 @@ impl ProjectOpenInputs<'_> {
             .servers
             .keys()
             .any(|key| same_canonical_path(&key.owner.graph_db_path, graph_db_path));
-        if !served && let Some(project_id) = hook_project_id_for_layout(cg.hook_store_layout()) {
+        if served {
+            return;
+        }
+        super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(
+            &cg.hook_store_layout().data_root,
+        )
+        .await;
+        if let Some(project_id) = hook_project_id_for_layout(cg.hook_store_layout()) {
             unregister_registered_context_scout_owner(project_id, graph_db_path);
         }
     }
@@ -750,7 +766,7 @@ impl ProjectOpenInputs<'_> {
         );
         let opened = self.admit_opened_graph(route, Arc::clone(&cg)).await;
         if opened.is_err() {
-            self.retire_failed_open_scout_owner(&cg).await;
+            self.retire_failed_open_process_owners(&cg).await;
         }
         opened
     }
@@ -1523,6 +1539,10 @@ impl ProjectOpenInputs<'_> {
                 )
                 .await?;
                 self.log_phase("independent_owners_registered", None, full_setup_started);
+                #[cfg(any(test, feature = "test-helpers"))]
+                {
+                    Box::pin(hold_after_independent_owners_for_test(self.cancellation)).await?;
+                }
                 project_open_cancellation_checkpoint(self.cancellation)?;
                 project_open_owners::register_project_open_dependent_owners(
                     self.invocation,
