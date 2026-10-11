@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rusqlite::{Connection, Savepoint, Transaction, TransactionBehavior};
+use tracedecay_sql::{Connection, Savepoint, Transaction, TransactionBehavior, TransactionControl};
 use tracedecay_store::{
     RuntimeCancellationStageV1, RuntimeSubmitOutcomeV1, StorageRuntimeErrorV1,
     StoreCommitReceiptV1, StoreRuntimeBindingV1, UnavailableReasonV1,
@@ -15,7 +15,6 @@ use tracedecay_store::{
 use crate::{
     RuntimeWriteAuthorityStage, StorageOperationExecutor,
     admission::QueueItem,
-    connection,
     persistence::RuntimeWriterPersistence,
     telemetry::{
         LockWorkScope, WriterBatchMetrics, WriterLockWorkSnapshot, WriterTelemetry,
@@ -125,12 +124,12 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
     let mut fatal = None;
     for item in items.by_ref() {
         let probe = Arc::clone(&item.probe);
-        let processed = connection::with_transaction_progress_cancellation(
-            &mut transaction,
-            move || probe.interruption().is_some(),
-            |transaction| process_request(transaction, binding, item, persistence),
-        )
-        .expect("install request-local SQLite progress handler");
+        let processed = transaction
+            .guard_scope_mut(
+                move || probe.interruption().is_some(),
+                |transaction| process_request(transaction, binding, item, persistence),
+            )
+            .expect("install request-local progress guard");
         fatal = processed.fatal;
         prepared.push(processed.prepared);
         if fatal.is_some() {
@@ -227,6 +226,8 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
     let has_pending_writes = prepared
         .iter()
         .any(|request| matches!(request.result, PreparedResult::AwaitingTransactionCommit(_)));
+    // COMMIT runs outside every request guard: no progress handler can
+    // interrupt it once it is stepped.
     let match_result = if has_pending_writes {
         let _span = tracing::trace_span!("rusqlite.commit").entered();
         transaction.commit()
@@ -238,14 +239,11 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
     let commit_failure = match match_result {
         Err(error) => {
             persistence.transaction_rolled_back(schema_was_ready);
-            Some(driver_failure(
-                error,
-                if has_pending_writes {
-                    "commit writer transaction"
-                } else {
-                    "roll back writer transaction without pending writes"
-                },
-            ))
+            Some(if has_pending_writes {
+                DriverFailure::CommitUnknown
+            } else {
+                driver_failure(error, "roll back writer transaction without pending writes")
+            })
         }
         Ok(()) => match publish_committed(&prepared, watermark_publisher) {
             Ok(()) => None,
@@ -470,7 +468,7 @@ fn settle_batch_failure(
 ) {
     match failure {
         DriverFailure::Busy => telemetry.busy(),
-        DriverFailure::Error(_) => telemetry.error(),
+        DriverFailure::CommitUnknown | DriverFailure::Error(_) => telemetry.error(),
     }
     for item in items {
         let result = failure.result(&item.request);
@@ -642,7 +640,7 @@ fn record_transaction(
 fn transaction_outcome(failure: &DriverFailure) -> WriterTransactionOutcome {
     match failure {
         DriverFailure::Busy => WriterTransactionOutcome::Busy,
-        DriverFailure::Error(_) => WriterTransactionOutcome::Error,
+        DriverFailure::CommitUnknown | DriverFailure::Error(_) => WriterTransactionOutcome::Error,
     }
 }
 

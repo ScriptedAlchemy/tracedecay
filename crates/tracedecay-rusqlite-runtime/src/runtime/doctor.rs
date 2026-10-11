@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-use rusqlite::{Connection, OptionalExtension, types::Type};
+use tracedecay_sql::{CheckpointMode, Connection, ConnectionControl};
 use tracedecay_store::StoreRuntimeBindingV1;
 
 use crate::{
@@ -38,7 +38,7 @@ pub struct DoctorHealthSnapshot {
 #[derive(Debug)]
 pub struct DoctorHealthError {
     stage: &'static str,
-    source: rusqlite::Error,
+    source: tracedecay_sql::Error,
 }
 
 impl fmt::Display for DoctorHealthError {
@@ -124,7 +124,7 @@ fn integrity_rows(
     let messages = statement
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(|source| DoctorHealthError { stage, source })?
-        .collect::<rusqlite::Result<Vec<_>>>()
+        .collect::<tracedecay_sql::Result<Vec<_>>>()
         .map_err(|source| DoctorHealthError { stage, source })?;
     if messages.len() == 1 && messages[0].eq_ignore_ascii_case("ok") {
         Ok(IntegrityResult::Healthy)
@@ -148,36 +148,24 @@ fn wal_health(connection: &Connection) -> Result<WalHealth, DoctorHealthError> {
             checkpointed_frames: 0,
         });
     }
-    let row = connection
-        .query_row("PRAGMA wal_checkpoint(NOOP)", [], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })
-        .optional()
-        .map_err(|source| DoctorHealthError {
-            stage: "wal state",
-            source,
-        })?
-        .ok_or(rusqlite::Error::QueryReturnedNoRows)
+    let outcome = connection
+        .checkpoint(CheckpointMode::Noop)
         .map_err(|source| DoctorHealthError {
             stage: "wal state",
             source,
         })?;
     Ok(WalHealth {
         enabled: true,
-        busy: row.0 != 0,
-        log_frames: nonnegative(row.1, 1)?,
-        checkpointed_frames: nonnegative(row.2, 2)?,
+        busy: outcome.busy,
+        log_frames: nonnegative(outcome.log_frames, 1)?,
+        checkpointed_frames: nonnegative(outcome.checkpointed_frames, 2)?,
     })
 }
 
 fn nonnegative(value: i64, column: usize) -> Result<u64, DoctorHealthError> {
-    u64::try_from(value).map_err(|error| DoctorHealthError {
+    u64::try_from(value).map_err(|_| DoctorHealthError {
         stage: "wal state",
-        source: rusqlite::Error::FromSqlConversionFailure(column, Type::Integer, Box::new(error)),
+        source: tracedecay_sql::Error::IntegralValueOutOfRange(column, value),
     })
 }
 

@@ -3,9 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rusqlite::Savepoint;
 use tempfile::TempDir;
 use tracedecay_domain::LocatorDigest;
+use tracedecay_sql::Savepoint;
 use tracedecay_store::{
     AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
     StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
@@ -103,7 +103,7 @@ impl StorageOperationExecutor for NoWrites {
         &mut self,
         _savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         Ok(())
     }
 }
@@ -114,7 +114,7 @@ struct NoReads;
 impl ReaderQueryExecutor for NoReads {
     fn execute_read(
         &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
+        _snapshot: &tracedecay_sql::Transaction<'_>,
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
         unreachable!("exact SQL queries bypass the closed product read executor")
@@ -151,7 +151,7 @@ fn locator(binding: &StoreRuntimeBindingV1, byte: char) -> VerifiedStoreLocatorV
 fn fixture(writer_digest: char, reader_digest: char) -> Fixture {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("exact-sql.sqlite3");
-    rusqlite::Connection::open(&path).unwrap();
+    tracedecay_sql::Connection::open(&path).unwrap();
     let path = path.canonicalize().unwrap();
     let binding = binding();
     let writer = PersistentWriter::start(

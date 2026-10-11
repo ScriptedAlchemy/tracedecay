@@ -104,7 +104,7 @@ fn memory_release_reaches_workers_inside_retained_snapshots() {
 fn closed_reader_pool_reports_typed_memory_release_noop() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("closed-pool.sqlite3");
-    rusqlite::Connection::open(&path).unwrap();
+    tracedecay_sql::Connection::open(&path).unwrap();
     let path = path.canonicalize().unwrap();
     let binding = binding();
     let readers = ReaderPool::start(

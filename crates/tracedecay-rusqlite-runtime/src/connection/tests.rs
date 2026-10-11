@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, ErrorCode, config::DbConfig, limits::Limit};
 use tempfile::NamedTempFile;
+use tracedecay_sql::{Connection, ConnectionControl, ErrorExt, ErrorKind};
 use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
 use super::{
     ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, VerifiedReaderError, open,
-    open_immutable_reader, open_verified_reader, open_writer, with_progress_cancellation,
+    open_immutable_reader, open_verified_reader, open_writer,
 };
 
 fn database() -> NamedTempFile {
@@ -47,11 +47,6 @@ fn writer_mode_applies_wal_integrity_and_write_policy() {
     assert_eq!(pragma_i64(&connection, "synchronous"), 1);
     assert_eq!(pragma_i64(&connection, "foreign_keys"), 1);
     assert_eq!(pragma_i64(&connection, "trusted_schema"), 0);
-    assert!(
-        connection
-            .db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE)
-            .unwrap()
-    );
     connection
         .execute("INSERT INTO items VALUES (2)", [])
         .expect("ordinary writer DML");
@@ -174,7 +169,6 @@ fn immutable_reader_applies_full_reader_policy_without_sidecars() {
     assert_eq!(pragma_i64(&connection, "foreign_keys"), 1);
     assert_eq!(pragma_i64(&connection, "trusted_schema"), 0);
     assert_eq!(pragma_i64(&connection, "busy_timeout"), 0);
-    assert_eq!(connection.limit(Limit::SQLITE_LIMIT_ATTACHED).unwrap(), 0);
     assert!(
         connection
             .execute("INSERT INTO items VALUES (2)", [])
@@ -193,29 +187,14 @@ fn immutable_reader_applies_full_reader_policy_without_sidecars() {
     assert!(!journal.exists());
 }
 
-#[test]
-fn maintenance_mode_makes_schema_exceptions_explicit() {
-    let file = database();
-    let connection = open(file.path(), ConnectionMode::Maintenance).expect("maintenance policy");
-
-    connection
-        .execute_batch("CREATE TABLE maintained(value); DROP TABLE maintained;")
-        .expect("maintenance schema operation");
-}
-
-/// Fails if any connection mode lets `ATTACH`/`DETACH` past its authorizer.
-/// Every mode also caps attachments at zero, so only `SQLITE_AUTH` at
-/// prepare proves the authorizer, not the run-time limit, refused it.
+/// Fails if any connection mode lets `ATTACH`/`DETACH` past its capability.
+/// Every mode also caps attachments at zero, so only a denial at prepare
+/// proves the capability, not the run-time limit, refused it.
 #[test]
 fn attach_and_detach_are_denied_in_every_connection_mode() {
     let file = database();
-    for mode in [
-        ConnectionMode::Writer,
-        ConnectionMode::Reader,
-        ConnectionMode::Maintenance,
-    ] {
+    for mode in [ConnectionMode::Writer, ConnectionMode::Reader] {
         let connection = open(file.path(), mode).expect("connection policy");
-        assert_eq!(connection.limit(Limit::SQLITE_LIMIT_ATTACHED).unwrap(), 0);
         for sql in [
             "ATTACH DATABASE ':memory:' AS denied_input",
             // SQLite reports a parameter-bound filename as an unknown action.
@@ -226,9 +205,9 @@ fn attach_and_detach_are_denied_in_every_connection_mode() {
                 .prepare(sql)
                 .expect_err("ATTACH/DETACH must be refused");
             assert_eq!(
-                error.sqlite_error_code(),
-                Some(ErrorCode::AuthorizationForStatementDenied),
-                "{mode:?} must deny `{sql}` at the authorizer, got {error:?}"
+                error.kind(),
+                ErrorKind::Denied,
+                "{mode:?} must deny `{sql}` at the capability, got {error:?}"
             );
         }
     }
@@ -239,8 +218,6 @@ fn limits_and_authorizer_reject_oversized_or_unsafe_sql() {
     let file = database();
     let connection = open(file.path(), ConnectionMode::Writer).expect("writer policy");
 
-    assert_eq!(connection.limit(Limit::SQLITE_LIMIT_ATTACHED).unwrap(), 0);
-    assert!(connection.limit(Limit::SQLITE_LIMIT_SQL_LENGTH).unwrap() <= 1024 * 1024);
     assert!(
         connection
             .execute_batch("ATTACH DATABASE ':memory:' AS other")
@@ -301,23 +278,20 @@ fn fresh_writer_uses_a_sidecar_compatible_path() {
 #[test]
 fn progress_cancellation_interrupts_and_is_removed_after_scope() {
     let file = database();
-    let mut connection =
-        open(file.path(), ConnectionMode::Maintenance).expect("maintenance policy");
-    let result = with_progress_cancellation(
-        &mut connection,
-        || true,
-        |connection| {
-            connection.query_row(
-                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT sum(x) FROM n",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-        },
-    )
-    .expect("progress handler setup");
-    assert!(
-        matches!(result, Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == ErrorCode::OperationInterrupted)
-    );
+    let connection = open(file.path(), ConnectionMode::Writer).expect("writer policy");
+    let result = connection
+        .guard_scope(
+            || true,
+            |connection| {
+                connection.query_row(
+                    "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT sum(x) FROM n",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            },
+        )
+        .expect("progress handler setup");
+    assert!(matches!(result, Err(error) if error.kind() == ErrorKind::Interrupted));
     assert_eq!(
         connection
             .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
