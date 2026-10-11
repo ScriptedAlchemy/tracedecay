@@ -980,7 +980,8 @@ fn rewrite_active_text_artifact_format_revision(store_root: &Path, revision: u64
         .join("code-text-artifacts-v1")
         .join(&descriptor.artifact_file);
     {
-        let connection = rusqlite::Connection::open(&old_path).expect("open published artifact");
+        let connection =
+            tracedecay_sql::Connection::open(&old_path).expect("open published artifact");
         let revision = i64::try_from(revision).expect("artifact revision fits SQLite INTEGER");
         assert_eq!(
             connection

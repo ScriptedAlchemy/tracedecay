@@ -958,7 +958,7 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
     );
     assert!(observation.resources.peak_scratch_memory_bytes.is_some());
     let artifact_path = active_text_artifact_path(store.path());
-    let revision: u32 = rusqlite::Connection::open(&artifact_path)
+    let revision: u32 = tracedecay_sql::Connection::open(&artifact_path)
         .expect("open sealed artifact")
         .query_row(
             "SELECT format_revision FROM artifact_state WHERE singleton = 1",
@@ -984,7 +984,8 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
     .expect("the current artifact revision opens");
     let previous = i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1) - 1;
     {
-        let connection = rusqlite::Connection::open(&artifact_path).expect("open sealed artifact");
+        let connection =
+            tracedecay_sql::Connection::open(&artifact_path).expect("open sealed artifact");
         assert_eq!(
             connection
                 .execute(
@@ -1857,7 +1858,7 @@ fn incompatible_partial_text_artifact_is_discarded_and_rebuilt() {
         .expect("partial staging database");
     {
         let connection =
-            rusqlite::Connection::open(&staging_path).expect("open partial staging database");
+            tracedecay_sql::Connection::open(&staging_path).expect("open partial staging database");
         assert_eq!(
             connection
                 .execute(
@@ -1934,7 +1935,7 @@ fn invalid_partial_text_artifact_cursor_is_discarded_and_rebuilt() {
         .expect("partial staging database");
     {
         let connection =
-            rusqlite::Connection::open(&staging_path).expect("open partial staging database");
+            tracedecay_sql::Connection::open(&staging_path).expect("open partial staging database");
         let cursor_bytes: Vec<u8> = connection
             .query_row(
                 "SELECT next_cursor FROM source_page_cursors ORDER BY page_ordinal DESC LIMIT 1",

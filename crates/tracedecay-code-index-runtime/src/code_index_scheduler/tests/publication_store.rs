@@ -3358,7 +3358,7 @@ fn completed_text_artifacts(root: &Path) -> BTreeSet<String> {
 
 /// The content metadata an artifact stores, which lists its logical paths.
 fn artifact_content_metadata(path: &Path) -> String {
-    let metadata: Vec<u8> = rusqlite::Connection::open(path)
+    let metadata: Vec<u8> = tracedecay_sql::Connection::open(path)
         .expect("open artifact")
         .query_row(
             "SELECT metadata FROM artifact_state WHERE singleton = 1",

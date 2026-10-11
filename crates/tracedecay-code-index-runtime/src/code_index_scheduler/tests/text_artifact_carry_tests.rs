@@ -88,10 +88,13 @@ fn page_count(artifact: &[u8]) -> i64 {
     let copy = TempDir::new().expect("artifact copy");
     let path = copy.path().join("artifact.sqlite");
     std::fs::write(&path, artifact).expect("copy the artifact");
-    rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .expect("open the artifact copy")
-        .query_row("SELECT COUNT(*) FROM source_pages", [], |row| row.get(0))
-        .expect("count source pages")
+    tracedecay_sql::Connection::open_with_flags(
+        &path,
+        tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open the artifact copy")
+    .query_row("SELECT COUNT(*) FROM source_pages", [], |row| row.get(0))
+    .expect("count source pages")
 }
 
 fn segment_files(store: &Path) -> BTreeSet<PathBuf> {
