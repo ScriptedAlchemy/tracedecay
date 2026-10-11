@@ -471,10 +471,10 @@ impl SessionTemporalRefreshWakeState {
                 SessionHistoricalServingState::Pending
             }
             SessionHistoricalIngestOutcome::Retryable { reason_code, .. } => {
-                SessionHistoricalServingState::Retryable(reason_code.to_owned())
+                SessionHistoricalServingState::Retryable(reason_code)
             }
             SessionHistoricalIngestOutcome::Blocked { reason_code, .. } => {
-                SessionHistoricalServingState::Blocked(reason_code.to_owned())
+                SessionHistoricalServingState::Blocked(reason_code)
             }
             SessionHistoricalIngestOutcome::Cancelled => return,
         };
@@ -1118,7 +1118,7 @@ mod tests {
         let state = SessionTemporalRefreshWakeState::default();
         assert!(!state.history_is_blocked());
         state.record_history_outcome(SessionHistoricalIngestOutcome::Blocked {
-            reason_code: "transcript_source_contract_invalid",
+            reason_code: "transcript_source_contract_invalid".to_owned(),
             made_progress: false,
         });
         assert!(state.history_is_blocked());

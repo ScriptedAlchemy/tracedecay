@@ -24,8 +24,8 @@ use crate::graph_projection::schema::SYMBOL_LABEL;
 use crate::graph_projection::warm_clock::WarmOwner;
 use crate::graph_projection::{
     CODE_GRAPH_PROJECTOR_REVISION, CodeGraphCatalogReleaseV1, CodeGraphProjectionError,
-    CodeGraphProjectionStore, CodeGraphReadCostMeter, CodeGraphServingWarmthV1,
-    CodeGraphSymbolSummaryV1, build_code_graph_manifest_inputs_checked,
+    CodeGraphProjectionStore, CodeGraphReadCostMeter, CodeGraphReadinessRequirement,
+    CodeGraphServingWarmthV1, CodeGraphSymbolSummaryV1, build_code_graph_manifest_inputs_checked,
     code_graph_projection_identity, current_generation_entity, has_label,
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
@@ -1297,8 +1297,12 @@ fn a_release_answers_busy_while_a_reader_holds_the_catalog() {
 fn catalog_admission_retains_a_catalog_that_warms_after_the_wait() {
     let store = store_for(production_manifest());
     let retain = store
-        .await_catalog_and_retain(Duration::from_secs(5))
-        .expect("cold admission has no released warm to wait for");
+        .await_rewarm_and_retain_for(
+            Duration::from_secs(5),
+            CodeGraphReadinessRequirement::Catalog,
+        )
+        .expect("cold admission has no released warm to wait for")
+        .expect("catalog reads retain their catalog");
     store
         .warm_interactive_catalog_with_cancellation(None, request())
         .expect("the concurrent first warm finishes before the reader opens");

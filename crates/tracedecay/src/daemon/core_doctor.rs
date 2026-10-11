@@ -602,6 +602,33 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
     .await
 }
 
+async fn project_open_status_response(
+    handshake: &DaemonHandshake,
+    store_administration: &super::StoreAdministration,
+    project_open: &ProjectOpenStatusV1,
+    stalled_failure: Option<&super::ProjectOpenFailure>,
+    id: serde_json::Value,
+) -> Result<JsonRpcResponse> {
+    if project_open.state == ProjectOpenStatusStateV1::Stalled {
+        let error = stalled_failure.map_or_else(
+            || super::stalled_project_open_error(project_open),
+            super::ProjectOpenFailure::to_error,
+        );
+        return Ok(super::project_open_handshake::project_open_error_response(
+            id, &error,
+        ));
+    }
+    let reset_required_stores = Box::pin(store_administration.session_runtime_registry())
+        .await?
+        .reset_required_stores();
+    let result = doctor_runtime_tool_result(project_open_status_value(
+        handshake,
+        project_open,
+        &reset_required_stores,
+    ));
+    Ok(JsonRpcResponse::success(id, result))
+}
+
 /// Serve a Doctor runtime request from the daemon core while the routed
 /// project owner has not published its Doctor report. Both broker paths share
 /// this route; only the cached-server fetch differs, so the caller supplies it
@@ -627,32 +654,30 @@ where
         && let Some(project_open) = status.project_open.as_ref()
         && project_open.state != ProjectOpenStatusStateV1::Completed
     {
-        drop(setup_activity);
-        if project_open.state == ProjectOpenStatusStateV1::Stalled {
-            let error = status.stalled_failure.as_ref().map_or_else(
-                || super::stalled_project_open_error(project_open),
-                super::ProjectOpenFailure::to_error,
-            );
-            Box::pin(write_json_rpc_response(
-                transport,
-                &super::project_open_handshake::project_open_error_response(id, &error),
-            ))
-            .await?;
-            return Ok(None);
+        // Full host admission can still be opening after the graph core is
+        // published. Its owner, rather than the admission task, answers status.
+        if let Some(project_path) = handshake.project_path.as_deref() {
+            let route = super::ProjectRouteKey::from_handshake(project_path, handshake)?;
+            if store_administration
+                .project_servers()
+                .lock()
+                .await
+                .get_route(&route)
+                .is_some()
+            {
+                return Ok(Some(setup_activity));
+            }
         }
-        let reset_required_stores = Box::pin(store_administration.session_runtime_registry())
-            .await?
-            .reset_required_stores();
-        let result = doctor_runtime_tool_result(project_open_status_value(
+        drop(setup_activity);
+        let response = Box::pin(project_open_status_response(
             handshake,
+            store_administration,
             project_open,
-            &reset_required_stores,
-        ));
-        Box::pin(write_json_rpc_response(
-            transport,
-            &JsonRpcResponse::success(id, result),
+            status.stalled_failure.as_ref(),
+            id,
         ))
         .await?;
+        Box::pin(write_json_rpc_response(transport, &response)).await?;
         return Ok(None);
     }
     let Some(request) = doctor_runtime_request(first_request.parsed()) else {
@@ -1082,6 +1107,125 @@ mod doctor_runtime_route_tests {
             "{}",
             transport.output
         );
+    }
+
+    #[tokio::test]
+    async fn status_uses_only_the_exact_published_core_during_full_admission() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).expect("fixture project");
+        std::fs::create_dir_all(&profile).expect("fixture profile");
+        initialize_test_project(&project, &profile).await;
+        let handshake = handshake(
+            project.clone(),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let administration = StoreAdministration::default().with_profile_identity(
+            tracedecay_daemon_identity::profile_identity::load_or_create(&profile)
+                .expect("fixture profile identity"),
+        );
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile,
+            REGISTERED_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed),
+            "status-published-core",
+        )
+        .expect("fixture daemon authority");
+        let graph = super::super::open_project_for_handshake(
+            &project,
+            &handshake,
+            &administration,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("fixture project graph");
+        let key = crate::daemon::ProjectServerKey::from_open_project(&graph, &handshake)
+            .expect("fixture server identity");
+        let route = crate::daemon::ProjectRouteKey::from_handshake(&project, &handshake)
+            .expect("fixture route identity");
+        let server =
+            McpServer::new_with_context(McpServerConstructionContext::direct(graph, None)).await;
+        administration
+            .project_servers()
+            .lock()
+            .await
+            .insert_pending_route(route, key.clone(), server);
+
+        for stage in ["pending", "published", "foreign_scope", "retired"] {
+            let mut selected = handshake.clone();
+            match stage {
+                "published" => {
+                    assert!(
+                        administration
+                            .project_servers()
+                            .lock()
+                            .await
+                            .mark_ready(&key)
+                    );
+                }
+                "foreign_scope" => selected.scope_prefix = Some("other".to_owned()),
+                "retired" => {
+                    assert_eq!(
+                        administration
+                            .project_servers()
+                            .lock()
+                            .await
+                            .remove_owner(&key.owner)
+                            .len(),
+                        1,
+                    );
+                }
+                _ => {}
+            }
+            let lifecycle = DaemonLifecycle::default();
+            let activity = lifecycle.try_enter().expect("status activity");
+            let mut transport = DoctorRouteTransport {
+                lifecycle,
+                output: String::new(),
+                idle_before_write: false,
+            };
+            let result = serve_core_doctor_runtime_request(
+                &mut transport,
+                &selected,
+                &administration,
+                CoreDoctorStatusV1 {
+                    project_open: Some(ProjectOpenStatusV1 {
+                        state: ProjectOpenStatusStateV1::Converging,
+                        reason: ProjectOpenStatusReasonV1::Converging,
+                        retry_after_ms: Some(50),
+                        detail: None,
+                    }),
+                    stalled_failure: None,
+                    git_watcher_health: None,
+                },
+                activity,
+                &AuthenticatedFirstRequest::new(status_request_line()),
+                || async { panic!("status must not open or audit the project") },
+            )
+            .await
+            .expect("typed status routing");
+            if stage == "published" {
+                assert!(
+                    result.is_some(),
+                    "published graph status must reach its owner"
+                );
+                assert!(
+                    transport.output.is_empty(),
+                    "core must not fabricate unavailable status"
+                );
+            } else {
+                assert!(
+                    result.is_none(),
+                    "{stage} must not borrow another serving route"
+                );
+                assert!(
+                    transport
+                        .output
+                        .contains("exact_scope_generation_not_ready")
+                );
+            }
+        }
     }
 
     #[tokio::test]

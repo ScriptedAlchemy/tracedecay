@@ -742,6 +742,7 @@ where
         request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, ErrorData> {
+        let negotiated = self.negotiate_initialize(&request)?;
         let mut response = self
             .dispatch(
                 context,
@@ -752,7 +753,11 @@ where
         if let Some(decorate) = &self.initialize_response_decorator {
             decorate(&mut response);
         }
-        rmcp_response_result(response)
+        let mut result = rmcp_response_result::<InitializeResult>(response)?;
+        // The broker delivers this result before rmcp's outer negotiation.
+        // Negotiate through the SDK first so the wire and peer agree.
+        result.protocol_version = negotiated.protocol_version;
+        Ok(result)
     }
 
     async fn list_tools(

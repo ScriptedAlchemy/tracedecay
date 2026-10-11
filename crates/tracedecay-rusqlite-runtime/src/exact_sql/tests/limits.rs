@@ -1,3 +1,5 @@
+use tracedecay_sql::ConnectionControl;
+
 use super::*;
 
 #[test]
@@ -25,24 +27,27 @@ fn query_materialization_is_bounded() {
 
 #[test]
 fn query_execution_time_is_bounded() {
-    let fixture = fixture('a', 'a');
-    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
-    let started = Instant::now();
+    // `execute_query` is the reader worker's statement path. Each read of this
+    // thread's clock moves it a quarter of the limit, so the statement's own
+    // progress callbacks carry it past its deadline.
+    let clock = FakeClock::ticking(EXACT_SQL_EXECUTION_LIMIT / 4);
+    clock.install();
+    let connection = Connection::open_in_memory().unwrap();
+    connection.set_capability(Capability::Reader).unwrap();
 
-    let error = channel
-        .query(
-            statement(
-                "WITH RECURSIVE n(value) AS (
-                        VALUES(1)
-                        UNION ALL
-                        SELECT value + 1 FROM n WHERE value < 100000
-                    )
-                    SELECT count(*) FROM n AS left_n CROSS JOIN n AS right_n",
-                vec![],
-            ),
-            Duration::from_secs(1),
-        )
-        .unwrap_err();
+    let error = execute_query(
+        &connection,
+        statement(
+            "WITH RECURSIVE n(value) AS (
+                    VALUES(1)
+                    UNION ALL
+                    SELECT value + 1 FROM n WHERE value < 10000
+                )
+                SELECT count(*) FROM n AS left_n CROSS JOIN n AS right_n",
+            vec![],
+        ),
+    )
+    .unwrap_err();
 
     // The native engine also bounds every statement's VM operations, so there
     // the budget may stop the cross join before the deadline does.
@@ -55,7 +60,7 @@ fn query_execution_time_is_bounded() {
         "{error:?}"
     );
     // The interrupt must land near the execution limit, not multiples beyond.
-    assert!(started.elapsed() < EXACT_SQL_EXECUTION_LIMIT * 2);
+    assert!(clock.elapsed() < EXACT_SQL_EXECUTION_LIMIT * 2);
 }
 
 #[test]

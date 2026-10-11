@@ -521,7 +521,13 @@ pub enum SessionRetrievalServiceOutcome {
     Partial {
         page: SessionRetrievalPageView,
         freshness: SessionDataFreshness,
+        /// The folded omission count: the freshness lag flag folded into the
+        /// same count as genuine record omissions (see `record_omitted`).
         omitted: u64,
+        /// Genuine missing records only — coverage and explicit omission
+        /// entries count the same records two ways, so the larger stands; the
+        /// lag flag measures projection distance, not records, and stays out.
+        record_omitted: u64,
     },
     WrongScope,
     Locked,

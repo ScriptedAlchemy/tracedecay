@@ -25,7 +25,7 @@ use crate::handlers::support::{
     decode_primitive_request, decode_retrieval_cursor, encode_retrieval_cursor,
     rendered_tool_result, unique_file_paths,
 };
-use crate::tools::render::{self, Md};
+use crate::tools::render::{self, Md, RankedRow, ranked_rows_md};
 use crate::{McpToolContext, ToolResult};
 
 use super::search_evidence::{
@@ -401,7 +401,17 @@ pub(crate) fn render_search(
         SearchResultV1::Unavailable(unavailable) => &unavailable.freshness,
     };
     let rendered = rendered_tool_result(response_handle_root, args, &value, Vec::new(), || {
-        format!("{}{}", freshness_lines(freshness), render_search_md(&value))
+        format!(
+            "{}{}",
+            freshness_lines(freshness),
+            render_search_md(
+                response_handle_root,
+                args.get("query")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                &value
+            )
+        )
     });
     Ok(match result {
         SearchResultV1::Complete(_) => rendered,
@@ -467,67 +477,58 @@ fn display_unavailable_suffix(row: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn render_search_md(value: &Value) -> String {
-    let items = if value.is_array() {
-        value.as_array()
+/// One result row with its rendered markdown.
+fn ranked_search_row(it: &Value) -> RankedRow {
+    let candidate = &it["candidate"];
+    let anchor = render::field_str(candidate, "anchor_id");
+    let exact_class = render::field_str(candidate, "exact_class");
+    let utility = candidate
+        .get("utility_micros")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let rank = it
+        .get("final_ordinal")
+        .and_then(Value::as_u64)
+        .unwrap_or_default()
+        .saturating_add(1);
+    let via = lexical_routing::result_route_suffix(it);
+    let mut md = Md::new();
+    let name = it
+        .get("display")
+        .map_or(anchor, |display| render::field_str(display, "name"));
+    if let Some(display) = it.get("display") {
+        let kind = render::field_str(display, "kind");
+        md.bullet(&format!(
+            "**{name}** ({kind}, {exact_class}), rank {rank} · utility {utility}{via}"
+        ));
+        md.line(&format!("  anchor_id: `{anchor}`"));
     } else {
-        value.get("results").and_then(Value::as_array)
-    };
+        let omitted = display_unavailable_suffix(it);
+        md.bullet(&format!(
+            "**{anchor}** ({exact_class}), rank {rank} · utility {utility}{via}{omitted}"
+        ));
+    }
+    if let Some(node_id) = it.get("node_id").and_then(Value::as_str) {
+        md.line(&format!(
+            "  Read source: `tracedecay_source_body` with `node_id: {node_id}`"
+        ));
+    }
+    RankedRow {
+        rank,
+        utility_micros: utility,
+        name: name.to_owned(),
+        anchored: lexical_routing::ranked_by_anchor(it),
+        markdown: md.render(),
+    }
+}
+
+fn render_search_md(response_handle_root: Option<&Path>, query: &str, value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Search Results");
-    match items {
+    match value.get("results").and_then(Value::as_array) {
         Some(items) if !items.is_empty() => {
-            for it in items {
-                if let Some(candidate) = it.get("candidate") {
-                    let anchor = render::field_str(candidate, "anchor_id");
-                    let exact_class = render::field_str(candidate, "exact_class");
-                    let utility = candidate
-                        .get("utility_micros")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    let ordinal = it
-                        .get("final_ordinal")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default();
-                    let via = lexical_routing::result_route_suffix(it);
-                    if let Some(display) = it.get("display") {
-                        let name = render::field_str(display, "name");
-                        let kind = render::field_str(display, "kind");
-                        md.bullet(&format!(
-                            "**{name}** ({kind}, {exact_class}), rank {} · utility {utility}{via}",
-                            ordinal.saturating_add(1)
-                        ));
-                        md.line(&format!("  anchor_id: `{anchor}`"));
-                    } else {
-                        let omitted = display_unavailable_suffix(it);
-                        md.bullet(&format!(
-                            "**{anchor}** ({exact_class}), rank {} · utility {utility}{via}{omitted}",
-                            ordinal.saturating_add(1)
-                        ));
-                    }
-                    if let Some(node_id) = it.get("node_id").and_then(Value::as_str) {
-                        md.line(&format!(
-                            "  Read source: `tracedecay_source_body` with `node_id: {node_id}`"
-                        ));
-                    }
-                    continue;
-                }
-                let name = render::field_str(it, "name");
-                let kind = render::field_str(it, "kind");
-                let file = render::field_str(it, "file");
-                let line = render::field_i64(it, "line");
-                let id = render::field_str(it, "id");
-                let score = it.get("score").and_then(Value::as_f64).unwrap_or(0.0);
-                md.bullet(&format!(
-                    "**{name}** ({kind}), {file}:{line} · score {score:.1}"
-                ));
-                let sig = render::field_str(it, "signature");
-                if sig.is_empty() {
-                    md.line(&format!("  `{id}`"));
-                } else {
-                    md.line(&format!("  `{id}` · `{sig}`"));
-                }
-            }
+            let rows = items.iter().map(ranked_search_row).collect::<Vec<_>>();
+            md.raw(&ranked_rows_md(response_handle_root, query, &rows));
         }
         _ => {
             md.empty_note("No matching symbols.");
@@ -561,6 +562,7 @@ fn render_search_md(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tracedecay_contracts::retrieval::{PrimitiveFreshnessStateV1, SearchRouteMatchV1};
     use tracedecay_domain::errors::TraceDecayError;
     use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
 
@@ -633,8 +635,8 @@ mod tests {
         with["coverage"] = coverage;
 
         assert_eq!(
-            render_search_md(&with),
-            render_search_md(&without),
+            render_search_md(None, "", &with),
+            render_search_md(None, "", &without),
             "warm coverage must be additive metadata, never rendered output"
         );
     }
@@ -656,32 +658,40 @@ mod tests {
             if !display.is_null() {
                 result["display"] = display;
             }
-            let rendered = render_search_md(&json!({"results": [result]}));
+            let rendered = render_search_md(None, "", &json!({"results": [result]}));
             assert!(rendered.contains(&format!(
                 "Read source: `tracedecay_source_body` with `node_id: {node_id}`"
             )));
             assert!(!rendered.contains("node_id: code-symbol:"));
         }
-        let chunk = render_search_md(&json!({"results": [{
-            "candidate": {"anchor_id": "code-chunk:chunk.fixture"}
-        }]}));
+        let chunk = render_search_md(
+            None,
+            "",
+            &json!({"results": [{
+                "candidate": {"anchor_id": "code-chunk:chunk.fixture"}
+            }]}),
+        );
         assert!(!chunk.contains("tracedecay_source_body"));
     }
 
     #[test]
     fn search_renders_the_typed_reason_a_row_has_no_display() {
-        let rendered = render_search_md(&json!({"results": [
-            {
-                "candidate": {"anchor_id": "code-symbol:a", "exact_class": "approximate", "utility_micros": 7},
-                "final_ordinal": 0,
-                "display_unavailable": "stale",
-            },
-            {
-                "candidate": {"anchor_id": "code-symbol:b", "exact_class": "approximate", "utility_micros": 5},
-                "final_ordinal": 1,
-                "display": {"name": "clamp", "kind": "function"},
-            },
-        ]}));
+        let rendered = render_search_md(
+            None,
+            "",
+            &json!({"results": [
+                {
+                    "candidate": {"anchor_id": "code-symbol:a", "exact_class": "approximate", "utility_micros": 7},
+                    "final_ordinal": 0,
+                    "display_unavailable": "stale",
+                },
+                {
+                    "candidate": {"anchor_id": "code-symbol:b", "exact_class": "approximate", "utility_micros": 5},
+                    "final_ordinal": 1,
+                    "display": {"name": "clamp", "kind": "function"},
+                },
+            ]}),
+        );
         let bullets = rendered
             .lines()
             .filter(|line| line.starts_with("- **"))
@@ -694,6 +704,101 @@ mod tests {
             ],
             "{rendered}"
         );
+    }
+
+    fn ranked_row(ordinal: u32, utility: u64, anchor_routed: bool) -> SearchResultRowV1 {
+        let name = format!("f{ordinal}");
+        SearchResultRowV1 {
+            candidate: serde_json::from_value(json!({
+                "anchor_id": format!("code-symbol:{name}"),
+                "logical_evidence_id": format!("evidence.{name}"),
+                "occurrences": [],
+                "exact_class": "exact_message",
+                "utility_micros": utility,
+                "contributions": [],
+                "freshness": [],
+                "decisions": [],
+            }))
+            .expect("fused candidate"),
+            final_ordinal: ordinal,
+            node_id: None,
+            display: Some(SearchResultDisplayV1 {
+                name: name.clone(),
+                qualified_name: name.clone(),
+                kind: "function".to_owned(),
+                path: "src/lib.rs".to_owned(),
+            }),
+            display_unavailable: None,
+            lexical_routes: anchor_routed.then(|| {
+                vec![SearchRouteMatchV1 {
+                    route: format!("anchor:{name}"),
+                    score_micros: 1,
+                    matched_terms: vec![name.clone()],
+                    spelling_variants: Vec::new(),
+                }]
+            }),
+        }
+    }
+
+    #[test]
+    fn markdown_search_trims_the_weak_tail_but_json_returns_every_row() {
+        let results = (0..10)
+            .map(|ordinal| {
+                let utility = if ordinal < 3 { 2_000_000 } else { 1_000_000 };
+                let mut row = ranked_row(ordinal, utility, ordinal == 6);
+                row.node_id = Some(format!("symbol.f{ordinal}"));
+                row
+            })
+            .collect();
+        let result = SearchResultV1::Complete(SearchCompleteV1 {
+            freshness: PrimitiveSearchFreshnessV1 {
+                state: PrimitiveFreshnessStateV1::Fresh,
+                indexing: None,
+            },
+            code_generation: "generation.fixture".to_owned(),
+            query_fallback_digest: "digest.fixture".to_owned(),
+            next_cursor: None,
+            coverage: search_coverage(&CodeIndexSearchCoverageV1::warm()),
+            results,
+            query_route: None,
+            lexical_routes: None,
+            lexical_anchors: None,
+            scope_prefix: None,
+            scope_prefix_applied: None,
+            verified_graph_evidence: None,
+            external_import_hint: None,
+        });
+        let root = tempfile::tempdir().expect("handle root");
+        let text = |args: Value| {
+            render_search(Some(root.path()), &args, &result)
+                .expect("rendered search")
+                .value["content"][0]["text"]
+                .as_str()
+                .expect("text content")
+                .to_owned()
+        };
+
+        let markdown = text(json!({}));
+        for ordinal in 0..=6 {
+            assert!(markdown.contains(&format!("**f{ordinal}**")), "{markdown}");
+        }
+        for ordinal in 7..10 {
+            assert!(!markdown.contains(&format!("**f{ordinal}**")), "{markdown}");
+        }
+        assert!(
+            markdown.contains("- _Trimmed 3 lower-ranked results (ranks 8-10, "),
+            "{markdown}"
+        );
+
+        let named = text(json!({"query": "F7"}));
+        assert!(named.contains("**f7**"), "{named}");
+        assert!(
+            named.contains("- _Trimmed 2 lower-ranked results (ranks 9-10, "),
+            "{named}"
+        );
+
+        let json: Value = serde_json::from_str(&text(json!({"format": "json"}))).expect("json");
+        assert_eq!(json["results"].as_array().map(Vec::len), Some(10));
     }
 
     #[tokio::test]

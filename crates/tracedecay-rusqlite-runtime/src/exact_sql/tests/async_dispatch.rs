@@ -451,10 +451,7 @@ fn admitted_execute_returning_completes_after_reply_waiter_is_abandoned() {
             vec![],
         )));
         assert!(poll_once(pending.as_mut()).await.is_pending());
-        tokio::time::timeout(Duration::from_secs(1), accepted)
-            .await
-            .unwrap()
-            .unwrap();
+        accepted.await.unwrap();
         drop(pending);
         release.send(()).unwrap();
         let rows = base

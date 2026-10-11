@@ -190,28 +190,27 @@ fn long_lease_transaction_renews_its_lease_after_successful_bounded_steps() {
     let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     base.execute_batch("CREATE TABLE lease_probe (value INTEGER)".to_owned())
         .unwrap();
-    let authority = Arc::new(LeaseClockAdvancingAuthority {
-        step: EXACT_SQL_TRANSACTION_LIMIT / 4,
-        execute_checks: AtomicUsize::new(0),
-    });
+    let clock = FakeClock::frozen();
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
         .unwrap()
-        .with_write_authority(authority.clone())
+        .with_write_authority(FakeClockAuthority::installing(&clock))
         .unwrap();
     let transaction = channel.begin_authorized_long_lease_immediate().unwrap();
 
-    // Five bounded steps, each preceded by a quarter-limit advance of the
-    // writer's fake lease clock, must together outlive the absolute
-    // transaction limit so success proves renewal.
-    for value in 0..5 {
+    // Half-idle steps on the writer's clock that together outlive the
+    // absolute transaction limit, so success proves renewal.
+    let step = EXACT_SQL_TRANSACTION_IDLE_LIMIT / 2;
+    let steps = EXACT_SQL_TRANSACTION_LIMIT.as_millis() / step.as_millis() + 1;
+    for value in 0..steps {
+        clock.advance(step);
         transaction
             .execute(statement(
                 "INSERT INTO lease_probe VALUES (?)",
-                vec![ExactSqlValue::Integer(value)],
+                vec![ExactSqlValue::Integer(i64::try_from(value).unwrap())],
             ))
             .unwrap();
     }
-    assert!(authority.fake_elapsed() > EXACT_SQL_TRANSACTION_LIMIT);
+    assert!(clock.elapsed() > EXACT_SQL_TRANSACTION_LIMIT);
     transaction.commit().unwrap();
 
     let rows = base
@@ -220,13 +219,18 @@ fn long_lease_transaction_renews_its_lease_after_successful_bounded_steps() {
             Duration::from_secs(1),
         )
         .unwrap();
-    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(5)]);
+    assert_eq!(
+        rows.rows[0].values,
+        vec![ExactSqlValue::Integer(i64::try_from(steps).unwrap())]
+    );
 }
 
 #[test]
 fn authority_revalidated_batch_has_no_guessed_deadline_and_rechecks_authority() {
     let fixture = fixture('a', 'a');
+    let clock = FakeClock::frozen();
     let authority = Arc::new(SlowSchemaAuthority {
+        clock: Arc::clone(&clock),
         execute_batch_checks: AtomicUsize::new(0),
     });
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
@@ -234,7 +238,6 @@ fn authority_revalidated_batch_has_no_guessed_deadline_and_rechecks_authority() 
         .with_write_authority(authority.clone())
         .unwrap();
     let transaction = channel.begin_authorized_long_lease_immediate().unwrap();
-    let started = Instant::now();
 
     transaction
         .execute_authority_revalidated_batch(
@@ -249,7 +252,7 @@ fn authority_revalidated_batch_has_no_guessed_deadline_and_rechecks_authority() 
         )
         .unwrap();
 
-    assert!(started.elapsed() > EXACT_SQL_EXECUTION_LIMIT);
+    assert!(clock.elapsed() > EXACT_SQL_EXECUTION_LIMIT);
     assert!(authority.execute_batch_checks.load(Ordering::Acquire) > 3);
     transaction.rollback().unwrap();
 }

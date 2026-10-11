@@ -32,10 +32,7 @@ fn storage(
     operation: &'static str,
     error: impl std::error::Error + Send + Sync + 'static,
 ) -> ProjectionStoreError {
-    ProjectionStoreError::Storage {
-        operation,
-        source: Box::new(error),
-    }
+    ProjectionStoreError::storage(operation, error)
 }
 
 fn source_key(

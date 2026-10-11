@@ -167,10 +167,23 @@ pub fn collect_files_with_ext_bounded(
     max_depth: u8,
     bounds: TranscriptDiscoveryBounds,
 ) -> FileDiscoveryReport {
+    collect_files_with_ext_matching(dir, ext, max_depth, bounds, &|_| true)
+}
+
+/// [`collect_files_with_ext_bounded`] that keeps only paths `retain` accepts.
+/// Rejected files are examined but do not consume the retained-file cap.
+pub fn collect_files_with_ext_matching(
+    dir: &Path,
+    ext: &str,
+    max_depth: u8,
+    bounds: TranscriptDiscoveryBounds,
+    retain: &dyn Fn(&Path) -> bool,
+) -> FileDiscoveryReport {
     let mut state = WalkState {
         bounds,
         ext,
         max_depth,
+        retain,
         paths: Vec::new(),
         truncated: None,
         skipped_oversized_entries: 0,
@@ -192,6 +205,7 @@ struct WalkState<'a> {
     bounds: TranscriptDiscoveryBounds,
     ext: &'a str,
     max_depth: u8,
+    retain: &'a dyn Fn(&Path) -> bool,
     paths: Vec<PathBuf>,
     truncated: Option<FileDiscoveryLimit>,
     skipped_oversized_entries: u64,
@@ -266,6 +280,9 @@ impl WalkState<'_> {
     fn try_retain(&mut self, path: PathBuf) {
         self.files_considered = self.files_considered.saturating_add(1);
         if self.truncated.is_some() {
+            return;
+        }
+        if !(self.retain)(&path) {
             return;
         }
         if self.paths.len() >= self.bounds.max_files {

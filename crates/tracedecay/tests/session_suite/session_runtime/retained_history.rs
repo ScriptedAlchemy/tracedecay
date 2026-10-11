@@ -183,7 +183,7 @@ impl SessionHistoricalIngestor for HealthyProvidersWithBlockedCursorIngestor {
                 .admit_healthy_provider("codex", "session.healthy.codex")
                 .await;
             SessionHistoricalIngestOutcome::Blocked {
-                reason_code: "observation_cursor_advance_collision",
+                reason_code: "observation_cursor_advance_collision".to_owned(),
                 made_progress: claude_progress || codex_progress,
             }
         })
@@ -308,7 +308,7 @@ impl SessionHistoricalIngestor for BlockThirdHistoricalIngestor {
                     self.third_entered.store(true, Ordering::Release);
                     self.release_third.notified().await;
                     SessionHistoricalIngestOutcome::Blocked {
-                        reason_code: "fixture_complete",
+                        reason_code: "fixture_complete".to_owned(),
                         made_progress: false,
                     }
                 }
@@ -331,7 +331,7 @@ impl SessionHistoricalIngestor for RetryThenBlockHistoricalIngestor {
             let pass = self.passes.fetch_add(1, Ordering::AcqRel);
             if pass == 0 {
                 return SessionHistoricalIngestOutcome::Retryable {
-                    reason_code: "provider_busy",
+                    reason_code: "provider_busy".to_owned(),
                     made_progress: false,
                 };
             }
@@ -561,7 +561,7 @@ async fn blocked_history_is_not_rewoken_by_ensure() {
     let authority = profile_authority(&temp, "history-blocked-rewake").await;
     let ingestor = Arc::new(ScriptedHistoricalIngestor::new([
         SessionHistoricalIngestOutcome::Blocked {
-            reason_code: "transcript_source_contract_invalid",
+            reason_code: "transcript_source_contract_invalid".to_owned(),
             made_progress: false,
         },
         SessionHistoricalIngestOutcome::Complete,
@@ -841,6 +841,77 @@ async fn saturated_history_admission_defers_the_pass_and_resumes() {
             .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
             .await
     );
+
+    registry.shutdown().await;
+}
+
+/// A refused worker queues for the shared admission behind no one, so the
+/// first freed permit is its turn. Every other mounted worker's release wait
+/// and summary page queue behind it. Dropping the granted permit and retrying
+/// admission hands that turn to the next waiter, so a daemon with more waiting
+/// workers than permits never runs the refused pass.
+#[tokio::test]
+async fn a_saturated_history_pass_runs_with_the_permit_its_queue_turn_grants() {
+    let temp = TempDir::new().unwrap();
+    let authority = profile_authority(&temp, "history-admission-queue-turn").await;
+    let ingestor = Arc::new(ScriptedHistoricalIngestor::new([
+        SessionHistoricalIngestOutcome::Complete,
+    ]));
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    let admission = registry.historical_ingest_admission();
+    let mut held = (0..admission.available_permits())
+        .map(|_| {
+            Arc::clone(&admission)
+                .try_acquire_owned()
+                .expect("occupy every historical ingest permit")
+        })
+        .collect::<Vec<_>>();
+
+    let wake = registry
+        .ensure_profile_with_history(
+            authority.database().db_path().to_path_buf(),
+            authority.database.clone(),
+            ingestor.clone(),
+        )
+        .await;
+    let saturated = SessionProjectionServingState::Stale {
+        reason: SessionProjectionStaleReason::HistoricalRetry {
+            reason_code: "history_admission_saturated".to_owned(),
+        },
+    };
+    assert!(
+        wait_until(
+            || wake.serving_status().state == saturated,
+            Duration::from_secs(2),
+        )
+        .await
+    );
+    assert!(
+        registry
+            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
+            .await,
+        "the refused worker waits in the admission queue"
+    );
+
+    let next_waiter = tokio::spawn(Arc::clone(&admission).acquire_owned());
+    tokio::task::yield_now().await;
+    held.pop();
+
+    assert!(
+        wait_until(
+            || ingestor.passes.load(Ordering::Acquire) >= 1,
+            Duration::from_secs(2),
+        )
+        .await,
+        "the worker first in the admission queue must run its pass with the freed permit"
+    );
+    let next_permit = tokio::time::timeout(Duration::from_secs(2), next_waiter)
+        .await
+        .expect("the pass returns its permit to the next queued waiter")
+        .unwrap()
+        .unwrap();
+    drop(next_permit);
+    drop(held);
 
     registry.shutdown().await;
 }

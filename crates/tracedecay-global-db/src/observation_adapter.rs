@@ -2554,8 +2554,8 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
 fn projection_runtime_error(
     error: ObservationStoreError,
 ) -> tracedecay_store::ProjectionStoreError {
-    tracedecay_store::ProjectionStoreError::Storage {
-        operation: "dispatch observation projection runtime operation",
-        source: Box::new(error),
-    }
+    tracedecay_store::ProjectionStoreError::storage(
+        "dispatch observation projection runtime operation",
+        error,
+    )
 }

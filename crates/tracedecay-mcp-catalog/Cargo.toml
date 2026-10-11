@@ -18,7 +18,6 @@ serde_json = "1"
 thiserror = "2"
 tracedecay-api = { path = "../tracedecay-api" }
 tracedecay-contracts = { path = "../tracedecay-contracts" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracing = "0.1"

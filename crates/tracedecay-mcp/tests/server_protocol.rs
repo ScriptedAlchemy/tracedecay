@@ -32,14 +32,38 @@ fn protocol_owner_classifies_every_transport_method() {
 
 #[test]
 fn initialize_payload_uses_composed_product_metadata() {
-    let result = initialize_result("9.8.7", "transport instructions");
+    let result = initialize_result("9.8.7", "transport instructions", None);
 
-    assert_eq!(result["protocolVersion"], json!("2024-11-05"));
     assert_eq!(result["serverInfo"]["name"], json!("tracedecay"));
     assert_eq!(result["serverInfo"]["version"], json!("9.8.7"));
     assert_eq!(result["instructions"], json!("transport instructions"));
-    assert!(result["capabilities"]["tools"].is_object());
-    assert!(result["capabilities"]["resources"].is_object());
+    assert_eq!(
+        result["capabilities"],
+        json!({"tools": {"listChanged": true}, "resources": {}})
+    );
+}
+
+#[test]
+fn initialize_agrees_to_a_supported_client_version_and_falls_back_to_the_newest() {
+    let supported = ["2024-11-05", "2025-06-18", "2025-11-25"];
+    for requested in supported {
+        let result = initialize_result("9.8.7", "transport instructions", Some(requested));
+        assert_eq!(result["protocolVersion"], json!(requested), "{requested}");
+    }
+
+    let unspecified = initialize_result("9.8.7", "transport instructions", None);
+    let fallback = &unspecified["protocolVersion"];
+    let fallback_revision = fallback
+        .as_str()
+        .expect("an unspecified initialize must name the agreed protocol version");
+    assert!(
+        supported.contains(&fallback_revision),
+        "unspecified initialize must agree to a handshake revision this server speaks, got {fallback}"
+    );
+    for requested in ["2026-07-28", "2099-01-01"] {
+        let result = initialize_result("9.8.7", "transport instructions", Some(requested));
+        assert_eq!(result["protocolVersion"], *fallback, "{requested}");
+    }
 }
 
 #[test]

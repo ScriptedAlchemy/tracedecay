@@ -36,7 +36,7 @@ INIT_STDERR=""
 run_smoke() {
   local work_dir="$1"
   local fixture="$2"
-  local tools_a tools_b call_out res_out unknown_out
+  local tools_a tools_b call_out res_out unknown_out search_out
   local diagnostics_out affected_out test_map_out test_map_err symbol_json impact_out impact_err node_id
   local failures=0
 
@@ -136,10 +136,23 @@ NODE
     else
       fail "tools/list has tools with object inputSchemas"
     fi
-    if json_assert "$tools_a" '["tracedecay_search", "tracedecay_diagnostics", "tracedecay_impact", "tracedecay_affected", "tracedecay_test_map"].every(name => j.tools.some(t => t.name === name))'; then
-      ok "tools/list includes required search and analysis tools"
+    if json_assert "$tools_a" '["tracedecay_search", "tracedecay_tool_search", "tracedecay_test_map"].every(name => j.tools.some(t => t.name === name))'; then
+      ok "tools/list includes the core search tools and tool search"
     else
-      fail "tools/list includes required search and analysis tools"
+      fail "tools/list includes the core search tools and tool search"
+    fi
+    search_out="$work_dir/tool-search.json"
+    if inspect --method tools/call --tool-name tracedecay_tool_search --tool-arg query= > "$search_out" 2>"$work_dir/tool-search.err" &&
+      json_assert "$search_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && ["tracedecay_diagnostics", "tracedecay_impact", "tracedecay_affected"].every(name => c.text.includes(name)))'; then
+      ok "tracedecay_tool_search names withheld analysis tools"
+    else
+      if [[ -s "$search_out" ]]; then
+        cat "$search_out" >&2
+      fi
+      if [[ -s "$work_dir/tool-search.err" ]]; then
+        cat "$work_dir/tool-search.err" >&2
+      fi
+      fail "tracedecay_tool_search names withheld analysis tools"
     fi
   else
     cat "$work_dir/tools-a.err" >&2

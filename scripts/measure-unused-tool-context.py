@@ -713,8 +713,11 @@ def main() -> int:
     rows = aggregate(reports)
     coverage["sessions_with_calls"] = len({report.session for report in reports})
     coverage["scored_calls"] = len(reports)
-    coverage.update(token_count_coverage(rows))
-    summary = {"providers": {name: dict(stats) for name, stats in sorted(by_provider.items())}, **coverage}
+    summary = {
+        "providers": {name: dict(stats) for name, stats in sorted(by_provider.items())},
+        **coverage,
+        **token_count_coverage(rows),
+    }
     print(render(rows, summary))
     examples = sanitized_examples(reports, args.examples) if args.examples else []
     if args.json:

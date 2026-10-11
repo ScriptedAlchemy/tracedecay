@@ -68,6 +68,7 @@ mod seat_swap_tests;
 mod serving_readiness_tests;
 mod serving_reads;
 
+use mount::StoreReleaseWaitStopV1;
 pub use scope_identity::latest_matches_scope_identity;
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
@@ -458,6 +459,15 @@ struct WorkerStepGateV1 {
 
 #[cfg(test)]
 fn published_text_projection_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, WorkerStepGateV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Holds a text projection the moment a held code-generation store lock
+/// refused one of its advances.
+#[cfg(test)]
+fn text_projection_store_contention_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>> {
     static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, WorkerStepGateV1>>> =
         std::sync::OnceLock::new();
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
@@ -2689,6 +2699,8 @@ impl CodeIndexSchedulerRegistryV1 {
         convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>>,
         installed: Option<Arc<RwLock<Option<LatestCodeTextGenerationV1>>>>,
         mut opened: Option<tokio::sync::oneshot::Sender<()>>,
+        store_root: &Path,
+        serving_generation_changed: &tokio::sync::watch::Sender<()>,
         #[cfg(test)] project_root: PathBuf,
     ) -> PublishedTextProjectionOutcomeV1 {
         #[cfg(test)]
@@ -2793,11 +2805,37 @@ impl CodeIndexSchedulerRegistryV1 {
                         );
                         return PublishedTextProjectionOutcomeV1::WaitingForMemory;
                     } else if error.is_generation_store_lock_contended() {
+                        #[cfg(test)]
+                        Self::wait_for_text_projection_store_contention_gate(&project_root).await;
                         tracing::info!(
                             event = "code_index_text_projection_waiting_for_store",
                             "published text projection waits for the code-generation store lock"
                         );
-                        return PublishedTextProjectionOutcomeV1::WaitingForStore;
+                        // Usually a reader such as the graph decode running
+                        // beside this projection. Handing the wait to the
+                        // worker made text readiness wait for the whole graph
+                        // activation and the next pass.
+                        match Self::wait_for_worker_store_release(
+                            store_root,
+                            &shutting_down,
+                            serving_generation_changed,
+                        )
+                        .await
+                        {
+                            Ok(()) => continue,
+                            Err(StoreReleaseWaitStopV1::Shutdown) => {
+                                return PublishedTextProjectionOutcomeV1::Shutdown;
+                            }
+                            Err(StoreReleaseWaitStopV1::Unavailable(reason)) => {
+                                tracing::warn!(
+                                    event = "code_index_text_projection_store_wait_failed",
+                                    error = %reason,
+                                    "text projection could not wait for the code-generation \
+                                     store lock; the worker takes over the wait"
+                                );
+                                return PublishedTextProjectionOutcomeV1::WaitingForStore;
+                            }
+                        }
                     } else {
                         tracing::warn!(
                             event = "code_index_text_projection_failed",

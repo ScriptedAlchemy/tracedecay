@@ -922,6 +922,7 @@ pub struct ReadContextParams {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub(super) struct ExplorerSessionCountsV1 {
     message_count: i64,
+    unpublished_message_count: i64,
     summary_node_count: i64,
     summary_token_count: Option<i64>,
     source_token_count: Option<i64>,
@@ -1074,7 +1075,8 @@ pub async fn read_context(
             let counts = explorer_session_counts(&stats);
             let returned_messages = i64::try_from(messages.len()).unwrap_or(i64::MAX);
             let returned_summary_nodes = i64::try_from(summary_nodes.len()).unwrap_or(i64::MAX);
-            let has_more_messages = stats.message_count > returned_messages;
+            let has_more_messages =
+                stats.message_count - stats.unpublished_message_count > returned_messages;
             let has_more_summary_nodes = stats.summary_node_count > returned_summary_nodes;
             let examined = u64::try_from(messages.len()).unwrap_or(u64::MAX);
             let has_more = has_more_messages || has_more_summary_nodes;
@@ -1236,6 +1238,7 @@ fn explorer_lcm_summary(summary: DashboardLcmCanonicalSummaryV1) -> LcmSummaryNo
 fn explorer_session_counts(stats: &DashboardLcmCanonicalStatsV1) -> ExplorerSessionCountsV1 {
     ExplorerSessionCountsV1 {
         message_count: stats.message_count,
+        unpublished_message_count: stats.unpublished_message_count,
         summary_node_count: stats.summary_node_count,
         summary_token_count: stats.summary_token_count,
         source_token_count: stats.source_token_count,

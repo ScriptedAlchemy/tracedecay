@@ -28,10 +28,7 @@ pub(super) fn storage(
     operation: &'static str,
     source: impl std::error::Error + Send + Sync + 'static,
 ) -> ProjectionStoreError {
-    ProjectionStoreError::Storage {
-        operation,
-        source: Box::new(source),
-    }
+    ProjectionStoreError::storage(operation, source)
 }
 
 pub(super) fn storage_message(

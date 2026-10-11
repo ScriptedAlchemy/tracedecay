@@ -1285,6 +1285,7 @@ mod tests {
         ("tracedecay_dead_code", BranchSensitivity::Sensitive),
         ("tracedecay_affected", BranchSensitivity::Sensitive),
         ("tracedecay_str_replace", BranchSensitivity::Sensitive),
+        ("tracedecay_ast_grep_rewrite", BranchSensitivity::Sensitive),
         ("tracedecay_health", BranchSensitivity::Sensitive),
         ("tracedecay_multi_root_execute", BranchSensitivity::Sensitive),
         ("tracedecay_code_symbol_search", BranchSensitivity::Sensitive),
@@ -1293,7 +1294,7 @@ mod tests {
         ("tracedecay_dashboard", BranchSensitivity::Sensitive),
     ];
 
-    fn advertised_tool_names(mode: crate::ToolRegistryMode) -> Vec<String> {
+    fn advertised_tool_names() -> Vec<String> {
         use crate::tools::catalog_discovery::{
             default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
         };
@@ -1307,7 +1308,6 @@ mod tests {
             &profile_id,
             &default_catalog_discovery_authority().expect("default discovery authority"),
             &project_catalog_discovery_scope(),
-            mode,
         )
         .expect("advertised tools")
         .into_iter()
@@ -1321,7 +1321,6 @@ mod tests {
     /// classification is a failed audit, not a silent pass.
     #[test]
     fn advertised_tools_have_exactly_one_branch_sensitivity_policy() {
-        use crate::ToolRegistryMode;
         use std::collections::HashMap;
 
         let pinned: HashMap<&str, BranchSensitivity> =
@@ -1334,45 +1333,30 @@ mod tests {
             );
         }
         let mut policies = HashMap::new();
-        let mut advertised = 0usize;
-        for mode in [
-            ToolRegistryMode::DeterministicMaximal,
-            ToolRegistryMode::HostAvailable,
-        ] {
-            for name in advertised_tool_names(mode) {
-                advertised += 1;
-                let policy = tool_branch_sensitivity(&name);
-                assert!(
-                    matches!(
-                        policy,
-                        BranchSensitivity::Sensitive | BranchSensitivity::Independent
-                    ),
-                    "{name} must resolve to exactly one sensitivity policy"
+        for name in advertised_tool_names() {
+            let policy = tool_branch_sensitivity(&name);
+            assert!(
+                matches!(
+                    policy,
+                    BranchSensitivity::Sensitive | BranchSensitivity::Independent
+                ),
+                "{name} must resolve to exactly one sensitivity policy"
+            );
+            if let Some(expected) = pinned.get(name.as_str()) {
+                assert_eq!(
+                    policy, *expected,
+                    "{name} must keep its pinned branch-sensitivity"
                 );
-                if let Some(previous) = policies.insert(name.clone(), policy) {
-                    assert_eq!(
-                        previous, policy,
-                        "{name} must not change policy across registry modes"
-                    );
-                }
-                if let Some(expected) = pinned.get(name.as_str()) {
-                    assert_eq!(
-                        policy, *expected,
-                        "{name} must keep its pinned branch-sensitivity"
-                    );
-                } else {
-                    assert_eq!(
-                        policy,
-                        BranchSensitivity::Sensitive,
-                        "{name} is not in the Independent pin and must stay Sensitive"
-                    );
-                }
+            } else {
+                assert_eq!(
+                    policy,
+                    BranchSensitivity::Sensitive,
+                    "{name} is not in the Independent pin and must stay Sensitive"
+                );
             }
+            policies.insert(name, policy);
         }
-        assert!(
-            advertised > 0,
-            "tools/list must advertise at least one tool in each registry mode"
-        );
+        assert!(!policies.is_empty(), "tools/list must advertise tools");
         assert!(
             policies
                 .values()

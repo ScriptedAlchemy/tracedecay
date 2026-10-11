@@ -227,7 +227,7 @@ async fn dwell_for_batch(
     checkpoint_closed: &mut bool,
 ) {
     loop {
-        if Instant::now() >= pending.window.deadline {
+        if tokio::time::Instant::now() >= tokio::time::Instant::from_std(pending.window.deadline) {
             return;
         }
         let wake = tokio::time::timeout_at(
@@ -1086,10 +1086,7 @@ mod auxiliary_scheduling_tests {
         time::{Duration, Instant},
     };
 
-    use tokio::{
-        runtime::Builder,
-        sync::{mpsc, oneshot},
-    };
+    use tokio::sync::{mpsc, oneshot};
     use tracedecay_store::{
         OperationPriorityV1, RuntimeCancellationIdentityV1, RuntimeDeadlineV1,
         RuntimeInterruptionV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, UnavailableReasonV1,
@@ -1310,46 +1307,53 @@ mod auxiliary_scheduling_tests {
         );
     }
 
-    /// The settled leader's receipt, not an in-flight refusal, must answer a
-    /// conflicting request that arrives after the reply but before the actor
-    /// retires the leader's in-flight entry.
     #[test]
-    fn conflicting_request_after_settlement_runs_instead_of_reporting_in_flight() {
+    fn conflicting_submission_after_settlement_is_queued_for_the_ledger() {
         let telemetry = WriterTelemetry::default();
         let mut queue = FairQueue::default();
         let mut inflight = HashMap::new();
-        let (leader, leader_rx) =
+        let (leader, mut leader_rx) =
             accepted_request_with_reply("operation.settled-conflict", "key.leader");
-        let (conflict, mut conflict_rx) =
-            accepted_request_with_reply("operation.settled-conflict", "key.conflict");
         assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
         let executing = queue.drain_fair().pop().expect("dequeued leader");
         inflight.insert(executing.operation_id().clone(), executing.shared_reply());
-        let outcome = RuntimeSubmitOutcomeV1::Unavailable {
+        let (concurrent, mut concurrent_rx) =
+            accepted_request_with_reply("operation.settled-conflict", "key.conflict");
+        assert!(!enqueue(&mut queue, &mut inflight, concurrent, &telemetry));
+        assert_eq!(
+            concurrent_rx.try_recv().expect("concurrent conflict reply"),
+            Err(
+                tracedecay_store::StorageRuntimeErrorV1::DuplicateOperationInFlight {
+                    operation_id: "operation.settled-conflict".to_owned(),
+                }
+            )
+        );
+        let leader_outcome = RuntimeSubmitOutcomeV1::Unavailable {
             reason: UnavailableReasonV1::Faulted,
         };
-        executing.settle(Ok(outcome.clone()));
+        executing.settle(Ok(leader_outcome.clone()));
         assert_eq!(
-            leader_rx.blocking_recv().expect("leader reply"),
-            Ok(outcome)
+            leader_rx.try_recv().expect("leader reply"),
+            Ok(leader_outcome)
         );
 
-        assert!(enqueue(&mut queue, &mut inflight, conflict, &telemetry));
-        assert!(
-            conflict_rx.try_recv().is_err(),
-            "the conflict waits for its own execution"
-        );
-        let queued = queue.drain_fair();
-        assert_eq!(queued.len(), 1);
-        assert_eq!(
-            queued[0].operation_id().as_str(),
-            "operation.settled-conflict"
-        );
+        let (later, mut later_rx) =
+            accepted_request_with_reply("operation.settled-conflict", "key.conflict");
+        assert!(enqueue(&mut queue, &mut inflight, later, &telemetry));
+        let later_outcome = RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Closed,
+        };
+        queue
+            .drain_fair()
+            .pop()
+            .expect("later conflict queued")
+            .settle(Ok(later_outcome.clone()));
+        assert_eq!(later_rx.try_recv().expect("later reply"), Ok(later_outcome));
     }
 
-    #[test]
-    fn dwell_collects_a_compatible_arrival_before_dispatch() {
-        let enqueued_at = Instant::now() + Duration::from_secs(1);
+    #[tokio::test(start_paused = true)]
+    async fn dwell_collects_a_compatible_arrival_before_dispatch() {
+        let enqueued_at = tokio::time::Instant::now().into_std();
         let mut config = tracedecay_store::AdmissionConfigV1::default();
         config.foreground_batch.max_operations = 2;
         config.validate().expect("valid foreground batch limit");
@@ -1359,7 +1363,7 @@ mod auxiliary_scheduling_tests {
             OperationPriorityV1::Foreground,
             false,
         )];
-        let pending = PendingBatchDwell::from_selected(&selected, &config, Instant::now())
+        let pending = PendingBatchDwell::from_selected(&selected, &config, enqueued_at)
             .expect("first request opens a dwell window");
         let telemetry = WriterTelemetry::default();
         let mut queue = FairQueue::default();
@@ -1369,11 +1373,12 @@ mod auxiliary_scheduling_tests {
         }
 
         let (write_tx, mut write_rx) = mpsc::channel(1);
+        tokio::time::advance(Duration::from_millis(1)).await;
         assert!(
             write_tx
                 .try_send(accepted_request(
                     1,
-                    enqueued_at + Duration::from_millis(1),
+                    tokio::time::Instant::now().into_std(),
                     OperationPriorityV1::Foreground,
                     false,
                 ))
@@ -1387,12 +1392,7 @@ mod auxiliary_scheduling_tests {
         let mut input_closed = false;
         let mut exact_sql_closed = false;
         let mut checkpoint_closed = false;
-        let runtime = Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .expect("test runtime");
-
-        runtime.block_on(dwell_for_batch(
+        dwell_for_batch(
             pending,
             &mut write_rx,
             &mut exact_sql_rx,
@@ -1406,7 +1406,8 @@ mod auxiliary_scheduling_tests {
             &mut input_closed,
             &mut exact_sql_closed,
             &mut checkpoint_closed,
-        ));
+        )
+        .await;
 
         let batches = build_batches(queue.drain_fair(), &config);
         assert_eq!(batches.len(), 1);

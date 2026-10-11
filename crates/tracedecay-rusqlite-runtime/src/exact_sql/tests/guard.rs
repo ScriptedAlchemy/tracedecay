@@ -26,18 +26,7 @@ fn queued_write_rechecks_authority_on_actor_dequeue() {
 
     allowed.store(false, Ordering::Release);
     transaction.rollback().unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .unwrap();
-    let error = runtime
-        .block_on(async {
-            tokio::time::timeout(Duration::from_secs(1), receive.recv())
-                .await
-                .unwrap()
-                .unwrap()
-        })
-        .unwrap_err();
+    let error = receive.recv_blocking().unwrap().unwrap_err();
 
     assert!(matches!(error, ExactSqlError::AuthorityDenied(_)));
     let rows = holder
@@ -175,6 +164,8 @@ fn pinned_batch_allows_schema_install_ddl() {
 
 #[test]
 fn exact_sql_guard_restores_authorizer_after_panic() {
+    let clock = FakeClock::frozen();
+    clock.install();
     let connection = Connection::open_in_memory().unwrap();
     connection.set_capability(Capability::Writer).unwrap();
 
@@ -192,7 +183,7 @@ fn exact_sql_guard_restores_authorizer_after_panic() {
     }));
 
     assert!(panic.is_err());
-    std::thread::sleep(EXACT_SQL_EXECUTION_LIMIT + Duration::from_millis(50));
+    clock.advance(EXACT_SQL_EXECUTION_LIMIT);
     let sum: i64 = connection
         .query_row(
             "WITH RECURSIVE n(value) AS (

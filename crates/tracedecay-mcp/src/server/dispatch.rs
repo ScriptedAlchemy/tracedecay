@@ -143,6 +143,19 @@ impl<'a> McpDispatchRequest<'a> {
         }
     }
 
+    /// The `protocolVersion` an `initialize` request asks for.
+    pub fn requested_protocol_version(&self) -> Option<&str> {
+        match &self.params {
+            McpDispatchParams::Raw(params) => params
+                .and_then(|params| params.get("protocolVersion"))
+                .and_then(Value::as_str),
+            McpDispatchParams::Initialize(params) => Some(params.protocol_version.as_str()),
+            McpDispatchParams::ToolsCall(_)
+            | McpDispatchParams::ResourcesRead(_)
+            | McpDispatchParams::TypedEmpty => None,
+        }
+    }
+
     /// The `resources/read` target URI.
     pub fn resource_uri(&self) -> Option<&str> {
         match &self.params {

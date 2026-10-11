@@ -19,7 +19,7 @@ inputs:
       Clippy can reuse Test Linux action outputs.
     default: ""
   test-tools:
-    description: Also install rust-analyzer, node, and ast-grep for `bazel test`.
+    description: Also install rust-analyzer and node for `bazel test`.
     default: "false"
 
 outputs:
@@ -84,8 +84,8 @@ runs:
         restore-keys: ${{ steps.disk-cache-config.outputs.restore-keys }}
 
     # Test dependencies, not conveniences: the LSP negotiation acceptance
-    # spawns rust-analyzer through the pinned toolchain, the ast-grep
-    # bindings are graded against the host CLI, and host journeys run node.
+    # spawns rust-analyzer through the pinned toolchain, and host journeys
+    # run node.
     # Bazel isolates HOME; retain the installed analyzer proxy and rustup
     # toolchain locations explicitly for the test launcher.
     - name: Install the pinned toolchain's components
@@ -104,9 +104,3 @@ runs:
       if: inputs.test-tools == 'true'
       with:
         node-version: 24
-
-    - name: Install ast-grep
-      if: inputs.test-tools == 'true'
-      uses: ./.github/actions/install-ast-grep
-      with:
-        version: ${{ env.AST_GREP_VERSION }}
