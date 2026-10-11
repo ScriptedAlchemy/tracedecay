@@ -146,6 +146,13 @@ impl From<super::Error> for Error {
                 LimboError::Interrupt => ErrorKind::Interrupted,
                 LimboError::ReadOnly => ErrorKind::ReadOnly,
                 LimboError::SchemaUpdated | LimboError::SchemaConflict => ErrorKind::Schema,
+                // turso's exclusive per-process file lock has no typed refusal;
+                // its message is the only mark of another process's ownership.
+                LimboError::LockingError(message)
+                    if message.contains("locked by another process") =>
+                {
+                    ErrorKind::OwnedElsewhere
+                }
                 // The driver's preflight already refused foreign files, so an
                 // unreadable header here is damage.
                 LimboError::Corrupt(_) | LimboError::NotADB => ErrorKind::Corrupt,

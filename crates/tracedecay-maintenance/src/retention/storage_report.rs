@@ -34,15 +34,13 @@ use tracedecay_code_index_retention::code_index_generations::{
     plan_code_generation_retention_with_verification, scoped_code_index_store_root,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
-use tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME;
 use tracedecay_sql::PageStats;
+use tracedecay_store::StoreFile;
 
 use super::quiesced_store::quiesced_page_stats;
 use crate::store_maintenance::{CodeGenerationProtectionUnavailableV1, code_generation_protection};
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 
-const GLOBAL_DB_FILENAME: &str = "global.db";
-const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
 pub const MAX_STORAGE_REPORT_PAGE_LIMIT: usize = 64;
 const CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const CODE_GENERATIONS_DIRECTORY: &str = "code-generations-v1";
@@ -103,7 +101,7 @@ impl StoreKindBytesV1 {
             .components()
             .map(|component| component.as_os_str().to_string_lossy());
         let first = components.next().unwrap_or_default();
-        let db_filename = tracedecay_runtime_core::config::DB_FILENAME;
+        let db_filename = tracedecay_store::StoreFile::Project.file_name();
         let family = if first == db_filename
             || first
                 .strip_prefix(db_filename)
@@ -124,10 +122,10 @@ impl StoreKindBytesV1 {
             } else {
                 &mut self.generation_artifacts
             }
-        } else if first.starts_with(SESSIONS_DB_FILENAME)
+        } else if first.starts_with(StoreFile::ProjectSessions.file_name())
             || first
                 .strip_prefix('.')
-                .is_some_and(|name| name.starts_with(SESSIONS_DB_FILENAME))
+                .is_some_and(|name| name.starts_with(StoreFile::ProjectSessions.file_name()))
         {
             &mut self.sessions
         } else {
@@ -365,7 +363,7 @@ pub struct CodeGenerationRetentionAvailabilityEntry {
 pub async fn build_storage_report(
     profile_root: &Path,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
-    let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
+    let global_db_path = StoreFile::Profile.path(&profile_root);
     // Capture the profile's physical footprint before opening any SQLite
     // readers. A report must describe the profile supplied by its caller, not
     // implementation-dependent SQLite sidecar churn caused while collecting
@@ -514,7 +512,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
     limit: usize,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     let limit = limit.clamp(1, MAX_STORAGE_REPORT_PAGE_LIMIT);
-    let global_db_bytes = database_family_bytes(&profile_root.join(GLOBAL_DB_FILENAME));
+    let global_db_bytes = database_family_bytes(&StoreFile::Profile.path(&profile_root));
     let user_sessions_db_bytes = user_sessions_family_bytes(profile_root);
     let binding = storage_report_binding(limit)?;
     let position = match cursor {
@@ -821,7 +819,7 @@ pub fn build_project_storage_report(
         &mut code_generation_retention,
         &mut code_generation_retention_availability,
     )?;
-    let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
+    let global_db_path = StoreFile::Profile.path(&profile_root);
     Ok(StorageReport {
         profile_root: profile_root.display().to_string(),
         stores,
@@ -999,12 +997,12 @@ fn generation_digest_scan_exceeds_budget(
 }
 
 fn user_sessions_family_bytes(profile_root: &Path) -> u64 {
-    database_family_bytes(&profile_root.join(USER_SESSIONS_DB_FILENAME))
+    database_family_bytes(&StoreFile::ProfileSessions.path(&profile_root))
 }
 
 fn database_family_bytes(database_path: &Path) -> u64 {
     let mut total_bytes = 0u64;
-    for suffix in ["", "-wal", "-shm"] {
+    for suffix in std::iter::once("").chain(StoreFile::SIDECAR_SUFFIXES.iter().copied()) {
         if let Ok(metadata) = std::fs::metadata(sqlite_family_member(database_path, suffix)) {
             total_bytes = total_bytes.saturating_add(metadata.len());
         }
@@ -1023,10 +1021,9 @@ fn sqlite_family_member(database_path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn project_graph_db(profile_root: &Path, project_id: &str) -> PathBuf {
-    profile_root
-        .join("projects")
-        .join(project_id)
-        .join(tracedecay_runtime_core::config::DB_FILENAME)
+    StoreFile::Project
+        .path(&profile_root.join("projects").join(project_id))
+        .into_path_buf()
 }
 
 /// Free bytes and free-page ratio from the page stats the owning daemon
@@ -1255,7 +1252,7 @@ mod tests {
     }
 
     async fn seed_global_db(profile_root: &Path, projects: &[(&str, &str)]) {
-        let conn = TestConnection::open(&profile_root.join(GLOBAL_DB_FILENAME));
+        let conn = TestConnection::open(&StoreFile::Profile.path(&profile_root));
         conn.execute_batch(
             "CREATE TABLE code_projects (
                 project_id TEXT NOT NULL PRIMARY KEY,
@@ -1278,7 +1275,7 @@ mod tests {
         let data_root = profile_root.join("projects").join(project_id);
         std::fs::create_dir_all(&data_root).unwrap();
         let connection = tracedecay_sql::Connection::open(
-            data_root.join(tracedecay_runtime_core::config::DB_FILENAME),
+            data_root.join(tracedecay_store::StoreFile::Project.file_name()),
         )
         .unwrap();
         connection
@@ -1663,12 +1660,12 @@ mod tests {
         std::fs::create_dir_all(&profile_root).unwrap();
         seed_global_db(&profile_root, &[]).await;
         std::fs::write(
-            profile_root.join(USER_SESSIONS_DB_FILENAME),
+            StoreFile::ProfileSessions.path(&profile_root),
             vec![1u8; 4_096],
         )
         .unwrap();
         std::fs::write(
-            profile_root.join(format!("{USER_SESSIONS_DB_FILENAME}-wal")),
+            profile_root.join(format!("{}-wal", StoreFile::ProfileSessions.file_name())),
             vec![2u8; 1_024],
         )
         .unwrap();
@@ -1717,8 +1714,8 @@ mod tests {
             let tmp = tempfile::TempDir::new().unwrap();
             let profile_root = tmp.path().join("profile");
             std::fs::create_dir_all(&profile_root).unwrap();
-            let global_db = profile_root.join(GLOBAL_DB_FILENAME);
-            let writer = tracedecay_sql::Connection::open(&global_db).unwrap();
+            let global_db = StoreFile::Profile.path(&profile_root);
+            let writer = tracedecay_sql::Connection::open(&*global_db).unwrap();
             writer
                 .execute_batch(
                     "PRAGMA journal_mode = WAL;
@@ -1808,7 +1805,7 @@ mod tests {
         let graph_db = profile_root
             .join("projects")
             .join("proj_a")
-            .join(tracedecay_runtime_core::config::DB_FILENAME);
+            .join(tracedecay_store::StoreFile::Project.file_name());
         let before = std::fs::metadata(&graph_db).unwrap().modified().unwrap();
         let profile_listing = directory_listing(&profile_root);
 
@@ -1860,7 +1857,7 @@ mod tests {
         std::fs::create_dir_all(&data_root).unwrap();
         // Not a SQLite database at all.
         std::fs::write(
-            data_root.join(tracedecay_runtime_core::config::DB_FILENAME),
+            data_root.join(tracedecay_store::StoreFile::Project.file_name()),
             vec![9u8; 4096],
         )
         .unwrap();
@@ -2236,7 +2233,7 @@ mod tests {
         assert_eq!(report.stores[0].project_id, "proj_a");
         assert_eq!(report.stores[0].canonical_root, "/repos/a");
         assert_eq!(report.code_generation_retention.len(), 0);
-        assert!(!profile_root.join(GLOBAL_DB_FILENAME).exists());
+        assert!(!StoreFile::Profile.path(&profile_root).exists());
     }
 
     #[test]

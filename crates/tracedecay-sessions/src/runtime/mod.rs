@@ -43,7 +43,6 @@ pub use ingest::{
     subscribe_history_capacity_release, transcript_source_profile,
     try_ingest_user_codex_sessions_with_db_and_admission, with_transcript_source_profile,
 };
-pub use ingest::{USER_SESSIONS_DB_FILENAME, user_sessions_db_path};
 pub use registered_db::{
     SessionExec, SessionQuery, SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn,
 };

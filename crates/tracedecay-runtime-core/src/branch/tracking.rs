@@ -102,7 +102,11 @@ mod default_branch_tests {
         run_git(&project_root, &["checkout", "--detach", "HEAD"]);
         let data_dir = temp.path().join("profile-shard");
         std::fs::create_dir(&data_dir).unwrap();
-        std::fs::write(data_dir.join(crate::config::DB_FILENAME), b"graph").unwrap();
+        std::fs::write(
+            data_dir.join(tracedecay_store::StoreFile::Project.file_name()),
+            b"graph",
+        )
+        .unwrap();
 
         let Err(error) = prepare_branch_tracking_in_layout(&project_root, "trunk", &data_dir).await
         else {
@@ -376,7 +380,11 @@ async fn default_branch_bootstrap_persists_canonical_metadata() {
 
     let data_dir = temp.path().join("profile-shard");
     std::fs::create_dir_all(&data_dir).unwrap();
-    std::fs::write(data_dir.join(crate::config::DB_FILENAME), b"graph").unwrap();
+    std::fs::write(
+        data_dir.join(tracedecay_store::StoreFile::Project.file_name()),
+        b"graph",
+    )
+    .unwrap();
     let meta_path = data_dir.join(crate::storage::BRANCH_META_FILENAME);
     assert!(!meta_path.exists());
 

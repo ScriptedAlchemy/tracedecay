@@ -183,6 +183,7 @@ tracedecay-sdk = { path = "../tracedecay-sdk" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory" }
 tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-sql = { path = "../tracedecay-sql" }
+tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracing = "0.1"

@@ -23,17 +23,11 @@ use super::daemon::{admin_cli_result, admin_cli_result_mismatch};
 /// shared holders such as hooks and doctor runs.
 const PROFILE_OFFLINE_LEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
-const PROFILE_SQLITE_DATABASES: [&str; 3] = ["global.db", "user-sessions.db", "user-memory.db"];
-const PROFILE_DATABASE_PATHS: [&str; 15] = [
+const PROFILE_DATABASE_PATHS: [&str; 10] = [
     "projects",
     "stores",
     "remote",
     "agent_managed",
-    "user-sessions.grafeo",
-    "user-sessions.grafeo.wal",
-    "user-memory.grafeo",
-    "user-memory.grafeo.wal",
-    ".user-sessions.db.host-admission",
     tracedecay_hooks::PROFILE_HOOK_ADMISSIONS_DIR,
     tracedecay_runtime_core::storage::RESPONSE_HANDLES_DIRECTORY,
     "lcm-payloads",
@@ -42,10 +36,22 @@ const PROFILE_DATABASE_PATHS: [&str; 15] = [
     "maintenance",
 ];
 
-fn sqlite_family_member(database: &Path, suffix: &str) -> PathBuf {
-    let mut member = database.as_os_str().to_os_string();
-    member.push(suffix);
-    member.into()
+/// Every profile-root store member under either engine: the database
+/// family, its graph store and its host-admission spool.
+fn profile_store_members() -> Vec<String> {
+    let mut members = Vec::new();
+    for store in tracedecay_store::StoreFile::PROFILE_ROOT {
+        for database in store.legacy_names().iter().chain(store.family_names()) {
+            members.push((*database).to_owned());
+        }
+        members.extend(store.graph_names().iter().map(|name| (*name).to_owned()));
+        for database in [store.legacy_names()[0], store.file_name()] {
+            members.push(format!(".{database}.host-admission"));
+        }
+    }
+    members.sort();
+    members.dedup();
+    members
 }
 
 fn wipe_io(
@@ -212,8 +218,8 @@ pub(crate) async fn try_admit_profile_registry(
             message: error.to_string(),
         }
     })?;
-    if !profile_root
-        .join("global.db")
+    if !tracedecay_store::StoreFile::Profile
+        .path(&profile_root)
         .try_exists()
         .map_err(
             |error| tracedecay_domain::errors::TraceDecayError::Database {
@@ -291,30 +297,17 @@ pub(crate) fn take_profile_offline(
 fn wipe_complete_profile_database_state(
     profile_root: &Path,
 ) -> tracedecay_domain::errors::Result<usize> {
+    let store_members = profile_store_members();
+    let names = PROFILE_DATABASE_PATHS
+        .iter()
+        .copied()
+        .chain(store_members.iter().map(String::as_str));
     let mut removed = 0usize;
-    for name in PROFILE_DATABASE_PATHS {
+    for name in names.clone() {
         removed += usize::from(remove_fixed_profile_path(profile_root, name)?);
     }
-    for database in PROFILE_SQLITE_DATABASES {
-        let database = profile_root.join(database);
-        for suffix in ["-wal", "-shm", "-journal", ""] {
-            let member = sqlite_family_member(&database, suffix);
-            removed += usize::from(
-                tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&member)
-                    .map_err(|error| {
-                        wipe_io("remove profile SQLite family member", &member, &error)
-                    })?,
-            );
-        }
-    }
-    for name in PROFILE_DATABASE_PATHS {
+    for name in names {
         verify_store_path_absent(&profile_root.join(name))?;
-    }
-    for database in PROFILE_SQLITE_DATABASES {
-        let database = profile_root.join(database);
-        for suffix in ["-wal", "-shm", "-journal", ""] {
-            verify_store_path_absent(&sqlite_family_member(&database, suffix))?;
-        }
     }
     Ok(removed)
 }

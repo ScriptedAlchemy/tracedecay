@@ -16,10 +16,8 @@ async fn projectless_user_session_setup_failure_is_a_typed_unavailable_terminal(
     // database under the system temp dir, so the whole retained path succeeds
     // and the refusal goes unexercised.
     let administration = test_store_administration_for_profile(&profile_root);
-    std::fs::create_dir_all(tracedecay_sessions::runtime::user_sessions_db_path(
-        &profile_root,
-    ))
-    .expect("block the registered profile-session store");
+    std::fs::create_dir_all(tracedecay_store::StoreFile::ProfileSessions.path(&profile_root))
+        .expect("block the registered profile-session store");
     let identity = test_client_identity_for(profile_root);
     let params = serde_json::json!({
         "name": "tracedecay_lcm_status",
@@ -158,7 +156,7 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
         .await
         .expect("reopened host admission spool");
     let broker_path = tracedecay_daemon_identity::authority::canonical_identity_path(
-        &tracedecay_sessions::runtime::user_sessions_db_path(&profile_root),
+        &tracedecay_store::StoreFile::ProfileSessions.path(&profile_root),
     )
     .unwrap();
     assert!(

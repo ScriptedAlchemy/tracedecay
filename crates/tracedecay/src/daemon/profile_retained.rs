@@ -26,7 +26,6 @@ use tracedecay_session_runtime::retained::{
     profile_retained_connection_authority, profile_session_retrieval_serving_identity,
 };
 use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
-use tracedecay_sessions::runtime::user_sessions_db_path;
 use tracedecay_store::StoreShardIdV1;
 
 use super::{StoreAdministration, await_user_profile_host_admission_replay_for_identity};
@@ -162,7 +161,12 @@ async fn execute_profile_retained(
             .to_path_buf();
         Box::pin(await_user_profile_host_admission_replay_for_identity(
             store_administration,
-            &DaemonClientIdentity::new(profile_root.clone(), profile_root.join("global.db")),
+            &DaemonClientIdentity::new(
+                profile_root.clone(),
+                tracedecay_store::StoreFile::Profile
+                    .path(&profile_root)
+                    .into_path_buf(),
+            ),
         ))
         .await?;
     }
@@ -369,7 +373,8 @@ fn profile_retained_connection_for(
         profile_identity.brain_id().clone(),
         profile_identity.profile_id().clone(),
     );
-    let serving_db = user_sessions_db_path(profile_identity.profile_root());
+    let serving_db =
+        tracedecay_store::StoreFile::ProfileSessions.path(profile_identity.profile_root());
     let serving = profile_session_retrieval_serving_identity(profile_identity, &shard, &serving_db)
         .ok_or_else(|| TraceDecayError::Config {
             message: "profile session identity is unavailable".to_owned(),

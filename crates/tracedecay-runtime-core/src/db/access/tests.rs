@@ -77,7 +77,9 @@ fn consolidation_authority_is_reserved_for_the_session_snapshots() {
 fn remote_node_databases_inherit_the_profile_scope() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("profile");
-    let remote = profile.join(format!("remote/nodes/{}/remote.db", "a".repeat(64)));
+    let remote = profile
+        .join(format!("remote/nodes/{}", "a".repeat(64)))
+        .join(tracedecay_store::StoreFile::RemoteNode.file_name());
     std::fs::create_dir_all(remote.parent().unwrap()).unwrap();
 
     let identity = DatabaseIdentity::for_path(&remote).unwrap();
@@ -249,4 +251,43 @@ fn a_root_reached_through_a_symlink_still_contains_its_fixtures() {
         &outside.path().join("fixture.db"),
         resolved
     ));
+}
+
+/// Defect caught: the native fresh start deleting nothing (a stale legacy
+/// family shadows the new store), deleting an unrelated file, running under
+/// the SQLite engine, or deleting again on a later boot.
+#[test]
+fn first_daemon_scope_deletes_legacy_families_only_under_the_native_engine() {
+    use tracedecay_store::StoreFile;
+
+    let temp = tempfile::tempdir().unwrap();
+    let profile_root = temp.path().canonicalize().unwrap();
+    for name in ["global.db", "global.db-wal", "unrelated.db"] {
+        std::fs::write(profile_root.join(name), name).unwrap();
+    }
+    let native = tracedecay_sql::ENGINE == tracedecay_sql::Engine::Native;
+
+    let scope = crate::db::enter_daemon_database_scope(&profile_root, 1, "fresh start").unwrap();
+
+    assert_eq!(profile_root.join("global.db").exists(), !native);
+    assert_eq!(profile_root.join("global.db-wal").exists(), !native);
+    assert_eq!(
+        std::fs::read(profile_root.join("unrelated.db")).unwrap(),
+        b"unrelated.db"
+    );
+    if native {
+        let store = StoreFile::Profile.path(&profile_root);
+        let connection = tracedecay_sql::Connection::open(&*store).unwrap();
+        connection
+            .execute("CREATE TABLE fresh(id INTEGER PRIMARY KEY)", [])
+            .unwrap();
+        drop(connection);
+        assert!(store.ends_with("global.tdb") && store.is_file());
+    }
+    drop(scope);
+
+    let rerun = crate::db::enter_daemon_database_scope(&profile_root, 2, "fresh start").unwrap();
+    drop(rerun);
+    assert!(StoreFile::Profile.path(&profile_root).is_file() || !native);
+    assert!(profile_root.join("unrelated.db").is_file());
 }

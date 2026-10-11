@@ -39,7 +39,7 @@ use tracedecay_global_db::tests::harness::{
 use tracedecay_lcm::retrieval_content::derived_text_for_index;
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
-use tracedecay_sessions::runtime::user_sessions_db_path;
+use tracedecay_store::StoreFile;
 
 fn fixture_session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()
@@ -2827,7 +2827,7 @@ async fn persist_caps_occurrence_index_text_and_measures_user_sessions_per_n() {
             "N={n}: capped index_text ({stored_index_bytes}) must be smaller than the full body ({uncapped_index_bytes})"
         );
 
-        let family_bytes = sqlite_family_bytes(&user_sessions_db_path(tmp.path()));
+        let family_bytes = sqlite_family_bytes(&StoreFile::ProfileSessions.path(tmp.path()));
         assert!(
             family_bytes > previous_family_bytes,
             "N={n}: user-sessions family must grow with sessions ({family_bytes} vs {previous_family_bytes})"
@@ -3209,7 +3209,7 @@ async fn realistic_user_sessions_dbstat_names_dominant_bytes() {
             .read_snapshot()
             .await
             .expect("dbstat snapshot");
-        let family = sqlite_family_bytes(&user_sessions_db_path(tmp.path()));
+        let family = sqlite_family_bytes(&StoreFile::ProfileSessions.path(tmp.path()));
         assert!(
             family > previous_family,
             "N={n}: family must grow ({family} vs {previous_family})"

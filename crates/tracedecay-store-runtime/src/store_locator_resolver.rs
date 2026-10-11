@@ -28,17 +28,13 @@ use tracedecay_runtime_core::shard_runtime::registry::{
     StoreRuntimeRegistryFuture, StoreRuntimeResolver,
 };
 use tracedecay_runtime_core::storage;
-use tracedecay_session_memory::memory::user::user_memory_db_path;
-use tracedecay_sessions::runtime::user_sessions_db_path;
 use tracedecay_store::{
-    BrainId, BrainNodeId, LocatorDigest, ProjectId, StoreShardIdV1, StoreShardScopeV1,
+    BrainId, BrainNodeId, LocatorDigest, ProjectId, StoreFile, StoreShardIdV1, StoreShardScopeV1,
     UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest as store_locator_digest,
 };
 
 mod graph;
 
-const PROFILE_DATABASE_FILENAME: &str = "global.db";
-const REMOTE_NODE_DATABASE_FILENAME: &str = "remote.db";
 /// Explicit local authority for one typed profile.
 ///
 /// `profile_root` is a locator supplied by the daemon's profile authority. It
@@ -385,7 +381,7 @@ impl LocalStoreRuntimeResolverV1 {
         match &shard_id.scope {
             StoreShardScopeV1::Profile => {
                 let locator_path = canonical_or_prospective_regular_file(
-                    &canonical_profile_root.join(PROFILE_DATABASE_FILENAME),
+                    &StoreFile::Profile.path(&canonical_profile_root),
                     &canonical_profile_root,
                 )?;
                 verified_locator(
@@ -399,7 +395,7 @@ impl LocalStoreRuntimeResolverV1 {
             }
             StoreShardScopeV1::ProfileMemory => {
                 let locator_path = canonical_or_prospective_regular_file(
-                    &user_memory_db_path(&canonical_profile_root),
+                    &StoreFile::ProfileMemory.path(&canonical_profile_root),
                     &canonical_profile_root,
                 )?;
                 verified_locator(
@@ -413,7 +409,7 @@ impl LocalStoreRuntimeResolverV1 {
             }
             StoreShardScopeV1::ProfileSessions => {
                 let locator_path = canonical_or_prospective_regular_file(
-                    &user_sessions_db_path(&canonical_profile_root),
+                    &StoreFile::ProfileSessions.path(&canonical_profile_root),
                     &canonical_profile_root,
                 )?;
                 verified_locator(
@@ -505,7 +501,7 @@ impl LocalStoreRuntimeResolverV1 {
             canonical_profile_root,
         )?;
         let locator_path = canonical_or_prospective_regular_file(
-            &canonical_store_root.join(REMOTE_NODE_DATABASE_FILENAME),
+            &StoreFile::RemoteNode.path(&canonical_store_root),
             &canonical_store_root,
         )?;
         verified_locator(
@@ -1665,7 +1661,9 @@ mod tests {
         let profile = resolved(resolve_as_local(&resolver, &profile_key));
         assert_eq!(
             profile.locator().path(),
-            fixture.profile_root.join(PROFILE_DATABASE_FILENAME)
+            StoreFile::Profile
+                .path(&fixture.profile_root)
+                .into_path_buf()
         );
         assert_eq!(
             profile.metadata().kind,
@@ -1682,7 +1680,9 @@ mod tests {
         let profile_memory = resolved(resolve_as_local(&resolver, &profile_memory_key));
         assert_eq!(
             profile_memory.locator().path(),
-            user_memory_db_path(&fixture.profile_root)
+            StoreFile::ProfileMemory
+                .path(&fixture.profile_root)
+                .into_path_buf()
         );
         assert_eq!(
             profile_memory.metadata().kind,
@@ -1699,7 +1699,9 @@ mod tests {
         let profile_sessions = resolved(resolve_as_local(&resolver, &profile_sessions_key));
         assert_eq!(
             profile_sessions.locator().path(),
-            user_sessions_db_path(&fixture.profile_root)
+            StoreFile::ProfileSessions
+                .path(&fixture.profile_root)
+                .into_path_buf()
         );
         assert_eq!(
             profile_sessions.metadata().kind,
@@ -1723,7 +1725,7 @@ mod tests {
                 .join("remote")
                 .join("nodes")
                 .join(hex::encode(Sha256::digest(node_id.as_str().as_bytes())))
-                .join(REMOTE_NODE_DATABASE_FILENAME)
+                .join(StoreFile::RemoteNode.file_name())
         );
         assert_eq!(
             remote_node.metadata().kind,
@@ -1745,7 +1747,7 @@ mod tests {
                 .profile_root
                 .join("projects")
                 .join(fixture.project_id.as_str())
-                .join(storage::SESSIONS_DB_FILENAME)
+                .join(StoreFile::ProjectSessions.file_name())
         );
         assert_eq!(
             sessions.metadata().kind,

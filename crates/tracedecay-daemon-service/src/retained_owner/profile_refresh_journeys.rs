@@ -31,7 +31,7 @@ fn profile_retrieval_root(
         profile_identity.profile_id().clone(),
     );
     let serving_db =
-        tracedecay_sessions::runtime::user_sessions_db_path(profile_identity.profile_root());
+        tracedecay_store::StoreFile::ProfileSessions.path(profile_identity.profile_root());
     let serving = profile_session_retrieval_serving_identity(profile_identity, &shard, &serving_db)
         .expect("profile serving identity");
     DaemonSessionRetrievalRoot::profile(serving).expect("profile retrieval root")

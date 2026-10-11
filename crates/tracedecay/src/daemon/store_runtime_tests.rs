@@ -135,7 +135,7 @@ async fn project_sessions_convergence_fixture(
         identity.profile_root(),
         project_id.as_str(),
     )
-    .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
+    .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     std::fs::create_dir_all(sessions_path.parent().expect("session database parent"))
         .expect("session database directory");
     register_registered_schema_installer();
@@ -444,8 +444,7 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
         "existing profile memory schema",
     )
     .expect("daemon database scope");
-    let memory_path =
-        tracedecay_session_memory::memory::user::user_memory_db_path(identity.profile_root());
+    let memory_path = tracedecay_store::StoreFile::ProfileMemory.path(identity.profile_root());
     let seed = TestConnection::open(&memory_path);
     tracedecay_runtime_core::db::migrations::create_schema_connection(&seed)
         .await
@@ -544,8 +543,9 @@ async fn profile_sessions_mount_uses_the_durable_profile_identity_and_profile_pi
         "profile sessions identity pin",
     )
     .expect("daemon database scope");
-    let user_sessions_path =
-        tracedecay_sessions::runtime::user_sessions_db_path(identity.profile_root());
+    let user_sessions_path = tracedecay_store::StoreFile::ProfileSessions
+        .path(identity.profile_root())
+        .into_path_buf();
 
     let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
@@ -1052,7 +1052,7 @@ async fn project_sessions_mount_uses_typed_enrollment_and_is_idempotent() {
         identity.profile_root(),
         project_id.as_str(),
     )
-    .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
+    .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
 
     let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
@@ -1691,7 +1691,7 @@ async fn worktree_graph_mount_does_not_require_git() {
         .await
         .expect("register non-git project authority");
     let project_store_root = profile_root.join("projects/project.non-git-worktree");
-    let database_path = project_store_root.join(tracedecay_runtime_core::config::DB_FILENAME);
+    let database_path = project_store_root.join(tracedecay_store::StoreFile::Project.file_name());
     std::fs::create_dir_all(database_path.parent().expect("database parent"))
         .expect("database directory");
     let authority = DatabaseAuthority::for_runtime(&database_path, "non-git project graph mount")
@@ -1969,7 +1969,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     )
     .expect("daemon database scope");
     let project_store_root = profile_root.join("projects/project.derived-graph-corrupt");
-    let database_path = project_store_root.join(tracedecay_runtime_core::config::DB_FILENAME);
+    let database_path = project_store_root.join(tracedecay_store::StoreFile::Project.file_name());
     std::fs::create_dir_all(database_path.parent().expect("database parent"))
         .expect("database directory");
 
@@ -2257,7 +2257,7 @@ async fn read_only_project_graph_reuses_daemon_publication_without_write_authori
         .expect("register project authority");
     let project_store_root = profile_root.join("projects/project.graph-publication");
     std::fs::create_dir_all(&project_store_root).expect("project store directory");
-    let main_path = project_store_root.join(tracedecay_runtime_core::config::DB_FILENAME);
+    let main_path = project_store_root.join(tracedecay_store::StoreFile::Project.file_name());
     let unpublished_path = project_store_root.join("unpublished.db");
     tracedecay_sql::Connection::open(&unpublished_path)
         .expect("seed unpublished branch database")

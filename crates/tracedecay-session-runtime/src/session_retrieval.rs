@@ -453,7 +453,7 @@ fn store_serves_graph(profile_root: &Path, store: &StoreInstanceRecord, serving_
     tracedecay_runtime_core::path_safety::same_canonical_path(
         &profile_root
             .join(&store.store_relpath)
-            .join(tracedecay_runtime_core::config::DB_FILENAME),
+            .join(tracedecay_store::StoreFile::Project.file_name()),
         serving_db,
     )
 }

@@ -110,6 +110,7 @@ pub(super) struct ReadOnlyDb {
 /// Callers that already proved the path is a regular file must defer, not
 /// treat this as a no-op.
 pub(super) async fn open_readonly_immutable(db_path: &Path) -> Result<ReadOnlyDb, String> {
+    crate::runtime::shared::require_foreign_sqlite_path(db_path)?;
     let path = db_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let opened = super::super::sqlite_reader::open_verified_immutable_reader(&path)

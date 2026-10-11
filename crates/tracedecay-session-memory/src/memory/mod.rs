@@ -23,7 +23,6 @@ mod project_memory;
 mod sanitize;
 pub mod similarity;
 pub mod trust;
-pub mod user;
 
 #[cfg(test)]
 mod tests;

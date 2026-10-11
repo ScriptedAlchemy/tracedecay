@@ -2191,7 +2191,7 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
         &home_path.join(".tracedecay"),
         &default_profile_project_id(&project_path),
     );
-    let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
+    let db_path = data_root.join(tracedecay_store::StoreFile::Project.file_name());
     // The init daemon keeps publishing into the store after init returns, so
     // seed between daemons. Dropping the probe table frees its pages and keeps
     // the exact schema the next daemon requires on open.

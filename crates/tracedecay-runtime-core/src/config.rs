@@ -12,12 +12,6 @@ pub const USER_DATA_DIR_ENV: &str = "TRACEDECAY_DATA_DIR";
 /// Environment variable that pins the user-level global database path.
 pub const GLOBAL_DB_PATH_ENV: &str = "TRACEDECAY_GLOBAL_DB";
 
-/// Project graph database filename inside a `.tracedecay/` data dir.
-pub const DB_FILENAME: &str = "tracedecay.db";
-
-/// Filename of the user-level global database inside the profile root.
-pub const GLOBAL_DB_FILENAME: &str = "global.db";
-
 /// Output directories a cargo target dir may hold for this workspace: the
 /// built-in profiles plus the `perf` profile that `cargo test-ci`/`test-all`
 /// and the CI test lanes build with (see `Cargo.toml` `[profile.perf]`).
@@ -194,12 +188,14 @@ impl ProfileRoot {
             .or_else(|| self.home.as_ref().map(|home| home.join(".config")))
     }
 
-    /// The user-level global database: `global.db` in the data directory
-    /// unless `TRACEDECAY_GLOBAL_DB` pinned an explicit path.
+    /// The user-level global database: the profile store in the data
+    /// directory unless `TRACEDECAY_GLOBAL_DB` pinned an explicit path.
     pub fn global_db_path(&self) -> PathBuf {
-        self.global_db_override
-            .clone()
-            .unwrap_or_else(|| self.data_dir.join(GLOBAL_DB_FILENAME))
+        self.global_db_override.clone().unwrap_or_else(|| {
+            tracedecay_store::StoreFile::Profile
+                .path(&self.data_dir)
+                .into_path_buf()
+        })
     }
 
     /// True when the global database path was pinned explicitly.
@@ -462,17 +458,15 @@ impl Drop for HostProgramSearchPathGuard {
 
 #[cfg(test)]
 mod profile_root_tests {
-    use super::{
-        DB_FILENAME, GLOBAL_DB_FILENAME, GLOBAL_DB_PATH_ENV, HOME_ENV, ProfileRoot, TRACEDECAY_DIR,
-        USER_DATA_DIR_ENV,
-    };
+    use super::{GLOBAL_DB_PATH_ENV, HOME_ENV, ProfileRoot, TRACEDECAY_DIR, USER_DATA_DIR_ENV};
     use crate::storage::{path_local_profile_project_id, profile_sharded_data_root};
+    use tracedecay_store::StoreFile;
 
     fn enroll(profile: &ProfileRoot, project: &std::path::Path) {
         let store =
             profile_sharded_data_root(profile.data_dir(), &path_local_profile_project_id(project));
         std::fs::create_dir_all(&store).unwrap();
-        std::fs::write(store.join(DB_FILENAME), b"").unwrap();
+        std::fs::write(StoreFile::Project.path(&store), b"").unwrap();
     }
 
     /// Two owners with their own profiles share one process at once; each
@@ -650,7 +644,7 @@ mod profile_root_tests {
         let profile = ProfileRoot::new(root.join("data"));
         assert_eq!(
             profile.global_db_path(),
-            root.join("data").join(GLOBAL_DB_FILENAME)
+            StoreFile::Profile.path(&root.join("data")).into_path_buf()
         );
         assert!(!profile.global_db_path_is_overridden());
 

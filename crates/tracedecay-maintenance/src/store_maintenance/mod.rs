@@ -567,7 +567,7 @@ pub async fn run_registered_code_generation_retention(
     };
     let graph_replay_pool_root = store
         .data_root
-        .join(tracedecay_runtime_core::config::DB_FILENAME)
+        .join(tracedecay_store::StoreFile::Project.file_name())
         .with_extension("graph-replay");
     let mut outcome = CodeGenerationRetentionOutcomeV1::Complete;
     for scope in scopes {

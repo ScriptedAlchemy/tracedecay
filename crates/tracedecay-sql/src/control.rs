@@ -25,6 +25,9 @@ pub enum ErrorKind {
     TransactionControlDenied,
     NoRows,
     Unsupported,
+    /// Another process holds the store's exclusive lock. The store is
+    /// unavailable to this process; it is not busy and retrying is futile.
+    OwnedElsewhere,
     Other,
     /// The file is not a TraceDecay native store (wrong header or
     /// application id). Refused before the engine touches it.
@@ -55,7 +58,10 @@ pub trait ErrorExt {
             ErrorKind::Constraint => 19,
             ErrorKind::Denied | ErrorKind::TransactionControlDenied => 23,
             ErrorKind::ForeignFormat => 26,
-            ErrorKind::NoRows | ErrorKind::Unsupported | ErrorKind::Other => return None,
+            ErrorKind::NoRows
+            | ErrorKind::Unsupported
+            | ErrorKind::OwnedElsewhere
+            | ErrorKind::Other => return None,
         };
         Some((code, code))
     }

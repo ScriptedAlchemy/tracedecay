@@ -691,7 +691,7 @@ impl StoreAdministration {
         let data_root =
             tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
         let project_sessions_path =
-            data_root.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
+            data_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name());
         let identity = self.profile_identity().map_err(|error| {
             cleanup_error(
                 RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
@@ -783,7 +783,7 @@ impl StoreAdministration {
             })?;
         super::retire_registered_context_scout_owner(
             &typed_project_id,
-            &data_root.join(tracedecay_runtime_core::config::DB_FILENAME),
+            &data_root.join(tracedecay_store::StoreFile::Project.file_name()),
         );
         self.git_index_transaction_services
             .retire_project_database(&typed_project_id, &project_sessions_path)
@@ -932,7 +932,7 @@ impl StoreAdministration {
                 ));
             }
             let database_paths = [
-                data_root.join(tracedecay_runtime_core::config::DB_FILENAME),
+                data_root.join(tracedecay_store::StoreFile::Project.file_name()),
                 project_sessions_path.clone(),
             ]
             .into_iter()

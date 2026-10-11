@@ -19,6 +19,7 @@ mod outbox;
 mod ports;
 mod repository_read;
 mod scope_set;
+mod store_file;
 mod telemetry;
 
 pub use consistency::{
@@ -106,6 +107,7 @@ pub use scope_set::{
     AuthorizedScopeSetRecordV1, MAX_AUTHORIZED_SCOPE_SET_BYTES_V1, ScopeSetCasOutcomeV1,
     ScopeSetCompareAndSwapV1, ScopeSetStoreContractError,
 };
+pub use store_file::{OwnedStorePath, StoreFile};
 pub use telemetry::{
     MaintenanceTelemetryV1, ReaderLaneV1, RuntimeMaintenanceStateV1, WalPressureV1,
 };

@@ -25,12 +25,6 @@ use super::scheduler::{
 use super::startup::TranscriptIngestOutcome;
 use super::user_provider::UserProviderUnit;
 
-pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
-
-pub fn user_sessions_db_path(profile_root: &Path) -> PathBuf {
-    profile_root.join(USER_SESSIONS_DB_FILENAME)
-}
-
 pub struct CodexHookIngestOutcome {
     pub stats: TranscriptIngestStats,
     pub source_deferred: bool,

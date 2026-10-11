@@ -367,7 +367,7 @@ pub(super) async fn await_user_profile_host_admission_replay_for_identity(
 ) -> Result<()> {
     ensure_user_profile_host_admission_replay_for_identity(store_administration).await?;
     let broker_path = authority::canonical_identity_path(
-        &tracedecay_sessions::runtime::user_sessions_db_path(&client_identity.profile_root),
+        &tracedecay_store::StoreFile::ProfileSessions.path(&client_identity.profile_root),
     )
     .map_err(|error| {
         TraceDecayError::project_route("host_admission_broker_unavailable", true, error.to_string())

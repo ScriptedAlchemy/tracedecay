@@ -236,6 +236,8 @@ impl BranchMeta {
 }
 
 /// A `db_file` key accepted only when it names the project graph store.
+/// Only SQLite-era metadata carries the key, so the store it names is the
+/// SQLite-era file name whatever engine reads it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RetiredStoreReference;
 
@@ -245,7 +247,7 @@ impl<'de> Deserialize<'de> for RetiredStoreReference {
         D: serde::Deserializer<'de>,
     {
         let store = String::deserialize(deserializer)?;
-        let project_store = crate::config::DB_FILENAME;
+        let project_store = tracedecay_store::StoreFile::Project.legacy_names()[0];
         if store == project_store {
             Ok(Self)
         } else {
