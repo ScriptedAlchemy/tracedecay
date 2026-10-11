@@ -26,6 +26,7 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry;
 use tracedecay_project::project::TraceDecay;
 
 use crate::handlers::SessionAuthorities;
@@ -48,6 +49,9 @@ struct AdminCliContext<'a> {
     /// The daemon's code-index scheduler registry, which resolves the
     /// retention protection set a storage report plans against.
     code_index_schedulers: Option<&'a CodeIndexSchedulerRegistryV1>,
+    /// The daemon's store telemetry registry, which brokers page stats for
+    /// stores the daemon holds open.
+    store_telemetry: Option<&'a StoreTelemetrySamplingRegistry>,
 }
 
 impl<'a> AdminCliContext<'a> {
@@ -80,6 +84,7 @@ impl<'a> AdminCliContext<'a> {
             deadline,
             cancellation,
             code_index_schedulers: None,
+            store_telemetry: None,
         }
     }
 
@@ -89,6 +94,7 @@ impl<'a> AdminCliContext<'a> {
         profile_root: &'a Path,
         active_checkout: Option<&'a Path>,
         code_index_schedulers: Option<&'a CodeIndexSchedulerRegistryV1>,
+        store_telemetry: Option<&'a StoreTelemetrySamplingRegistry>,
     ) -> Self {
         Self {
             global_db,
@@ -104,6 +110,7 @@ impl<'a> AdminCliContext<'a> {
             deadline: None,
             cancellation: None,
             code_index_schedulers,
+            store_telemetry,
         }
     }
 
@@ -232,6 +239,7 @@ pub async fn compute_projectless_admin_cli(
     profile_root: &Path,
     active_checkout: Option<&Path>,
     code_index_schedulers: Option<&CodeIndexSchedulerRegistryV1>,
+    store_telemetry: Option<&StoreTelemetrySamplingRegistry>,
 ) -> Result<AdminCliResultV1> {
     dispatch_admin_cli(
         AdminCliContext::projectless(
@@ -240,6 +248,7 @@ pub async fn compute_projectless_admin_cli(
             profile_root,
             active_checkout,
             code_index_schedulers,
+            store_telemetry,
         ),
         request,
     )
@@ -432,6 +441,7 @@ async fn dispatch_admin_cli(
                         &project_root,
                         global_db,
                         context.code_index_schedulers,
+                        context.store_telemetry,
                     )
                     .await?
                 }
@@ -440,6 +450,7 @@ async fn dispatch_admin_cli(
                         profile_root,
                         global_db,
                         context.code_index_schedulers,
+                        context.store_telemetry,
                         cursor.as_deref(),
                         limit,
                     )
@@ -883,7 +894,7 @@ mod tests {
             .await
             .unwrap();
         let mut context =
-            AdminCliContext::projectless(&profile_database, None, &profile, None, None);
+            AdminCliContext::projectless(&profile_database, None, &profile, None, None, None);
         context.project = Some(&project);
         // A supplied foreign session pointer must never substitute for the
         // current project's registered runtime authority.

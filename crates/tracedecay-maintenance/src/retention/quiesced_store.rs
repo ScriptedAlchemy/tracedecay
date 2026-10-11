@@ -1,18 +1,19 @@
-//! Copy-free reads of a quiesced `SQLite` family.
+//! Copy-free reads of a quiesced store file.
 
 use std::io;
 use std::path::Path;
 
-use rusqlite::{Connection, OpenFlags};
+use tracedecay_sql::{Connection, ConnectionControl, Engine, OpenFlags, PageStats};
 
 /// Opens `database` read-only without locks, sidecars, or a copy, or refuses
 /// with [`io::ErrorKind::WouldBlock`] while its `-wal` holds frames.
 ///
-/// `immutable=1` reads only the main file: it takes no lock and never opens,
-/// creates, or writes a `-wal` or `-shm`, so nothing beside the store changes.
-/// That read is exact only once every frame is checkpointed. A clean runtime
-/// shutdown truncates the WAL, so a closed store qualifies; a store with a
-/// live writer or a crashed one does not, and its owner must answer instead.
+/// The SQLite engine opens with `immutable=1`, which reads only the main file:
+/// it takes no lock and never opens, creates, or writes a `-wal` or `-shm`, so
+/// nothing beside the store changes. That read is exact only once every frame
+/// is checkpointed. A clean runtime shutdown truncates the WAL, so a closed
+/// store qualifies; a store with a live writer or a crashed one does not, and
+/// its owner must answer instead.
 pub(crate) fn open_quiesced(database: &Path) -> io::Result<Connection> {
     let mut wal = database.as_os_str().to_os_string();
     wal.push("-wal");
@@ -30,13 +31,27 @@ pub(crate) fn open_quiesced(database: &Path) -> io::Result<Connection> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    Connection::open_with_flags(
-        immutable_uri(database)?,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(io::Error::other)
+    let opened = match tracedecay_sql::ENGINE {
+        Engine::Sqlite => Connection::open_with_flags(
+            immutable_uri(database)?,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ),
+        Engine::Native => Connection::open_with_flags(
+            database,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ),
+    };
+    opened.map_err(io::Error::other)
+}
+
+/// Page size, page count and freelist count of a quiesced store, read through
+/// the driver's page stats on an [`open_quiesced`] connection.
+pub(crate) fn quiesced_page_stats(database: &Path) -> io::Result<PageStats> {
+    open_quiesced(database)?
+        .page_stats()
+        .map_err(io::Error::other)
 }
 
 fn immutable_uri(path: &Path) -> io::Result<String> {
@@ -78,6 +93,40 @@ mod tests {
             .collect::<Vec<_>>();
         entries.sort();
         entries
+    }
+
+    /// Catches a size probe that reads anything but the store's own page
+    /// counters or writes beside it: freed pages must surface in the freelist,
+    /// the stats must equal the writer's, and the directory must be
+    /// byte-identical after the read.
+    #[test]
+    fn page_stats_size_a_quiesced_store_without_writing_beside_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("graph.db");
+        let writer = Connection::open(&database).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE facts (body BLOB);
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 64)
+                 INSERT INTO facts SELECT zeroblob(4096) FROM n;
+                 DELETE FROM facts;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        let expected = writer.page_stats().unwrap();
+        drop(writer);
+        let before = listing(directory.path());
+
+        let stats = quiesced_page_stats(&database).unwrap();
+
+        assert_eq!(stats, expected);
+        assert!(stats.page_size > 0 && stats.page_count > 0);
+        assert!(
+            stats.freelist_count >= 64,
+            "64 deleted 4 KiB rows must leave freed pages: {stats:?}"
+        );
+        assert_eq!(listing(directory.path()), before);
     }
 
     /// Catches a reader that copies, materializes sidecars, or writes beside

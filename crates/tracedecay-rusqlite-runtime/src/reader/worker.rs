@@ -578,16 +578,13 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 let _ = reply.send(result);
             }
             SnapshotCommand::StoreSize { reply } => {
-                let read = || -> Result<StoreSizeTelemetrySample, tracedecay_sql::Error> {
-                    let stats = transaction.page_stats()?;
-                    let page_size_bytes = u32::try_from(stats.page_size).map_err(|_| {
-                        tracedecay_sql::Error::IntegralValueOutOfRange(
-                            0,
-                            i64::try_from(stats.page_size).unwrap_or(i64::MAX),
-                        )
-                    })?;
+                let read = || -> Result<StoreSizeTelemetrySample, String> {
+                    let stats = transaction
+                        .page_stats()
+                        .map_err(|error| error.to_string())?;
                     Ok(StoreSizeTelemetrySample {
-                        page_size_bytes,
+                        page_size_bytes: u32::try_from(stats.page_size)
+                            .map_err(|_| format!("page size {} exceeds u32", stats.page_size))?,
                         page_count: stats.page_count,
                         freelist_pages: stats.freelist_count,
                     })

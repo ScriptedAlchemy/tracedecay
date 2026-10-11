@@ -8,10 +8,11 @@
 //!
 //! A report never copies, snapshots, or materializes a store. Sizes come from
 //! filesystem metadata (exact, no locks, no I/O beyond `stat`) and free-page
-//! counts from a short read-only connection. If a free-page connection fails
-//! because the store is busy, corrupt, or a WAL database with no `-shm` to map
-//! read-only, its fields are `None` rather than guessed at, and the store
-//! still reports its size.
+//! counts from the driver's page stats: the owning daemon's retained reader
+//! when the daemon holds the store open, otherwise a quiesced read of the
+//! closed store. If neither can answer because the store is live elsewhere,
+//! has outstanding WAL frames, or is corrupt, its fields are `None` rather
+//! than guessed at, and the store still reports its size.
 //!
 //! The offline registry read opens `global.db` immutable, which reads only the
 //! main file and writes nothing beside it. A `global.db` with outstanding WAL
@@ -20,7 +21,6 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
@@ -35,8 +35,11 @@ use tracedecay_code_index_retention::code_index_generations::{
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME;
+use tracedecay_sql::PageStats;
 
+use super::quiesced_store::quiesced_page_stats;
 use crate::store_maintenance::{CodeGenerationProtectionUnavailableV1, code_generation_protection};
+use crate::telemetry::StoreTelemetrySamplingRegistry;
 
 const GLOBAL_DB_FILENAME: &str = "global.db";
 const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
@@ -412,7 +415,7 @@ struct SampledRegisteredStorage {
 fn read_registered_project_rows(
     global_db_path: &Path,
 ) -> tracedecay_domain::errors::Result<Vec<(String, String)>> {
-    let connection = super::quiesced_sqlite::open_quiesced(global_db_path)
+    let connection = super::quiesced_store::open_quiesced(global_db_path)
         .map_err(|error| report_error("open quiesced global.db for read-only report", error))?;
     let mut statement = connection
         .prepare("SELECT project_id, canonical_root FROM code_projects ORDER BY project_id")
@@ -442,6 +445,7 @@ fn sample_registered_storage(
             &project_id,
             &canonical_root,
             Err(RETENTION_PROTECTION_UNRESOLVED),
+            None,
             &mut stores,
             &mut code_generation_retention,
             &mut code_generation_retention_availability,
@@ -505,6 +509,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
     profile_root: &Path,
     global_db: &tracedecay_global_db::RegisteredGlobalDb,
     code_index_schedulers: Option<&CodeIndexSchedulerRegistryV1>,
+    store_telemetry: Option<&StoreTelemetrySamplingRegistry>,
     cursor: Option<&str>,
     limit: usize,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
@@ -526,6 +531,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
                 profile_root,
                 global_db,
                 code_index_schedulers,
+                store_telemetry,
                 &binding,
                 after_project_id.as_deref(),
                 limit,
@@ -592,6 +598,7 @@ async fn project_storage_report_page(
     profile_root: &Path,
     global_db: &tracedecay_global_db::RegisteredGlobalDb,
     code_index_schedulers: Option<&CodeIndexSchedulerRegistryV1>,
+    store_telemetry: Option<&StoreTelemetrySamplingRegistry>,
     binding: &CursorBindingV1,
     after_project_id: Option<&str>,
     limit: usize,
@@ -618,14 +625,15 @@ async fn project_storage_report_page(
     let next_cursor = storage_report_cursor(binding, &next_position)?;
     let mut protections = Vec::with_capacity(projects.len());
     for project in &projects {
-        protections.push(
+        protections.push((
             resolve_retention_protection(
                 code_index_schedulers,
                 global_db,
                 Path::new(&project.canonical_root),
             )
             .await,
-        );
+            held_page_stats(store_telemetry, profile_root, &project.project_id).await,
+        ));
     }
     let profile_root = profile_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -636,12 +644,13 @@ async fn project_storage_report_page(
             coverage: StorageReportCoverage::partial(next_cursor),
             ..StorageReport::default()
         };
-        for (project, protection) in projects.into_iter().zip(protections) {
+        for (project, (protection, held_pages)) in projects.into_iter().zip(protections) {
             append_project_report(
                 &profile_root,
                 &project.project_id,
                 &project.canonical_root,
                 protection,
+                held_pages,
                 &mut report.stores,
                 &mut report.code_generation_retention,
                 &mut report.code_generation_retention_availability,
@@ -712,8 +721,9 @@ fn list_project_directories_page(
     })
 }
 
-/// Builds one project-scoped report on the daemon's blocking pool so bounded
-/// read-only `SQLite` samples cannot stall the async authority loop.
+/// Builds one project-scoped report on the daemon's blocking pool so file
+/// stats and quiesced reads cannot stall the async authority loop. Free pages
+/// of a graph store the daemon holds open come from its retained reader.
 ///
 /// The retention dry run plans against the same protection set daemon
 /// retention resolves: the scheduler's serving generations and the live
@@ -726,17 +736,39 @@ pub async fn build_project_storage_report_from_daemon(
     canonical_root: &Path,
     global_db: &tracedecay_global_db::RegisteredGlobalDb,
     code_index_schedulers: Option<&CodeIndexSchedulerRegistryV1>,
+    store_telemetry: Option<&StoreTelemetrySamplingRegistry>,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     let protection =
         resolve_retention_protection(code_index_schedulers, global_db, canonical_root).await;
+    let held_pages = held_page_stats(store_telemetry, profile_root, project_id).await;
     let profile_root = profile_root.to_path_buf();
     let project_id = project_id.to_owned();
     let canonical_root = canonical_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        build_project_storage_report(&profile_root, &project_id, &canonical_root, protection)
+        build_project_storage_report(
+            &profile_root,
+            &project_id,
+            &canonical_root,
+            protection,
+            held_pages,
+        )
     })
     .await
     .map_err(|error| report_error("join daemon-backed project storage report", error))?
+}
+
+/// Page stats of a project graph store this daemon holds open, read through
+/// its retained reader. A store the daemon does not hold is closed or owned
+/// elsewhere, and the report falls back to a quiesced read.
+async fn held_page_stats(
+    store_telemetry: Option<&StoreTelemetrySamplingRegistry>,
+    profile_root: &Path,
+    project_id: &str,
+) -> Option<PageStats> {
+    let database = project_graph_db(profile_root, project_id);
+    // The registry keys stores by their canonical database path.
+    let database = std::fs::canonicalize(&database).unwrap_or(database);
+    store_telemetry?.held_page_stats(&database).await
 }
 
 async fn resolve_retention_protection(
@@ -760,13 +792,16 @@ async fn resolve_retention_protection(
 /// bindings) is only resolvable from daemon authorities; a caller that holds
 /// it passes it here. Inventory-less surfaces pass the reason it is missing,
 /// and the retention dry run reports itself unavailable with that reason
-/// rather than planning against an unproven protection set.
+/// rather than planning against an unproven protection set. `held_pages` is
+/// the owning daemon's page stats for a graph store it holds open; without
+/// them the free pages come from a quiesced read.
 #[tracing::instrument(name = "maintenance.storage_report.project", level = "trace", skip_all)]
 pub fn build_project_storage_report(
     profile_root: &Path,
     project_id: &str,
     canonical_root: &Path,
     vector_readable_sources: Result<BTreeSet<CodeGenerationId>, &'static str>,
+    held_pages: Option<PageStats>,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     tracedecay_runtime_core::storage::validate_project_id(project_id).map_err(|message| {
         tracedecay_domain::errors::TraceDecayError::Config {
@@ -781,6 +816,7 @@ pub fn build_project_storage_report(
         project_id,
         &canonical_root.to_string_lossy(),
         vector_readable_sources,
+        held_pages,
         &mut stores,
         &mut code_generation_retention,
         &mut code_generation_retention_availability,
@@ -805,6 +841,7 @@ fn append_project_report(
     project_id: &str,
     canonical_root: &str,
     vector_readable_sources: RetentionProtection,
+    held_pages: Option<PageStats>,
     stores: &mut Vec<StoreSizeReportEntry>,
     code_generation_retention: &mut Vec<CodeGenerationRetentionDryRunEntry>,
     code_generation_retention_availability: &mut Vec<CodeGenerationRetentionAvailabilityEntry>,
@@ -818,10 +855,7 @@ fn append_project_report(
             }
         });
         let (free_bytes, free_page_ratio) =
-            sample_free_pages(&data_root.join(tracedecay_runtime_core::config::DB_FILENAME))
-                .map_or((None, None), |(free_bytes, ratio)| {
-                    (Some(free_bytes), Some(ratio))
-                });
+            sample_free_pages(&project_graph_db(profile_root, project_id), held_pages).unzip();
         stores.push(StoreSizeReportEntry {
             project_id: project_id.to_owned(),
             canonical_root: canonical_root.to_owned(),
@@ -988,34 +1022,26 @@ fn sqlite_family_member(database_path: &Path, suffix: &str) -> PathBuf {
     }
 }
 
-/// Reads the free-page pragmas over a bounded read-only probe.
-/// Returns `None` on any failure, a store held by a busy writer, a corrupt
-/// file, or a WAL database whose `-shm` cannot be mapped read-only. A report
-/// must degrade, never block and never repair.
-fn sample_free_pages(graph_db_path: &Path) -> Option<(u64, f64)> {
-    // `NO_MUTEX` is sound: `rusqlite::Connection` is not `Sync`, so the probe
-    // stays owned by this one thread.
-    let connection = rusqlite::Connection::open_with_flags(
-        graph_db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()?;
-    connection.busy_timeout(Duration::from_millis(200)).ok()?;
-    let pragma_u64 = |pragma: &str| {
-        connection
-            .query_row(&format!("PRAGMA {pragma}"), [], |row| row.get::<_, i64>(0))
-            .ok()
-            .and_then(|value| u64::try_from(value).ok())
-    };
-    let page_size = pragma_u64("page_size")?;
-    let page_count = pragma_u64("page_count")?;
-    let freelist = pragma_u64("freelist_count")?;
-    if page_size == 0 || page_count == 0 {
+fn project_graph_db(profile_root: &Path, project_id: &str) -> PathBuf {
+    profile_root
+        .join("projects")
+        .join(project_id)
+        .join(tracedecay_runtime_core::config::DB_FILENAME)
+}
+
+/// Free bytes and free-page ratio from the page stats the owning daemon
+/// brokered, or else from a quiesced read of the closed store. Returns `None`
+/// when neither answers: a store live in another process, one with
+/// outstanding WAL frames, or a corrupt file. A report must degrade, never
+/// block and never repair.
+fn sample_free_pages(graph_db_path: &Path, held: Option<PageStats>) -> Option<(u64, f64)> {
+    let stats = held.or_else(|| quiesced_page_stats(graph_db_path).ok())?;
+    if stats.page_size == 0 || stats.page_count == 0 {
         return None;
     }
-    let free_bytes = page_size.saturating_mul(freelist);
+    let free_bytes = stats.page_size.saturating_mul(stats.freelist_count);
     #[allow(clippy::cast_precision_loss)]
-    let free_page_ratio = freelist as f64 / page_count as f64;
+    let free_page_ratio = stats.freelist_count as f64 / stats.page_count as f64;
     Some((free_bytes, free_page_ratio))
 }
 
@@ -1251,7 +1277,7 @@ mod tests {
     fn seed_graph_db(profile_root: &Path, project_id: &str) {
         let data_root = profile_root.join("projects").join(project_id);
         std::fs::create_dir_all(&data_root).unwrap();
-        let connection = rusqlite::Connection::open(
+        let connection = tracedecay_sql::Connection::open(
             data_root.join(tracedecay_runtime_core::config::DB_FILENAME),
         )
         .unwrap();
@@ -1381,16 +1407,23 @@ mod tests {
             std::fs::create_dir_all(&project).unwrap();
             std::fs::write(project.join("payload"), b"1234").unwrap();
         }
-        let registry =
-            build_storage_report_page_from_registered_global_db(profile_root, &db, None, None, 1)
-                .await
-                .unwrap();
+        let registry = build_storage_report_page_from_registered_global_db(
+            profile_root,
+            &db,
+            None,
+            None,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
         assert_eq!(registry.stores.len(), 0);
         let directories = registry.coverage.next_cursor.unwrap();
         assert!(directories.starts_with("bc1."), "{directories}");
         let first = build_storage_report_page_from_registered_global_db(
             profile_root,
             &db,
+            None,
             None,
             Some(&directories),
             1,
@@ -1406,6 +1439,7 @@ mod tests {
             profile_root,
             &db,
             None,
+            None,
             Some(&cursor),
             1,
         )
@@ -1414,6 +1448,7 @@ mod tests {
         let repeated = build_storage_report_page_from_registered_global_db(
             profile_root,
             &db,
+            None,
             None,
             Some(&cursor),
             1,
@@ -1445,6 +1480,7 @@ mod tests {
                 profile_root,
                 &db,
                 None,
+                None,
                 Some(presented),
                 limit,
             )
@@ -1459,6 +1495,7 @@ mod tests {
             profile_root,
             &db,
             None,
+            None,
             second.coverage.next_cursor.as_deref(),
             1,
         )
@@ -1471,6 +1508,7 @@ mod tests {
         let exhausted = build_storage_report_page_from_registered_global_db(
             profile_root,
             &db,
+            None,
             None,
             third.coverage.next_cursor.as_deref(),
             1,
@@ -1680,7 +1718,7 @@ mod tests {
             let profile_root = tmp.path().join("profile");
             std::fs::create_dir_all(&profile_root).unwrap();
             let global_db = profile_root.join(GLOBAL_DB_FILENAME);
-            let writer = rusqlite::Connection::open(&global_db).unwrap();
+            let writer = tracedecay_sql::Connection::open(&global_db).unwrap();
             writer
                 .execute_batch(
                     "PRAGMA journal_mode = WAL;
@@ -1835,6 +1873,110 @@ mod tests {
         assert_eq!(report.stores[0].free_page_ratio, None);
     }
 
+    /// Writes a closed graph store with freed pages and returns its page stats.
+    fn seed_graph_db_with_free_pages(profile_root: &Path, project_id: &str) -> PageStats {
+        let database = project_graph_db(profile_root, project_id);
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let writer = tracedecay_sql::Connection::open(&database).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE fixture (body BLOB);
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 32)
+                 INSERT INTO fixture SELECT zeroblob(4096) FROM n;
+                 DELETE FROM fixture;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        let stats = tracedecay_sql::ConnectionControl::page_stats(&writer).unwrap();
+        assert!(
+            stats.freelist_count > 0,
+            "fixture must free pages: {stats:?}"
+        );
+        stats
+    }
+
+    /// Catches a report that sizes free pages from anything but the store's
+    /// page stats, or that writes beside the store to read them: the free
+    /// bytes must equal the store's own freelist and the profile listing must
+    /// be byte-identical afterwards.
+    #[test]
+    fn storage_report_sizes_a_closed_store_through_page_stats_without_writing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let stats = seed_graph_db_with_free_pages(&profile_root, "proj_a");
+        let before = directory_listing(&profile_root);
+
+        let report = build_project_storage_report(
+            &profile_root,
+            "proj_a",
+            Path::new("/repos/a"),
+            Err(RETENTION_PROTECTION_UNRESOLVED),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(report.stores.len(), 1);
+        assert_eq!(
+            report.stores[0].free_bytes,
+            Some(stats.page_size * stats.freelist_count)
+        );
+        let ratio = stats.freelist_count as f64 / stats.page_count as f64;
+        assert_eq!(
+            report.stores[0].free_page_ratio.map(f64::to_bits),
+            Some(ratio.to_bits())
+        );
+        assert_eq!(directory_listing(&profile_root), before);
+    }
+
+    /// Catches a daemon report that reopens a store it already holds instead
+    /// of using the owner's page stats: the store here has outstanding WAL
+    /// frames, so only the brokered stats can answer.
+    #[test]
+    fn storage_report_prefers_the_owning_daemons_page_stats() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        seed_graph_db_with_free_pages(&profile_root, "proj_a");
+        let database = project_graph_db(&profile_root, "proj_a");
+        let writer = tracedecay_sql::Connection::open(&database).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA wal_autocheckpoint = 0;
+                 INSERT INTO fixture VALUES (zeroblob(16));",
+            )
+            .unwrap();
+        let held = PageStats {
+            page_size: 4096,
+            page_count: 10,
+            freelist_count: 4,
+        };
+
+        let unbrokered = build_project_storage_report(
+            &profile_root,
+            "proj_a",
+            Path::new("/repos/a"),
+            Err(RETENTION_PROTECTION_UNRESOLVED),
+            None,
+        )
+        .unwrap();
+        let brokered = build_project_storage_report(
+            &profile_root,
+            "proj_a",
+            Path::new("/repos/a"),
+            Err(RETENTION_PROTECTION_UNRESOLVED),
+            Some(held),
+        )
+        .unwrap();
+
+        assert_eq!(unbrokered.stores[0].free_bytes, None);
+        assert_eq!(brokered.stores[0].free_bytes, Some(4 * 4096));
+        assert_eq!(
+            brokered.stores[0].free_page_ratio.map(f64::to_bits),
+            Some(0.4_f64.to_bits())
+        );
+        drop(writer);
+    }
+
     /// The backlog walker must not follow symlinks: one pointing at an
     /// ancestor would recurse until the stack ran out, and one pointing
     /// outside would bill another tree's bytes to the backlog.
@@ -1913,6 +2055,7 @@ mod tests {
             "proj_a",
             Path::new("/repos/a"),
             Err(RETENTION_PROTECTION_UNRESOLVED),
+            None,
         )
         .unwrap();
 
@@ -1987,6 +2130,7 @@ mod tests {
             &db,
             Some(&schedulers),
             None,
+            None,
             8,
         )
         .await
@@ -2026,10 +2170,16 @@ mod tests {
             StorageReportAvailabilityState::Available
         );
 
-        let without_authority =
-            build_storage_report_page_from_registered_global_db(&profile_root, &db, None, None, 8)
-                .await
-                .unwrap();
+        let without_authority = build_storage_report_page_from_registered_global_db(
+            &profile_root,
+            &db,
+            None,
+            None,
+            None,
+            8,
+        )
+        .await
+        .unwrap();
         assert_eq!(without_authority.code_generation_retention.len(), 0);
         assert_eq!(
             without_authority.code_generation_retention_availability[0]
@@ -2078,6 +2228,7 @@ mod tests {
             "proj_a",
             Path::new("/repos/a"),
             Err(RETENTION_PROTECTION_UNRESOLVED),
+            None,
         )
         .unwrap();
 
@@ -2106,6 +2257,7 @@ mod tests {
             "proj_a",
             canonical_root,
             Err(RETENTION_PROTECTION_UNRESOLVED),
+            None,
         )
         .unwrap();
 
@@ -2159,6 +2311,7 @@ mod tests {
             "proj_a",
             canonical_root,
             Ok(BTreeSet::new()),
+            None,
         )
         .unwrap();
         let payload = serde_json::to_value(report).unwrap();

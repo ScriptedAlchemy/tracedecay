@@ -428,6 +428,7 @@ async fn handle_storage_report(
                     project_id,
                     project_root,
                     Err(tracedecay_maintenance::retention::storage_report::RETENTION_PROTECTION_UNRESOLVED),
+                    None,
                 )
             }
             (None, None) => {
