@@ -284,8 +284,6 @@ pub(crate) fn is_allowed_exact_sql_pragma(pragma_name: &str, pragma_value: Optio
                     && (value.eq_ignore_ascii_case("on") || value == "1"))
                 || (pragma_name.eq_ignore_ascii_case("busy_timeout")
                     && value.parse::<u32>().is_ok())
-                || (pragma_name.eq_ignore_ascii_case("secure_delete")
-                    && (value.eq_ignore_ascii_case("on") || value == "1"))
                 || (pragma_name.eq_ignore_ascii_case("user_version")
                     && value.parse::<u32>().is_ok())
                 || (pragma_name.eq_ignore_ascii_case("wal_autocheckpoint")
@@ -328,7 +326,6 @@ fn is_exact_sql_read_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bo
         "query_only",
         "recursive_triggers",
         "schema_version",
-        "secure_delete",
         "synchronous",
         "temp_store",
         "user_version",

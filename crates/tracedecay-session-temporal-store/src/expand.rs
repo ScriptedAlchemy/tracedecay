@@ -422,8 +422,8 @@ async fn assertions_for_anchors(
              WHERE assertion.session_id = ?1
                AND +assertion.generation <= ?2
                AND (
-                   assertion.subject_anchor_id IN (SELECT value FROM json_each(?3))
-                   OR assertion.object_anchor_id IN (SELECT value FROM json_each(?3))
+                   assertion.subject_anchor_id IN (SELECT CAST(value AS TEXT) FROM json_each(?3))
+                   OR assertion.object_anchor_id IN (SELECT CAST(value AS TEXT) FROM json_each(?3))
                )
                AND (
                    ?4 <> 'as_of'
@@ -491,7 +491,7 @@ async fn summary_anchors_for(
             "SELECT summary_id, summary_anchor_id
              FROM session_summary_nodes
              WHERE session_id = ?1
-               AND summary_id IN (SELECT value FROM json_each(?2))",
+               AND summary_id IN (SELECT CAST(value AS TEXT) FROM json_each(?2))",
             params![session_id.as_str(), encoded_ids],
         )
         .await

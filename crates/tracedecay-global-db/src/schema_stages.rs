@@ -1892,10 +1892,24 @@ mod tests {
             let directory = TempDir::new().unwrap();
             let database_path = directory.path().join("sessions.db");
             install_registered_schema(&database_path).await;
-            tracedecay_sql::Connection::open(&database_path)
-                .unwrap()
-                .execute_batch(drift)
+            // Turso rejects DROP COLUMN while any trigger reads NEW.rowid
+            // (turso-bugs/drop-column-rejects-trigger-rowid.md), so the drift
+            // is applied with that trigger lifted and restored verbatim.
+            let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
+            let rowid_trigger: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_schema
+                     WHERE name = 'receipt_audit_invalidate_nonappend_insert_v1'",
+                    [],
+                    |row| row.get(0),
+                )
                 .unwrap();
+            connection
+                .execute_batch("DROP TRIGGER receipt_audit_invalidate_nonappend_insert_v1")
+                .unwrap();
+            connection.execute_batch(drift).unwrap();
+            connection.execute_batch(&rowid_trigger).unwrap();
+            drop(connection);
 
             let error = registered_admission_error(&database_path).await;
             assert_eq!(

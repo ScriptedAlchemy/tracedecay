@@ -28,6 +28,7 @@ conformance!(
     transaction_commit_and_rollback_on_drop,
     savepoints_nest_and_roll_back_on_drop,
     constraint_is_classified,
+    raised_and_checked_refusals_carry_the_schema_text,
     busy_is_classified,
     capability_scope_denies_and_restores,
     exact_sql_scope_fails_on_swallowed_transaction_control,
@@ -261,6 +262,32 @@ mod cases {
             .execute("INSERT INTO items (name) VALUES (NULL)", [])
             .expect_err("NULL name violates NOT NULL");
         assert_eq!(not_null.kind(), ErrorKind::Constraint, "{not_null}");
+        Ok(())
+    }
+
+    pub(super) fn raised_and_checked_refusals_carry_the_schema_text() -> Result<()> {
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "CREATE TABLE ledger (id INTEGER PRIMARY KEY, amount INTEGER NOT NULL CHECK (amount >= 0));
+             CREATE TRIGGER ledger_immutable BEFORE UPDATE ON ledger
+             BEGIN SELECT RAISE(ABORT, 'ledger rows are immutable'); END;
+             INSERT INTO ledger (amount) VALUES (1);",
+        )?;
+        let raised = connection
+            .execute("UPDATE ledger SET amount = 2", [])
+            .expect_err("the trigger refuses updates");
+        assert_eq!(raised.kind(), ErrorKind::Constraint, "{raised}");
+        assert_eq!(raised.to_string(), "ledger rows are immutable");
+        let checked = connection
+            .execute("INSERT INTO ledger (amount) VALUES (-1)", [])
+            .expect_err("the CHECK refuses negative amounts");
+        assert_eq!(checked.kind(), ErrorKind::Constraint, "{checked}");
+        assert!(
+            checked
+                .to_string()
+                .starts_with("CHECK constraint failed: amount >= 0"),
+            "{checked}"
+        );
         Ok(())
     }
 

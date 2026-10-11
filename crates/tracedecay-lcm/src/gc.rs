@@ -728,7 +728,7 @@ async fn plan_dangling(
         .map_err(|error| LcmError::Db(format!("payload GC dangling scan cursor: {error}")))?;
     let scanned_through = util::fetch_i64(
         conn,
-        "SELECT COALESCE(MAX(store_id), 0) FROM lcm_raw_messages",
+        "SELECT COALESCE((SELECT MAX(store_id) FROM lcm_raw_messages), 0)",
         (),
         "payload GC raw row watermark returned no row",
     )

@@ -137,12 +137,13 @@ impl RegisteredGlobalDb {
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
-    use tracedecay_runtime_core::db::engine::Value;
 
     use super::*;
     use crate::ParseOffset;
 
-    use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use crate::tests::harness::{
+        HostAdmissionScope, HostAdmissionTestRuntimeV1, statement_vm_steps,
+    };
 
     fn session(provider: &str, session_id: &str, transcript_path: &str) -> SessionRecord {
         SessionRecord {
@@ -162,66 +163,38 @@ mod tests {
         }
     }
 
-    async fn query_plan(
-        database: &RegisteredGlobalDb,
-        sql: &str,
-        params: Vec<Value>,
-    ) -> Vec<String> {
-        let snapshot = database.read_snapshot().await.unwrap();
-        let mut rows = snapshot
-            .query(&format!("EXPLAIN QUERY PLAN {sql}"), params)
-            .await
-            .unwrap();
-        let mut details = Vec::new();
-        while let Some(row) = rows.next().await.unwrap() {
-            details.push(row.get::<String>(3).unwrap());
-        }
-        details
-    }
-
-    fn assert_scoped_index_plan(details: &[String], index: &str) {
-        assert!(
-            details.iter().any(|detail| detail.contains(index)),
-            "query plan did not use {index}: {details:?}"
-        );
-        assert!(
-            !details
-                .iter()
-                .any(|detail| detail.contains("INTEGER PRIMARY KEY")),
-            "query plan regressed to a global rowid scan: {details:?}"
-        );
-        assert!(
-            !details.iter().any(|detail| detail.contains("TEMP B-TREE")),
-            "query plan regressed to a sort: {details:?}"
-        );
+    /// Interleaves `rows` target and noise messages. Timestamps count down from
+    /// `newest`; within one timestamp ordinals tie, so the message id decides.
+    fn interleaved_messages_sql(first: i64, rows: i64, newest: i64) -> String {
+        let last = first + rows - 1;
+        format!(
+            "WITH RECURSIVE rows(value) AS (
+                SELECT {first}
+                UNION ALL
+                SELECT value + 1 FROM rows WHERE value < {last}
+             )
+             INSERT INTO lcm_raw_messages(
+                provider, message_id, session_id, role, timestamp, ordinal, content,
+                kind, model, tool_names, source_path, source_offset, metadata_json,
+                content_hash, storage_kind
+             )
+             SELECT
+                'claude',
+                printf('message-%06d', value),
+                CASE WHEN value % 2 = 0 THEN 'target' ELSE 'noise' END,
+                'assistant',
+                {newest} - (value - {first}) / 8,
+                CASE WHEN value % 2 = 0 THEN value / 4 ELSE value / 2 END,
+                'payload', NULL, NULL, printf('tool-%06d', {last} - value), NULL, NULL, NULL,
+                'hash', 'inline'
+             FROM rows;"
+        )
     }
 
     async fn insert_interleaved_messages(database: &RegisteredGlobalDb, rows: i64) {
-        let final_value = rows - 1;
         let transaction = database.begin_write_transaction().await.unwrap();
         transaction
-            .execute_batch(&format!(
-                "WITH RECURSIVE rows(value) AS (
-                    SELECT 0
-                    UNION ALL
-                    SELECT value + 1 FROM rows WHERE value < {final_value}
-                 )
-                 INSERT INTO lcm_raw_messages(
-                    provider, message_id, session_id, role, timestamp, ordinal, content,
-                    kind, model, tool_names, source_path, source_offset, metadata_json,
-                    content_hash, storage_kind
-                 )
-                 SELECT
-                    'claude',
-                    printf('message-%04d', value),
-                    CASE WHEN value % 2 = 0 THEN 'target' ELSE 'noise' END,
-                    'assistant',
-                    1700000000 + ({final_value} - value / 8),
-                    CASE WHEN value % 2 = 0 THEN value / 4 ELSE value / 2 END,
-                    'payload', NULL, NULL, printf('tool-%04d', {final_value} - value), NULL, NULL, NULL,
-                    'hash', 'inline'
-                 FROM rows;"
-            ))
+            .execute_batch(&interleaved_messages_sql(0, rows, 1_700_000_000 + rows - 1))
             .await
             .unwrap();
         transaction.commit().await.unwrap();
@@ -405,7 +378,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn interleaved_session_activity_reads_use_covering_index() {
+    async fn interleaved_session_activity_pages_cost_their_rows_not_the_session() {
         let profile = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
             .await
@@ -444,25 +417,26 @@ mod tests {
             }
         }
 
-        let activity_plan = query_plan(
-            database,
-            SESSION_MESSAGES_AFTER_SQL,
-            vec![
-                Value::Text("claude".to_owned()),
-                Value::Text("target".to_owned()),
-                Value::Integer(1_700_000_000),
-                Value::Integer(512),
-            ],
-        )
-        .await;
-        assert_scoped_index_plan(&activity_plan, "idx_lcm_raw_session_activity");
-        // The index orders the scan; `metadata_json` is fetched from the table
-        // for the bounded page rather than duplicated into the index.
+        // A page reads its own rows: newer activity in the same session, eight
+        // times the first batch, must not raise the cost of the oldest page.
+        let path = database.db_path().to_path_buf();
+        drop(runtime);
+        let connection = tracedecay_sql::Connection::open(&path).unwrap();
+        let page_steps = || {
+            statement_vm_steps(
+                &connection,
+                SESSION_MESSAGES_AFTER_SQL,
+                tracedecay_sql::params!["claude", "target", 1_700_000_000_i64, 512_i64],
+            )
+        };
+        let base = page_steps();
+        connection
+            .execute_batch(&interleaved_messages_sql(2_048, 16_384, 1_800_000_000))
+            .unwrap();
+        let grown = page_steps();
         assert!(
-            !activity_plan
-                .iter()
-                .any(|detail| detail.contains("COVERING INDEX")),
-            "activity index must not carry the metadata blob: {activity_plan:?}"
+            grown <= 2 * base,
+            "the oldest 512-row page must cost its rows, not the session's: {base} -> {grown}"
         );
     }
 }

@@ -19,8 +19,9 @@ use tracedecay_sessions::runtime::store_access::find_preceding_codex_goal_respon
 
 use super::state::{
     canonicalize_session_project_paths, read_message, read_observation, read_output_state,
-    read_session, reaggregate_output_state_for_output, reconcile_session_rows_detailed, storage,
-    storage_message, stored_output_digest, verify_output_state,
+    read_session, reaggregate_output_state_for_output, reconcile_session_rows_detailed,
+    record_projection_cache_high_water, storage, storage_message, stored_output_digest,
+    verify_output_state,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -1399,7 +1400,7 @@ async fn apply_provenance(
     )
     .await
     .map_err(|error| storage("update projection output state", error))?;
-    Ok(())
+    record_projection_cache_high_water(conn).await
 }
 
 async fn verify_skip_disposition(

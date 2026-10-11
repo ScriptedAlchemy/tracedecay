@@ -16,7 +16,7 @@ use tracedecay_global_db::tests::harness::{
 };
 use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot, TestDatabaseRuntimeScope,
-    engine::{Connection, Executor, TestConnection, Value as SqlValue},
+    engine::{BackendKind, Connection, Executor, TestConnection, Value as SqlValue},
 };
 use tracedecay_temporal_query::candidates::CandidateChannel;
 use tracedecay_temporal_query::execution::{
@@ -409,6 +409,20 @@ struct RegisteredTemporalRead {
 impl RegisteredTemporalRead {
     fn adapter(&self) -> SessionTemporalReadPort<'_> {
         SessionTemporalReadPort::new_registered(&self.read)
+    }
+
+    fn backend(&self) -> BackendKind {
+        tracedecay_runtime_core::db::engine::QueryExecutor::backend_kind(&self.read)
+    }
+
+    /// `EXPLAIN QUERY PLAN` detail lines on SQLite. The native engine has no
+    /// SQLite plan introspection, so its plans are not asserted
+    /// (approved delta: sqlite-introspection-removed).
+    async fn sqlite_plan(&self, sql: &str, params: Vec<SqlValue>) -> Option<Vec<String>> {
+        match self.backend() {
+            BackendKind::Sqlite => Some(self.explain_query_plan(sql, params).await),
+            BackendKind::NativeTurso => None,
+        }
     }
 
     async fn record_kinds(
@@ -1685,6 +1699,7 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         .expect("registered profile runtime");
     runtime.seed_candidate_query_fixture_for_test().await;
     let read = runtime.retrieval_read_for_test().await;
+    let backend = read.backend();
     let exact_params = vec![
         SqlValue::Text("session-plan-inside".to_string()),
         SqlValue::Integer(1),
@@ -1709,10 +1724,7 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Text("session-plan-inside".to_string()),
         SqlValue::Integer(1),
         SqlValue::Text("claude".to_string()),
-        SqlValue::Text(fts_phrase(
-            "needle candidate",
-            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
-        )),
+        SqlValue::Text(fts_phrase("needle candidate", backend)),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Integer(128),
@@ -1722,19 +1734,25 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Integer(10),
     ];
     assert_eq!(
-        read.text_column(OCCURRENCE_FTS_QUERY, occurrence_fts_params.clone(), 0)
-            .await,
+        read.text_column(
+            occurrence_fts_query(backend),
+            occurrence_fts_params.clone(),
+            0
+        )
+        .await,
         ["occurrence-plan-inside"]
     );
     let occurrence_fts_plan = read
-        .explain_query_plan(OCCURRENCE_FTS_QUERY, occurrence_fts_params)
+        .sqlite_plan(occurrence_fts_query(backend), occurrence_fts_params)
         .await;
-    assert!(
-        occurrence_fts_plan.iter().any(|detail| {
-            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
-        }),
-        "occurrence retrieval must execute through the live FTS operator: {occurrence_fts_plan:?}"
-    );
+    if let Some(occurrence_fts_plan) = &occurrence_fts_plan {
+        assert!(
+            occurrence_fts_plan.iter().any(|detail| {
+                detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
+            }),
+            "occurrence retrieval must execute through the live FTS operator: {occurrence_fts_plan:?}"
+        );
+    }
 
     let time_params = vec![
         SqlValue::Text("session-plan-inside".to_string()),
@@ -1761,23 +1779,20 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
             "occurrence-plan-inside-last"
         ]
     );
-    let time_plan = read
-        .explain_query_plan(TIME_CANDIDATE_QUERY, time_params)
-        .await;
-    assert!(
-        time_plan
-            .iter()
-            .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_GENERATION_ORDER")),
-        "session time retrieval must use the live generation-order index: {time_plan:?}"
-    );
+    let time_plan = read.sqlite_plan(TIME_CANDIDATE_QUERY, time_params).await;
+    if let Some(time_plan) = &time_plan {
+        assert!(
+            time_plan
+                .iter()
+                .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_GENERATION_ORDER")),
+            "session time retrieval must use the live generation-order index: {time_plan:?}"
+        );
+    }
 
     let summary_params = vec![
         SqlValue::Text("session-plan-inside".to_string()),
         SqlValue::Integer(1),
-        SqlValue::Text(fts_phrase(
-            "needle summary",
-            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
-        )),
+        SqlValue::Text(fts_phrase("needle summary", backend)),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Integer(128),
@@ -1788,27 +1803,27 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Text("current".to_string()),
     ];
     assert_eq!(
-        read.text_column(SUMMARY_CANDIDATE_QUERY, summary_params.clone(), 0)
+        read.text_column(summary_candidate_query(backend), summary_params.clone(), 0)
             .await,
         ["summary-plan-inside", "summary-plan-inside-old"]
     );
     let summary_plan = read
-        .explain_query_plan(SUMMARY_CANDIDATE_QUERY, summary_params)
+        .sqlite_plan(summary_candidate_query(backend), summary_params)
         .await;
-    assert!(
-        summary_plan.iter().any(|detail| {
-            detail.contains("SESSION_SUMMARY_NODES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
-        }),
-        "summary retrieval must execute through the live FTS operator: {summary_plan:?}"
-    );
+    if let Some(summary_plan) = &summary_plan {
+        assert!(
+            summary_plan.iter().any(|detail| {
+                detail.contains("SESSION_SUMMARY_NODES_FTS")
+                    && detail.contains("VIRTUAL TABLE INDEX")
+            }),
+            "summary retrieval must execute through the live FTS operator: {summary_plan:?}"
+        );
+    }
 
     let root_fts_params = vec![
         SqlValue::Text("user".to_string()),
         SqlValue::Null,
-        SqlValue::Text(fts_phrase(
-            "needle candidate",
-            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
-        )),
+        SqlValue::Text(fts_phrase("needle candidate", backend)),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Text(String::new()),
@@ -1820,29 +1835,32 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Integer(10),
     ];
     assert_eq!(
-        read.text_column(ROOT_OCCURRENCE_FTS_QUERY, root_fts_params.clone(), 0)
-            .await,
+        read.text_column(
+            root_occurrence_fts_query(backend),
+            root_fts_params.clone(),
+            0
+        )
+        .await,
         ["occurrence-plan-inside"],
         "root retrieval must exclude the populated out-of-root session"
     );
     let root_fts_plan = read
-        .explain_query_plan(ROOT_OCCURRENCE_FTS_QUERY, root_fts_params)
+        .sqlite_plan(root_occurrence_fts_query(backend), root_fts_params)
         .await;
-    assert!(
-        root_fts_plan.iter().any(|detail| {
-            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
-        }),
-        "root retrieval must execute one live FTS store query: {root_fts_plan:?}"
-    );
+    if let Some(root_fts_plan) = &root_fts_plan {
+        assert!(
+            root_fts_plan.iter().any(|detail| {
+                detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
+            }),
+            "root retrieval must execute one live FTS store query: {root_fts_plan:?}"
+        );
+    }
 
     let root_exact_params = vec![
         SqlValue::Text("user".to_string()),
         SqlValue::Text("claude".to_string()),
         SqlValue::Text("needle candidate".to_string()),
-        SqlValue::Text(fts_phrase(
-            "needle candidate",
-            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
-        )),
+        SqlValue::Text(fts_phrase("needle candidate", backend)),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Text(String::new()),
@@ -1855,20 +1873,29 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Integer(10),
     ];
     assert_eq!(
-        read.text_column(ROOT_EXACT_CANDIDATE_QUERY, root_exact_params.clone(), 0)
-            .await,
+        read.text_column(
+            root_exact_candidate_query(backend),
+            root_exact_params.clone(),
+            0
+        )
+        .await,
         ["occurrence-plan-inside"],
         "root exact retrieval must exclude the populated out-of-root session"
     );
     let root_exact_plan = read
-        .explain_query_plan(ROOT_EXACT_CANDIDATE_QUERY, root_exact_params.clone())
+        .sqlite_plan(
+            root_exact_candidate_query(backend),
+            root_exact_params.clone(),
+        )
         .await;
-    assert!(
-        root_exact_plan.iter().any(|detail| {
-            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
-        }),
-        "root exact retrieval must prefilter through the live FTS operator: {root_exact_plan:?}"
-    );
+    if let Some(root_exact_plan) = &root_exact_plan {
+        assert!(
+            root_exact_plan.iter().any(|detail| {
+                detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
+            }),
+            "root exact retrieval must prefilter through the live FTS operator: {root_exact_plan:?}"
+        );
+    }
 
     // Every retained snippet contains a space, so `instr` alone would admit all
     // three in-root rows. The literal has no FTS token, so the maintained index
@@ -1876,13 +1903,10 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
     // scans retained text and never refuses.
     let mut root_exact_tokenless_params = root_exact_params;
     root_exact_tokenless_params[2] = SqlValue::Text(" ".to_string());
-    root_exact_tokenless_params[3] = SqlValue::Text(fts_phrase(
-        " ",
-        tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
-    ));
+    root_exact_tokenless_params[3] = SqlValue::Text(fts_phrase(" ", backend));
     assert_eq!(
         read.text_column(
-            ROOT_EXACT_CANDIDATE_QUERY,
+            root_exact_candidate_query(backend),
             root_exact_tokenless_params.clone(),
             0
         )
@@ -1891,14 +1915,19 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         "a literal without an indexable token must be an empty exact channel"
     );
     let root_exact_tokenless_plan = read
-        .explain_query_plan(ROOT_EXACT_CANDIDATE_QUERY, root_exact_tokenless_params)
+        .sqlite_plan(
+            root_exact_candidate_query(backend),
+            root_exact_tokenless_params,
+        )
         .await;
-    assert!(
-        root_exact_tokenless_plan.iter().any(|detail| {
-            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
-        }),
-        "a token-free exact literal must still be admitted through the FTS operator: {root_exact_tokenless_plan:?}"
-    );
+    if let Some(root_exact_tokenless_plan) = &root_exact_tokenless_plan {
+        assert!(
+            root_exact_tokenless_plan.iter().any(|detail| {
+                detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
+            }),
+            "a token-free exact literal must still be admitted through the FTS operator: {root_exact_tokenless_plan:?}"
+        );
+    }
 
     let root_time_params = vec![
         SqlValue::Text("user".to_string()),
@@ -1927,14 +1956,16 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
          and exclude the populated out-of-root session"
     );
     let root_time_plan = read
-        .explain_query_plan(ROOT_TIME_CANDIDATE_QUERY, root_time_params)
+        .sqlite_plan(ROOT_TIME_CANDIDATE_QUERY, root_time_params)
         .await;
-    assert!(
-        root_time_plan
-            .iter()
-            .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
-        "root time retrieval must use the live root generation-order index: {root_time_plan:?}"
-    );
+    if let Some(root_time_plan) = &root_time_plan {
+        assert!(
+            root_time_plan
+                .iter()
+                .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
+            "root time retrieval must use the live root generation-order index: {root_time_plan:?}"
+        );
+    }
 
     let root_scope_params = vec![
         SqlValue::Text("user".to_string()),
@@ -1961,32 +1992,38 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
          and exclude the populated out-of-root session"
     );
     let root_scope_plan = read
-        .explain_query_plan(ROOT_SCOPE_CANDIDATE_QUERY, root_scope_params)
+        .sqlite_plan(ROOT_SCOPE_CANDIDATE_QUERY, root_scope_params)
         .await;
-    assert!(
-        root_scope_plan
-            .iter()
-            .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
-        "root scope browse must use the live root generation-order index: {root_scope_plan:?}"
-    );
-    assert!(
-        root_scope_plan
-            .iter()
-            .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
-        "root scope browse must take its leading keyset order from the index: {root_scope_plan:?}"
-    );
+    if let Some(root_scope_plan) = &root_scope_plan {
+        assert!(
+            root_scope_plan
+                .iter()
+                .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
+            "root scope browse must use the live root generation-order index: {root_scope_plan:?}"
+        );
+    }
+    if let Some(root_scope_plan) = &root_scope_plan {
+        assert!(
+            root_scope_plan
+                .iter()
+                .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+            "root scope browse must take its leading keyset order from the index: {root_scope_plan:?}"
+        );
+    }
     // `ORDER BY knowledge_at DESC, session_id, occurrence_id` mixes directions
     // against an all-ascending index, so SQLite can only walk the leading
     // keyset column from the index and must sort the trailing terms inside each
     // `knowledge_at` group. The live contract is that the leading column is
     // never sorted: a plain `USE TEMP B-TREE FOR ORDER BY` would mean the whole
     // root window was materialized before the LIMIT.
-    assert!(
-        root_time_plan
-            .iter()
-            .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
-        "root time retrieval must take its leading keyset order from the index: {root_time_plan:?}"
-    );
+    if let Some(root_time_plan) = &root_time_plan {
+        assert!(
+            root_time_plan
+                .iter()
+                .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+            "root time retrieval must take its leading keyset order from the index: {root_time_plan:?}"
+        );
+    }
 }
 
 const LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY: &str = "
@@ -2251,13 +2288,11 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         .expect("registered profile runtime");
     runtime.seed_candidate_query_fixture_for_test().await;
     let read = runtime.retrieval_read_for_test().await;
+    let backend = read.backend();
 
     let root_summary_params = vec![
         SqlValue::Text("user".to_string()),
-        SqlValue::Text(fts_phrase(
-            "needle summary",
-            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
-        )),
+        SqlValue::Text(fts_phrase("needle summary", backend)),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Text(String::new()),
@@ -2270,43 +2305,51 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         SqlValue::Text("current".to_string()),
     ];
     assert_eq!(
-        read.text_column(ROOT_SUMMARY_CANDIDATE_QUERY, root_summary_params.clone(), 0)
-            .await,
+        read.text_column(
+            root_summary_candidate_query(backend),
+            root_summary_params.clone(),
+            0
+        )
+        .await,
         ["summary-plan-inside", "summary-plan-inside-old"],
         "root summary retrieval must be ordered and exclude the populated out-of-root summary"
     );
     let root_summary_plan = read
-        .explain_query_plan(ROOT_SUMMARY_CANDIDATE_QUERY, root_summary_params)
+        .sqlite_plan(root_summary_candidate_query(backend), root_summary_params)
         .await;
-    assert!(
-        root_summary_plan.iter().any(|detail| {
-            detail.contains("SESSION_SUMMARY_NODES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
-        }),
-        "root summaries must use the live summary FTS operator: {root_summary_plan:?}"
-    );
+    if let Some(root_summary_plan) = &root_summary_plan {
+        assert!(
+            root_summary_plan.iter().any(|detail| {
+                detail.contains("SESSION_SUMMARY_NODES_FTS")
+                    && detail.contains("VIRTUAL TABLE INDEX")
+            }),
+            "root summaries must use the live summary FTS operator: {root_summary_plan:?}"
+        );
+    }
     // `idx_session_summary_nodes_root_created_order` serves an unfiltered root
     // scan; this query is driven by a mandatory `session_summary_nodes_fts
     // MATCH`, so SQLite reaches the base row by rowid and must sort the ordered
     // projection. The live contract this query can hold is that the base table
     // is never scanned per candidate.
-    assert!(
-        root_summary_plan
-            .iter()
-            .any(|detail| detail.contains("SEARCH N USING INTEGER PRIMARY KEY")),
-        "root summaries must reach summary rows by rowid from the FTS match: {root_summary_plan:?}"
-    );
-    assert!(
-        root_summary_plan
-            .iter()
-            .all(|detail| !detail.contains("SCAN N")),
-        "root summaries must never scan the summary node table: {root_summary_plan:?}"
-    );
+    if let Some(root_summary_plan) = &root_summary_plan {
+        assert!(
+            root_summary_plan
+                .iter()
+                .any(|detail| detail.contains("SEARCH N USING INTEGER PRIMARY KEY")),
+            "root summaries must reach summary rows by rowid from the FTS match: {root_summary_plan:?}"
+        );
+    }
+    if let Some(root_summary_plan) = &root_summary_plan {
+        assert!(
+            root_summary_plan
+                .iter()
+                .all(|detail| !detail.contains("SCAN N")),
+            "root summaries must never scan the summary node table: {root_summary_plan:?}"
+        );
+    }
     let root_summary_missing_phrase = vec![
         SqlValue::Text("user".to_string()),
-        SqlValue::Text(fts_phrase(
-            "absent summary phrase",
-            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
-        )),
+        SqlValue::Text(fts_phrase("absent summary phrase", backend)),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Text(String::new()),
@@ -2319,9 +2362,13 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         SqlValue::Text("current".to_string()),
     ];
     assert!(
-        read.text_column(ROOT_SUMMARY_CANDIDATE_QUERY, root_summary_missing_phrase, 0)
-            .await
-            .is_empty(),
+        read.text_column(
+            root_summary_candidate_query(backend),
+            root_summary_missing_phrase,
+            0
+        )
+        .await
+        .is_empty(),
         "root summary retrieval must require a real FTS match"
     );
 
@@ -2330,57 +2377,55 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         SqlValue::Integer(1),
         SqlValue::Text("span".to_string()),
         SqlValue::Text("claude".to_string()),
-        SqlValue::Text(fts_phrase(
-            "derived needle",
-            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
-        )),
+        SqlValue::Text(fts_phrase("derived needle", backend)),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Integer(10),
     ];
     assert_eq!(
-        read.text_column(DERIVED_CANDIDATE_QUERY, derived_params.clone(), 0)
+        read.text_column(derived_candidate_query(backend), derived_params.clone(), 0)
             .await,
         ["derived-plan-inside", "derived-plan-inside-old"]
     );
     assert_eq!(
-        read.optional_text_column(DERIVED_CANDIDATE_QUERY, derived_params.clone(), 3)
+        read.optional_text_column(derived_candidate_query(backend), derived_params.clone(), 3)
             .await,
         [Some("message-plan-inside".to_string()), None],
         "only singleton derived evidence may inherit its member logical message"
     );
     let derived_plan = read
-        .explain_query_plan(DERIVED_CANDIDATE_QUERY, derived_params)
+        .sqlite_plan(derived_candidate_query(backend), derived_params)
         .await;
-    assert!(
-        derived_plan.iter().any(|detail| {
-            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
-        }),
-        "derived retrieval must search members through the live occurrence FTS operator: {derived_plan:?}"
-    );
-    assert!(
-        derived_plan.iter().any(|detail| {
-            detail
-                .contains("SEARCH EVIDENCE USING INDEX SQLITE_AUTOINDEX_SESSION_DERIVED_EVIDENCE_1")
-                && detail.contains("SESSION_ID=? AND EVIDENCE_KIND=?")
-        }),
-        "derived retrieval must search evidence by its session and kind key: {derived_plan:?}"
-    );
+    if let Some(derived_plan) = &derived_plan {
+        assert!(
+            derived_plan.iter().any(|detail| {
+                detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
+            }),
+            "derived retrieval must search members through the live occurrence FTS operator: {derived_plan:?}"
+        );
+    }
+    if let Some(derived_plan) = &derived_plan {
+        assert!(
+            derived_plan.iter().any(|detail| {
+                detail.contains(
+                    "SEARCH EVIDENCE USING INDEX SQLITE_AUTOINDEX_SESSION_DERIVED_EVIDENCE_1",
+                ) && detail.contains("SESSION_ID=? AND EVIDENCE_KIND=?")
+            }),
+            "derived retrieval must search evidence by its session and kind key: {derived_plan:?}"
+        );
+    }
     let derived_wrong_provider = vec![
         SqlValue::Text("session-plan-inside".to_string()),
         SqlValue::Integer(1),
         SqlValue::Text("span".to_string()),
         SqlValue::Text("codex".to_string()),
-        SqlValue::Text(fts_phrase(
-            "derived needle",
-            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
-        )),
+        SqlValue::Text(fts_phrase("derived needle", backend)),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Integer(10),
     ];
     assert!(
-        read.text_column(DERIVED_CANDIDATE_QUERY, derived_wrong_provider, 0)
+        read.text_column(derived_candidate_query(backend), derived_wrong_provider, 0)
             .await
             .is_empty(),
         "derived candidates must fail closed for the wrong provider"
@@ -2390,16 +2435,13 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         SqlValue::Integer(1),
         SqlValue::Text("span".to_string()),
         SqlValue::Text("claude".to_string()),
-        SqlValue::Text(fts_phrase(
-            "absent derived phrase",
-            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
-        )),
+        SqlValue::Text(fts_phrase("absent derived phrase", backend)),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Integer(10),
     ];
     assert!(
-        read.text_column(DERIVED_CANDIDATE_QUERY, derived_missing_phrase, 0)
+        read.text_column(derived_candidate_query(backend), derived_missing_phrase, 0)
             .await
             .is_empty(),
         "derived candidates must require an FTS-matching member"
@@ -2409,31 +2451,36 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         SqlValue::Text("user".to_string()),
         SqlValue::Text("span".to_string()),
         SqlValue::Text("claude".to_string()),
-        SqlValue::Text(fts_phrase(
-            "derived needle",
-            tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
-        )),
+        SqlValue::Text(fts_phrase("derived needle", backend)),
         SqlValue::Integer(i64::MAX),
         SqlValue::Text(String::new()),
         SqlValue::Text(String::new()),
         SqlValue::Integer(10),
     ];
     assert_eq!(
-        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_params.clone(), 0)
-            .await,
+        read.text_column(
+            root_derived_candidate_query(backend),
+            root_derived_params.clone(),
+            0
+        )
+        .await,
         ["derived-plan-inside", "derived-plan-inside-old"],
         "root derived retrieval must be ordered and exclude out-of-root evidence"
     );
     assert_eq!(
-        read.optional_text_column(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_params.clone(), 3)
-            .await,
+        read.optional_text_column(
+            root_derived_candidate_query(backend),
+            root_derived_params.clone(),
+            3
+        )
+        .await,
         [Some("message-plan-inside".to_string()), None]
     );
 
     let mut first_page_params = root_derived_params.clone();
     first_page_params[7] = SqlValue::Integer(1);
     assert_eq!(
-        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, first_page_params, 0)
+        read.text_column(root_derived_candidate_query(backend), first_page_params, 0)
             .await,
         ["derived-plan-inside"]
     );
@@ -2444,7 +2491,7 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
     second_page_params[6] = SqlValue::Text("derived-plan-inside".to_string());
     second_page_params[7] = SqlValue::Integer(1);
     assert_eq!(
-        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, second_page_params, 0)
+        read.text_column(root_derived_candidate_query(backend), second_page_params, 0)
             .await,
         ["derived-plan-inside-old"],
         "root derived retrieval must preserve keyset pagination order"
@@ -2453,51 +2500,65 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
     let mut full_root_params = root_derived_params.clone();
     full_root_params[0] = SqlValue::Text("project-outside".to_string());
     assert_eq!(
-        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, full_root_params, 0)
+        read.text_column(root_derived_candidate_query(backend), full_root_params, 0)
             .await,
         ["derived-plan-outside"],
         "a root containing the complete fixture must retain its derived evidence"
     );
     let root_derived_plan = read
-        .explain_query_plan(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_params.clone())
+        .sqlite_plan(
+            root_derived_candidate_query(backend),
+            root_derived_params.clone(),
+        )
         .await;
-    assert!(
-        root_derived_plan.iter().any(|detail| {
-            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
-        }),
-        "root derived retrieval must use one live occurrence FTS operator: {root_derived_plan:?}"
-    );
-    assert!(
-        root_derived_plan
-            .iter()
-            .any(|detail| detail.contains("SEARCH EVIDENCE")),
-        "root derived retrieval must perform a bounded evidence search: {root_derived_plan:?}"
-    );
-    assert!(
-        root_derived_plan
-            .iter()
-            .all(|detail| !detail.contains("SCAN EVIDENCE")),
-        "root derived retrieval must never scan the evidence table: {root_derived_plan:?}"
-    );
+    if let Some(root_derived_plan) = &root_derived_plan {
+        assert!(
+            root_derived_plan.iter().any(|detail| {
+                detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
+            }),
+            "root derived retrieval must use one live occurrence FTS operator: {root_derived_plan:?}"
+        );
+    }
+    if let Some(root_derived_plan) = &root_derived_plan {
+        assert!(
+            root_derived_plan
+                .iter()
+                .any(|detail| detail.contains("SEARCH EVIDENCE")),
+            "root derived retrieval must perform a bounded evidence search: {root_derived_plan:?}"
+        );
+    }
+    if let Some(root_derived_plan) = &root_derived_plan {
+        assert!(
+            root_derived_plan
+                .iter()
+                .all(|detail| !detail.contains("SCAN EVIDENCE")),
+            "root derived retrieval must never scan the evidence table: {root_derived_plan:?}"
+        );
+    }
 
     let mut wrong_provider_params = root_derived_params.clone();
     wrong_provider_params[2] = SqlValue::Text("codex".to_string());
     assert!(
-        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, wrong_provider_params, 0)
-            .await
-            .is_empty(),
+        read.text_column(
+            root_derived_candidate_query(backend),
+            wrong_provider_params,
+            0
+        )
+        .await
+        .is_empty(),
         "root derived retrieval must fail closed for the wrong provider"
     );
 
     let mut missing_phrase_params = root_derived_params.clone();
-    missing_phrase_params[3] = SqlValue::Text(fts_phrase(
-        "absent derived phrase",
-        tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
-    ));
+    missing_phrase_params[3] = SqlValue::Text(fts_phrase("absent derived phrase", backend));
     assert!(
-        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, missing_phrase_params, 0)
-            .await
-            .is_empty(),
+        read.text_column(
+            root_derived_candidate_query(backend),
+            missing_phrase_params,
+            0
+        )
+        .await
+        .is_empty(),
         "root derived retrieval must require an FTS-matching member"
     );
 
@@ -2517,9 +2578,13 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
     .expect("supersede candidate generation");
     let read = runtime.retrieval_read_for_test().await;
     assert!(
-        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_params, 0)
-            .await
-            .is_empty(),
+        read.text_column(
+            root_derived_candidate_query(backend),
+            root_derived_params,
+            0
+        )
+        .await
+        .is_empty(),
         "root derived retrieval must exclude superseded temporal generations"
     );
 }

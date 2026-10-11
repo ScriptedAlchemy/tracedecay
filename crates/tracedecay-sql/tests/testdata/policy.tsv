@@ -161,8 +161,8 @@ allow	allow	allow	allow	allow	allow	PRAGMA quick_check(1)
 deny	deny	deny	deny	deny	allow	PRAGMA recursive_triggers = ON
 allow	allow	allow	allow	allow	allow	PRAGMA schema_version
 deny	deny	deny	deny	deny	allow	PRAGMA schema_version = 1
-allow	allow	allow	allow	allow	allow	PRAGMA secure_delete
-deny	deny	deny	allow	allow	allow	PRAGMA secure_delete = ON
+allow	allow	allow	deny	deny	allow	PRAGMA secure_delete
+deny	deny	deny	deny	deny	allow	PRAGMA secure_delete = ON
 deny	deny	deny	deny	deny	allow	PRAGMA secure_delete = OFF
 deny	deny	deny	deny	deny	allow	PRAGMA secure_delete = FAST
 allow	allow	allow	allow	allow	allow	PRAGMA shrink_memory
