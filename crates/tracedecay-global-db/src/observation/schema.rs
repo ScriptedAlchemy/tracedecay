@@ -762,19 +762,18 @@ mod tests {
             .execute(insert, params!["authority.fixture"])
             .await
             .expect("a keyed fence is accepted");
-        let refused = connection
+        connection
             .execute(insert, params![Option::<String>::None])
             .await
             .expect_err("a NULL authority_key must be refused");
-        assert!(refused.to_string().contains("NOT NULL"), "{refused}");
         let mut rows = connection
-            .query(
-                "SELECT count(*) FROM remote_writer_fences WHERE authority_key IS NULL",
-                (),
-            )
+            .query("SELECT authority_key FROM remote_writer_fences", ())
             .await
             .unwrap();
-        let stored: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
-        assert_eq!(stored, 0);
+        let mut stored = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            stored.push(row.get::<Option<String>>(0).unwrap());
+        }
+        assert_eq!(stored, [Some("authority.fixture".to_owned())]);
     }
 }

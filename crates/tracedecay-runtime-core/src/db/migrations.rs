@@ -14,7 +14,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 mod final_shape;
 
 pub use final_shape::{
-    expected_final_schema_fingerprint, fingerprint_schema_objects,
+    expected_final_schema_fingerprint, fingerprint_schema_objects, native_final_schema_objects,
     render_expected_final_schema_markdown,
 };
 
@@ -98,6 +98,7 @@ async fn set_version(conn: &impl Executor, version: u32) -> Result<()> {
         })?;
     Ok(())
 }
+
 /// Creates the complete schema from scratch for a brand-new database and
 /// stamps [`SCHEMA_VERSION`]. This is the only way a store comes into
 /// existence: there is no stepwise path to this shape.
@@ -158,6 +159,15 @@ pub async fn create_schema_connection(conn: &Connection) -> Result<()> {
 }
 
 async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> {
+    install_final_schema_objects(conn).await?;
+    final_shape::require_exact_final_shape(conn).await?;
+    set_version(conn, SCHEMA_VERSION).await?;
+    Ok(())
+}
+
+/// Creates every object of the final shape without admitting it, so the
+/// native golden inventory can be regenerated from what this binary installs.
+async fn install_final_schema_objects(conn: &(impl Executor + Sync)) -> Result<()> {
     conn.execute_batch(ROOT_SCHEMA)
         .await
         .map_err(|e| TraceDecayError::Database {
@@ -185,8 +195,6 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
             message: format!("failed to create runtime writer ledger: {e}"),
             operation: "create_schema".to_string(),
         })?;
-    final_shape::require_exact_final_shape(conn).await?;
-    set_version(conn, SCHEMA_VERSION).await?;
     Ok(())
 }
 
