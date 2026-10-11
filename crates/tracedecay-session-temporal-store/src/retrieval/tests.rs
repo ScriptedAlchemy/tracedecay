@@ -42,6 +42,7 @@ use tracedecay_temporal_query::snapshot::{
     TemporalAuthorizedRoot, TemporalRetrievalScope, TemporalSnapshotRequest,
 };
 
+mod relation_batch_tests;
 mod relation_graph_tests;
 
 #[test]

@@ -148,6 +148,112 @@ fn redelivered_producer_event_with_pending_work_is_an_exact_duplicate() {
     assert_eq!(pending_work(data_root.path()).len(), 0);
 }
 
+/// A long-lived daemon admits for more project/host pairs over its lifetime
+/// than it holds ledgers open at once.
+#[test]
+fn admission_ledgers_cycle_past_the_open_bound_without_restart() {
+    let now = hook_now();
+    let envelope = admission_test_envelope(35, 7);
+    let roots = (0..MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS + 8)
+        .map(|_| tempfile::tempdir().unwrap())
+        .collect::<Vec<_>>();
+    for (pair, root) in roots.iter().enumerate() {
+        let staged = stage_hook_v2_admission(root.path(), &envelope, Some(&envelope), now)
+            .unwrap_or_else(|| panic!("project/host pair {pair} must admit without restart"));
+        staged.commit.wait().unwrap();
+        assert_eq!(
+            staged.receipt.decision,
+            tracedecay_hooks::HookAdmissionDecisionV1::Admitted
+        );
+    }
+
+    let first = roots[0].path();
+    assert_eq!(
+        record_hook_v2_admission(first, &envelope, now)
+            .unwrap()
+            .decision,
+        tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
+    );
+    assert_eq!(
+        record_hook_v2_admission(first, &admission_test_envelope(35, 8), now)
+            .unwrap()
+            .decision,
+        tracedecay_hooks::HookAdmissionDecisionV1::Conflict
+    );
+    restart_ledger(first);
+    assert_eq!(pending_work(first), vec![envelope.clone()]);
+    restart_ledger(first);
+    assert!(
+        complete_hook_v2_pending_work(first, &envelope),
+        "a released ledger reopens to record completion"
+    );
+    assert_eq!(pending_work(first).len(), 0);
+}
+
+/// Only a ledger whose commits have all settled is released for another pair,
+/// and it reopens with its records and owed work intact.
+#[test]
+fn a_ledger_with_a_commit_in_flight_keeps_its_writer_fence() {
+    let host = tracedecay_domain::NativeHostIdentityV1::ClaudeCode;
+    let now = UtcMicros(1_000);
+    let envelope = admission_test_envelope(36, 7);
+    let ledgers = HookV2AdmissionLedgers::new(2);
+    let [a, b, c, d] = std::array::from_fn(|_| tempfile::tempdir().unwrap());
+    let stage = |root: &std::path::Path, envelope: &tracedecay_hooks::HookEventEnvelopeV2| {
+        ledgers
+            .with_ledger(
+                Some(root),
+                hook_v2_admission_ledger_root(root, host),
+                host,
+                now,
+                |ledger| ledger.stage_admission(envelope, Some(envelope), now),
+            )
+            .map(|staged| staged.unwrap())
+    };
+    let lock_is_free = |root: &std::path::Path| match tracedecay_hooks::HookAdmissionLedgerV1::open(
+        hook_v2_admission_ledger_root(root, host),
+        host,
+        tracedecay_hooks::HookAdmissionLedgerLimitsV1::stock(),
+        now,
+    ) {
+        Ok(_) => true,
+        Err(tracedecay_hooks::HookAdmissionLedgerError::Busy) => false,
+        Err(error) => panic!("unexpected ledger open failure: {error}"),
+    };
+
+    let a_in_flight = stage(a.path(), &envelope).unwrap();
+    stage(b.path(), &envelope).unwrap().commit.wait().unwrap();
+    let c_in_flight = stage(c.path(), &envelope).unwrap();
+    assert!(!lock_is_free(a.path()), "an unsettled ledger stays open");
+    assert!(lock_is_free(b.path()), "the settled ledger was released");
+
+    assert!(matches!(
+        stage(d.path(), &envelope),
+        Err(HookV2AdmissionLedgerUnavailable::AtCapacity)
+    ));
+
+    a_in_flight.commit.wait().unwrap();
+    stage(d.path(), &envelope).unwrap().commit.wait().unwrap();
+    assert!(
+        lock_is_free(a.path()),
+        "a settled ledger is released on demand"
+    );
+    let duplicate = stage(a.path(), &envelope).unwrap();
+    duplicate.commit.wait().unwrap();
+    assert_eq!(
+        duplicate.receipt.decision,
+        tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
+    );
+    assert!(!duplicate.receipt.work_completed);
+    let conflict = stage(a.path(), &admission_test_envelope(36, 8)).unwrap();
+    conflict.commit.wait().unwrap();
+    assert_eq!(
+        conflict.receipt.decision,
+        tracedecay_hooks::HookAdmissionDecisionV1::Conflict
+    );
+    c_in_flight.commit.wait().unwrap();
+}
+
 #[test]
 fn pre_ledger_pending_work_is_refused_for_reset_not_adopted() {
     let data_root = tempfile::tempdir().unwrap();

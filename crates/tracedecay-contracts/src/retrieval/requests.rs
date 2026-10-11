@@ -14,7 +14,6 @@ use crate::feedback::feedback_surface_operation;
 use crate::handlers::ApplicationOperation;
 use crate::result::OpaqueCursor;
 use crate::retrieval::catalog::primitive_read_operation;
-use crate::retrieval::grep_analysis::{AstGrepRequestV1, DependencyDepthRequestV1, GrepRequestV1};
 use crate::retrieval::source_read::SourceReadPrimitiveRequest;
 use crate::retrieval::symbol_graph::{
     ExactSymbolRequest, GraphImpactPrimitiveRequest, GraphRelationRequest, ImplementationsRequest,
@@ -499,9 +498,6 @@ pub enum PrimitiveRequest {
     SourceRead(SourceReadPrimitiveRequest),
     TestMap(TestMapPrimitiveRequest),
     AffectedFileTests(AffectedFileTestsPrimitiveRequest),
-    LexicalGrep(GrepRequestV1),
-    AstGrep(AstGrepRequestV1),
-    DependencyDepth(DependencyDepthRequestV1),
     SessionLookup(SessionLookupRequest),
     QualifiedName(QualifiedNamePrimitiveRequest),
     CallChain(CallChainPrimitiveRequest),
@@ -542,13 +538,9 @@ impl PrimitiveRequest {
             Self::HealthDelta(_) => ApplicationSurfaceOperation::HealthDelta,
             Self::StorageStatus(_) => ApplicationSurfaceOperation::StorageStatus,
             Self::DiagnosticsRead(_) => ApplicationSurfaceOperation::DiagnosticsRead,
-            Self::ExactSymbol(_)
-            | Self::Callees(_)
-            | Self::SourceRead(_)
-            | Self::TestMap(_)
-            | Self::LexicalGrep(_)
-            | Self::AstGrep(_)
-            | Self::DependencyDepth(_) => return None,
+            Self::ExactSymbol(_) | Self::Callees(_) | Self::SourceRead(_) | Self::TestMap(_) => {
+                return None;
+            }
         })
     }
 

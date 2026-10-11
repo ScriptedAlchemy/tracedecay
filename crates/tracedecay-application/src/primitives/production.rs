@@ -3,7 +3,6 @@
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use tracedecay_contracts::retrieval::grep_analysis::PrimitiveCoverageV1;
 use tracedecay_contracts::retrieval::{
     PrimitiveFailure, PrimitiveFailureKind, RetrievalPortOutcome, TemporalRetrievalPort,
     TestPrimitivePortContext, TestPrimitivePortOutcome,
@@ -61,7 +60,6 @@ mod affected_tests;
 #[cfg(test)]
 mod affected_tests_tests;
 mod extended_primitive;
-mod lexical_grep;
 mod managed_test_scope;
 #[cfg(test)]
 #[path = "production/managed_test_scope_tests.rs"]
@@ -76,7 +74,6 @@ mod unavailable_evidence_tests;
 
 pub use affected_tests::TraceDecayAffectedTestsPortV1;
 pub use extended_primitive::TraceDecayExtendedPrimitivePortV1;
-pub use lexical_grep::TraceDecayLexicalGrepAuthorityV1;
 use managed_test_scope::ProductionManagedTestRunCurrentScope;
 pub use retrieval_ports::{TraceDecayHealthPortV1, TraceDecaySourceLinesPortV1};
 pub use symbol_graph_snapshot::ProjectSymbolGraphCursorSnapshotAuthority;
@@ -705,22 +702,6 @@ impl ManagedTestResultCursorPort for AuthenticatedDiagnosticCursorAuthorityV1 {
     }
 }
 
-fn coverage(files_scanned: u64, returned: u64, truncated: bool) -> PrimitiveCoverageV1 {
-    PrimitiveCoverageV1 {
-        visited: Some(files_scanned),
-        eligible: Some(files_scanned),
-        returned,
-        completeness: if truncated {
-            CoverageCompleteness::Partial
-        } else {
-            CoverageCompleteness::Complete
-        },
-        // The filesystem grep scan applies no language admission; nothing is
-        // skipped as unsupported.
-        unsupported_languages: Vec::new(),
-    }
-}
-
 fn now_observed() -> UtcMicros {
     now_micros()
 }
@@ -751,44 +732,6 @@ fn all_code_graph_symbols(
         PAGE_SIZE,
         "verified symbol census exceeded its analytical budget",
     )
-}
-
-fn logical_file_symbols(
-    graph: &CodeGraphInteractiveReader,
-    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
-    file: &str,
-) -> Result<Vec<CodeGraphSymbolSummaryV1>, ()> {
-    graph
-        .symbols_in_logical_file(file, 100_000, cancellation)
-        .map_err(|_| ())
-}
-
-fn symbol_at_line(
-    symbols: &[CodeGraphSymbolSummaryV1],
-    line_1based: u32,
-) -> Result<Option<CodeGraphSymbolSummaryV1>, ()> {
-    let line = line_1based.checked_sub(1).ok_or(())?;
-    let mut enclosing = symbols
-        .iter()
-        .filter(|symbol| {
-            symbol.metadata.as_ref().is_some_and(|metadata| {
-                metadata.line_span > 0
-                    && metadata.start_line <= line
-                    && metadata
-                        .start_line
-                        .checked_add(metadata.line_span)
-                        .is_some_and(|end| line < end)
-            })
-        })
-        .collect::<Vec<_>>();
-    enclosing.sort_by(|left, right| {
-        left.metadata
-            .as_ref()
-            .map(|metadata| metadata.line_span)
-            .cmp(&right.metadata.as_ref().map(|metadata| metadata.line_span))
-            .then(left.occurrence.cmp(&right.occurrence))
-    });
-    Ok(enclosing.into_iter().next().cloned())
 }
 
 fn test_annotation_evidence(
@@ -981,10 +924,6 @@ pub async fn open_production_primitive_runtime(
         cursors,
         ignored_dependency_admission,
         Arc::new(TraceDecayTestPrimitivePortV1::new(Arc::clone(&code_graph))),
-        Arc::new(TraceDecayLexicalGrepAuthorityV1::new(
-            Arc::clone(&source_runtime),
-            Arc::clone(&code_graph),
-        )),
         temporal,
         Arc::new(TraceDecaySourceLinesPortV1::new(
             Arc::clone(&source_runtime),

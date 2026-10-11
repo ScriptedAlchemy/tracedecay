@@ -9,10 +9,15 @@
 #![cfg(feature = "test-transport")]
 
 use std::fs;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::registry::LookupSpan;
 
 use crate::support::{
     ProductionCompositionFixture, handle_real_server_tool_call_raw,
@@ -43,6 +48,84 @@ dynamic dispatch, unresolved refs) and must be reviewed by hand. Graph \
 call-edge coverage improves as the resolver does.";
 
 const TEXT_ONLY_NOTE: &str = "text-only matches, review manually";
+
+type SourceEncoding = (&'static [u8], Option<fn(u16) -> [u8; 2]>);
+
+struct ReadPause {
+    entered: mpsc::Sender<()>,
+    resume: mpsc::Receiver<()>,
+}
+
+#[derive(Default)]
+struct PreviewReads {
+    count: AtomicUsize,
+    pause: Mutex<Option<ReadPause>>,
+    closed: tokio::sync::Notify,
+}
+
+struct ObservePreviewReads(Arc<PreviewReads>);
+
+impl<S> Layer<S> for ObservePreviewReads
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
+        let span = ctx.span(id).unwrap();
+        if span.metadata().name() != "source.read"
+            || !span
+                .scope()
+                .any(|ancestor| ancestor.metadata().name() == "mcp.graph.rename_preview.walk")
+        {
+            return;
+        }
+        self.0.count.fetch_add(1, Ordering::AcqRel);
+        let pause = self.0.pause.lock().unwrap().take();
+        if let Some(pause) = pause {
+            pause.entered.send(()).unwrap();
+            let resumed = pause.resume.recv_timeout(Duration::from_secs(30));
+            assert!(!matches!(resumed, Err(mpsc::RecvTimeoutError::Timeout)));
+        }
+    }
+
+    fn on_close(&self, id: tracing::span::Id, ctx: Context<'_, S>) {
+        if ctx.span(&id).unwrap().metadata().name() == "mcp.graph.rename_preview.walk" {
+            self.0.closed.notify_one();
+        }
+    }
+}
+
+impl PreviewReads {
+    fn install() -> Arc<Self> {
+        // An isolated child keeps RMCP and blocking workers on one registry.
+        assert!(crate::common::in_child_test());
+        let reads = Arc::new(Self::default());
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(ObservePreviewReads(Arc::clone(&reads))),
+        )
+        .unwrap();
+        reads
+    }
+
+    fn pause_next(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (entered, entered_rx) = mpsc::channel();
+        let (resume_tx, resume) = mpsc::channel();
+        *self.pause.lock().unwrap() = Some(ReadPause { entered, resume });
+        (entered_rx, resume_tx)
+    }
+
+    async fn wait_closed(&self) {
+        tokio::time::timeout(Duration::from_secs(5), self.closed.notified())
+            .await
+            .expect("rename file worker must finish");
+    }
+}
+
+async fn wait_for_preview_read(entered: mpsc::Receiver<()>) {
+    tokio::task::spawn_blocking(move || entered.recv_timeout(Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .expect("actual rename source reader must start");
+}
 
 async fn opened_fixture() -> (ProductionCompositionFixture, Arc<McpServer>) {
     let fixture = production_composition_fixture_with_sources(|project| {
@@ -265,4 +348,312 @@ async fn rename_preview_refuses_unknown_and_unusable_node_identity() {
         "invalid arguments for tracedecay_rename_preview: unknown field `dry_run`, expected `node_id` or `new_name`",
     );
     assert_sources_unchanged(&fixture);
+}
+
+#[tokio::test]
+async fn rename_preview_reads_dense_reference_sources_once_per_file() {
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_handler_test::rename_preview_test::rename_preview_reads_dense_reference_sources_once_per_file",
+            &[],
+        );
+        return;
+    }
+    let reads = PreviewReads::install();
+    let mut sources = vec![("src/stock.rs", STOCK_RS.to_owned())];
+    for (file, prefix) in [("src/lib.rs", "lib"), ("src/other.rs", "other")] {
+        let mut source = "// é😀 padding\r\n".repeat(2_000);
+        source.push_str("use crate::stock::reserve_stock;\r\n");
+        source.push_str("// reserve_stock needs manual review\r\n");
+        for i in 0..8 {
+            source.push_str(&format!(
+                "pub fn {prefix}_caller_{i}(qty: u32) -> u32 {{ reserve_stock(qty) }}\r\n"
+            ));
+        }
+        sources.push((file, source));
+    }
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        for (file, source) in &sources {
+            fs::write(project.join(file), source).unwrap();
+        }
+    })
+    .await;
+    let server = fixture.harness.server(&fixture.project_root).unwrap();
+    warm_code_index_search(&server, "reserve_stock").await;
+    let reserve_id = symbol_id(&server, "reserve_stock").await;
+    let response = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_rename_preview",
+        json!({ "node_id": reserve_id, "format": "json" }),
+    )
+    .await;
+    let preview = tool_json(&response);
+    reads.wait_closed().await;
+    assert_eq!(reads.count.load(Ordering::Acquire), sources.len());
+    assert_eq!(preview["reference_count"], 16, "{preview}");
+    assert_eq!(
+        preview["node"]["snippet"],
+        "pub fn reserve_stock(qty: u32) -> u32 {"
+    );
+    for reference in preview["references"].as_array().unwrap() {
+        let name = reference["from_name"].as_str().unwrap();
+        let ordinal = name.rsplit('_').next().unwrap().parse::<u32>().unwrap();
+        assert_eq!(reference["line"], 2_003 + ordinal, "{reference}");
+        assert_eq!(
+            reference["snippet"],
+            format!("pub fn {name}(qty: u32) -> u32 {{ reserve_stock(qty) }}")
+        );
+    }
+    let text_only = preview["text_only_matches"].as_array().unwrap();
+    assert_eq!(text_only.len(), 2, "{preview}");
+    assert!(
+        text_only.iter().all(|file| file["text_only_count"] == 2),
+        "{preview}"
+    );
+    for (file, source) in &sources {
+        assert_eq!(
+            fs::read_to_string(fixture.project_root.join(file)).unwrap(),
+            *source
+        );
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn rename_preview_uses_canonical_bom_and_utf16_source_for_snippets() {
+    let encodings: &[SourceEncoding] = &[
+        (&[0xEF, 0xBB, 0xBF], None),
+        (&[0xFF, 0xFE], Some(u16::to_le_bytes)),
+        (&[0xFE, 0xFF], Some(u16::to_be_bytes)),
+    ];
+    for (bom, encode_unit) in encodings {
+        let encode = |source: &str| {
+            let mut bytes = bom.to_vec();
+            if let Some(encode_unit) = encode_unit {
+                bytes.extend(source.encode_utf16().flat_map(encode_unit));
+            } else {
+                bytes.extend(source.as_bytes());
+            }
+            bytes
+        };
+        let (fixture, server) = opened_fixture().await;
+        let reserve_id = symbol_id(&server, "reserve_stock").await;
+        let checkout_id = symbol_id(&server, "checkout").await;
+        fs::write(fixture.project_root.join("src/stock.rs"), encode(STOCK_RS)).unwrap();
+        fs::write(fixture.project_root.join("src/lib.rs"), encode(LIB_RS)).unwrap();
+        let response = handle_real_server_tool_call_raw(
+            &server,
+            "tracedecay_rename_preview",
+            json!({"node_id":reserve_id, "format":"json"}),
+        )
+        .await;
+        assert_eq!(
+            tool_json(&response),
+            expected_preview(&reserve_id, &checkout_id, None)
+        );
+        assert_eq!(
+            fs::read(fixture.project_root.join("src/stock.rs")).unwrap(),
+            encode(STOCK_RS)
+        );
+        assert_eq!(
+            fs::read(fixture.project_root.join("src/lib.rs")).unwrap(),
+            encode(LIB_RS)
+        );
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn rename_preview_rereads_current_text_on_the_next_request() {
+    let (fixture, server) = opened_fixture().await;
+    let reserve_id = symbol_id(&server, "reserve_stock").await;
+    let first = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_rename_preview",
+        json!({"node_id":reserve_id, "format":"json"}),
+    )
+    .await;
+    assert_eq!(
+        tool_json(&first)["text_only_matches"][0]["text_only_count"],
+        3
+    );
+    let source_path = fixture.project_root.join("src/lib.rs");
+    let edited = format!("{LIB_RS}// reserve_stock was edited after the previous preview\n");
+    fs::write(&source_path, &edited).unwrap();
+    let second = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_rename_preview",
+        json!({"node_id":reserve_id, "format":"json"}),
+    )
+    .await;
+    let preview = tool_json(&second);
+    assert_eq!(preview["reference_count"], 1, "{preview}");
+    assert_eq!(preview["references"][0]["line"], 8);
+    assert_eq!(
+        preview["text_only_matches"][0]["text_only_count"], 4,
+        "{preview}"
+    );
+    assert_eq!(fs::read_to_string(&source_path).unwrap(), edited);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn rename_preview_refuses_reference_offsets_past_current_source() {
+    let (fixture, server) = opened_fixture().await;
+    let reserve_id = symbol_id(&server, "reserve_stock").await;
+    let source_path = fixture.project_root.join("src/lib.rs");
+    fs::write(&source_path, "// short\n").unwrap();
+    let response = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_rename_preview",
+        json!({"node_id":reserve_id, "format":"json"}),
+    )
+    .await;
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "unavailable", "{response}");
+    assert_eq!(
+        problem["code"], "verified-code-graph-symbol-corrupt",
+        "{response}"
+    );
+    assert_eq!(problem["retry"], "never", "{response}");
+    assert!(
+        problem["message"]
+            .as_str()
+            .unwrap()
+            .contains("graph evidence byte offset"),
+        "{response}"
+    );
+    assert_eq!(fs::read_to_string(&source_path).unwrap(), "// short\n");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn rename_preview_keeps_a_missing_declaration_snippet_optional() {
+    let (fixture, server) = opened_fixture().await;
+    let reserve_id = symbol_id(&server, "reserve_stock").await;
+    let checkout_id = symbol_id(&server, "checkout").await;
+    let declaration = fixture.project_root.join("src/stock.rs");
+    fs::remove_file(&declaration).unwrap();
+    let response = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_rename_preview",
+        json!({"node_id":reserve_id, "format":"json"}),
+    )
+    .await;
+    let mut expected = expected_preview(&reserve_id, &checkout_id, None);
+    expected["node"]["snippet"] = Value::Null;
+    assert_eq!(tool_json(&response), expected);
+    assert!(!declaration.exists());
+    assert_eq!(
+        fs::read_to_string(fixture.project_root.join("src/lib.rs")).unwrap(),
+        LIB_RS
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn rename_preview_deadline_stops_the_worker_before_the_next_file() {
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_handler_test::rename_preview_test::rename_preview_deadline_stops_the_worker_before_the_next_file",
+            &[],
+        );
+        return;
+    }
+    let reads = PreviewReads::install();
+    let (fixture, server) = opened_fixture().await;
+    let reserve_id = symbol_id(&server, "reserve_stock").await;
+    let (entered, resume) = reads.pause_next();
+    let deadline =
+        tracedecay_domain::UtcMicros(tracedecay_contracts::clock::now_micros().0 + 1_000_000);
+    let response = {
+        let pending = fixture.harness.call_tool_with_deadline(
+            &fixture.project_root,
+            "tracedecay_rename_preview",
+            json!({"node_id":reserve_id, "format":"json"}),
+            deadline,
+        );
+        tokio::pin!(pending);
+        tokio::select! {
+            () = wait_for_preview_read(entered) => {}
+            early = &mut pending => panic!("deadline request settled before source read: {early:?}"),
+        }
+        tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let response = serde_json::to_value(response).unwrap();
+    assert_eq!(
+        response["error"]["data"]["reason_code"], "tool_dispatch_deadline_exceeded",
+        "{response}"
+    );
+    resume.send(()).unwrap();
+    reads.wait_closed().await;
+    assert_eq!(reads.count.load(Ordering::Acquire), 1);
+    assert_sources_unchanged(&fixture);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn rename_preview_transport_cancel_stops_the_worker_before_the_next_file() {
+    if !crate::common::in_child_test() {
+        crate::common::rerun_test_in_child(
+            "mcp_handler_test::rename_preview_test::rename_preview_transport_cancel_stops_the_worker_before_the_next_file",
+            &[],
+        );
+        return;
+    }
+    let reads = PreviewReads::install();
+    let (fixture, server) = opened_fixture().await;
+    let reserve_id = symbol_id(&server, "reserve_stock").await;
+    let (entered, resume) = reads.pause_next();
+    let (mut transport, sender, mut responses) = tracedecay_mcp::transport::ChannelTransport::new();
+    let serving = tokio::spawn(async move { server.run_connection(&mut transport).await });
+    sender.send(json!({
+        "jsonrpc":"2.0", "id":41, "method":"tools/call",
+        "params":{"name":"tracedecay_rename_preview", "arguments":{"node_id":reserve_id,"format":"json"}}
+    }).to_string()).unwrap();
+    wait_for_preview_read(entered).await;
+    sender
+        .send(
+            json!({
+                "jsonrpc":"2.0", "method":"notifications/cancelled",
+                "params":{"requestId":41,"reason":"stop before the next file"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    sender
+        .send(json!({"jsonrpc":"2.0","id":42,"method":"ping"}).to_string())
+        .unwrap();
+    let ping = tokio::time::timeout(Duration::from_secs(5), responses.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let ping: Value = serde_json::from_str(&ping).unwrap();
+    assert_eq!(ping["id"], 42, "{ping}");
+    resume.send(()).unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(5), responses.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let response: Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["id"], 41, "{response}");
+    assert_eq!(response["error"]["code"], -32800, "{response}");
+    assert_eq!(
+        response["error"]["data"]["reason_code"], "request_cancelled",
+        "{response}"
+    );
+    reads.wait_closed().await;
+    assert_eq!(reads.count.load(Ordering::Acquire), 1);
+    assert_sources_unchanged(&fixture);
+    drop(sender);
+    tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    fixture.shutdown().await;
 }

@@ -3,11 +3,10 @@
 //! This crate owns intake validation, language registry, extraction,
 //! chunks, and capability emission port traits, plus the generation engine:
 //! immutable generation planning/sealing, increment planning, symbol lineage
-//! resolution, projection receipt construction, and read-side joins over the
-//! existing Git, managed-diagnostic, graph-impact, and test authorities. No
-//! parser acquisition, filesystem access, storage, or scheduling lives here;
-//! capture owns intake snapshots, the owning stores retain evidence, and the
-//! projector composition owns publication.
+//! resolution, projection receipt construction, and the generation-bound
+//! test-attribution join. No parser acquisition, filesystem access, storage,
+//! or scheduling lives here; capture owns intake snapshots, the owning stores
+//! retain evidence, and the projector composition owns publication.
 //!
 //! Contract constructors in this tree validate canonical identities built
 //! from controlled formats; the `expect` on those constructor calls documents
@@ -18,14 +17,11 @@ pub mod ast_grep_search;
 pub mod capabilities;
 pub mod chunks;
 pub mod clones;
-pub mod diagnostics;
 pub mod extract;
 pub mod generations;
-pub mod git_join;
 pub mod git_projection;
 pub mod graph_projection;
 pub mod grep_search;
-pub mod impact_join;
 pub mod incremental;
 pub mod intake;
 pub mod languages;
@@ -52,6 +48,22 @@ pub fn is_test_marker(record: &lineage::LineageSymbolRecordV1) -> bool {
     record.kind == "annotation_usage" && is_test_annotation_name(&record.simple_name)
 }
 
+/// Whether an extracted symbol is a parser-attested `#[cfg(test)]` attribute:
+/// the item its canonical `Annotates` edge targets exists only in test builds.
+///
+/// Only the exact `test` predicate qualifies; `cfg(any(test, feature = ..))`
+/// also compiles into feature builds, so it does not prove test status.
+pub fn is_test_gate_marker(record: &lineage::LineageSymbolRecordV1) -> bool {
+    record.kind == "annotation_usage"
+        && record.simple_name == "cfg"
+        && record.signature.as_deref().is_some_and(|signature| {
+            signature
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .eq("#[cfg(test)]".chars())
+        })
+}
+
 fn is_test_annotation_name(name: &str) -> bool {
     matches!(
         name.rsplit("::").next().unwrap_or(name),
@@ -68,8 +80,9 @@ const TEST_DIRECTORY_COMPONENTS: [&str; 5] = ["test", "tests", "__tests__", "spe
 const TEST_FILE_NAME_MARKERS: [&str; 4] = [".test.", ".spec.", "_test.", "_spec."];
 
 /// Naming heuristic over a `/`-separated logical path: `true` when a
-/// directory component is exactly one of `TEST_DIRECTORY_COMPONENTS` or the
-/// final filename contains one of `TEST_FILE_NAME_MARKERS`.
+/// directory component is exactly one of `TEST_DIRECTORY_COMPONENTS`, the
+/// final filename contains one of `TEST_FILE_NAME_MARKERS`, or the filename
+/// follows pytest's `test_*.py` discovery pattern.
 ///
 /// Components that merely contain a marker word (`contest/`, `latest.rs`) do
 /// not match, and a marker inside a directory name (`fixtures.test.d/`) is
@@ -79,9 +92,10 @@ const TEST_FILE_NAME_MARKERS: [&str; 4] = [".test.", ".spec.", "_test.", "_spec.
 pub fn is_test_file(path: &str) -> bool {
     let mut components = path.rsplit('/');
     let file_name = components.next().unwrap_or_default();
-    TEST_FILE_NAME_MARKERS
-        .iter()
-        .any(|marker| contains_ascii_case_insensitive(file_name, marker))
+    (file_name.starts_with("test_") && file_name.ends_with(".py"))
+        || TEST_FILE_NAME_MARKERS
+            .iter()
+            .any(|marker| contains_ascii_case_insensitive(file_name, marker))
         || components.any(|directory| {
             TEST_DIRECTORY_COMPONENTS
                 .iter()
@@ -128,6 +142,7 @@ mod is_test_file_tests {
             "src/Utils.Test.ts",
             "crates/x/tests/",
             "packages/app/src/__tests__/deep/nested/helper.js",
+            "src/pkg/test_client.py",
         ] {
             assert!(is_test_file(path), "{path}");
         }
@@ -151,6 +166,9 @@ mod is_test_file_tests {
             "src/test.rs",
             "src/spec.rb",
             "src/fixtures.test.d/data.rs",
+            "src/testnet/client.rs",
+            "src/test_support.rs",
+            "src/pkg/contest_client.py",
             "tests",
             "",
         ] {

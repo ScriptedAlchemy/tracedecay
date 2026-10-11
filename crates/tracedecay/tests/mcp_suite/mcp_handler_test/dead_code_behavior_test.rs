@@ -8,13 +8,14 @@
 //! | 7    | `caller`         | private function, nothing calls it                  |
 //! | 14   | `dead_inline`    | `#[inline]` is an annotation, not a caller         |
 //! | 16   | `dead_plain`     | private function, nothing calls it                  |
+//! | 23   | `test_prefixed`  | a `test` name outside a test file is not a test     |
 //! | 34   | `unused_method`  | private method, nothing calls it                    |
 //!
 //! These are in the same file and must not appear unless an argument opts in:
 //! `main` (entry-point name), `called_helper` (called from `main` and
 //! `caller`), `published_unused` (public, and `include_public` defaults to
-//! false), `slope_excludes_lfe` (`#[test]`), `test_prefixed` (name prefix),
-//! `async_suite_case` (`#[tokio::test]`), `parameterized_case` (`#[rstest]`).
+//! false), `slope_excludes_lfe` (`#[test]`), `async_suite_case`
+//! (`#[tokio::test]`), `parameterized_case` (`#[rstest]`).
 
 use std::collections::HashSet;
 use std::fs;
@@ -84,6 +85,13 @@ fn private_dead_symbols() -> Value {
             "file": "src/lib.rs",
             "line": 16,
             "signature": "fn dead_plain() -> i32"
+        },
+        {
+            "name": "test_prefixed",
+            "kind": "function",
+            "file": "src/lib.rs",
+            "line": 23,
+            "signature": "fn test_prefixed()"
         },
         {
             "name": "unused_method",
@@ -190,13 +198,13 @@ async fn dead_code_reports_only_the_uncalled_private_symbols() {
     wait_for_current_graph(&server).await;
 
     let payload = call_dead_code(&fixture, json!({"format": "json"})).await;
-    assert_eq!(payload["dead_code_count"], 4, "{payload}");
+    assert_eq!(payload["dead_code_count"], 5, "{payload}");
     assert_eq!(census(&payload), private_dead_symbols(), "{payload}");
     assert_occurrence_ids(&payload);
 
     let with_public =
         call_dead_code(&fixture, json!({"include_public": true, "format": "json"})).await;
-    assert_eq!(with_public["dead_code_count"], 5, "{with_public}");
+    assert_eq!(with_public["dead_code_count"], 6, "{with_public}");
     assert_eq!(
         census(&with_public),
         json!([
@@ -227,6 +235,13 @@ async fn dead_code_reports_only_the_uncalled_private_symbols() {
                 "file": "src/lib.rs",
                 "line": 16,
                 "signature": "fn dead_plain() -> i32"
+            },
+            {
+                "name": "test_prefixed",
+                "kind": "function",
+                "file": "src/lib.rs",
+                "line": 23,
+                "signature": "fn test_prefixed()"
             },
             {
                 "name": "unused_method",
@@ -305,7 +320,7 @@ async fn dead_code_reports_only_the_uncalled_private_symbols() {
         markdown_without_ids(markdown),
         "\
 freshness: fresh
-**dead_code_count:** 4
+**dead_code_count:** 5
 
 ## symbols
 **file:** src/lib.rs
@@ -322,6 +337,10 @@ freshness: fresh
   **kind:** function
   **line:** 16
   **signature:** `fn dead_plain() -> i32`
+- **test_prefixed**
+  **kind:** function
+  **line:** 23
+  **signature:** `fn test_prefixed()`
 - **unused_method**
   **kind:** method
   **line:** 34
@@ -332,7 +351,7 @@ freshness: fresh
         .filter(|line| line.trim_start().starts_with("**id:**"))
         .count();
     assert_eq!(
-        id_lines, 4,
+        id_lines, 5,
         "default markdown must identify each symbol:\n{markdown}"
     );
 
