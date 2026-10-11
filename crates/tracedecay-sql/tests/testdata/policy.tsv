@@ -1,0 +1,193 @@
+reader	exact_sql_read	writer	exact_sql	exact_sql_savepoints	maintenance	sql
+allow	allow	allow	allow	allow	allow	SELECT a FROM t WHERE id = ?1
+allow	allow	allow	allow	allow	allow	SELECT * FROM v
+allow	allow	allow	allow	allow	allow	SELECT count(*) FROM sqlite_schema
+allow	allow	allow	allow	allow	allow	SELECT name FROM sqlite_temp_schema
+allow	allow	allow	allow	allow	allow	SELECT rowid FROM f WHERE f MATCH 'x'
+allow	allow	allow	allow	allow	allow	SELECT value FROM json_each('[1,2]')
+allow	allow	allow	allow	allow	allow	SELECT key FROM json_tree('{"a":1}')
+allow	allow	allow	allow	allow	allow	SELECT name FROM pragma_table_info('t')
+allow	allow	allow	allow	allow	allow	SELECT name FROM pragma_index_list('t')
+allow	allow	allow	allow	allow	allow	WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3) SELECT x FROM c
+allow	allow	allow	allow	allow	allow	EXPLAIN SELECT 1
+allow	allow	allow	allow	allow	allow	EXPLAIN QUERY PLAN SELECT a FROM t WHERE a = 'x'
+allow	allow	allow	allow	allow	allow	SELECT sqlite_version()
+allow	allow	allow	allow	allow	allow	SELECT randomblob(4)
+allow	allow	allow	allow	allow	allow	SELECT a FROM t WHERE a LIKE 'x%' ESCAPE '\\'
+deny	deny	deny	deny	deny	allow	SELECT load_extension('x')
+deny	deny	deny	deny	deny	allow	SELECT load_extension('x', 'entry')
+error	error	error	error	error	error	SELECT * FROM sqlite_dbpage('main')
+allow	allow	allow	allow	allow	allow	SELECT * FROM dbstat
+error	error	error	error	error	error	SELECT * FROM btree_dump
+error	error	error	error	error	error	SELECT * FROM turso_types
+deny	deny	allow	allow	allow	allow	INSERT INTO t(a, b) VALUES ('x', 1)
+deny	deny	allow	allow	allow	allow	INSERT INTO t(a, b) VALUES ('x', 1) ON CONFLICT(id) DO UPDATE SET b = excluded.b
+deny	deny	allow	allow	allow	allow	INSERT OR REPLACE INTO t(id, a) VALUES (1, 'y')
+deny	deny	allow	allow	allow	allow	INSERT INTO t(a) VALUES ('x') RETURNING id
+deny	deny	allow	allow	allow	allow	INSERT INTO t(a) SELECT a FROM t
+deny	deny	allow	allow	allow	allow	REPLACE INTO u(id, t_id) VALUES (1, 1)
+deny	deny	allow	allow	allow	allow	UPDATE t SET a = 'z' WHERE id = 1
+deny	deny	allow	allow	allow	allow	UPDATE t SET a = 'z' WHERE id = 1 RETURNING a
+deny	deny	allow	allow	allow	allow	DELETE FROM t WHERE id = 1
+deny	deny	allow	allow	allow	allow	DELETE FROM u
+deny	deny	allow	allow	allow	allow	INSERT INTO f(body) VALUES ('hello')
+deny	deny	allow	allow	allow	allow	INSERT INTO f(f) VALUES ('optimize')
+deny	deny	allow	allow	allow	allow	DELETE FROM f WHERE rowid = 1
+deny	deny	allow	allow	allow	allow	INSERT INTO tf(x) VALUES (1)
+error	error	error	error	error	error	UPDATE sqlite_schema SET sql = '' WHERE name = 't'
+deny	deny	allow	allow	allow	allow	CREATE TABLE n(x)
+deny	deny	allow	allow	allow	allow	CREATE TABLE IF NOT EXISTS t(id INTEGER PRIMARY KEY)
+deny	deny	allow	allow	allow	allow	CREATE TABLE n2 AS SELECT * FROM t
+deny	deny	allow	allow	allow	allow	CREATE TABLE n3(x NOT NULL PRIMARY KEY) WITHOUT ROWID
+deny	deny	allow	allow	allow	allow	CREATE TABLE n4(x INTEGER PRIMARY KEY, y TEXT NOT NULL, UNIQUE(y)) STRICT
+deny	deny	allow	allow	allow	allow	CREATE INDEX n_b ON t(b)
+deny	deny	allow	allow	allow	allow	CREATE UNIQUE INDEX IF NOT EXISTS t_a_unique ON t(a)
+deny	deny	allow	allow	allow	allow	CREATE INDEX n_partial ON t(b) WHERE b IS NOT NULL
+deny	deny	deny	allow	allow	allow	CREATE TRIGGER n_tr AFTER DELETE ON t BEGIN DELETE FROM u WHERE t_id = old.id; END
+deny	deny	deny	allow	allow	allow	CREATE TRIGGER IF NOT EXISTS n_guard BEFORE UPDATE ON t BEGIN SELECT RAISE(ABORT, 'immutable'); END
+deny	deny	deny	allow	allow	allow	CREATE TRIGGER main.n_main AFTER INSERT ON t BEGIN SELECT 1; END
+deny	deny	deny	allow	allow	allow	CREATE VIEW n_v AS SELECT a FROM t
+deny	deny	deny	allow	allow	allow	CREATE VIEW IF NOT EXISTS main.n_v2 AS SELECT a FROM t
+deny	deny	deny	allow	allow	allow	CREATE VIRTUAL TABLE n_f USING fts5(body)
+deny	deny	deny	allow	allow	allow	CREATE VIRTUAL TABLE n_f2 USING fts5(body, content='t', content_rowid='id')
+deny	deny	deny	allow	allow	allow	ALTER TABLE t ADD COLUMN c TEXT
+deny	deny	deny	allow	allow	allow	ALTER TABLE t RENAME TO t_renamed
+deny	deny	deny	allow	allow	allow	ALTER TABLE t RENAME COLUMN a TO a2
+deny	deny	deny	allow	allow	allow	ALTER TABLE u DROP COLUMN t_id
+deny	deny	deny	allow	allow	allow	DROP TABLE u
+allow	allow	allow	allow	allow	allow	DROP TABLE IF EXISTS missing
+deny	deny	deny	allow	allow	allow	DROP INDEX t_a
+allow	allow	allow	allow	allow	allow	DROP INDEX IF EXISTS missing_index
+deny	deny	deny	allow	allow	allow	DROP TRIGGER t_ai
+deny	deny	deny	allow	allow	allow	DROP TRIGGER main.t_ai
+deny	deny	deny	allow	allow	allow	DROP VIEW v
+deny	deny	deny	allow	allow	allow	DROP VIEW main.v
+deny	deny	deny	allow	allow	allow	DROP TABLE f
+deny	deny	deny	allow	allow	allow	ANALYZE
+deny	deny	deny	allow	allow	allow	ANALYZE t
+allow	allow	allow	allow	allow	allow	REINDEX t
+allow	allow	allow	allow	allow	allow	VACUUM
+allow	allow	allow	allow	allow	allow	VACUUM INTO 'policy-corpus-never-written.db'
+deny	deny	deny	allow	allow	allow	CREATE TEMP TABLE n_tt(x)
+deny	deny	deny	allow	allow	allow	CREATE TEMPORARY TABLE n_tt2 AS SELECT * FROM t
+deny	deny	allow	allow	allow	allow	CREATE TABLE temp.n_tt3(x)
+deny	deny	deny	allow	allow	allow	CREATE TEMP TABLE IF NOT EXISTS tf(x)
+deny	deny	deny	allow	allow	allow	CREATE INDEX temp.n_tt_x ON tf(x)
+deny	deny	deny	deny	deny	allow	CREATE TEMP TRIGGER n_ttr AFTER INSERT ON t BEGIN SELECT 1; END
+deny	deny	deny	deny	deny	allow	CREATE TRIGGER temp.n_ttr2 AFTER INSERT ON tf BEGIN SELECT 1; END
+deny	deny	deny	deny	deny	allow	CREATE TEMP VIEW n_tv AS SELECT 1
+deny	deny	deny	allow	allow	allow	CREATE VIEW temp.n_tv2 AS SELECT 1
+deny	deny	deny	allow	allow	allow	DROP TABLE temp.tf
+deny	deny	deny	allow	allow	allow	DROP TABLE tf
+deny	deny	deny	allow	allow	allow	DROP INDEX temp.tf_x
+error	error	error	error	error	error	DROP TRIGGER temp.tf_tr
+error	error	error	error	error	error	DROP TRIGGER tf_tr
+error	error	error	error	error	error	DROP VIEW temp.tf_v
+error	error	error	error	error	error	DROP VIEW tf_v
+deny	deny	deny	deny	deny	deny	ATTACH DATABASE ':memory:' AS aux
+deny	deny	deny	deny	deny	deny	ATTACH DATABASE ?1 AS aux
+deny	deny	deny	deny	deny	deny	ATTACH 'file:policy-corpus?mode=memory' AS aux
+deny	deny	deny	deny	deny	deny	DETACH DATABASE aux
+deny	deny	deny	deny	deny	deny	DETACH aux
+allow	deny	allow	deny	deny	allow	BEGIN
+allow	deny	allow	deny	deny	allow	BEGIN DEFERRED
+allow	deny	allow	deny	deny	allow	BEGIN IMMEDIATE
+allow	deny	allow	deny	deny	allow	BEGIN EXCLUSIVE
+allow	deny	allow	deny	deny	allow	COMMIT
+allow	deny	allow	deny	deny	allow	END
+allow	deny	allow	deny	deny	allow	ROLLBACK
+allow	deny	allow	deny	allow	allow	SAVEPOINT sp
+allow	deny	allow	deny	allow	allow	RELEASE sp
+allow	deny	allow	deny	allow	allow	RELEASE SAVEPOINT sp
+allow	deny	allow	deny	allow	allow	ROLLBACK TO sp
+allow	deny	allow	deny	allow	allow	ROLLBACK TO SAVEPOINT sp
+allow	allow	allow	allow	allow	allow	PRAGMA application_id
+deny	deny	deny	deny	deny	allow	PRAGMA application_id = 1413762609
+allow	allow	allow	allow	allow	allow	PRAGMA auto_vacuum
+deny	deny	deny	deny	deny	allow	PRAGMA auto_vacuum = INCREMENTAL
+deny	deny	deny	deny	deny	allow	PRAGMA auto_vacuum = 2
+deny	deny	deny	deny	deny	allow	PRAGMA auto_vacuum = NONE
+allow	allow	allow	allow	allow	allow	PRAGMA busy_timeout
+deny	deny	allow	allow	allow	allow	PRAGMA busy_timeout = 5000
+allow	allow	allow	deny	deny	allow	PRAGMA cache_flush
+allow	allow	allow	allow	allow	allow	PRAGMA cache_size
+deny	deny	deny	deny	deny	allow	PRAGMA cache_size = -2000
+deny	deny	deny	deny	deny	allow	PRAGMA case_sensitive_like = ON
+deny	deny	deny	deny	deny	allow	PRAGMA cell_size_check = ON
+allow	allow	allow	allow	allow	allow	PRAGMA collation_list
+allow	allow	allow	allow	allow	allow	PRAGMA compile_options
+allow	allow	allow	allow	allow	allow	PRAGMA data_version
+allow	allow	allow	allow	allow	allow	PRAGMA database_list
+allow	allow	allow	allow	allow	allow	PRAGMA defer_foreign_keys
+deny	deny	deny	allow	allow	allow	PRAGMA defer_foreign_keys = ON
+deny	deny	deny	deny	deny	allow	PRAGMA defer_foreign_keys = OFF
+allow	allow	allow	allow	allow	allow	PRAGMA foreign_key_check
+allow	allow	allow	allow	allow	allow	PRAGMA foreign_key_check(u)
+allow	allow	allow	allow	allow	allow	PRAGMA foreign_key_list(u)
+allow	allow	allow	allow	allow	allow	PRAGMA foreign_keys
+deny	deny	deny	allow	allow	allow	PRAGMA foreign_keys = ON
+deny	deny	deny	deny	deny	allow	PRAGMA foreign_keys = OFF
+allow	allow	allow	allow	allow	allow	PRAGMA freelist_count
+allow	allow	allow	allow	allow	allow	PRAGMA function_list
+deny	deny	deny	deny	deny	allow	PRAGMA hard_heap_limit = 0
+deny	deny	deny	deny	deny	allow	PRAGMA ignore_check_constraints = ON
+allow	allow	allow	deny	deny	allow	PRAGMA incremental_vacuum
+deny	deny	deny	deny	deny	allow	PRAGMA incremental_vacuum(10)
+allow	allow	allow	allow	allow	allow	PRAGMA index_info(t_a)
+allow	allow	allow	allow	allow	allow	PRAGMA index_list(t)
+allow	allow	allow	allow	allow	allow	PRAGMA index_xinfo(t_a)
+allow	allow	allow	allow	allow	allow	PRAGMA integrity_check
+allow	allow	allow	allow	allow	allow	PRAGMA integrity_check(1)
+allow	allow	allow	allow	allow	allow	PRAGMA journal_mode
+deny	deny	deny	deny	deny	allow	PRAGMA journal_mode = WAL
+deny	deny	deny	deny	deny	allow	PRAGMA journal_mode = DELETE
+allow	allow	allow	deny	deny	allow	PRAGMA journal_size_limit
+deny	deny	deny	deny	deny	allow	PRAGMA journal_size_limit = 0
+deny	deny	deny	deny	deny	allow	PRAGMA locking_mode = EXCLUSIVE
+allow	allow	allow	allow	allow	allow	PRAGMA main.user_version
+allow	allow	allow	allow	allow	allow	PRAGMA mmap_size
+deny	deny	deny	deny	deny	allow	PRAGMA mmap_size = 0
+allow	allow	allow	allow	allow	allow	PRAGMA module_list
+allow	allow	allow	deny	deny	allow	PRAGMA optimize
+allow	allow	allow	allow	allow	allow	PRAGMA page_count
+allow	allow	allow	allow	allow	allow	PRAGMA page_size
+deny	deny	deny	deny	deny	allow	PRAGMA page_size = 4096
+allow	allow	allow	allow	allow	allow	PRAGMA pragma_list
+allow	allow	allow	allow	allow	allow	PRAGMA query_only
+deny	deny	deny	deny	deny	allow	PRAGMA query_only = ON
+deny	deny	deny	deny	deny	allow	PRAGMA query_only = OFF
+allow	allow	allow	allow	allow	allow	PRAGMA quick_check
+allow	allow	allow	allow	allow	allow	PRAGMA quick_check(1)
+deny	deny	deny	deny	deny	allow	PRAGMA recursive_triggers = ON
+allow	allow	allow	allow	allow	allow	PRAGMA schema_version
+deny	deny	deny	deny	deny	allow	PRAGMA schema_version = 1
+allow	allow	allow	allow	allow	allow	PRAGMA secure_delete
+deny	deny	deny	allow	allow	allow	PRAGMA secure_delete = ON
+deny	deny	deny	deny	deny	allow	PRAGMA secure_delete = OFF
+deny	deny	deny	deny	deny	allow	PRAGMA secure_delete = FAST
+allow	allow	allow	allow	allow	allow	PRAGMA shrink_memory
+deny	deny	deny	deny	deny	allow	PRAGMA soft_heap_limit = 0
+allow	allow	allow	allow	allow	allow	PRAGMA synchronous
+deny	deny	deny	deny	deny	allow	PRAGMA synchronous = NORMAL
+deny	deny	deny	deny	deny	allow	PRAGMA synchronous = OFF
+allow	allow	allow	allow	allow	allow	PRAGMA table_info(t)
+allow	allow	allow	allow	allow	allow	PRAGMA table_list
+allow	allow	allow	allow	allow	allow	PRAGMA table_xinfo(t)
+allow	allow	allow	allow	allow	allow	PRAGMA temp.table_info(tf)
+allow	allow	allow	allow	allow	allow	PRAGMA temp_store
+deny	deny	deny	deny	deny	allow	PRAGMA temp_store = MEMORY
+allow	allow	allow	deny	deny	allow	PRAGMA threads
+deny	deny	deny	deny	deny	allow	PRAGMA threads = 4
+allow	allow	allow	deny	deny	allow	PRAGMA trusted_schema
+deny	deny	deny	deny	deny	allow	PRAGMA trusted_schema = OFF
+allow	allow	allow	allow	allow	allow	PRAGMA user_version
+deny	deny	deny	allow	allow	allow	PRAGMA user_version = 7
+allow	allow	allow	allow	allow	allow	PRAGMA wal_autocheckpoint
+deny	deny	allow	allow	allow	allow	PRAGMA wal_autocheckpoint = 1000
+allow	allow	allow	deny	deny	allow	PRAGMA wal_checkpoint
+deny	deny	allow	deny	deny	allow	PRAGMA wal_checkpoint(PASSIVE)
+deny	deny	allow	deny	deny	allow	PRAGMA wal_checkpoint(FULL)
+deny	deny	allow	deny	deny	allow	PRAGMA wal_checkpoint(RESTART)
+deny	deny	allow	deny	deny	allow	PRAGMA wal_checkpoint(TRUNCATE)
+allow	allow	allow	deny	deny	allow	PRAGMA writable_schema
+deny	deny	deny	deny	deny	allow	PRAGMA writable_schema = ON

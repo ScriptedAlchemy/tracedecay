@@ -29,6 +29,8 @@ use crate::{
     TransactionControl, control::is_allowed_exact_sql_pragma,
 };
 
+mod census;
+
 pub const ENGINE: Engine = Engine::Sqlite;
 
 pub mod types {
@@ -275,6 +277,7 @@ fn install_authorizer(
     capability: Capability,
     transaction_control_denied: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
+    census::trace(connection, capability);
     connection.authorizer(Some(move |context: AuthContext<'_>| {
         if denies_transaction_control(capability, &context.action) {
             if let Some(denied) = &transaction_control_denied {
