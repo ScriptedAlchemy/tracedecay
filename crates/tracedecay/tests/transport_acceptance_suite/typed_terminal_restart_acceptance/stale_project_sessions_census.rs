@@ -307,7 +307,7 @@ fn previous_lcm_schema_profile_resets_its_session_stores_and_keeps_the_registry(
         .filter(|relative| {
             relative
                 .extension()
-                .is_some_and(|extension| extension == "db")
+                .is_some_and(|extension| extension == "db" || extension == "tdb")
         })
         .collect();
     let mut expected_removed = released_stores[1..].to_vec();

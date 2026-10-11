@@ -333,6 +333,11 @@ fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
             "{context}"
         );
     }
+    // A live daemon owns its stores exclusively, so they are read once it
+    // stops: serving the refusals left every stamp as it was.
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon serving the refusals");
     assert_eq!(
         session_temporal_version(
             &profile_root.join(tracedecay_store::StoreFile::Profile.file_name())
@@ -347,6 +352,7 @@ fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
         previous
     );
 
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
     let (reset_status, reset_output) =
         super::run_scoped_reset(&home_path, &project_path, &mut daemon, || {});
     assert!(
@@ -368,6 +374,15 @@ fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
         );
     }
     assert_eq!(
+        status_reset_required_stores(&home_path, &project_path),
+        json!([]),
+        "the reset store serves again"
+    );
+
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon that recreated the stores");
+    assert_eq!(
         session_temporal_version(&project_store),
         SESSION_TEMPORAL_SCHEMA_VERSION
     );
@@ -377,11 +392,4 @@ fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
         ),
         SESSION_TEMPORAL_SCHEMA_VERSION
     );
-    assert_eq!(
-        status_reset_required_stores(&home_path, &project_path),
-        json!([]),
-        "the reset store serves again"
-    );
-
-    let _ = daemon.kill_and_wait();
 }

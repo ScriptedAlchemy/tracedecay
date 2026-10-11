@@ -43,11 +43,31 @@ pub(super) fn give_registry_the_released_graph_scope_shape(db_path: &Path) -> i6
         .expect("read graph scope dependents")
         .collect::<tracedecay_sql::Result<_>>()
         .expect("graph scope dependents");
+    // The rows go through a scratch table rather than `ALTER TABLE ... RENAME`:
+    // Turso's rename rewrites the stored text of every trigger in the schema
+    // (turso-bugs/rename-table-rewrites-every-trigger.md), which would change
+    // the configuration authority's shape as well as the registry's.
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
              BEGIN;
-             CREATE TABLE released_graph_scopes (
+             CREATE TABLE released_graph_scope_rows (
+                 graph_scope_id TEXT NOT NULL,
+                 project_id TEXT NOT NULL,
+                 store_id TEXT NOT NULL,
+                 branch_name TEXT NOT NULL,
+                 db_relpath TEXT NOT NULL,
+                 parent_scope_id TEXT,
+                 last_synced_at INTEGER,
+                 writable INTEGER NOT NULL
+             );
+             INSERT INTO released_graph_scope_rows
+                 SELECT scope.graph_scope_id, scope.project_id, scope.store_id,
+                        scope.branch_name, store.store_relpath || '/tracedecay.db',
+                        scope.parent_scope_id, scope.last_synced_at, scope.writable
+                 FROM graph_scopes AS scope JOIN store_instances AS store USING (store_id);
+             DROP TABLE graph_scopes;
+             CREATE TABLE graph_scopes (
                  graph_scope_id TEXT PRIMARY KEY,
                  project_id TEXT NOT NULL,
                  store_id TEXT NOT NULL,
@@ -59,13 +79,8 @@ pub(super) fn give_registry_the_released_graph_scope_shape(db_path: &Path) -> i6
                  FOREIGN KEY(project_id) REFERENCES code_projects(project_id) ON DELETE CASCADE,
                  FOREIGN KEY(store_id) REFERENCES store_instances(store_id) ON DELETE CASCADE
              );
-             INSERT INTO released_graph_scopes
-                 SELECT scope.graph_scope_id, scope.project_id, scope.store_id,
-                        scope.branch_name, store.store_relpath || '/tracedecay.db',
-                        scope.parent_scope_id, scope.last_synced_at, scope.writable
-                 FROM graph_scopes AS scope JOIN store_instances AS store USING (store_id);
-             DROP TABLE graph_scopes;
-             ALTER TABLE released_graph_scopes RENAME TO graph_scopes;
+             INSERT INTO graph_scopes SELECT * FROM released_graph_scope_rows;
+             DROP TABLE released_graph_scope_rows;
              COMMIT;",
         )
         .expect("give graph_scopes the released shape");

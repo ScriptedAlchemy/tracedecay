@@ -2330,31 +2330,30 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
     #[cfg(unix)]
     std::fs::set_permissions(&identity_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    use tracedecay_store::StoreFile;
-    // Both the SQLite-era family and the compiled engine's family of every
-    // owned store: wipe removes whichever a profile holds.
+    // Spelled out rather than taken from `StoreFile`, which wipe itself
+    // reads: the SQLite-era family of every owned store, plus the native
+    // family when the native engine is compiled in.
+    let mut suffixes = vec![".db", ".db-wal", ".db-shm", ".db-journal"];
+    if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Native {
+        suffixes.extend([".tdb", ".tdb-wal"]);
+    }
     let database_members: Vec<PathBuf> = [
-        (profile.clone(), StoreFile::Profile),
-        (profile.clone(), StoreFile::ProfileSessions),
-        (profile.clone(), StoreFile::ProfileMemory),
-        (profile.join("projects/orphan-project"), StoreFile::Project),
-        (
-            profile.join("projects/orphan-project"),
-            StoreFile::ProjectSessions,
-        ),
-        (profile.join("stores/legacy-orphan"), StoreFile::Project),
+        (profile.clone(), "global"),
+        (profile.clone(), "user-sessions"),
+        (profile.clone(), "user-memory"),
+        (profile.join("projects/orphan-project"), "tracedecay"),
+        (profile.join("projects/orphan-project"), "sessions"),
+        (profile.join("stores/legacy-orphan"), "tracedecay"),
         (
             profile.join(format!("remote/nodes/{}", "a".repeat(64))),
-            StoreFile::RemoteNode,
+            "remote",
         ),
     ]
     .into_iter()
-    .flat_map(|(directory, store)| {
-        store
-            .legacy_names()
+    .flat_map(|(directory, stem)| {
+        suffixes
             .iter()
-            .chain(store.family_names())
-            .map(move |name| directory.join(name))
+            .map(move |suffix| directory.join(format!("{stem}{suffix}")))
     })
     .collect();
     for member in &database_members {

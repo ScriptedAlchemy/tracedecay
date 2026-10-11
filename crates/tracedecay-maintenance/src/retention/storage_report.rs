@@ -1840,14 +1840,14 @@ mod tests {
         assert!(report.stores[0].total_bytes > 0);
 
         assert_eq!(report.stores.len(), 1);
-        let family_bytes: u64 = StoreFile::Project
-            .family_names()
-            .iter()
-            .filter_map(|name| std::fs::metadata(graph_db.with_file_name(name)).ok())
+        let directory_bytes: u64 = std::fs::read_dir(graph_db.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().metadata().unwrap())
+            .filter(std::fs::Metadata::is_file)
             .map(|metadata| metadata.len())
             .sum();
         assert_eq!(
-            report.stores[0].total_bytes, family_bytes,
+            report.stores[0].total_bytes, directory_bytes,
             "size must come from filesystem metadata"
         );
         assert!(
