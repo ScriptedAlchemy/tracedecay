@@ -104,8 +104,8 @@ allow	allow	deny	allow	allow	ROLLBACK TO SAVEPOINT sp
 allow	allow	allow	allow	allow	PRAGMA application_id
 deny	deny	deny	deny	allow	PRAGMA application_id = 1413762609
 allow	allow	allow	allow	allow	PRAGMA auto_vacuum
-deny	allow	allow	allow	allow	PRAGMA auto_vacuum = INCREMENTAL
-deny	allow	allow	allow	allow	PRAGMA auto_vacuum = 2
+deny	deny	deny	deny	allow	PRAGMA auto_vacuum = INCREMENTAL
+deny	deny	deny	deny	allow	PRAGMA auto_vacuum = 2
 deny	deny	deny	deny	allow	PRAGMA auto_vacuum = NONE
 allow	allow	allow	allow	allow	PRAGMA busy_timeout
 deny	allow	allow	allow	allow	PRAGMA busy_timeout = 5000
@@ -132,7 +132,7 @@ allow	allow	allow	allow	allow	PRAGMA function_list
 deny	deny	deny	deny	allow	PRAGMA hard_heap_limit = 0
 deny	deny	deny	deny	allow	PRAGMA ignore_check_constraints = ON
 allow	allow	deny	deny	allow	PRAGMA incremental_vacuum
-deny	allow	allow	allow	allow	PRAGMA incremental_vacuum(10)
+deny	deny	deny	deny	allow	PRAGMA incremental_vacuum(10)
 allow	allow	allow	allow	allow	PRAGMA index_info(t_a)
 allow	allow	allow	allow	allow	PRAGMA index_list(t)
 allow	allow	allow	allow	allow	PRAGMA index_xinfo(t_a)
