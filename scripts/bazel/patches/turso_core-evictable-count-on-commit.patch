@@ -1,0 +1,46 @@
+--- a/storage/page_cache.rs
++++ b/storage/page_cache.rs
+@@ -555,6 +555,24 @@
+         }
+     }
+ 
++    /// Notify the cache that a dirty, unspilled page is about to be marked
++    /// clean, as a commit does once its frames are durable. Without this the
++    /// count only falls after each commit, `needs_spill` drops to its O(n)
++    /// recount on every page allocation, and eviction finds the clean pages
++    /// the count missed one full scan at a time.
++    pub fn notify_page_clean(&mut self, key: PageCacheKey, page: &PageRef) {
++        if let Some(&entry_ptr) = self.map.get(&key) {
++            let entry = unsafe { &*entry_ptr };
++            if Arc::ptr_eq(&entry.page, page)
++                && page.get().id() != DatabaseHeader::PAGE_ID
++                && page.is_dirty()
++                && !page.is_spilled()
++            {
++                self.evictable_count += 1;
++            }
++        }
++    }
++
+     /// Notify the cache that a page has been spilled.
+     /// This should be called when a page transitions from dirty to spilled.
+     /// The page must already be in the cache.
+--- a/storage/pager.rs
++++ b/storage/pager.rs
+@@ -4753,6 +4753,16 @@
+                     // all I/O complete, NOW it's safe to advance WAL state
+                     let mut commit_info = self.commit_info.write();
+                     wal.commit_prepared_frames(&commit_info.prepared_frames);
++                    {
++                        let mut cache = self.page_cache.write();
++                        for (page, _, _) in commit_info
++                            .prepared_frames
++                            .iter()
++                            .flat_map(|batch| &batch.metadata)
++                        {
++                            cache.notify_page_clean(PageCacheKey::new(page.get().id()), page);
++                        }
++                    }
+                     wal.finalize_committed_pages(&commit_info.prepared_frames);
+                     wal.finish_append_frames_commit()?;
+                     self.dirty_pages.write().clear();

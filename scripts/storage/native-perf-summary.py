@@ -16,6 +16,9 @@ for (tag, mode, engine), records in groups.items():
     line = (f"{tag:24} {mode:6} {engine:10} n={len(records)} ingest median "
             f"{statistics.median(ingest):>6} min {min(ingest):>6} load {min(loads)}-{max(loads)} "
             f"rss {max(r['peak_rss_bytes'] for r in records) / 2**20:.0f}MiB bytes {records[0]['artifact_bytes']}")
+    instructions = [r["instructions_u"] for r in records if "instructions_u" in r]
+    if instructions:
+        line += f" instr:u median {statistics.median(instructions) / 1e9:.1f}G"
     print(line)
     if mode == "search":
         classes = records[0]["classes"]

@@ -27,6 +27,7 @@ import pathlib
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 
 BINARIES = {"index": "tracedecay-index-bench", "search": "tracedecay-search-bench"}
@@ -81,21 +82,43 @@ def search_facts(report):
     }
 
 
+def perf_counts(path):
+    """`perf stat -x,` lines: value,unit,event,..."""
+    counts = {}
+    for line in pathlib.Path(path).read_text().splitlines():
+        fields = line.split(",")
+        if len(fields) > 2 and fields[0] and not line.startswith("#"):
+            counts[fields[2]] = float(fields[0])
+    return {
+        "instructions_u": int(counts["instructions:u"]),
+        "task_clock_ms": round(counts["task-clock"]),
+    }
+
+
 def run_once(binary, mode, corpus, extra):
     before = load1()
     started = time.monotonic()
-    result = subprocess.run(
-        [str(binary), "--corpus", str(corpus), *extra],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    wall_ms = round((time.monotonic() - started) * 1000)
-    if result.returncode != 0:
-        raise SystemExit(f"{binary} failed ({result.returncode}): {result.stderr[-2000:]}")
+    with tempfile.NamedTemporaryFile(suffix=".perf") as counters:
+        result = subprocess.run(
+            ["perf", "stat", "-x,", "-e", "instructions:u,task-clock", "-o", counters.name,
+             str(binary), "--corpus", str(corpus), *extra],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        wall_ms = round((time.monotonic() - started) * 1000)
+        if result.returncode != 0:
+            raise SystemExit(f"{binary} failed ({result.returncode}): {result.stderr[-2000:]}")
+        counted = perf_counts(counters.name)
     report = json.loads(result.stdout)
     facts = index_facts(report) if mode == "index" else search_facts(report)
-    return {"load1_before": before, "load1_after": load1(), "process_wall_ms": wall_ms, **facts}
+    return {
+        "load1_before": before,
+        "load1_after": load1(),
+        "process_wall_ms": wall_ms,
+        **counted,
+        **facts,
+    }
 
 
 def main():
@@ -144,6 +167,7 @@ def main():
                 samples[label].append(facts["ingest_ms"])
                 print(
                     f"{options.tag} {label} run {run}: ingest {facts['ingest_ms']} ms, "
+                    f"instr:u {facts['instructions_u'] / 1e9:.1f}G, "
                     f"load {facts['load1_before']:.0f}->{facts['load1_after']:.0f}",
                     file=sys.stderr,
                 )
