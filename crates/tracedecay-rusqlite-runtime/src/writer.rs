@@ -64,7 +64,7 @@ impl RuntimeWriteAuthority for UnrestrictedRuntimeWriteAuthority {
     }
 }
 
-use request::{AcceptedRequest, CheckpointCommand, IncrementalVacuumCommand};
+use request::{AcceptedRequest, CheckpointCommand};
 use worker::Worker;
 
 #[derive(Clone)]
@@ -434,7 +434,6 @@ pub enum WriterActorError {
     AuthorityDenied { stage: RuntimeWriteAuthorityStage },
     ReplyDropped,
     StorageFailure(StorageRuntimeErrorV1),
-    IncrementalVacuumFailed(String),
     InvalidWorkerOutcome(StorageRuntimeContractErrorV1),
     ThreadPanicked,
 }
@@ -451,9 +450,6 @@ impl fmt::Display for WriterActorError {
             }
             Self::ReplyDropped => f.write_str("SQLite writer stopped before replying"),
             Self::StorageFailure(error) => write!(f, "SQLite writer failed: {error}"),
-            Self::IncrementalVacuumFailed(message) => {
-                write!(f, "SQLite incremental vacuum failed: {message}")
-            }
             Self::InvalidWorkerOutcome(error) => {
                 write!(f, "SQLite writer returned an invalid outcome: {error}")
             }
@@ -509,7 +505,6 @@ pub struct PersistentWriter {
     shutdown_requested: Arc<AtomicBool>,
     sender: Mutex<Option<mpsc::Sender<AcceptedRequest>>>,
     exact_sql_sender: Mutex<Option<mpsc::Sender<ExactSqlWriterCommand>>>,
-    incremental_vacuum_sender: Mutex<Option<mpsc::Sender<IncrementalVacuumCommand>>>,
     checkpoint_sender: Mutex<Option<mpsc::Sender<CheckpointCommand>>>,
     shutdown_sender: Option<mpsc::UnboundedSender<()>>,
     join: Option<JoinHandle<()>>,
@@ -585,7 +580,6 @@ impl PersistentWriter {
         // transaction can queue behind the active one instead of observing a
         // spurious Busy error from the transport's single-slot channel.
         let (exact_sql_sender, exact_sql_receiver) = mpsc::channel(capacity);
-        let (incremental_vacuum_sender, incremental_vacuum_receiver) = mpsc::channel(1);
         let (checkpoint_sender, checkpoint_receiver) = mpsc::channel(1);
         let (shutdown_sender, shutdown_receiver) = mpsc::unbounded_channel();
         let (checkpoint_status_tx, checkpoint_status) = watch::channel(CheckpointStatus::default());
@@ -602,7 +596,6 @@ impl PersistentWriter {
             config,
             receiver,
             exact_sql_receiver,
-            incremental_vacuum_receiver,
             checkpoint_receiver,
             shutdown_receiver,
             persistence,
@@ -628,7 +621,6 @@ impl PersistentWriter {
                 shutdown_requested,
                 sender: Mutex::new(Some(sender)),
                 exact_sql_sender: Mutex::new(Some(exact_sql_sender)),
-                incremental_vacuum_sender: Mutex::new(Some(incremental_vacuum_sender)),
                 checkpoint_sender: Mutex::new(Some(checkpoint_sender)),
                 shutdown_sender: Some(shutdown_sender),
                 join: Some(join),
@@ -789,47 +781,6 @@ impl PersistentWriter {
         Ok(outcome)
     }
 
-    pub async fn bounded_incremental_vacuum(
-        &self,
-        max_pages: u32,
-        authority: Arc<dyn RuntimeWriteAuthority>,
-    ) -> Result<(), WriterActorError> {
-        authority
-            .verify(RuntimeWriteAuthorityStage::BeforeAdmission)
-            .map_err(|_| WriterActorError::AuthorityDenied {
-                stage: RuntimeWriteAuthorityStage::BeforeAdmission,
-            })?;
-        if self.state() != WriterState::Ready {
-            return Err(WriterActorError::IncrementalVacuumFailed(
-                "writer is unavailable".to_owned(),
-            ));
-        }
-        let (reply, response) = oneshot::channel();
-        let command = IncrementalVacuumCommand::new(max_pages, authority, reply);
-        let send_result = {
-            let sender = self
-                .incremental_vacuum_sender
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if self.state() != WriterState::Ready {
-                Err(mpsc::error::TrySendError::Closed(command))
-            } else if let Some(sender) = sender.as_ref() {
-                sender.try_send(command)
-            } else {
-                Err(mpsc::error::TrySendError::Closed(command))
-            }
-        };
-        send_result.map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => {
-                WriterActorError::IncrementalVacuumFailed("command channel is busy".to_owned())
-            }
-            mpsc::error::TrySendError::Closed(_) => {
-                WriterActorError::IncrementalVacuumFailed("writer is unavailable".to_owned())
-            }
-        })?;
-        response.await.map_err(|_| WriterActorError::ReplyDropped)?
-    }
-
     fn unavailable(&self) -> RuntimeSubmitOutcomeV1 {
         RuntimeSubmitOutcomeV1::Unavailable {
             reason: self.state().unavailable_reason(),
@@ -848,10 +799,6 @@ impl PersistentWriter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         self.exact_sql_sender
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        self.incremental_vacuum_sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();

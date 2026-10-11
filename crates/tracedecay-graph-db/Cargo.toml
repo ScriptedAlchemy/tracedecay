@@ -81,7 +81,7 @@ tempfile = "3"
 
 [dev-dependencies]
 criterion = "0.5"
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+rusqlite = { version = "0.40.1", default-features = false }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 
 [[bench]]

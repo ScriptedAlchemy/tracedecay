@@ -16,7 +16,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rusqlite::TransactionBehavior;
 use tokio::{
     runtime::Runtime,
     sync::{mpsc, watch},
@@ -48,10 +47,9 @@ use crate::{
 };
 
 use super::{
-    WriterActorError, WriterStartError, WriterState,
+    WriterStartError, WriterState,
     request::{
-        AcceptedRequest, CheckpointCommand, CheckpointCommandKind, ExecutionBatch,
-        IncrementalVacuumCommand, SharedReply,
+        AcceptedRequest, CheckpointCommand, CheckpointCommandKind, ExecutionBatch, SharedReply,
     },
     transaction::{BatchTiming, WriterReporting, process_batch},
 };
@@ -60,13 +58,10 @@ mod ingress;
 mod rejection;
 
 use ingress::{
-    AuxiliaryWork, WorkerWake, apply_wake, drain_command_ingress, drain_ingress, enqueue,
-    select_auxiliary_work, wait_for_work,
+    WorkerWake, apply_wake, drain_command_ingress, drain_ingress, enqueue, exact_sql_turn,
+    wait_for_work,
 };
-use rejection::{
-    cancel_waiting, reject_all, reject_all_exact_sql, reject_all_incremental_vacuum,
-    reject_incremental_vacuum, reject_unauthorized,
-};
+use rejection::{cancel_waiting, reject_all, reject_all_exact_sql, reject_unauthorized};
 
 const HARD_CHECKPOINT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -219,18 +214,15 @@ async fn dwell_for_batch(
     mut pending: PendingBatchDwell,
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
     exact_sql_receiver: &mut mpsc::Receiver<ExactSqlWriterCommand>,
-    incremental_vacuum_receiver: &mut mpsc::Receiver<IncrementalVacuumCommand>,
     checkpoint_receiver: &mut mpsc::Receiver<CheckpointCommand>,
     shutdown_receiver: &mut mpsc::UnboundedReceiver<()>,
     queue: &mut FairQueue<AcceptedRequest>,
     inflight: &mut HashMap<StoreOperationIdV1, SharedReply>,
     exact_sql_queue: &mut VecDeque<ExactSqlWriterCommand>,
-    incremental_vacuum_queue: &mut VecDeque<IncrementalVacuumCommand>,
     checkpoint_queue: &mut VecDeque<CheckpointCommand>,
     telemetry: &WriterTelemetry,
     input_closed: &mut bool,
     exact_sql_closed: &mut bool,
-    incremental_vacuum_closed: &mut bool,
     checkpoint_closed: &mut bool,
 ) {
     loop {
@@ -242,12 +234,10 @@ async fn dwell_for_batch(
             wait_for_work(
                 receiver,
                 exact_sql_receiver,
-                incremental_vacuum_receiver,
                 checkpoint_receiver,
                 shutdown_receiver,
                 *input_closed,
                 *exact_sql_closed,
-                *incremental_vacuum_closed,
                 *checkpoint_closed,
                 None,
             ),
@@ -283,12 +273,10 @@ async fn dwell_for_batch(
                     queue,
                     inflight,
                     exact_sql_queue,
-                    incremental_vacuum_queue,
                     checkpoint_queue,
                     telemetry,
                     input_closed,
                     exact_sql_closed,
-                    incremental_vacuum_closed,
                     checkpoint_closed,
                 );
                 return;
@@ -307,7 +295,6 @@ pub(super) struct Worker {
     pub(super) config: AdmissionConfigV1,
     pub(super) receiver: mpsc::Receiver<AcceptedRequest>,
     pub(super) exact_sql_receiver: mpsc::Receiver<ExactSqlWriterCommand>,
-    pub(super) incremental_vacuum_receiver: mpsc::Receiver<IncrementalVacuumCommand>,
     pub(super) checkpoint_receiver: mpsc::Receiver<CheckpointCommand>,
     pub(super) shutdown_receiver: mpsc::UnboundedReceiver<()>,
     pub(super) persistence: crate::persistence::RuntimeWriterPersistence<
@@ -481,14 +468,11 @@ impl Worker {
         let mut queue = FairQueue::default();
         let mut inflight = HashMap::new();
         let mut exact_sql_queue = VecDeque::new();
-        let mut incremental_vacuum_queue = VecDeque::new();
         let mut checkpoint_queue = VecDeque::new();
         let mut input_closed = false;
         let mut exact_sql_closed = false;
-        let mut incremental_vacuum_closed = false;
         let mut checkpoint_closed = false;
-        let mut prefer_auxiliary = true;
-        let mut next_auxiliary = AuxiliaryWork::IncrementalVacuum;
+        let mut prefer_exact_sql = true;
         let mut hard_checkpoint_retry_due = None;
         loop {
             {
@@ -511,17 +495,11 @@ impl Worker {
                         &mut exact_sql_queue,
                         &mut exact_sql_closed,
                     );
-                    drain_command_ingress(
-                        &mut self.incremental_vacuum_receiver,
-                        &mut incremental_vacuum_queue,
-                        &mut incremental_vacuum_closed,
-                    );
                 }
             };
             if self.shutdown_requested.load(Ordering::Acquire)
                 && queue.is_empty()
                 && exact_sql_queue.is_empty()
-                && incremental_vacuum_queue.is_empty()
             {
                 checkpoint_queue.clear();
                 break;
@@ -529,24 +507,17 @@ impl Worker {
             if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
                 reject_all(&mut queue, &self.telemetry);
                 reject_all_exact_sql(&mut exact_sql_queue);
-                reject_all_incremental_vacuum(&mut incremental_vacuum_queue);
                 checkpoint_queue.clear();
-                if input_closed
-                    && exact_sql_closed
-                    && incremental_vacuum_closed
-                    && checkpoint_closed
-                {
+                if input_closed && exact_sql_closed && checkpoint_closed {
                     break;
                 }
                 let wake = runtime.block_on(wait_for_work(
                     &mut self.receiver,
                     &mut self.exact_sql_receiver,
-                    &mut self.incremental_vacuum_receiver,
                     &mut self.checkpoint_receiver,
                     &mut self.shutdown_receiver,
                     input_closed,
                     exact_sql_closed,
-                    incremental_vacuum_closed,
                     checkpoint_closed,
                     None,
                 ));
@@ -555,12 +526,10 @@ impl Worker {
                     &mut queue,
                     &mut inflight,
                     &mut exact_sql_queue,
-                    &mut incremental_vacuum_queue,
                     &mut checkpoint_queue,
                     &self.telemetry,
                     &mut input_closed,
                     &mut exact_sql_closed,
-                    &mut incremental_vacuum_closed,
                     &mut checkpoint_closed,
                 );
                 continue;
@@ -591,12 +560,10 @@ impl Worker {
                 let wake = runtime.block_on(wait_for_work(
                     &mut self.receiver,
                     &mut self.exact_sql_receiver,
-                    &mut self.incremental_vacuum_receiver,
                     &mut self.checkpoint_receiver,
                     &mut self.shutdown_receiver,
                     input_closed,
                     exact_sql_closed,
-                    incremental_vacuum_closed,
                     checkpoint_closed,
                     Some(retry_due.saturating_duration_since(now)),
                 ));
@@ -612,107 +579,67 @@ impl Worker {
                         &mut queue,
                         &mut inflight,
                         &mut exact_sql_queue,
-                        &mut incremental_vacuum_queue,
                         &mut checkpoint_queue,
                         &self.telemetry,
                         &mut input_closed,
                         &mut exact_sql_closed,
-                        &mut incremental_vacuum_closed,
                         &mut checkpoint_closed,
                     );
                 }
                 continue;
             }
             hard_checkpoint_retry_due = None;
-            if let Some(auxiliary) = select_auxiliary_work(
+            if exact_sql_turn(
                 !exact_sql_queue.is_empty(),
-                !incremental_vacuum_queue.is_empty(),
                 queue.is_empty(),
-                prefer_auxiliary,
-                next_auxiliary,
+                prefer_exact_sql,
             ) {
-                match auxiliary {
-                    AuxiliaryWork::ExactSql => {
-                        let command = exact_sql_queue
-                            .pop_front()
-                            .expect("exact SQL queue checked non-empty");
-                        if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
-                            let started = Instant::now();
-                            let connection = checkpoint.connection_mut();
-                            let rows_before = connection.total_changes();
-                            let lock_work = LockWorkScope::enter();
-                            let reply = {
-                                let _span =
-                                    tracing::trace_span!("rusqlite.writer.exact_sql").entered();
-                                {
-                                    run_writer_command(
-                                        connection,
-                                        command,
-                                        &self.shutdown_requested,
-                                    )
-                                }
-                            };
-                            self.telemetry.exact_sql_command(
-                                1,
-                                connection.total_changes().saturating_sub(rows_before),
-                                duration_micros(started.elapsed()),
-                                take_observed_vm(),
-                                lock_work.take(),
-                            );
-                            // Answer only once the work is in the telemetry, so
-                            // a caller's snapshot after its reply includes it.
-                            reply.send();
-                            self.fit_page_cache(&mut page_cache, &mut checkpoint);
-                            self.run_scheduled_checkpoint(&mut checkpoint);
-                            hard_checkpoint_retry_due = checkpoint
-                                .hard_drain_required()
-                                .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
-                        } else {
-                            reject_writer_command(command);
-                        }
-                        next_auxiliary = AuxiliaryWork::IncrementalVacuum;
-                    }
-                    AuxiliaryWork::IncrementalVacuum => {
-                        let command = incremental_vacuum_queue
-                            .pop_front()
-                            .expect("incremental vacuum queue checked non-empty");
-                        if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
-                            {
-                                let _span =
-                                    tracing::trace_span!("rusqlite.writer.incremental_vacuum")
-                                        .entered();
-                                {
-                                    run_incremental_vacuum(checkpoint.connection_mut(), command);
-                                }
-                            };
-                        } else {
-                            reject_incremental_vacuum(command);
-                        }
-                        next_auxiliary = AuxiliaryWork::ExactSql;
-                    }
+                let command = exact_sql_queue
+                    .pop_front()
+                    .expect("exact SQL queue checked non-empty");
+                if self.state.load(Ordering::Acquire) == WriterState::Ready as u8 {
+                    let started = Instant::now();
+                    let connection = checkpoint.connection_mut();
+                    let rows_before = connection.total_changes();
+                    let lock_work = LockWorkScope::enter();
+                    let reply = {
+                        let _span = tracing::trace_span!("rusqlite.writer.exact_sql").entered();
+                        run_writer_command(connection, command, &self.shutdown_requested)
+                    };
+                    self.telemetry.exact_sql_command(
+                        1,
+                        connection.total_changes().saturating_sub(rows_before),
+                        duration_micros(started.elapsed()),
+                        take_observed_vm(),
+                        lock_work.take(),
+                    );
+                    // Answer only once the work is in the telemetry, so
+                    // a caller's snapshot after its reply includes it.
+                    reply.send();
+                    self.fit_page_cache(&mut page_cache, &mut checkpoint);
+                    self.run_scheduled_checkpoint(&mut checkpoint);
+                    hard_checkpoint_retry_due = checkpoint
+                        .hard_drain_required()
+                        .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                } else {
+                    reject_writer_command(command);
                 }
                 if !queue.is_empty() {
-                    prefer_auxiliary = false;
+                    prefer_exact_sql = false;
                 }
                 continue;
             }
             if queue.is_empty() {
-                if input_closed
-                    && exact_sql_closed
-                    && incremental_vacuum_closed
-                    && checkpoint_closed
-                {
+                if input_closed && exact_sql_closed && checkpoint_closed {
                     break;
                 }
                 let wake = runtime.block_on(wait_for_work(
                     &mut self.receiver,
                     &mut self.exact_sql_receiver,
-                    &mut self.incremental_vacuum_receiver,
                     &mut self.checkpoint_receiver,
                     &mut self.shutdown_receiver,
                     input_closed,
                     exact_sql_closed,
-                    incremental_vacuum_closed,
                     checkpoint_closed,
                     None,
                 ));
@@ -721,12 +648,10 @@ impl Worker {
                     &mut queue,
                     &mut inflight,
                     &mut exact_sql_queue,
-                    &mut incremental_vacuum_queue,
                     &mut checkpoint_queue,
                     &self.telemetry,
                     &mut input_closed,
                     &mut exact_sql_closed,
-                    &mut incremental_vacuum_closed,
                     &mut checkpoint_closed,
                 );
                 continue;
@@ -753,18 +678,15 @@ impl Worker {
                             pending,
                             &mut self.receiver,
                             &mut self.exact_sql_receiver,
-                            &mut self.incremental_vacuum_receiver,
                             &mut self.checkpoint_receiver,
                             &mut self.shutdown_receiver,
                             &mut queue,
                             &mut inflight,
                             &mut exact_sql_queue,
-                            &mut incremental_vacuum_queue,
                             &mut checkpoint_queue,
                             &self.telemetry,
                             &mut input_closed,
                             &mut exact_sql_closed,
-                            &mut incremental_vacuum_closed,
                             &mut checkpoint_closed,
                         ));
                     }
@@ -836,7 +758,7 @@ impl Worker {
             for operation_id in executing {
                 inflight.remove(&operation_id);
             }
-            prefer_auxiliary = true;
+            prefer_exact_sql = true;
         }
         if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
             return;
@@ -1079,63 +1001,6 @@ fn queue_wait_micros(enqueued_at: impl IntoIterator<Item = Instant>, dequeued_at
     })
 }
 
-fn run_incremental_vacuum(
-    connection: &mut rusqlite::Connection,
-    command: IncrementalVacuumCommand,
-) {
-    if command
-        .authority
-        .verify(RuntimeWriteAuthorityStage::Dequeued)
-        .is_err()
-    {
-        command.settle(Err(WriterActorError::AuthorityDenied {
-            stage: RuntimeWriteAuthorityStage::Dequeued,
-        }));
-        return;
-    }
-    let match_result = {
-        let _span = tracing::trace_span!("rusqlite.begin_immediate").entered();
-        connection.transaction_with_behavior(TransactionBehavior::Immediate)
-    };
-    let transaction = match match_result {
-        Ok(transaction) => transaction,
-        Err(error) => {
-            command.settle(Err(WriterActorError::IncrementalVacuumFailed(
-                error.to_string(),
-            )));
-            return;
-        }
-    };
-    if let Err(error) =
-        transaction.pragma_update(None, "incremental_vacuum", command.max_pages.max(1))
-    {
-        command.settle(Err(WriterActorError::IncrementalVacuumFailed(
-            error.to_string(),
-        )));
-        return;
-    }
-    if command
-        .authority
-        .verify(RuntimeWriteAuthorityStage::BeforeCommit)
-        .is_err()
-    {
-        let result = match transaction.rollback() {
-            Ok(()) => Err(WriterActorError::AuthorityDenied {
-                stage: RuntimeWriteAuthorityStage::BeforeCommit,
-            }),
-            Err(error) => Err(WriterActorError::IncrementalVacuumFailed(format!(
-                "rollback after authority loss: {error}"
-            ))),
-        };
-        command.settle(result);
-        return;
-    }
-    let result = transaction
-        .commit()
-        .map_err(|error| WriterActorError::IncrementalVacuumFailed(error.to_string()));
-    command.settle(result);
-}
-
 fn build_batches(
     selected: Vec<AcceptedRequest>,
     config: &AdmissionConfigV1,
@@ -1219,7 +1084,7 @@ mod auxiliary_scheduling_tests {
     use std::{
         collections::{HashMap, VecDeque},
         sync::{
-            Arc, Mutex,
+            Arc,
             atomic::{AtomicBool, Ordering},
         },
         time::{Duration, Instant},
@@ -1235,7 +1100,6 @@ mod auxiliary_scheduling_tests {
     };
 
     use crate::{
-        RuntimeWriteAuthority, RuntimeWriteAuthorityError, RuntimeWriteAuthorityStage,
         admission::{Admission, FairQueue, QueueItem},
         telemetry::WriterTelemetry,
         test_support::{metadata, request as test_request},
@@ -1243,9 +1107,8 @@ mod auxiliary_scheduling_tests {
 
     use super::super::{UnrestrictedRuntimeWriteAuthority, admission_limits};
     use super::{
-        AcceptedRequest, AuxiliaryWork, BatchCoalescingWindow, IncrementalVacuumCommand,
-        PendingBatchDwell, WriterActorError, build_batches, checkpoint_config, dwell_for_batch,
-        enqueue, run_incremental_vacuum, select_auxiliary_work,
+        AcceptedRequest, BatchCoalescingWindow, PendingBatchDwell, build_batches,
+        checkpoint_config, dwell_for_batch, enqueue, exact_sql_turn,
     };
 
     struct BatchProbe {
@@ -1484,15 +1347,12 @@ mod auxiliary_scheduling_tests {
                 .is_ok()
         );
         let (_exact_sql_tx, mut exact_sql_rx) = mpsc::channel(1);
-        let (_vacuum_tx, mut vacuum_rx) = mpsc::channel(1);
         let (_checkpoint_tx, mut checkpoint_rx) = mpsc::channel(1);
         let (_shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
         let mut exact_sql_queue = VecDeque::new();
-        let mut vacuum_queue = VecDeque::new();
         let mut checkpoint_queue = VecDeque::new();
         let mut input_closed = false;
         let mut exact_sql_closed = false;
-        let mut vacuum_closed = false;
         let mut checkpoint_closed = false;
         let runtime = Builder::new_current_thread()
             .enable_time()
@@ -1503,18 +1363,15 @@ mod auxiliary_scheduling_tests {
             pending,
             &mut write_rx,
             &mut exact_sql_rx,
-            &mut vacuum_rx,
             &mut checkpoint_rx,
             &mut shutdown_rx,
             &mut queue,
             &mut inflight,
             &mut exact_sql_queue,
-            &mut vacuum_queue,
             &mut checkpoint_queue,
             &telemetry,
             &mut input_closed,
             &mut exact_sql_closed,
-            &mut vacuum_closed,
             &mut checkpoint_closed,
         ));
 
@@ -1839,104 +1696,15 @@ mod auxiliary_scheduling_tests {
         );
     }
 
-    struct RecordingAuthority {
-        stages: Arc<Mutex<Vec<RuntimeWriteAuthorityStage>>>,
-        deny_before_commit: bool,
-    }
-
-    impl RuntimeWriteAuthority for RecordingAuthority {
-        fn verify(
-            &self,
-            stage: RuntimeWriteAuthorityStage,
-        ) -> Result<(), RuntimeWriteAuthorityError> {
-            self.stages.lock().unwrap().push(stage);
-            if self.deny_before_commit && stage == RuntimeWriteAuthorityStage::BeforeCommit {
-                Err(RuntimeWriteAuthorityError::denied("revoked before commit"))
-            } else {
-                Ok(())
-            }
-        }
+    #[test]
+    fn exact_sql_cannot_starve_product_writes() {
+        assert!(exact_sql_turn(true, false, true));
+        assert!(!exact_sql_turn(true, false, false));
     }
 
     #[test]
-    fn auxiliary_work_cannot_starve_product_writes() {
-        assert_eq!(
-            select_auxiliary_work(true, true, false, true, AuxiliaryWork::IncrementalVacuum),
-            Some(AuxiliaryWork::IncrementalVacuum)
-        );
-        assert_eq!(
-            select_auxiliary_work(true, true, false, false, AuxiliaryWork::ExactSql),
-            None
-        );
-    }
-
-    #[test]
-    fn auxiliary_work_alternates_when_product_queue_is_empty() {
-        assert_eq!(
-            select_auxiliary_work(true, true, true, false, AuxiliaryWork::IncrementalVacuum),
-            Some(AuxiliaryWork::IncrementalVacuum)
-        );
-        assert_eq!(
-            select_auxiliary_work(true, true, true, false, AuxiliaryWork::ExactSql),
-            Some(AuxiliaryWork::ExactSql)
-        );
-        assert_eq!(
-            select_auxiliary_work(false, true, true, false, AuxiliaryWork::ExactSql),
-            Some(AuxiliaryWork::IncrementalVacuum)
-        );
-    }
-
-    #[test]
-    fn incremental_vacuum_samples_worker_authority_stages() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection
-            .pragma_update(None, "auto_vacuum", "INCREMENTAL")
-            .unwrap();
-        let stages = Arc::new(Mutex::new(Vec::new()));
-        let authority = Arc::new(RecordingAuthority {
-            stages: Arc::clone(&stages),
-            deny_before_commit: false,
-        });
-        let (reply, mut response) = oneshot::channel();
-
-        run_incremental_vacuum(
-            &mut connection,
-            IncrementalVacuumCommand::new(0, authority, reply),
-        );
-
-        assert!(response.try_recv().unwrap().is_ok());
-        assert_eq!(
-            *stages.lock().unwrap(),
-            [
-                RuntimeWriteAuthorityStage::Dequeued,
-                RuntimeWriteAuthorityStage::BeforeCommit
-            ]
-        );
-    }
-
-    #[test]
-    fn incremental_vacuum_rolls_back_when_authority_is_revoked() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection
-            .pragma_update(None, "auto_vacuum", "INCREMENTAL")
-            .unwrap();
-        let authority = Arc::new(RecordingAuthority {
-            stages: Arc::new(Mutex::new(Vec::new())),
-            deny_before_commit: true,
-        });
-        let (reply, mut response) = oneshot::channel();
-
-        run_incremental_vacuum(
-            &mut connection,
-            IncrementalVacuumCommand::new(8, authority, reply),
-        );
-
-        assert!(matches!(
-            response.try_recv().unwrap(),
-            Err(WriterActorError::AuthorityDenied {
-                stage: RuntimeWriteAuthorityStage::BeforeCommit
-            })
-        ));
-        assert!(connection.is_autocommit());
+    fn exact_sql_runs_whenever_the_product_queue_is_empty() {
+        assert!(exact_sql_turn(true, true, false));
+        assert!(!exact_sql_turn(false, true, true));
     }
 }

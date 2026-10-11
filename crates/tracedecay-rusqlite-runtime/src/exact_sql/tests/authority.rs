@@ -51,7 +51,6 @@ fn writer_actor_allows_only_product_schema_pragmas() {
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
 
     for pragma in [
-        "PRAGMA auto_vacuum = INCREMENTAL",
         "PRAGMA foreign_keys = ON",
         "PRAGMA defer_foreign_keys = ON",
         "PRAGMA secure_delete = ON",
@@ -62,7 +61,9 @@ fn writer_actor_allows_only_product_schema_pragmas() {
             .unwrap_or_else(|error| panic!("{pragma} must remain available: {error}"));
     }
     for pragma in [
+        "PRAGMA auto_vacuum = INCREMENTAL",
         "PRAGMA auto_vacuum = NONE",
+        "PRAGMA incremental_vacuum(8)",
         "PRAGMA foreign_keys = OFF",
         "PRAGMA secure_delete = OFF",
         "PRAGMA writable_schema = ON",

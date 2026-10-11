@@ -12,8 +12,6 @@
 //!   `dbstat`/pragma sources.
 //! - [`debris`] (§5): incident-artifact classification and debris scan read
 //!   models.
-//! - [`compaction`] (§6): the free-page-ratio compaction trigger policy, off the
-//!   hot path by construction.
 //! - [`inventory`]: orphan / retention-backlog read models.
 //! - [`findings`]: pure producers mapping the read models onto
 //!   [`crate::doctor::DoctorFindingV1`] with honest evidence states.
@@ -21,7 +19,6 @@
 //! This crate owns no store or runtime; the telemetry port implementation is a
 //! reported seam in the storage runtime crate (see [`telemetry`]).
 
-pub mod compaction;
 pub mod convergence;
 pub mod debris;
 pub mod findings;
@@ -29,7 +26,6 @@ pub mod identity;
 pub mod inventory;
 pub mod telemetry;
 
-pub use compaction::{CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1};
 pub use convergence::{
     SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
     SchemaConvergenceStateV1,
