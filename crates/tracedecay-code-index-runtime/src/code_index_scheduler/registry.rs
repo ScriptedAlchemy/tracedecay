@@ -463,6 +463,15 @@ fn published_text_projection_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerSt
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+/// Holds a text projection the moment a held code-generation store lock
+/// refused one of its advances.
+#[cfg(test)]
+fn text_projection_store_contention_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, WorkerStepGateV1>>> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
 /// Holds a publication's text projection after its first advance opened the
 /// build, while the pass that published it waits to join it.
 #[cfg(test)]
@@ -2793,6 +2802,8 @@ impl CodeIndexSchedulerRegistryV1 {
                         );
                         return PublishedTextProjectionOutcomeV1::WaitingForMemory;
                     } else if error.is_generation_store_lock_contended() {
+                        #[cfg(test)]
+                        Self::wait_for_text_projection_store_contention_gate(&project_root).await;
                         tracing::info!(
                             event = "code_index_text_projection_waiting_for_store",
                             "published text projection waits for the code-generation store lock"

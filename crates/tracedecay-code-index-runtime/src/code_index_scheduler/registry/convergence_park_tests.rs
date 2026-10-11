@@ -24,6 +24,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay_code_index_retention::code_index_generations::{
     code_text_artifact_staging_root, scoped_code_index_store_root,
+    try_acquire_code_generation_store_read_lock,
 };
 
 use tracedecay_contracts::code_index_freshness::{
@@ -65,6 +66,9 @@ struct Fixture {
     /// The exact durable text-artifacts root of the mounted worktree's scoped
     /// store, the directory the owner-privacy contract governs.
     artifacts_root: std::path::PathBuf,
+    /// The mounted worktree's scoped generation store, whose lock the
+    /// publication, graph decode, and text projection share.
+    scope_store_root: std::path::PathBuf,
     registry: CodeIndexSchedulerRegistryV1,
 }
 
@@ -130,6 +134,7 @@ impl Fixture {
                 _root: root,
                 project,
                 artifacts_root,
+                scope_store_root: scoped,
                 registry,
             },
             admission,
@@ -477,6 +482,76 @@ async fn fresh_graph_activation_never_delays_the_published_text_owner() {
     })
     .await
     .expect("the publication seats once graph activation and text are done");
+    fixture.registry.shutdown().await;
+}
+
+/// A store reader that is active when the published text projection needs
+/// the store lock (the graph decode running beside it holds a shared lock)
+/// must not make text readiness wait for graph activation. The projection
+/// waits for that reader to finish and then completes while activation is
+/// still held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn published_text_projection_outlasts_a_store_reader_beside_graph_activation() {
+    let (fixture, admission) =
+        Fixture::mount_with_poisoned_artifacts_root_held("project.text-outlasts-reader", |_| {})
+            .await;
+    let scope = fixture
+        .registry
+        .serving_code_scope(&fixture.project)
+        .await
+        .expect("mounted scope");
+    let gate = install_injected_activation_gate(&scope.worktree_id);
+    let (opened, release_opened) = fixture
+        .registry
+        .pause_next_opened_published_text_projection(fixture.project.clone());
+    let (contended, release_contended) = fixture
+        .registry
+        .pause_next_text_projection_store_contention(fixture.project.clone());
+    drop(admission);
+
+    tokio::time::timeout(CONVERGENCE_DEADLINE, opened)
+        .await
+        .expect("the published text projection opens its build")
+        .expect("opened gate sender");
+    tokio::time::timeout(CONVERGENCE_DEADLINE, gate.wait_until_started())
+        .await
+        .expect("graph activation starts beside the opened text projection");
+    let reader = try_acquire_code_generation_store_read_lock(&fixture.scope_store_root)
+        .expect("store read lock")
+        .expect("no writer holds the store while activation is held");
+    release_opened
+        .send(())
+        .expect("release the opened projection");
+    tokio::time::timeout(CONVERGENCE_DEADLINE, contended)
+        .await
+        .expect("the projection meets the held store lock")
+        .expect("contention gate sender");
+    drop(reader);
+    release_contended
+        .send(())
+        .expect("release the contended projection");
+
+    let canonical = canonical_existing_identity(&fixture.project).expect("canonical project");
+    let text = {
+        let mounted = fixture.registry.mounted.lock().await;
+        mounted
+            .get(&canonical)
+            .expect("mounted worktree")
+            .text_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    .expect("the publication installed its text owner before activation");
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
+    tokio::time::timeout(CONVERGENCE_DEADLINE, async {
+        while !text.query_owners_are_ready() {
+            signals.changed().await;
+        }
+    })
+    .await
+    .expect("the text owner finishes once the reader lets go, while activation is held");
+    gate.release();
     fixture.registry.shutdown().await;
 }
 
