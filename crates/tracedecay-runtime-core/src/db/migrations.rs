@@ -98,18 +98,6 @@ async fn set_version(conn: &impl Executor, version: u32) -> Result<()> {
         })?;
     Ok(())
 }
-/// Configures incremental auto-vacuum for a brand-new database before any
-/// schema-shaping pragmas or tables are created.
-pub async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &str) -> Result<()> {
-    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("{operation}: failed to configure fresh auto_vacuum: {e}"),
-            operation: operation.to_string(),
-        })?;
-    Ok(())
-}
-
 /// Creates the complete schema from scratch for a brand-new database and
 /// stamps [`SCHEMA_VERSION`]. This is the only way a store comes into
 /// existence: there is no stepwise path to this shape.
@@ -120,12 +108,6 @@ pub async fn create_schema(database: &crate::db::Database) -> Result<()> {
 }
 
 async fn create_schema_engine_connection(conn: &DatabaseEngineWriteConnection) -> Result<()> {
-    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
-        .await
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("create_schema: failed to configure fresh auto_vacuum: {error}"),
-            operation: "create_schema".to_owned(),
-        })?;
     let transaction = conn
         .authorized_long_lease_transaction()
         .await
@@ -152,9 +134,6 @@ async fn create_schema_engine_connection(conn: &DatabaseEngineWriteConnection) -
 /// Creates the schema on an already-open connection. This is the door the
 /// store runtime uses when it initializes a brand-new shard.
 pub async fn create_schema_connection(conn: &Connection) -> Result<()> {
-    // Fresh databases only need the pragma before tables are created.
-    configure_fresh_auto_vacuum(conn, "create_schema").await?;
-
     let transaction = conn
         .authorized_long_lease_transaction()
         .await

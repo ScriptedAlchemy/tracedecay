@@ -4,7 +4,6 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use crate::compaction_receipt::record_live_compaction_outcome;
 use crate::lease::ProjectStoreMaintenanceLeaseV1;
 use crate::store_maintenance::{
     CodeGenerationRetentionOutcomeV1, RegisteredProjectStoreV1, run_code_generation_retention,
@@ -12,29 +11,26 @@ use crate::store_maintenance::{
 };
 use crate::telemetry::StoreTelemetrySamplingRegistry;
 use crate::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
-use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 
 /// Run the production generation-maintenance journey for one admitted store lease.
 ///
 /// A fresh full tick runs bounded code-generation retention, then collects
-/// the scopes of removed worktrees, then the independent compaction passes.
-/// A collected scope continues on the short cadence so the next
-/// code-generation pass sweeps the shared segments and text artifacts only it
-/// named. A code-generation continuation runs only the bounded
-/// code-generation unit, draining a superseded backlog without re-running
-/// scope reconciliation or compaction.
+/// the scopes of removed worktrees. A collected scope continues on the short
+/// cadence so the next code-generation pass sweeps the shared segments and
+/// text artifacts only it named. A code-generation continuation runs only the
+/// bounded code-generation unit, draining a superseded backlog without
+/// re-running scope reconciliation.
 #[tracing::instrument(name = "daemon.maintenance.generation", level = "trace", skip_all)]
 pub async fn run_project_generation_maintenance(
     lease: &ProjectStoreMaintenanceLeaseV1,
     code_index_schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &StoreTelemetrySamplingRegistry,
     cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
-    compaction: Option<&CompactionThresholdConfig>,
     continuation: Option<MaintenanceContinuation>,
 ) -> MaintenanceTickOutcome {
     // Each ordered phase gets its own wall span: the outer generation span is
     // inclusive, so a slow tick is attributed to code generation retention or
-    // compaction, not guessed.
+    // scope reconciliation, not guessed.
     let code_generation = if cancellation.is_cancelled() {
         CodeGenerationRetentionOutcomeV1::Failed
     } else {
@@ -72,33 +68,12 @@ pub async fn run_project_generation_maintenance(
                 .await
         });
     }
-    if !cancellation.is_cancelled()
-        && let Some(compaction) = compaction
-    {
-        use tracing::Instrument as _;
-        async {
-            let project_compacted = record_live_compaction_outcome(
-                tracedecay_runtime_core::config::DB_FILENAME,
-                crate::retention::live_compaction::compact_project_store(
-                    lease.graph_db(),
-                    compaction,
-                )
-                .await,
-            );
-            if !project_compacted {
-                outcome = MaintenanceTickOutcome::Retry;
-            }
-        }
-        .instrument(tracing::trace_span!("daemon.maintenance.compaction"))
-        .await;
-    }
     finalize_generation_outcome(outcome, cancellation)
 }
 
 /// Run code-generation retention over the scopes of one registered project
 /// that no mounted graph owns. It is the whole unit on a full tick and on a
-/// code-generation continuation alike: an unmounted store has no compaction
-/// pass of its own here.
+/// code-generation continuation alike.
 #[tracing::instrument(
     name = "daemon.maintenance.registered_generation",
     level = "trace",

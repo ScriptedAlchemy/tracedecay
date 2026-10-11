@@ -143,7 +143,7 @@ hex = "0.4"
 # allocator.
 libsqlite3-sys = { version = "0.38.2", default-features = false }
 rayon = "1"
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+rusqlite = { version = "0.40.1", default-features = false }
 self-replace = "1"
 semver = "1"
 serde = { version = "1", features = ["derive"] }

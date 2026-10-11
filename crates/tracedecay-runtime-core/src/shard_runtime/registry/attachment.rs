@@ -112,23 +112,6 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
         Err("physical runtime has no store-size telemetry port".to_owned())
     }
 
-    /// Runs one typed, page-bounded incremental compaction on the retained
-    /// writer. The authority is sampled by the writer at admission, dequeue,
-    /// and before commit; no SQL or path crosses this port.
-    fn run_bounded_incremental_compaction<'a>(
-        &'a self,
-        max_pages: u32,
-        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), StoreRuntimeRegistryFailure>> + Send + 'a>> {
-        let _ = (max_pages, authority);
-        Box::pin(async {
-            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "run bounded incremental compaction",
-                message: "physical runtime has no typed compaction port".to_owned(),
-            })
-        })
-    }
-
     fn run_checkpoint<'a>(
         &'a self,
         request: tracedecay_rusqlite_runtime::CheckpointRequest,

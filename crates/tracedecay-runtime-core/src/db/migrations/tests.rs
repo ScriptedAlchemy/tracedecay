@@ -35,8 +35,7 @@ async fn create_raw_db() -> (TestConnection, TempDir) {
     let setup = tracedecay_sql::Connection::open(&db_path).expect("open schema fixture");
     setup
         .execute_batch(
-            "PRAGMA auto_vacuum = INCREMENTAL;
-             PRAGMA journal_mode = WAL;
+            "PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
         )
@@ -412,9 +411,6 @@ async fn a_current_stamp_with_retired_memory_projection_columns_is_reset_require
 #[tokio::test]
 async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
     let (conn, _dir) = create_raw_db().await;
-    super::configure_fresh_auto_vacuum(&conn, "test interrupted fresh schema")
-        .await
-        .unwrap();
 
     let transaction = conn.authorized_long_lease_transaction().await.unwrap();
     super::create_schema_transaction(&transaction)

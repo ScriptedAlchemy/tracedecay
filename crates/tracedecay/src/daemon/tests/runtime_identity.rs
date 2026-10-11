@@ -783,7 +783,6 @@ async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_on
                 &engine.invocation.code_index_schedulers,
                 &observations,
                 &cancellation,
-                None,
                 continuation,
             )
             .await;
@@ -848,7 +847,6 @@ async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_on
             &engine.invocation.code_index_schedulers,
             &observations,
             &cancellation,
-            None,
             None,
         )
         .await,

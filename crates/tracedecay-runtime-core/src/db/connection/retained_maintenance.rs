@@ -256,17 +256,4 @@ impl Database {
             operation: "sample SQLite-store pages".to_owned(),
         })
     }
-
-    /// Runs bounded incremental vacuum through the canonical writer lane.
-    pub async fn run_incremental_vacuum(&self, pages: u64) -> Result<()> {
-        let authority = self.write_authority()?;
-        self.client
-            .runtime()
-            .run_bounded_incremental_compaction(pages, authority)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to compact SQLite store: {error:?}"),
-                operation: "run bounded SQLite-store compaction".to_owned(),
-            })
-    }
 }

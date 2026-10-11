@@ -980,7 +980,6 @@ mod durable_inventory {
             profile.path(),
             &data_root,
             Some(b"{ not json"),
-            &durable_check_scratch_root(profile.path()),
             unbounded_collection_control(),
         )
         .await;
@@ -990,6 +989,86 @@ mod durable_inventory {
             DurableMemoryCheck::Unverifiable,
             "an unverifiable inventory must protect the store, never clear it for deletion"
         );
+    }
+
+    fn profile_listing(root: &Path) -> BTreeSet<(PathBuf, Vec<u8>)> {
+        let mut listing = BTreeSet::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let bytes = std::fs::read(&path).unwrap();
+                    listing.insert((path, bytes));
+                }
+            }
+        }
+        listing
+    }
+
+    /// Catches a durable-memory check that copies the store or leaves a
+    /// scratch file or sidecar in the profile: the rows must be found in
+    /// place and every profile file must be byte-identical afterwards.
+    #[tokio::test]
+    async fn durable_rows_are_found_in_place_without_a_copy() {
+        let profile = tempfile::tempdir().unwrap();
+        let data_root = profile.path().join("stores/durable");
+        std::fs::create_dir_all(&data_root).unwrap();
+        let writer = rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY);
+                 INSERT INTO memory_facts VALUES (1);
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        let before = profile_listing(profile.path());
+
+        let check = check_store_durable_memory(
+            profile.path(),
+            &data_root,
+            Some(&manifest_bytes("graph.db")),
+            unbounded_collection_control(),
+        )
+        .await;
+
+        assert_eq!(check, DurableMemoryCheck::Present);
+        assert_eq!(profile_listing(profile.path()), before);
+        drop(writer);
+    }
+
+    /// Catches a check that reads only the main file while committed memory
+    /// rows sit in the WAL and so reports a protected store `Empty`.
+    #[tokio::test]
+    async fn rows_still_in_the_wal_protect_the_store() {
+        let profile = tempfile::tempdir().unwrap();
+        let data_root = profile.path().join("stores/live");
+        std::fs::create_dir_all(&data_root).unwrap();
+        let writer = rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA wal_autocheckpoint = 0;
+                 CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY);
+                 INSERT INTO memory_facts VALUES (1);",
+            )
+            .unwrap();
+        let before = profile_listing(profile.path());
+
+        let check = check_store_durable_memory(
+            profile.path(),
+            &data_root,
+            Some(&manifest_bytes("graph.db")),
+            unbounded_collection_control(),
+        )
+        .await;
+
+        assert_eq!(check, DurableMemoryCheck::Unverifiable);
+        assert_eq!(profile_listing(profile.path()), before);
+        drop(writer);
     }
 
     #[tokio::test]
@@ -1003,7 +1082,6 @@ mod durable_inventory {
             profile.path(),
             &data_root,
             Some(&manifest_bytes("graph.db")),
-            &durable_check_scratch_root(profile.path()),
             cancelled_collection_control(),
         )
         .await;

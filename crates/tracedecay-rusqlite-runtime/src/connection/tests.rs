@@ -251,7 +251,9 @@ fn limits_and_authorizer_reject_oversized_or_unsafe_sql() {
 }
 
 #[test]
-fn writer_bootstraps_fresh_incremental_auto_vacuum_before_wal() {
+/// Catches a reintroduced incremental-vacuum lane: a fresh writer leaves
+/// auto-vacuum off and refuses to enable it or run a bounded vacuum.
+fn writer_never_enables_or_runs_incremental_vacuum() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("fresh.sqlite3");
     std::fs::File::create(&path).expect("create empty database file");
@@ -261,16 +263,17 @@ fn writer_bootstraps_fresh_incremental_auto_vacuum_before_wal() {
         connection
             .query_row("PRAGMA auto_vacuum", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        2
+        0
     );
-    connection
-        .execute_batch("PRAGMA auto_vacuum = INCREMENTAL")
-        .expect("repeat safe incremental auto-vacuum");
-    assert!(
-        connection
-            .execute_batch("PRAGMA auto_vacuum = NONE")
-            .is_err()
-    );
+    for pragma in [
+        "PRAGMA auto_vacuum = INCREMENTAL",
+        "PRAGMA incremental_vacuum(8)",
+    ] {
+        assert!(
+            connection.execute_batch(pragma).is_err(),
+            "{pragma} must be denied"
+        );
+    }
 }
 
 #[cfg(any(unix, windows))]
