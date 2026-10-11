@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 pub use tracedecay_code_index::clones::CloneSelectedBlockV1;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
-use tracedecay_runtime_core::path_safety::{SqliteDatabasePathError, sqlite_database_path};
-use tracedecay_sql::{Capability, ConnectionControl, ErrorExt, ErrorKind};
+use tracedecay_sql::{Capability, CheckpointMode, ConnectionControl, ErrorExt, ErrorKind};
 
 mod builder;
 mod clone_census;
@@ -88,10 +87,8 @@ pub fn code_lexical_artifact_build_memory_budget_for(admitted_process_bytes: u64
 }
 /// Maximum reader cache budget: the stored metadata copy plus the SQLite
 /// page-cache grant, which stays inside the kernel SQLite window ([2, 64]
-/// MiB page cache). Sealed read-only readers also mmap the immutable file
-/// itself; that mapping is file-backed and is not part of this heap claim.
-/// The reader's retained claim is the metadata copy plus the cache actually
-/// granted, never this whole bound.
+/// MiB page cache). The reader's retained claim is the metadata copy plus
+/// the cache actually granted, never this whole bound.
 /// The same narrowed claim as the build budget applies: `cache_size` is a
 /// target, not a hard allocator bound.
 pub const CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1: usize = 256 * 1024 * 1024;
@@ -108,9 +105,7 @@ pub enum CodeLexicalArtifactBatchLimitV1 {
 
 /// Page-cache authority granted to artifact connections; charged in full
 /// against the memory ledgers because SQLite may use all of it. Sized to
-/// the top of the kernel SQLite window ([2, 64] MiB page cache). Staging
-/// builder connections never grant an mmap window. Sealed read-only readers mmap the
-/// content-addressed file so serving does not re-pread the same pages.
+/// the top of the kernel SQLite window ([2, 64] MiB page cache).
 pub const CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1: usize = 64 * 1024 * 1024;
 const ARTIFACT_SQLITE_CACHE_BYTES: usize = CODE_LEXICAL_ARTIFACT_SQLITE_CACHE_BYTES_V1;
 /// The kernel SQLite window's page-cache floor.
@@ -171,19 +166,30 @@ fn sqlite_error(error: tracedecay_sql::Error) -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Io(error.to_string())
 }
 
-/// The spelling every artifact SQLite open hands to SQLite. A name SQLite can
-/// never open is a contract failure, which ends the build instead of
-/// retrying it as an unavailable store.
+/// The absolute spelling every artifact open hands to the engine. SQLite's
+/// Windows VFS passes the name to `CreateFileW` as given, so a long Windows
+/// path takes the extended-length prefix. A name longer than the engine can
+/// open is a contract failure, which ends the build instead of retrying it as
+/// an unavailable store.
 fn sqlite_open_path(path: &Path) -> Result<PathBuf, CodeLexicalArtifactErrorV1> {
-    sqlite_database_path(path).map_err(|error| match error {
-        SqliteDatabasePathError::NameTooLong { .. } => {
-            CodeLexicalArtifactErrorV1::Contract(error.to_string())
-        }
-        SqliteDatabasePathError::Unresolved { .. }
-        | SqliteDatabasePathError::VfsUnavailable { .. } => {
-            CodeLexicalArtifactErrorV1::Io(error.to_string())
-        }
-    })
+    let absolute = std::path::absolute(path).map_err(|error| {
+        CodeLexicalArtifactErrorV1::Io(format!(
+            "cannot resolve lexical artifact path '{}': {error}",
+            path.display()
+        ))
+    })?;
+    #[cfg(windows)]
+    let absolute = tracedecay_runtime_core::path_safety::extended_length_path(&absolute);
+    let bytes = absolute.as_os_str().len();
+    if let Some(limit) = tracedecay_sql::max_database_path_bytes()
+        && bytes >= limit
+    {
+        return Err(CodeLexicalArtifactErrorV1::Contract(format!(
+            "SQLite database path '{}' is {bytes} bytes; SQLite's default VFS opens names shorter than {limit} bytes",
+            absolute.display()
+        )));
+    }
+    Ok(absolute)
 }
 
 fn sqlite_corrupt(error: tracedecay_sql::Error) -> CodeLexicalArtifactErrorV1 {
@@ -196,103 +202,18 @@ fn sqlite_corrupt(error: tracedecay_sql::Error) -> CodeLexicalArtifactErrorV1 {
     }
 }
 
-/// How a builder connection's commits reach the disk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum BuilderDurabilityV1 {
-    /// A private sibling that becomes visible only after its caller fsyncs
-    /// and renames it. A crash before then discards it, so no commit syncs.
-    Unpublished,
-    /// The visible, resumable staging file.
-    Resumable,
-}
-
-/// Open one artifact staging connection inside the kernel SQLite window:
-/// no mmap grant, page cache at the kernel's 64 MiB ceiling, and
-/// `synchronous = NORMAL` for the resumable staging file. Appends and
-/// finalization wakes commit into a WAL ([`enter_resumable_journal`]) that is
-/// never checkpointed on its own: a crash replays exactly the committed
-/// prefix, so every commit stays a consistent resume point without an fsync.
-/// The sealed artifact is one content-addressed file, so the WAL is folded
-/// back into it ([`leave_resumable_journal`]) before the canonical rewrite
-/// and before the seal, which are the build's only sync points.
-/// SQLite's auxiliary sorter width reuses the canonical code-index worker
-/// authority: the connection thread occupies one admitted worker and SQLite
-/// may use only the memory-backed remainder. Corpus-wide CREATE INDEX runs use
-/// in-memory temporary b-trees only when the same budget holds their modeled
-/// reservation; otherwise they spill to files. The modeled
-/// reservation is a subset of the scheduler's existing admission, not
-/// another cache or a second memory authority.
+/// Open one artifact staging connection with its page cache at the kernel
+/// window's 64 MiB ceiling. Every commit is durable when it returns, so each
+/// committed batch or finalization wake is a resume point.
 fn open_builder_connection(
     path: &Path,
-    durability: BuilderDurabilityV1,
-    memory_budget_bytes: usize,
 ) -> Result<tracedecay_sql::Connection, CodeLexicalArtifactErrorV1> {
     let connection =
         tracedecay_sql::Connection::open(sqlite_open_path(path)?).map_err(sqlite_error)?;
-    match durability {
-        BuilderDurabilityV1::Unpublished => {
-            connection
-                .pragma_update(None, "journal_mode", "DELETE")
-                .map_err(sqlite_error)?;
-            connection
-                .pragma_update(None, "synchronous", "OFF")
-                .map_err(sqlite_error)?;
-        }
-        BuilderDurabilityV1::Resumable => {
-            connection
-                .pragma_update(None, "synchronous", "NORMAL")
-                .map_err(sqlite_error)?;
-            connection
-                .pragma_update(None, "wal_autocheckpoint", 0i64)
-                .map_err(sqlite_error)?;
-        }
-    }
-    connection
-        .pragma_update(None, "mmap_size", 0i64)
-        .map_err(sqlite_error)?;
     let cache_kib = -i64::try_from(ARTIFACT_SQLITE_CACHE_BYTES / 1024)
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
     connection
         .pragma_update(None, "cache_size", cache_kib)
-        .map_err(sqlite_error)?;
-    let sorter_budget_bytes =
-        u64::try_from(memory_budget_bytes.saturating_sub(ARTIFACT_SQLITE_CACHE_BYTES))
-            .unwrap_or(u64::MAX);
-    let requested_sorter_workers = (0..tracedecay_code_index::parallelism::indexing_workers())
-        .rev()
-        .find(|helpers| {
-            tracedecay_code_index::parallelism::worker_reservation_bytes(helpers.saturating_add(1))
-                <= sorter_budget_bytes
-        })
-        .unwrap_or(0);
-    let requested_sorter_workers_i64 = i64::try_from(requested_sorter_workers)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-    connection
-        .pragma_update(None, "threads", requested_sorter_workers_i64)
-        .map_err(sqlite_error)?;
-    let effective_sorter_workers: i64 = connection
-        .pragma_query_value(None, "threads", |row| row.get(0))
-        .map_err(sqlite_error)?;
-    let effective_sorter_workers = usize::try_from(effective_sorter_workers).map_err(|_| {
-        CodeLexicalArtifactErrorV1::Contract(
-            "SQLite returned a negative lexical sorter worker limit".to_owned(),
-        )
-    })?;
-    if effective_sorter_workers > requested_sorter_workers {
-        return Err(CodeLexicalArtifactErrorV1::Contract(format!(
-            "SQLite granted {effective_sorter_workers} lexical sorter workers above the canonical {requested_sorter_workers} auxiliary-worker bound"
-        )));
-    }
-    // SQLite disables sorter helpers when temporary b-trees are memory-only.
-    // FILE still uses the admitted page cache while allowing parallel PMA
-    // generation and merge for corpus-wide CREATE INDEX statements.
-    let temp_store_file = true;
-    connection
-        .pragma_update(
-            None,
-            "temp_store",
-            if temp_store_file { "FILE" } else { "MEMORY" },
-        )
         .map_err(sqlite_error)?;
     // The builder installs the private schema, its triggers and every
     // finalization drop on this one connection.
@@ -302,103 +223,37 @@ fn open_builder_connection(
     Ok(connection)
 }
 
-/// Commit the staging file's following writes into its WAL. Idempotent.
-fn enter_resumable_journal(
+/// Fold every committed WAL frame into the file at `path` and remove the
+/// `-wal` name, so the one file holds the committed state before it is
+/// renamed, hashed or sealed. A rollback-journal store has nothing to fold.
+/// The connection must make no further commit afterwards: it would write a
+/// WAL that no longer has a name.
+fn fold_journal(
     connection: &tracedecay_sql::Connection,
+    path: &Path,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    set_journal_mode(connection, "wal")
-}
-
-/// Fold the WAL into the staging file and return it to a rollback journal,
-/// syncing both. Idempotent; a no-op outside WAL.
-fn leave_resumable_journal(
-    connection: &tracedecay_sql::Connection,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    {
-        let _span = tracing::trace_span!("query.artifact.staging.journal_fold").entered();
-        set_journal_mode(connection, "delete")
-    }
-}
-
-fn set_journal_mode(
-    connection: &tracedecay_sql::Connection,
-    mode: &str,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let granted: String = connection
-        .query_row(&format!("PRAGMA journal_mode = {mode}"), [], |row| {
-            row.get(0)
-        })
+    let _span = tracing::trace_span!("query.artifact.staging.journal_fold").entered();
+    let outcome = connection
+        .checkpoint(CheckpointMode::Truncate)
         .map_err(sqlite_error)?;
-    if granted.eq_ignore_ascii_case(mode) {
-        Ok(())
-    } else {
-        Err(CodeLexicalArtifactErrorV1::Io(format!(
-            "lexical artifact staging kept journal mode {granted} instead of {mode}"
-        )))
+    if outcome.busy {
+        return Err(CodeLexicalArtifactErrorV1::Io(
+            "lexical artifact staging could not fold its WAL".to_owned(),
+        ));
     }
+    remove_journal_sidecar(path)
 }
 
-/// Run one batch append with memory-backed statement journals.
-///
-/// Every staged insert fires a builder-gate trigger that may abort it, so
-/// SQLite journals each statement's touched pages. Under file-backed temporary
-/// storage the first journal to outgrow SQLite's spill threshold becomes a
-/// temp file for the rest of the transaction, and every later insert writes
-/// its pages through it (gigabytes per corpus for a journal that never exceeds
-/// a few hundred KiB). A batch runs no corpus-wide sort, so its journals stay
-/// in memory; the connection returns to file-backed storage afterwards so
-/// finalization keeps its threaded sorter.
-fn with_memory_statement_journals<T>(
-    connection: &mut tracedecay_sql::Connection,
-    append: impl FnOnce(&mut tracedecay_sql::Connection) -> Result<T, CodeLexicalArtifactErrorV1>,
-) -> Result<T, CodeLexicalArtifactErrorV1> {
-    select_temp_store(connection, true)?;
-    let appended = append(connection);
-    select_temp_store(connection, false)?;
-    appended
-}
-
-/// SQLite latches in-memory statement journals when a write transaction
-/// begins and in-memory sorting when a statement starts, so this runs before
-/// the transaction it governs. Memory storage also disables the sorter's
-/// spill and helper threads: an `ORDER BY` then holds its whole input.
-fn select_temp_store(
-    connection: &tracedecay_sql::Connection,
-    memory: bool,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    connection
-        .pragma_update(None, "temp_store", if memory { "MEMORY" } else { "FILE" })
-        .map_err(sqlite_error)
-}
-
-/// CPU units one builder statement occupies: the builder thread plus every
-/// SQLite sorter helper the connection was granted.
-fn builder_sorter_cpu_units(
-    connection: &tracedecay_sql::Connection,
-) -> Result<usize, CodeLexicalArtifactErrorV1> {
-    let effective_sorter_workers: i64 = connection
-        .pragma_query_value(None, "threads", |row| row.get(0))
-        .map_err(sqlite_error)?;
-    usize::try_from(effective_sorter_workers)
-        .map_err(|_| {
-            CodeLexicalArtifactErrorV1::Contract(
-                "SQLite returned a negative lexical sorter worker limit".to_owned(),
-            )
-        })?
-        .checked_add(1)
-        .ok_or_else(|| {
-            CodeLexicalArtifactErrorV1::Contract(
-                "lexical sorter CPU admission width overflowed".to_owned(),
-            )
-        })
-}
-
-fn with_builder_sorter_cpu_admission<T>(
-    connection: &tracedecay_sql::Connection,
-    operation: impl FnOnce() -> T,
-) -> Result<T, CodeLexicalArtifactErrorV1> {
-    let admitted_units = builder_sorter_cpu_units(connection)?;
-    Ok(tracedecay_code_index::parallelism::with_background_cpu_permits(admitted_units, operation))
+fn remove_journal_sidecar(path: &Path) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut name = path.as_os_str().to_os_string();
+    name.push("-wal");
+    match std::fs::remove_file(PathBuf::from(name)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CodeLexicalArtifactErrorV1::Io(format!(
+            "lexical artifact staging could not remove its folded WAL: {error}"
+        ))),
+    }
 }
 
 /// The `EXPLAIN QUERY PLAN` detail lines of `sql`, so tests pin a
@@ -439,189 +294,10 @@ fn temporary_sorts(plan: &[String]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
-
-    use tracedecay_code_index::parallelism::ProcessBackgroundCpuV1;
-
     use super::{
-        ARTIFACT_SQLITE_CACHE_BYTES, BuilderDurabilityV1,
-        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1, CodeLexicalArtifactErrorV1,
-        builder_sorter_cpu_units, code_lexical_artifact_build_memory_budget_for,
-        open_builder_connection, with_memory_statement_journals,
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        code_lexical_artifact_build_memory_budget_for,
     };
-
-    fn temp_store(connection: &tracedecay_sql::Connection) -> i64 {
-        connection
-            .pragma_query_value(None, "temp_store", |row| row.get(0))
-            .expect("temp-store pragma")
-    }
-
-    /// A batch append keeps its statement journals in memory, and the
-    /// connection returns to file-backed temporary storage afterwards, even
-    /// when the append fails, so finalization never sorts in memory.
-    #[test]
-    fn batch_appends_journal_in_memory_and_restore_file_backed_sorting() {
-        let directory = tempfile::tempdir().expect("artifact tempdir");
-        let mut connection = open_builder_connection(
-            &directory.path().join("journals.sqlite"),
-            BuilderDurabilityV1::Resumable,
-            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-        )
-        .expect("builder connection");
-
-        let during = with_memory_statement_journals(&mut connection, |connection| {
-            Ok(temp_store(connection))
-        })
-        .expect("append succeeds");
-        assert_eq!(during, 2, "a batch append must journal in memory");
-        assert_eq!(
-            temp_store(&connection),
-            1,
-            "a committed append restores FILE"
-        );
-
-        let failed = with_memory_statement_journals(&mut connection, |_| {
-            Err::<(), _>(CodeLexicalArtifactErrorV1::Contract("refused".to_owned()))
-        });
-        assert!(failed.is_err(), "the append's refusal is returned");
-        assert_eq!(temp_store(&connection), 1, "a refused append restores FILE");
-    }
-
-    /// Staging builder connections stay inside the kernel SQLite window:
-    /// no mmap grant, page cache at most 64 MiB, and `synchronous = NORMAL`,
-    /// never a silent mmap/cache/sync override. Sealed readers mmap the
-    /// immutable file on purpose; that path is not this connection.
-    #[test]
-    fn builder_connections_stay_inside_the_kernel_sqlite_window() {
-        let directory = tempfile::tempdir().expect("artifact tempdir");
-        let connection = open_builder_connection(
-            &directory.path().join("window.sqlite"),
-            BuilderDurabilityV1::Resumable,
-            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-        )
-        .expect("builder connection");
-        let mmap: i64 = connection
-            .pragma_query_value(None, "mmap_size", |row| row.get(0))
-            .expect("mmap pragma");
-        assert_eq!(
-            mmap, 0,
-            "staging builder connections must not grant an mmap window"
-        );
-        let cache_kib: i64 = connection
-            .pragma_query_value(None, "cache_size", |row| row.get(0))
-            .expect("cache pragma");
-        assert_eq!(
-            cache_kib,
-            -i64::try_from(ARTIFACT_SQLITE_CACHE_BYTES / 1024).expect("cache bound"),
-            "the page cache must sit at the kernel window's 64 MiB ceiling"
-        );
-        assert!(
-            (2 * 1024..=64 * 1024).contains(&(-cache_kib)),
-            "the page cache must stay within the kernel [2, 64] MiB window"
-        );
-        let synchronous: i64 = connection
-            .pragma_query_value(None, "synchronous", |row| row.get(0))
-            .expect("synchronous pragma");
-        assert_eq!(
-            synchronous, 1,
-            "artifact staging must use synchronous=NORMAL"
-        );
-        let temp_store: i64 = connection
-            .pragma_query_value(None, "temp_store", |row| row.get(0))
-            .expect("temp-store pragma");
-        assert_eq!(
-            temp_store, 1,
-            "threaded SQLite sorters require file-backed temporary b-trees"
-        );
-    }
-
-    #[test]
-    fn builder_connections_reuse_canonical_worker_width_for_sqlite_sorters() {
-        let directory = tempfile::tempdir().expect("artifact tempdir");
-        let connection = open_builder_connection(
-            &directory.path().join("workers.sqlite"),
-            BuilderDurabilityV1::Resumable,
-            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-        )
-        .expect("builder connection");
-        let capability_probe = tracedecay_sql::Connection::open_in_memory()
-            .expect("open SQLite worker capability probe");
-        capability_probe
-            .pragma_update(None, "threads", i64::MAX)
-            .expect("probe SQLite worker ceiling");
-        let sqlite_worker_ceiling: i64 = capability_probe
-            .pragma_query_value(None, "threads", |row| row.get(0))
-            .expect("read SQLite worker ceiling");
-        let sorter_budget = u64::try_from(
-            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1 - ARTIFACT_SQLITE_CACHE_BYTES,
-        )
-        .expect("sorter budget");
-        let admitted_auxiliary_threads =
-            (0..tracedecay_code_index::parallelism::indexing_workers())
-                .rev()
-                .find(|helpers| {
-                    tracedecay_code_index::parallelism::worker_reservation_bytes(helpers + 1)
-                        <= sorter_budget
-                })
-                .expect("one builder worker fits")
-                .min(
-                    usize::try_from(sqlite_worker_ceiling)
-                        .expect("nonnegative SQLite worker ceiling"),
-                );
-        let configured_threads: i64 = connection
-            .pragma_query_value(None, "threads", |row| row.get(0))
-            .expect("read artifact SQLite worker limit");
-        assert_eq!(
-            usize::try_from(configured_threads).expect("nonnegative artifact worker limit"),
-            admitted_auxiliary_threads,
-            "SQLite must receive the maximum auxiliary width available below the canonical worker bound and its own compile-time ceiling"
-        );
-    }
-
-    /// A builder statement is weighted as one builder thread plus every
-    /// SQLite sorter helper the connection was granted, and that weight is
-    /// clamped to the authority's width and released afterwards. The
-    /// authority is local to the test; nothing process-wide is installed.
-    #[test]
-    fn builder_sorter_statements_hold_their_weighted_cpu_width() {
-        let worker_width = tracedecay_code_index::parallelism::indexing_workers();
-        let authority = std::sync::Arc::new(ProcessBackgroundCpuV1::new(
-            NonZeroUsize::new(worker_width).expect("nonzero code-index worker width"),
-        ));
-        let directory = tempfile::tempdir().expect("artifact tempdir");
-        let connection = open_builder_connection(
-            &directory.path().join("weighted.sqlite"),
-            BuilderDurabilityV1::Resumable,
-            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-        )
-        .expect("builder connection");
-        let configured_threads: i64 = connection
-            .pragma_query_value(None, "threads", |row| row.get(0))
-            .expect("read configured SQLite helper width");
-        let expected_units = usize::try_from(configured_threads)
-            .expect("nonnegative SQLite helper width")
-            .saturating_add(1)
-            .min(worker_width);
-
-        let weighted_units =
-            builder_sorter_cpu_units(&connection).expect("builder statement weight");
-        assert_eq!(
-            weighted_units,
-            usize::try_from(configured_threads).expect("nonnegative SQLite helper width") + 1,
-            "one builder plus every configured SQLite helper is the statement's weight"
-        );
-        let observed_units = authority.with_permits(weighted_units, || authority.active_units());
-
-        assert_eq!(
-            observed_units, expected_units,
-            "the weighted statement must occupy its helpers' units, clamped to the process width"
-        );
-        assert_eq!(
-            authority.active_units(),
-            0,
-            "weighted admission must release every unit after the statement"
-        );
-    }
 
     #[test]
     fn build_memory_budget_scales_from_process_admission() {
@@ -639,77 +315,5 @@ mod tests {
             code_lexical_artifact_build_memory_budget_for(256 * GIB),
             16 * GIB as usize
         );
-    }
-}
-
-#[cfg(test)]
-mod sorter_identity_tests {
-    use std::fs;
-    use std::path::Path;
-
-    use sha2::{Digest, Sha256};
-
-    use super::{
-        BuilderDurabilityV1, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-        open_builder_connection,
-    };
-
-    fn build_ngram_index(path: &Path, workers: i64) -> Vec<u8> {
-        let mut connection = open_builder_connection(
-            path,
-            BuilderDurabilityV1::Resumable,
-            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-        )
-        .expect("open ngram identity fixture");
-        connection
-            .pragma_update(None, "threads", workers)
-            .expect("set fixture sorter width");
-        connection
-            .execute_batch(
-                "CREATE TABLE ngram_postings (
-                    page_ordinal INTEGER NOT NULL, kind INTEGER NOT NULL,
-                    ngram INTEGER NOT NULL, documents BLOB NOT NULL,
-                    cardinality INTEGER NOT NULL,
-                    PRIMARY KEY(page_ordinal, kind, ngram)
-                );",
-            )
-            .expect("create ngram identity fixture");
-        let transaction = connection.transaction().expect("seed ngram fixture");
-        {
-            let mut insert = transaction
-                .prepare("INSERT INTO ngram_postings VALUES (?1, ?2, ?3, ?4, ?5)")
-                .expect("prepare ngram fixture insert");
-            for page in 0..64i64 {
-                for ngram in (0..512i64).rev() {
-                    insert
-                        .execute(tracedecay_sql::params![
-                            page,
-                            ngram % 2,
-                            ngram,
-                            ngram.to_le_bytes(),
-                            1i64
-                        ])
-                        .expect("insert ngram fixture row");
-                }
-            }
-        }
-        transaction.commit().expect("commit ngram fixture");
-        connection
-            .execute_batch(
-                "CREATE UNIQUE INDEX ngram_postings_by_ngram
-                 ON ngram_postings(kind, ngram, page_ordinal, cardinality)",
-            )
-            .expect("build ngram fixture index");
-        drop(connection);
-        fs::read(path).expect("read ngram identity fixture")
-    }
-
-    #[test]
-    fn threaded_sorter_preserves_ngram_index_file_identity() {
-        let directory = tempfile::tempdir().expect("artifact tempdir");
-        let serial = build_ngram_index(&directory.path().join("serial.sqlite"), 0);
-        let parallel = build_ngram_index(&directory.path().join("parallel.sqlite"), i64::MAX);
-        assert_eq!(Sha256::digest(&parallel), Sha256::digest(&serial));
-        assert_eq!(parallel, serial, "sorter width must preserve every byte");
     }
 }
