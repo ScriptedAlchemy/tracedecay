@@ -919,40 +919,6 @@ impl StoreRuntimeClientLease {
         Ok(counts)
     }
 
-    pub async fn run_bounded_incremental_compaction(
-        &self,
-        max_pages: u64,
-        authority: crate::db::DatabaseAuthority,
-    ) -> Result<(), StoreRuntimeRegistryFailure> {
-        let max_pages = u32::try_from(max_pages).map_err(|_| {
-            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "run bounded incremental compaction",
-                message: "incremental compaction page limit exceeds u32".to_owned(),
-            }
-        })?;
-        if max_pages == 0 {
-            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "run bounded incremental compaction",
-                message: "incremental compaction page limit must be positive".to_owned(),
-            });
-        }
-        let opened_file_identity = self.validate_database_write_authority(
-            &authority,
-            "authorize registered incremental compaction",
-        )?;
-        let authority = Arc::new(RuntimeDatabaseWriteAuthority {
-            canonical_path: authority.canonical_database_path().to_path_buf(),
-            authority,
-            opened_file_identity,
-        });
-        self.inner
-            .attachment
-            .run_bounded_incremental_compaction(max_pages, authority)
-            .await?;
-        self.validate_opened_file_identity("complete registered incremental compaction")?;
-        Ok(())
-    }
-
     pub async fn run_checkpoint(
         &self,
         request: tracedecay_rusqlite_runtime::CheckpointRequest,

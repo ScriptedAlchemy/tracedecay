@@ -141,9 +141,9 @@ measurements, not inferred table sizes.
    could not see the artifacts it was claimed to own.
 6. **Free-page bloat.** Large DBs carry unreclaimed free pages; no
    compaction policy exists.
-   Corrected 2026-08-08: this class is closed. A compaction policy now exists
-   and is engaged, see the dated Delivery amendment below. The sentence above
-   is retained as the original measured finding, not as current state.
+   Amended 2026-10-11: free pages are reused in place and are not reclaimed.
+   The Turso cutover (#3402) deleted compaction and incremental vacuum, see
+   the dated Delivery amendment below.
 
 ## Product contract
 
@@ -205,8 +205,9 @@ measurements, not inferred table sizes.
    into a single quarantined location with metadata, surfaced by Doctor,
    and collected by the same retention machinery, never left as loose
    sibling files.
-6. **Compaction policy.** The daemon schedules incremental vacuum/compaction
-   for stores whose free-page ratio crosses a threshold, off the hot path.
+6. **No compaction.** Stores never compact, vacuum, or copy themselves. Free
+   pages stay on the freelist for reuse, and the free-page ratio is reported,
+   not acted on.
 7. **Size observability and budgets.** Per-store size and free-page ratio are
    first-class user-visible telemetry, cheap to query. Per-table growth remains
    daemon tracing until it has a typed finding or dashboard/CLI payload. Doctor
@@ -273,22 +274,13 @@ measurements, not inferred table sizes.
   tracing only; the dashboard exposes per-store size/free ratio and whole-store
   history, while CLI Doctor uses a separate path. This is not a user-visible
   per-table reporting surface or acceptance of historical ad hoc figures.
-- Amended 2026-08-08: **compaction policy (product contract §6) is delivered.**
-  The prior Delivery section omitted it entirely and failure class 6 still read
-  "no compaction policy exists"; both were stale. `CompactionTriggerPolicyV1`
-  (free-page-ratio threshold plus a reclaimable-bytes floor) and
-  `CompactionPlacementV1::DeferredBackground` live in
-  `crates/tracedecay-contracts/src/storage/compaction.rs`. The placement enum
-  is the type-level enforcement of the "no background compaction that competes
-  with foreground writes" non-goal: a compaction cannot be constructed into a
-  foreground lane. The daemon maintenance cadence applies the policy from
-  `crates/tracedecay/src/daemon/store_maintenance/`. The bounded mechanic
-  underneath is `Database::run_incremental_vacuum` in
-  `crates/tracedecay-runtime-core/src/db/connection/retained_maintenance.rs`,
-  delegating to `run_bounded_incremental_compaction` in
-  `crates/tracedecay-runtime-core/src/store_runtime/registry.rs`, which
-  takes an explicit authority and a page bound. The configuration surface is
-  `CompactionThresholdConfig`.
+- Amended 2026-10-11: **compaction is deleted (product contract §6).** The
+  Turso cutover (#3402) removed the free-page compaction policy, the
+  incremental-vacuum writer lane, the `retention.compaction` setting, and every
+  store backup, export, and snapshot copy. Turso has no incremental vacuum and
+  no backup API, and the owner ruled that TraceDecay never copies a store. The
+  storage report and the orphan sweep read stores in place: sizes from file
+  metadata, rows from an immutable read of a checkpointed store.
 - Amended 2026-08-08: the historical ~41 GB identity-drift orphan-store backlog
   remains **operationally unverified**. The identity-drift *code* repairs are
   landed (moved-checkout daemon source rebinding; former-path project-root

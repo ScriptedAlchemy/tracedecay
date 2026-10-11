@@ -63,7 +63,6 @@ mod retention_config_tests {
             "session_lcm": { "enabled": true, "drop_after_days": 30 },
             "observation": { "enabled": true, "anchor_release_after_days": 45 },
             "orphan_store_gc_days": 14,
-            "compaction": { "free_page_ratio_threshold": 0.25, "minimum_reclaimable_bytes": 1000000 },
             "store_soft_budgets_bytes": { "sessions.db": 2000000000 },
             "interval_hours": 12
         }"#;
@@ -74,9 +73,6 @@ mod retention_config_tests {
         assert_eq!(retention.observation.anchor_release_after_days, Some(45));
         assert_eq!(retention.orphan_store_gc_days, Some(14));
         assert_eq!(retention.interval_hours, 12);
-        let compaction = retention.compaction.expect("compaction configured");
-        assert!((compaction.free_page_ratio_threshold - 0.25).abs() < f64::EPSILON);
-        assert_eq!(compaction.minimum_reclaimable_bytes, 1_000_000);
         assert_eq!(
             retention.store_soft_budgets_bytes.get("sessions.db"),
             Some(&2_000_000_000)

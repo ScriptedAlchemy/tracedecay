@@ -15,8 +15,7 @@ use crate::{
 };
 
 use super::super::{
-    WriterActorError,
-    request::{AcceptedRequest, IncrementalVacuumCommand},
+    request::AcceptedRequest,
     settlement::{interruption_outcome, missing_authority},
 };
 
@@ -68,17 +67,5 @@ pub(super) fn reject_all(queue: &mut FairQueue<AcceptedRequest>, telemetry: &Wri
 pub(super) fn reject_all_exact_sql(queue: &mut VecDeque<ExactSqlWriterCommand>) {
     for command in queue.drain(..) {
         reject_writer_command(command);
-    }
-}
-
-pub(super) fn reject_incremental_vacuum(command: IncrementalVacuumCommand) {
-    command.settle(Err(WriterActorError::IncrementalVacuumFailed(
-        "writer is unavailable".to_owned(),
-    )));
-}
-
-pub(super) fn reject_all_incremental_vacuum(queue: &mut VecDeque<IncrementalVacuumCommand>) {
-    for command in queue.drain(..) {
-        reject_incremental_vacuum(command);
     }
 }

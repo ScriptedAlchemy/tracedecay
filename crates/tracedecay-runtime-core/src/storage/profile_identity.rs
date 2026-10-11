@@ -1,9 +1,8 @@
 //! Canonical on-disk profile-identity record and its fail-closed reader.
 //!
 //! The daemon remains the write/mint authority that publishes this file.
-//! Backup, restore, and other readers consume this same record shape and
-//! validation chain so corrupt or invalid material cannot fork a second
-//! interpretation.
+//! Every reader consumes this same record shape and validation chain so
+//! corrupt or invalid material cannot fork a second interpretation.
 
 use std::path::Path;
 
