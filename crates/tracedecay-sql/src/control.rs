@@ -18,6 +18,8 @@ pub enum ErrorKind {
     Interrupted,
     ReadOnly,
     Schema,
+    /// The file is not a database or its pages are damaged.
+    Corrupt,
     Denied,
     /// A statement inside a [`ConnectionControl::with_capability`] scope tried
     /// to begin, end or (outside its lease) nest a transaction.
@@ -45,6 +47,7 @@ pub trait ErrorExt {
             ErrorKind::Interrupted => 9,
             ErrorKind::ReadOnly => 8,
             ErrorKind::Schema => 17,
+            ErrorKind::Corrupt => 11,
             ErrorKind::Constraint => 19,
             ErrorKind::Denied | ErrorKind::TransactionControlDenied => 23,
             ErrorKind::ForeignFormat => 26,
