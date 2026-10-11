@@ -1683,11 +1683,7 @@ fn refresh_begins_at_the_committed_frontier_after_background_summaries_publish()
                 > 0
         })
         .await;
-        assert!(
-            registry
-                .wait_profile_idle(db.db_path(), Duration::from_secs(10))
-                .await
-        );
+        registry.wait_profile_idle(db.db_path()).await;
 
         let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db.as_ref());
         let session = SessionId::new(session_id).unwrap();
@@ -1808,9 +1804,12 @@ async fn mounted_schedulers_share_historical_work_admission() {
             tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
                     if registry.profile_pass_count(db.db_path()).await >= 1
-                        && registry
-                            .wait_profile_idle(db.db_path(), Duration::from_millis(25))
-                            .await
+                        && tokio::time::timeout(
+                            Duration::from_millis(25),
+                            registry.wait_profile_idle(db.db_path()),
+                        )
+                        .await
+                        .is_ok()
                     {
                         break;
                     }

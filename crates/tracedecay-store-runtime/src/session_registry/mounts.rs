@@ -326,7 +326,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         };
         // A project whose root is gone cannot open its store either.
         if !tracedecay_store::StoreFile::ProjectSessions
-            .path(&store_root)
+            .path(store_root)
             .is_file()
             || !manifest.project_root.is_dir()
         {

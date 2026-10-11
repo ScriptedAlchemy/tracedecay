@@ -1017,8 +1017,10 @@ async fn profile_sessions_mount_rejects_incompatible_schema_through_registered_r
         Err(error) => error,
     };
 
+    // SQLite says "no such column: project_key"; Turso says "invalid
+    // expression in CREATE INDEX: project_key". Both refuse the same column.
     assert!(
-        error.to_string().contains("no such column: project_key")
+        error.to_string().contains("project_key")
             && error.to_string().contains("initialize transcript schema"),
         "unexpected mount error: {error}"
     );

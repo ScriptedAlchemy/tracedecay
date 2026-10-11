@@ -619,11 +619,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn wait_profile_idle(
-        &self,
-        database_path: &std::path::Path,
-        timeout: Duration,
-    ) -> bool {
+    pub async fn wait_profile_idle(&self, database_path: &std::path::Path) {
         let state = self
             .profile
             .lock()
@@ -631,21 +627,14 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .get(database_path)
             .map(|entry| Arc::clone(&entry.state));
         let Some(state) = state else {
-            return true;
+            return;
         };
-        let deadline = tokio::time::Instant::now() + timeout;
         loop {
+            let idle = super::wake::enabled_idle_notification(&state);
             if state.is_idle() {
-                return true;
+                return;
             }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return false;
-            }
-            tokio::select! {
-                () = state.idle.notified() => {}
-                () = tokio::time::sleep(remaining) => return state.is_idle(),
-            }
+            idle.await;
         }
     }
 }
