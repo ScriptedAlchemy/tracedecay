@@ -98,6 +98,7 @@ impl RusqliteCheckpointDriver {
                     CheckpointMode::Truncate => "PRAGMA wal_checkpoint(TRUNCATE)",
                 };
                 let row = self.checkpoint_row(sql)?;
+                failpoint!("mid_checkpoint");
                 Ok(CheckpointReport {
                     busy: row.0 != 0,
                     log_frames: row.1,

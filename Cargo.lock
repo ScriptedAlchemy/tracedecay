@@ -7485,6 +7485,7 @@ dependencies = [
  "tokio",
  "tracedecay-contracts",
  "tracedecay-domain",
+ "tracedecay-sql",
  "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracing",

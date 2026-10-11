@@ -26,7 +26,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-rusqlite-runtime__+test-transport__dev",
+    name = "tracedecay-rusqlite-runtime__+test-helpers_+test-transport__dev",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_rusqlite_runtime",
@@ -39,7 +39,23 @@ rust_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
     rustc_flags = perf_rustc_flags(2),
-    crate_features = ["test-transport"],
+    crate_features = ["test-helpers", "test-transport"],
+)
+
+rust_test(
+    name = "crash",
+    size = "large",
+    srcs = glob(["tests/crash/**/*.rs"]),
+    crate_root = "tests/crash/main.rs",
+    edition = crate_edition(),
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-helpers_+test-transport__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-sql:tracedecay-sql__+test-helpers__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    aliases = aliases(normal = True, normal_dev = True),
+    rustc_flags = perf_rustc_flags(2),
+    crate_features = ["test-helpers", "test-transport"],
+    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/crash/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -48,11 +64,11 @@ rust_test(
     crate_root = "tests/rusqlite_suite/main.rs",
     edition = crate_edition(),
     version = "0.1.0",
-    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-transport__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
+    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-helpers_+test-transport__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-sql:tracedecay-sql__+test-helpers__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
-    crate_features = ["test-transport"],
+    crate_features = ["test-helpers", "test-transport"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
     data = glob(["tests/rusqlite_suite/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:storage_runtime_rusqlite_suite"] + ["//tests:fixtures"],
 )
@@ -63,22 +79,22 @@ rust_test(
     crate_root = "tests/work_product_read_scaling.rs",
     edition = crate_edition(),
     version = "0.1.0",
-    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-transport__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
+    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-helpers_+test-transport__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-sql:tracedecay-sql__+test-helpers__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
-    crate_features = ["test-transport"],
+    crate_features = ["test-helpers", "test-transport"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
     data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//tests:storage_runtime_rusqlite_suite"] + ["//tests:fixtures"],
 )
 
 rust_test(
     name = "unit_test",
-    crate = ":tracedecay-rusqlite-runtime__+test-transport__dev",
-    crate_features = ["test-transport"],
+    crate = ":tracedecay-rusqlite-runtime__+test-helpers_+test-transport__dev",
+    crate_features = ["test-helpers", "test-transport"],
     edition = crate_edition(),
     version = "0.1.0",
-    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
+    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-sql:tracedecay-sql__+test-helpers__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
@@ -89,7 +105,7 @@ rust_test(
 
 filegroup(
     name = "rustfmt_sources_2024",
-    srcs = depset(glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], exclude = ["tests/fixtures/**"]) + ["//tests:storage_runtime_rusqlite_suite_sources"] + glob(["tests/rusqlite_suite/**/*.rs"]) + glob(["tests/support/**/*.rs"]) + ["//tests:storage_runtime_rusqlite_suite_sources"]).to_list(),
+    srcs = depset(glob(["src/**/*.rs"]) + glob(["tests/**/*.rs"], exclude = ["tests/fixtures/**"]) + ["//tests:storage_runtime_rusqlite_suite_sources"] + glob(["tests/crash/**/*.rs"]) + glob(["tests/rusqlite_suite/**/*.rs"]) + glob(["tests/support/**/*.rs"]) + ["//tests:storage_runtime_rusqlite_suite_sources"]).to_list(),
     tags = ["manual"],
 )
 

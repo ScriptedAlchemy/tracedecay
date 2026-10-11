@@ -229,7 +229,10 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
         .any(|request| matches!(request.result, PreparedResult::AwaitingTransactionCommit(_)));
     let match_result = if has_pending_writes {
         let _span = tracing::trace_span!("rusqlite.commit").entered();
-        transaction.commit()
+        failpoint!("before_commit");
+        transaction
+            .commit()
+            .inspect(|()| failpoint!("after_commit_before_watermark"))
     } else {
         let result = transaction.rollback();
         persistence.transaction_rolled_back(schema_was_ready);
