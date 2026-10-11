@@ -3771,7 +3771,9 @@ async fn daemon_reopens_retained_receipts_without_reset() {
         );
     }
     for _ in 0..2 {
-        let daemon = spawn_tracedecay_daemon(home.path());
+        // The daemon admits the profile store at startup; the store is read
+        // after it stops, since a live daemon owns the file exclusively.
+        drop(spawn_tracedecay_daemon(home.path()));
         let db = tracedecay_sql::Connection::open_with_flags(
             &db_path,
             tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -3809,8 +3811,6 @@ async fn daemon_reopens_retained_receipts_without_reset() {
             )
             .unwrap();
         assert_eq!(journal, r#"{"effects":1}"#);
-        drop(db);
-        drop(daemon);
     }
 }
 
