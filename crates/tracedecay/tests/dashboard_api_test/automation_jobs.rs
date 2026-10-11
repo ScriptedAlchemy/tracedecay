@@ -329,7 +329,6 @@ for line in sys.stdin:
             .as_str()
             .unwrap_or_else(|| panic!("accepted run must expose its exact id: {accepted}"));
 
-        let backend_wait_started = std::time::Instant::now();
         for _ in 0..250 {
             if backend_started.exists() {
                 break;
@@ -337,7 +336,6 @@ for line in sys.stdin:
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         let started = backend_started.exists();
-        let backend_wait_ms = backend_wait_started.elapsed().as_millis();
         let unsettled =
             tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
                 &dashboard_root,
@@ -358,11 +356,8 @@ for line in sys.stdin:
             "admitted execution must not expose ledger history before outer settlement"
         );
 
-        let settlement_wait_started = std::time::Instant::now();
         let mut settled = None;
-        let mut settlement_polls = 0_u32;
         for _ in 0..250 {
-            settlement_polls += 1;
             settled =
                 tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
                     &dashboard_root,
@@ -375,11 +370,6 @@ for line in sys.stdin:
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        let settlement_wait_ms = settlement_wait_started.elapsed().as_millis();
-        eprintln!(
-            "issue-3204 settlement probe backend_wait_ms={backend_wait_ms} settlement_wait_ms={settlement_wait_ms} polls={settlement_polls} appeared={}",
-            settled.is_some()
-        );
         let settled = settled.unwrap_or_else(|| {
             panic!("retained dashboard user-job history must appear after settlement")
         });
