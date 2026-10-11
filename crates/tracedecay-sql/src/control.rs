@@ -19,6 +19,9 @@ pub enum ErrorKind {
     ReadOnly,
     Schema,
     Denied,
+    /// A statement inside a [`ConnectionControl::with_capability`] scope tried
+    /// to begin, end or (outside its lease) nest a transaction.
+    TransactionControlDenied,
     NoRows,
     Unsupported,
     Other,
@@ -26,6 +29,22 @@ pub enum ErrorKind {
 
 pub trait ErrorExt {
     fn kind(&self) -> ErrorKind;
+
+    /// SQLite's `(primary, extended)` result codes. Exact on the SQLite arm;
+    /// derived from [`ErrorExt::kind`] elsewhere, until callers that persist
+    /// codes match on the kind instead.
+    fn sqlite_codes(&self) -> Option<(i32, i32)> {
+        let code = match self.kind() {
+            ErrorKind::Busy => 5,
+            ErrorKind::Interrupted => 9,
+            ErrorKind::ReadOnly => 8,
+            ErrorKind::Schema => 17,
+            ErrorKind::Constraint => 19,
+            ErrorKind::Denied | ErrorKind::TransactionControlDenied => 23,
+            ErrorKind::NoRows | ErrorKind::Unsupported | ErrorKind::Other => return None,
+        };
+        Some((code, code))
+    }
 }
 
 /// What statements compiled on a connection may do.
@@ -33,16 +52,28 @@ pub trait ErrorExt {
 pub enum Capability {
     /// Queries and read-only introspection pragmas.
     Reader,
+    /// Caller-supplied SQL on a reader: [`Capability::Reader`] without
+    /// transaction control or savepoints, which would end the reader's
+    /// snapshot.
+    ExactSqlRead,
     /// DML plus idempotent `CREATE TABLE`/`CREATE INDEX` for ledger bootstrap.
     /// Triggers, views, drops, temp objects, ATTACH and protected pragmas are
     /// denied.
     Writer,
-    /// Schema install, repair and maintenance: everything.
+    /// Caller-supplied SQL on the writer. Durable DDL, temp tables and temp
+    /// indexes are allowed. Temp triggers and views, ATTACH, `load_extension`,
+    /// pragmas outside the exact SQL allowlist and transaction control are
+    /// denied; savepoints only when the caller holds a transaction lease.
+    ExactSql { savepoints: bool },
+    /// Schema install, repair and maintenance: everything except ATTACH and
+    /// DETACH.
     Maintenance,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointMode {
+    /// Reports the WAL's frame counts without copying any frame back.
+    Noop,
     Passive,
     Full,
     Restart,
@@ -75,8 +106,11 @@ pub trait ConnectionControl {
     /// Installs `capability` as this connection's statement policy.
     fn set_capability(&self, capability: Capability) -> crate::Result<()>;
 
-    /// Runs `operation` under `scoped`, then reinstalls `base` and drops cached
-    /// statements compiled under `scoped`, on success, error and unwind.
+    /// Runs `operation` under `scoped`, then reinstalls `base` on success,
+    /// error and unwind. No statement compiled under `scoped` runs under
+    /// `base` without being authorized again. A transaction-control statement
+    /// denied inside the scope makes the scope fail with
+    /// [`ErrorKind::TransactionControlDenied`] whatever `operation` returned.
     fn with_capability<T>(
         &self,
         scoped: Capability,
@@ -100,6 +134,35 @@ pub trait ConnectionControl {
     /// Whether the main database file's pathname no longer names the file the
     /// engine holds open.
     fn file_has_moved(&self) -> crate::Result<bool>;
+}
+
+/// [`ConnectionControl::guard_scope`] for a transaction, whose operation needs
+/// the transaction itself to open savepoints.
+pub trait TransactionControl {
+    fn guard_scope_mut<T>(
+        &mut self,
+        should_interrupt: impl FnMut() -> bool + Send + 'static,
+        operation: impl FnOnce(&mut Self) -> T,
+    ) -> crate::Result<T>;
+}
+
+/// Engine settings every owned-store connection carries: zero busy wait, no
+/// checkpoint on close, resource limits, the statement-cache size and the
+/// engine build checks.
+pub trait EnginePolicy {
+    fn apply_engine_policy(&self) -> crate::Result<()>;
+}
+
+/// Per-statement work counters, reset when read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StatementCounters {
+    pub vm_steps: u64,
+    pub fullscan_steps: u64,
+    pub sort_steps: u64,
+}
+
+pub trait StatementControl {
+    fn take_counters(&self) -> StatementCounters;
 }
 
 pub const PROGRESS_INTERVAL_OPS: i32 = 1_000;
