@@ -1,7 +1,7 @@
 //! Concrete SQLite persistence for the application-owned Work authority.
 
-use rusqlite::Connection;
 use tracedecay_domain::WorkAuthority;
+use tracedecay_sql::Connection;
 
 use crate::exact_sql::{
     ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction, ExactSqlValue,

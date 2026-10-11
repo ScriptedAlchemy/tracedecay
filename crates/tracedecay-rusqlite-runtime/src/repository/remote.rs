@@ -1,4 +1,4 @@
-use rusqlite::{OptionalExtension, Savepoint, params};
+use tracedecay_sql::{OptionalExtension, Savepoint, params};
 use tracedecay_store::{RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1};
 
 use super::support::{encode, invalid};
@@ -6,7 +6,7 @@ use super::support::{encode, invalid};
 pub(super) fn verify_and_seed_writer_fence(
     savepoint: &Savepoint<'_>,
     write: &RemoteObservationReplayWriteV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let writer_json = encode(&write.writer_fence)?;
     let capture_sequence = i64::try_from(write.capture_sequence)
         .map_err(|_| invalid("remote capture sequence exceeds SQLite INTEGER"))?;
@@ -47,7 +47,7 @@ pub(super) fn verify_and_seed_writer_fence(
 pub(super) fn persist_remote_observation_event(
     savepoint: &Savepoint<'_>,
     write: &RemoteObservationReplayWriteV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let writer_json = encode(&write.writer_fence)?;
     let enrollment_revision = i64::try_from(write.enrollment_revision)
         .map_err(|_| invalid("remote enrollment revision exceeds SQLite INTEGER"))?;
@@ -136,7 +136,7 @@ pub(super) fn persist_remote_observation_event(
 pub(super) fn install_writer_fence(
     savepoint: &Savepoint<'_>,
     install: &RemoteWriterFenceInstallV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     install
         .validate()
         .map_err(|error| invalid(error.to_string()))?;
@@ -242,12 +242,12 @@ mod tests {
         statement
             .query_map((), |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap()
-            .collect::<rusqlite::Result<_>>()
+            .collect::<tracedecay_sql::Result<_>>()
             .unwrap()
     }
 
-    fn connection() -> rusqlite::Connection {
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
+    fn connection() -> tracedecay_sql::Connection {
+        let connection = tracedecay_sql::Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE remote_writer_fences (
@@ -270,7 +270,7 @@ mod tests {
         savepoint
             .execute(
                 "INSERT INTO remote_writer_fences VALUES (?1, ?2, 7, 10)",
-                rusqlite::params![
+                tracedecay_sql::params![
                     install.authority_key.as_str(),
                     encode(install.expected.as_ref().unwrap()).unwrap(),
                 ],
@@ -337,7 +337,7 @@ mod tests {
         savepoint
             .execute(
                 "INSERT INTO remote_writer_fences VALUES (?1, ?2, 7, 10)",
-                rusqlite::params![
+                tracedecay_sql::params![
                     promotion.authority_key.as_str(),
                     encode(&promotion.replacement).unwrap(),
                 ],

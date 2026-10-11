@@ -1,4 +1,3 @@
-use rusqlite::Connection;
 use serde_json::json;
 use tracedecay_domain::{
     AnchorDurabilityClass, AnchorSourceGeneration, CanonicalObservationEnvelopeV1,
@@ -14,6 +13,7 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1, SessionId, UtcMicros, VectorWatermark,
 };
+use tracedecay_sql::Connection;
 use tracedecay_store::{
     AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
     CANONICAL_BODIES_TABLE_SQL, CursorAdvanceLedgerReasonV1, CursorAdvanceLedgerReceiptIdV1,
@@ -462,7 +462,7 @@ fn execute(
 fn read(
     connection: &mut Connection,
     operation: &ObservationReadOperationV1,
-) -> rusqlite::Result<ObservationReadResultV1> {
+) -> tracedecay_sql::Result<ObservationReadResultV1> {
     let transaction = connection.transaction()?;
     ObservationExecutor.execute_read(&transaction, operation)
 }
@@ -846,7 +846,7 @@ fn advance_ledger_ends(connection: &Connection) -> Vec<i64> {
     statement
         .query_map([], |row| row.get(0))
         .unwrap()
-        .collect::<rusqlite::Result<_>>()
+        .collect::<tracedecay_sql::Result<_>>()
         .unwrap()
 }
 
@@ -979,7 +979,7 @@ fn corrupt_cursor_advance_ledger_values_are_opaque_and_content_free() {
     connection
         .execute(
             "UPDATE source_cursor_advances SET reason = ?1, receipt_id = ?2",
-            rusqlite::params![private_ledger_value, private_ledger_value],
+            tracedecay_sql::params![private_ledger_value, private_ledger_value],
         )
         .unwrap();
     let conflicting = ObservationCursorAdvance::for_ordering(
@@ -1044,7 +1044,7 @@ fn short_corrupt_ledger_receipt_stays_opaque_across_runtime_boundary() {
     connection
         .execute(
             "UPDATE source_cursor_advances SET receipt_id = ?1",
-            rusqlite::params![secret],
+            tracedecay_sql::params![secret],
         )
         .unwrap();
     let conflicting = ObservationCursorAdvance::for_ordering(
@@ -1482,13 +1482,17 @@ fn stored_observation_body_errors_preserve_database_and_body_causes() {
         (tracedecay_store::BODY_REF_KEY): {"/payload": "missing"},
     })
     .to_string();
-    assert!(matches!(
-        super::decode_stored_observation(&conn, &encoded),
-        Err(rusqlite::Error::SqliteFailure(..))
-    ));
+    let database_error = super::decode_stored_observation(&conn, &encoded).unwrap_err();
+    assert!(
+        !matches!(
+            database_error,
+            tracedecay_sql::Error::FromSqlConversionFailure(..)
+        ) && database_error.to_string().contains("no such table"),
+        "a database failure must surface as the engine error, got {database_error:?}"
+    );
     conn.execute_batch(CANONICAL_BODIES_TABLE_SQL).unwrap();
     let error = super::decode_stored_observation(&conn, &encoded).unwrap_err();
-    let rusqlite::Error::FromSqlConversionFailure(_, _, source) = error else {
+    let tracedecay_sql::Error::FromSqlConversionFailure(_, _, source) = error else {
         panic!("missing body must retain its typed cause");
     };
     assert!(
@@ -1501,7 +1505,7 @@ fn stored_observation_body_errors_preserve_database_and_body_causes() {
     )
     .unwrap();
     let error = super::decode_stored_observation(&conn, &encoded).unwrap_err();
-    let rusqlite::Error::FromSqlConversionFailure(_, _, source) = error else {
+    let tracedecay_sql::Error::FromSqlConversionFailure(_, _, source) = error else {
         panic!("corrupt body must retain its typed cause");
     };
     assert!(matches!(

@@ -37,7 +37,7 @@ mod retrieval_anchor;
 mod scope_set;
 mod support;
 
-use rusqlite::{Savepoint, Transaction};
+use tracedecay_sql::{Savepoint, Transaction};
 use tracedecay_store::RepositoryWritePayloadV1;
 
 use crate::StorageOperationExecutor;
@@ -85,11 +85,13 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         match self.execute_closed(savepoint, payload) {
             Ok(()) => Ok(()),
             Err(StorageOperationError::Native(error)) => Err(error),
-            Err(error) => Err(rusqlite::Error::InvalidParameterName(error.to_string())),
+            Err(error) => Err(tracedecay_sql::Error::InvalidParameterName(
+                error.to_string(),
+            )),
         }
     }
 
@@ -154,7 +156,7 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             | RepositoryWritePayloadV1::EnqueueOutbox(_)
             | RepositoryWritePayloadV1::ApplyInbox(_)
             | RepositoryWritePayloadV1::AcknowledgeOutbox(_) => {
-                return Err(rusqlite::Error::InvalidParameterName(format!(
+                return Err(tracedecay_sql::Error::InvalidParameterName(format!(
                     "repository attachment does not own {}",
                     payload.name()
                 ))
@@ -177,7 +179,7 @@ impl ConcreteRepositoryReadExecutor {
         &mut self,
         snapshot: &Transaction<'_>,
         operation: &RepositoryReadOperationV1,
-    ) -> rusqlite::Result<RepositoryReadResultV1> {
+    ) -> tracedecay_sql::Result<RepositoryReadResultV1> {
         match operation {
             RepositoryReadOperationV1::Profile(operation) => self
                 .configuration
@@ -191,12 +193,14 @@ impl ConcreteRepositoryReadExecutor {
                 .project
                 .execute_external_source_read(snapshot, operation)
                 .map(RepositoryReadResultV1::ExternalSource),
-            RepositoryReadOperationV1::Code(_) => Err(rusqlite::Error::InvalidParameterName(
+            RepositoryReadOperationV1::Code(_) => Err(tracedecay_sql::Error::InvalidParameterName(
                 "repository attachment does not own code reads".to_owned(),
             )),
-            RepositoryReadOperationV1::Effects(_) => Err(rusqlite::Error::InvalidParameterName(
-                "repository attachment does not own effects reads".to_owned(),
-            )),
+            RepositoryReadOperationV1::Effects(_) => {
+                Err(tracedecay_sql::Error::InvalidParameterName(
+                    "repository attachment does not own effects reads".to_owned(),
+                ))
+            }
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Stateless bridge from the writer's request savepoint to native execution
 //! and ledger persistence.
 
-use rusqlite::{Savepoint, Transaction};
+use tracedecay_sql::{Savepoint, Transaction};
 use tracedecay_store::{
     CorruptionClassV1, IdempotencyIdentityV1, RuntimeSubmitRequestV1, StorageRuntimeErrorV1,
     StoreCommitReceiptV1, StoreRuntimeBindingV1,
@@ -123,11 +123,11 @@ fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
     use tracedecay_domain::{
         ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
         ObservationSourceIdentityV1, ObservationSourceRangeV1, ProviderId, SessionId,
     };
+    use tracedecay_sql::{Capability, Connection, ConnectionControl};
     use tracedecay_store::{
         CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
         ObservationCoverageReason, ObservationCoverageV1, RepositoryWritePayloadV1,
@@ -144,7 +144,7 @@ mod tests {
             &mut self,
             savepoint: &Savepoint<'_>,
             _payload: &RepositoryWritePayloadV1,
-        ) -> rusqlite::Result<()> {
+        ) -> tracedecay_sql::Result<()> {
             savepoint.execute_batch(
                 "CREATE TABLE IF NOT EXISTS operation_marker (value INTEGER NOT NULL)",
             )?;
@@ -255,20 +255,6 @@ mod tests {
         assert_eq!(marker_exists, 0);
     }
 
-    fn deny_schema_change(
-        context: rusqlite::hooks::AuthContext<'_>,
-    ) -> rusqlite::hooks::Authorization {
-        match context.action {
-            rusqlite::hooks::AuthAction::CreateTable { .. }
-            | rusqlite::hooks::AuthAction::CreateIndex { .. }
-            | rusqlite::hooks::AuthAction::CreateTempTable { .. }
-            | rusqlite::hooks::AuthAction::CreateTempIndex { .. } => {
-                rusqlite::hooks::Authorization::Deny
-            }
-            _ => rusqlite::hooks::Authorization::Allow,
-        }
-    }
-
     #[test]
     fn lookup_after_schema_install_does_not_run_ddl() {
         let mut connection = Connection::open_in_memory().unwrap();
@@ -290,7 +276,7 @@ mod tests {
             transaction.commit().unwrap();
         }
 
-        connection.authorizer(Some(deny_schema_change)).unwrap();
+        connection.set_capability(Capability::Reader).unwrap();
         let transaction = connection.transaction().unwrap();
         assert!(
             persistence

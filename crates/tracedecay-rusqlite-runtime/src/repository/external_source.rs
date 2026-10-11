@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_domain::{SourceBindingIdentityV1, SourceBindingOwnerV1, SourceDeletionSemanticsV1};
+use tracedecay_sql::{OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_store::{
     ExternalSourceReadOperationV1, ExternalSourceReadResultV1, SourceAcquisitionQueueCasV1,
     SourceAcquisitionQueueStateV1, SourceAuthorityPublicationReceiptV1,
@@ -194,7 +194,7 @@ impl ExternalSourceExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         commit: &SourceCommitV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         commit.validate().map_err(invalid)?;
         let binding = commit.binding().immutable_identity().map_err(invalid)?;
         if let Some(receipt) =
@@ -228,7 +228,7 @@ impl ExternalSourceExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         publication: &SourceAuthorityPublicationV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         publication.validate().map_err(invalid)?;
         let binding = publication
             .binding()
@@ -267,7 +267,7 @@ impl ExternalSourceExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         projection: &SourceProjectionCommitV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         projection.validate().map_err(invalid)?;
         let binding = projection.source_frontier().binding();
         if let Some(existing) =
@@ -311,7 +311,7 @@ impl ExternalSourceExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         command: &SourceAcquisitionQueueCasV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         command.validate().map_err(invalid)?;
         let current_digest = savepoint
             .prepare_cached(
@@ -358,7 +358,7 @@ impl ExternalSourceExecutor {
         &mut self,
         snapshot: &Transaction<'_>,
         operation: &ExternalSourceReadOperationV1,
-    ) -> rusqlite::Result<ExternalSourceReadResultV1> {
+    ) -> tracedecay_sql::Result<ExternalSourceReadResultV1> {
         match operation {
             ExternalSourceReadOperationV1::State { binding, objects } => {
                 binding.validate().map_err(invalid)?;
@@ -417,9 +417,9 @@ impl ExternalSourceExecutor {
 }
 
 fn load_acquisition_state(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding: &SourceBindingIdentityV1,
-) -> rusqlite::Result<Option<SourceAcquisitionQueueStateV1>> {
+) -> tracedecay_sql::Result<Option<SourceAcquisitionQueueStateV1>> {
     let state = connection
         .prepare_cached(
             "SELECT state_json
@@ -446,9 +446,9 @@ fn load_acquisition_state(
 }
 
 fn load_next_ready_acquisition(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     now: tracedecay_domain::UtcMicros,
-) -> rusqlite::Result<Option<SourceAcquisitionQueueStateV1>> {
+) -> tracedecay_sql::Result<Option<SourceAcquisitionQueueStateV1>> {
     let state = connection
         .prepare_cached(
             "SELECT state_json
@@ -475,10 +475,10 @@ fn load_next_ready_acquisition(
     skip_all
 )]
 fn load_state(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding: &SourceBindingIdentityV1,
     coverage: &SourceObjectCoverageV1,
-) -> rusqlite::Result<Option<SourceStoreStateV1>> {
+) -> tracedecay_sql::Result<Option<SourceStoreStateV1>> {
     let row = connection
         .prepare_cached(
             "SELECT source_id, definition_revision, binding_revision,
@@ -547,10 +547,10 @@ fn load_state(
     skip_all
 )]
 fn load_definition(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     source_id: &str,
     revision: i64,
-) -> rusqlite::Result<tracedecay_domain::SourceDefinitionV1> {
+) -> tracedecay_sql::Result<tracedecay_domain::SourceDefinitionV1> {
     let encoded: String = connection.query_row(
         "SELECT definition_json
          FROM external_source_definition_revisions_v1
@@ -567,10 +567,10 @@ fn load_definition(
     skip_all
 )]
 fn load_binding(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding_id: &str,
     revision: i64,
-) -> rusqlite::Result<tracedecay_domain::SourceBindingV1> {
+) -> tracedecay_sql::Result<tracedecay_domain::SourceBindingV1> {
     let encoded: String = connection.query_row(
         "SELECT binding_json
          FROM external_source_binding_revisions_v1
@@ -593,11 +593,11 @@ enum CurrentObjects {
     skip_all
 )]
 fn load_current_mutations(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     table: CurrentObjects,
     binding: &SourceBindingIdentityV1,
     coverage: &SourceObjectCoverageV1,
-) -> rusqlite::Result<Vec<SourceObjectMutationV1>> {
+) -> tracedecay_sql::Result<Vec<SourceObjectMutationV1>> {
     let table = match table {
         CurrentObjects::Observed => "external_source_objects_v2",
         CurrentObjects::Projected => "external_source_projected_objects_v2",
@@ -613,7 +613,7 @@ fn load_current_mutations(
           AND history.mutation_digest = current.mutation_digest
          WHERE current.binding_id = ?1"
     );
-    let hydrate = |row: &rusqlite::Row<'_>| {
+    let hydrate = |row: &tracedecay_sql::Row<'_>| {
         let absent =
             || invalid("external source current object names a mutation absent from history");
         let slim: String = row.get::<_, Option<String>>(0)?.ok_or_else(absent)?;
@@ -666,7 +666,7 @@ fn persist_source_commit(
     state: &SourceStoreStateV1,
     receipt: &SourceCommitReceiptV1,
     mut mutation_encodings: BTreeMap<String, String>,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     state.validate().map_err(invalid)?;
     receipt.validate().map_err(invalid)?;
     let binding = state.binding().immutable_identity().map_err(invalid)?;
@@ -863,13 +863,12 @@ fn retire_superseded_history(
     binding_id: &str,
     receipts: &[&str],
     projections: &[&str],
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let mut frontiers = BTreeSet::new();
-    let mut collect_frontiers = |rows: rusqlite::Rows<'_>| -> rusqlite::Result<()> {
-        for row in rows.mapped(|row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))) {
-            let (predecessor, successor) = row?;
-            frontiers.insert(predecessor);
-            frontiers.insert(successor);
+    let mut collect_frontiers = |mut rows: tracedecay_sql::Rows<'_>| -> tracedecay_sql::Result<()> {
+        while let Some(row) = rows.next()? {
+            frontiers.insert(row.get::<_, String>(0)?);
+            frontiers.insert(row.get::<_, String>(1)?);
         }
         Ok(())
     };
@@ -944,7 +943,7 @@ fn persist_projection(
     state: &SourceStoreStateV1,
     source_receipt: &SourceCommitReceiptV1,
     projection: &SourceProjectionCommitV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     state.validate().map_err(invalid)?;
     projection.validate().map_err(invalid)?;
     let binding = projection.source_frontier().binding();
@@ -1105,7 +1104,7 @@ fn persist_authority_publication(
     savepoint: &Savepoint<'_>,
     state: &SourceStoreStateV1,
     receipt: &SourceAuthorityPublicationReceiptV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     state.validate().map_err(invalid)?;
     receipt.validate().map_err(invalid)?;
     let binding = state.binding().immutable_identity().map_err(invalid)?;
@@ -1160,7 +1159,7 @@ fn persist_definition_and_binding(
     savepoint: &Savepoint<'_>,
     definition: &tracedecay_domain::SourceDefinitionV1,
     binding: &tracedecay_domain::SourceBindingV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let definition_revision = i64::try_from(definition.revision)
         .map_err(|_| invalid("external source definition revision exceeds SQLite INTEGER"))?;
     let definition_json = encode(definition)?;
@@ -1219,7 +1218,7 @@ fn persist_definition_and_binding(
 fn upsert_current_state(
     savepoint: &Savepoint<'_>,
     state: &SourceStoreStateV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let binding = state.binding().immutable_identity().map_err(invalid)?;
     let (owner_kind, owner_id) = owner_key(&binding.owner);
     let projection_frontier = state
@@ -1283,10 +1282,10 @@ const REVISION_COLLISION_PROBE_CHUNK: usize = 100;
     skip_all
 )]
 fn validate_revision_collisions(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding: &SourceBindingIdentityV1,
     commit: &SourceCommitV1,
-) -> rusqlite::Result<BTreeMap<String, String>> {
+) -> tracedecay_sql::Result<BTreeMap<String, String>> {
     let mutations = commit.mutations();
     let mut encodings = BTreeMap::new();
     for mutation in mutations {
@@ -1316,7 +1315,7 @@ fn validate_revision_collisions(
         sql.push(')');
         let mut statement = connection.prepare(&sql)?;
         let mut stored = BTreeMap::new();
-        let mut rows = statement.query(rusqlite::params_from_iter(probe_params))?;
+        let mut rows = statement.query(tracedecay_sql::params_from_iter(probe_params))?;
         while let Some(row) = rows.next()? {
             stored.insert(
                 (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
@@ -1356,7 +1355,7 @@ fn persist_frontiers(
     savepoint: &Savepoint<'_>,
     binding_id: &str,
     frontiers: &[(String, String)],
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     for (digest, frontier_json) in frontiers {
         savepoint.execute(
             "INSERT OR IGNORE INTO external_source_frontiers_v1 (

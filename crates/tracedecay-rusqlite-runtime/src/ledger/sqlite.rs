@@ -1,6 +1,6 @@
 use std::ops::Deref;
 
-use rusqlite::{CachedStatement, Connection, Savepoint, Transaction};
+use tracedecay_sql::{CachedStatement, Connection, Savepoint, Transaction};
 use tracedecay_store::{
     DurabilityClassV1, OperationPriorityV1, RuntimeTransactionScopeV1, ShardWatermarkV1,
     StoreCommitReceiptV1, StoreIncarnationV1, StoreOperationMetadataV1, StoreRuntimeBindingV1,
@@ -10,27 +10,31 @@ use tracedecay_store::{
 use super::LedgerError;
 
 pub(crate) trait LedgerTransaction {
-    fn execute<P: rusqlite::Params>(&self, sql: &str, parameters: P) -> rusqlite::Result<usize>;
-    fn execute_batch(&self, sql: &str) -> rusqlite::Result<()>;
-    fn prepare(&self, sql: &str) -> rusqlite::Result<CachedStatement<'_>>;
+    fn execute<P: tracedecay_sql::Params>(
+        &self,
+        sql: &str,
+        parameters: P,
+    ) -> tracedecay_sql::Result<usize>;
+    fn execute_batch(&self, sql: &str) -> tracedecay_sql::Result<()>;
+    fn prepare(&self, sql: &str) -> tracedecay_sql::Result<CachedStatement<'_>>;
 }
 
 macro_rules! impl_transaction {
     ($type:ty) => {
         impl LedgerTransaction for $type {
-            fn execute<P: rusqlite::Params>(
+            fn execute<P: tracedecay_sql::Params>(
                 &self,
                 sql: &str,
                 parameters: P,
-            ) -> rusqlite::Result<usize> {
+            ) -> tracedecay_sql::Result<usize> {
                 self.deref().execute(sql, parameters)
             }
 
-            fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
+            fn execute_batch(&self, sql: &str) -> tracedecay_sql::Result<()> {
                 self.deref().execute_batch(sql)
             }
 
-            fn prepare(&self, sql: &str) -> rusqlite::Result<CachedStatement<'_>> {
+            fn prepare(&self, sql: &str) -> tracedecay_sql::Result<CachedStatement<'_>> {
                 self.deref().prepare_cached(sql)
             }
         }
@@ -41,15 +45,19 @@ impl_transaction!(Transaction<'_>);
 impl_transaction!(Savepoint<'_>);
 
 impl LedgerTransaction for Connection {
-    fn execute<P: rusqlite::Params>(&self, sql: &str, parameters: P) -> rusqlite::Result<usize> {
+    fn execute<P: tracedecay_sql::Params>(
+        &self,
+        sql: &str,
+        parameters: P,
+    ) -> tracedecay_sql::Result<usize> {
         Connection::execute(self, sql, parameters)
     }
 
-    fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
+    fn execute_batch(&self, sql: &str) -> tracedecay_sql::Result<()> {
         Connection::execute_batch(self, sql)
     }
 
-    fn prepare(&self, sql: &str) -> rusqlite::Result<CachedStatement<'_>> {
+    fn prepare(&self, sql: &str) -> tracedecay_sql::Result<CachedStatement<'_>> {
         self.prepare_cached(sql)
     }
 }

@@ -17,7 +17,7 @@ use super::authority::{
     REPOSITORY_PROVENANCE_CAPTURE_JOIN, REPOSITORY_PROVENANCE_HYDRATED_COLUMNS,
 };
 
-pub(super) fn decode_nonnegative(value: i64, message: &'static str) -> rusqlite::Result<u64> {
+pub(super) fn decode_nonnegative(value: i64, message: &'static str) -> tracedecay_sql::Result<u64> {
     u64::try_from(value).map_err(|_| invalid(message))
 }
 
@@ -68,8 +68,8 @@ pub(super) fn observation_row_projection() -> String {
 
 /// Reads one [`observation_row_projection`] row in column order.
 pub(super) fn encoded_observation_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<EncodedObservationRow> {
+    row: &tracedecay_sql::Row<'_>,
+) -> tracedecay_sql::Result<EncodedObservationRow> {
     Ok((
         row.get::<_, i64>(0)?,
         row.get::<_, String>(1)?,
@@ -97,7 +97,7 @@ pub(super) fn decode_observation_row(
         repository_owner,
         projection_queued,
     ): EncodedObservationRow,
-) -> rusqlite::Result<StoredObservationRowV1> {
+) -> tracedecay_sql::Result<StoredObservationRowV1> {
     let repository_availability: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> =
         decode(
             repository_availability

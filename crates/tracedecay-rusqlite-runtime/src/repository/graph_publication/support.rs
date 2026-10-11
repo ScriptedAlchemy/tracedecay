@@ -1389,9 +1389,9 @@ mod dependency_batch_tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use rusqlite::Savepoint;
     use tempfile::TempDir;
     use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMicros};
+    use tracedecay_sql::Savepoint;
     use tracedecay_store::{
         AdmissionConfigV1, GraphDependencyGenerationClosureDigestV1,
         GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1,
@@ -1417,7 +1417,7 @@ mod dependency_batch_tests {
             &mut self,
             _savepoint: &Savepoint<'_>,
             _payload: &RepositoryWritePayloadV1,
-        ) -> rusqlite::Result<()> {
+        ) -> tracedecay_sql::Result<()> {
             Ok(())
         }
     }
@@ -1435,7 +1435,7 @@ mod dependency_batch_tests {
             let path = directory
                 .path()
                 .join("graph-publication-dependency-batch.sqlite3");
-            drop(rusqlite::Connection::open(&path).unwrap());
+            drop(tracedecay_sql::Connection::open(&path).unwrap());
             let path = path.canonicalize().unwrap();
             let shard_id = StoreShardIdV1::project(
                 BrainId::new("brain.dependency-batch").unwrap(),

@@ -1,9 +1,5 @@
-use std::{
-    cell::Cell,
-    collections::{BTreeMap, BTreeSet},
-};
+use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use tracedecay_domain::feedback::{
     FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
 };
@@ -149,7 +145,10 @@ fn successor_naming_fixture_object(prior: &SourceStoreStateV1, sequence: u64) ->
     )
 }
 
-fn corrupt_current_objects(connection: &rusqlite::Connection, binding: &SourceBindingIdentityV1) {
+fn corrupt_current_objects(
+    connection: &tracedecay_sql::Connection,
+    binding: &SourceBindingIdentityV1,
+) {
     connection
         .execute(
             "UPDATE external_source_objects_v2
@@ -158,19 +157,6 @@ fn corrupt_current_objects(connection: &rusqlite::Connection, binding: &SourceBi
             [binding.binding_id.as_str()],
         )
         .unwrap();
-}
-
-thread_local! {
-    static OBSERVED_CURRENT_OBJECT_SELECTS: Cell<usize> = const { Cell::new(0) };
-}
-
-fn count_full_state_reads(event: TraceEvent<'_>) {
-    if let TraceEvent::Stmt(_, sql) = event
-        && sql.contains("FROM external_source_objects_v2 AS current")
-    {
-        OBSERVED_CURRENT_OBJECT_SELECTS
-            .set(OBSERVED_CURRENT_OBJECT_SELECTS.get().saturating_add(1));
-    }
 }
 
 fn acquisition_state() -> (SourceAcquisitionQueueStateV1, SourceBindingIdentityV1) {
@@ -260,7 +246,7 @@ fn acquisition_queue_cas_survives_restart_and_rejects_stale_writers() {
     let database_path = temporary.path().join("external-source-acquisition.sqlite");
     let (state, binding) = acquisition_state();
     {
-        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        let mut connection = tracedecay_sql::Connection::open(&database_path).unwrap();
         connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
@@ -273,7 +259,7 @@ fn acquisition_queue_cas_survives_restart_and_rejects_stale_writers() {
         savepoint.commit().unwrap();
         transaction.commit().unwrap();
     }
-    let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+    let mut connection = tracedecay_sql::Connection::open(&database_path).unwrap();
     let transaction = connection.transaction().unwrap();
     assert_eq!(
         ExternalSourceExecutor
@@ -458,7 +444,7 @@ fn empty_successor_with_coverage(
 fn source_commits_enqueue_and_restart_drain_exact_predecessor_chain() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("external-source-backlog.sqlite");
-    let mut connection = rusqlite::Connection::open(&path).unwrap();
+    let mut connection = tracedecay_sql::Connection::open(&path).unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
     let (first, binding) = fixture();
     let mut transaction = connection.transaction().unwrap();
@@ -499,14 +485,14 @@ fn source_commits_enqueue_and_restart_drain_exact_predecessor_chain() {
             ))
         })
         .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
+        .collect::<tracedecay_sql::Result<Vec<_>>>()
         .unwrap();
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[1].0, rows[0].1);
     assert_eq!(rows[2].0, rows[1].1);
     drop(connection);
 
-    let mut connection = rusqlite::Connection::open(&path).unwrap();
+    let mut connection = tracedecay_sql::Connection::open(&path).unwrap();
     let state = load_state(&connection, &binding, &SourceObjectCoverageV1::Complete)
         .unwrap()
         .unwrap();
@@ -593,7 +579,7 @@ fn source_commits_enqueue_and_restart_drain_exact_predecessor_chain() {
 
 #[test]
 fn ten_thousand_receipts_do_not_make_current_read_or_write_scan_history() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
     let (first, binding) = fixture();
     let first_key = first.idempotency_key().clone();
@@ -635,24 +621,29 @@ fn ten_thousand_receipts_do_not_make_current_read_or_write_scan_history() {
         serde_json::to_vec(&current).unwrap().len() < 64 * 1024,
         "current-state bytes must not include receipt history"
     );
-    let mut lookup = connection
-        .prepare(
-            "SELECT request_digest FROM external_source_commit_receipts_v2
-                 WHERE binding_id = ?1 AND idempotency_key = ?2",
-        )
-        .unwrap();
-    let _: String = lookup
+    let lookup = "SELECT request_digest FROM external_source_commit_receipts_v2
+                 WHERE binding_id = ?1 AND idempotency_key = ?2";
+    let _: String = connection
         .query_row(
+            lookup,
             params![binding.binding_id.as_str(), first_key.as_str()],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(
-        lookup.get_status(rusqlite::StatementStatus::FullscanStep),
-        0,
-        "exact receipt replay must use its primary-key index"
+    let plan = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {lookup}"))
+        .unwrap()
+        .query_map(
+            params![binding.binding_id.as_str(), first_key.as_str()],
+            |row| row.get::<_, String>(3),
+        )
+        .unwrap()
+        .collect::<tracedecay_sql::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        !plan.is_empty() && plan.iter().all(|step| step.starts_with("SEARCH")),
+        "exact receipt replay must use its primary-key index: {plan:?}"
     );
-    drop(lookup);
 
     let pages_before: i64 = connection
         .query_row("PRAGMA page_count", [], |row| row.get(0))
@@ -676,7 +667,7 @@ fn ten_thousand_receipts_do_not_make_current_read_or_write_scan_history() {
 
 #[test]
 fn empty_complete_is_noop_and_partial_never_derives_absence() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
     let (first, binding) = fixture();
     let object = first.mutations()[0].observation().native_object().clone();
@@ -733,7 +724,7 @@ fn empty_complete_is_noop_and_partial_never_derives_absence() {
 
 #[test]
 fn stale_source_fork_rejection_preserves_the_committed_pending_chain() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
     let (first, binding) = fixture();
     {
@@ -792,7 +783,7 @@ fn stale_source_fork_rejection_preserves_the_committed_pending_chain() {
 
 #[test]
 fn separate_projection_write_rolls_back_effect_and_checkpoint_together() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
     let (commit, binding) = fixture();
     {
@@ -883,11 +874,11 @@ fn separate_projection_write_rolls_back_effect_and_checkpoint_together() {
 
 #[test]
 fn projected_history_shrinks_to_replay_summaries() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
     let (first, binding) = fixture();
     let projector = ComponentVersion::new("external-source-projector-v1").unwrap();
-    let write = |connection: &mut rusqlite::Connection, commit: &SourceCommitV1| {
+    let write = |connection: &mut tracedecay_sql::Connection, commit: &SourceCommitV1| {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
         ExternalSourceExecutor
@@ -896,7 +887,7 @@ fn projected_history_shrinks_to_replay_summaries() {
         savepoint.commit().unwrap();
         transaction.commit().unwrap();
     };
-    let project = |connection: &mut rusqlite::Connection| {
+    let project = |connection: &mut tracedecay_sql::Connection| {
         let pending = load_next_pending_projection(connection, &binding)
             .unwrap()
             .unwrap();
@@ -918,7 +909,7 @@ fn projected_history_shrinks_to_replay_summaries() {
         write(&mut connection, &numbered_empty_successor(&state, sequence));
         project(&mut connection);
     }
-    let count = |connection: &rusqlite::Connection, sql: &str| -> i64 {
+    let count = |connection: &tracedecay_sql::Connection, sql: &str| -> i64 {
         connection.query_row(sql, [], |row| row.get(0)).unwrap()
     };
     assert_eq!(
@@ -976,7 +967,7 @@ fn commit_replay_and_restart_read_share_one_durable_state() {
     let database_path = temporary.path().join("external-source.sqlite");
     let (commit, binding) = fixture();
     {
-        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        let mut connection = tracedecay_sql::Connection::open(&database_path).unwrap();
         connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
         let mut interrupted = connection.transaction().unwrap();
         let savepoint = interrupted.savepoint().unwrap();
@@ -987,7 +978,7 @@ fn commit_replay_and_restart_read_share_one_durable_state() {
         drop(interrupted);
     }
     {
-        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        let mut connection = tracedecay_sql::Connection::open(&database_path).unwrap();
         let transaction = connection.transaction().unwrap();
         assert!(matches!(
             ExternalSourceExecutor
@@ -1003,7 +994,7 @@ fn commit_replay_and_restart_read_share_one_durable_state() {
         ));
     }
     {
-        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        let mut connection = tracedecay_sql::Connection::open(&database_path).unwrap();
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
         ExternalSourceExecutor
@@ -1012,7 +1003,7 @@ fn commit_replay_and_restart_read_share_one_durable_state() {
         savepoint.commit().unwrap();
         transaction.commit().unwrap();
     }
-    let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+    let mut connection = tracedecay_sql::Connection::open(&database_path).unwrap();
     let mut replay = connection.transaction().unwrap();
     let savepoint = replay.savepoint().unwrap();
     ExternalSourceExecutor
@@ -1087,7 +1078,7 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
     let definition_v1 = commit.definition().clone();
     let binding_v1 = commit.binding().clone();
     {
-        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        let mut connection = tracedecay_sql::Connection::open(&database_path).unwrap();
         connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
@@ -1129,7 +1120,7 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
     )
     .unwrap();
     {
-        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        let mut connection = tracedecay_sql::Connection::open(&database_path).unwrap();
         let mut interrupted = connection.transaction().unwrap();
         let savepoint = interrupted.savepoint().unwrap();
         ExternalSourceExecutor
@@ -1139,7 +1130,7 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
         drop(interrupted);
     }
     {
-        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
         assert_eq!(
             connection
                 .query_row(
@@ -1152,7 +1143,7 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
         );
     }
     {
-        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        let mut connection = tracedecay_sql::Connection::open(&database_path).unwrap();
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
         ExternalSourceExecutor
@@ -1162,7 +1153,7 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
         transaction.commit().unwrap();
     }
     {
-        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        let mut connection = tracedecay_sql::Connection::open(&database_path).unwrap();
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
         ExternalSourceExecutor
@@ -1171,7 +1162,7 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
         savepoint.commit().unwrap();
         transaction.commit().unwrap();
     }
-    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
     assert_eq!(
         connection
             .query_row(
@@ -1226,7 +1217,7 @@ fn authority_and_source_receipt_histories_survive_restart_and_rollback() {
 
 #[test]
 fn projection_drain_reads_current_objects_only_for_complete_snapshots() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
     let (first, binding) = fixture();
     let mut source_writer = ExternalSourceExecutor;
@@ -1252,12 +1243,11 @@ fn projection_drain_reads_current_objects_only_for_complete_snapshots() {
     let projector = ComponentVersion::new("external-source-projector-v1").unwrap();
     let mut reader = ExternalSourceExecutor;
     let mut projection_writer = ExternalSourceExecutor;
-    OBSERVED_CURRENT_OBJECT_SELECTS.set(0);
-    connection.trace_v2(
-        TraceEventCodes::SQLITE_TRACE_STMT,
-        Some(count_full_state_reads),
-    );
-    for _ in 0..8 {
+    for drained in 0..8 {
+        if drained == 1 {
+            // Any later read of a current object now fails hydration.
+            corrupt_current_objects(&connection, &binding);
+        }
         let transaction = connection.transaction().unwrap();
         let pending = match reader
             .execute_read(
@@ -1277,21 +1267,17 @@ fn projection_drain_reads_current_objects_only_for_complete_snapshots() {
         let savepoint = transaction.savepoint().unwrap();
         projection_writer
             .execute_projection_write(&savepoint, &projection)
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!("receipt {drained} names no object and must read none: {error}")
+            });
         savepoint.commit().unwrap();
         transaction.commit().unwrap();
     }
-    connection.trace_v2(TraceEventCodes::empty(), None);
-    assert_eq!(
-        OBSERVED_CURRENT_OBJECT_SELECTS.get(),
-        1,
-        "only the complete-snapshot projection reads current objects; receipts naming none read none"
-    );
 }
 
 #[test]
 fn narrow_pending_read_skips_unrelated_corrupt_current_object_but_writer_does_not() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
     let (commit, binding) = fixture();
     {
@@ -1345,7 +1331,7 @@ fn narrow_pending_read_skips_unrelated_corrupt_current_object_but_writer_does_no
 
 #[test]
 fn narrow_pending_projection_matches_full_restore_semantics() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
     let (first, binding) = fixture();
     let mut writer = ExternalSourceExecutor;
@@ -1440,7 +1426,7 @@ fn narrow_pending_projection_matches_full_restore_semantics() {
 
 #[test]
 fn rolled_back_projection_reapplies_from_the_durable_predecessor() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
     let (commit, binding) = fixture();
     let mut writer = ExternalSourceExecutor;
@@ -1467,11 +1453,19 @@ fn rolled_back_projection_reapplies_from_the_durable_predecessor() {
             .unwrap();
         savepoint.commit().unwrap();
     }
-    OBSERVED_CURRENT_OBJECT_SELECTS.set(0);
-    connection.trace_v2(
-        TraceEventCodes::SQLITE_TRACE_STMT,
-        Some(count_full_state_reads),
-    );
+    {
+        let mut probe = connection.transaction().unwrap();
+        corrupt_current_objects(&probe, &binding);
+        let savepoint = probe.savepoint().unwrap();
+        assert_eq!(
+            writer
+                .execute_projection_write(&savepoint, &projection)
+                .unwrap_err()
+                .to_string(),
+            "Invalid parameter name: external source current object names a mutation absent from history",
+            "the reapplied complete-snapshot projection reads the durable current objects"
+        );
+    }
     {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
@@ -1481,12 +1475,6 @@ fn rolled_back_projection_reapplies_from_the_durable_predecessor() {
         savepoint.commit().unwrap();
         transaction.commit().unwrap();
     }
-    connection.trace_v2(TraceEventCodes::empty(), None);
-    assert_eq!(
-        OBSERVED_CURRENT_OBJECT_SELECTS.get(),
-        1,
-        "the reapplied complete-snapshot projection reads the durable current objects once"
-    );
     assert_eq!(
         load_state(&connection, &binding, &SourceObjectCoverageV1::Complete)
             .unwrap()
@@ -1500,7 +1488,7 @@ fn rolled_back_projection_reapplies_from_the_durable_predecessor() {
 
 #[test]
 fn stale_source_cas_leaves_the_next_write_validating_durable_rows() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
     let (first, binding) = fixture();
     let mut writer = ExternalSourceExecutor;
@@ -1564,7 +1552,7 @@ fn writer_validates_rows_another_connection_changed() {
     let path = temporary
         .path()
         .join("external-source-external-change.sqlite");
-    let mut writer_connection = rusqlite::Connection::open(&path).unwrap();
+    let mut writer_connection = tracedecay_sql::Connection::open(&path).unwrap();
     writer_connection
         .execute_batch(EXTERNAL_SOURCE_SCHEMA_V1)
         .unwrap();
@@ -1585,7 +1573,7 @@ fn writer_validates_rows_another_connection_changed() {
     .unwrap()
     .unwrap();
     let successor = successor_naming_fixture_object(&current, 2);
-    let external = rusqlite::Connection::open(&path).unwrap();
+    let external = tracedecay_sql::Connection::open(&path).unwrap();
     external
         .execute(
             "UPDATE external_source_objects_v2
@@ -1615,7 +1603,7 @@ fn reopened_executor_fully_validates_historical_current_rows() {
         .join("external-source-reopen-validation.sqlite");
     let (first, binding) = fixture();
     let successor = {
-        let mut connection = rusqlite::Connection::open(&path).unwrap();
+        let mut connection = tracedecay_sql::Connection::open(&path).unwrap();
         connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
         let mut writer = ExternalSourceExecutor;
         {
@@ -1640,7 +1628,7 @@ fn reopened_executor_fully_validates_historical_current_rows() {
         successor
     };
 
-    let mut reopened = rusqlite::Connection::open(&path).unwrap();
+    let mut reopened = tracedecay_sql::Connection::open(&path).unwrap();
     let mut transaction = reopened.transaction().unwrap();
     let savepoint = transaction.savepoint().unwrap();
     assert_eq!(
@@ -1655,7 +1643,7 @@ fn reopened_executor_fully_validates_historical_current_rows() {
 
 #[test]
 fn writer_reads_only_the_current_objects_a_commit_names() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
     let (first, binding) = fixture();
     let mut writer = ExternalSourceExecutor;
@@ -1673,11 +1661,6 @@ fn writer_reads_only_the_current_objects_a_commit_names() {
     let naming_object = successor_naming_fixture_object(&state, 2);
     corrupt_current_objects(&connection, &binding);
 
-    OBSERVED_CURRENT_OBJECT_SELECTS.set(0);
-    connection.trace_v2(
-        TraceEventCodes::SQLITE_TRACE_STMT,
-        Some(count_full_state_reads),
-    );
     {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
@@ -1687,22 +1670,18 @@ fn writer_reads_only_the_current_objects_a_commit_names() {
                 .unwrap_err()
                 .to_string(),
             "Invalid parameter name: external source current object names a mutation absent from history",
+            "a commit naming an object reads its current row"
         );
     }
-    assert_eq!(OBSERVED_CURRENT_OBJECT_SELECTS.get(), 1);
     {
         let mut transaction = connection.transaction().unwrap();
         let savepoint = transaction.savepoint().unwrap();
-        writer.execute_write(&savepoint, &naming_nothing).unwrap();
+        writer
+            .execute_write(&savepoint, &naming_nothing)
+            .expect("a commit naming no object reads no current object");
         savepoint.commit().unwrap();
         transaction.commit().unwrap();
     }
-    connection.trace_v2(TraceEventCodes::empty(), None);
-    assert_eq!(
-        OBSERVED_CURRENT_OBJECT_SELECTS.get(),
-        1,
-        "a commit naming no object reads no current object"
-    );
     assert_eq!(
         load_state(
             &connection,

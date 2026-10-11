@@ -27,6 +27,7 @@ tokio = { version = "1", default-features = false, features = [
 ] }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-sql = { path = "../tracedecay-sql" }
 tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-sql = { path = "../tracedecay-sql" }
 tracing = "0.1"

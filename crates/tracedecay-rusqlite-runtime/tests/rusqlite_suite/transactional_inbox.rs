@@ -23,12 +23,12 @@
 
 use std::sync::Arc;
 
-use rusqlite::{Connection, Savepoint};
 use tempfile::TempDir;
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor, WriterActorError,
     WriterState,
 };
+use tracedecay_sql::{Connection, Savepoint};
 use tracedecay_store::{
     AdmissionConfigV1, LocatorDigest, RepositoryOperationEnvelopeV1, RepositoryWritePayloadV1,
     RuntimeBatchCompatibilityV1, RuntimeCancellationIdentityV1, RuntimeDeadlineV1,
@@ -77,7 +77,7 @@ impl StorageOperationExecutor for ApplyInboxMarkerExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         let RepositoryWritePayloadV1::ApplyInbox(entry) = payload else {
             panic!("this test only ever submits ApplyInbox payloads");
         };
@@ -89,7 +89,7 @@ impl StorageOperationExecutor for ApplyInboxMarkerExecutor {
             [entry.identity.effect_id.as_str()],
         )?;
         if self.fail {
-            return Err(rusqlite::Error::InvalidParameterName(
+            return Err(tracedecay_sql::Error::InvalidParameterName(
                 "injected apply-inbox failure".to_owned(),
             ));
         }

@@ -1,9 +1,9 @@
-use rusqlite::{OptionalExtension, Savepoint, Transaction, params, params_from_iter};
 use tracedecay_domain::{
     CodeGenerationId, DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,
     DiagnosticRecordStateV1, DiagnosticSeverityV1, FileOccurrenceId, GenerationDiagnosticV1,
     RetrievalAnchorId, SourceSpan, UtcMicros,
 };
+use tracedecay_sql::{OptionalExtension, Savepoint, Transaction, params, params_from_iter};
 use tracedecay_store::{
     DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DiagnosticReadOperationV1,
     DiagnosticReadResultV1, DiagnosticRecordStateKindV1, SanitizedCleanDiagnosticSnapshotV1,
@@ -32,7 +32,7 @@ impl DiagnosticExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         snapshot: &SanitizedCleanDiagnosticSnapshotV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         let generation = snapshot.generation_id();
         let publication_revision = if let Some((revision, state)) = savepoint
             .query_row(
@@ -148,7 +148,7 @@ impl DiagnosticExecutor {
         &mut self,
         snapshot: &Transaction<'_>,
         operation: &DiagnosticReadOperationV1,
-    ) -> rusqlite::Result<DiagnosticReadResultV1> {
+    ) -> tracedecay_sql::Result<DiagnosticReadResultV1> {
         match operation {
             DiagnosticReadOperationV1::CurrentGeneration => {
                 let generation = snapshot
@@ -217,7 +217,7 @@ fn insert_record(
     savepoint: &Savepoint<'_>,
     publication_revision: i64,
     record: &GenerationDiagnosticV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     record.validate().map_err(invalid)?;
     let (state, state_generation) = state_columns(&record.state);
     savepoint.execute(
@@ -273,9 +273,9 @@ fn insert_record(
 }
 
 fn read_record_by_anchor(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     anchor: &RetrievalAnchorId,
-) -> rusqlite::Result<Option<GenerationDiagnosticV1>> {
+) -> tracedecay_sql::Result<Option<GenerationDiagnosticV1>> {
     let sql = format!(
         "{SELECT_RECORDS} WHERE diagnostic_anchor = ?1 \
          ORDER BY CASE WHEN EXISTS (SELECT 1 FROM \
@@ -291,11 +291,11 @@ fn read_record_by_anchor(
         .optional()
 }
 
-fn read_records<P: rusqlite::Params>(
-    connection: &rusqlite::Connection,
+fn read_records<P: tracedecay_sql::Params>(
+    connection: &tracedecay_sql::Connection,
     clause: &str,
     parameters: P,
-) -> rusqlite::Result<Vec<GenerationDiagnosticV1>> {
+) -> tracedecay_sql::Result<Vec<GenerationDiagnosticV1>> {
     let sql = format!("{SELECT_RECORDS} {clause}");
     let mut statement = connection.prepare_cached(&sql)?;
     statement.query_map(parameters, record_from_row)?.collect()
@@ -308,7 +308,9 @@ const SELECT_RECORDS: &str = "SELECT diagnostic_anchor, generation_id, repositor
     collected_at, record_state, state_generation
  FROM generation_diagnostics";
 
-fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationDiagnosticV1> {
+fn record_from_row(
+    row: &tracedecay_sql::Row<'_>,
+) -> tracedecay_sql::Result<GenerationDiagnosticV1> {
     let text = |index| row.get::<_, String>(index);
     let optional_text = |index| row.get::<_, Option<String>>(index);
     let stored_state = text(22)?;
@@ -388,7 +390,7 @@ fn severity_name(value: DiagnosticSeverityV1) -> &'static str {
     diagnostic_severity_name(value)
 }
 
-fn parse_severity(value: &str) -> rusqlite::Result<DiagnosticSeverityV1> {
+fn parse_severity(value: &str) -> tracedecay_sql::Result<DiagnosticSeverityV1> {
     parse_diagnostic_severity(value)
         .ok_or_else(|| conversion(format!("unknown diagnostic severity {value}")))
 }
@@ -397,7 +399,7 @@ fn producer_name(value: DiagnosticProducerKindV1) -> &'static str {
     diagnostic_producer_kind_name(value)
 }
 
-fn parse_producer(value: &str) -> rusqlite::Result<DiagnosticProducerKindV1> {
+fn parse_producer(value: &str) -> tracedecay_sql::Result<DiagnosticProducerKindV1> {
     parse_diagnostic_producer_kind(value)
         .ok_or_else(|| conversion(format!("unknown diagnostic producer {value}")))
 }
@@ -406,7 +408,7 @@ fn evidence_name(value: DiagnosticEvidenceClassV1) -> &'static str {
     diagnostic_evidence_class_name(value)
 }
 
-fn parse_evidence(value: &str) -> rusqlite::Result<DiagnosticEvidenceClassV1> {
+fn parse_evidence(value: &str) -> tracedecay_sql::Result<DiagnosticEvidenceClassV1> {
     parse_diagnostic_evidence_class(value)
         .ok_or_else(|| conversion(format!("unknown diagnostic evidence class {value}")))
 }

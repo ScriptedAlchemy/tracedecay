@@ -1,4 +1,3 @@
-use rusqlite::Connection;
 use tempfile::TempDir;
 use tracedecay_domain::test_fixtures::{id, repeated_sha256_text as digest};
 use tracedecay_domain::{
@@ -7,6 +6,7 @@ use tracedecay_domain::{
 };
 use tracedecay_rusqlite_runtime::StorageOperationExecutor;
 use tracedecay_rusqlite_runtime::repository::ConcreteRepositoryWriteExecutor;
+use tracedecay_sql::Connection;
 use tracedecay_store::{
     GENERATION_DIAGNOSTICS_SCHEMA_DDL, RepositoryWritePayloadV1, SanitizedCleanDiagnosticSnapshotV1,
 };

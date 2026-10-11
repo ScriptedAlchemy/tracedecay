@@ -12,7 +12,7 @@ use tracedecay_store::{FactCurrentQuery, FactLineageQuery, FactWriteBatch};
 
 /// Every table `insert_assertion` writes or compares against, so the write
 /// path is exercised with the real column set rather than a stub.
-fn assertion_schema(connection: &rusqlite::Connection) {
+fn assertion_schema(connection: &tracedecay_sql::Connection) {
     connection
         .execute_batch(
             "CREATE TABLE memory_v2_facts (
@@ -162,7 +162,7 @@ fn assertion(fact_id: &FactId, content: &str, evidence: Vec<FactEvidenceRefV1>) 
 
 #[test]
 fn assertion_replay_is_idempotent_and_reuse_is_a_collision() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     assertion_schema(&connection);
     let owner = OwnerColumns::new(&FactOwnerV1::Profile).unwrap();
     let fact_id = profile_fact_id("operation.assertion-replay");
@@ -205,7 +205,7 @@ fn assertion_replay_is_idempotent_and_reuse_is_a_collision() {
 
 #[test]
 fn evidence_rebound_to_another_anchor_is_a_collision() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     assertion_schema(&connection);
     let owner = OwnerColumns::new(&FactOwnerV1::Profile).unwrap();
     let fact_id = profile_fact_id("operation.evidence-rebound");
@@ -241,7 +241,7 @@ fn evidence_rebound_to_another_anchor_is_a_collision() {
 
 #[test]
 fn evidence_exact_replay_is_accepted() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     assertion_schema(&connection);
     let owner = OwnerColumns::new(&FactOwnerV1::Profile).unwrap();
     let fact_id = profile_fact_id("operation.evidence-replay");
@@ -311,7 +311,7 @@ fn identity(operation: &str) -> (FactIdentityMaterialV1, FactId) {
 }
 
 fn insert_owned_fact(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     owner: &OwnerColumns,
     operation: &str,
 ) -> FactId {
@@ -334,7 +334,7 @@ fn insert_owned_fact(
 }
 
 fn seed_normalized_tag_target(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
 ) -> (OwnerColumns, FactId, FactAssertionId, FactEventId) {
     let owner = OwnerColumns::new(&FactOwnerV1::Profile).unwrap();
     let fact_id = insert_owned_fact(connection, &owner, "operation.normalized-tag-target");
@@ -415,7 +415,7 @@ fn normalized_tag_write_batch(
 }
 
 fn normalized_tag_state(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     fact_id: &FactId,
 ) -> (i64, i64, i64, String, String, i64) {
     let assertions = connection
@@ -460,7 +460,7 @@ fn normalized_tag_state(
 
 #[test]
 fn normalized_tag_write_rejects_missing_evidence_before_any_mutation() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     assertion_schema(&connection);
     let (_owner, fact_id, assertion_id, event_id) = seed_normalized_tag_target(&connection);
     let missing = profile_fact_id("operation.normalized-tag-missing-evidence");
@@ -486,7 +486,7 @@ fn normalized_tag_write_rejects_missing_evidence_before_any_mutation() {
 
 #[test]
 fn normalized_tag_write_accepts_256_owned_evidence_facts_including_self() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     assertion_schema(&connection);
     let (owner, fact_id, assertion_id, event_id) = seed_normalized_tag_target(&connection);
     let mut evidence_fact_ids = vec![fact_id.clone()];
@@ -523,7 +523,7 @@ fn normalized_tag_write_accepts_256_owned_evidence_facts_including_self() {
 
 #[test]
 fn fact_write_rejects_stored_identity_mismatch() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
             "CREATE TABLE memory_v2_current_facts (
@@ -601,7 +601,7 @@ fn fact_write_rejects_stored_identity_mismatch() {
 
 #[test]
 fn fact_executor_does_not_claim_replay_without_writer_ledger() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
             "CREATE TABLE memory_v2_current_facts (
@@ -665,7 +665,7 @@ fn fact_executor_does_not_claim_replay_without_writer_ledger() {
 #[test]
 fn purge_access_transition_clears_active_assertion() {
     for current in [PayloadAccessState::Quarantined, PayloadAccessState::Deleted] {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE memory_v2_current_facts (
@@ -736,7 +736,7 @@ fn purge_access_transition_clears_active_assertion() {
 
 #[test]
 fn supersession_clears_active_assertion_without_purging_payload_access() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
             "CREATE TABLE memory_v2_current_facts (
@@ -809,7 +809,7 @@ fn supersession_clears_active_assertion_without_purging_payload_access() {
 
 #[test]
 fn supersession_projection_rejects_a_trailing_lineage_event() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
             "CREATE TABLE memory_v2_current_facts (
@@ -874,7 +874,7 @@ fn supersession_projection_rejects_a_trailing_lineage_event() {
 
 #[test]
 fn stale_projection_transitions_are_rejected() {
-    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
             "CREATE TABLE memory_v2_current_facts (
@@ -963,7 +963,7 @@ fn stale_projection_transitions_are_rejected() {
 
 #[test]
 fn current_read_omits_fact_without_active_assertion() {
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    let connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
             "CREATE TABLE memory_v2_facts (
@@ -1022,7 +1022,7 @@ fn current_read_omits_fact_without_active_assertion() {
 
 #[test]
 fn lineage_read_rejects_stored_event_identity_mismatch() {
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    let connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
             "CREATE TABLE memory_v2_lineage_events (
@@ -1072,10 +1072,10 @@ fn lineage_read_rejects_stored_event_identity_mismatch() {
 fn referenced_anchor_availability_matches_row_at_a_time() {
     // The row-at-a-time predicate the batched `anchor_id IN (...)` load replaces.
     fn old_path(
-        connection: &rusqlite::Connection,
+        connection: &tracedecay_sql::Connection,
         owner: &OwnerColumns,
         anchor_ids: &[RetrievalAnchorId],
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         for anchor_id in anchor_ids {
             let exists = connection.query_row(
                 "SELECT EXISTS(
@@ -1092,7 +1092,7 @@ fn referenced_anchor_availability_matches_row_at_a_time() {
         Ok(())
     }
 
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    let connection = tracedecay_sql::Connection::open_in_memory().unwrap();
     connection
         .execute_batch(tracedecay_store::RETRIEVAL_ANCHORS_SCHEMA_DDL)
         .unwrap();
