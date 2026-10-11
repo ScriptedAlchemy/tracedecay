@@ -31,6 +31,7 @@ use tracedecay_domain::{
     WorkflowOperationRef, WorkflowOutputName, WorkflowStep, WorkflowStepId, WorktreeId,
     canonical_sha256,
 };
+use super::BRAIN;
 use tracedecay_rusqlite_runtime::remote::{
     RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1,
 };
@@ -202,7 +203,8 @@ pub fn keyring() -> Arc<dyn RemoteSpoolKeyringV1> {
     )))
 }
 
-/// The remote writer authority; its fence epoch must equal the shard's.
+/// The remote writer authority; its fence brain and epoch must equal the
+/// shard's.
 pub fn remote_writer(authority_epoch: u64) -> RemoteWriterAuthorityV1 {
     serde_json::from_value(json!({
         "project_id": "project.remote",
@@ -215,7 +217,7 @@ pub fn remote_writer(authority_epoch: u64) -> RemoteWriterAuthorityV1 {
         },
         "authority": {
             "fence": {
-                "brain_id": "brain.remote",
+                "brain_id": BRAIN,
                 "shard_id": "shard.remote",
                 "generation_id": "generation.remote",
                 "placement_revision": 1,
@@ -229,10 +231,10 @@ pub fn remote_writer(authority_epoch: u64) -> RemoteWriterAuthorityV1 {
     .unwrap()
 }
 
-pub fn enrollment_grant(brain: &str, node: &str, authority_epoch: u64) -> EnrollmentGrantV1 {
+pub fn enrollment_grant(node: &str, authority_epoch: u64) -> EnrollmentGrantV1 {
     EnrollmentGrantV1 {
         grant_id: EntityId::new("grant.remote.writer-scope").unwrap(),
-        brain_id: BrainId::new(brain).unwrap(),
+        brain_id: BrainId::new(BRAIN).unwrap(),
         node_id: BrainNodeId::new(node).unwrap(),
         fingerprint: RemoteCredentialFingerprintV1::from_secret(&[3_u8; 32]).unwrap(),
         revision: 1,

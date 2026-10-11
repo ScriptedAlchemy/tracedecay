@@ -1,7 +1,7 @@
 //! Request, probe, authority and trace plumbing shared by every stream.
 
 use std::{
-    fmt::Display,
+    fmt::Debug,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -148,7 +148,7 @@ impl Trace {
         }
     }
 
-    pub fn record(&mut self, step: &str, result: Result<RuntimeSubmitOutcomeV1, impl Display>) {
+    pub fn record(&mut self, step: &str, result: Result<RuntimeSubmitOutcomeV1, impl Debug>) {
         let entry = match result {
             Ok(outcome) => {
                 let mut outcome = serde_json::to_value(outcome).expect("serialize outcome");
@@ -161,7 +161,7 @@ impl Trace {
     }
 
     /// A step whose result is not a submit outcome (exact-SQL store calls).
-    pub fn note(&mut self, step: &str, result: Result<impl serde::Serialize, impl Display>) {
+    pub fn note(&mut self, step: &str, result: Result<impl serde::Serialize, impl Debug>) {
         let entry = match result {
             Ok(value) => {
                 let mut value: Json = serde_json::to_value(value).expect("serialize result");
@@ -173,8 +173,8 @@ impl Trace {
         self.lines.push(entry.to_string());
     }
 
-    fn error_entry(&self, step: &str, error: &dyn Display) -> Json {
-        json!({ "step": step, "error": scrub_path(&error.to_string(), &self.store_dir) })
+    fn error_entry(&self, step: &str, error: &dyn Debug) -> Json {
+        json!({ "step": step, "error": scrub_path(&format!("{error:?}"), &self.store_dir) })
     }
 
     /// Receipt trace followed by the logical dump of `store`.

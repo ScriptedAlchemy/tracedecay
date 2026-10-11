@@ -13,7 +13,7 @@ use tracedecay_domain::{UtcMicros, WorkPlacementBlockerV1};
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
 use tracedecay_store::StoreShardScopeV1;
 
-use super::super::fixtures::{BRAIN, project_id, stores};
+use super::super::fixtures::{project_id, stores};
 use super::registered::Registered;
 
 fn debug<T: Debug, E: Debug>(result: Result<T, E>) -> Result<String, String> {
@@ -119,7 +119,7 @@ pub async fn remote() -> String {
     let epoch = store.binding.authority_epoch.get();
     match store.database.provision_remote_storage(stores::keyring()) {
         Ok(remote) => {
-            let grant = stores::enrollment_grant(BRAIN, node_id.as_str(), epoch);
+            let grant = stores::enrollment_grant(node_id.as_str(), epoch);
             store.trace.note(
                 "remote_store_enrollment_grant",
                 debug(remote.store_enrollment_grant(&grant, &stores::enrollment_admission(&grant))),
