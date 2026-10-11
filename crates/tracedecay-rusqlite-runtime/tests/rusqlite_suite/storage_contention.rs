@@ -7,7 +7,6 @@
 use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
-use rusqlite::{Savepoint, Transaction};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::test_fixtures::{id, repeated_sha256_text as digest};
 use tracedecay_domain::{
@@ -19,6 +18,7 @@ use tracedecay_rusqlite_runtime::{
     reader::{ReaderPool, ReaderQueryExecutor},
     repository::{ConcreteRepositoryReadExecutor, ConcreteRepositoryWriteExecutor},
 };
+use tracedecay_sql::{Savepoint, Transaction};
 use tracedecay_store::{
     AdmissionConfigV1, DiagnosticReadOperationV1, DiagnosticReadResultV1,
     GENERATION_DIAGNOSTICS_SCHEMA_DDL, ProjectReadOperationV1, ProjectReadResultV1,
@@ -207,7 +207,7 @@ pub(crate) fn generation(outcome: &RuntimeReadOutcomeV1) -> String {
 
 /// Rows durably present in `table`. The writer creates its ledger tables inside
 /// the first committed transaction, so a rolled-back first write leaves none.
-fn persisted_rows(connection: &rusqlite::Connection, table: &str) -> i64 {
+fn persisted_rows(connection: &tracedecay_sql::Connection, table: &str) -> i64 {
     let exists: bool = connection
         .query_row(
             "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
@@ -264,7 +264,7 @@ impl StorageOperationExecutor for PausedPublication {
         &mut self,
         savepoint: &Savepoint<'_>,
         payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         ConcreteRepositoryWriteExecutor::default().execute(savepoint, payload)?;
         self.entered.send(()).unwrap();
         let (released, condition) = &*self.gate;
@@ -545,10 +545,10 @@ impl StorageOperationExecutor for FailOnceAfterMutation {
         &mut self,
         savepoint: &Savepoint<'_>,
         payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         ConcreteRepositoryWriteExecutor::default().execute(savepoint, payload)?;
         if std::mem::take(&mut self.0) {
-            return Err(rusqlite::Error::InvalidQuery);
+            return Err(tracedecay_sql::Error::InvalidQuery);
         }
         Ok(())
     }
@@ -615,7 +615,7 @@ impl StorageOperationExecutor for ExitAfterMutation {
         &mut self,
         savepoint: &Savepoint<'_>,
         payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         ConcreteRepositoryWriteExecutor::default().execute(savepoint, payload)?;
         if matches!(payload, RepositoryWritePayloadV1::Diagnostics(snapshot) if snapshot.generation_id().as_str() == "generation.crashing")
         {

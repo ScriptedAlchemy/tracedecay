@@ -426,8 +426,7 @@ async fn runtime_connection_and_transactions_preserve_sqlite_semantics() {
     assert!(matches!(
         error,
         Error::Sqlite {
-            code: Some(_),
-            extended_code: Some(_),
+            kind: tracedecay_sql::ErrorKind::Constraint,
             ..
         }
     ));
@@ -484,9 +483,10 @@ async fn transaction_statement_batch_reports_the_exact_failed_statement() {
         .await
         .unwrap_err();
 
-    assert!(
-        error.sqlite_code().is_some(),
-        "batch attribution must preserve the underlying SQLite classification"
+    assert_eq!(
+        error.engine_kind(),
+        Some(tracedecay_sql::ErrorKind::Constraint),
+        "batch attribution must preserve the underlying engine classification"
     );
     match error {
         Error::StatementBatch { index, source } => {
@@ -517,8 +517,7 @@ fn deterministic_refusals_are_distinguished_from_transient_engine_faults() {
     // A schema-contract trigger abort refuses this exact row for good.
     let constraint = Error::Sqlite {
         operation: "execute",
-        code: Some(19),
-        extended_code: Some(1811),
+        kind: tracedecay_sql::ErrorKind::Constraint,
         message: "invalid session refresh progress".to_owned(),
     };
     assert!(constraint.is_deterministic_refusal());
@@ -542,8 +541,7 @@ fn deterministic_refusals_are_distinguished_from_transient_engine_faults() {
     assert!(
         !Error::Sqlite {
             operation: "execute",
-            code: Some(5),
-            extended_code: Some(5),
+            kind: tracedecay_sql::ErrorKind::Busy,
             message: "database is locked".to_owned(),
         }
         .is_deterministic_refusal()
@@ -551,28 +549,29 @@ fn deterministic_refusals_are_distinguished_from_transient_engine_faults() {
 }
 
 #[test]
-fn busy_or_locked_is_the_sqlite_lock_codes_not_their_text() {
-    let sqlite = |code: i32, extended_code: i32, message: &str| Error::Sqlite {
+fn busy_or_locked_is_the_engine_kind_not_its_text() {
+    use tracedecay_sql::ErrorKind;
+
+    let engine = |kind: ErrorKind, message: &str| Error::Sqlite {
         operation: "prepare query",
-        code: Some(code),
-        extended_code: Some(extended_code),
+        kind,
         message: message.to_owned(),
     };
 
-    assert!(sqlite(5, 5, "database is locked").is_busy_or_locked());
-    assert!(sqlite(5, 261, "database is locked").is_busy_or_locked());
-    assert!(sqlite(6, 6, "database table is locked").is_busy_or_locked());
+    assert!(engine(ErrorKind::Busy, "database is locked").is_busy_or_locked());
     assert!(Error::Busy.is_busy_or_locked());
     assert!(
         Error::StatementBatch {
             index: 2,
-            source: Box::new(sqlite(5, 5, "database is locked")),
+            source: Box::new(engine(ErrorKind::Busy, "database is locked")),
         }
         .is_busy_or_locked()
     );
 
-    assert!(!sqlite(1, 1, "no such table: main.locked_rows").is_busy_or_locked());
-    assert!(!sqlite(19, 2067, "UNIQUE constraint failed: busy.id").is_busy_or_locked());
+    assert!(!engine(ErrorKind::Other, "no such table: main.locked_rows").is_busy_or_locked());
+    assert!(
+        !engine(ErrorKind::Constraint, "UNIQUE constraint failed: busy.id").is_busy_or_locked()
+    );
     assert!(!Error::Runtime("exact SQL reader lane is busy".to_owned()).is_busy_or_locked());
 }
 

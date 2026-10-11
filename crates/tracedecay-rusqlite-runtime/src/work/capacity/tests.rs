@@ -4,8 +4,7 @@ use crate::exact_sql::ExactSqlRow;
 fn locked(message: &str) -> ExactSqlError {
     ExactSqlError::Sqlite {
         operation: "prepare query",
-        code: Some(5),
-        extended_code: Some(261),
+        kind: tracedecay_sql::ErrorKind::Busy,
         message: message.to_owned(),
     }
 }

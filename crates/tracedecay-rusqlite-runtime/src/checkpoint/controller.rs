@@ -16,16 +16,13 @@ pub(crate) struct WriterCheckpointController {
 }
 
 impl WriterCheckpointController {
-    /// Construct policy state and disable SQLite's connection-local automatic
-    /// checkpointing. Startup fails closed when this cannot be established.
+    /// Construct policy state. The writer connection's engine policy already
+    /// disabled automatic checkpoints, so this controller is the only one.
     pub(crate) fn new(
-        mut driver: RusqliteCheckpointDriver,
+        driver: RusqliteCheckpointDriver,
         config: CheckpointConfig,
     ) -> Result<Self, CheckpointError<RusqliteCheckpointError>> {
         let config = config.validate().map_err(CheckpointError::InvalidConfig)?;
-        driver
-            .disable_auto_checkpoint()
-            .map_err(CheckpointError::Driver)?;
         Ok(Self {
             driver,
             config,

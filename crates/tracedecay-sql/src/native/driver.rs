@@ -72,31 +72,38 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // rusqlite's wording, which stored messages and callers compare.
         match self {
-            Self::QueryReturnedNoRows => formatter.write_str("query returned no rows"),
-            Self::InvalidParameterName(name) => write!(formatter, "invalid parameter name: {name}"),
+            Self::QueryReturnedNoRows => formatter.write_str("Query returned no rows"),
+            Self::InvalidParameterName(name) => write!(formatter, "Invalid parameter name: {name}"),
             Self::InvalidParameterCount(actual, expected) => write!(
                 formatter,
-                "wrong number of parameters: {actual} supplied, {expected} expected"
+                "Wrong number of parameters passed to query. Got {actual}, needed {expected}"
             ),
-            Self::InvalidColumnIndex(index) => write!(formatter, "invalid column index: {index}"),
-            Self::InvalidColumnName(name) => write!(formatter, "invalid column name: {name}"),
+            Self::InvalidColumnIndex(index) => write!(formatter, "Invalid column index: {index}"),
+            Self::InvalidColumnName(name) => write!(formatter, "Invalid column name: {name}"),
             Self::InvalidColumnType(index, name, kind) => {
                 write!(
                     formatter,
-                    "invalid column type {kind} at index {index}, name {name}"
+                    "Invalid column type {kind} at index: {index}, name: {name}"
                 )
             }
+            Self::FromSqlConversionFailure(UNKNOWN_COLUMN, _, error) => error.fmt(formatter),
             Self::FromSqlConversionFailure(index, kind, error) => write!(
                 formatter,
-                "conversion error from type {kind} at index {index}: {error}"
+                "Conversion error from type {kind} at index: {index}, {error}"
             ),
-            Self::ToSqlConversionFailure(error) => write!(formatter, "{error}"),
-            Self::IntegralValueOutOfRange(index, value) => {
-                write!(formatter, "integer {value} out of range at index {index}")
+            Self::ToSqlConversionFailure(error) => error.fmt(formatter),
+            Self::IntegralValueOutOfRange(UNKNOWN_COLUMN, value) => {
+                write!(formatter, "Integer {value} out of range")
             }
-            Self::InvalidQuery => formatter.write_str("query is not read-only"),
-            Self::InvalidPath(path) => write!(formatter, "invalid path: {}", path.display()),
+            Self::IntegralValueOutOfRange(index, value) => {
+                write!(formatter, "Integer {value} out of range at index {index}")
+            }
+            Self::InvalidQuery => formatter.write_str("Query is not read-only"),
+            Self::InvalidPath(path) => {
+                write!(formatter, "Invalid path: {}", path.to_string_lossy())
+            }
             Self::Engine { message, .. } => formatter.write_str(message),
         }
     }
@@ -157,6 +164,8 @@ impl From<super::Error> for Error {
                 // unreadable header here is damage.
                 LimboError::Corrupt(_) | LimboError::NotADB => ErrorKind::Corrupt,
                 LimboError::TooBig => ErrorKind::LimitExceeded,
+                LimboError::CompletionError(_) => ErrorKind::IoErr,
+                LimboError::IoBackendUnavailable(_) => ErrorKind::CantOpen,
                 _ => ErrorKind::Other,
             },
             super::Error::QueryLimitExceeded
@@ -678,12 +687,22 @@ pub enum DropBehavior {
     Panic,
 }
 
-/// One thread-owned native connection with rusqlite's method surface. A
-/// read-write open starts with no statement restriction, as a SQLite
-/// connection without an authorizer does; a read-only open is a reader.
+/// One thread-owned native connection with rusqlite's method surface. An
+/// open starts with no statement restriction, as a SQLite connection without
+/// an authorizer does; a read-only open is also query-only.
 pub struct Connection {
     core: super::Connection,
     savepoint_depth: Cell<usize>,
+}
+
+impl fmt::Debug for Connection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Connection")
+            .field("path", &self.path())
+            .field("autocommit", &self.is_autocommit())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Connection {
@@ -703,15 +722,22 @@ impl Connection {
             return Err(Error::InvalidPath(path.to_owned()));
         }
         let database = Database::open_path(path, !read_only)?;
-        let capability = if read_only {
-            Capability::Reader
-        } else {
-            Capability::Maintenance
-        };
         Ok(Self {
-            core: database.connect_with(capability, read_only)?,
+            core: database.connect_with(Capability::Maintenance, read_only)?,
             savepoint_depth: Cell::new(0),
         })
+    }
+
+    /// The store's canonical path; `None` in memory.
+    pub fn path(&self) -> Option<&str> {
+        self.core.database().path()
+    }
+
+    /// Closing is dropping: the drop rolls back any open transaction and the
+    /// engine stays open while another connection holds it.
+    pub fn close(self) -> std::result::Result<(), (Self, Error)> {
+        drop(self);
+        Ok(())
     }
 
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> Result<usize> {
@@ -750,11 +776,7 @@ impl Connection {
         &mut self,
         behavior: TransactionBehavior,
     ) -> Result<Transaction<'_>> {
-        self.core.begin_transaction(behavior)?;
-        Ok(Transaction {
-            connection: self,
-            drop_behavior: DropBehavior::Rollback,
-        })
+        Transaction::new_unchecked(self, behavior)
     }
 
     /// Outside a transaction this begins a deferred one, as SQLite's
@@ -918,15 +940,19 @@ impl ConnectionControl for Connection {
             CheckpointMode::Restart => "RESTART",
             CheckpointMode::Truncate => "TRUNCATE",
         };
-        let outcome = self.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |row| {
-            Ok(CheckpointOutcome {
-                busy: row.get::<_, i64>(0)? != 0,
-                log_frames: row.get(1)?,
-                checkpointed_frames: row.get(2)?,
-            })
-        })?;
-        self.core
-            .record_checkpoint(outcome.checkpointed_frames.max(0).unsigned_abs())?;
+        let outcome = self.run_checkpoint(mode)?;
+        // SQLite's next writer starts the WAL over once every frame is copied
+        // back. The engine ties that restart to its automatic checkpoint, which
+        // every connection disables, so the checkpoint lane restarts the log
+        // here. A reader still using the WAL keeps it: the restart reports busy
+        // and the next checkpoint tries again.
+        if matches!(mode, "PASSIVE" | "FULL")
+            && !outcome.busy
+            && outcome.log_frames > 0
+            && outcome.checkpointed_frames == outcome.log_frames
+        {
+            self.run_checkpoint("RESTART")?;
+        }
         Ok(outcome)
     }
 
@@ -947,13 +973,66 @@ impl ConnectionControl for Connection {
     }
 }
 
+impl Connection {
+    fn run_checkpoint(&self, mode: &str) -> Result<CheckpointOutcome> {
+        let (busy, log_frames, checkpointed_frames) =
+            self.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? != 0,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })?;
+        let (log_frames, checkpointed_frames) = match (log_frames, checkpointed_frames) {
+            (Some(log), Some(checkpointed)) => {
+                self.core
+                    .record_checkpoint(checkpointed.max(0).unsigned_abs())?;
+                (log, checkpointed)
+            }
+            // The engine leaves both counts NULL when the checkpoint is busy;
+            // report the WAL as it stands, as SQLite does.
+            _ => {
+                let (log, checkpointed) = self.core.wal_frames()?;
+                (frames(log)?, frames(checkpointed)?)
+            }
+        };
+        Ok(CheckpointOutcome {
+            busy,
+            log_frames,
+            checkpointed_frames,
+        })
+    }
+}
+
 /// Drop applies the drop behavior, rollback by default.
 pub struct Transaction<'c> {
     connection: &'c Connection,
     drop_behavior: DropBehavior,
 }
 
-impl Transaction<'_> {
+impl fmt::Debug for Transaction<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Transaction")
+            .field("drop_behavior", &self.drop_behavior)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'c> Transaction<'c> {
+    /// Begins a transaction through a shared borrow, as rusqlite's does; the
+    /// caller guarantees no other transaction is open on the connection.
+    pub fn new_unchecked(
+        connection: &'c Connection,
+        behavior: TransactionBehavior,
+    ) -> Result<Self> {
+        connection.core.begin_transaction(behavior)?;
+        Ok(Self {
+            connection,
+            drop_behavior: DropBehavior::Rollback,
+        })
+    }
+
     pub fn savepoint(&mut self) -> Result<Savepoint<'_>> {
         Savepoint::open(self.connection)
     }
@@ -967,9 +1046,12 @@ impl Transaction<'_> {
     }
 
     /// Any failure after COMMIT starts is [`ErrorKind::CommitOutcomeUnknown`].
+    /// A transaction still open after a failed COMMIT is rolled back by the
+    /// drop, as rusqlite's is.
     pub fn commit(mut self) -> Result<()> {
+        self.connection.commit()?;
         self.drop_behavior = DropBehavior::Ignore;
-        self.connection.commit()
+        Ok(())
     }
 
     pub fn rollback(mut self) -> Result<()> {
@@ -1032,6 +1114,16 @@ pub struct Savepoint<'c> {
     owns_transaction: bool,
     drop_behavior: DropBehavior,
     finished: bool,
+}
+
+impl fmt::Debug for Savepoint<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Savepoint")
+            .field("name", &self.name)
+            .field("drop_behavior", &self.drop_behavior)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'c> Savepoint<'c> {
@@ -1130,18 +1222,32 @@ pub struct Statement<'c> {
     connection: &'c Connection,
     prepared: Option<Prepared>,
     cached: bool,
+    columns: Rc<[String]>,
     /// The engine's lifetime counters when last taken. A cached program
     /// keeps counting across uses, so only the difference is this caller's.
     counted: Cell<StatementCounters>,
 }
 
+impl fmt::Debug for Statement<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Statement")
+            .field("columns", &self.columns)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'c> Statement<'c> {
     fn new(connection: &'c Connection, prepared: Prepared, cached: bool) -> Self {
         let counted = Cell::new(engine_counters(&prepared));
+        let columns = (0..prepared.statement.num_columns())
+            .map(|index| prepared.statement.get_column_name(index).into_owned())
+            .collect();
         Self {
             connection,
             prepared: Some(prepared),
             cached,
+            columns,
             counted,
         }
     }
@@ -1153,7 +1259,11 @@ impl<'c> Statement<'c> {
     }
 
     pub fn column_count(&self) -> usize {
-        self.prepared().statement.num_columns()
+        self.columns.len()
+    }
+
+    pub fn column_names(&self) -> Vec<&str> {
+        self.columns.iter().map(String::as_str).collect()
     }
 
     fn start<P: Params>(&mut self, params: P) -> Result<&mut Prepared> {
@@ -1185,10 +1295,8 @@ impl<'c> Statement<'c> {
     pub fn query<P: Params>(&mut self, params: P) -> Result<Rows<'_>> {
         let connection = self.connection;
         let core = &connection.core;
+        let columns = Rc::clone(&self.columns);
         let prepared = self.start(params)?;
-        let columns = (0..prepared.statement.num_columns())
-            .map(|index| prepared.statement.get_column_name(index).into_owned())
-            .collect();
         Ok(Rows {
             core,
             prepared,
@@ -1260,6 +1368,7 @@ impl Drop for Statement<'_> {
     }
 }
 
+#[derive(Debug)]
 pub struct CachedStatement<'c>(Statement<'c>);
 
 impl<'c> Deref for CachedStatement<'c> {

@@ -334,12 +334,14 @@ fn require_workflow_schema(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if actual
-        != WORKFLOW_TABLE_CONTRACTS_V1
+    let exact = actual.len() == WORKFLOW_TABLE_CONTRACTS_V1.len()
+        && actual
             .iter()
-            .map(|table| (table.name, table.sql))
-            .collect::<Vec<_>>()
-    {
+            .zip(WORKFLOW_TABLE_CONTRACTS_V1)
+            .all(|((name, sql), table)| {
+                *name == table.name && tracedecay_sql::stored_schema_matches(sql, table.sql)
+            });
+    if !exact {
         return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
     }
     let schema = handle

@@ -7,6 +7,7 @@
 use std::error::Error;
 use std::fmt;
 
+use tracedecay_sql::ErrorKind;
 use tracedecay_sql::types::{Value, ValueRef};
 
 use super::{CELL_ALLOCATION_OVERHEAD, MAX_REQUEST_BYTES, MAX_SQL_BYTES, MAX_SQL_PARAMETERS};
@@ -40,8 +41,7 @@ impl ExactSqlValue {
                 std::str::from_utf8(value)
                     .map_err(|error| ExactSqlError::Sqlite {
                         operation: "decode query text",
-                        code: None,
-                        extended_code: None,
+                        kind: ErrorKind::Other,
                         message: error.to_string(),
                     })?
                     .to_owned(),
@@ -297,8 +297,7 @@ pub enum ExactSqlError {
     TransactionExpired,
     Sqlite {
         operation: &'static str,
-        code: Option<i32>,
-        extended_code: Option<i32>,
+        kind: ErrorKind,
         message: String,
     },
 }

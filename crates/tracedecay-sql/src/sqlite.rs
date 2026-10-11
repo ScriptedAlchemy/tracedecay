@@ -60,8 +60,16 @@ impl ErrorExt for Error {
         {
             return ErrorKind::TransactionControlDenied;
         }
+        if self
+            .sqlite_error()
+            .is_some_and(|failure| failure.extended_code == rusqlite::ffi::SQLITE_CORRUPT_VTAB)
+        {
+            return ErrorKind::CorruptVtab;
+        }
         match self.sqlite_error_code() {
             Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => ErrorKind::Busy,
+            Some(ErrorCode::SystemIoFailure) => ErrorKind::IoErr,
+            Some(ErrorCode::CannotOpen) => ErrorKind::CantOpen,
             Some(ErrorCode::ConstraintViolation) => ErrorKind::Constraint,
             Some(ErrorCode::OperationInterrupted) => ErrorKind::Interrupted,
             Some(ErrorCode::ReadOnly) => ErrorKind::ReadOnly,
@@ -71,11 +79,6 @@ impl ErrorExt for Error {
             Some(ErrorCode::AuthorizationForStatementDenied) => ErrorKind::Denied,
             _ => ErrorKind::Other,
         }
-    }
-
-    fn sqlite_codes(&self) -> Option<(i32, i32)> {
-        self.sqlite_error()
-            .map(|failure| (failure.extended_code & 0xff, failure.extended_code))
     }
 }
 
@@ -200,6 +203,16 @@ impl EnginePolicy for Connection {
         self.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
         self.pragma_update(None, "trusted_schema", false)?;
         self.pragma_update(None, "synchronous", "NORMAL")?;
+        // The runtime's checkpoint lane is the only checkpoint scheduler, as
+        // `wal_auto_actions_disable` makes it on the native engine.
+        self.pragma_update(None, "wal_autocheckpoint", 0_i64)?;
+        let autocheckpoint: i64 =
+            self.pragma_query_value(None, "wal_autocheckpoint", |row| row.get(0))?;
+        if autocheckpoint != 0 {
+            return Err(policy_violation(format!(
+                "wal_autocheckpoint={autocheckpoint}, expected 0"
+            )));
+        }
         let synchronous: i64 = self.pragma_query_value(None, "synchronous", |row| row.get(0))?;
         if synchronous != 1 {
             return Err(policy_violation(format!(
@@ -467,6 +480,10 @@ mod tests {
             .pragma_query_value(None, "busy_timeout", |row| row.get(0))
             .unwrap();
         assert_eq!(busy_timeout, 0);
+        let autocheckpoint: i64 = connection
+            .pragma_query_value(None, "wal_autocheckpoint", |row| row.get(0))
+            .unwrap();
+        assert_eq!(autocheckpoint, 0, "only the runtime's lane checkpoints");
     }
 
     #[test]

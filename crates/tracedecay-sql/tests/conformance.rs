@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use tracedecay_sql::{
     Capability, CheckpointMode, Connection, ConnectionControl, EnginePolicy, Error, ErrorExt,
-    ErrorKind, OptionalExtension, Result, StatementControl, StatementCounters, TransactionBehavior,
-    TransactionControl, params, params_from_iter,
+    ErrorKind, OptionalExtension, Result, StatementControl, StatementCounters, Transaction,
+    TransactionBehavior, TransactionControl, params, params_from_iter,
     types::{FromSql, Value, ValueRef},
 };
 
@@ -41,6 +41,12 @@ conformance!(
     engine_policy_never_waits_on_a_busy_store,
     damaged_pages_are_classified_corrupt,
     statements_report_columns_and_conversions_carry_into_errors,
+    unchecked_transactions_commit_or_roll_back_through_a_shared_borrow,
+    close_rolls_back_and_path_names_the_store,
+    deferred_constraint_at_commit_is_a_refusal_that_rolls_back,
+    busy_checkpoint_reports_the_wal_it_could_not_reset,
+    a_copied_back_wal_starts_over_on_the_next_write,
+    an_interrupted_write_ends_its_transaction,
 );
 
 mod cases {
@@ -103,6 +109,13 @@ mod cases {
             connection.query_row("SELECT name FROM items", [], |row| row.get::<_, String>(0));
         let error = missing.expect_err("an empty table has no first row");
         assert_eq!(error.kind(), ErrorKind::NoRows);
+        // Callers store and compare these messages, so both engines word
+        // them alike.
+        assert_eq!(error.to_string(), "Query returned no rows");
+        assert_eq!(
+            Error::InvalidParameterName("stored digest mismatch".to_owned()).to_string(),
+            "Invalid parameter name: stored digest mismatch"
+        );
         let optional = connection
             .query_row("SELECT name FROM items", [], |row| row.get::<_, String>(0))
             .optional()?;
@@ -332,6 +345,38 @@ mod cases {
         Ok(())
     }
 
+    /// An interrupted INSERT inside a transaction takes the transaction with
+    /// it, as SQLite's interrupt does; the runtime's writer relies on that.
+    pub(super) fn an_interrupted_write_ends_its_transaction() -> Result<()> {
+        let (_directory, _path, mut connection) = file_database();
+        items(&connection)?;
+        connection.execute("INSERT INTO items (name) VALUES ('before')", [])?;
+        let transaction = connection.transaction()?;
+        transaction.execute("INSERT INTO items (name) VALUES ('inside')", [])?;
+        let interrupted = transaction
+            .guard_scope(
+                || true,
+                |connection| {
+                    connection.execute_batch(
+                        "INSERT INTO items (name)
+                         WITH RECURSIVE n(i) AS (
+                            SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000000
+                         )
+                         SELECT 'row-' || i FROM n",
+                    )
+                },
+            )?
+            .expect_err("an always-true guard interrupts the insert");
+        assert_eq!(interrupted.kind(), ErrorKind::Interrupted, "{interrupted}");
+        assert!(
+            transaction.is_autocommit(),
+            "the interrupted write ended its transaction"
+        );
+        drop(transaction);
+        assert_eq!(names(&connection)?, ["before"]);
+        Ok(())
+    }
+
     pub(super) fn page_stats_and_checkpoint_report_the_file() -> Result<()> {
         let (_directory, path, connection) = file_database();
         items(&connection)?;
@@ -515,6 +560,58 @@ mod cases {
         Ok(())
     }
 
+    /// Without a restart the WAL only grows between maintenance truncations,
+    /// however often its frames are copied back.
+    pub(super) fn a_copied_back_wal_starts_over_on_the_next_write() -> Result<()> {
+        let (_directory, _path, connection) = file_database();
+        connection.apply_engine_policy()?;
+        connection.execute_batch("PRAGMA journal_mode = WAL")?;
+        items(&connection)?;
+        let mut insert = connection.prepare("INSERT INTO items (name) VALUES (?1)")?;
+        for index in 0..20 {
+            insert.execute([format!("{index}-{}", "x".repeat(4_000))])?;
+        }
+        drop(insert);
+        let grown = connection.checkpoint(CheckpointMode::Noop)?.log_frames;
+        let passive = connection.checkpoint(CheckpointMode::Passive)?;
+        assert!(!passive.busy, "{passive:?}");
+        connection.execute("INSERT INTO items (name) VALUES ('next')", [])?;
+        let next = connection.checkpoint(CheckpointMode::Noop)?.log_frames;
+        assert!(
+            next < grown,
+            "the WAL kept growing after every frame was copied back: {grown} then {next}"
+        );
+        Ok(())
+    }
+
+    /// A reader's snapshot blocks a TRUNCATE checkpoint: the outcome is busy
+    /// and still counts the WAL it left in place.
+    pub(super) fn busy_checkpoint_reports_the_wal_it_could_not_reset() -> Result<()> {
+        let (_directory, path, writer) = file_database();
+        writer.apply_engine_policy()?;
+        writer.execute_batch("PRAGMA journal_mode = WAL")?;
+        items(&writer)?;
+        writer.execute("INSERT INTO items (name) VALUES ('seen')", [])?;
+        let mut reader = Connection::open(&path)?;
+        reader.apply_engine_policy()?;
+        let snapshot = reader.transaction()?;
+        let seen: i64 = snapshot.query_row("SELECT count(*) FROM items", [], |row| row.get(0))?;
+        assert_eq!(seen, 1);
+        writer.execute("INSERT INTO items (name) VALUES ('unseen')", [])?;
+
+        let outcome = writer.checkpoint(CheckpointMode::Truncate)?;
+        assert!(outcome.busy, "the snapshot blocks the reset: {outcome:?}");
+        assert!(outcome.log_frames > 0, "{outcome:?}");
+        assert!(
+            (0..=outcome.log_frames).contains(&outcome.checkpointed_frames),
+            "{outcome:?}"
+        );
+        drop(snapshot);
+        let cleared = writer.checkpoint(CheckpointMode::Truncate)?;
+        assert!(!cleared.busy, "{cleared:?}");
+        Ok(())
+    }
+
     pub(super) fn statement_work_grows_with_its_target_not_unrelated_rows() -> Result<()> {
         let connection = Connection::open_in_memory()?;
         connection
@@ -643,6 +740,7 @@ mod cases {
         let connection = Connection::open_in_memory()?;
         let statement = connection.prepare("SELECT 1 AS a, 2 AS b")?;
         assert_eq!(statement.column_count(), 2);
+        assert_eq!(statement.column_names(), ["a", "b"]);
         assert!(matches!(
             narrow(ValueRef::Integer(300)),
             Err(Error::IntegralValueOutOfRange(_, 300))
@@ -651,6 +749,72 @@ mod cases {
             narrow(ValueRef::Text(b"x")),
             Err(Error::FromSqlConversionFailure(..))
         ));
+        Ok(())
+    }
+
+    pub(super) fn unchecked_transactions_commit_or_roll_back_through_a_shared_borrow() -> Result<()>
+    {
+        let connection = Connection::open_in_memory()?;
+        items(&connection)?;
+        let committed = Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)?;
+        committed.execute("INSERT INTO items (name) VALUES ('kept')", [])?;
+        committed.commit()?;
+        let dropped = Transaction::new_unchecked(&connection, TransactionBehavior::Deferred)?;
+        dropped.execute("INSERT INTO items (name) VALUES ('dropped')", [])?;
+        assert!(
+            !connection.is_autocommit(),
+            "the shared borrow opened a transaction"
+        );
+        drop(dropped);
+        assert!(connection.is_autocommit());
+        assert_eq!(names(&connection)?, ["kept"]);
+        Ok(())
+    }
+
+    /// A deferred foreign key is checked before COMMIT writes anything: the
+    /// failure is a known refusal, not an unknown outcome, and nothing stays.
+    pub(super) fn deferred_constraint_at_commit_is_a_refusal_that_rolls_back() -> Result<()> {
+        let mut connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE child (
+                id INTEGER PRIMARY KEY,
+                parent INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED
+             );",
+        )?;
+        let transaction = connection.transaction()?;
+        transaction.execute("INSERT INTO child VALUES (1, 9)", [])?;
+        let error = transaction
+            .commit()
+            .expect_err("the dangling child refuses the commit");
+        assert_eq!(error.kind(), ErrorKind::Constraint, "{error}");
+        assert!(
+            connection.is_autocommit(),
+            "the refused transaction is gone"
+        );
+        let children: i64 =
+            connection.query_row("SELECT count(*) FROM child", [], |row| row.get(0))?;
+        assert_eq!(children, 0);
+        Ok(())
+    }
+
+    pub(super) fn close_rolls_back_and_path_names_the_store() -> Result<()> {
+        let (_directory, path, connection) = file_database();
+        items(&connection)?;
+        let reported = std::fs::canonicalize(connection.path().expect("a file store has a path"))
+            .expect("the reported path exists");
+        assert_eq!(
+            reported,
+            std::fs::canonicalize(&path).expect("store exists")
+        );
+        connection.execute_batch("BEGIN; INSERT INTO items (name) VALUES ('open');")?;
+        connection.close().map_err(|(_, error)| error)?;
+        let reopened = Connection::open(&path)?;
+        assert!(
+            names(&reopened)?.is_empty(),
+            "close rolled back the open write"
+        );
         Ok(())
     }
 }

@@ -1,5 +1,7 @@
 use std::fmt;
 
+use tracedecay_sql::ErrorKind;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,8 +20,7 @@ pub enum Error {
     Runtime(String),
     Sqlite {
         operation: &'static str,
-        code: Option<i32>,
-        extended_code: Option<i32>,
+        kind: ErrorKind,
         message: String,
     },
     NativeTurso {
@@ -115,13 +116,11 @@ impl From<tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> for Error {
             ExactSqlError::AuthorityDenied(message) => Self::InvalidOperation(message),
             ExactSqlError::Sqlite {
                 operation,
-                code,
-                extended_code,
+                kind,
                 message,
             } => Self::Sqlite {
                 operation,
-                code,
-                extended_code,
+                kind,
                 message,
             },
             ExactSqlError::Busy => Self::Busy,
@@ -142,26 +141,19 @@ impl Error {
         }
     }
 
-    pub const fn sqlite_code(&self) -> Option<i32> {
+    /// The engine's classification of the failure, through a statement batch.
+    pub const fn engine_kind(&self) -> Option<ErrorKind> {
         match self {
-            Self::Sqlite { code, .. } => *code,
-            Self::StatementBatch { source, .. } => source.sqlite_code(),
-            _ => None,
-        }
-    }
-
-    pub const fn sqlite_extended_code(&self) -> Option<i32> {
-        match self {
-            Self::Sqlite { extended_code, .. } => *extended_code,
-            Self::StatementBatch { source, .. } => source.sqlite_extended_code(),
+            Self::Sqlite { kind, .. } => Some(*kind),
+            Self::StatementBatch { source, .. } => source.engine_kind(),
             _ => None,
         }
     }
 
     /// True when replaying this exact statement can never succeed.
     ///
-    /// A `SQLITE_CONSTRAINT` abort is a schema-contract trigger or constraint
-    /// refusing this exact row, and `InvalidOperation` is an admission or
+    /// A constraint abort is a schema-contract trigger or constraint refusing
+    /// this exact row, and `InvalidOperation` is an admission or
     /// materialization ceiling refusing this exact statement. Neither is a
     /// transient engine condition, so a caller that retries one spins until
     /// something else changes the durable state.
@@ -173,19 +165,28 @@ impl Error {
                 ..
             } => true,
             Self::StatementBatch { source, .. } => source.is_deterministic_refusal(),
-            _ => matches!(self.sqlite_code(), Some(SQLITE_CONSTRAINT)),
+            _ => matches!(self.engine_kind(), Some(ErrorKind::Constraint)),
         }
     }
 
-    /// True when another connection holds the database (`SQLITE_BUSY` or
-    /// `SQLITE_LOCKED`) or the runtime lane itself is saturated: the same
-    /// statement can succeed once the holder releases.
+    /// True when another connection holds the database or the runtime lane
+    /// itself is saturated: the same statement can succeed once the holder
+    /// releases.
     pub const fn is_busy_or_locked(&self) -> bool {
         match self {
             Self::Busy => true,
             Self::StatementBatch { source, .. } => source.is_busy_or_locked(),
-            _ => matches!(self.sqlite_code(), Some(SQLITE_BUSY | SQLITE_LOCKED)),
+            _ => matches!(self.engine_kind(), Some(ErrorKind::Busy)),
         }
+    }
+
+    pub const fn is_interrupted(&self) -> bool {
+        matches!(self.engine_kind(), Some(ErrorKind::Interrupted))
+    }
+
+    /// True when a full-text index's shadow data is damaged.
+    pub const fn is_corrupt_virtual_table(&self) -> bool {
+        matches!(self.engine_kind(), Some(ErrorKind::CorruptVtab))
     }
 
     /// True when the whole native transaction must restart from a fresh snapshot.
@@ -209,23 +210,13 @@ impl Error {
             _ => {
                 self.is_busy_or_locked()
                     || matches!(
-                        self.sqlite_code(),
-                        Some(SQLITE_INTERRUPT | SQLITE_IOERR | SQLITE_CANTOPEN)
+                        self.engine_kind(),
+                        Some(ErrorKind::Interrupted | ErrorKind::IoErr | ErrorKind::CantOpen)
                     )
             }
         }
     }
 }
-
-/// `SQLITE_BUSY`: another connection holds a conflicting database lock.
-const SQLITE_BUSY: i32 = 5;
-/// `SQLITE_LOCKED`: a conflicting lock inside the same shared cache.
-const SQLITE_LOCKED: i32 = 6;
-/// `SQLITE_CONSTRAINT`: a constraint or `RAISE(ABORT)` trigger refused the row.
-const SQLITE_CONSTRAINT: i32 = 19;
-const SQLITE_INTERRUPT: i32 = 9;
-const SQLITE_IOERR: i32 = 10;
-const SQLITE_CANTOPEN: i32 = 14;
 
 impl From<tracedecay_sql::native::Error> for Error {
     fn from(error: tracedecay_sql::native::Error) -> Self {
@@ -258,28 +249,34 @@ impl From<tracedecay_sql::native::Error> for Error {
 
 #[cfg(test)]
 mod tests {
+    use tracedecay_sql::ErrorKind;
+
     use super::Error;
 
-    fn sqlite(extended_code: i32) -> Error {
+    fn engine(kind: ErrorKind) -> Error {
         Error::Sqlite {
             operation: "step",
-            code: Some(extended_code & 0xff),
-            extended_code: Some(extended_code),
+            kind,
             message: "fixture".to_owned(),
         }
     }
 
     #[test]
-    fn transient_read_failures_are_named_by_engine_code() {
-        // SQLITE_BUSY_SNAPSHOT, SQLITE_LOCKED, SQLITE_IOERR_SHORT_READ.
-        for transient in [sqlite(517), sqlite(6), sqlite(522), Error::Busy] {
+    fn transient_read_failures_are_named_by_engine_kind() {
+        for transient in [
+            engine(ErrorKind::Busy),
+            engine(ErrorKind::Interrupted),
+            engine(ErrorKind::IoErr),
+            engine(ErrorKind::CantOpen),
+            Error::Busy,
+        ] {
             assert!(transient.is_transient_read_failure(), "{transient:?}");
         }
-        // SQLITE_CONSTRAINT_TRIGGER, SQLITE_CORRUPT, a column that does not
-        // decode: each answers the same on every read.
+        // A constraint abort, damaged pages, a column that does not decode:
+        // each answers the same on every read.
         for verdict in [
-            sqlite(1811),
-            sqlite(11),
+            engine(ErrorKind::Constraint),
+            engine(ErrorKind::Corrupt),
             Error::TypeMismatch {
                 column: 0,
                 expected: "text",
