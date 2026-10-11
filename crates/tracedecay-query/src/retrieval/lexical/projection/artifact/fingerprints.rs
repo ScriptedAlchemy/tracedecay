@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use rusqlite::{Connection, OptionalExtension};
 use tracedecay_code_index::clones::{
     CLONE_FINGERPRINT_K_V1, CloneAlignedDifferenceV1, CloneAlignmentStopReasonV1,
     CloneBodyEligibilityV1, CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneBodyRenameStatusV1,
@@ -10,6 +9,7 @@ use tracedecay_code_index::clones::{
 };
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{ManifestDigest, RetrieverCoverage, SymbolOccurrenceId, canonical_sha256};
+use tracedecay_sql::{Connection, OptionalExtension};
 
 use super::clone_codec::{CloneOccurrenceRouteV1, routed_clone_body_row};
 use super::format::{VerifiedCodeLexicalArtifactV1, contract_number, decode_fingerprint_postings};
@@ -310,7 +310,7 @@ pub(super) fn read_clone_fingerprint_page(
         }
         let count: Option<i64> = count_statement
             .query_row(
-                rusqlite::params![
+                tracedecay_sql::params![
                     descriptor.language,
                     i64::from(descriptor.class as u8),
                     i64::from(descriptor.normalization_revision),
@@ -359,7 +359,7 @@ pub(super) fn read_clone_fingerprint_page(
         let read_limit = remaining.min(posting_count);
         let list: Vec<u8> = list_statement
             .query_row(
-                rusqlite::params![
+                tracedecay_sql::params![
                     descriptor.language,
                     i64::from(descriptor.class as u8),
                     i64::from(descriptor.normalization_revision),

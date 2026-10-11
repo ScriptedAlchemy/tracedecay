@@ -10,10 +10,6 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use rayon::prelude::*;
-use rusqlite::config::DbConfig;
-use rusqlite::functions::FunctionFlags;
-use rusqlite::types::{ToSqlOutput, Value, ValueRef};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::ExtractionAdmittedCodeSearchChunkV1;
@@ -29,6 +25,8 @@ use tracedecay_domain::{
 };
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 use tracedecay_private_fs::{create_private_file_retained, open_private_file};
+use tracedecay_sql::types::{ToSqlOutput, Value, ValueRef};
+use tracedecay_sql::{Connection, ConnectionControl, OptionalExtension, Transaction, params};
 
 use super::clone_census::read_clone_index_census;
 use super::clone_codec::{digest_from_key, digest_key};
@@ -80,7 +78,6 @@ const SQLITE_HEADER_HISTORY_OFFSETS: [u64; 3] = [24, 40, 92];
 const SEALED_HEADER_HISTORY: u32 = 1;
 const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, next_cursor \
      FROM source_page_cursors ORDER BY page_ordinal DESC LIMIT 1";
-const FINALIZATION_PROGRESS_INTERVAL_OPS: i32 = 4_096;
 const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
 // A plan entry owns its sort key (borrowed term text, integer field code,
 // document id) and one posting reference. Five words match the 64-bit
@@ -96,19 +93,11 @@ const EXACT_INSERT_PLAN_BYTES_PER_REF: usize = 8 * std::mem::size_of::<usize>();
 const EXACT_INSERT_CONTROL_INTERVAL: usize = TERM_INSERT_CONTROL_INTERVAL;
 /// Rows per multi-row `INSERT ... VALUES (...), (...)` statement in the
 /// append phase. The per-row cost of the base-table inserts is statement
-/// overhead plus the per-row builder-gate trigger, not I/O: on a
-/// one-row-per-posting shape at production pragmas (120k sorted rows in one
-/// transaction) one row per statement costs 1.47 µs/row and 32 rows per
-/// statement 0.86 µs/row, the trigger still firing for every row. Five
-/// columns × 32 rows stays under SQLite's 999-parameter floor.
+/// overhead, not I/O: on a one-row-per-posting shape at production pragmas
+/// (120k sorted rows in one transaction) one row per statement costs
+/// 1.47 µs/row and 32 rows per statement 0.86 µs/row. Five columns × 32 rows
+/// stays under SQLite's 999-parameter floor.
 const INSERT_ROWS_PER_STATEMENT: usize = 32;
-// This gate serializes mutation within the private-profile/stable-handle
-// authority. It denies ordinary second-connection DML, but is not a
-// cryptographic defense against malicious same-UID code that deliberately
-// registers a lookalike SQLite function.
-const BUILDER_MUTATION_GATE_FUNCTION: &str = "tracedecay_lexical_builder_append_authorized";
-const BUILDER_MUTATION_IDLE: u8 = 0;
-const BUILDER_MUTATION_APPEND: u8 = 1;
 
 /// One planned posting, keyed `(term, field, document_id)` so the merged
 /// stream yields each `(term, field)` run of the batch contiguously and in
@@ -162,57 +151,6 @@ struct PreparedExactInsertPlanV1<'a> {
     interned_terms: Vec<(&'a [u8], i64)>,
 }
 
-const BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 14] = [
-    ("builder_gate_source_pages_insert", "source_pages", "INSERT"),
-    ("builder_gate_row_blocks_insert", "row_blocks", "INSERT"),
-    ("builder_gate_row_blocks_update", "row_blocks", "UPDATE"),
-    ("builder_gate_row_blocks_delete", "row_blocks", "DELETE"),
-    ("builder_gate_row_chunks_insert", "row_chunks", "INSERT"),
-    ("builder_gate_row_chunks_update", "row_chunks", "UPDATE"),
-    ("builder_gate_row_chunks_delete", "row_chunks", "DELETE"),
-    (
-        "builder_gate_term_postings_insert",
-        "term_postings",
-        "INSERT",
-    ),
-    (
-        "builder_gate_term_postings_update",
-        "term_postings",
-        "UPDATE",
-    ),
-    (
-        "builder_gate_term_postings_delete",
-        "term_postings",
-        "DELETE",
-    ),
-    (
-        "builder_gate_exact_postings_insert",
-        "exact_postings",
-        "INSERT",
-    ),
-    (
-        "builder_gate_exact_postings_update",
-        "exact_postings",
-        "UPDATE",
-    ),
-    (
-        "builder_gate_exact_postings_delete",
-        "exact_postings",
-        "DELETE",
-    ),
-    (
-        "builder_gate_ngram_postings_insert",
-        "ngram_postings",
-        "INSERT",
-    ),
-];
-/// Batches append each document's chunk id here in document order;
-/// finalization sorts it into `row_chunks` and drops it, gates included.
-const SOURCE_PAGE_CURSORS_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 1] = [(
-    "builder_gate_source_page_cursors_insert",
-    "source_page_cursors",
-    "INSERT",
-)];
 const SOURCE_PAGE_CURSORS_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 2] = [
     (
         "immutable_source_page_cursors_update",
@@ -225,121 +163,6 @@ const SOURCE_PAGE_CURSORS_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 2
         "source_page_cursors",
         "DELETE",
         "immutable lexical source page cursors",
-    ),
-];
-const ROW_CHUNK_PAGES_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
-    (
-        "builder_gate_row_chunk_pages_insert",
-        "row_chunk_pages",
-        "INSERT",
-    ),
-    (
-        "builder_gate_row_chunk_pages_update",
-        "row_chunk_pages",
-        "UPDATE",
-    ),
-    (
-        "builder_gate_row_chunk_pages_delete",
-        "row_chunk_pages",
-        "DELETE",
-    ),
-];
-/// Batches append postings in page order to these staging tables under the
-/// private-builder gate; finalization merges each into its sealed serving
-/// table and drops it, gates included.
-const TERM_POSTING_RUNS_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
-    (
-        "builder_gate_term_posting_runs_insert",
-        "term_posting_runs",
-        "INSERT",
-    ),
-    (
-        "builder_gate_term_posting_runs_update",
-        "term_posting_runs",
-        "UPDATE",
-    ),
-    (
-        "builder_gate_term_posting_runs_delete",
-        "term_posting_runs",
-        "DELETE",
-    ),
-];
-const EXACT_POSTING_RUNS_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
-    (
-        "builder_gate_exact_posting_runs_insert",
-        "exact_posting_runs",
-        "INSERT",
-    ),
-    (
-        "builder_gate_exact_posting_runs_update",
-        "exact_posting_runs",
-        "UPDATE",
-    ),
-    (
-        "builder_gate_exact_posting_runs_delete",
-        "exact_posting_runs",
-        "DELETE",
-    ),
-];
-const EXACT_VOCABULARY_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
-    (
-        "builder_gate_exact_vocabulary_insert",
-        "exact_vocabulary",
-        "INSERT",
-    ),
-    (
-        "builder_gate_exact_vocabulary_update",
-        "exact_vocabulary",
-        "UPDATE",
-    ),
-    (
-        "builder_gate_exact_vocabulary_delete",
-        "exact_vocabulary",
-        "DELETE",
-    ),
-];
-const CLONE_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
-    (
-        "builder_gate_clone_body_payloads_insert",
-        "clone_body_payloads",
-        "INSERT",
-    ),
-    (
-        "builder_gate_clone_occurrences_insert",
-        "clone_occurrences",
-        "INSERT",
-    ),
-    (
-        "builder_gate_clone_exact_postings_insert",
-        "clone_exact_postings",
-        "INSERT",
-    ),
-];
-const CLONE_FINGERPRINT_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 1] = [(
-    "builder_gate_clone_fingerprint_postings_insert",
-    "clone_fingerprint_postings",
-    "INSERT",
-)];
-/// Revision 16 stages fingerprint postings per batch in arrival order
-/// (`clone_fingerprint_postings_pages`) under the same private-builder gate
-/// and immutability guards as the row dictionary pages; finalization sorts
-/// them once into the keyed `clone_fingerprint_postings` tree and drops the
-/// staging table.
-const CLONE_FINGERPRINT_PAGES_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
-    (
-        "builder_gate_clone_fingerprint_postings_pages_insert",
-        "clone_fingerprint_postings_pages",
-        "INSERT",
-    ),
-    (
-        "builder_gate_clone_fingerprint_postings_pages_update",
-        "clone_fingerprint_postings_pages",
-        "UPDATE",
-    ),
-    (
-        "builder_gate_clone_fingerprint_postings_pages_delete",
-        "clone_fingerprint_postings_pages",
-        "DELETE",
     ),
 ];
 const CLONE_FINGERPRINT_PAGES_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 2] = [
@@ -448,27 +271,6 @@ const EXACT_VOCABULARY_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 2] =
         "immutable lexical exact vocabulary",
     ),
 ];
-/// Revision 14 stages row dictionary entries per page during the append
-/// phase (`row_dictionary_pages`) under the same private-builder gate and
-/// immutability guards as the exact vocabulary; finalization derives the
-/// sealed `row_dictionary` from it and drops the staging table.
-const ROW_DICTIONARY_PAGES_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
-    (
-        "builder_gate_row_dictionary_pages_insert",
-        "row_dictionary_pages",
-        "INSERT",
-    ),
-    (
-        "builder_gate_row_dictionary_pages_update",
-        "row_dictionary_pages",
-        "UPDATE",
-    ),
-    (
-        "builder_gate_row_dictionary_pages_delete",
-        "row_dictionary_pages",
-        "DELETE",
-    ),
-];
 const ROW_DICTIONARY_PAGES_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 2] = [
     (
         "immutable_row_dictionary_pages_update",
@@ -483,74 +285,6 @@ const ROW_DICTIONARY_PAGES_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 
         "immutable lexical row dictionary pages",
     ),
 ];
-/// Per-field posting-length totals folded in by every committed batch and
-/// sealed into `field_stats` (which drops this table) at finalization.
-const FIELD_STATS_STAGING_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
-    (
-        "builder_gate_field_stats_staging_insert",
-        "field_stats_staging",
-        "INSERT",
-    ),
-    (
-        "builder_gate_field_stats_staging_update",
-        "field_stats_staging",
-        "UPDATE",
-    ),
-    (
-        "builder_gate_field_stats_staging_delete",
-        "field_stats_staging",
-        "DELETE",
-    ),
-];
-
-pub(super) struct BuilderMutationGuardV1 {
-    gate: Arc<AtomicU8>,
-}
-
-impl BuilderMutationGuardV1 {
-    pub(super) fn enter(gate: &Arc<AtomicU8>) -> Result<Self, CodeLexicalArtifactErrorV1> {
-        gate.compare_exchange(
-            BUILDER_MUTATION_IDLE,
-            BUILDER_MUTATION_APPEND,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        )
-        .map_err(|_| {
-            CodeLexicalArtifactErrorV1::Corrupt(
-                "lexical artifact builder mutation authority is already active".to_owned(),
-            )
-        })?;
-        Ok(Self {
-            gate: Arc::clone(gate),
-        })
-    }
-}
-
-impl Drop for BuilderMutationGuardV1 {
-    fn drop(&mut self) {
-        self.gate.store(BUILDER_MUTATION_IDLE, Ordering::Release);
-    }
-}
-
-pub(super) fn register_builder_mutation_gate(
-    connection: &Connection,
-) -> Result<Arc<AtomicU8>, CodeLexicalArtifactErrorV1> {
-    let gate = Arc::new(AtomicU8::new(BUILDER_MUTATION_IDLE));
-    let function_gate = Arc::clone(&gate);
-    connection
-        .create_scalar_function(
-            BUILDER_MUTATION_GATE_FUNCTION,
-            0,
-            FunctionFlags::SQLITE_UTF8,
-            move |_| {
-                Ok(i64::from(
-                    function_gate.load(Ordering::Acquire) == BUILDER_MUTATION_APPEND,
-                ))
-            },
-        )
-        .map_err(sqlite_error)?;
-    Ok(gate)
-}
 
 #[cfg(test)]
 std::thread_local! {
@@ -871,7 +605,6 @@ pub struct CodeLexicalArtifactBuilderV1 {
     private_file: File,
     file_identity: StableArtifactFileIdentityV1,
     connection: Connection,
-    mutation_gate: Arc<AtomicU8>,
     metadata: CodeLexicalProjectionMetadataV1,
     metadata_digest: ManifestDigest,
     memory_budget_bytes: usize,
@@ -929,15 +662,13 @@ impl CodeLexicalArtifactBuilderV1 {
         publish_initialized_staging(path, &metadata, &metadata_digest, memory_budget_bytes)?;
         let (connection, private_file, file_identity) =
             open_private_builder_connection(path, memory_budget_bytes)?;
-        let mutation_gate = register_builder_mutation_gate(&connection)?;
-        verify_builder_mutation_gate_schema(&connection)?;
+        verify_layout_dependent_triggers(&connection)?;
         crate::observe::Residency::Cold.record("query.artifact.residency");
         Ok(Self {
             path: path.to_path_buf(),
             private_file,
             file_identity,
             connection,
-            mutation_gate,
             metadata,
             metadata_digest,
             memory_budget_bytes,
@@ -966,14 +697,13 @@ impl CodeLexicalArtifactBuilderV1 {
             let _span = tracing::trace_span!("query.artifact.open.sqlite_connect").entered();
             open_private_builder_connection(path, memory_budget_bytes)
         }?;
-        let mutation_gate = register_builder_mutation_gate(&connection)?;
         require_staged_revision(&connection)?;
         {
             let _span = tracing::trace_span!("query.artifact.open.schema_verify").entered();
             {
                 require_integrity(&connection, control)?;
                 verify_artifact_table_layout(&connection)?;
-                verify_builder_mutation_gate_schema(&connection)
+                verify_layout_dependent_triggers(&connection)
             }
         }?;
         let expected_digest = {
@@ -1027,7 +757,6 @@ impl CodeLexicalArtifactBuilderV1 {
             private_file,
             file_identity,
             connection,
-            mutation_gate,
             metadata: expected_metadata,
             metadata_digest: expected_digest,
             memory_budget_bytes,
@@ -1081,7 +810,6 @@ impl CodeLexicalArtifactBuilderV1 {
         }?;
         let (mut connection, private_file, file_identity) =
             open_private_builder_connection(path, memory_budget_bytes)?;
-        let mutation_gate = register_builder_mutation_gate(&connection)?;
         require_staged_revision(&connection)?;
         verify_artifact_table_layout(&connection)?;
         if read_receipt_with_control(&connection, control)?.is_none()
@@ -1092,18 +820,16 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         enter_resumable_journal(&connection)?;
-        // The sealed parent's freeze triggers stay in its schema unchanged,
-        // since the layout rewrite copies the schema as it stands; the carry
-        // only switches them off for its own connection.
-        set_triggers_enabled(&connection, false)?;
         let transaction = connection.transaction().map_err(sqlite_error)?;
-        let carried = carry_parent_rows(
-            &transaction,
-            &metadata,
-            replacements,
-            stage_file_pages,
-            control,
-        )?;
+        let carried = without_triggers(&transaction, || {
+            carry_parent_rows(
+                &transaction,
+                &metadata,
+                replacements,
+                stage_file_pages,
+                control,
+            )
+        })?;
         let content_epoch =
             i64::try_from(carried.pages + carried.documents).map_err(contract_number)?;
         transaction
@@ -1133,7 +859,6 @@ impl CodeLexicalArtifactBuilderV1 {
         )?;
         checkpoint(control)?;
         transaction.commit().map_err(sqlite_error)?;
-        set_triggers_enabled(&connection, true)?;
         tracing::debug!(
             pages = carried.pages,
             re_encoded_pages = carried.re_encoded_pages,
@@ -1146,7 +871,6 @@ impl CodeLexicalArtifactBuilderV1 {
             private_file,
             file_identity,
             connection,
-            mutation_gate,
             metadata,
             metadata_digest,
             memory_budget_bytes,
@@ -1528,11 +1252,9 @@ impl CodeLexicalArtifactBuilderV1 {
             )
         }?;
         enter_resumable_journal(&self.connection)?;
-        let mutation_gate = &self.mutation_gate;
         super::with_memory_statement_journals(&mut self.connection, |connection| {
             let _span = tracing::trace_span!("query.artifact.batch.sqlite").entered();
             {
-                let _mutation_authority = BuilderMutationGuardV1::enter(mutation_gate)?;
                 let transaction = connection.transaction().map_err(sqlite_error)?;
                 let mutation = (|| {
                     {
@@ -1701,7 +1423,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 )
                 .entered();
                 with_cancellable_sqlite_statement(&transaction, control, || {
-                    derive_clone_fingerprint_postings(&transaction, &self.mutation_gate, control)
+                    derive_clone_fingerprint_postings(&transaction, control)
                 })
             })??;
             let content_epoch = authenticated_authority_epoch(&transaction, source, control)?;
@@ -1746,7 +1468,6 @@ impl CodeLexicalArtifactBuilderV1 {
                     &transaction,
                     &mut state,
                     &ServingIndexStepAuthorityV1 {
-                        mutation_gate: &self.mutation_gate,
                         generation: &self.metadata.generation,
                         ngram_memory_bytes: self.memory_budget_bytes / 4,
                     },
@@ -1905,13 +1626,10 @@ impl CodeLexicalArtifactBuilderV1 {
 
     /// Rewrite the staging file from its content alone.
     ///
-    /// Under the builder's rollback journal an in-place `VACUUM` writes the
-    /// file three times (a temporary copy, a journal of every original page,
-    /// and the copy back) with syncs between them, so it stretches whenever
-    /// another writer shares the disk. `VACUUM INTO` writes a private sibling
-    /// once, which then replaces the staging path. The sibling carries the
-    /// finalization state, so a crash on either side of the rename resumes
-    /// into this same rewrite.
+    /// The builder writes the content, in key order, into a fresh private
+    /// sibling once, which then replaces the staging path. The sibling
+    /// carries the finalization state, so a crash on either side of the
+    /// rename resumes into this same rewrite.
     #[cfg(unix)]
     fn rewrite_canonical_layout(
         &mut self,
@@ -1924,22 +1642,15 @@ impl CodeLexicalArtifactBuilderV1 {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(private_staging_error(error)),
         }
-        let compacted = create_private_file_retained(&compacting)
-            .map_err(|failure| private_staging_error(failure.into_error()))?;
-        let target = compacting.to_str().ok_or_else(|| {
-            CodeLexicalArtifactErrorV1::Contract(
-                "lexical artifact staging path is not UTF-8".to_owned(),
-            )
-        })?;
         // The staging WAL is named after the path the compacted file takes
         // over, so it must be folded away before the rename.
         leave_resumable_journal(&self.connection)?;
+        let (mut target, compacted, _) =
+            create_private_builder_connection(&compacting, self.memory_budget_bytes)?;
         with_cancellable_sqlite_statement(&self.connection, control, || {
-            self.connection
-                .execute("VACUUM INTO ?1", [target])
-                .map(drop)
-                .map_err(sqlite_error)
+            write_canonical_copy(&self.connection, &mut target, control)
         })?;
+        drop(target);
         compacted.sync_all().map_err(private_staging_error)?;
         std::fs::rename(&compacting, &self.path).map_err(private_staging_error)?;
         sync_parent_directory(&self.path, DirectorySyncPolicy::Strict)
@@ -1952,7 +1663,6 @@ impl CodeLexicalArtifactBuilderV1 {
                     .to_owned(),
             ));
         }
-        self.mutation_gate = register_builder_mutation_gate(&connection)?;
         self.connection = connection;
         self.private_file = private_file;
         self.file_identity = file_identity;
@@ -2047,10 +1757,9 @@ fn publish_initialized_staging(
     let metadata_bytes = content_metadata_bytes(metadata)?;
     let (mut connection, private_file, _) =
         create_private_builder_connection(&initializing, memory_budget_bytes)?;
-    let _mutation_gate = register_builder_mutation_gate(&connection)?;
     let initialization = connection.transaction().map_err(sqlite_error)?;
     create_schema(&initialization)?;
-    verify_builder_mutation_gate_schema(&initialization)?;
+    verify_layout_dependent_triggers(&initialization)?;
     #[cfg(test)]
     if take_failed_staging_initialization() {
         return Err(CodeLexicalArtifactErrorV1::Contract(
@@ -2145,14 +1854,134 @@ fn copy_sealed_parent(
         .map_err(|error| staging_initialization_error("sync the staging directory", error))
 }
 
-fn set_triggers_enabled(
-    connection: &Connection,
-    enabled: bool,
+/// Write every table of `source`, then its indexes, then its triggers, into
+/// the empty database behind `target`. Rows go in primary-key order (rowid
+/// order for a table without one), so the file's pages are a function of the
+/// content and never of the batch history that staged it; triggers come last
+/// so none fires on the copy. Schema objects keep their relative order.
+fn write_canonical_copy(
+    source: &Connection,
+    target: &mut Connection,
+    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    connection
-        .set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, enabled)
-        .map(drop)
-        .map_err(sqlite_error)
+    let schema = source
+        .prepare(
+            "SELECT type, name, sql FROM sqlite_schema \
+             WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid",
+        )
+        .map_err(sqlite_corrupt)?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(sqlite_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_corrupt)?;
+    let of_kind = |kind: &'static str| {
+        schema
+            .iter()
+            .filter(move |(object, _, _)| object == kind)
+            .map(|(_, name, sql)| (name.as_str(), sql.as_str()))
+    };
+    // Dropped staging tables must leave the sealed file, as they left the
+    // staging file, so the copy keeps the staging file's vacuum mode.
+    target
+        .execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+        .map_err(sqlite_error)?;
+    let transaction = target.transaction().map_err(sqlite_error)?;
+    for (_, sql) in of_kind("table") {
+        transaction.execute_batch(sql).map_err(sqlite_error)?;
+    }
+    let mut copied = 0usize;
+    for (table, _) in of_kind("table") {
+        let columns = source
+            .prepare("SELECT name, pk FROM pragma_table_info(?1) ORDER BY cid")
+            .map_err(sqlite_corrupt)?
+            .query_map([table], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(sqlite_corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_corrupt)?;
+        let mut key = columns
+            .iter()
+            .filter(|(_, ordinal)| *ordinal > 0)
+            .collect::<Vec<_>>();
+        key.sort_by_key(|(_, ordinal)| *ordinal);
+        let order = if key.is_empty() {
+            "rowid".to_owned()
+        } else {
+            key.iter()
+                .map(|(name, _)| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut select = source
+            .prepare(&format!("SELECT * FROM \"{table}\" ORDER BY {order}"))
+            .map_err(sqlite_error)?;
+        let mut insert = transaction
+            .prepare(&format!(
+                "INSERT INTO \"{table}\" VALUES ({})",
+                vec!["?"; columns.len()].join(", ")
+            ))
+            .map_err(sqlite_error)?;
+        let mut rows = select.query([]).map_err(sqlite_error)?;
+        while let Some(row) = rows.next().map_err(sqlite_error)? {
+            if copied.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
+                checkpoint(control)?;
+            }
+            copied += 1;
+            let values = (0..columns.len())
+                .map(|index| row.get::<_, Value>(index))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sqlite_corrupt)?;
+            insert
+                .execute(tracedecay_sql::params_from_iter(values))
+                .map_err(sqlite_error)?;
+        }
+    }
+    for kind in ["index", "trigger"] {
+        for (_, sql) in of_kind(kind) {
+            transaction.execute_batch(sql).map_err(sqlite_error)?;
+        }
+    }
+    checkpoint(control)?;
+    transaction.commit().map_err(sqlite_error)
+}
+
+/// Run `carry` with the sealed parent's freeze and epoch triggers lifted, then
+/// reinstall their exact text in their original order, all inside the caller's
+/// transaction. The layout rewrite copies triggers in that order, so a carried
+/// successor keeps the schema a cold build seals.
+fn without_triggers<T>(
+    transaction: &Transaction<'_>,
+    carry: impl FnOnce() -> Result<T, CodeLexicalArtifactErrorV1>,
+) -> Result<T, CodeLexicalArtifactErrorV1> {
+    let triggers = {
+        let mut statement = transaction
+            .prepare("SELECT name, sql FROM sqlite_schema WHERE type = 'trigger' ORDER BY rowid")
+            .map_err(sqlite_corrupt)?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sqlite_corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_corrupt)?
+    };
+    for (name, _) in &triggers {
+        transaction
+            .execute_batch(&format!("DROP TRIGGER \"{name}\""))
+            .map_err(sqlite_error)?;
+    }
+    let carried = carry()?;
+    for (_, sql) in &triggers {
+        transaction.execute_batch(sql).map_err(sqlite_error)?;
+    }
+    Ok(carried)
 }
 
 fn staging_initialization_error(
@@ -2856,8 +2685,8 @@ fn merge_two_runs<T: Copy, K: Ord>(
 }
 
 // Mirrors `prepare_term_insert_plan` for `exact_postings`,
-// whose `PRIMARY KEY(field, term, document_id)` `WITHOUT ROWID` layout has
-// the same clustered-index cost for out-of-order inserts as `term_postings`.
+// whose `PRIMARY KEY(field, term, document_id)` key index has the same cost
+// for out-of-order inserts as `term_postings`.
 fn prepare_exact_insert_plan<'a>(
     fixed_ledger_charge_bytes: usize,
     memory_budget_bytes: usize,
@@ -3457,9 +3286,9 @@ struct MultiRowInsertV1<'transaction, 'row> {
     table_columns: &'static str,
     columns: usize,
     conflict_clause: &'static str,
-    full_statement: rusqlite::CachedStatement<'transaction>,
+    full_statement: tracedecay_sql::CachedStatement<'transaction>,
     buffer: Vec<ToSqlOutput<'row>>,
-    map_error: fn(rusqlite::Error) -> CodeLexicalArtifactErrorV1,
+    map_error: fn(tracedecay_sql::Error) -> CodeLexicalArtifactErrorV1,
 }
 
 impl<'transaction, 'row> MultiRowInsertV1<'transaction, 'row> {
@@ -3467,7 +3296,7 @@ impl<'transaction, 'row> MultiRowInsertV1<'transaction, 'row> {
         transaction: &'transaction Transaction<'transaction>,
         table_columns: &'static str,
         columns: usize,
-        map_error: fn(rusqlite::Error) -> CodeLexicalArtifactErrorV1,
+        map_error: fn(tracedecay_sql::Error) -> CodeLexicalArtifactErrorV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         Self::new_with_conflict_clause(transaction, table_columns, columns, "", map_error)
     }
@@ -3482,7 +3311,7 @@ impl<'transaction, 'row> MultiRowInsertV1<'transaction, 'row> {
         table_columns: &'static str,
         columns: usize,
         conflict_clause: &'static str,
-        map_error: fn(rusqlite::Error) -> CodeLexicalArtifactErrorV1,
+        map_error: fn(tracedecay_sql::Error) -> CodeLexicalArtifactErrorV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         let full_statement = transaction
             .prepare_cached(&multi_row_insert_sql(
@@ -3516,7 +3345,7 @@ impl<'transaction, 'row> MultiRowInsertV1<'transaction, 'row> {
         }
         if self.buffer.len() == self.columns * INSERT_ROWS_PER_STATEMENT {
             self.full_statement
-                .execute(rusqlite::params_from_iter(self.buffer.iter()))
+                .execute(tracedecay_sql::params_from_iter(self.buffer.iter()))
                 .map_err(self.map_error)?;
             self.buffer.clear();
         }
@@ -3537,7 +3366,7 @@ impl<'transaction, 'row> MultiRowInsertV1<'transaction, 'row> {
                 self.conflict_clause,
             ))
             .map_err(self.map_error)?;
-        tail.execute(rusqlite::params_from_iter(self.buffer.iter()))
+        tail.execute(tracedecay_sql::params_from_iter(self.buffer.iter()))
             .map_err(self.map_error)?;
         self.buffer.clear();
         Ok(())
@@ -3630,7 +3459,7 @@ fn verify_clone_payload_digests<'body>(
             PAYLOAD_DIGEST_CONFLICT_CHECK_CHUNK - chunk.len(),
         ));
         let mut rows = statement
-            .query(rusqlite::params_from_iter(parameters))
+            .query(tracedecay_sql::params_from_iter(parameters))
             .map_err(sqlite_error)?;
         while let Some(row) = rows.next().map_err(sqlite_error)? {
             let key: Vec<u8> = row.get(0).map_err(sqlite_error)?;
@@ -3813,14 +3642,11 @@ type FingerprintKeyV1 = (String, i64, i64, i64);
 /// Merge the staged fingerprint postings into one sealed list per
 /// `(language, class, normalization revision, fingerprint)` in a single
 /// sorted pass, so the keyed tree is written sequentially once, then drop the
-/// staging table. The keyed table keeps its private-builder insert gate, so
-/// the pass holds the mutation authority exactly as a batch append does.
+/// staging table.
 fn derive_clone_fingerprint_postings(
     transaction: &Transaction<'_>,
-    mutation_gate: &Arc<AtomicU8>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let _mutation_authority = BuilderMutationGuardV1::enter(mutation_gate)?;
     let mut select = transaction
         .prepare(
             "SELECT language, class, normalization_revision, fingerprint, occurrence_ordinal, token_position
@@ -4125,7 +3951,8 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
     // staging table and drops it. Incremental auto-vacuum must be chosen
     // before the first table exists so those dropped pages leave the file.
     // `row_dictionary`, `row_chunks`, and the three posting tables stay empty
-    // until then.
+    // until then. The field statistics key is `INT`, not `INTEGER`, so it is
+    // not a rowid alias and a NULL field is refused instead of numbered.
     connection
         .execute_batch(
             "
@@ -4172,27 +3999,27 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             CREATE TABLE row_chunks (
                 chunk_id BLOB NOT NULL PRIMARY KEY,
                 document_id INTEGER NOT NULL
-            ) WITHOUT ROWID;
+            );
             CREATE TABLE term_posting_runs (
                 page_ordinal INTEGER NOT NULL,
                 term TEXT NOT NULL,
                 field INTEGER NOT NULL,
                 postings BLOB NOT NULL,
                 PRIMARY KEY(page_ordinal, term, field)
-            ) WITHOUT ROWID;
+            );
             CREATE TABLE term_postings (
                 term TEXT NOT NULL PRIMARY KEY,
                 in_fuzzy INTEGER NOT NULL CHECK(in_fuzzy IN (0, 1)),
                 lists BLOB NOT NULL
-            ) WITHOUT ROWID;
+            );
             CREATE TABLE field_stats (
-                field INTEGER PRIMARY KEY,
+                field INT NOT NULL PRIMARY KEY,
                 total_length INTEGER NOT NULL
-            ) WITHOUT ROWID;
+            );
             CREATE TABLE field_stats_staging (
-                field INTEGER PRIMARY KEY,
+                field INT NOT NULL PRIMARY KEY,
                 total_length INTEGER NOT NULL
-            ) WITHOUT ROWID;
+            );
             CREATE TABLE exact_vocabulary (
                 term_id INTEGER PRIMARY KEY,
                 term BLOB NOT NULL
@@ -4203,20 +4030,20 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 field INTEGER NOT NULL,
                 documents BLOB NOT NULL,
                 PRIMARY KEY(page_ordinal, term_id, field)
-            ) WITHOUT ROWID;
+            );
             CREATE TABLE exact_postings (
                 term_id INTEGER NOT NULL,
                 field INTEGER NOT NULL,
                 documents BLOB NOT NULL,
                 PRIMARY KEY(term_id, field)
-            ) WITHOUT ROWID;
+            );
             CREATE TABLE ngram_postings (
                 kind INTEGER NOT NULL,
                 ngram INTEGER NOT NULL,
                 document_frequency INTEGER NOT NULL CHECK(document_frequency > 0),
                 documents BLOB NOT NULL,
                 PRIMARY KEY(kind, ngram)
-            ) WITHOUT ROWID;
+            );
             CREATE TABLE row_dictionary (
                 entry_id INTEGER PRIMARY KEY,
                 entry BLOB NOT NULL,
@@ -4227,7 +4054,7 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 entry_id INTEGER NOT NULL,
                 entry BLOB NOT NULL,
                 PRIMARY KEY(page_ordinal, entry_id)
-            ) WITHOUT ROWID;
+            );
             CREATE TRIGGER content_epoch_source_pages_insert AFTER INSERT ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             CREATE TRIGGER content_epoch_row_chunk_pages_insert AFTER INSERT ON row_chunk_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             CREATE TRIGGER immutable_source_pages_update BEFORE UPDATE ON source_pages BEGIN SELECT RAISE(ABORT, 'immutable lexical source pages'); END;
@@ -4240,39 +4067,6 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             CREATE TRIGGER immutable_exact_vocabulary_delete BEFORE DELETE ON exact_vocabulary BEGIN SELECT RAISE(ABORT, 'immutable lexical exact vocabulary'); END;
             CREATE TRIGGER immutable_row_dictionary_pages_update BEFORE UPDATE ON row_dictionary_pages BEGIN SELECT RAISE(ABORT, 'immutable lexical row dictionary pages'); END;
             CREATE TRIGGER immutable_row_dictionary_pages_delete BEFORE DELETE ON row_dictionary_pages BEGIN SELECT RAISE(ABORT, 'immutable lexical row dictionary pages'); END;
-            CREATE TRIGGER builder_gate_source_pages_insert BEFORE INSERT ON source_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_source_page_cursors_insert BEFORE INSERT ON source_page_cursors WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_row_blocks_insert BEFORE INSERT ON row_blocks WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_row_blocks_update BEFORE UPDATE ON row_blocks WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_row_blocks_delete BEFORE DELETE ON row_blocks WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_row_chunk_pages_insert BEFORE INSERT ON row_chunk_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_row_chunk_pages_update BEFORE UPDATE ON row_chunk_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_row_chunk_pages_delete BEFORE DELETE ON row_chunk_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_row_chunks_insert BEFORE INSERT ON row_chunks WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_row_chunks_update BEFORE UPDATE ON row_chunks WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_row_chunks_delete BEFORE DELETE ON row_chunks WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_term_posting_runs_insert BEFORE INSERT ON term_posting_runs WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_term_posting_runs_update BEFORE UPDATE ON term_posting_runs WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_term_posting_runs_delete BEFORE DELETE ON term_posting_runs WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_term_postings_insert BEFORE INSERT ON term_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_term_postings_update BEFORE UPDATE ON term_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_term_postings_delete BEFORE DELETE ON term_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_exact_posting_runs_insert BEFORE INSERT ON exact_posting_runs WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_exact_posting_runs_update BEFORE UPDATE ON exact_posting_runs WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_exact_posting_runs_delete BEFORE DELETE ON exact_posting_runs WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_exact_postings_insert BEFORE INSERT ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_exact_postings_update BEFORE UPDATE ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_exact_postings_delete BEFORE DELETE ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_ngram_postings_insert BEFORE INSERT ON ngram_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_exact_vocabulary_insert BEFORE INSERT ON exact_vocabulary WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_exact_vocabulary_update BEFORE UPDATE ON exact_vocabulary WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_exact_vocabulary_delete BEFORE DELETE ON exact_vocabulary WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_row_dictionary_pages_insert BEFORE INSERT ON row_dictionary_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_row_dictionary_pages_update BEFORE UPDATE ON row_dictionary_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_row_dictionary_pages_delete BEFORE DELETE ON row_dictionary_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_field_stats_staging_insert BEFORE INSERT ON field_stats_staging WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_field_stats_staging_update BEFORE UPDATE ON field_stats_staging WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_field_stats_staging_delete BEFORE DELETE ON field_stats_staging WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
             ",
         )
         .map_err(sqlite_error)?;
@@ -4299,10 +4093,7 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                     digest BLOB NOT NULL,
                     occurrence_ordinal INTEGER NOT NULL,
                     PRIMARY KEY(class, normalization_revision, digest, occurrence_ordinal)
-                ) WITHOUT ROWID;
-                CREATE TRIGGER builder_gate_clone_body_payloads_insert BEFORE INSERT ON clone_body_payloads WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-                CREATE TRIGGER builder_gate_clone_occurrences_insert BEFORE INSERT ON clone_occurrences WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-                CREATE TRIGGER builder_gate_clone_exact_postings_insert BEFORE INSERT ON clone_exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+                );
                 CREATE TRIGGER immutable_clone_body_payloads_update BEFORE UPDATE ON clone_body_payloads BEGIN SELECT RAISE(ABORT, 'immutable clone body payloads'); END;
                 CREATE TRIGGER immutable_clone_body_payloads_delete BEFORE DELETE ON clone_body_payloads BEGIN SELECT RAISE(ABORT, 'immutable clone body payloads'); END;
                 CREATE TRIGGER immutable_clone_occurrences_update BEFORE UPDATE ON clone_occurrences BEGIN SELECT RAISE(ABORT, 'immutable clone occurrences'); END;
@@ -4317,7 +4108,7 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                     posting_count INTEGER NOT NULL CHECK(posting_count > 0),
                     postings BLOB NOT NULL,
                     PRIMARY KEY(language, class, normalization_revision, fingerprint)
-                ) WITHOUT ROWID;
+                );
                 CREATE TABLE clone_fingerprint_postings_pages (
                     language TEXT NOT NULL,
                     class INTEGER NOT NULL,
@@ -4326,10 +4117,6 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                     occurrence_ordinal INTEGER NOT NULL,
                     token_position INTEGER NOT NULL
                 );
-                CREATE TRIGGER builder_gate_clone_fingerprint_postings_insert BEFORE INSERT ON clone_fingerprint_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-                CREATE TRIGGER builder_gate_clone_fingerprint_postings_pages_insert BEFORE INSERT ON clone_fingerprint_postings_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-                CREATE TRIGGER builder_gate_clone_fingerprint_postings_pages_update BEFORE UPDATE ON clone_fingerprint_postings_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-                CREATE TRIGGER builder_gate_clone_fingerprint_postings_pages_delete BEFORE DELETE ON clone_fingerprint_postings_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
                 CREATE TRIGGER immutable_clone_fingerprint_postings_update BEFORE UPDATE ON clone_fingerprint_postings BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint postings'); END;
                 CREATE TRIGGER immutable_clone_fingerprint_postings_delete BEFORE DELETE ON clone_fingerprint_postings BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint postings'); END;
                 CREATE TRIGGER immutable_clone_fingerprint_postings_pages_update BEFORE UPDATE ON clone_fingerprint_postings_pages BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint posting pages'); END;
@@ -4349,18 +4136,6 @@ fn table_exists(connection: &Connection, table: &str) -> Result<bool, CodeLexica
         .map_err(sqlite_error)
 }
 
-fn verify_builder_mutation_gate_schema(
-    connection: &Connection,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    for (name, table, operation) in BUILDER_GATE_TRIGGER_LAYOUT {
-        let expected = format!(
-            "CREATE TRIGGER {name} BEFORE {operation} ON {table} WHEN {BUILDER_MUTATION_GATE_FUNCTION}() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END"
-        );
-        verify_trigger_schema(connection, name, table, &expected)?;
-    }
-    verify_layout_dependent_triggers(connection)
-}
-
 fn verify_layout_dependent_triggers(
     connection: &Connection,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -4368,53 +4143,10 @@ fn verify_layout_dependent_triggers(
     // each once its sealed table is derived.
     let has_exact_vocabulary = table_exists(connection, "exact_vocabulary")?;
     let has_row_dictionary_pages = table_exists(connection, "row_dictionary_pages")?;
-    let has_field_stats_staging = table_exists(connection, "field_stats_staging")?;
-    let has_row_chunk_pages = table_exists(connection, "row_chunk_pages")?;
-    let has_term_posting_runs = table_exists(connection, "term_posting_runs")?;
-    let has_exact_posting_runs = table_exists(connection, "exact_posting_runs")?;
     let has_clone_index = table_exists(connection, "clone_body_payloads")?;
     let has_clone_fingerprints = table_exists(connection, "clone_fingerprint_postings")?;
     let has_clone_fingerprint_pages = table_exists(connection, "clone_fingerprint_postings_pages")?;
     let has_source_page_cursors = table_exists(connection, "source_page_cursors")?;
-    let gated_layouts: [(bool, &[GateTriggerLayoutV1]); 10] = [
-        (
-            has_source_page_cursors,
-            &SOURCE_PAGE_CURSORS_BUILDER_GATE_TRIGGER_LAYOUT,
-        ),
-        (
-            has_row_chunk_pages,
-            &ROW_CHUNK_PAGES_BUILDER_GATE_TRIGGER_LAYOUT,
-        ),
-        (
-            has_exact_vocabulary,
-            &EXACT_VOCABULARY_BUILDER_GATE_TRIGGER_LAYOUT,
-        ),
-        (
-            has_row_dictionary_pages,
-            &ROW_DICTIONARY_PAGES_BUILDER_GATE_TRIGGER_LAYOUT,
-        ),
-        (
-            has_field_stats_staging,
-            &FIELD_STATS_STAGING_BUILDER_GATE_TRIGGER_LAYOUT,
-        ),
-        (
-            has_term_posting_runs,
-            &TERM_POSTING_RUNS_BUILDER_GATE_TRIGGER_LAYOUT,
-        ),
-        (
-            has_exact_posting_runs,
-            &EXACT_POSTING_RUNS_BUILDER_GATE_TRIGGER_LAYOUT,
-        ),
-        (has_clone_index, &CLONE_BUILDER_GATE_TRIGGER_LAYOUT),
-        (
-            has_clone_fingerprints,
-            &CLONE_FINGERPRINT_BUILDER_GATE_TRIGGER_LAYOUT,
-        ),
-        (
-            has_clone_fingerprint_pages,
-            &CLONE_FINGERPRINT_PAGES_BUILDER_GATE_TRIGGER_LAYOUT,
-        ),
-    ];
     let immutable_layouts: [(bool, &[ImmutableTriggerLayoutV1]); 7] = [
         (true, &IMMUTABLE_TRIGGER_LAYOUT),
         (
@@ -4439,45 +4171,19 @@ fn verify_layout_dependent_triggers(
             &CLONE_FINGERPRINT_PAGES_IMMUTABLE_TRIGGER_LAYOUT,
         ),
     ];
-    verify_trigger_layouts(
-        connection,
-        gated_layouts
-            .iter()
-            .filter(|(present, _)| *present)
-            .flat_map(|(_, layout)| layout.iter().copied())
-            .map(|(name, table, operation)| (name, table, operation, None))
-            .chain(
-                immutable_layouts
-                    .iter()
-                    .filter(|(present, _)| *present)
-                    .flat_map(|(_, layout)| layout.iter().copied())
-                    .map(|(name, table, operation, message)| {
-                        (name, table, operation, Some(message))
-                    }),
-            ),
-    )
-}
-
-fn verify_trigger_layouts<'a>(
-    connection: &Connection,
-    layouts: impl Iterator<Item = (&'a str, &'a str, &'a str, Option<&'a str>)>,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    for (name, table, operation, message) in layouts {
-        let expected = match message {
-            Some(message) => format!(
-                "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
-            ),
-            None => format!(
-                "CREATE TRIGGER {name} BEFORE {operation} ON {table} WHEN {BUILDER_MUTATION_GATE_FUNCTION}() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END"
-            ),
-        };
+    for (name, table, operation, message) in immutable_layouts
+        .iter()
+        .filter(|(present, _)| *present)
+        .flat_map(|(_, layout)| layout.iter().copied())
+    {
+        let expected = format!(
+            "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
+        );
         verify_trigger_schema(connection, name, table, &expected)?;
     }
     Ok(())
 }
 
-/// `(trigger name, table, operation)` of one private-builder gate trigger.
-type GateTriggerLayoutV1 = (&'static str, &'static str, &'static str);
 /// `(trigger name, table, operation, abort message)` of one immutability
 /// trigger.
 type ImmutableTriggerLayoutV1 = (&'static str, &'static str, &'static str, &'static str);
@@ -4564,7 +4270,7 @@ fn authenticated_authority_epoch(
     source: &VerifiedSealedLexicalSourceReceiptV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<i64, CodeLexicalArtifactErrorV1> {
-    verify_builder_mutation_gate_schema(transaction)?;
+    verify_layout_dependent_triggers(transaction)?;
     let (pages, documents): (i64, i64) = transaction
         .query_row(
             "SELECT (SELECT COUNT(*) FROM source_pages), (SELECT COUNT(*) FROM row_chunk_pages)",
@@ -4677,7 +4383,7 @@ fn verify_clone_rows(
         let count: i64 = row.get(0).map_err(sqlite_error)?;
         let encoded = row
             .get_ref(1)
-            .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
+            .and_then(|value| value.as_blob().map_err(tracedecay_sql::Error::from))
             .map_err(sqlite_corrupt)?;
         let postings = decode_fingerprint_postings(encoded)?;
         if usize::try_from(count).ok() != Some(postings.len())
@@ -4695,9 +4401,9 @@ fn verify_clone_rows(
 }
 
 /// Whether a finalization wake runs with memory-backed temporary storage.
-/// A merge wake inserts every merged list into a builder-gated serving
-/// table, so each insert journals its statement; under file-backed storage
-/// the first journal to spill stays a temp file that every later insert of
+/// A merge wake inserts every merged list into a serving table; when those
+/// inserts journal their statements under file-backed storage, the first
+/// journal to spill stays a temp file that every later insert of
 /// the wake rewrites (1.1 GB of `write()` for the 198k term lists of the
 /// 768-file journey). Memory storage keeps those journals in memory but also
 /// holds the merge's whole `ORDER BY` input, so a merge over staged runs is
@@ -4791,52 +4497,46 @@ fn with_cancellable_sqlite_statement<T>(
     let interruption = Arc::new(AtomicU8::new(0));
     let finished = Arc::new(AtomicBool::new(false));
     let progress_interruption = Arc::clone(&interruption);
-    connection
-        .progress_handler(
-            FINALIZATION_PROGRESS_INTERVAL_OPS,
-            Some(move || progress_interruption.load(Ordering::Acquire) != 0),
-        )
+    let should_interrupt = move || progress_interruption.load(Ordering::Acquire) != 0;
+    let monitored = connection
+        .guard_scope(should_interrupt, |_| {
+            std::thread::scope(|scope| {
+                let monitor_interruption = Arc::clone(&interruption);
+                let monitor_finished = Arc::clone(&finished);
+                let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(0);
+                let monitor = spawn_finalization_control_monitor(scope, move || {
+                    let mut ready = false;
+                    loop {
+                        let reason = if control.is_cancelled() {
+                            1
+                        } else if control.is_deadline_exceeded() {
+                            2
+                        } else {
+                            0
+                        };
+                        if reason != 0 {
+                            monitor_interruption.store(reason, Ordering::Release);
+                        }
+                        if !ready {
+                            let _ = ready_sender.send(());
+                            ready = true;
+                        }
+                        if reason != 0 || monitor_finished.load(Ordering::Acquire) {
+                            break;
+                        }
+                        std::thread::sleep(FINALIZATION_CONTROL_POLL_INTERVAL);
+                    }
+                })?;
+                let readiness = ready_receiver.recv();
+                let outcome = readiness
+                    .as_ref()
+                    .ok()
+                    .map(|_| catch_unwind(AssertUnwindSafe(operation)));
+                finished.store(true, Ordering::Release);
+                Ok::<_, std::io::Error>((readiness, outcome, monitor.join()))
+            })
+        })
         .map_err(sqlite_error)?;
-
-    let monitored = std::thread::scope(|scope| {
-        let monitor_interruption = Arc::clone(&interruption);
-        let monitor_finished = Arc::clone(&finished);
-        let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(0);
-        let monitor = spawn_finalization_control_monitor(scope, move || {
-            let mut ready = false;
-            loop {
-                let reason = if control.is_cancelled() {
-                    1
-                } else if control.is_deadline_exceeded() {
-                    2
-                } else {
-                    0
-                };
-                if reason != 0 {
-                    monitor_interruption.store(reason, Ordering::Release);
-                }
-                if !ready {
-                    let _ = ready_sender.send(());
-                    ready = true;
-                }
-                if reason != 0 || monitor_finished.load(Ordering::Acquire) {
-                    break;
-                }
-                std::thread::sleep(FINALIZATION_CONTROL_POLL_INTERVAL);
-            }
-        })?;
-        let readiness = ready_receiver.recv();
-        let outcome = readiness
-            .as_ref()
-            .ok()
-            .map(|_| catch_unwind(AssertUnwindSafe(operation)));
-        finished.store(true, Ordering::Release);
-        Ok::<_, std::io::Error>((readiness, outcome, monitor.join()))
-    });
-    let clear = connection
-        .progress_handler(FINALIZATION_PROGRESS_INTERVAL_OPS, None::<fn() -> bool>)
-        .map_err(sqlite_error);
-    clear?;
 
     let (readiness, outcome, monitor) = monitored.map_err(|error| {
         CodeLexicalArtifactErrorV1::Io(format!(
@@ -4925,7 +4625,7 @@ fn derive_statistics_step(
                  {
             // Every committed batch already folded its posting lengths into
             // the staging totals (`stage_field_totals`): sealing copies at
-            // most nine rows and drops the staging table with its gates.
+            // most nine rows and drops the staging table.
             transaction.execute_batch(
                 "INSERT INTO field_stats(field, total_length) SELECT field, total_length FROM field_stats_staging ORDER BY field;
                  DROP TABLE field_stats_staging;
@@ -4978,10 +4678,9 @@ fn release_free_pages(
 }
 
 /// What the pre-digest index steps need beyond the transaction: the
-/// builder's mutation authority, the generation rows decode under, and the
-/// memory the n-gram rebuild may hold at once.
+/// generation rows decode under, and the memory the n-gram rebuild may hold
+/// at once.
 struct ServingIndexStepAuthorityV1<'a> {
-    mutation_gate: &'a Arc<AtomicU8>,
     generation: &'a CodeGenerationId,
     ngram_memory_bytes: usize,
 }
@@ -4992,14 +4691,12 @@ fn build_serving_index_step(
     authority: &ServingIndexStepAuthorityV1<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let mutation_gate = authority.mutation_gate;
     match ordinal {
         0 => {
             let _span =
                 tracing::trace_span!("query.artifact.finalization.index.row_chunks").entered();
             {
                 derive_row_dictionary(transaction)?;
-                let _mutation_authority = BuilderMutationGuardV1::enter(mutation_gate)?;
                 transaction
                 .execute_batch(
                     "INSERT INTO row_chunks(chunk_id, document_id) SELECT chunk_id, document_id FROM row_chunk_pages ORDER BY chunk_id;
@@ -5012,12 +4709,12 @@ fn build_serving_index_step(
         1 => {
             let _span =
                 tracing::trace_span!("query.artifact.finalization.merge.term_postings").entered();
-            derive_term_postings(transaction, mutation_gate, control)
+            derive_term_postings(transaction, control)
         }
         2 => {
             let _span =
                 tracing::trace_span!("query.artifact.finalization.merge.exact_postings").entered();
-            derive_exact_postings(transaction, mutation_gate, control)
+            derive_exact_postings(transaction, control)
         }
         // Last, so its lists reuse the pages the dropped runs freed.
         3 => {
@@ -5038,10 +4735,8 @@ fn build_serving_index_step(
 /// field but the subtoken field.
 fn derive_term_postings(
     transaction: &Transaction<'_>,
-    mutation_gate: &Arc<AtomicU8>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let _mutation_authority = BuilderMutationGuardV1::enter(mutation_gate)?;
     let subtoken = field_code(LexicalFieldV1::Subtoken);
     let mut select = transaction
         .prepare(
@@ -5074,12 +4769,12 @@ fn derive_term_postings(
         visited += 1;
         let term = row
             .get_ref(0)
-            .and_then(|value| value.as_str().map_err(rusqlite::Error::from))
+            .and_then(|value| value.as_str().map_err(tracedecay_sql::Error::from))
             .map_err(sqlite_corrupt)?;
         let field: i64 = row.get(1).map_err(sqlite_error)?;
         let staged = row
             .get_ref(2)
-            .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
+            .and_then(|value| value.as_blob().map_err(tracedecay_sql::Error::from))
             .map_err(sqlite_corrupt)?;
         if let Some((sealed, lists)) = current.take_if(|(current, _)| current != term) {
             seal(&sealed, lists)?;
@@ -5121,10 +4816,8 @@ fn derive_term_postings(
 /// the same way.
 fn derive_exact_postings(
     transaction: &Transaction<'_>,
-    mutation_gate: &Arc<AtomicU8>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let _mutation_authority = BuilderMutationGuardV1::enter(mutation_gate)?;
     let mut select = transaction
         .prepare(
             "SELECT term_id, field, documents FROM exact_posting_runs ORDER BY term_id, field, page_ordinal",
@@ -5147,7 +4840,7 @@ fn derive_exact_postings(
         );
         let staged = row
             .get_ref(2)
-            .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
+            .and_then(|value| value.as_blob().map_err(tracedecay_sql::Error::from))
             .map_err(sqlite_corrupt)?;
         if let Some(((term_id, field), encoder)) = list.take_if(|(list_key, _)| *list_key != key) {
             insert
@@ -5488,7 +5181,6 @@ fn derive_ngram_postings(
     authority: &ServingIndexStepAuthorityV1<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let _mutation_authority = BuilderMutationGuardV1::enter(authority.mutation_gate)?;
     let mut insert = transaction
         .prepare(
             "INSERT INTO ngram_postings(kind, ngram, document_frequency, documents) VALUES (?1, ?2, ?3, ?4)",
@@ -5511,7 +5203,7 @@ fn derive_ngram_postings(
             let first_document: i64 = block.get(0).map_err(sqlite_error)?;
             let payload = block
                 .get_ref(1)
-                .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
+                .and_then(|value| value.as_blob().map_err(tracedecay_sql::Error::from))
                 .map_err(sqlite_corrupt)?;
             window.blocks.push((first_document, payload.to_vec()));
             if window.blocks.len() >= NGRAM_DERIVE_WINDOW_BLOCKS {
@@ -5630,7 +5322,7 @@ fn verify_artifact_state_metadata(
 /// rows") attributes the failure to no authority an operator can act on.
 fn artifact_state_row_corrupt(
     columns: &'static str,
-    error: rusqlite::Error,
+    error: tracedecay_sql::Error,
 ) -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Corrupt(format!(
         "lexical artifact staging artifact_state singleton {columns} read failed: {error}"
@@ -5951,7 +5643,7 @@ fn advance_clone_section_rows(
     }
 }
 
-fn advance_native_section_rows<P: rusqlite::Params>(
+fn advance_native_section_rows<P: tracedecay_sql::Params>(
     transaction: &Transaction<'_>,
     section: FinalizationSectionV1,
     query: &str,
@@ -6020,7 +5712,7 @@ fn advance_native_section_rows<P: rusqlite::Params>(
 
 fn native_row_key(
     section: FinalizationSectionV1,
-    row: &rusqlite::Row<'_>,
+    row: &tracedecay_sql::Row<'_>,
 ) -> Result<PersistedFinalizationKeyV1, CodeLexicalArtifactErrorV1> {
     if matches!(
         section,
@@ -6056,7 +5748,7 @@ fn native_row_key(
 
 fn clone_row_key(
     section: FinalizationSectionV1,
-    row: &rusqlite::Row<'_>,
+    row: &tracedecay_sql::Row<'_>,
 ) -> Result<PersistedFinalizationKeyV1, CodeLexicalArtifactErrorV1> {
     if matches!(
         section,
@@ -6109,7 +5801,7 @@ fn absorb_section_row(
     name: &str,
     row_ordinal: u64,
     accumulator: &mut Vec<u8>,
-    row: &rusqlite::Row<'_>,
+    row: &tracedecay_sql::Row<'_>,
     column_count: usize,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let previous: [u8; 32] = accumulator.as_slice().try_into().map_err(|_| {
@@ -6608,7 +6300,7 @@ fn digest_query(
 
 fn map_section_digest_sql_error(
     section: &str,
-    error: rusqlite::Error,
+    error: tracedecay_sql::Error,
 ) -> CodeLexicalArtifactErrorV1 {
     let message = error.to_string();
     if message.contains("no such column") || message.contains("no such table") {
@@ -6782,8 +6474,6 @@ mod tests {
         CodeLexicalCloneIndexCensusV1,
     };
     use super::*;
-    use rusqlite::StatementStatus;
-    use rusqlite::hooks::{AuthAction, Authorization};
     use tracedecay_domain::{
         CodeGenerationId, ComponentRevision, FreshnessCompatibilityV1, ScoreDomainId,
         SourceFreshness, SourceInstanceKey, SourceNamespace, UtcMicros,
@@ -6963,37 +6653,152 @@ mod tests {
         }
     }
 
-    fn create_mutable_test_schema(connection: &Connection) -> BuilderMutationGuardV1 {
-        let gate =
-            register_builder_mutation_gate(connection).expect("register builder mutation gate");
+    fn create_mutable_test_schema(connection: &Connection) {
         create_schema(connection).expect("create artifact schema");
-        BuilderMutationGuardV1::enter(&gate).expect("enter test builder mutation authority")
+    }
+
+    /// The tables that left the `WITHOUT ROWID` layout keep its key
+    /// semantics: each runs the same NULL-key, duplicate-key, UPSERT and
+    /// DELETE sequence against its rowid table and its `WITHOUT ROWID` twin,
+    /// and both must accept and refuse the same statements and end with the
+    /// same rows.
+    #[test]
+    fn rowid_tables_keep_without_rowid_key_semantics() {
+        const CONVERTED: [&str; 11] = [
+            "row_chunks",
+            "term_posting_runs",
+            "term_postings",
+            "field_stats",
+            "field_stats_staging",
+            "exact_posting_runs",
+            "exact_postings",
+            "ngram_postings",
+            "row_dictionary_pages",
+            "clone_exact_postings",
+            "clone_fingerprint_postings",
+        ];
+        let schema = Connection::open_in_memory().expect("schema database");
+        create_schema(&schema).expect("create artifact schema");
+        for table in CONVERTED {
+            let ddl: String = schema
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("converted table ddl");
+            let columns = schema
+                .prepare("SELECT name, type, pk FROM pragma_table_info(?1) ORDER BY cid")
+                .expect("prepare columns")
+                .query_map([table], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .expect("read columns")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect columns");
+            let key = columns
+                .iter()
+                .filter(|(_, _, pk)| *pk > 0)
+                .map(|(name, _, _)| name.as_str())
+                .collect::<Vec<_>>();
+            // A table keyed on every column can only skip a conflicting row.
+            let conflict = columns
+                .iter()
+                .find(|(_, _, pk)| *pk == 0)
+                .map_or("DO NOTHING".to_owned(), |(payload, _, _)| {
+                    format!("DO UPDATE SET {payload} = excluded.{payload}")
+                });
+            let names = columns
+                .iter()
+                .map(|(name, _, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let row = |seed: i64, null_key: Option<&str>| {
+                columns
+                    .iter()
+                    .map(|(name, kind, pk)| match (kind.as_str(), *pk > 0) {
+                        _ if null_key == Some(name.as_str()) => "NULL".to_owned(),
+                        ("TEXT", _) => format!("'v{seed}'"),
+                        ("BLOB", _) => format!("x'0{seed}'"),
+                        (_, true) => seed.to_string(),
+                        (_, false) => "1".to_owned(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let mut statements = vec![
+                format!("INSERT INTO {table}({names}) VALUES ({})", row(1, None)),
+                format!("INSERT INTO {table}({names}) VALUES ({})", row(1, None)),
+                format!("INSERT INTO {table}({names}) VALUES ({})", row(2, None)),
+                format!(
+                    "INSERT INTO {table}({names}) VALUES ({}) ON CONFLICT({}) {conflict}",
+                    row(2, None),
+                    key.join(", ")
+                ),
+                format!(
+                    "DELETE FROM {table} WHERE ({}) = ({})",
+                    key.join(", "),
+                    row(1, None)
+                        .split(", ")
+                        .zip(&columns)
+                        .filter(|(_, (_, _, pk))| *pk > 0)
+                        .map(|(value, _)| value)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ];
+            for column in &key {
+                statements.push(format!(
+                    "INSERT INTO {table}({names}) VALUES ({})",
+                    row(3, Some(column))
+                ));
+            }
+            let run = |ddl: &str| {
+                let connection = Connection::open_in_memory().expect("twin database");
+                connection.execute_batch(ddl).expect("create twin table");
+                let outcomes = statements
+                    .iter()
+                    .map(|statement| connection.execute(statement, []).ok())
+                    .collect::<Vec<_>>();
+                let rows = connection
+                    .prepare(&format!(
+                        "SELECT * FROM {table} ORDER BY {}",
+                        key.join(", ")
+                    ))
+                    .expect("prepare contents")
+                    .query_map([], |row| {
+                        (0..columns.len())
+                            .map(|index| row.get::<_, Value>(index))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .expect("read contents")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("collect contents");
+                (outcomes, rows)
+            };
+            let twin = format!("{ddl}{}", concat!(" WITHOUT", " ROWID"));
+            assert_eq!(
+                run(&ddl),
+                run(&twin),
+                "{table} must keep its WITHOUT ROWID key semantics"
+            );
+        }
     }
 
     /// Fingerprint postings are appended to an arrival-ordered staging table
     /// and reach the keyed tree only through the sorted finalization pass:
-    /// the staging table is gated like every other builder table, the pass
-    /// seals one list per fingerprint holding every posting in key order, and
-    /// nothing of the staging table survives it (so a finalized artifact
-    /// verifies without it).
+    /// the pass seals one list per fingerprint holding every posting in key
+    /// order, and nothing of the staging table survives it (so a finalized
+    /// artifact verifies without it).
     #[test]
     fn fingerprint_postings_stage_in_arrival_order_and_seal_one_list_per_fingerprint() {
         let mut connection = Connection::open_in_memory().expect("fingerprint database");
-        let gate =
-            register_builder_mutation_gate(&connection).expect("register builder mutation gate");
         create_schema(&connection).expect("create artifact schema");
-        verify_builder_mutation_gate_schema(&connection).expect("staging triggers present");
-
-        let refused = connection.execute(
-            "INSERT INTO clone_fingerprint_postings_pages(language, class, normalization_revision, fingerprint, occurrence_ordinal, token_position) VALUES ('rust', 1, 1, 9, 2, 0)",
-            [],
-        );
-        assert!(
-            refused
-                .expect_err("ungated staging insert must be refused")
-                .to_string()
-                .contains("private lexical builder mutation required")
-        );
+        verify_layout_dependent_triggers(&connection).expect("staging triggers present");
 
         // Arrival order deliberately disagrees with key order.
         let arrivals = [
@@ -7003,16 +6808,13 @@ mod tests {
             ("rust", 2, 1, 7),
             ("rust", 2, 1, 4),
         ];
-        {
-            let _authority = BuilderMutationGuardV1::enter(&gate).expect("enter authority");
-            for (language, fingerprint, occurrence, position) in arrivals {
-                connection
-                    .execute(
-                        "INSERT INTO clone_fingerprint_postings_pages(language, class, normalization_revision, fingerprint, occurrence_ordinal, token_position) VALUES (?1, 1, 1, ?2, ?3, ?4)",
-                        params![language, fingerprint, occurrence, position],
-                    )
-                    .expect("stage fingerprint posting");
-            }
+        for (language, fingerprint, occurrence, position) in arrivals {
+            connection
+                .execute(
+                    "INSERT INTO clone_fingerprint_postings_pages(language, class, normalization_revision, fingerprint, occurrence_ordinal, token_position) VALUES (?1, 1, 1, ?2, ?3, ?4)",
+                    params![language, fingerprint, occurrence, position],
+                )
+                .expect("stage fingerprint posting");
         }
         let keyed_before: i64 = connection
             .query_row(
@@ -7024,15 +6826,14 @@ mod tests {
         assert_eq!(keyed_before, 0, "appends must not touch the keyed tree");
 
         let transaction = connection.transaction().expect("finalization transaction");
-        derive_clone_fingerprint_postings(&transaction, &gate, &ActiveControl)
-            .expect("sorted pass");
+        derive_clone_fingerprint_postings(&transaction, &ActiveControl).expect("sorted pass");
         transaction.commit().expect("commit sorted pass");
 
         assert!(
             !table_exists(&connection, "clone_fingerprint_postings_pages").expect("table probe"),
             "staging table must not survive finalization"
         );
-        verify_builder_mutation_gate_schema(&connection)
+        verify_layout_dependent_triggers(&connection)
             .expect("finalized layout verifies without the staging table");
         let mut statement = connection
             .prepare(
@@ -7071,7 +6872,7 @@ mod tests {
     fn field_statistics_preserve_posting_sums_and_omit_absent_fields() {
         for empty in [false, true] {
             let mut connection = Connection::open_in_memory().expect("statistics database");
-            let _authority = create_mutable_test_schema(&connection);
+            create_mutable_test_schema(&connection);
             if !empty {
                 // Two committed batches: the staged totals must accumulate
                 // across them exactly as a scan over every posting would.
@@ -7101,7 +6902,7 @@ mod tests {
                 .expect("derived sums")
                 .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
                 .expect("derived rows")
-                .collect::<rusqlite::Result<Vec<_>>>()
+                .collect::<tracedecay_sql::Result<Vec<_>>>()
                 .expect("derived totals");
             assert_eq!(actual, expected);
             assert!(
@@ -7237,26 +7038,22 @@ mod tests {
     #[test]
     fn receipt_verification_does_not_read_append_only_base_tables() {
         let connection = Connection::open_in_memory().expect("open artifact database");
-        let _mutation_authority = create_mutable_test_schema(&connection);
+        create_mutable_test_schema(&connection);
+        // Remove every base table and staging run from the schema, so a
+        // statement that reads one fails to prepare. The vocabulary is the
+        // sealed terms and their fuzzy flags; their posting lists stay unread.
+        let base_tables = BASE_SECTION_NAMES
+            .iter()
+            .filter(|section| section.ends_with("_postings") && **section != "term_postings")
+            .chain(&["term_posting_runs", "exact_posting_runs"]);
+        for table in base_tables {
+            connection
+                .execute_batch(&format!("DROP TABLE {table}"))
+                .expect("remove base table");
+        }
         connection
-            .authorizer(Some(
-                |context: rusqlite::hooks::AuthContext<'_>| match context.action {
-                    // The vocabulary is the sealed terms and their fuzzy
-                    // flags; their posting lists stay unread.
-                    AuthAction::Read {
-                        table_name: "term_postings",
-                        column_name,
-                    } if column_name != "lists" => Authorization::Allow,
-                    AuthAction::Read { table_name, .. }
-                        if BASE_SECTION_NAMES.contains(&table_name)
-                            || table_name.ends_with("_runs") =>
-                    {
-                        Authorization::Deny
-                    }
-                    _ => Authorization::Allow,
-                },
-            ))
-            .expect("deny exhaustive base-table verification reads");
+            .execute_batch("ALTER TABLE term_postings DROP COLUMN lists")
+            .expect("remove term posting lists");
 
         let sections = compute_section_digests(&connection, &ActiveControl)
             .expect("verify only source-page receipts and derived sections");
@@ -7283,7 +7080,7 @@ mod tests {
         let metadata_digest = metadata_digest(&metadata).expect("metadata digest");
         let connection = Connection::open(&path).expect("artifact database");
         {
-            let _mutation_authority = create_mutable_test_schema(&connection);
+            create_mutable_test_schema(&connection);
             connection
                 .execute(
                     "INSERT INTO artifact_state(singleton, format_revision, metadata, metadata_digest, receipt) VALUES (1, ?1, ?2, ?3, ?4)",
@@ -7355,7 +7152,7 @@ mod tests {
     #[test]
     fn finalization_monitor_spawn_failure_is_typed_and_leaves_sqlite_reusable() {
         let mut connection = Connection::open_in_memory().expect("open artifact database");
-        let _mutation_authority = create_mutable_test_schema(&connection);
+        create_mutable_test_schema(&connection);
         let transaction = connection.transaction().expect("start transaction");
         fail_next_finalization_monitor_spawn();
         let operation_ran = AtomicBool::new(false);
@@ -7380,7 +7177,7 @@ mod tests {
     #[test]
     fn posting_staging_keeps_source_page_order_without_a_serving_index() {
         let connection = Connection::open_in_memory().expect("open artifact database");
-        let _mutation_authority = create_mutable_test_schema(&connection);
+        create_mutable_test_schema(&connection);
         for (page_ordinal, term) in [(0i64, "omega"), (0, "zeta"), (1, "alpha"), (1, "beta")] {
             connection
                 .execute(
@@ -7407,12 +7204,11 @@ mod tests {
             );
         }
 
-        let mut statement = connection
-            .prepare(
-                "SELECT page_ordinal, term FROM term_posting_runs ORDER BY page_ordinal, term, field",
-            )
-            .expect("prepare staging-order scan");
-        let rows = statement
+        let staging_order =
+            "SELECT page_ordinal, term FROM term_posting_runs ORDER BY page_ordinal, term, field";
+        let rows = connection
+            .prepare(staging_order)
+            .expect("prepare staging-order scan")
             .query_map([], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })
@@ -7429,7 +7225,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            statement.get_status(StatementStatus::Sort),
+            super::super::temporary_sorts(&super::super::query_plan(
+                &connection,
+                staging_order,
+                []
+            )),
             0,
             "source-page catch-up must be the maintained table order"
         );
@@ -7533,38 +7333,32 @@ mod tests {
     #[test]
     fn posting_merges_seal_one_list_per_serving_key() {
         let mut connection = Connection::open_in_memory().expect("open artifact database");
-        let gate =
-            register_builder_mutation_gate(&connection).expect("register builder mutation gate");
         create_schema(&connection).expect("create artifact schema");
-        {
-            let _authority = BuilderMutationGuardV1::enter(&gate).expect("enter authority");
-            for (page_ordinal, term, field, postings) in [
-                (0i64, "render", 4i64, vec![(1u32, 1u32), (2, 3)]),
-                (0, "render", 7, vec![(4, 1)]),
-                (0, "widget", 7, vec![(2, 1)]),
-                (2, "render", 4, vec![(7, 2)]),
-            ] {
-                connection
-                    .execute(
-                        "INSERT INTO term_posting_runs(page_ordinal, term, field, postings) VALUES (?1, ?2, ?3, ?4)",
-                        params![page_ordinal, term, field, encoded_postings(true, &postings)],
-                    )
-                    .expect("seed term run");
-            }
-            for (page_ordinal, documents) in [(0i64, vec![(1u32, 1u32)]), (2, vec![(7, 1)])] {
-                connection
-                    .execute(
-                        "INSERT INTO exact_posting_runs(page_ordinal, term_id, field, documents) VALUES (?1, 9, 1, ?2)",
-                        params![page_ordinal, encoded_postings(false, &documents)],
-                    )
-                    .expect("seed exact run");
-            }
+        for (page_ordinal, term, field, postings) in [
+            (0i64, "render", 4i64, vec![(1u32, 1u32), (2, 3)]),
+            (0, "render", 7, vec![(4, 1)]),
+            (0, "widget", 7, vec![(2, 1)]),
+            (2, "render", 4, vec![(7, 2)]),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO term_posting_runs(page_ordinal, term, field, postings) VALUES (?1, ?2, ?3, ?4)",
+                    params![page_ordinal, term, field, encoded_postings(true, &postings)],
+                )
+                .expect("seed term run");
+        }
+        for (page_ordinal, documents) in [(0i64, vec![(1u32, 1u32)]), (2, vec![(7, 1)])] {
+            connection
+                .execute(
+                    "INSERT INTO exact_posting_runs(page_ordinal, term_id, field, documents) VALUES (?1, 9, 1, ?2)",
+                    params![page_ordinal, encoded_postings(false, &documents)],
+                )
+                .expect("seed exact run");
         }
 
         let transaction = connection.transaction().expect("merge transaction");
         let generation = test_metadata().generation;
         let authority = ServingIndexStepAuthorityV1 {
-            mutation_gate: &gate,
             generation: &generation,
             ngram_memory_bytes: 1024 * 1024,
         };
@@ -7581,7 +7375,7 @@ mod tests {
                 "{table} must not survive finalization"
             );
         }
-        verify_builder_mutation_gate_schema(&connection)
+        verify_layout_dependent_triggers(&connection)
             .expect("sealed layout verifies without the staging tables");
         let free_pages: i64 = connection
             .query_row("PRAGMA freelist_count", [], |row| row.get(0))
@@ -7651,7 +7445,6 @@ mod tests {
                 .expect("inspect sealed indexes");
             assert_eq!(secondary_indexes, 0, "{table} carries no duplicate index");
         }
-        let _authority = BuilderMutationGuardV1::enter(&gate).expect("enter authority");
         assert!(
             connection
                 .execute(
@@ -7659,7 +7452,7 @@ mod tests {
                     [],
                 )
                 .is_err(),
-            "sealed term postings must be frozen even under builder authority"
+            "sealed term postings must be frozen"
         );
         let plan = connection
             .prepare(
@@ -7671,9 +7464,11 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("collect ngram serving plan");
         assert!(
-            plan.iter()
-                .any(|detail| detail.contains("USING PRIMARY KEY")),
-            "phrase candidates must seek the clustered key, got {plan:?}"
+            plan.len() == 1
+                && plan.iter().all(|detail| {
+                    detail.starts_with("SEARCH") && detail.contains("(kind=? AND ngram=?)")
+                }),
+            "phrase candidates must seek the primary key, got {plan:?}"
         );
     }
 
@@ -7687,23 +7482,18 @@ mod tests {
             ([(0, vec![(1, 1)]), (1, vec![(1, 1)])], "overlap"),
         ] {
             let mut connection = Connection::open_in_memory().expect("open artifact database");
-            let gate = register_builder_mutation_gate(&connection).expect("register gate");
             create_schema(&connection).expect("create schema");
-            {
-                let _authority = BuilderMutationGuardV1::enter(&gate).expect("enter authority");
-                for (page_ordinal, postings) in &runs {
-                    connection
-                        .execute(
-                            "INSERT INTO term_posting_runs(page_ordinal, term, field, postings) VALUES (?1, 'render', 4, ?2)",
-                            params![page_ordinal, encoded_postings(true, postings)],
-                        )
-                        .expect("seed term run");
-                }
+            for (page_ordinal, postings) in &runs {
+                connection
+                    .execute(
+                        "INSERT INTO term_posting_runs(page_ordinal, term, field, postings) VALUES (?1, 'render', 4, ?2)",
+                        params![page_ordinal, encoded_postings(true, postings)],
+                    )
+                    .expect("seed term run");
             }
             let transaction = connection.transaction().expect("merge transaction");
             let generation = test_metadata().generation;
             let authority = ServingIndexStepAuthorityV1 {
-                mutation_gate: &gate,
                 generation: &generation,
                 ngram_memory_bytes: 1024 * 1024,
             };
@@ -7734,7 +7524,7 @@ mod tests {
                     ngram INTEGER NOT NULL,
                     document_id INTEGER NOT NULL,
                     PRIMARY KEY(kind, ngram, document_id)
-                 ) WITHOUT ROWID;
+                 );
                  DROP TABLE current_ngram_postings;",
             )
             .expect("install superseded branch-local layout");
@@ -7773,23 +7563,18 @@ mod tests {
                 .expect("seed persisted progress");
         }
 
-        let mut statement = connection
-            .prepare(PROGRESS_TAIL_QUERY)
-            .expect("prepare maintained progress lookup");
-        let latest: i64 = statement
-            .query_row([], |row| row.get(0))
+        let latest: i64 = connection
+            .query_row(PROGRESS_TAIL_QUERY, [], |row| row.get(0))
             .expect("read latest progress row");
 
         assert_eq!(latest, 4_095);
+        // Walking the key backwards under `LIMIT 1` reads one row; any other
+        // order would sort every page first.
+        let plan = super::super::query_plan(&connection, PROGRESS_TAIL_QUERY, []);
         assert_eq!(
-            statement.get_status(StatementStatus::FullscanStep),
-            0,
-            "progress must seek the latest maintained cursor regardless of page count"
-        );
-        assert_eq!(
-            statement.get_status(StatementStatus::Sort),
-            0,
-            "the primary-key tail lookup must not build a temporary order"
+            (plan.len(), super::super::temporary_sorts(&plan)),
+            (1, 0),
+            "progress must seek the latest maintained cursor on the primary key, got {plan:?}"
         );
     }
 
@@ -7799,7 +7584,7 @@ mod tests {
     #[test]
     fn bounded_finalization_resume_seeks_each_native_section_index() {
         let connection = Connection::open_in_memory().expect("open artifact database");
-        let _mutation_authority = create_mutable_test_schema(&connection);
+        create_mutable_test_schema(&connection);
         connection
             .execute_batch(
                 "INSERT INTO source_pages(page_ordinal, file_ordinal, chunk_count, payload_bytes, import_count, import_payload_bytes, import_digest, clone_body_count, ngram_digest, base_sections_receipt) VALUES (0, 0, 1, 1, 1, 1, 'imports', 0, 'ngrams', X'00');

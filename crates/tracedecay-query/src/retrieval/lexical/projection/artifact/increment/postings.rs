@@ -4,9 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rayon::prelude::*;
-use rusqlite::types::Value;
-use rusqlite::{Transaction, params};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_sql::types::Value;
+use tracedecay_sql::{Transaction, params};
 
 use super::super::format::{
     PostingListDecoderV1, PostingListEncoderV1, contract_number, decode_document_set,
@@ -127,7 +127,7 @@ pub(super) fn scan_window<K, R>(
     after: &str,
     last: &Option<K>,
     bind: impl Fn(&K) -> Vec<Value>,
-    read: impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<R>,
+    read: impl Fn(&tracedecay_sql::Row<'_>) -> tracedecay_sql::Result<R>,
 ) -> Result<Vec<R>, CodeLexicalArtifactErrorV1> {
     let limit = Value::Integer(CARRY_SCAN_ROWS as i64);
     let (sql, mut values) = match last {
@@ -137,7 +137,7 @@ pub(super) fn scan_window<K, R>(
     values.push(limit);
     let mut statement = transaction.prepare_cached(sql).map_err(sqlite_error)?;
     statement
-        .query_map(rusqlite::params_from_iter(values), read)
+        .query_map(tracedecay_sql::params_from_iter(values), read)
         .map_err(sqlite_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(sqlite_error)

@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tracedecay_code_index::clones::{
     CloneBodyEligibilityV1, CloneBodyRenameStatusV1, CloneNormalizationClassV1,
 };
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_sql::Connection;
 
 use super::clone_codec::{decode_clone_eligibility, decode_clone_payload, digest_from_key};
 use super::format::decode_fingerprint_postings;
@@ -165,7 +165,7 @@ pub(super) fn read_clone_index_census(
         let payload_ordinal: i64 = row.get(0).map_err(sqlite_error)?;
         let eligibility = row
             .get_ref(1)
-            .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
+            .and_then(|value| value.as_blob().map_err(tracedecay_sql::Error::from))
             .map_err(sqlite_error)?;
         census.source_bodies = census.source_bodies.saturating_add(1);
         match decode_clone_eligibility(eligibility)? {
@@ -270,7 +270,7 @@ pub(super) fn read_clone_index_census(
         posting_rows += 1;
         let encoded = row
             .get_ref(0)
-            .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
+            .and_then(|value| value.as_blob().map_err(tracedecay_sql::Error::from))
             .map_err(sqlite_error)?;
         fingerprinted.extend(
             decode_fingerprint_postings(encoded)?
@@ -292,13 +292,13 @@ pub(super) fn read_clone_index_census(
 pub(super) mod tests {
     use super::super::clone_codec::{digest_key, encode_clone_eligibility, encode_clone_payload};
     use super::*;
-    use rusqlite::params;
     use tracedecay_code_extraction::{
         CloneBodyTokenizationStatusV1, CloneTokenStreamV1, ConservativeCloneTokenV1,
         ExtractedCloneBodyV1,
     };
     use tracedecay_code_index::clones::CloneBodyPayloadV1;
     use tracedecay_domain::{NodeKind, SourceSpan};
+    use tracedecay_sql::params;
 
     struct ActiveControl;
 

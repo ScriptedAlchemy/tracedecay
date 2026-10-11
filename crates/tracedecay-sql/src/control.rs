@@ -18,6 +18,8 @@ pub enum ErrorKind {
     Interrupted,
     ReadOnly,
     Schema,
+    /// The file is not a database or its pages are damaged.
+    Corrupt,
     Denied,
     NoRows,
     Unsupported,
