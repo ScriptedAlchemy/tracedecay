@@ -1,8 +1,10 @@
 //! Size observability read models and soft budgets (Plan 38 §7).
 //!
 //! Per-store size, per-table growth, and free-page ratio are first-class,
-//! cheap-to-query telemetry. The raw numbers come from `PRAGMA page_count`,
-//! `PRAGMA freelist_count`, `PRAGMA page_size`, and the `dbstat` virtual table.
+//! cheap-to-query telemetry. Store sizes come from the storage engine's page
+//! stats (page size, page count, freelist count). Per-table growth comes from
+//! SQLite's `dbstat` virtual table, so a native-engine build reports it
+//! `Unsupported`.
 //! Those reads live behind [`StoreSizeTelemetryPort`], whose implementation is
 //! owned by the storage runtime (see the module docs on the port). This module
 //! owns only the typed read models, the budget contract, and the pure
@@ -21,7 +23,8 @@ use crate::error::ApplicationContractError;
 
 use super::identity::{FreePageRatioV1, StorageByteSizeV1, StoreKeyV1, TableNameV1};
 
-/// One cheap size sample for a single store, derived from page-count pragmas.
+/// One cheap size sample for a single store, derived from the engine's page
+/// stats.
 ///
 /// `total_bytes` is `page_count * page_size`; `free_bytes` is
 /// `freelist_pages * page_size`. Both are recorded so the free-page ratio can

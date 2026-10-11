@@ -21,6 +21,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_runtime_core::db::DatabaseStorageTelemetryHandle;
+use tracedecay_sql::{Engine, PageStats};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::tick::MaintenanceTickOutcome;
@@ -116,6 +117,13 @@ impl GuardedStoreTelemetryPort {
             async move {
                 if !self.admits(context, store) {
                     return TableGrowthTelemetryReadV1::Denied {
+                        store: store.clone(),
+                    };
+                }
+                // Per-table bytes come from SQLite's `dbstat`, which the
+                // native engine does not provide.
+                if tracedecay_sql::ENGINE == Engine::Native {
+                    return TableGrowthTelemetryReadV1::Unsupported {
                         store: store.clone(),
                     };
                 }
@@ -399,6 +407,27 @@ impl StoreTelemetrySamplingRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cached = ports.get(path)?;
         Some((cached.store.clone(), cached.port.for_scope(scope.clone())))
+    }
+
+    /// Page stats of a store this daemon holds open, read through its
+    /// retained reader. `None` when the store has no registered port or the
+    /// read is not observed.
+    pub async fn held_page_stats(&self, path: &Path) -> Option<PageStats> {
+        let cached = self
+            .ports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(path)
+            .cloned()?;
+        let context = storage_telemetry_request_context(cached.scope.clone()).ok()?;
+        match cached.port.store_size(&context, &cached.store).await {
+            StorageTelemetryReadV1::Observed { sample } => Some(PageStats {
+                page_size: u64::from(sample.page_size_bytes),
+                page_count: sample.page_count,
+                freelist_count: sample.freelist_pages,
+            }),
+            _ => None,
+        }
     }
 
     /// Release the telemetry client's exact database lease before the owning

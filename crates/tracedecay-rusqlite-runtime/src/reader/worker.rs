@@ -13,6 +13,7 @@ use rusqlite::{Connection, InterruptHandle, Transaction, TransactionBehavior};
 use tracedecay_domain::process_heap::{
     IDLE_THREAD_COLLECTION_WAIT_V1, collect_idle_thread_heap_v1,
 };
+use tracedecay_sql::ConnectionControl;
 use tracedecay_store::{
     RuntimeInterruptionV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeRequestProbeV1,
     StorageRuntimeErrorV1, UnavailableReasonV1,
@@ -576,25 +577,15 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 let _ = reply.send(result);
             }
             SnapshotCommand::StoreSize { reply } => {
-                let read = || -> Result<StoreSizeTelemetrySample, rusqlite::Error> {
-                    let page_size = transaction
-                        .pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))?;
-                    let page_count = transaction
-                        .pragma_query_value(None, "page_count", |row| row.get::<_, i64>(0))?;
-                    let freelist_pages =
-                        transaction.pragma_query_value(None, "freelist_count", |row| {
-                            row.get::<_, i64>(0)
-                        })?;
-                    let page_size_bytes = u32::try_from(page_size)
-                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, page_size))?;
-                    let page_count = u64::try_from(page_count)
-                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, page_count))?;
-                    let freelist_pages = u64::try_from(freelist_pages)
-                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, freelist_pages))?;
+                let read = || -> Result<StoreSizeTelemetrySample, String> {
+                    let stats = transaction
+                        .page_stats()
+                        .map_err(|error| error.to_string())?;
                     Ok(StoreSizeTelemetrySample {
-                        page_size_bytes,
-                        page_count,
-                        freelist_pages,
+                        page_size_bytes: u32::try_from(stats.page_size)
+                            .map_err(|_| format!("page size {} exceeds u32", stats.page_size))?,
+                        page_count: stats.page_count,
+                        freelist_pages: stats.freelist_count,
                     })
                 };
                 let result = read().map_err(|error| {

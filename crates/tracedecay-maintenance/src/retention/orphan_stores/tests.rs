@@ -110,7 +110,7 @@ async fn seed_store(
     // guard reads this file in place before any
     // collection, so the fixture must be a database the guard can actually
     // inspect and prove carries no `memory_facts`/etc. rows.
-    rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
+    tracedecay_sql::Connection::open(data_root.join("graph.db")).unwrap();
 
     let manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
