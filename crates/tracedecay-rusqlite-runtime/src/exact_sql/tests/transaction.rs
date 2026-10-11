@@ -205,7 +205,13 @@ fn attach_and_detach_are_denied_on_every_exact_sql_lane() {
     ) {
         let error = result.expect_err("ATTACH/DETACH must be refused");
         assert!(
-            matches!(error, ExactSqlError::Sqlite { code: Some(23), .. }),
+            matches!(
+                error,
+                ExactSqlError::Sqlite {
+                    kind: ErrorKind::Denied,
+                    ..
+                }
+            ),
             "{lane} must deny `{sql}` at the authorizer, got {error:?}"
         );
     }
@@ -337,7 +343,13 @@ fn leased_commit_failure_rolls_back_and_releases_writer() {
     let error = transaction.commit().unwrap_err();
 
     assert!(
-        matches!(error, ExactSqlError::Sqlite { code: Some(19), .. }),
+        matches!(
+            error,
+            ExactSqlError::Sqlite {
+                kind: ErrorKind::Constraint,
+                ..
+            }
+        ),
         "{error:?}"
     );
     let rows = channel
@@ -358,30 +370,27 @@ fn leased_commit_failure_rolls_back_and_releases_writer() {
 fn rollback_failure_keeps_the_write_error() {
     let write = ExactSqlError::Sqlite {
         operation: "commit returning write transaction",
-        code: Some(19),
-        extended_code: Some(787),
+        kind: ErrorKind::Constraint,
         message: "FOREIGN KEY constraint failed".to_owned(),
     };
     let rollback = ExactSqlError::Sqlite {
         operation: "rollback write transaction",
-        code: Some(10),
-        extended_code: Some(10),
+        kind: ErrorKind::IoErr,
         message: "disk I/O error".to_owned(),
     };
 
     let error = super::super::command::rollback_failed_after(write, rollback);
 
-    let (operation, code, message) = match error {
+    let (operation, kind, message) = match error {
         ExactSqlError::Sqlite {
             operation,
-            code,
+            kind,
             message,
-            ..
-        } => (operation, code, message),
+        } => (operation, kind, message),
         other => panic!("expected the rollback failure, got {other:?}"),
     };
     assert_eq!(operation, "rollback write transaction");
-    assert_eq!(code, Some(10));
+    assert_eq!(kind, ErrorKind::IoErr);
     assert!(message.contains("disk I/O error"), "{message}");
     assert!(
         message.contains("FOREIGN KEY constraint failed"),

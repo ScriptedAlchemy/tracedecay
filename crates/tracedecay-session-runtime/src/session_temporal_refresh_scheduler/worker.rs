@@ -1403,8 +1403,7 @@ mod tests {
             "persist session refresh progress",
             EngineError::Sqlite {
                 operation: "execute",
-                code: Some(19),
-                extended_code: Some(1811),
+                kind: tracedecay_sql::ErrorKind::Constraint,
                 message: "invalid session refresh progress".to_owned(),
             },
         );

@@ -155,7 +155,10 @@ fn coherent_capacity_query(
 fn sqlite_busy_or_locked(error: &ExactSqlError) -> bool {
     matches!(
         error,
-        ExactSqlError::Sqlite { code: Some(5), .. } | ExactSqlError::Sqlite { code: Some(6), .. }
+        ExactSqlError::Sqlite {
+            kind: tracedecay_sql::ErrorKind::Busy,
+            ..
+        }
     )
 }
 

@@ -7,13 +7,13 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use rusqlite::{Connection, Savepoint, Transaction};
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
     reader::{ExistingReaderLocator, ReaderQueryExecutor},
 };
+use tracedecay_sql::{Connection, Savepoint, Transaction};
 use tracedecay_store::{
     AdmissionConfigV1, CommitSequenceV1, LocatorDigest, ReaderBudgetV1,
     RepositoryOperationEnvelopeV1, RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1,
@@ -395,7 +395,7 @@ impl StorageOperationExecutor for NoopRepositoryWrite {
         &mut self,
         savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         savepoint.execute_batch(
             "CREATE TABLE IF NOT EXISTS runtime_writes (
                 operation INTEGER PRIMARY KEY AUTOINCREMENT

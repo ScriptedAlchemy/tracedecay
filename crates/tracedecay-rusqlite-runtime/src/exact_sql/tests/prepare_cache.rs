@@ -128,6 +128,9 @@ fn cached_prepare_without_hot_path_ddl_does_not_reprepare() {
     );
 }
 
+/// A cached program compiled against the old table would read the dropped
+/// table's pages or its column layout; the cached query must answer from the
+/// table that exists now.
 #[test]
 fn intervening_ddl_reprepares_a_cached_query() {
     let connection = Connection::open_in_memory().unwrap();
@@ -138,15 +141,22 @@ fn intervening_ddl_reprepares_a_cached_query() {
     drop(statement);
 
     connection
-        .execute_batch("CREATE TABLE ddl_invalidates_cache(value INTEGER NOT NULL)")
+        .execute_batch(
+            "DROP TABLE hot_path_rows;
+             CREATE TABLE hot_path_rows (
+                padding TEXT,
+                payload TEXT NOT NULL,
+                id INTEGER PRIMARY KEY
+             );
+             INSERT INTO hot_path_rows(padding, payload, id) VALUES ('pad', 'rebuilt', 1);",
+        )
         .unwrap();
 
     let mut statement = prepare_read_statement(&connection, QUERY_SQL).unwrap();
     let payload: String = statement.query_row([1_i64], |row| row.get(1)).unwrap();
-    assert_eq!(payload, "row");
-    assert!(
-        statement.take_counters().reprepares > 0,
-        "CREATE TABLE on the same connection must reprepare the cached query"
+    assert_eq!(
+        payload, "rebuilt",
+        "the cached query must read the table the DDL created"
     );
 }
 

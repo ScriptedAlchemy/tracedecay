@@ -642,20 +642,18 @@ async fn native_admitted_returning_write_persists_after_its_waiter_is_aborted() 
     write.abort();
     assert!(write.await.unwrap_err().is_cancelled());
     drop(release);
-    let id = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            let mut rows = connection
-                .query("SELECT id FROM records WHERE label = ?1", ("abandoned",))
-                .await
-                .unwrap();
-            if let Some(row) = rows.next().await.unwrap() {
-                break row.get::<i64>(0).unwrap();
-            }
-            tokio::task::yield_now().await;
+    // Wait for the admitted write itself; a wall-clock bound only measured
+    // how fast a loaded host schedules the released writer.
+    let id = loop {
+        let mut rows = connection
+            .query("SELECT id FROM records WHERE label = ?1", ("abandoned",))
+            .await
+            .unwrap();
+        if let Some(row) = rows.next().await.unwrap() {
+            break row.get::<i64>(0).unwrap();
         }
-    })
-    .await
-    .unwrap();
+        tokio::task::yield_now().await;
+    };
     enabled.store(false, Ordering::Release);
     let mut other = connection
         .execute_returning(

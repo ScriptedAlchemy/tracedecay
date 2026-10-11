@@ -7,7 +7,8 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use tracedecay_sql::{
-    Capability, Connection, ConnectionControl, EnginePolicy, OpenFlags, file_identity,
+    Capability, Connection, ConnectionControl, Engine, EnginePolicy, FileIdentity, OpenFlags,
+    file_identity, path_identity,
 };
 use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
@@ -42,25 +43,48 @@ use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 const RETAINED_WAL_BYTES: i64 = WAL_SOFT_LIMIT_BYTES as i64;
 
 /// Pins and identifies the exact regular file that an attachment is about to
-/// open. The descriptor stays alive until every SQLite worker has reported
+/// open. On SQLite the descriptor stays alive until every worker has reported
 /// startup, after which `verify_current_path` proves the pathname still names
-/// that same physical file. Attachments retain the identity, never a later
-/// pathname stat.
+/// that same physical file. The native engine holds the file itself and
+/// fences its identity on every connect, so no descriptor is pinned: closing
+/// one would release the engine's POSIX lock on the store. Attachments retain
+/// the identity, never a later pathname stat.
 #[derive(Debug)]
 pub struct OpenedDatabaseFile {
-    file: File,
+    file: Option<File>,
     identity: u64,
 }
 
 impl OpenedDatabaseFile {
     pub fn pin(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
+        if tracedecay_sql::ENGINE == Engine::Native {
+            return Self::unpinned(path, current_identity(path)?);
+        }
         let file = open_pinned_database(path).map_err(|_| OpenedDatabaseFileError::Open)?;
         Self::adopt(file)
     }
 
     pub(crate) fn create_new(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
         let file = create_pinned_database(path).map_err(|_| OpenedDatabaseFileError::Create)?;
-        Self::adopt(file)
+        let created = Self::adopt(file)?;
+        if tracedecay_sql::ENGINE == Engine::Native {
+            // Closed before the engine locks the file.
+            return Self::unpinned(path, created.identity);
+        }
+        Ok(created)
+    }
+
+    fn unpinned(path: &Path, identity: u64) -> Result<Self, OpenedDatabaseFileError> {
+        if !std::fs::metadata(path)
+            .map_err(|_| OpenedDatabaseFileError::Inspect)?
+            .is_file()
+        {
+            return Err(OpenedDatabaseFileError::NotFile);
+        }
+        Ok(Self {
+            file: None,
+            identity,
+        })
     }
 
     /// Takes ownership of an already-open handle and records its identity.
@@ -72,7 +96,10 @@ impl OpenedDatabaseFile {
             return Err(OpenedDatabaseFileError::NotFile);
         }
         let identity = identity_of(&file)?;
-        Ok(Self { file, identity })
+        Ok(Self {
+            file: Some(file),
+            identity,
+        })
     }
 
     pub const fn identity(&self) -> u64 {
@@ -83,23 +110,27 @@ impl OpenedDatabaseFile {
         Ok(Self {
             file: self
                 .file
-                .try_clone()
+                .as_ref()
+                .map(File::try_clone)
+                .transpose()
                 .map_err(|_| OpenedDatabaseFileError::Open)?,
             identity: self.identity,
         })
     }
 
+    /// The pinned descriptor's own pathname, or the canonical path when no
+    /// descriptor is pinned.
     #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
     pub(crate) fn worker_open_path(
         &self,
-        _canonical_path: &Path,
+        canonical_path: &Path,
     ) -> Result<PathBuf, OpenedDatabaseFileError> {
         use std::os::unix::io::AsRawFd;
 
-        Ok(PathBuf::from(format!(
-            "/proc/self/fd/{}",
-            self.file.as_raw_fd()
-        )))
+        Ok(self.file.as_ref().map_or_else(
+            || canonical_path.to_path_buf(),
+            |file| PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd())),
+        ))
     }
 
     /// Selects the pathname used by a writer connection.
@@ -108,7 +139,8 @@ impl OpenedDatabaseFile {
     /// retaining the pinned-file ABA fence. macOS (and other non-Linux Unix
     /// hosts) cannot reliably create fresh WAL sidecars from `/dev/fd/*`, so
     /// writers use the verified canonical pathname while the pinned descriptor
-    /// remains alive for the worker lifetime.
+    /// remains alive for the worker lifetime. The native engine refuses a
+    /// symlinked pathname, so it always gets the canonical one.
     #[cfg(any(unix, windows))]
     pub(crate) fn writer_open_path(
         &self,
@@ -162,11 +194,9 @@ impl OpenedDatabaseFile {
     }
 
     pub fn verify_current_path(&self, path: &Path) -> Result<(), OpenedDatabaseFileError> {
-        let current = File::open(path).map_err(|_| OpenedDatabaseFileError::Open)?;
-        if identity_of(&current)? != self.identity {
+        if current_identity(path)? != self.identity {
             return Err(OpenedDatabaseFileError::Replaced);
         }
-        let _ = &self.file;
         Ok(())
     }
 
@@ -197,8 +227,7 @@ impl OpenedDatabaseFile {
 
     pub(crate) fn discard_created(self, path: &Path) -> Result<(), OpenedDatabaseFileError> {
         self.verify_current_path(path)?;
-        let Self { file, .. } = self;
-        drop(file);
+        drop(self);
         for candidate in [
             sidecar_path(path, "-wal"),
             sidecar_path(path, "-shm"),
@@ -303,14 +332,27 @@ fn identity_of(file: &File) -> Result<u64, OpenedDatabaseFileError> {
     let unidentified = OpenedDatabaseFileError::Identify;
     #[cfg(not(windows))]
     let unidentified = OpenedDatabaseFileError::Inspect;
-    let identity = file_identity(file).map_err(|_| unidentified)?;
+    Ok(fold_identity(
+        file_identity(file).map_err(|_| unidentified)?,
+    ))
+}
+
+/// The identity `path` names now, without opening it: closing a descriptor of
+/// a store releases the engine's POSIX lock on it.
+pub(crate) fn current_identity(path: &Path) -> Result<u64, OpenedDatabaseFileError> {
+    path_identity(path)
+        .map(fold_identity)
+        .map_err(|_| OpenedDatabaseFileError::Open)
+}
+
+fn fold_identity(identity: FileIdentity) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update(identity.volume.to_le_bytes());
     hasher.update(identity.file.to_le_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    Ok(u64::from_le_bytes(bytes).max(1))
+    u64::from_le_bytes(bytes).max(1)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -478,8 +520,7 @@ fn open_raw(path: &Path, mode: ConnectionMode) -> Result<Connection, ConnectionP
             let flags = match mode {
                 ConnectionMode::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY,
                 ConnectionMode::Writer => OpenFlags::SQLITE_OPEN_READ_WRITE,
-            } | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
+            } | OpenFlags::SQLITE_OPEN_NO_MUTEX;
             Connection::open_with_flags(&path, flags).map_err(|source| policy("open", source))
         }
     }
@@ -515,21 +556,22 @@ fn apply_policy(
         .pragma_update(None, "foreign_keys", true)
         .map_err(|source| policy("foreign keys", source))?;
 
+    // The native engine truncates the WAL file on a TRUNCATE checkpoint and
+    // has no retained-size bound to set.
+    let bounds_retained_wal = tracedecay_sql::ENGINE == Engine::Sqlite;
     if mode == ConnectionMode::Writer {
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(|source| policy("WAL journal", source))?;
-        connection
-            .pragma_update(None, "wal_autocheckpoint", 0_i64)
-            .map_err(|source| policy("WAL auto-checkpoint", source))?;
     }
     // Applied after the journal mode is settled, on the writer: it owns every
     // checkpoint. Readers never reset a log, so bounding one there would be
     // inert.
     match mode {
-        ConnectionMode::Writer => connection
+        ConnectionMode::Writer if bounds_retained_wal => connection
             .pragma_update(None, "journal_size_limit", RETAINED_WAL_BYTES)
             .map_err(|source| policy("retained WAL bytes", source))?,
+        ConnectionMode::Writer => {}
         ConnectionMode::Reader => connection
             .pragma_update(None, "query_only", true)
             .map_err(|source| policy("query-only reader", source))?,
@@ -539,8 +581,9 @@ fn apply_policy(
     match mode {
         ConnectionMode::Writer => {
             verify_pragma_text(connection, "journal_mode", "wal")?;
-            verify_pragma_i64(connection, "wal_autocheckpoint", 0)?;
-            verify_pragma_i64(connection, "journal_size_limit", RETAINED_WAL_BYTES)?;
+            if bounds_retained_wal {
+                verify_pragma_i64(connection, "journal_size_limit", RETAINED_WAL_BYTES)?;
+            }
         }
         ConnectionMode::Reader => verify_pragma_i64(connection, "query_only", 1)?,
     }

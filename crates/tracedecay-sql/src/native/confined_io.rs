@@ -42,6 +42,11 @@ impl ConfinedIo {
         })
     }
 
+    #[cfg_attr(not(td_engine = "native"), allow(dead_code))]
+    pub(crate) fn main(&self) -> &str {
+        &self.main
+    }
+
     /// Fails when the main pathname no longer names the held file.
     pub(crate) fn verify(&self) -> Result<()> {
         if self.has_moved()? {
