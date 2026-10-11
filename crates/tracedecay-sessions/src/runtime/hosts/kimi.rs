@@ -666,8 +666,28 @@ pub async fn capture_kimi_observations(
                     outcome.deferred = true;
                     break;
                 }
-                let pending = match PendingTranscript::observe(convergence, &path).await {
-                    Ok(Some(pending)) => pending,
+                // One blocking round per source: convergence observation and
+                // the identity read both touch the same file, and a fused
+                // dispatch halves the executor round-trips every path pays.
+                let owned_convergence =
+                    convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_owned()));
+                let (pending, file_identity) = match run_blocking_transcript_section("kimi", {
+                    let path = path.clone();
+                    move || {
+                        let observed = PendingTranscript::observe_blocking(
+                            owned_convergence
+                                .as_ref()
+                                .map(|(hub, consumer)| (hub, consumer.as_str())),
+                            &path,
+                        )?;
+                        Ok::<_, TranscriptIngestError>(
+                            observed.map(|pending| (pending, jsonl_file_identity(&path))),
+                        )
+                    }
+                })
+                .await?
+                {
+                    Ok(Some(pair)) => pair,
                     Ok(None) => {
                         covered_wires.insert(path);
                         processed_sequence = Some(sequence);
@@ -696,14 +716,7 @@ pub async fn capture_kimi_observations(
                 let canonical_session_id =
                     protect_sensitive_structural_id(&session_id).map_err(|_| invalid_frame())?;
                 let session = SessionId::new(&canonical_session_id).map_err(|_| invalid_frame())?;
-                let match_result = {
-                    run_blocking_transcript_section("kimi", {
-                        let path = path.clone();
-                        move || jsonl_file_identity(&path)
-                    })
-                    .await?
-                };
-                let file_identity = match match_result {
+                let file_identity = match file_identity {
                     Ok(file_identity) => file_identity,
                     Err(error) => {
                         warn_isolated_source(&path, "source_identity_unavailable");

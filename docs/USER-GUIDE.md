@@ -535,6 +535,22 @@ tracedecay serve
 
 This starts the MCP server over stdio. You normally don't need to run this yourself, the agent integration handles it. But it's useful for debugging or connecting custom tools.
 
+### Repeated-query hints (experimental)
+
+When the profile setting `user.repeated_query_hints.v1` is `true`, a tool call
+whose query words overlap more than 60% with a call to the same tool among the
+previous six calls of the same MCP session gets one extra text block naming
+that earlier call, as a sign of a possible loop. The hint never blocks a call
+or changes the rest of the result. The setting is off by default, belongs to
+your profile, and applies to MCP sessions started after it changes:
+
+```bash
+tracedecay tool configuration_set --args '{"layer":{"kind":"user_profile","profile_id":"<id>"},"key":"user.repeated_query_hints.v1","value":{"kind":"boolean","value":true},"expected_revision":"<revision>","idempotency_key":"<key>"}'
+```
+
+Read the current value and revision with `tracedecay tool configuration_get
+--args '{"key":"user.repeated_query_hints.v1"}'`.
+
 ### Working from a subdirectory
 
 You can open your AI agent from any subdirectory of an enrolled project.

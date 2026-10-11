@@ -5,7 +5,6 @@ use std::collections::BTreeSet;
 use crate::memory::entities::normalize_entity;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::Value;
 use tracedecay_runtime_core::db::{Database, DatabaseMemoryTransaction as Transaction};
 
@@ -82,11 +81,16 @@ fn project_memory_search_scores(
     normalized_bm25: f64,
     fact: &ProjectMemoryFactV1,
     now: UtcMicros,
-) -> FactStoreResult<(ProjectMemoryFactSearchScoresV1, ProjectMemorySearchWhy)> {
+) -> FactStoreResult<Option<(ProjectMemoryFactSearchScoresV1, ProjectMemorySearchWhy)>> {
     let fact_tokens = project_memory_fact_tokens(fact);
     let coverage = project_memory_term_coverage(query_tokens, &fact_tokens);
     let fts = project_memory_fts_component(normalized_bm25, coverage);
     let jaccard = project_memory_jaccard(query_tokens, &fact_tokens);
+    let fts_millionths = project_memory_millionths(fts);
+    let jaccard_millionths = project_memory_millionths(jaccard);
+    if !query_tokens.is_empty() && fts_millionths == 0 && jaccard_millionths == 0 {
+        return Ok(None);
+    }
     let holographic = project_memory_holographic_score(encoder, query_vector, fact)?;
     let trust = fact.trust().as_f64();
     let temporal_decay = project_memory_temporal_decay(fact.telemetry().updated_at(), now);
@@ -99,11 +103,11 @@ fn project_memory_search_scores(
         temporal_decay,
         retrieval_count,
     );
-    Ok((
+    Ok(Some((
         ProjectMemoryFactSearchScoresV1::new(
             project_memory_score_millionths(score),
-            project_memory_millionths(fts),
-            project_memory_millionths(jaccard),
+            fts_millionths,
+            jaccard_millionths,
             project_memory_millionths(holographic),
             project_memory_millionths(trust),
         )?,
@@ -116,7 +120,87 @@ fn project_memory_search_scores(
             temporal_decay,
             retrieval_count,
         },
-    ))
+    )))
+}
+
+#[cfg(test)]
+mod score_tests {
+    use super::super::search_tests::{add_command, database, write_control};
+    use super::{HolographicEncoder, project_memory_search_scores, project_memory_tokens};
+    use crate::fact_store::DatabaseFactStore;
+    use tracedecay_store::ProjectMemoryFactStore;
+
+    #[tokio::test]
+    async fn lexical_eligibility_preserves_rounding_and_tokenless_scores() {
+        let (_directory, database) = database().await;
+        let store = DatabaseFactStore::new(&database);
+        let outcome = store
+            .add_project_memory_fact(
+                add_command(
+                    "operation.lexical-rounding",
+                    "canonical parser configuration",
+                    vec![],
+                ),
+                &write_control(),
+            )
+            .await
+            .unwrap();
+        let tracedecay_store::ProjectMemoryFactProjectionV1::Available(fact) = outcome.fact()
+        else {
+            panic!("canonical fixture payload must be available");
+        };
+        let encoder = HolographicEncoder::new();
+        let tokens = project_memory_tokens("unmatched");
+        let query = encoder.encode_fact("unmatched", &tokens).unwrap();
+        let query = encoder.prepare_query(&query).unwrap();
+        assert!(
+            project_memory_search_scores(
+                &tokens,
+                &encoder,
+                &query,
+                0.98e-6,
+                fact,
+                fact.telemetry().updated_at(),
+            )
+            .unwrap()
+            .is_none(),
+            "positive FTS below half a millionth still rounds to rejection"
+        );
+        let (scores, why) = project_memory_search_scores(
+            &tokens,
+            &encoder,
+            &query,
+            1.0e-6,
+            fact,
+            fact.telemetry().updated_at(),
+        )
+        .unwrap()
+        .expect("half a millionth is eligible");
+        assert_eq!(scores.fts_score_millionths(), 1);
+        assert_eq!(scores.jaccard_score_millionths(), 0);
+        assert_eq!(why.fts, 0.5e-6);
+        assert_eq!(why.temporal_decay, 1.0);
+
+        let tokens = project_memory_tokens("!");
+        assert!(tokens.is_empty());
+        let query = encoder.encode_fact("!", &tokens).unwrap();
+        let query = encoder.prepare_query(&query).unwrap();
+        let (scores, why) = project_memory_search_scores(
+            &tokens,
+            &encoder,
+            &query,
+            0.0,
+            fact,
+            fact.telemetry().updated_at(),
+        )
+        .unwrap()
+        .expect("tokenless queries retain holographic scoring");
+        assert_eq!(scores.fts_score_millionths(), 0);
+        assert_eq!(scores.jaccard_score_millionths(), 0);
+        assert_eq!(why.trust, fact.trust().as_f64());
+        assert_eq!(why.temporal_decay, 1.0);
+        assert_eq!(why.retrieval_count, fact.telemetry().retrieval_count());
+    }
 }
 
 /// Orders a page highest-score first, breaking ties on most-recently-updated
@@ -221,20 +305,17 @@ async fn project_memory_rank_facts_tx(
                 .map_err(project_memory_holographic_error)?;
             for fact in facts.drain(..) {
                 ensure_project_memory_read_active(read_control)?;
-                let (scores, why) = project_memory_search_scores(
+                let Some((scores, why)) = project_memory_search_scores(
                     &tokens,
                     &encoder,
                     &query_vector,
                     fts_scores.get(fact.fact_id()).copied().unwrap_or(0.0),
                     &fact,
                     now,
-                )?;
-                if !tokens.is_empty()
-                    && scores.fts_score_millionths() == 0
-                    && scores.jaccard_score_millionths() == 0
-                {
+                )?
+                else {
                     continue;
-                }
+                };
                 if query
                     .filter()
                     .threshold_millionths()
@@ -630,34 +711,36 @@ async fn project_memory_update_retrieval_projection_tx(
     debug_assert!(!fact_ids.is_empty());
     let key = OwnerKey::new(owner)?;
     let recall = i64::from(recall);
-    let mut values = vec![
-        Value::Integer(recall),
-        Value::Integer(timestamp.0),
+    let requested = serde_json::to_string(&fact_ids.iter().map(FactId::as_str).collect::<Vec<_>>())
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    let values = vec![
         Value::Integer(recall),
         Value::Integer(timestamp.0),
         Value::Text(key.kind.to_string()),
         Value::Text(key.project_id.clone()),
+        Value::Text(requested),
     ];
-    values.extend(
-        fact_ids
-            .iter()
-            .map(|fact_id| Value::Text(fact_id.as_str().to_owned())),
-    );
-    let sql = format!(
-        "UPDATE memory_v2_current_facts SET
+    // Rows are picked by rowid through a primary-key seek per requested id:
+    // native Turso never seeks `fact_id IN (...)` and scans the owner instead.
+    let sql = "UPDATE memory_v2_current_facts SET
                 retrieval_count = retrieval_count + 1,
-                access_count = access_count + ?,
-                last_retrieved_at = ?,
-                last_recalled_at = CASE WHEN ? = 1 THEN ? ELSE last_recalled_at END
-             WHERE owner_kind = ?
-               AND project_id = ?
-               AND payload_access = 'eligible'
-               AND active_assertion_id IS NOT NULL
-               AND fact_id IN ({})",
-        build_qmark_placeholders(fact_ids.len())
-    );
+                access_count = access_count + ?1,
+                last_retrieved_at = ?2,
+                last_recalled_at = CASE WHEN ?1 = 1 THEN ?2 ELSE last_recalled_at END
+             WHERE rowid IN (
+                 SELECT current_facts.rowid
+                 FROM (
+                     SELECT DISTINCT CAST(value AS TEXT) AS fact_id FROM json_each(?5)
+                 ) AS requested
+                 CROSS JOIN memory_v2_current_facts AS current_facts
+                   ON current_facts.fact_id = requested.fact_id
+                 WHERE current_facts.owner_kind = ?3
+                   AND current_facts.project_id = ?4
+                   AND current_facts.payload_access = 'eligible'
+                   AND current_facts.active_assertion_id IS NOT NULL
+             )";
     let changed = transaction
-        .execute(&sql, values)
+        .execute(sql, values)
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     if changed != fact_ids.len() as u64 {

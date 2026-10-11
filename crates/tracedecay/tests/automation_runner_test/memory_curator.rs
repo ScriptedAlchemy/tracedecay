@@ -301,6 +301,10 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     );
     assert_eq!(
         validation_payload["improvement_gate"]["generated_evals_status"],
+        json!("not_run")
+    );
+    assert_eq!(
+        validation_payload["improvement_gate"]["record_integrity_status"],
         json!("passed")
     );
     assert_eq!(
@@ -390,10 +394,6 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     .unwrap();
     assert_eq!(eval_payload["status"], json!("generated_from_validation"));
     assert_eq!(eval_payload["loop_stage"], json!("generated_evals"));
-    assert_eq!(
-        eval_payload["automatic_application"]["status"],
-        json!("applied")
-    );
     assert_eq!(eval_payload["source_refs"][0]["kind"], json!("traces"));
     assert_eq!(eval_payload["source_refs"][1]["kind"], json!("feedback"));
     assert_eq!(
@@ -404,49 +404,42 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
         eval_payload["format"],
         json!("tracedecay_automation_eval:v1")
     );
-    assert_eq!(eval_payload["runner"]["type"], json!("validation_replay"));
     assert_eq!(
-        eval_payload["runner"]["commands"][0],
-        json!(
-            "cargo test --test automation_runner_test memory_curator_repairs_then_applies_validated_ops_and_records_ledger -- --nocapture"
-        )
+        eval_payload["record_integrity"]["type"],
+        json!("recorded_validation_integrity")
     );
     assert_eq!(
-        eval_payload["runner"]["artifact_api"],
+        eval_payload["record_integrity"]["inputs"]["expected_eval_count"],
+        json!(1)
+    );
+    assert!(
+        eval_payload["record_integrity"]["inputs"]["validation_report_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
+    assert_eq!(eval_payload["record_integrity"]["status"], json!("passed"));
+    assert_eq!(
+        eval_payload["record_integrity"]["checks"][0]["check"],
+        json!("accepted_count_matches")
+    );
+    assert_eq!(
+        eval_payload["record_integrity"]["checks"][0]["status"],
+        json!("passed")
+    );
+    assert_eq!(
+        eval_payload["independent_evaluation"]["status"],
+        json!("not_run")
+    );
+    assert_eq!(
+        eval_payload["independent_evaluation"]["artifact_api"],
         json!(format!(
             "/api/automation/runs/{}/artifacts/generated_evals",
             run.run_id
         ))
     );
     assert_eq!(
-        eval_payload["runner"]["inputs"]["artifact_kind"],
-        json!("generated_evals")
-    );
-    assert_eq!(
-        eval_payload["runner"]["inputs"]["expected_eval_count"],
-        json!(1)
-    );
-    assert!(
-        eval_payload["runner"]["inputs"]["validation_report_hash"]
-            .as_str()
-            .is_some_and(|hash| hash.starts_with("sha256:"))
-    );
-    assert_eq!(
-        eval_payload["runner"]["checks"].as_array().unwrap().len(),
-        3
-    );
-    assert_eq!(eval_payload["runner"]["status"], json!("passed"));
-    assert_eq!(
-        eval_payload["runner"]["results"][0]["check"],
-        json!("accepted_count_matches")
-    );
-    assert_eq!(
-        eval_payload["runner"]["results"][0]["status"],
-        json!("passed")
-    );
-    assert_eq!(
-        eval_payload["automatic_application"]["retry_required"],
-        json!(false)
+        eval_payload["independent_evaluation"]["harness_commands"][0],
+        json!("bazel test //crates/tracedecay:automation_runner_test --test_arg=memory_curator")
     );
     assert!(
         eval_payload["artifact_refs"]
@@ -468,9 +461,10 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
                 && entry["source_feedback_ref"] == json!("accepted:0")
                 && entry["schema_version"] == json!(1)
                 && entry["kind"] == json!("automation_validation_regression")
-                && entry["harness"]["type"] == json!("cargo_test_filter")
+                && entry["harness"]["type"] == json!("bazel_test_filter")
+                && entry["harness"]["status"] == json!("not_run")
                 && entry["harness"]["commands"][0]
-                    == json!("cargo test --test automation_runner_test memory_curator")
+                    == json!("bazel test //crates/tracedecay:automation_runner_test --test_arg=memory_curator")
                 && entry["fixture"]["candidate"].is_object()
                 && entry["source_feedback"]["artifact_kind"] == json!("feedback")
                 && entry["source_feedback"]["feedback_id"] == json!("accepted:0")
@@ -588,17 +582,12 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
         ))
     );
     assert_eq!(
-        handoff_payload["eval_replay"]["artifact_api"],
-        json!(format!(
-            "/api/automation/runs/{}/artifacts/generated_evals",
-            run.run_id
-        ))
+        handoff_payload["independent_evaluation"]["status"],
+        json!("not_run")
     );
     assert_eq!(
-        handoff_payload["eval_replay"]["commands"][0],
-        json!(
-            "cargo test --test automation_runner_test memory_curator_repairs_then_applies_validated_ops_and_records_ledger -- --nocapture"
-        )
+        handoff_payload["readiness"]["independent_evaluation_status"],
+        json!("not_run")
     );
     assert!(
         handoff_payload["request"]["evidence_hash"]
@@ -769,10 +758,7 @@ async fn memory_curator_runner_artifacts_block_handoff_without_validation_exampl
 
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["summary"]["eval_count"], json!(0));
-    assert_eq!(
-        eval_payload["automatic_application"]["status"],
-        json!("no_candidate")
-    );
+    assert_eq!(eval_payload["record_integrity"]["status"], json!("not_run"));
     assert_eq!(eval_payload["eval_definitions"], json!([]));
 
     let validation_payload =

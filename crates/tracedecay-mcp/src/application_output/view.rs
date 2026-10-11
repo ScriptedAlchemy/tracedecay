@@ -10,6 +10,15 @@ use tracedecay_tool_catalog::BindingId;
 
 use crate::tools::render::{Md, whole_markdown_prefix};
 
+pub(crate) const PROVENANCE_FIELD: &str = "Provenance";
+pub(crate) const RECEIPT_FIELD: &str = "Receipt";
+pub(crate) const REQUEST_FIELD: &str = "Request";
+pub(crate) const TRACE_FIELD: &str = "Trace";
+/// Fields whose value differs on every call for the same answer: request and
+/// trace ids, timestamps, and elapsed time.
+pub(crate) const PER_CALL_FIELDS: [&str; 4] =
+    [PROVENANCE_FIELD, RECEIPT_FIELD, REQUEST_FIELD, TRACE_FIELD];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum HumanFieldValue {
     Block(String),
@@ -67,7 +76,7 @@ impl CanonicalHumanView {
                             envelope.contract.schema_revision()
                         ),
                     );
-                    view.code("Request", envelope.request_id.as_str());
+                    view.code(REQUEST_FIELD, envelope.request_id.as_str());
                     view.push_scope(&envelope.scope)?;
                     view.code("Outcome", "preview");
                     view.code("Preview", preview.preview_id.as_str());
@@ -89,7 +98,7 @@ impl CanonicalHumanView {
                             envelope.contract.schema_revision()
                         ),
                     );
-                    view.code("Request", envelope.request_id.as_str());
+                    view.code(REQUEST_FIELD, envelope.request_id.as_str());
                     view.push_scope(&envelope.scope)?;
                     view.code("Outcome", "effect");
                     view.code("Effect", effect.effect_id.as_str());
@@ -107,7 +116,7 @@ impl CanonicalHumanView {
                     view.code("Status", "success");
                     view.code("Operation", operation);
                     view.code("Binding", binding_id.as_str());
-                    view.code("Request", envelope.request_id.as_str());
+                    view.code(REQUEST_FIELD, envelope.request_id.as_str());
                     view.push_scope(&envelope.scope)?;
                     view.code("Outcome", "result");
                 }
@@ -203,7 +212,7 @@ impl CanonicalHumanView {
         elapsed_micros: u64,
     ) -> serde_json::Result<()> {
         self.code(
-            "Provenance",
+            PROVENANCE_FIELD,
             format!(
                 "binding={}; request={}; project={}; worktree={}; elapsed_us={elapsed_micros}",
                 binding_id.as_str(),
@@ -261,7 +270,7 @@ impl CanonicalHumanView {
     fn push_receipt(&mut self, receipt: &OperationReceipt) -> serde_json::Result<()> {
         self.code("Termination", scalar(&receipt.termination)?);
         self.code(
-            "Receipt",
+            RECEIPT_FIELD,
             format!(
                 "started={}, ended={}, deadline={}, units={}, bytes={}, elapsed_us={}",
                 receipt.started_at.0,
@@ -290,8 +299,8 @@ impl CanonicalHumanView {
         self.code("Problem revision", problem.revision.to_string());
         self.code("Owning layer", scalar(&problem.owning_layer)?);
         self.code("Terminality", scalar(&problem.terminality)?);
-        self.code("Request", problem.request_id.as_str());
-        self.code("Trace", problem.trace_id.as_str());
+        self.code(REQUEST_FIELD, problem.request_id.as_str());
+        self.code(TRACE_FIELD, problem.trace_id.as_str());
         self.text("Message", problem.message.clone());
         if let Some(detail) = &problem.detail {
             for (label, value) in detail.labelled_fields() {

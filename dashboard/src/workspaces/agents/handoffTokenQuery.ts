@@ -48,11 +48,12 @@ export function useAgentHandoffTokens(sessionId: string | null) {
     queryFn:
       sessionId === null
         ? skipToken
-        : () =>
+        : ({ signal }) =>
             callWork(
               HANDOFF_LIST_TASK_ROUTE,
               { session_id: sessionId },
               scopedUrl(scope, HANDOFF_LIST_TASK_ROUTE.path),
+              signal,
             ),
   });
 }

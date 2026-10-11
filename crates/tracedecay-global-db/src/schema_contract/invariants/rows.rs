@@ -36,6 +36,7 @@ enum InvariantRowAuditCategory {
 const BOUNDED_ROW_AUDIT_VIOLATIONS: &[&str] = &[
     "graph_scopes contains a store/project identity mismatch",
     "projection_queue contains an observation identity mismatch",
+    "observation projection provenance contains invalid message_created",
     "session cursor key rotation state is invalid",
     "session refresh operation state is invalid",
     "session temporal generation state is invalid",

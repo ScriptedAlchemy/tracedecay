@@ -3935,6 +3935,18 @@ mod authority_tests {
         assert_eq!(value["payload"]["savings"]["available"], false);
         assert_eq!(value["payload"]["sessions"]["available"], false);
         assert_eq!(value["payload"]["provider_usage"]["available"], false);
+        let mut blocks: Vec<&str> = value["payload"]
+            .as_object()
+            .expect("savings overview payload object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        blocks.sort_unstable();
+        assert_eq!(
+            blocks,
+            ["pricing", "provider_usage", "savings", "sessions"],
+            "the canonical cost projection is served by /api/costs alone"
+        );
     }
 
     #[test]

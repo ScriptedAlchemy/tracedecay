@@ -2044,7 +2044,7 @@ async fn admitted_graph_read_retains_only_the_catalog_it_requires() {
     );
     drop(reader);
     assert!(matches!(
-        graph.release_interactive_catalog(),
+        crate::test_support::release_idle_interactive_catalog(&graph).await,
         CodeGraphCatalogReleaseV1::Released { .. }
     ));
 

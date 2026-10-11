@@ -199,14 +199,7 @@ pub(super) fn application_definitions() -> Result<Vec<ToolDefinition>, McpCatalo
                     "readOnlyHint": executable.effect().is_read_only(),
                     "title": manifest.routing().name(),
                 })),
-                // Callers stays loaded: "who calls this" is the most common
-                // native reflex after grep and chains straight from a node ID.
-                meta: matches!(
-                    operation,
-                    ApplicationSurfaceOperation::StorageStatus
-                        | ApplicationSurfaceOperation::CodeCallers
-                )
-                .then(|| json!({ "anthropic/alwaysLoad": true })),
+                meta: None,
             })
         })
         .collect()

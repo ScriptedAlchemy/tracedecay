@@ -23,7 +23,9 @@ use crate::serve_harness::{
 };
 #[cfg(unix)]
 use crate::serve_harness::{init_project_under, register_global_project};
-use crate::serve_harness::{init_project_with_file, profile_root};
+use crate::serve_harness::{
+    init_project_with_file, profile_root, run_serve_after_ready, serve_command,
+};
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -271,32 +273,16 @@ async fn serve_stdio_smokes_managed_skill_list_and_view() {
     .unwrap();
     let _daemon = common::spawn_tracedecay_daemon(home.path());
 
-    let mut child = tracedecay_command_with_home(home.path())
-        .arg("serve")
-        .arg("--path")
-        .arg(project.path())
-        .env_remove("TRACEDECAY_DAEMON_SOCKET")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tracedecay serve should run");
-    {
-        let stdin = child.stdin.as_mut().expect("stdin should be piped");
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {}
-            })
-        )
-        .unwrap();
-        writeln!(
-            stdin,
-            "{}",
+    let mut command = serve_command(
+        home.path(),
+        project.path(),
+        Some(project.path().as_os_str()),
+    );
+    command.env_remove("TRACEDECAY_DAEMON_SOCKET");
+    let output = run_serve_after_ready(
+        command,
+        json!({}),
+        &[
             json!({
                 "jsonrpc": "2.0",
                 "id": 2,
@@ -305,12 +291,7 @@ async fn serve_stdio_smokes_managed_skill_list_and_view() {
                     "name": "tracedecay_skill_list",
                     "arguments": { "state": "active", "format": "json" }
                 }
-            })
-        )
-        .unwrap();
-        writeln!(
-            stdin,
-            "{}",
+            }),
             json!({
                 "jsonrpc": "2.0",
                 "id": 3,
@@ -323,14 +304,9 @@ async fn serve_stdio_smokes_managed_skill_list_and_view() {
                         "format": "json"
                     }
                 }
-            })
-        )
-        .unwrap();
-    }
-
-    let output = child
-        .wait_with_output()
-        .expect("tracedecay serve should exit after stdin closes");
+            }),
+        ],
+    );
     assert!(
         output.status.success(),
         "serve skill stdio smoke failed\nstdout:\n{}\nstderr:\n{}",
@@ -425,52 +401,29 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
     .unwrap();
     let _daemon = common::spawn_tracedecay_daemon(home.path());
 
-    let mut child = tracedecay_command_with_home(home.path())
-        .arg("serve")
-        .arg("--path")
-        .arg(project.path())
-        .env_remove("TRACEDECAY_DAEMON_SOCKET")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tracedecay serve should run");
-    {
-        let stdin = child.stdin.as_mut().expect("stdin should be piped");
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {}
-            })
-        )
-        .unwrap();
-        writeln!(
-            stdin,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "tracedecay_automation_run_artifact_view",
-                    "arguments": {
-                        "run_id": run_id,
-                        "kind": "codex_handoff",
-                        "format": "json"
-                    }
+    let mut command = serve_command(
+        home.path(),
+        project.path(),
+        Some(project.path().as_os_str()),
+    );
+    command.env_remove("TRACEDECAY_DAEMON_SOCKET");
+    let output = run_serve_after_ready(
+        command,
+        json!({}),
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedecay_automation_run_artifact_view",
+                "arguments": {
+                    "run_id": run_id,
+                    "kind": "codex_handoff",
+                    "format": "json"
                 }
-            })
-        )
-        .unwrap();
-    }
-
-    let output = child
-        .wait_with_output()
-        .expect("tracedecay serve should exit after stdin closes");
+            }
+        })],
+    );
     assert!(
         output.status.success(),
         "serve artifact stdio smoke failed\nstdout:\n{}\nstderr:\n{}",
@@ -1016,9 +969,9 @@ fn configuration_get_request(id: i64, key: &str) -> Value {
 }
 
 /// A session served without any project still reads and writes the profile's
-/// user settings over MCP: the tool search loads the configuration tools that
-/// can name a user key, `configuration_get` answers from the profile store, and
-/// a project-scoped key is the typed `project_required` refusal.
+/// user settings over MCP: discovery lists the configuration tools that can
+/// name a user key, `configuration_get` answers from the profile store, and a
+/// project-scoped key is the typed `project_required` refusal.
 #[cfg(unix)]
 #[tokio::test]
 async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
@@ -1043,16 +996,6 @@ async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
             configuration_get_request(2, "user.upload_enabled.v1"),
             json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
             configuration_get_request(4, "index.max_file_size.v1"),
-            json!({
-                "jsonrpc": "2.0",
-                "id": 5,
-                "method": "tools/call",
-                "params": {
-                    "name": "tracedecay_tool_search",
-                    "arguments": { "query": "configuration get set unset batch runtime" }
-                }
-            }),
-            json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list" }),
         ],
     );
     assert!(output.status.success(), "{output:?}");
@@ -1070,24 +1013,13 @@ async fn projectless_session_serves_user_settings_and_refuses_project_keys() {
         "{setting}"
     );
 
-    assert!(
-        json_rpc_response(&output.stdout, 3)["result"]["tools"].is_array(),
-        "projectless tools/list must answer with a tool array"
-    );
-    // The configuration tools sit outside the core list; the tool search loads
-    // them from this session's projectless catalog, which has no project-bound
-    // tools such as tracedecay_runtime to load.
-    let tools = json_rpc_response(&output.stdout, 6);
+    let tools = json_rpc_response(&output.stdout, 3);
     let names: std::collections::BTreeSet<&str> = tools["result"]["tools"]
         .as_array()
         .unwrap_or_else(|| panic!("tools/list must carry a tool array: {tools}"))
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect();
-    assert!(
-        !names.contains("tracedecay_runtime"),
-        "a projectless search must not load project-bound tools: {names:?}"
-    );
     for tool in [
         "tracedecay_configuration_get",
         "tracedecay_configuration_set",

@@ -428,11 +428,9 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
     let list_payload: Value = serde_json::from_str(extract_real_server_text(&list)).unwrap();
     assert_eq!(
         list_payload["registry_path"],
-        client_registry_path
-            .canonicalize()
-            .unwrap()
-            .display()
-            .to_string()
+        canonical_root_identity(&client_registry_path)
+            .to_string_lossy()
+            .as_ref()
     );
     let list_text = extract_real_server_text(&list);
     assert!(list_text.contains("proj_alpha"));
@@ -464,11 +462,9 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
     assert_eq!(context_payload["project"]["project_id"], "proj_alpha");
     assert_eq!(
         context_payload["registry_path"],
-        client_registry_path
-            .canonicalize()
-            .unwrap()
-            .display()
-            .to_string()
+        canonical_root_identity(&client_registry_path)
+            .to_string_lossy()
+            .as_ref()
     );
 }
 

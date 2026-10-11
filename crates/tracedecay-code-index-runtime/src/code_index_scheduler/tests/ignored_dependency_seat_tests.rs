@@ -13,7 +13,8 @@ use tracedecay_domain::{CodeGenerationId, UtcMicros};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use super::{
-    GitFixture, application_context, test_project_id, wait_for_live_complete_generation, write,
+    GitFixture, SERVING_SEAT_FAILURE_CEILING, application_context, test_project_id,
+    wait_for_live_complete_generation, write,
 };
 use crate::code_index_scheduler::{
     CodeIndexIgnoredDependencyRequestV1, CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1,
@@ -78,7 +79,7 @@ async fn ignored_dependency_admission_waits_for_the_pre_seat_graph_tail() {
         .await
         .expect("mount worktree");
     assert!(registry.request_complete_generation(fixture.path()).await);
-    tokio::time::timeout(Duration::from_secs(10), swap_entered)
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, swap_entered)
         .await
         .expect("publication did not reach its serving swap")
         .expect("serving swap gate stays armed");

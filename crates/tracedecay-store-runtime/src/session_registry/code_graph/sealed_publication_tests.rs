@@ -439,8 +439,8 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
         .await
         .expect("retain fresh code graph runtime");
 
-    let historical_fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../tracedecay-code-index/tests/fixtures/partitioned_pre_paging");
+    let historical_fixture =
+        Path::new("../tracedecay-code-index/tests/fixtures/partitioned_pre_paging");
     let historical_digest = "6fece830a4b12904018853a467e404edc60ea76e2cab48d4645fbbb4132bd6af";
     let generations_root = scoped_store.join("code-generations-v1");
     let segments_root = code_generation_segments_root(&scoped_store);

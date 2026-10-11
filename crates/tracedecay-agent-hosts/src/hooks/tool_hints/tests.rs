@@ -348,3 +348,26 @@ fn non_memory_edits_get_no_memory_store_hint() {
         "C:\\Users\\z\\.claude\\projects\\foo\\memory\\notes.md"
     ));
 }
+
+#[test]
+fn every_tool_a_hint_names_is_cataloged() {
+    let catalog = tracedecay_mcp_catalog::get_tool_definitions()
+        .unwrap()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    for spec in CATEGORY_SPECS {
+        for text in [spec.message, spec.context] {
+            for token in text
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|token| token.starts_with("tracedecay_") && *token != "tracedecay_")
+            {
+                assert!(
+                    catalog.contains(token),
+                    "the {} hint names {token}, which no host can call",
+                    spec.key
+                );
+            }
+        }
+    }
+}

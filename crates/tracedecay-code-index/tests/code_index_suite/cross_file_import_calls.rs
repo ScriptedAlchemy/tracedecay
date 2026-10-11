@@ -30,10 +30,7 @@ use crate::{
     typescript_module_resolution::reader,
 };
 
-const FIXTURE_ROOT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../tracedecay-code-extraction/fixtures/cross-file-calls"
-);
+const FIXTURE_ROOT: &str = "../tracedecay-code-extraction/fixtures/cross-file-calls";
 
 /// Every call of the designed graph, `(caller, callee)` by role. The two
 /// `main -> add|get` calls go through a local `store` value.

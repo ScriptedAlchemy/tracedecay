@@ -3,7 +3,7 @@ use tracedecay_runtime_core::config::ProfileRoot;
 
 use futures_util::StreamExt;
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Duration, interval};
 use tokio_util::codec::FramedRead;
 use tracedecay_contracts::{CancellationSignal, Deadline, InvocationError};
@@ -88,45 +88,61 @@ async fn run_stdio_bridge(
     )
     .await
     .map_err(lsp_invocation_error)?;
-    let mut stdout = tokio::io::stdout();
-    let mut pending_client_frame = initialize.map(|binding| binding.frame);
-    let mut poll_timer = interval(Duration::from_millis(25));
-
-    let bridge_result = async {
-        loop {
-            // Keep each pump fair: a queued daemon burst must not starve host input.
-            if flush_daemon_frame(&mut session, &mut stdout).await? {
-                return Ok(());
-            }
-
-            if let Some(frame) = pending_client_frame.as_deref() {
-                match send_client_frame_with_reconnect(&mut session, frame).await? {
-                    FrameSend::Sent => {
-                        pending_client_frame = None;
-                        continue;
-                    }
-                    FrameSend::Backpressured => {}
-                    FrameSend::Closed => return Ok(()),
-                }
-            }
-
-            tokio::select! {
-                frame = stdin.next(), if pending_client_frame.is_none() => {
-                    let Some(frame) = frame else {
-                        return Ok(());
-                    };
-                    let frame = frame.map_err(|error| bridge_error("decode", error))?;
-                    pending_client_frame = Some(String::from_utf8(frame).map_err(|_| {
-                        bridge_config_error("LSP bridge received a non-UTF-8 JSON-RPC payload")
-                    })?);
-                }
-                _ = poll_timer.tick() => {}
-            }
-        }
-    }
+    let bridge_result = pump_stdio_bridge(
+        &mut stdin,
+        &mut tokio::io::stdout(),
+        &mut session,
+        initialize.map(|binding| binding.frame),
+    )
     .await;
     let detach_result = detach_stdio_bridge(&mut session).await;
     finish_stdio_bridge(bridge_result, detach_result)
+}
+
+/// Forwards frames until either side closes. At most one client frame is held
+/// while the daemon backpressures, and a daemon frame is acknowledged only
+/// after stdout has flushed it.
+async fn pump_stdio_bridge<R, W>(
+    stdin: &mut FramedRead<R, ContentLengthCodec>,
+    stdout: &mut W,
+    session: &mut DaemonLspSessionClient,
+    mut pending_client_frame: Option<String>,
+) -> tracedecay_domain::errors::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut poll_timer = interval(Duration::from_millis(25));
+    loop {
+        // Keep each pump fair: a queued daemon burst must not starve host input.
+        if flush_daemon_frame(session, stdout).await? {
+            return Ok(());
+        }
+
+        if let Some(frame) = pending_client_frame.as_deref() {
+            match send_client_frame_with_reconnect(session, frame).await? {
+                FrameSend::Sent => {
+                    pending_client_frame = None;
+                    continue;
+                }
+                FrameSend::Backpressured => {}
+                FrameSend::Closed => return Ok(()),
+            }
+        }
+
+        tokio::select! {
+            frame = stdin.next(), if pending_client_frame.is_none() => {
+                let Some(frame) = frame else {
+                    return Ok(());
+                };
+                let frame = frame.map_err(|error| bridge_error("decode", error))?;
+                pending_client_frame = Some(String::from_utf8(frame).map_err(|_| {
+                    bridge_config_error("LSP bridge received a non-UTF-8 JSON-RPC payload")
+                })?);
+            }
+            _ = poll_timer.tick() => {}
+        }
+    }
 }
 
 async fn detach_stdio_bridge(
@@ -159,7 +175,7 @@ struct InitializeBinding {
     frame: String,
 }
 
-async fn read_initialize_binding<R: tokio::io::AsyncRead + Unpin>(
+async fn read_initialize_binding<R: AsyncRead + Unpin>(
     reader: &mut FramedRead<R, ContentLengthCodec>,
 ) -> tracedecay_domain::errors::Result<InitializeBinding> {
     let frame = reader
@@ -325,9 +341,9 @@ fn canonicalize_workspace_root(path: &Path) -> tracedecay_domain::errors::Result
         .ok_or_else(|| bridge_config_error("LSP workspace root must be a directory"))
 }
 
-async fn flush_daemon_frame(
+async fn flush_daemon_frame<W: AsyncWrite + Unpin>(
     session: &mut DaemonLspSessionClient,
-    stdout: &mut tokio::io::Stdout,
+    stdout: &mut W,
 ) -> tracedecay_domain::errors::Result<bool> {
     match poll_daemon_frame_with_reconnect(session).await? {
         FramePoll::Frame(frame) => {
@@ -824,5 +840,218 @@ mod tests {
             .err()
             .expect("remote root must fail closed");
         assert!(error.to_string().contains("local file URI"), "{error}");
+    }
+
+    #[cfg(unix)]
+    mod pump {
+        use std::pin::Pin;
+        use std::sync::{Arc, Mutex};
+        use std::task::{Context, Poll};
+        use std::time::Duration;
+
+        use serde_json::{Value, json};
+        use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, duplex};
+        use tokio_util::codec::FramedRead;
+        use tracedecay_daemon_protocol::{
+            BrokerListener, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
+            DaemonAuthPreface, DaemonClientIdentity, DaemonConnection, DaemonHandshake,
+            DaemonInvocationClient, DaemonLspSessionClient, MovedStoreAdoption,
+            default_loopback_endpoint,
+        };
+        use tracedecay_lsp::ContentLengthCodec;
+
+        use super::super::{lsp_request_control, pump_stdio_bridge};
+
+        const TOKEN: &str = "lsp-pump-test-token";
+        const DAEMON_FRAME: &str = r#"{"jsonrpc":"2.0","method":"window/logMessage","params":{"type":3,"message":"daemon"}}"#;
+        const FIRST_CLIENT_FRAME: &str = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+        const SECOND_CLIENT_FRAME: &str =
+            r#"{"jsonrpc":"2.0","method":"textDocument/didSave","params":{}}"#;
+
+        /// Accepts three bytes per write, so one frame takes many partial
+        /// writes, and records how many written bytes were flushed.
+        #[derive(Clone, Default)]
+        struct TrickleStdout(Arc<Mutex<(Vec<u8>, usize)>>);
+
+        impl AsyncWrite for TrickleStdout {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                let accepted = buf.len().min(3);
+                self.0
+                    .lock()
+                    .expect("stdout lock")
+                    .0
+                    .extend_from_slice(&buf[..accepted]);
+                Poll::Ready(Ok(accepted))
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+                let mut state = self.0.lock().expect("stdout lock");
+                state.1 = state.0.len();
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                self.poll_flush(cx)
+            }
+        }
+
+        fn reply(request: &Value, outcome: Value) -> String {
+            let mut response = json!({
+                "protocol": DAEMON_INVOCATION_PROTOCOL,
+                "revision": DAEMON_INVOCATION_REVISION,
+                "request_id": request["request_id"],
+            });
+            response
+                .as_object_mut()
+                .expect("response object")
+                .extend(outcome.as_object().expect("outcome object").clone());
+            format!("{response}\n")
+        }
+
+        /// Answers the bridge like the daemon actor: one queued daemon frame,
+        /// the first client frame backpressured, and a close once both client
+        /// frames were accepted. Returns the stdout bytes seen at
+        /// acknowledgement and every client frame in arrival order.
+        async fn scripted_daemon(
+            listener: BrokerListener,
+            stdout: TrickleStdout,
+        ) -> (Option<Vec<u8>>, Vec<String>) {
+            let (reader, mut writer) = listener
+                .accept()
+                .await
+                .expect("accept bridge connection")
+                .into_split();
+            let mut lines = BufReader::new(reader).lines();
+            let preface = lines.next_line().await.expect("read preface");
+            let preface = preface.expect("auth preface");
+            assert!(
+                DaemonAuthPreface::from_line(preface.trim())
+                    .expect("parse preface")
+                    .authenticate(TOKEN)
+            );
+            lines
+                .next_line()
+                .await
+                .expect("read handshake")
+                .expect("handshake");
+
+            let mut daemon_frame_sent = false;
+            let mut acknowledged_stdout = None;
+            let mut client_frames = Vec::new();
+            while let Some(line) = lines.next_line().await.expect("read invocation") {
+                let request: Value = serde_json::from_str(&line).expect("invocation json");
+                let outcome = match request["operation"].as_str().expect("operation") {
+                    "lsp_open" => json!({
+                        "status": "lsp_opened",
+                        "session": {"session_id": "lsp-pump-test", "credential": "0".repeat(64)},
+                        "expires_at_ms": 1000,
+                    }),
+                    "lsp_poll" if !daemon_frame_sent => {
+                        daemon_frame_sent = true;
+                        json!({"status": "lsp_frame", "frame": DAEMON_FRAME, "closed": false})
+                    }
+                    "lsp_poll" => json!({
+                        "status": "lsp_frame",
+                        "frame": null,
+                        "closed": client_frames.len() == 3,
+                    }),
+                    "lsp_acknowledge" => {
+                        let (written, flushed) = stdout.0.lock().expect("stdout lock").clone();
+                        assert_eq!(flushed, written.len(), "acknowledged before stdout flushed");
+                        acknowledged_stdout = Some(written);
+                        json!({"status": "lsp_acknowledged", "acknowledged": true})
+                    }
+                    "lsp_frame" => {
+                        client_frames.push(request["frame"].as_str().expect("frame").to_owned());
+                        json!({
+                            "status": "lsp_frame_accepted",
+                            "backpressured": client_frames.len() == 1,
+                            "closed": false,
+                        })
+                    }
+                    operation => panic!("unexpected bridge operation {operation}"),
+                };
+                writer
+                    .write_all(reply(&request, outcome).as_bytes())
+                    .await
+                    .expect("write reply");
+                writer.flush().await.expect("flush reply");
+            }
+            (acknowledged_stdout, client_frames)
+        }
+
+        #[tokio::test]
+        async fn pump_holds_one_backpressured_frame_and_acknowledges_after_flush() {
+            let (listener, endpoint) = BrokerListener::bind(&default_loopback_endpoint())
+                .await
+                .expect("loopback listener");
+            let mut stdout = TrickleStdout::default();
+            let daemon = tokio::spawn(scripted_daemon(listener, stdout.clone()));
+
+            let profile = tempfile::TempDir::new().expect("profile");
+            let handshake = DaemonHandshake {
+                project_path: Some(profile.path().to_path_buf()),
+                scope_prefix: None,
+                timings: false,
+                allow_init: false,
+                allow_initialize_root_routing: false,
+                client_identity: DaemonClientIdentity {
+                    profile_root: profile.path().to_path_buf(),
+                    global_db_path: profile.path().join("global.db"),
+                },
+                client_version: env!("CARGO_PKG_VERSION").to_owned(),
+                client_instance_id: "client.lsp-pump-test".to_owned(),
+                tool_list_changed_capable: false,
+                catalog_version: String::new(),
+                moved_store_adoption: MovedStoreAdoption::Never,
+            };
+            let invocation = DaemonInvocationClient::new(
+                DaemonConnection::new(endpoint, TOKEN.to_owned()),
+                handshake,
+            );
+            let (deadline, cancellation) = lsp_request_control().expect("open control");
+            let mut session = DaemonLspSessionClient::open(
+                invocation,
+                env!("CARGO_PKG_VERSION"),
+                None,
+                Vec::new(),
+                deadline,
+                cancellation,
+            )
+            .await
+            .expect("open LSP session");
+
+            let (mut host, stdin) = duplex(4096);
+            for frame in [FIRST_CLIENT_FRAME, SECOND_CLIENT_FRAME] {
+                let encoded = ContentLengthCodec::encode(frame.as_bytes()).expect("encode");
+                host.write_all(&encoded).await.expect("write host frame");
+            }
+            drop(host);
+            let mut stdin = FramedRead::new(stdin, ContentLengthCodec::new());
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                pump_stdio_bridge(&mut stdin, &mut stdout, &mut session, None),
+            )
+            .await
+            .expect("pump stops when the daemon closes")
+            .expect("pump result");
+            drop(session);
+
+            let (acknowledged_stdout, client_frames) = daemon.await.expect("daemon task");
+            let encoded = ContentLengthCodec::encode(DAEMON_FRAME.as_bytes()).expect("encode");
+            assert_eq!(acknowledged_stdout.as_ref(), Some(&encoded));
+            assert_eq!(stdout.0.lock().expect("stdout lock").0, encoded);
+            assert_eq!(
+                client_frames,
+                [FIRST_CLIENT_FRAME, FIRST_CLIENT_FRAME, SECOND_CLIENT_FRAME]
+            );
+        }
     }
 }

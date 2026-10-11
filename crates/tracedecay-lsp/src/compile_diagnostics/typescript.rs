@@ -18,59 +18,15 @@
 //! missing-compiler state, not an empty success, because a caller that asks
 //! for diagnostics must learn that nothing checked the project.
 
-use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use std::process::Stdio;
 
-use super::tsconfig::{typescript_install_command, typescript_projects};
-use super::{Diagnostic, Driver, Scope, is_diagnostic_level};
+use super::{Diagnostic, is_diagnostic_level};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Installs the project's own compiler where the producer looks for it; the
 /// command for a package with no workspace lockfile to install from.
 pub const TYPESCRIPT_INSTALL_COMMAND: &str = "npm install --save-dev typescript";
-
-pub struct TscDriver;
-
-impl Driver for TscDriver {
-    fn name(&self) -> &'static str {
-        "typescript"
-    }
-
-    fn detect(&self, project_root: &Path) -> bool {
-        project_root.join("tsconfig.json").exists()
-    }
-
-    fn run<'a>(
-        &'a self,
-        project_root: &'a Path,
-        _scope: &'a Scope,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Diagnostic>>> + Send + 'a>> {
-        Box::pin(tracing::Instrument::instrument(
-            async move {
-                let mut diagnostics = Vec::new();
-                for project in typescript_projects(project_root) {
-                    let Some(compiler) = project.compiler else {
-                        let package = project.tsconfig.parent().unwrap_or(project_root);
-                        return Err(TraceDecayError::Config {
-                            message: format!(
-                                "no TypeScript compiler for '{}': run `{}`",
-                                project.tsconfig.display(),
-                                typescript_install_command(project_root, package)
-                            ),
-                        });
-                    };
-                    diagnostics.extend(
-                        run_compiler(&compiler, project_root, &project.tsconfig, None).await?,
-                    );
-                }
-                Ok(diagnostics)
-            },
-            tracing::trace_span!("compile_diagnostics.typescript.tsc"),
-        ))
-    }
-}
 
 /// Runs one resolved compiler over one tsconfig and parses its report.
 ///

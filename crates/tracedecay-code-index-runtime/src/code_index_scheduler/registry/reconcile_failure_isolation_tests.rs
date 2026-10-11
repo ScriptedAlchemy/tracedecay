@@ -30,7 +30,7 @@ use super::super::{
         ReconcileFaultInjectionV1, ReconcileFaultKindV1,
     },
 };
-use super::CodeIndexSchedulerRegistryV1;
+use super::{CodeIndexOwnerActivityV1, CodeIndexSchedulerRegistryV1};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::resident_memory::{RESIDENT_OWNER_IDLE_WINDOW_V1, ResidentOwnersV1};
 
@@ -146,25 +146,50 @@ impl Fixture {
     /// A pass gives up its owner-pass guard before its graph tail (prepare,
     /// activation, seat), so only a finished pass, tail included, is quiet.
     async fn settle_for(&self, window: Duration) {
+        self.quiet_for(window, CodeIndexOwnerActivityV1::pass_finished)
+            .await;
+    }
+
+    /// Block until no owner pass has started or run for `window`. A worker
+    /// waiting out a held store lock owes a pass, so it never settles, but it
+    /// starts none until the holder lets go.
+    async fn pass_free_for(&self, window: Duration) {
+        self.quiet_for(window, |activity| !activity.passes().running())
+            .await;
+    }
+
+    /// Block until `quiet` has held, with no pass started, for `window`. A
+    /// worker that never goes quiet panics: every caller asserts on what the
+    /// worker did after it stopped, which a still-running pass falsifies.
+    async fn quiet_for(&self, window: Duration, quiet: impl Fn(&CodeIndexOwnerActivityV1) -> bool) {
         let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
-        let mut quiet_since: Option<tokio::time::Instant> = None;
+        let mut quiet_since: Option<(tokio::time::Instant, Option<u64>)> = None;
         while tokio::time::Instant::now() < deadline {
-            if self
-                .registry
-                .subscribe_owner_activity(&self.project)
-                .await
-                .is_some_and(|activity| !activity.pass_finished())
-            {
+            let activity = self.registry.subscribe_owner_activity(&self.project).await;
+            let started = activity.as_ref().map(|activity| activity.passes().started);
+            if activity.as_ref().is_some_and(|activity| !quiet(activity)) {
                 quiet_since = None;
             } else {
                 match quiet_since {
-                    None => quiet_since = Some(tokio::time::Instant::now()),
-                    Some(since) if since.elapsed() >= window => return,
-                    Some(_) => {}
+                    Some((since, at)) if at == started => {
+                        if since.elapsed() >= window {
+                            return;
+                        }
+                    }
+                    _ => quiet_since = Some((tokio::time::Instant::now(), started)),
                 }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+        let activity = self
+            .registry
+            .subscribe_owner_activity(&self.project)
+            .await
+            .map(|activity| (activity.passes(), activity.worker_phase()));
+        panic!(
+            "the worker never stayed quiet for {window:?} within {SETTLE_DEADLINE:?}; \
+             last (passes, phase): {activity:?}"
+        );
     }
 
     /// Install the fault and hand back the shared counter of dispatched passes.
@@ -296,11 +321,9 @@ async fn wait_until_pending_wake_drained(fixture: &Fixture) -> u64 {
     }
 }
 
-/// Poll until the mount reports a sealed complete generation, waking the
-/// worker as a query would. Panics at the deadline: a mount that never seals
-/// is the failure these tests exist to catch, not a timing artifact.
+/// Wait until the mount reports a sealed complete generation, waking the
+/// worker as a query would and re-reading on every owner transition.
 async fn wait_for_latest_generation(fixture: &Fixture) -> String {
-    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
     let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
     loop {
         let freshness = fixture
@@ -311,12 +334,8 @@ async fn wait_for_latest_generation(fixture: &Fixture) -> String {
         if let Some(generation) = freshness.latest_generation_id {
             return generation;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the mount never sealed a generation: {freshness:?}"
-        );
         fixture.wake_with_pending_arrival().await;
-        signals.changed_before(deadline.into_std()).await;
+        signals.changed().await;
     }
 }
 
@@ -598,7 +617,7 @@ async fn a_held_generation_store_lock_retries_on_its_release() {
         "the hint must reach the mounted scheduler"
     );
     assert_eq!(wait_for_attempts(&passes, 1).await, 1);
-    fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
+    fixture.pass_free_for(TERMINATION_QUIET_WINDOW).await;
     assert_eq!(
         passes.attempts(),
         1,
@@ -613,7 +632,6 @@ async fn a_held_generation_store_lock_retries_on_its_release() {
     assert_eq!(parked, None, "a held lock is a wait, not a park");
     drop(holder);
 
-    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
     let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
     let freshness = loop {
         let freshness = fixture
@@ -621,12 +639,12 @@ async fn a_held_generation_store_lock_retries_on_its_release() {
             .dashboard_freshness(&fixture.project)
             .await
             .expect("mounted freshness");
-        let converged = freshness.latest_generation_id.as_ref() != Some(&sealed_before)
-            && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh);
-        if converged || tokio::time::Instant::now() >= deadline {
+        if freshness.latest_generation_id.as_ref() != Some(&sealed_before)
+            && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh)
+        {
             break freshness;
         }
-        signals.changed_before(deadline.into_std()).await;
+        signals.changed().await;
     };
     assert_eq!(freshness.parked, None, "{freshness:?}");
     assert_eq!(
@@ -677,7 +695,7 @@ async fn follow_up_wakes_wait_out_a_held_store_lock() {
         "the hint must reach the mounted scheduler"
     );
     assert_eq!(wait_for_attempts(&passes, 1).await, 1);
-    fixture.settle_for(MOUNT_QUIET_WINDOW).await;
+    fixture.pass_free_for(MOUNT_QUIET_WINDOW).await;
     assert_eq!(
         passes.attempts(),
         1,
@@ -702,7 +720,6 @@ async fn follow_up_wakes_wait_out_a_held_store_lock() {
     assert_eq!(parked, None, "a held lock is a wait, not a park");
     drop(holder);
 
-    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
     let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
     let freshness = loop {
         let freshness = fixture
@@ -710,12 +727,12 @@ async fn follow_up_wakes_wait_out_a_held_store_lock() {
             .dashboard_freshness(&fixture.project)
             .await
             .expect("mounted freshness");
-        let converged = freshness.latest_generation_id.as_ref() != Some(&sealed_before)
-            && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh);
-        if converged || tokio::time::Instant::now() >= deadline {
+        if freshness.latest_generation_id.as_ref() != Some(&sealed_before)
+            && freshness.staleness_state == Some(CodeIndexStalenessStateV1::Fresh)
+        {
             break freshness;
         }
-        signals.changed_before(deadline.into_std()).await;
+        signals.changed().await;
     };
     assert_eq!(freshness.parked, None, "{freshness:?}");
     assert_eq!(
@@ -745,10 +762,9 @@ async fn a_capacity_refusal_that_never_clears_is_bounded() {
     let bound = 1 + MAX_CONSECUTIVE_CAPACITY_RETRIES_V1 as usize;
 
     fixture.wake_without_new_input().await;
-    // Sample the chain at its policy bound rather than after a quiet window:
-    // `settle_for` gives its deadline up silently, so on a loaded machine a
-    // retry still queued was sampled as the terminal count and the comparison
-    // below read its arrival as a re-arm.
+    // Reach the policy bound before the quiet window: on a loaded machine a
+    // retry still queued would otherwise be sampled as the terminal count and
+    // the comparison below would read its arrival as a re-arm.
     wait_for_attempts(&fault, bound).await;
     fixture.settle_for(TERMINATION_QUIET_WINDOW).await;
     let settled = fault.attempts();
@@ -950,7 +966,6 @@ async fn a_reproducing_reconcile_failure_parks_typed_and_converges_after_the_fix
     // would keep a wake pending behind every pass that outlasts the spacing,
     // and a pending wake never reads as fresh. Fresh text seats before the
     // complete generation does, so the wait covers both.
-    let deadline = std::time::Instant::now() + SETTLE_DEADLINE;
     let mut signals = OwnerSignals::subscribe(&restarted.registry, &restarted.project).await;
     restarted
         .registry
@@ -971,11 +986,7 @@ async fn a_reproducing_reconcile_failure_parks_typed_and_converges_after_the_fix
         {
             break (freshness, serving);
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fixed worktree never served a fresh complete generation: {freshness:?}"
-        );
-        signals.changed_before(deadline).await;
+        signals.changed().await;
     };
     assert!(freshness.parked.is_none(), "{freshness:?}");
     assert_eq!(

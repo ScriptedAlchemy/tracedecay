@@ -12,7 +12,9 @@ use tracedecay_mcp::JsonRpcResponse;
 
 use crate::daemon::ProductionProjectCompositionHarnessV1;
 
-const PREWARM_KEY: &str = "diagnostics.prewarm.v1";
+const THRESHOLD_KEY: &str = "feedback.proximity.risk_threshold";
+const DEFAULT_THRESHOLD: u64 = 7_000;
+const OVERRIDE_THRESHOLD: u64 = 6_000;
 const TIMINGS_KEY: &str = "telemetry.timings.v1";
 const BATCH_KEY: &str = "configuration.idempotency.mcp-batch-proof";
 const RESTORE_KEY: &str = "configuration.idempotency.mcp-batch-restore";
@@ -30,6 +32,10 @@ fn initialize_project(project: &Path) {
 
 fn boolean_value(value: bool) -> Value {
     json!({"kind": "boolean", "value": value})
+}
+
+fn unsigned_value(value: u64) -> Value {
+    json!({"kind": "unsigned", "value": value})
 }
 
 fn project_layer(project_id: &str) -> Value {
@@ -216,28 +222,34 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         &harness,
         &project,
         "tracedecay_configuration_get",
-        json!({"key": PREWARM_KEY, "format": "json"}),
+        json!({"key": THRESHOLD_KEY, "format": "json"}),
     )
     .await;
     let (refused, enrolled_payload) = tool_text(&enrolled);
-    assert!(!refused, "initial prewarm read refused: {enrolled_payload}");
+    assert!(
+        !refused,
+        "initial threshold read refused: {enrolled_payload}"
+    );
     let project_id = enrolled_payload["scope"]["project_id"]
         .as_str()
         .expect("enrolled project id")
         .to_owned();
-    let prewarm = enrolled_payload["outcome"]["value"]["payload"].clone();
+    let threshold = enrolled_payload["outcome"]["value"]["payload"].clone();
     let timings = read_setting(&harness, &project, TIMINGS_KEY).await;
-    let initial_revision = prewarm["revision_id"]
+    let initial_revision = threshold["revision_id"]
         .as_str()
         .expect("initial revision")
         .to_owned();
     assert_eq!(initial_revision, "configuration.initial.canonical.v1");
     assert_eq!(timings["revision_id"], initial_revision);
-    assert_eq!(prewarm["key"], PREWARM_KEY);
+    assert_eq!(threshold["key"], THRESHOLD_KEY);
     assert_eq!(timings["key"], TIMINGS_KEY);
-    assert_eq!(prewarm["effective_value"], boolean_value(false));
+    assert_eq!(
+        threshold["effective_value"],
+        unsigned_value(DEFAULT_THRESHOLD)
+    );
     assert_eq!(timings["effective_value"], boolean_value(true));
-    assert_default_candidate(&prewarm);
+    assert_default_candidate(&threshold);
     assert_default_candidate(&timings);
 
     let layer = project_layer(&project_id);
@@ -246,7 +258,11 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         &project,
         batch_arguments(
             json!([
-                set_mutation(layer.clone(), PREWARM_KEY, boolean_value(true)),
+                set_mutation(
+                    layer.clone(),
+                    THRESHOLD_KEY,
+                    unsigned_value(OVERRIDE_THRESHOLD)
+                ),
                 set_mutation(layer.clone(), TIMINGS_KEY, boolean_value(false))
             ]),
             &initial_revision,
@@ -293,13 +309,16 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         .to_owned();
     assert_ne!(committed_revision, initial_revision);
 
-    let committed_prewarm = read_setting(&harness, &project, PREWARM_KEY).await;
+    let committed_threshold = read_setting(&harness, &project, THRESHOLD_KEY).await;
     let committed_timings = read_setting(&harness, &project, TIMINGS_KEY).await;
-    assert_eq!(committed_prewarm["effective_value"], boolean_value(true));
+    assert_eq!(
+        committed_threshold["effective_value"],
+        unsigned_value(OVERRIDE_THRESHOLD)
+    );
     assert_eq!(committed_timings["effective_value"], boolean_value(false));
-    assert_eq!(committed_prewarm["revision_id"], committed_revision);
+    assert_eq!(committed_threshold["revision_id"], committed_revision);
     assert_eq!(committed_timings["revision_id"], committed_revision);
-    assert_winning_candidate(&committed_prewarm, &project_id, &committed_revision);
+    assert_winning_candidate(&committed_threshold, &project_id, &committed_revision);
     assert_winning_candidate(&committed_timings, &project_id, &committed_revision);
 
     let observed = call_tool(
@@ -329,7 +348,11 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         &project,
         batch_arguments(
             json!([
-                set_mutation(layer.clone(), PREWARM_KEY, boolean_value(true)),
+                set_mutation(
+                    layer.clone(),
+                    THRESHOLD_KEY,
+                    unsigned_value(OVERRIDE_THRESHOLD)
+                ),
                 set_mutation(layer.clone(), TIMINGS_KEY, boolean_value(false))
             ]),
             &initial_revision,
@@ -346,7 +369,7 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         applied_payload["outcome"]["value"]
     );
     assert_eq!(
-        read_setting(&harness, &project, PREWARM_KEY).await["revision_id"],
+        read_setting(&harness, &project, THRESHOLD_KEY).await["revision_id"],
         committed_revision
     );
 
@@ -355,7 +378,11 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         &project,
         batch_arguments(
             json!([
-                set_mutation(layer.clone(), PREWARM_KEY, boolean_value(false)),
+                set_mutation(
+                    layer.clone(),
+                    THRESHOLD_KEY,
+                    unsigned_value(DEFAULT_THRESHOLD)
+                ),
                 set_mutation(layer.clone(), TIMINGS_KEY, boolean_value(false))
             ]),
             &initial_revision,
@@ -377,7 +404,11 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         &project,
         batch_arguments(
             json!([
-                set_mutation(layer.clone(), PREWARM_KEY, boolean_value(true)),
+                set_mutation(
+                    layer.clone(),
+                    THRESHOLD_KEY,
+                    unsigned_value(OVERRIDE_THRESHOLD)
+                ),
                 set_mutation(layer.clone(), TIMINGS_KEY, boolean_value(true))
             ]),
             &initial_revision,
@@ -420,8 +451,16 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         &project,
         batch_arguments(
             json!([
-                set_mutation(layer.clone(), PREWARM_KEY, boolean_value(false)),
-                set_mutation(layer.clone(), PREWARM_KEY, boolean_value(true))
+                set_mutation(
+                    layer.clone(),
+                    THRESHOLD_KEY,
+                    unsigned_value(DEFAULT_THRESHOLD)
+                ),
+                set_mutation(
+                    layer.clone(),
+                    THRESHOLD_KEY,
+                    unsigned_value(OVERRIDE_THRESHOLD)
+                )
             ]),
             &committed_revision,
             "configuration.idempotency.mcp-batch-duplicate",
@@ -442,7 +481,11 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         &project,
         batch_arguments(
             json!([
-                set_mutation(layer.clone(), PREWARM_KEY, boolean_value(false)),
+                set_mutation(
+                    layer.clone(),
+                    THRESHOLD_KEY,
+                    unsigned_value(DEFAULT_THRESHOLD)
+                ),
                 set_mutation(json!({"kind": "default"}), TIMINGS_KEY, boolean_value(true))
             ]),
             &committed_revision,
@@ -487,7 +530,11 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         &project,
         batch_arguments(
             json!([
-                set_mutation(layer.clone(), PREWARM_KEY, boolean_value(false)),
+                set_mutation(
+                    layer.clone(),
+                    THRESHOLD_KEY,
+                    unsigned_value(DEFAULT_THRESHOLD)
+                ),
                 set_mutation(
                     layer.clone(),
                     TIMINGS_KEY,
@@ -514,8 +561,8 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         batch_arguments(
             json!([set_mutation(
                 project_layer("project.configuration-batch.foreign"),
-                PREWARM_KEY,
-                boolean_value(false)
+                THRESHOLD_KEY,
+                unsigned_value(DEFAULT_THRESHOLD)
             )]),
             &committed_revision,
             "configuration.idempotency.mcp-batch-foreign",
@@ -557,8 +604,8 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
     let mut unknown_field = batch_arguments(
         json!([set_mutation(
             layer.clone(),
-            PREWARM_KEY,
-            boolean_value(false)
+            THRESHOLD_KEY,
+            unsigned_value(DEFAULT_THRESHOLD)
         )]),
         &committed_revision,
         "configuration.idempotency.mcp-batch-unknown-field",
@@ -567,11 +614,14 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
     let schema = call_batch(&harness, &project, unknown_field).await;
     assert_schema_refusal(&schema);
 
-    let unchanged_prewarm = read_setting(&harness, &project, PREWARM_KEY).await;
+    let unchanged_threshold = read_setting(&harness, &project, THRESHOLD_KEY).await;
     let unchanged_timings = read_setting(&harness, &project, TIMINGS_KEY).await;
-    assert_eq!(unchanged_prewarm["effective_value"], boolean_value(true));
+    assert_eq!(
+        unchanged_threshold["effective_value"],
+        unsigned_value(OVERRIDE_THRESHOLD)
+    );
     assert_eq!(unchanged_timings["effective_value"], boolean_value(false));
-    assert_eq!(unchanged_prewarm["revision_id"], committed_revision);
+    assert_eq!(unchanged_threshold["revision_id"], committed_revision);
     assert_eq!(unchanged_timings["revision_id"], committed_revision);
 
     let restored = call_batch(
@@ -579,7 +629,7 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         &project,
         batch_arguments(
             json!([
-                unset_mutation(layer.clone(), PREWARM_KEY),
+                unset_mutation(layer.clone(), THRESHOLD_KEY),
                 unset_mutation(layer, TIMINGS_KEY)
             ]),
             &committed_revision,
@@ -598,13 +648,16 @@ async fn configuration_batch_applies_both_settings_and_refuses_the_other_inputs(
         .expect("restored revision")
         .to_owned();
     assert_ne!(restored_revision, committed_revision);
-    let restored_prewarm = read_setting(&harness, &project, PREWARM_KEY).await;
+    let restored_threshold = read_setting(&harness, &project, THRESHOLD_KEY).await;
     let restored_timings = read_setting(&harness, &project, TIMINGS_KEY).await;
-    assert_eq!(restored_prewarm["effective_value"], boolean_value(false));
+    assert_eq!(
+        restored_threshold["effective_value"],
+        unsigned_value(DEFAULT_THRESHOLD)
+    );
     assert_eq!(restored_timings["effective_value"], boolean_value(true));
-    assert_eq!(restored_prewarm["revision_id"], restored_revision);
+    assert_eq!(restored_threshold["revision_id"], restored_revision);
     assert_eq!(restored_timings["revision_id"], restored_revision);
-    assert_default_candidate(&restored_prewarm);
+    assert_default_candidate(&restored_threshold);
     assert_default_candidate(&restored_timings);
 
     harness.shutdown().await;

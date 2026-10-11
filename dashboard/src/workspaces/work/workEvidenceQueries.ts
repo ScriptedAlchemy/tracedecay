@@ -150,11 +150,12 @@ export function useWorkEvidence(
     queryFn:
       request === undefined
         ? skipToken
-        : () =>
+        : ({ signal }) =>
             callWork(
               WORK_RETRIEVE_EVIDENCE_ROUTE,
               request,
               scopedUrl(scope, WORK_RETRIEVE_EVIDENCE_ROUTE.path),
+              signal,
             ),
   });
 }

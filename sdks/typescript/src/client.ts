@@ -14,12 +14,14 @@ import {
   type PageOptions,
 } from "./request-control";
 export type { OperationRequestOptions, PageOptions } from "./request-control";
-import type {
-  ApplicationProblemRecord,
-  HttpProblemEnvelope,
-  HttpSseEvent,
-  HttpSuccessEnvelope,
-  OperationReceipt,
+import {
+  applicationProblemStatusMatches,
+  isHttpProblemEnvelope,
+  type ApplicationProblemRecord,
+  type HttpProblemEnvelope,
+  type HttpSseEvent,
+  type HttpSuccessEnvelope,
+  type OperationReceipt,
 } from "./types";
 
 type FetchImplementation = typeof globalThis.fetch;
@@ -208,79 +210,6 @@ function hasMediaType(response: Response, expected: string): boolean {
   );
 }
 
-function isContract(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    isBoundedOpaqueString(value.schema_id, 512) &&
-    isSafeUnsignedInteger(value.schema_revision) &&
-    value.schema_revision > 0
-  );
-}
-
-function isDiagnostic(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    typeof value.code === "string" &&
-    typeof value.message === "string"
-  );
-}
-
-function isProblemDetail(value: unknown): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
-  switch (value.kind) {
-    case "parked":
-      return (
-        typeof value.cause === "string" &&
-        typeof value.remedy === "string" &&
-        typeof value.retries_on_wake === "boolean"
-      );
-    case "stale_refresh_frontier":
-      return (
-        isSafeUnsignedInteger(value.requested) &&
-        isSafeUnsignedInteger(value.committed) &&
-        isSafeUnsignedInteger(value.active)
-      );
-    case "stale_precondition":
-      return (
-        typeof value.field === "string" &&
-        isSafeUnsignedInteger(value.requested) &&
-        isSafeUnsignedInteger(value.current)
-      );
-    case "lock_deadline":
-      return typeof value.resource === "string" && isSafeUnsignedInteger(value.deadline_ms);
-    case "diagnostics_unsupported":
-      return (
-        (value.file === null || typeof value.file === "string") &&
-        Array.isArray(value.searched) &&
-        value.searched.every(
-          (candidate) =>
-            isRecord(candidate) &&
-            typeof candidate.path === "string" &&
-            typeof candidate.present === "boolean",
-        )
-      );
-    case "diagnostics_pending":
-      return (
-        typeof value.producer === "string" &&
-        (value.generation === null || typeof value.generation === "string")
-      );
-    case "code_graph_rewarming":
-      return isSafeUnsignedInteger(value.retry_after_millis);
-    case "reset_required":
-      return (
-        typeof value.authority === "string" &&
-        (value.found_version === null || isSafeInteger(value.found_version)) &&
-        (value.required_version === null || isSafeInteger(value.required_version)) &&
-        typeof value.reason === "string" &&
-        typeof value.remedy === "string"
-      );
-    default:
-      return false;
-  }
-}
-
 function isReceipt(value: unknown): value is OperationReceipt {
   if (
     !isRecord(value) ||
@@ -322,206 +251,6 @@ function isDecodedSuccessEnvelope(value: unknown): boolean {
     );
   }
   return value.outcome.outcome === "preview" || value.outcome.outcome === "effect";
-}
-
-function isProblemEnvelope(value: unknown): value is HttpProblemEnvelope {
-  if (
-    !isRecord(value) ||
-    (value.binding_id !== undefined && typeof value.binding_id !== "string") ||
-    !isContract(value.contract) ||
-    !isBoundedOpaqueString(value.request_id, MAX_REQUEST_ID_BYTES) ||
-    !isRecord(value.problem)
-  ) {
-    return false;
-  }
-  const problem = value.problem;
-  const kinds = [
-    "invalid_request", "not_found_or_not_authorized", "conflict", "partial_effect",
-    "stale", "unsupported", "unavailable", "execution_failed", "reset_required",
-    "saturated", "cancelled", "timed_out",
-  ];
-  const cancellationStages = [
-    "before_admission", "before_read", "during_read", "before_effect", "effect_in_flight",
-  ];
-  const unavailableClasses = [
-    "authority", "backend_unavailable", "backend_disconnected", "backend_retryable",
-  ];
-  const executionFailureClasses = ["denied", "malformed_output", "permanent"];
-  const legalActions = Array.isArray(problem.legal_actions)
-    ? problem.legal_actions
-    : null;
-  const detailKinds = ["stale", "unsupported", "unavailable", "reset_required", "saturated"];
-  const diagnosticKinds = [
-    "invalid_request", "conflict", "partial_effect", "stale", "unsupported",
-    "unavailable", "execution_failed", "reset_required", "saturated",
-  ];
-  const expectedRetryScope =
-    problem.retry === "never"
-      ? null
-      : problem.retry === "same_request" || problem.retry === "after_delay"
-        ? "same_request"
-        : problem.retry === "after_revalidate"
-          ? "fresh_request"
-          : problem.retry === "after_reconcile"
-            ? "same_operation"
-            : undefined;
-  const validShape =
-    problem.revision === 1 &&
-    typeof problem.kind === "string" && kinds.includes(problem.kind) &&
-    typeof problem.code === "string" &&
-    typeof problem.message === "string" &&
-    (problem.diagnostic === null || isDiagnostic(problem.diagnostic)) &&
-    "detail" in problem &&
-    (problem.detail === null || isProblemDetail(problem.detail)) &&
-    "committed_receipt" in problem &&
-    typeof problem.owning_layer === "string" &&
-    typeof problem.terminality === "string" &&
-    typeof problem.retryable === "boolean" &&
-    typeof problem.retry === "string" &&
-    (problem.retry_scope === null || typeof problem.retry_scope === "string") &&
-    (problem.retry_after_millis === null ||
-      isSafeUnsignedInteger(problem.retry_after_millis)) &&
-    "cancellation_stage" in problem &&
-    (problem.cancellation_stage === null ||
-      (typeof problem.cancellation_stage === "string" &&
-        cancellationStages.includes(problem.cancellation_stage))) &&
-    "unavailable_classification" in problem &&
-    (problem.unavailable_classification === null ||
-      (typeof problem.unavailable_classification === "string" &&
-        unavailableClasses.includes(problem.unavailable_classification))) &&
-    "execution_failure_classification" in problem &&
-    (problem.execution_failure_classification === null ||
-      (typeof problem.execution_failure_classification === "string" &&
-        executionFailureClasses.includes(problem.execution_failure_classification))) &&
-    problem.request_id === value.request_id &&
-    isBoundedOpaqueString(problem.trace_id, MAX_REQUEST_ID_BYTES) &&
-    Array.isArray(problem.details) &&
-    problem.details.every(isDiagnostic) &&
-    legalActions !== null &&
-    legalActions.every((action) => typeof action === "string") &&
-    "coverage" in problem;
-  if (!validShape || legalActions === null) {
-    return false;
-  }
-  const admittedStage =
-    problem.cancellation_stage !== null &&
-    problem.cancellation_stage !== "before_admission";
-  const admittedUnavailable =
-    problem.unavailable_classification !== null &&
-    problem.unavailable_classification !== "authority";
-  const expectedAdmitted =
-    problem.kind === "partial_effect" ||
-    problem.kind === "reset_required" ||
-    problem.kind === "execution_failed" ||
-    admittedStage ||
-    admittedUnavailable;
-  if (
-    problem.terminality !==
-      (expectedAdmitted ? "admitted_terminal" : "pre_admission") ||
-    (problem.kind === "unavailable") !==
-      (problem.unavailable_classification !== null) ||
-    (problem.kind === "execution_failed") !==
-      (problem.execution_failure_classification !== null) ||
-    (problem.kind === "cancelled" || problem.kind === "timed_out") !==
-      (problem.cancellation_stage !== null) ||
-    (problem.diagnostic !== null) !==
-      (typeof problem.kind === "string" && diagnosticKinds.includes(problem.kind)) ||
-    (problem.detail !== null &&
-      !(typeof problem.kind === "string" && detailKinds.includes(problem.kind))) ||
-    problem.retryable !== (problem.retry !== "never") ||
-    expectedRetryScope === undefined ||
-    problem.retry_scope !== expectedRetryScope ||
-    (problem.retry === "after_delay") !==
-      (problem.retry_after_millis !== null)
-  ) {
-    return false;
-  }
-  if (problem.kind === "partial_effect") {
-    return (
-      problem.terminality === "admitted_terminal" &&
-      problem.retryable === false &&
-      problem.retry === "never" &&
-      isCommittedEffectReceipt(problem.committed_receipt, value.request_id) &&
-      legalActions.length === 1 &&
-      legalActions[0] === "reconcile"
-    );
-  }
-  if (problem.kind === "reset_required") {
-    return (
-      problem.terminality === "admitted_terminal" &&
-      problem.retryable === false &&
-      problem.retry === "never" &&
-      problem.committed_receipt === null &&
-      legalActions.length === 1 &&
-      legalActions[0] === "reset"
-    );
-  }
-  if (
-    problem.kind === "unavailable" &&
-    problem.unavailable_classification !== "authority"
-  ) {
-    return (
-      problem.terminality === "admitted_terminal" &&
-      problem.retryable === true &&
-      problem.retry === "after_revalidate" &&
-      problem.committed_receipt === null &&
-      legalActions.length === 1 &&
-      legalActions[0] === "retry"
-    );
-  }
-  if (problem.kind === "execution_failed") {
-    return (
-      problem.terminality === "admitted_terminal" &&
-      problem.retryable === false &&
-      problem.retry === "never" &&
-      problem.committed_receipt === null &&
-      legalActions.length === 1 &&
-      legalActions[0] === "contact_administrator"
-    );
-  }
-  return problem.committed_receipt === null;
-}
-
-function isCommittedEffectReceipt(value: unknown, requestId: string): boolean {
-  return (
-    isRecord(value) &&
-    value.request_id === requestId &&
-    value.outcome === "partial" &&
-    typeof value.operation === "string" &&
-    typeof value.effect_class === "string" &&
-    typeof value.idempotency_key === "string" &&
-    typeof value.input_digest === "string" &&
-    (typeof value.committed_state === "string" ||
-      typeof value.external_proof === "string")
-  );
-}
-
-function statusMatchesProblem(status: number, kind: string): boolean {
-  switch (kind) {
-    case "invalid_request":
-      return status === 400;
-    case "not_found_or_not_authorized":
-      return status === 404;
-    case "conflict":
-    case "partial_effect":
-    case "stale":
-      return status === 409;
-    case "unsupported":
-      return status === 422;
-    case "unavailable":
-    case "reset_required":
-      return status === 503;
-    case "execution_failed":
-      return status === 500;
-    case "saturated":
-      return status === 429;
-    case "cancelled":
-      return status === 408;
-    case "timed_out":
-      return status === 504;
-    default:
-      return false;
-  }
 }
 
 function validatePageOptions(page: PageOptions | undefined): void {
@@ -1027,7 +756,7 @@ export class TraceDecayClient {
     const envelope = parseJson(await response.text(), response.status);
     if (isRecord(envelope) && envelope.kind === "problem") {
       const problemEnvelope = envelope.value;
-      if (!isProblemEnvelope(problemEnvelope)) {
+      if (!isHttpProblemEnvelope(problemEnvelope)) {
         throw new TraceDecayMalformedResponseError(
           "the daemon returned a malformed problem envelope",
           { status: response.status, payload: problemEnvelope },
@@ -1042,7 +771,7 @@ export class TraceDecayClient {
         response.ok ||
         !validBinding ||
         (expectedRequestId !== undefined && problemEnvelope.request_id !== expectedRequestId) ||
-        !statusMatchesProblem(response.status, problemEnvelope.problem.kind)
+        !applicationProblemStatusMatches(response.status, problemEnvelope.problem.kind)
       ) {
         throw new TraceDecayMalformedResponseError(
           "the daemon returned a malformed problem envelope",

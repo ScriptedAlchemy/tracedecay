@@ -260,17 +260,13 @@ mod goal_event_tests {
     }
 
     fn load_codex_golden_input(name: &str) -> Value {
-        let path = format!(
-            "{}/../../tests/fixtures/provider_normalization/codex/{name}.input.json",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let path = format!("../../tests/fixtures/provider_normalization/codex/{name}.input.json");
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
     fn load_codex_golden_expected(name: &str, stable_record_id: &str) -> Value {
         let path = format!(
-            "{}/../../tests/fixtures/provider_normalization/codex/{name}.expected_envelope.json",
-            env!("CARGO_MANIFEST_DIR")
+            "../../tests/fixtures/provider_normalization/codex/{name}.expected_envelope.json"
         );
         let raw = std::fs::read_to_string(path).unwrap().replace(
             "\"$STABLE_RECORD_ID\"",

@@ -38,7 +38,7 @@ use std::collections::BTreeSet;
 
 use regex::Regex;
 use tracedecay_automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
-use tracedecay_mcp::{TOOL_SEARCH_NAME, get_tool_definitions};
+use tracedecay_mcp::get_tool_definitions;
 
 use crate::plugin_validation_support::{load_skill_docs_from, repo_path};
 use tempfile::TempDir;
@@ -71,7 +71,7 @@ fn command_slugs() -> BTreeSet<String> {
     std::fs::read_dir(repo_path(CURSOR_COMMAND_ROOT))
         .expect("cursor commands dir readable")
         .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+        .filter(|entry| entry.path().is_file())
         .filter_map(|entry| {
             entry
                 .path()
@@ -334,13 +334,11 @@ fn cursor_commands_are_hygienic_and_reference_resolve() {
 }
 
 fn mcp_tool_names() -> BTreeSet<String> {
-    let mut names = get_tool_definitions()
+    get_tool_definitions()
         .expect("tool definitions")
         .into_iter()
         .map(|definition| definition.name)
-        .collect::<BTreeSet<_>>();
-    names.insert(TOOL_SEARCH_NAME.to_owned());
-    names
+        .collect()
 }
 
 fn tool_reference_regex() -> Regex {
@@ -359,7 +357,8 @@ fn cursor_tool_references_resolve_only_existing_tools_and_families() {
     let names = mcp_tool_names();
     let regex = tool_reference_regex();
     for (reference, resolves) in [
-        (TOOL_SEARCH_NAME, true),
+        ("tracedecay_grep", true),
+        ("tracedecay_tool_search", false),
         ("tracedecay_work_*", true),
         ("tracedecay_workflow_*", true),
         ("tracedecay_work", false),

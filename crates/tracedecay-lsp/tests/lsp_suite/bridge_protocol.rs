@@ -1,12 +1,11 @@
 use serde_json::{Value, json};
-use tracedecay_daemon_protocol::{FramePoll, FrameSend};
 use tracedecay_lsp::{
     AdmittedRoot, AnalyzerEvent, AnalyzerSemanticAdapter, AnalyzerState, ClientCapabilities,
-    ContextProjectionKind, ContextProjectionOutcome, ContextProjectionPort,
+    ClientFrameAdmission, ContextProjectionKind, ContextProjectionOutcome, ContextProjectionPort,
     ContextProjectionRegistration, ContextProjectionRequest, DaemonLspProtocolSession,
-    DaemonLspProtocolTransport, DaemonLspSessionTransport, FeedbackCyclePort, FeedbackCycleRequest,
-    FeedbackCycleResponse, GatewayCapabilities, LspLocation, LspPosition, LspRange, LspRequestId,
-    SemanticCapability, SemanticProviderOutcome, SemanticProviderPort, TRACEDECAY_CONTEXT_REVISION,
+    FeedbackCyclePort, FeedbackCycleRequest, FeedbackCycleResponse, GatewayCapabilities,
+    LspLocation, LspPosition, LspRange, LspRequestId, ProtocolDispatch, SemanticCapability,
+    SemanticProviderOutcome, SemanticProviderPort, TRACEDECAY_CONTEXT_REVISION,
     UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities, negotiate_capabilities,
 };
 
@@ -213,50 +212,37 @@ where
     serde_json::from_slice(&messages[0]).expect("valid JSON-RPC response")
 }
 
-fn transport_frame<S>(
-    transport: &mut DaemonLspProtocolTransport<Feedback, S, UnavailableDiagnosticSnapshotProvider>,
-) -> Vec<u8>
+fn admit<S>(session: &mut ProtocolSession<S>, frame: &[u8], now_ms: u64)
 where
     S: SemanticProviderPort,
 {
-    match transport.poll_daemon_frame().expect("poll transport") {
-        FramePoll::Frame(frame) => frame,
-        outcome => panic!("expected an outbound frame, got {outcome:?}"),
-    }
+    assert!(matches!(
+        session.try_handle_client_payload(frame, now_ms),
+        ClientFrameAdmission::Consumed(ProtocolDispatch { closed: false, .. })
+    ));
 }
 
 #[test]
-fn direct_and_transport_paths_are_byte_equivalent() {
+fn direct_and_admitted_paths_are_byte_equivalent() {
     let initialize = br#"{"jsonrpc":"2.0","id":"initialize","method":"initialize","params":{"rootUri":"file:///workspace","capabilities":{"general":{"positionEncodings":["utf-16"]},"textDocument":{"definition":{}}}}}"#;
     let initialized = br#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
     let definition = br#"{"jsonrpc":"2.0","id":"definition","method":"textDocument/definition","params":{"textDocument":{"uri":"file:///workspace/src/lib.rs"},"position":{"line":0,"character":0}}}"#;
 
     let mut direct = protocol_session(AnalyzerFailure);
-    let mut transport = DaemonLspProtocolTransport::new(protocol_session(AnalyzerFailure));
+    let mut admitted = protocol_session(AnalyzerFailure);
     direct.handle_payload(initialize, 0);
-    assert_eq!(
-        transport.try_send_client_frame(initialize).unwrap(),
-        FrameSend::Sent
-    );
+    admit(&mut admitted, initialize, 0);
     let direct_initialize = direct.poll_outbound().unwrap().to_vec();
-    let transport_initialize = transport_frame(&mut transport);
-    assert_eq!(direct_initialize, transport_initialize);
+    assert_eq!(Some(direct_initialize.as_slice()), admitted.poll_outbound());
     assert!(direct.acknowledge_outbound());
-    transport.acknowledge_daemon_frame().unwrap();
+    assert!(admitted.acknowledge_outbound());
 
     direct.handle_payload(initialized, 1);
-    assert_eq!(
-        transport.try_send_client_frame(initialized).unwrap(),
-        FrameSend::Sent
-    );
+    admit(&mut admitted, initialized, 1);
     direct.handle_payload(definition, 2);
-    assert_eq!(
-        transport.try_send_client_frame(definition).unwrap(),
-        FrameSend::Sent
-    );
+    admit(&mut admitted, definition, 2);
     let direct_definition = direct.poll_outbound().unwrap().to_vec();
-    let transport_definition = transport_frame(&mut transport);
-    assert_eq!(direct_definition, transport_definition);
+    assert_eq!(Some(direct_definition.as_slice()), admitted.poll_outbound());
 
     let response: Value = serde_json::from_slice(&direct_definition).unwrap();
     assert_eq!(response["jsonrpc"], "2.0");

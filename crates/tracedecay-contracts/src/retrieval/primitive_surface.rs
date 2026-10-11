@@ -430,6 +430,10 @@ pub struct ContextResultV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub related_omission: Option<ContextRelatedOmissionV1>,
     pub code: Vec<ContextCodeBlockV1>,
+    /// Matched symbols whose declaration is larger than one code block.
+    /// Their code is withheld rather than served as a partial window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oversized_symbols: Vec<PrimitiveSymbolLocationV1>,
     pub coverage: PrimitiveSearchCoverageV1,
     pub memory_matches: Vec<FactSearchHitV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -967,6 +971,7 @@ mod tests {
             related_symbols: vec![],
             related_omission: None,
             code: vec![],
+            oversized_symbols: vec![],
             coverage: PrimitiveSearchCoverageV1 {
                 exact: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),
                 lexical: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),
