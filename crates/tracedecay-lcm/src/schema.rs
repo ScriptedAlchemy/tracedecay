@@ -70,13 +70,17 @@ const MIGRATION_NAME: &str = "lcm";
 /// that relies on it: SQLite substitutes a partial index only when its query
 /// terms structurally imply the index's WHERE clause. The status predicates
 /// live in [`super::query`]; the raw direct-user candidate predicate lives in
-/// [`super::query::grep`].
+/// [`super::query::grep`]. Turso evaluates a partial-index predicate without
+/// short-circuiting `AND`, so `json_type` sits behind a `CASE` that never
+/// hands it metadata that is not JSON
+/// (`benchmark_data/storage-concurrency/turso-bugs/partial-index-and-short-circuit.md`).
 pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_lcm_raw_lossy_ingest
          ON lcm_raw_messages(provider, session_id)
          WHERE metadata_json IS NOT NULL
            AND json_valid(metadata_json)
-           AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true';",
+           AND CASE WHEN json_valid(metadata_json)
+               THEN json_type(metadata_json, '$.ingest_protection.lossy') END = 'true';",
     // Raw LIKE retrieval must retain infix and lossless-content semantics, so
     // FTS cannot be its candidate authority. Direct-user retrieval instead
     // admits the complete `role = 'user'` superset through this narrow index,

@@ -33,10 +33,14 @@ async fn fresh_temporal_schema_stores_and_searches_a_summary_node() {
     .unwrap();
     let mut rows = conn
         .query(
-            "SELECT n.summary_id, n.session_id, n.summary_text, n.created_at
-             FROM session_summary_nodes_fts
-             JOIN session_summary_nodes AS n ON n.rowid = session_summary_nodes_fts.rowid
-             WHERE session_summary_nodes_fts MATCH 'quokka'",
+            &format!(
+                "SELECT n.summary_id, n.session_id, n.summary_text, n.created_at {}",
+                tracedecay_runtime_core::db::native_search::SearchIndex::Summary.matching_rows(
+                    conn.backend_kind(),
+                    "n",
+                    "'quokka'"
+                )
+            ),
             (),
         )
         .await

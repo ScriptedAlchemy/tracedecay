@@ -778,22 +778,37 @@ impl HostAdmissionTestRuntimeV1 {
             .session_database_for_test(scope)?
             .read_snapshot()
             .await?;
+        // A native `USING fts` index covers every row of its table, so the
+        // indexed rows are the table's rows; FTS5 keeps a separate table.
+        let indexed =
+            match tracedecay_runtime_core::db::engine::QueryExecutor::backend_kind(&snapshot) {
+                tracedecay_runtime_core::db::engine::BackendKind::Sqlite => {
+                    "(SELECT COUNT(*) FROM lcm_raw_messages_fts
+                  JOIN lcm_raw_messages raw
+                    ON raw.store_id = lcm_raw_messages_fts.rowid
+                  WHERE raw.provider = ?1 AND raw.session_id = ?2),
+                 (SELECT COUNT(*) FROM lcm_raw_messages_fts)"
+                }
+                tracedecay_runtime_core::db::engine::BackendKind::NativeTurso => {
+                    "(SELECT COUNT(*) FROM lcm_raw_messages
+                  WHERE provider = ?1 AND session_id = ?2),
+                 (SELECT COUNT(*) FROM lcm_raw_messages)"
+                }
+            };
         let mut rows = snapshot
             .query(
-                "SELECT
+                &format!(
+                    "SELECT
                     (SELECT COUNT(*) FROM sessions
                      WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages
                      WHERE provider = ?1 AND session_id = ?2),
-                    (SELECT COUNT(*) FROM lcm_raw_messages_fts
-                     JOIN lcm_raw_messages raw
-                       ON raw.store_id = lcm_raw_messages_fts.rowid
-                     WHERE raw.provider = ?1 AND raw.session_id = ?2),
-                    (SELECT COUNT(*) FROM lcm_raw_messages_fts),
+                    {indexed},
                     (SELECT COUNT(*) FROM session_summary_nodes
                      WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM parse_offsets
-                     WHERE file_path = ?3)",
+                     WHERE file_path = ?3)"
+                ),
                 tracedecay_runtime_core::db::engine::params![
                     provider,
                     session_id,

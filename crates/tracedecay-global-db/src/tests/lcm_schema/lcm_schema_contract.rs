@@ -158,7 +158,8 @@ async fn short_lived_attach_convergence_rebuilds_queryable_lcm_status_indexes() 
              WHERE provider = ?1 AND session_id = ?2
                AND metadata_json IS NOT NULL
                AND json_valid(metadata_json)
-               AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true'",
+               AND CASE WHEN json_valid(metadata_json)
+                   THEN json_type(metadata_json, '$.ingest_protection.lossy') END = 'true'",
         ),
         (
             "idx_lcm_external_payloads_owner_bytes",

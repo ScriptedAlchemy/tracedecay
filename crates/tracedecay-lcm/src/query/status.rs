@@ -215,7 +215,8 @@ fn status_counts_query(provider: &str, session_id: Option<&str>) -> (String, Vec
                 FROM lcm_raw_messages
                WHERE metadata_json IS NOT NULL
                  AND json_valid(metadata_json)
-                 AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true'\
+                 AND CASE WHEN json_valid(metadata_json)
+                     THEN json_type(metadata_json, '$.ingest_protection.lossy') END = 'true'\
                  {content_and}),
              (SELECT COUNT(*)
                 FROM lcm_summary_convergence_queue
@@ -1824,7 +1825,8 @@ mod tests {
                      AND (?2 IS NULL OR session_id = ?2)
                      AND metadata_json IS NOT NULL
                      AND json_valid(metadata_json)
-                     AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true')";
+                     AND CASE WHEN json_valid(metadata_json)
+                         THEN json_type(metadata_json, '$.ingest_protection.lossy') END = 'true')";
         let (sargable_sql, sargable_values) = status_counts_query("all", None);
         let mut tautology_samples = Vec::new();
         let mut sargable_samples = Vec::new();

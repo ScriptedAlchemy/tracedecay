@@ -23,7 +23,8 @@ use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_lcm::payload::{upsert_payload_metadata, write_external_payload};
 use tracedecay_lcm::types::LcmImmutableSummaryPublication;
 use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{BackendKind, QueryExecutor, params};
+use tracedecay_runtime_core::db::native_search::{SearchIndex, quote_term};
 use tracedecay_temporal_query::execution::ExecutionControl;
 
 pub(super) const PROJECT_ID: &str = "project.tracedecay";
@@ -277,28 +278,62 @@ impl RegisteredTemporalHarness {
         }
     }
 
-    /// Every full-text sink the schema currently defines. Enumerated rather
-    /// than listed so a sink added later is swept without editing the test.
-    pub(super) async fn full_text_sinks(&self) -> Vec<String> {
+    /// How many rows of every full-text sink the schema currently defines
+    /// match `phrase`. Enumerated rather than listed so a sink added later is
+    /// swept without editing the test.
+    pub(super) async fn full_text_sink_matches(&self, phrase: &str) -> Vec<(String, i64)> {
         let snapshot = self
             .registered
             .read_snapshot()
             .await
             .expect("registered read snapshot");
-        let mut rows = snapshot
-            .query(
+        let backend = snapshot.backend_kind();
+        let sink_sql = match backend {
+            BackendKind::Sqlite => {
                 "SELECT name FROM sqlite_master
                  WHERE type = 'table' AND sql LIKE '%USING fts5%'
-                 ORDER BY name",
-                (),
-            )
+                 ORDER BY name"
+            }
+            BackendKind::NativeTurso => {
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND sql LIKE '%USING fts%'
+                 ORDER BY name"
+            }
+        };
+        let mut rows = snapshot
+            .query(sink_sql, ())
             .await
             .expect("query full-text sinks");
         let mut sinks = Vec::new();
         while let Some(row) = rows.next().await.expect("full-text sink row") {
             sinks.push(row.get::<String>(0).expect("sink name column"));
         }
-        sinks
+        drop(rows);
+        let quoted = quote_term(backend, phrase);
+        let mut matches = Vec::with_capacity(sinks.len());
+        for sink in sinks {
+            let index = SearchIndex::ALL
+                .into_iter()
+                .find(|index| index.index_name() == sink)
+                .unwrap_or_else(|| panic!("unrecognized full-text sink {sink}"));
+            let count_sql = format!(
+                "SELECT COUNT(*) {}",
+                index.matching_rows(backend, "sunk", "?1")
+            );
+            let mut count = snapshot
+                .query(&count_sql, params![quoted.as_str()])
+                .await
+                .expect("count full-text sink matches");
+            let matched = count
+                .next()
+                .await
+                .expect("full-text sink count row")
+                .expect("full-text sink count")
+                .get::<i64>(0)
+                .expect("full-text sink count value");
+            matches.push((sink, matched));
+        }
+        matches
     }
 
     pub(super) async fn count(&self, sql: &str) -> i64 {

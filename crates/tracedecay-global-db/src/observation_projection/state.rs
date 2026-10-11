@@ -532,19 +532,7 @@ pub(super) struct ProjectionOutputState {
     pub(super) owner_count: u64,
 }
 
-async fn projection_cache_tokens(conn: &impl Executor) -> ProjectionStoreResult<(i64, i64)> {
-    let mut version_rows = conn
-        .query("PRAGMA data_version", ())
-        .await
-        .map_err(|error| storage("read projection cache data version", error))?;
-    let data_version = version_rows
-        .next()
-        .await
-        .map_err(|error| storage("read projection cache data version", error))?
-        .ok_or_else(|| storage_message("read projection cache data version", "no row"))?
-        .get::<i64>(0)
-        .map_err(|error| storage("read projection cache data version", error))?;
-    drop(version_rows);
+async fn provenance_high_water(conn: &impl Executor) -> ProjectionStoreResult<i64> {
     let mut rowid_rows = conn
         .query(
             "SELECT COALESCE(MAX(rowid), 0) FROM observation_projection_provenance",
@@ -559,7 +547,26 @@ async fn projection_cache_tokens(conn: &impl Executor) -> ProjectionStoreResult<
         .ok_or_else(|| storage_message("read projection cache provenance rowid", "no row"))?
         .get::<i64>(0)
         .map_err(|error| storage("read projection cache provenance rowid", error))?;
-    Ok((data_version, provenance_rowid))
+    Ok(provenance_rowid)
+}
+
+/// Records that this connection's cache already reflects every provenance row
+/// up to the current high-water mark. Called by the writer right after it
+/// applied its own provenance insert to the cache, so only a row some other
+/// connection inserted moves the mark past the recorded one.
+pub(super) async fn record_projection_cache_high_water(
+    conn: &impl Executor,
+) -> ProjectionStoreResult<()> {
+    let provenance_rowid = provenance_high_water(conn).await?;
+    conn.execute(
+        "UPDATE temp.observation_projection_output_state_meta
+         SET provenance_rowid = ?1
+         WHERE initialized = 1",
+        params![provenance_rowid],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| storage("refresh projection cache token", error))
 }
 
 pub(in super::super) async fn ensure_projection_output_state_cache(
@@ -579,17 +586,16 @@ pub(in super::super) async fn ensure_projection_output_state_cache(
         );
         CREATE TEMP TABLE IF NOT EXISTS observation_projection_output_state_meta (
             initialized INTEGER NOT NULL UNIQUE CHECK(initialized = 1),
-            data_version INTEGER NOT NULL CHECK(data_version >= 0),
             provenance_rowid INTEGER NOT NULL CHECK(provenance_rowid >= 0)
         );",
     )
     .await
     .map_err(|error| storage("create projection output state cache", error))?;
-    let (data_version, provenance_rowid) = projection_cache_tokens(conn).await?;
+    let provenance_rowid = provenance_high_water(conn).await?;
 
     let mut rows = conn
         .query(
-            "SELECT data_version, provenance_rowid
+            "SELECT provenance_rowid
              FROM temp.observation_projection_output_state_meta
              WHERE initialized = 1",
             (),
@@ -600,34 +606,17 @@ pub(in super::super) async fn ensure_projection_output_state_cache(
         .next()
         .await
         .map_err(|error| storage("read projection output state cache", error))?
-        .map(|row| -> ProjectionStoreResult<(i64, i64)> {
-            Ok((
-                row.get(0)
-                    .map_err(|error| storage("read projection output state cache", error))?,
-                row.get(1)
-                    .map_err(|error| storage("read projection output state cache", error))?,
-            ))
+        .map(|row| {
+            row.get::<i64>(0)
+                .map_err(|error| storage("read projection output state cache", error))
         })
         .transpose()?;
     drop(rows);
-    if let Some((stored_version, stored_rowid)) = cached
-        && (stored_rowid == provenance_rowid || stored_version == data_version)
-    {
-        // `data_version` moves when any other connection commits, including
-        // session rows that do not touch provenance. Rebuilding here scans the
-        // whole ownership table once per queued observation. This writer keeps
-        // the temp rows current itself; a foreign provenance insert changes
-        // `MAX(rowid)` and still rebuilds.
-        if stored_version != data_version || stored_rowid != provenance_rowid {
-            conn.execute(
-                "UPDATE temp.observation_projection_output_state_meta
-                 SET data_version = ?1, provenance_rowid = ?2
-                 WHERE initialized = 1",
-                params![data_version, provenance_rowid],
-            )
-            .await
-            .map_err(|error| storage("refresh projection cache token", error))?;
-        }
+    // This writer keeps the temp rows current itself and records the
+    // provenance high-water mark after each of its own inserts
+    // ([`record_projection_cache_high_water`]). A mark that moved since then
+    // means another connection inserted provenance, so the cache rebuilds.
+    if cached == Some(provenance_rowid) {
         return Ok(());
     }
 
@@ -642,12 +631,12 @@ pub(in super::super) async fn ensure_projection_output_state_cache(
         .map_err(|error| storage("initialize projection output state cache", error))?;
     conn.execute(
         "INSERT INTO temp.observation_projection_output_state_meta(
-            initialized, data_version, provenance_rowid
-         ) VALUES (1, ?1, ?2)",
-        params![data_version, provenance_rowid],
+            initialized, provenance_rowid
+         ) VALUES (1, ?1)",
+        params![provenance_rowid],
     )
     .await
-    .map_err(|error| storage("record projection cache data version", error))?;
+    .map_err(|error| storage("record projection cache high-water mark", error))?;
 
     let mut rows = conn
         .query(

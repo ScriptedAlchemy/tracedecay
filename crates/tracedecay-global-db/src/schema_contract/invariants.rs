@@ -687,21 +687,100 @@ async fn foreign_key_audit_next_table(
     Ok(Some(table))
 }
 
+fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Whether any row of `table` names a parent key no parent row holds, for
+/// every foreign key `table` declares. A key with a NULL column is not
+/// checked, as `PRAGMA foreign_key_check` does not check it. Built from the
+/// declared keys so it runs on both engines; the native engine has no
+/// `pragma_foreign_key_check`.
 async fn foreign_key_table_violates(
     conn: &impl QueryExecutor,
     table: &str,
 ) -> tracedecay_domain::errors::Result<bool> {
     let mut rows = conn
         .query(
-            "SELECT 1 FROM pragma_foreign_key_check(?1) LIMIT 1",
+            "SELECT id, \"table\", \"from\", \"to\" FROM pragma_foreign_key_list(?1)
+             ORDER BY id, seq",
             (table,),
         )
         .await
         .map_err(audit_read_error)?;
-    rows.next()
+    let mut keys: Vec<(i64, String, Vec<(String, Option<String>)>)> = Vec::new();
+    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
+        let id = row.get::<i64>(0).map_err(audit_read_error)?;
+        let parent = row.get::<String>(1).map_err(audit_read_error)?;
+        let column = (
+            row.get::<String>(2).map_err(audit_read_error)?,
+            row.get::<Option<String>>(3).map_err(audit_read_error)?,
+        );
+        match keys.last_mut() {
+            Some((last, _, columns)) if *last == id => columns.push(column),
+            _ => keys.push((id, parent, vec![column])),
+        }
+    }
+    drop(rows);
+
+    for (_, parent, columns) in keys {
+        let parent_columns = if columns.iter().any(|(_, to)| to.is_none()) {
+            parent_primary_key(conn, &parent).await?
+        } else {
+            columns.iter().filter_map(|(_, to)| to.clone()).collect()
+        };
+        if parent_columns.len() != columns.len() {
+            return Err(authority_violation(format!(
+                "foreign key from {table} to {parent} names no matching parent key"
+            )));
+        }
+        let child_present = columns
+            .iter()
+            .map(|(from, _)| format!("child.{} IS NOT NULL", quote_identifier(from)))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let matched = columns
+            .iter()
+            .zip(&parent_columns)
+            .map(|((from, _), to)| {
+                format!(
+                    "parent.{} = child.{}",
+                    quote_identifier(to),
+                    quote_identifier(from)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let sql = format!(
+            "SELECT 1 FROM {} AS child WHERE {child_present}
+               AND NOT EXISTS (SELECT 1 FROM {} AS parent WHERE {matched})
+             LIMIT 1",
+            quote_identifier(table),
+            quote_identifier(&parent)
+        );
+        if query_has_rows(conn, &sql).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn parent_primary_key(
+    conn: &impl QueryExecutor,
+    parent: &str,
+) -> tracedecay_domain::errors::Result<Vec<String>> {
+    let mut rows = conn
+        .query(
+            "SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk",
+            (parent,),
+        )
         .await
-        .map(|row| row.is_some())
-        .map_err(audit_read_error)
+        .map_err(audit_read_error)?;
+    let mut columns = Vec::new();
+    while let Some(row) = rows.next().await.map_err(audit_read_error)? {
+        columns.push(row.get::<String>(0).map_err(audit_read_error)?);
+    }
+    Ok(columns)
 }
 
 async fn record_foreign_key_audit_table(
@@ -754,14 +833,7 @@ async fn foreign_key_violation_exists_read_only(
     drop(rows);
 
     for table in tables {
-        let mut rows = conn
-            .query(
-                "SELECT 1 FROM pragma_foreign_key_check(?1) LIMIT 1",
-                (table,),
-            )
-            .await
-            .map_err(audit_read_error)?;
-        if rows.next().await.map_err(audit_read_error)?.is_some() {
+        if foreign_key_table_violates(conn, &table).await? {
             return Ok(true);
         }
     }

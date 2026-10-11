@@ -66,6 +66,34 @@ impl SearchIndex {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
+impl SearchIndex {
+    /// `FROM ... WHERE ...` over the indexed table's rows, aliased `alias`,
+    /// whose indexed text matches `query_parameter` on `backend`.
+    pub fn matching_rows(self, backend: BackendKind, alias: &str, query_parameter: &str) -> String {
+        let table = self.table_name();
+        let index = self.index_name();
+        match backend {
+            BackendKind::Sqlite => {
+                let content_rowid = match self {
+                    Self::RawMessage => "store_id",
+                    Self::MemoryPayload | Self::Occurrence | Self::Summary => "rowid",
+                };
+                format!(
+                    "FROM {index} JOIN {table} AS {alias} \
+                     ON {alias}.{content_rowid} = {index}.rowid \
+                     WHERE {index} MATCH {query_parameter}"
+                )
+            }
+            BackendKind::NativeTurso => format!(
+                "FROM {table} AS {alias} WHERE {alias}.rowid IN \
+                 (SELECT rowid FROM {table} WHERE fts_match({}, {query_parameter}))",
+                self.columns().join(", ")
+            ),
+        }
+    }
+}
+
 /// Arguments are trusted SQL column/parameter fragments supplied by callers;
 /// user search text remains a bound value rather than part of the SQL.
 pub fn predicate(

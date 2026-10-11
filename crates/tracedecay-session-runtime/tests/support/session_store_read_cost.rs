@@ -549,7 +549,9 @@ pub fn session_store_path(fixture: &DrainFixture) -> PathBuf {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 pending.push(path);
-            } else if path.file_name().is_some_and(|name| name == "sessions.db") {
+            } else if path.file_name().is_some_and(|name| {
+                name == tracedecay_store::StoreFile::ProjectSessions.file_name()
+            }) {
                 stores.push(path);
             }
         }
