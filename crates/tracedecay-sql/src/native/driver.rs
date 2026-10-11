@@ -311,6 +311,22 @@ pub mod types {
         }
     }
 
+    impl<'a> From<&'a turso_core::Value> for ValueRef<'a> {
+        fn from(value: &'a turso_core::Value) -> Self {
+            match value {
+                turso_core::Value::Null => Self::Null,
+                turso_core::Value::Numeric(turso_core::Numeric::Integer(value)) => {
+                    Self::Integer(*value)
+                }
+                turso_core::Value::Numeric(turso_core::Numeric::Float(value)) => {
+                    Self::Real(f64::from(*value))
+                }
+                turso_core::Value::Text(value) => Self::Text(value.as_str().as_bytes()),
+                turso_core::Value::Blob(value) => Self::Blob(value),
+            }
+        }
+    }
+
     impl Value {
         pub fn data_type(&self) -> Type {
             ValueRef::from(self).data_type()
@@ -1246,9 +1262,7 @@ impl fmt::Debug for Statement<'_> {
 impl<'c> Statement<'c> {
     fn new(connection: &'c Connection, prepared: Prepared, cached: bool) -> Self {
         let counted = Cell::new(engine_counters(&prepared));
-        let columns = (0..prepared.statement.num_columns())
-            .map(|index| prepared.statement.get_column_name(index).into_owned())
-            .collect();
+        let columns = Rc::clone(&prepared.columns);
         Self {
             connection,
             prepared: Some(prepared),
@@ -1414,7 +1428,7 @@ impl<'s> Rows<'s> {
                 })?;
                 self.current = Some(Row {
                     columns: Rc::clone(&self.columns),
-                    values: row.get_values().map(Value::from_native).collect(),
+                    current: std::ptr::from_ref(row),
                     _statement: PhantomData,
                 });
                 Ok(self.current.as_ref())
@@ -1456,9 +1470,12 @@ where
     }
 }
 
+/// The statement's current result row, read in place rather than copied.
 pub struct Row<'s> {
     columns: Rc<[String]>,
-    values: Vec<Value>,
+    /// Valid until the statement steps again, which needs the `&mut Rows`
+    /// that every `&Row` borrows.
+    current: *const turso_core::Row,
     _statement: PhantomData<&'s ()>,
 }
 
@@ -1486,14 +1503,23 @@ impl RowIndex for &str {
 }
 
 impl Row<'_> {
+    fn value(&self, index: usize) -> Result<ValueRef<'_>> {
+        // SAFETY: `current` is the statement row owned by the `Rows` that
+        // lent this `Row`. `Rows::next` drops it before the next step.
+        let row = unsafe { &*self.current };
+        if index >= self.columns.len() {
+            return Err(Error::InvalidColumnIndex(index));
+        }
+        Ok(ValueRef::from(row.get_value(index)))
+    }
+
     pub fn get_ref<I: RowIndex>(&self, index: I) -> Result<ValueRef<'_>> {
-        let index = index.index(&self.columns)?;
-        Ok(ValueRef::from(&self.values[index]))
+        self.value(index.index(&self.columns)?)
     }
 
     pub fn get<I: RowIndex, T: FromSql>(&self, index: I) -> Result<T> {
         let index = index.index(&self.columns)?;
-        let value = ValueRef::from(&self.values[index]);
+        let value = self.value(index)?;
         T::column_result(value).map_err(|error| match error {
             FromSqlError::InvalidType => {
                 Error::InvalidColumnType(index, self.columns[index].clone(), value.data_type())

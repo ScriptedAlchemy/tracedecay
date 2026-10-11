@@ -1,12 +1,16 @@
-//! The engine's entire filesystem: the pinned main file and its `-wal`
-//! sidecar. Every other open or remove fails, so no SQL can make the engine
-//! touch a path the runtime did not hand it.
+//! The engine's entire filesystem: the pinned main file, its `-wal` sidecar
+//! and the private `-tmp` directory its sorts and ephemeral tables spill to.
+//! Every other open or remove fails, so no SQL can make the engine touch a
+//! path the runtime did not hand it.
 
 use std::{
     fs::{self, File, OpenOptions},
     io,
-    path::Path,
-    sync::{Arc, Mutex, PoisonError},
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use turso_core::{
@@ -24,6 +28,11 @@ pub(crate) struct ConfinedIo {
     delegate: Arc<dyn IO>,
     main: String,
     wal: String,
+    /// Holds one engine-made subdirectory per temporary file. It belongs to
+    /// this instance only once the engine holds the store's lock: before
+    /// that it may be another process's.
+    temp: PathBuf,
+    owns_temp: AtomicBool,
     identity: FileIdentity,
     /// Descriptors stay open for the engine's lifetime: closing any descriptor
     /// of a file drops every POSIX record lock this process holds on it,
@@ -36,6 +45,8 @@ impl ConfinedIo {
         Ok(Self {
             delegate: turso_core::Database::io_for_path(&main)?,
             wal: format!("{main}-wal"),
+            temp: PathBuf::from(format!("{main}-tmp")),
+            owns_temp: AtomicBool::new(false),
             main,
             identity,
             held: Mutex::new(vec![file]),
@@ -45,6 +56,31 @@ impl ConfinedIo {
     #[cfg_attr(not(td_engine = "native"), allow(dead_code))]
     pub(crate) fn main(&self) -> &str {
         &self.main
+    }
+
+    /// Takes the temporary directory once the engine holds the store's lock,
+    /// discarding whatever a process that died mid-sort left there.
+    pub(crate) fn claim_temp(&self) -> Result<()> {
+        match fs::remove_dir_all(&self.temp) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::InvalidOperation(format!(
+                    "clear native temporary directory {}: {error}",
+                    self.temp.display()
+                )));
+            }
+        }
+        self.owns_temp.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Whether `path` is a file in one of the engine's temporary
+    /// subdirectories (`{main}-tmp/<dir>/file`). The directory is only
+    /// admitted after [`Self::claim_temp`].
+    fn is_temp(&self, path: &str) -> bool {
+        self.owns_temp.load(Ordering::Acquire)
+            && Path::new(path).parent().and_then(Path::parent) == Some(self.temp.as_path())
     }
 
     /// Fails when the main pathname no longer names the held file.
@@ -170,6 +206,9 @@ impl IO for ConfinedIo {
             let wal = open_regular(Path::new(path), flags.contains(OpenFlags::Create))
                 .map_err(|error| LimboError::InvalidArgument(format!("open {path}: {error}")))?;
             held.push(wal);
+        } else if self.is_temp(path) {
+            drop(held);
+            return self.delegate.open_file(path, flags, direct);
         } else {
             return Err(refused(path));
         }
@@ -193,8 +232,8 @@ impl IO for ConfinedIo {
     }
 
     fn remove_file(&self, path: &str) -> turso_core::Result<()> {
-        // The engine discards an orphaned WAL; nothing else may be removed.
-        if path != self.wal {
+        // The engine discards an orphaned WAL or a spilled sort file.
+        if path != self.wal && !self.is_temp(path) {
             return Err(refused(path));
         }
         self.delegate.remove_file(path)
@@ -220,6 +259,20 @@ impl IO for ConfinedIo {
         self.delegate.register_fixed_buffer(pointer, length)
     }
 
+    fn temp_dir(&self) -> Option<PathBuf> {
+        if !self.owns_temp.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(&self.temp) {
+            Ok(()) => Some(self.temp.clone()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Some(self.temp.clone()),
+            Err(_) => None,
+        }
+    }
+
     fn file_id(&self, path: &str) -> turso_core::Result<FileId> {
         if path == self.main {
             return Ok(FileId {
@@ -227,10 +280,18 @@ impl IO for ConfinedIo {
                 ino: self.identity.file,
             });
         }
-        if path != self.wal {
+        if path != self.wal && !self.is_temp(path) {
             return Err(refused(path));
         }
         self.delegate.file_id(path)
+    }
+}
+
+impl Drop for ConfinedIo {
+    fn drop(&mut self) {
+        if self.owns_temp.load(Ordering::Acquire) {
+            let _ = fs::remove_dir_all(&self.temp);
+        }
     }
 }
 

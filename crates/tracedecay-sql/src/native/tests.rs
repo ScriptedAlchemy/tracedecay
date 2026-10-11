@@ -543,9 +543,10 @@ fn foreign_files_are_refused_before_the_engine_touches_them() {
     );
 }
 
-/// Catches the engine reaching a path other than its main file and WAL.
+/// Catches the engine reaching a path other than its main file, WAL, or a
+/// claimed sort-spill file under `{main}-tmp/<dir>/`.
 #[test]
-fn confined_io_admits_only_the_main_file_and_its_wal() {
+fn confined_io_admits_only_the_main_file_wal_and_claimed_temp() {
     use turso_core::{IO, OpenFlags};
     let directory = tempfile::tempdir().unwrap();
     let main = directory.path().join("store.tdb");
@@ -554,10 +555,13 @@ fn confined_io_admits_only_the_main_file_and_its_wal() {
     let main = main.to_str().unwrap().to_owned();
     let io = confined_io::ConfinedIo::new(main.clone(), file, identity).unwrap();
     let elsewhere = directory.path().join("elsewhere");
+    let unclaimed = format!("{main}-tmp/spill/tursodb_temp_file");
     for path in [
         elsewhere.to_str().unwrap().to_owned(),
         format!("{main}-journal"),
         format!("{main}-shm"),
+        format!("{main}-tmp/evil"),
+        unclaimed.clone(),
     ] {
         assert!(
             io.open_file(&path, OpenFlags::Create, false).is_err(),
@@ -583,6 +587,16 @@ fn confined_io_admits_only_the_main_file_and_its_wal() {
     io.open_file(&format!("{main}-wal"), OpenFlags::Create, false)
         .unwrap();
     io.remove_file(&format!("{main}-wal")).unwrap();
+    io.claim_temp().unwrap();
+    let spilled = format!("{main}-tmp/spill/tursodb_temp_file");
+    std::fs::create_dir_all(format!("{main}-tmp/spill")).unwrap();
+    assert!(io.open_file(&spilled, OpenFlags::Create, false).is_ok());
+    io.remove_file(&spilled).unwrap();
+    assert!(
+        io.open_file(&format!("{main}-tmp/evil"), OpenFlags::Create, false)
+            .is_err(),
+        "a file directly under -tmp is not an engine spill"
+    );
 }
 
 /// Catches a connection that keeps using a store whose pathname now names a
@@ -1090,5 +1104,55 @@ mod driver {
                  acknowledged {acknowledged:?}, durable {durable:?}"
             );
         }
+    }
+
+    /// Catches a file store that still forces in-memory sorts: a large
+    /// ORDER BY must complete on FILE temp storage, and closing the store
+    /// must not leave `{path}-tmp` behind.
+    #[test]
+    fn file_sorts_use_file_temp_store_and_leave_nothing_behind() {
+        let (directory, path, connection) = open();
+        connection.set_capability(Capability::Maintenance).unwrap();
+        let temp_store: i64 = connection
+            .pragma_query_value(None, "temp_store", |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            temp_store, 1,
+            "file stores must spill sorts (temp_store=FILE)"
+        );
+        connection
+            .execute_batch("CREATE TABLE t(k INTEGER, body TEXT)")
+            .unwrap();
+        let body = "x".repeat(1000);
+        for batch in 0..8 {
+            let rows = (batch * 500..(batch + 1) * 500)
+                .map(|k| format!("({k}, '{body}')"))
+                .collect::<Vec<_>>();
+            connection
+                .execute_batch(&format!("INSERT INTO t VALUES {}", rows.join(",")))
+                .unwrap();
+        }
+        let mut statement = connection
+            .prepare("SELECT k FROM t ORDER BY body DESC, k DESC")
+            .unwrap();
+        let sorted = statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(sorted.len(), 4000);
+        assert_eq!(sorted[0], 3999);
+        assert_eq!(sorted[3999], 0);
+        drop(statement);
+        drop(connection);
+        let mut temp = path.into_os_string();
+        temp.push("-tmp");
+        let temp = std::path::PathBuf::from(temp);
+        assert!(
+            !temp.exists(),
+            "closing the store must remove {}",
+            temp.display()
+        );
+        drop(directory);
     }
 }

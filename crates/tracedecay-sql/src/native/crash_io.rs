@@ -275,6 +275,10 @@ impl IO for CrashIo {
     fn file_id(&self, path: &str) -> turso_core::Result<FileId> {
         self.delegate.file_id(path)
     }
+
+    fn temp_dir(&self) -> Option<PathBuf> {
+        self.delegate.temp_dir()
+    }
 }
 
 impl turso_core::File for CrashFile {
