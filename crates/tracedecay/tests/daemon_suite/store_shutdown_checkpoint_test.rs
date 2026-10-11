@@ -251,6 +251,44 @@ async fn stop_after_owner_registration_releases_every_store_lease() {
     );
 }
 
+/// A stop right after `init` lands mid-reconcile: the code-index worker is
+/// still projecting or seating the first generation. Its join must finish
+/// inside the shutdown abort deadline, or the worker keeps its project store
+/// leases and both project WALs survive the stop. One round rarely lands in
+/// the narrow window, so the test repeats it.
+#[tokio::test]
+async fn stop_after_init_joins_the_code_index_worker_and_truncates_wals() {
+    for round in 0..12 {
+        let (environment, project) = IsolatedHome::new();
+        let project = project.canonicalize().expect("canonical fixture project");
+        initialize_repository(&project);
+        let log_path = environment.scratch().join("stop-after-init.log");
+        let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |_| {});
+        initialize_tracedecay(environment.home(), &project);
+        stop_daemon_gracefully(&mut daemon);
+
+        let log = fs::read_to_string(&log_path).expect("daemon log");
+        assert!(
+            !log.contains("outcome=code_index_scheduler_pending"),
+            "round {round}: the code-index worker must join within the abort deadline; log={log}"
+        );
+        assert_clean_shutdown_log(&log);
+        let (graph_db, sessions_db) = project_stores(environment.home(), &project);
+        let profile = environment
+            .home()
+            .join(".tracedecay")
+            .join(tracedecay_store::StoreFile::Profile.file_name());
+        for store in [&profile, &graph_db, &sessions_db] {
+            assert_eq!(
+                wal_bytes(store),
+                0,
+                "round {round}: a stop after init keeps no WAL for {}",
+                store.display()
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn stop_cancels_an_admitted_project_open() {
     let (environment, project) = IsolatedHome::new();
