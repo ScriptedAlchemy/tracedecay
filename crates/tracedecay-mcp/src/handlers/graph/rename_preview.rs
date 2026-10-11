@@ -21,14 +21,28 @@ use crate::handlers::support::{decode_primitive_request, unique_file_paths};
 use crate::server::{DispatchSettlement, dispatch_cancelled_error};
 use crate::tools::dispatch_ceiling::{tool_dispatch_budget, tool_dispatch_deadline_error};
 
+use tracedecay_runtime_core::sync::{DecodedSourceFile, SourceTextEncoding};
+
 use super::{
     graph_occurrence_id, graph_symbol_corrupt, graph_tool_completion, node_not_found_result,
     required_graph_file_path, required_graph_metadata, single_graph_adjacency_batch, user_line,
 };
 
+/// Snippet and text-only text for one file.
+///
+/// Line offsets always use the canonical decode. Displayed snippets follow the
+/// historical `read_to_string` body: a UTF-8 BOM stays on the first line, and
+/// UTF-16 has no raw UTF-8 body so those snippets stay absent.
+enum SnippetBody {
+    Canonical,
+    LeadingBom(String),
+    Absent,
+}
+
 struct PreviewSource {
     text: String,
     line_starts: Vec<usize>,
+    snippets: SnippetBody,
 }
 
 struct PreviewWalkControl {
@@ -65,16 +79,50 @@ impl PreviewWalkControl {
 }
 
 impl PreviewSource {
-    fn new(text: String, control: &PreviewWalkControl) -> Result<Self> {
-        control.check()?;
+    /// Builds the newline index once from the canonical decode.
+    fn from_decoded(decoded: DecodedSourceFile) -> Self {
         let mut line_starts = vec![0];
-        for (offset, _) in text.match_indices('\n') {
-            control.check()?;
-            line_starts.push(offset + 1);
+        line_starts.extend(
+            decoded
+                .text
+                .match_indices('\n')
+                .map(|(offset, _)| offset + 1),
+        );
+        let snippets = match decoded.encoding {
+            SourceTextEncoding::Utf8 { leading_bom: false } => SnippetBody::Canonical,
+            SourceTextEncoding::Utf8 { leading_bom: true } => {
+                let mut raw = String::with_capacity(decoded.text.len() + '\u{feff}'.len_utf8());
+                raw.push('\u{feff}');
+                raw.push_str(&decoded.text);
+                SnippetBody::LeadingBom(raw)
+            }
+            SourceTextEncoding::Utf16Le | SourceTextEncoding::Utf16Be => SnippetBody::Absent,
+        };
+        Self {
+            text: decoded.text,
+            line_starts,
+            snippets,
         }
-        Ok(Self { text, line_starts })
     }
 
+    #[cfg(test)]
+    fn from_canonical_utf8(text: String) -> Self {
+        Self::from_decoded(DecodedSourceFile {
+            text,
+            encoding: SourceTextEncoding::Utf8 { leading_bom: false },
+        })
+    }
+
+    fn snippet_lines(&self) -> Option<Vec<&str>> {
+        let body = match &self.snippets {
+            SnippetBody::Canonical => self.text.as_str(),
+            SnippetBody::LeadingBom(raw) => raw.as_str(),
+            SnippetBody::Absent => return None,
+        };
+        Some(body.lines().collect())
+    }
+
+    #[cfg(test)]
     fn line(&self, index: usize) -> Option<&str> {
         let start = *self.line_starts.get(index)?;
         if start == self.text.len() {
@@ -116,18 +164,14 @@ fn snippet_text(line: &str) -> String {
 /// Picks a current-text snippet near `approx_line` (0-based; edge line bases are
 /// approximate, so neighbors are tried) that actually contains `name`, falling
 /// back to the line itself. `None` when no line is available.
-fn reference_line_snippet(
-    source: &PreviewSource,
-    approx_line: Option<u32>,
-    name: &str,
-) -> Option<String> {
+fn reference_line_snippet(lines: &[&str], approx_line: Option<u32>, name: &str) -> Option<String> {
     let approx = approx_line? as usize;
     let candidates = [approx, approx.saturating_sub(1), approx + 1];
     let idx = candidates
         .into_iter()
-        .find(|&i| source.line(i).is_some_and(|line| line.contains(name)))
+        .find(|&i| lines.get(i).is_some_and(|line| line.contains(name)))
         .unwrap_or(approx);
-    source.line(idx).map(snippet_text)
+    lines.get(idx).map(|line| snippet_text(line))
 }
 
 /// True for bytes that can appear inside an identifier. Non-ASCII bytes count so
@@ -199,24 +243,34 @@ impl PreviewFileWalk {
             let has_references = reference_inputs
                 .peek()
                 .is_some_and(|input| input.file == file);
-            let text = match tracedecay_runtime_core::sync::read_source_file(
+            let decoded = match tracedecay_runtime_core::sync::read_decoded_source_file(
                 &self.project_root.join(&file),
             ) {
-                Ok(text) => text,
+                Ok(decoded) => decoded,
                 Err(error) if has_references => return Err(error.into()),
                 // Declaration snippets are optional; reference evidence is not.
                 Err(_) => continue,
             };
-            let source = PreviewSource::new(text, &self.control)?;
+            // The in-flight read can finish after cancellation. Stop before
+            // the line index or the next file.
+            self.control.check()?;
+            // One decoded buffer and its newline index, dropped before the
+            // next file so the preview does not retain every touched source.
+            let source = PreviewSource::from_decoded(decoded);
+            let lines = source.snippet_lines();
             if file == self.result.node.file {
-                decl_snippet = source
-                    .line(self.declaration_line as usize)
-                    .map(snippet_text);
+                decl_snippet = lines.as_ref().and_then(|lines| {
+                    lines
+                        .get(self.declaration_line as usize)
+                        .copied()
+                        .map(snippet_text)
+                });
             }
             while let Some(input) = reference_inputs.next_if(|input| input.file == file) {
-                self.control.check()?;
                 let line = source.line_for_byte_offset(input.evidence_start_byte)?;
-                let snippet = reference_line_snippet(&source, Some(line), &self.result.symbol);
+                let snippet = lines.as_deref().and_then(|lines| {
+                    reference_line_snippet(lines, Some(line), &self.result.symbol)
+                });
                 references.push((
                     input.ordinal,
                     RenamePreviewReferenceV1 {
@@ -230,11 +284,12 @@ impl PreviewFileWalk {
                     },
                 ));
             }
-            let mut total = 0;
-            for line in source.text.lines() {
-                self.control.check()?;
-                total += count_identifier_occurrences(line, &self.result.symbol);
-            }
+            let total = lines.as_ref().map_or(0, |lines| {
+                lines
+                    .iter()
+                    .map(|line| count_identifier_occurrences(line, &self.result.symbol))
+                    .sum::<usize>()
+            });
             let graph = self.graph_counts.get(&file).copied().unwrap_or(0);
             let text_only = total.saturating_sub(graph);
             if text_only > 0 {
@@ -403,18 +458,11 @@ pub async fn compute_rename_preview(
 
 #[cfg(test)]
 mod tests {
-    use super::{PreviewSource, PreviewWalkControl};
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use super::PreviewSource;
+    use tracedecay_runtime_core::sync::{DecodedSourceFile, SourceTextEncoding};
 
     #[test]
     fn source_lines_preserve_byte_boundaries_and_refuse_stale_offsets() {
-        let control = PreviewWalkControl {
-            cancelled: Arc::new(AtomicBool::new(false)),
-            cancellation: None,
-            deadline: None,
-            budget: crate::tools::dispatch_ceiling::TOOL_DISPATCH_CEILING,
-        };
         for text in [
             "",
             "\n",
@@ -423,7 +471,7 @@ mod tests {
             "\r",
             "first\r\nlast\r",
         ] {
-            let source = PreviewSource::new(text.to_owned(), &control).unwrap();
+            let source = PreviewSource::from_canonical_utf8(text.to_owned());
             let lines = text.lines().collect::<Vec<_>>();
             for (index, expected) in lines.iter().enumerate() {
                 assert_eq!(source.line(index), Some(*expected));
@@ -442,6 +490,27 @@ mod tests {
             for offset in [text.len() as u64 + 1, u64::MAX] {
                 assert!(source.line_for_byte_offset(offset).is_err());
             }
+        }
+    }
+
+    #[test]
+    fn snippets_keep_a_utf8_bom_and_omit_utf16_bodies() {
+        let bom = PreviewSource::from_decoded(DecodedSourceFile {
+            text: "pub fn reserve_stock() {}\nnext\n".to_owned(),
+            encoding: SourceTextEncoding::Utf8 { leading_bom: true },
+        });
+        let lines = bom.snippet_lines().expect("utf-8 bom still has raw lines");
+        assert_eq!(lines[0], "\u{feff}pub fn reserve_stock() {}");
+        assert_eq!(lines[1], "next");
+        assert_eq!(bom.line_for_byte_offset(0).unwrap(), 0);
+
+        for encoding in [SourceTextEncoding::Utf16Le, SourceTextEncoding::Utf16Be] {
+            let utf16 = PreviewSource::from_decoded(DecodedSourceFile {
+                text: "pub fn reserve_stock() {}\n".to_owned(),
+                encoding,
+            });
+            assert!(utf16.snippet_lines().is_none());
+            assert_eq!(utf16.line_for_byte_offset(0).unwrap(), 0);
         }
     }
 }

@@ -49,8 +49,6 @@ call-edge coverage improves as the resolver does.";
 
 const TEXT_ONLY_NOTE: &str = "text-only matches, review manually";
 
-type SourceEncoding = (&'static [u8], Option<fn(u16) -> [u8; 2]>);
-
 struct ReadPause {
     entered: mpsc::Sender<()>,
     resume: mpsc::Receiver<()>,
@@ -421,25 +419,45 @@ async fn rename_preview_reads_dense_reference_sources_once_per_file() {
 }
 
 #[tokio::test]
-async fn rename_preview_uses_canonical_bom_and_utf16_source_for_snippets() {
-    let encodings: &[SourceEncoding] = &[
-        (&[0xEF, 0xBB, 0xBF], None),
-        (&[0xFF, 0xFE], Some(u16::to_le_bytes)),
-        (&[0xFE, 0xFF], Some(u16::to_be_bytes)),
-    ];
-    for (bom, encode_unit) in encodings {
+async fn rename_preview_keeps_raw_utf8_snippets_and_utf16_line_offsets() {
+    let (fixture, server) = opened_fixture().await;
+    let reserve_id = symbol_id(&server, "reserve_stock").await;
+    let checkout_id = symbol_id(&server, "checkout").await;
+
+    let encode_utf8_bom = |source: &str| {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend(source.as_bytes());
+        bytes
+    };
+    fs::write(
+        fixture.project_root.join("src/stock.rs"),
+        encode_utf8_bom(STOCK_RS),
+    )
+    .unwrap();
+    fs::write(
+        fixture.project_root.join("src/lib.rs"),
+        encode_utf8_bom(LIB_RS),
+    )
+    .unwrap();
+    let bom_response = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_rename_preview",
+        json!({"node_id":reserve_id, "format":"json"}),
+    )
+    .await;
+    let mut bom_expected = expected_preview(&reserve_id, &checkout_id, None);
+    bom_expected["node"]["snippet"] = json!("\u{feff}pub fn reserve_stock(qty: u32) -> u32 {");
+    assert_eq!(tool_json(&bom_response), bom_expected);
+
+    for (bom, encode_unit) in [
+        (&[0xFF, 0xFE][..], u16::to_le_bytes as fn(u16) -> [u8; 2]),
+        (&[0xFE, 0xFF][..], u16::to_be_bytes),
+    ] {
         let encode = |source: &str| {
             let mut bytes = bom.to_vec();
-            if let Some(encode_unit) = encode_unit {
-                bytes.extend(source.encode_utf16().flat_map(encode_unit));
-            } else {
-                bytes.extend(source.as_bytes());
-            }
+            bytes.extend(source.encode_utf16().flat_map(encode_unit));
             bytes
         };
-        let (fixture, server) = opened_fixture().await;
-        let reserve_id = symbol_id(&server, "reserve_stock").await;
-        let checkout_id = symbol_id(&server, "checkout").await;
         fs::write(fixture.project_root.join("src/stock.rs"), encode(STOCK_RS)).unwrap();
         fs::write(fixture.project_root.join("src/lib.rs"), encode(LIB_RS)).unwrap();
         let response = handle_real_server_tool_call_raw(
@@ -448,20 +466,17 @@ async fn rename_preview_uses_canonical_bom_and_utf16_source_for_snippets() {
             json!({"node_id":reserve_id, "format":"json"}),
         )
         .await;
-        assert_eq!(
-            tool_json(&response),
-            expected_preview(&reserve_id, &checkout_id, None)
-        );
-        assert_eq!(
-            fs::read(fixture.project_root.join("src/stock.rs")).unwrap(),
-            encode(STOCK_RS)
-        );
+        let mut expected = expected_preview(&reserve_id, &checkout_id, None);
+        expected["node"]["snippet"] = Value::Null;
+        expected["references"][0]["snippet"] = Value::Null;
+        expected["text_only_matches"] = json!([]);
+        assert_eq!(tool_json(&response), expected, "{bom:?}");
         assert_eq!(
             fs::read(fixture.project_root.join("src/lib.rs")).unwrap(),
             encode(LIB_RS)
         );
-        fixture.shutdown().await;
     }
+    fixture.shutdown().await;
 }
 
 #[tokio::test]

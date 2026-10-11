@@ -2,21 +2,56 @@ use std::path::Path;
 
 use tracedecay_domain::canonical_text::sha256_hex;
 
-/// Read a source file to a UTF-8 string, transparently handling UTF-16 LE/BE
-/// (detected via BOM). Returns an IO error only when the file genuinely cannot
-/// be read or decoded.
-#[tracing::instrument(name = "source.read", level = "trace", skip_all)]
-pub fn read_source_file(path: &Path) -> std::io::Result<String> {
-    let bytes = read_file_bytes(path)?;
+/// How [`read_decoded_source_file`] classified the bytes it decoded.
+///
+/// Reference line offsets use the canonical decoded text. Snippet and
+/// text-only scans that historically used `read_to_string` follow this tag:
+/// UTF-8 keeps the BOM character, and UTF-16 has no raw UTF-8 body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceTextEncoding {
+    Utf8 { leading_bom: bool },
+    Utf16Le,
+    Utf16Be,
+}
 
+/// One canonical decode of a source file.
+pub struct DecodedSourceFile {
+    pub text: String,
+    pub encoding: SourceTextEncoding,
+}
+
+/// Read and decode a source file once.
+///
+/// UTF-16 LE/BE is detected via BOM. UTF-8 BOMs are stripped from [`DecodedSourceFile::text`]
+/// and reported on [`SourceTextEncoding`]. Returns an IO error only when the
+/// file genuinely cannot be read or decoded.
+#[tracing::instrument(name = "source.read", level = "trace", skip_all)]
+pub fn read_decoded_source_file(path: &Path) -> std::io::Result<DecodedSourceFile> {
+    decode_source_bytes(&read_file_bytes(path)?)
+}
+
+/// Canonical decoded text of a source file.
+///
+/// Callers that also need the encoding classification use [`read_decoded_source_file`].
+pub fn read_source_file(path: &Path) -> std::io::Result<String> {
+    read_decoded_source_file(path).map(|decoded| decoded.text)
+}
+
+fn decode_source_bytes(bytes: &[u8]) -> std::io::Result<DecodedSourceFile> {
     let decode_unit = if bytes.starts_with(&[0xFF, 0xFE]) {
-        Some(u16::from_le_bytes as fn([u8; 2]) -> u16)
+        Some((
+            SourceTextEncoding::Utf16Le,
+            u16::from_le_bytes as fn([u8; 2]) -> u16,
+        ))
     } else if bytes.starts_with(&[0xFE, 0xFF]) {
-        Some(u16::from_be_bytes as fn([u8; 2]) -> u16)
+        Some((
+            SourceTextEncoding::Utf16Be,
+            u16::from_be_bytes as fn([u8; 2]) -> u16,
+        ))
     } else {
         None
     };
-    if let Some(decode_unit) = decode_unit {
+    if let Some((encoding, decode_unit)) = decode_unit {
         let (units, remainder) = bytes[2..].as_chunks::<2>();
         if !remainder.is_empty() {
             return Err(std::io::Error::new(
@@ -25,18 +60,21 @@ pub fn read_source_file(path: &Path) -> std::io::Result<String> {
             ));
         }
         let u16s: Vec<u16> = units.iter().copied().map(decode_unit).collect();
-        return String::from_utf16(&u16s)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+        let text = String::from_utf16(&u16s)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        return Ok(DecodedSourceFile { text, encoding });
     }
 
-    // Strip UTF-8 BOM if present, then validate
-    let start = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        3
-    } else {
-        0
-    };
-    String::from_utf8(bytes[start..].to_vec())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    // Strip UTF-8 BOM if present, then validate. The tag preserves the
+    // historical snippet distinction: raw UTF-8 kept the BOM character.
+    let leading_bom = bytes.starts_with(&[0xEF, 0xBB, 0xBF]);
+    let start = if leading_bom { 3 } else { 0 };
+    let text = String::from_utf8(bytes[start..].to_vec())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(DecodedSourceFile {
+        text,
+        encoding: SourceTextEncoding::Utf8 { leading_bom },
+    })
 }
 
 /// Reads a file's bytes, absorbing transient Windows file locks.
@@ -96,13 +134,19 @@ pub fn content_hash(content: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::read_source_file;
+    use super::{SourceTextEncoding, read_decoded_source_file, read_source_file};
     use std::io::ErrorKind;
 
     fn read_bytes(bytes: &[u8]) -> std::io::Result<String> {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), bytes).unwrap();
         read_source_file(file.path())
+    }
+
+    fn encoding_of(bytes: &[u8]) -> SourceTextEncoding {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), bytes).unwrap();
+        read_decoded_source_file(file.path()).unwrap().encoding
     }
 
     #[test]
@@ -149,6 +193,16 @@ mod tests {
             assert_eq!(read_bytes(bytes).unwrap(), "hi\n");
         }
         assert_eq!(read_bytes(b"").unwrap(), "");
+        assert_eq!(
+            encoding_of(b"hi\n"),
+            SourceTextEncoding::Utf8 { leading_bom: false }
+        );
+        assert_eq!(
+            encoding_of(b"\xEF\xBB\xBFhi\n"),
+            SourceTextEncoding::Utf8 { leading_bom: true }
+        );
+        assert_eq!(encoding_of(b"\xFF\xFEhi"), SourceTextEncoding::Utf16Le);
+        assert_eq!(encoding_of(b"\xFE\xFFhi"), SourceTextEncoding::Utf16Be);
         for bytes in [&b"\x80"[..], &b"\xEF\xBB\xBF\x80"[..]] {
             assert_eq!(
                 read_bytes(bytes).unwrap_err().kind(),
