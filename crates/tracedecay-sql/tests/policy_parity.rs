@@ -520,6 +520,8 @@ mod native {
     /// The census's SQLite search shape.
     struct SearchShape {
         tables: Vec<Fts5Table>,
+        /// The FTS5 tables, their shadow tables, and the triggers and views
+        /// over them.
         objects: BTreeSet<String>,
     }
 
@@ -529,8 +531,16 @@ mod native {
                 .iter()
                 .filter_map(|row| Fts5Table::parse(&row.sql))
                 .collect();
-            let objects = tables.iter().flat_map(Fts5Table::objects).collect();
-            Self { tables, objects }
+            let mut shape = Self {
+                objects: tables.iter().flat_map(Fts5Table::objects).collect(),
+                tables,
+            };
+            let dependents: Vec<String> = census
+                .iter()
+                .filter_map(|row| shape.dependent(&row.sql))
+                .collect();
+            shape.objects.extend(dependents);
+            shape
         }
 
         fn names_fts5(&self, names: &[String]) -> bool {
@@ -539,14 +549,35 @@ mod native {
                 .any(|name| name == "fts5" || self.objects.contains(name))
         }
 
+        /// The trigger or view `sql` creates over an FTS5 object.
+        fn dependent(&self, sql: &str) -> Option<String> {
+            let names: Vec<String> = identifiers(statement_text(sql)).collect();
+            let mut words = names.iter().map(String::as_str);
+            if words.next()? != "create" {
+                return None;
+            }
+            let mut kind = words.next()?;
+            if matches!(kind, "temp" | "temporary") {
+                kind = words.next()?;
+            }
+            if !matches!(kind, "trigger" | "view") {
+                return None;
+            }
+            let mut name = words.next()?;
+            if name == "if" {
+                name = words.nth(2)?;
+            }
+            self.names_fts5(&names).then(|| name.to_owned())
+        }
+
         /// `ddl` as a native store installs it: each external-content FTS5
-        /// table becomes its native index, and the sync triggers and anything
-        /// else that names an FTS5 object are not installed.
+        /// table becomes its native index, and the sync triggers and views
+        /// over FTS5 objects are not installed.
         fn native_ddl(&self, ddl: Vec<&str>) -> Vec<String> {
             ddl.into_iter()
                 .filter_map(|sql| match Fts5Table::parse(sql) {
                     Some(table) => table.native_index(),
-                    None if self.names_fts5(&identifiers(sql).collect::<Vec<_>>()) => None,
+                    None if self.dependent(sql).is_some() => None,
                     None => Some(sql.to_owned()),
                 })
                 .collect()
