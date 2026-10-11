@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use tempfile::tempdir;
 use tracedecay_domain::{
     MAX_OBSERVATION_RECORD_BYTES, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
@@ -2085,16 +2083,55 @@ const LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY: &str = "
              occurrence.occurrence_id
     LIMIT ?11";
 
+fn root_scope_occurrences_sql(start: usize, end: usize, session_count: usize) -> String {
+    format!(
+        "WITH RECURSIVE sequence(value) AS (
+            VALUES({start})
+            UNION ALL
+            SELECT value + 1 FROM sequence WHERE value < {end}
+         )
+         INSERT INTO session_occurrences (
+            session_id, generation, occurrence_id, source_observation_id,
+            source_sequence, source_provider, projection_output_ordinal,
+            retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
+            valid_time_json, evidence_json, sanitized_content_digest,
+            sanitized_content_bytes, index_text
+         )
+         SELECT
+            printf('root-scope-%04d', value % {session_count}),
+            1,
+            printf('root-scope-%06d', value),
+            'root-scope-observation',
+            1,
+            'claude',
+            value,
+            'root-scope-anchor',
+            '[]',
+            'assistant',
+            value,
+            json_object('kind', 'unknown'),
+            '{{}}',
+            '0000000000000000000000000000000000000000000000000000000000000000',
+            15,
+            'root scope occurrence'
+         FROM sequence;"
+    )
+}
+
+/// A root-wide browse page reads its page through the occurrence keyset index.
+/// Ten times the history must not raise its work; the generation-first shape
+/// it replaced sorts the whole window before `LIMIT`, so its work grows with
+/// the history, which shows the measurement can see the defect.
 #[tokio::test]
 async fn root_scope_browse_pages_from_the_occurrence_index_on_a_large_history() {
-    const OCCURRENCE_COUNT: usize = 50_000;
+    const BASE_OCCURRENCES: usize = 5_000;
+    const GROWN_OCCURRENCES: usize = 50_000;
     const SESSION_COUNT: usize = 2_703;
     const PAGE: i64 = 64;
-    const CHUNK: usize = 10_000;
 
     let directory = tempdir().expect("temporary directory");
     let database_path = directory.path().join("sessions.db");
-    let (_database, _owner) = open_registered_test_database_fixture(
+    let (database, owner) = open_registered_test_database_fixture(
         &database_path,
         TestDatabaseRuntimeScope::ProfileSessions,
     )
@@ -2139,48 +2176,17 @@ async fn root_scope_browse_pages_from_the_occurrence_index_on_a_large_history() 
         )
         .await
         .expect("root-scope identity fixture");
-
     let seed = connection
         .authorized_long_lease_transaction()
         .await
         .expect("long-lease seed");
-    for start in (0..OCCURRENCE_COUNT).step_by(CHUNK) {
-        let end = start + CHUNK - 1;
-        seed.execute_authority_revalidated_batch(&format!(
-            "WITH RECURSIVE sequence(value) AS (
-                VALUES({start})
-                UNION ALL
-                SELECT value + 1 FROM sequence WHERE value < {end}
-             )
-             INSERT INTO session_occurrences (
-                session_id, generation, occurrence_id, source_observation_id,
-                source_sequence, source_provider, projection_output_ordinal,
-                retrieval_anchor_id, copied_from_anchor_ids_json, role, knowledge_at,
-                valid_time_json, evidence_json, sanitized_content_digest,
-                sanitized_content_bytes, index_text
-             )
-             SELECT
-                printf('root-scope-%04d', value % {SESSION_COUNT}),
-                1,
-                printf('root-scope-%06d', value),
-                'root-scope-observation',
-                1,
-                'claude',
-                value,
-                'root-scope-anchor',
-                '[]',
-                'assistant',
-                value,
-                json_object('kind', 'unknown'),
-                '{{}}',
-                '0000000000000000000000000000000000000000000000000000000000000000',
-                15,
-                'root scope occurrence'
-             FROM sequence;"
-        ))
-        .await
-        .expect("root-scope occurrence chunk");
-    }
+    seed.execute_authority_revalidated_batch(&root_scope_occurrences_sql(
+        0,
+        BASE_OCCURRENCES - 1,
+        SESSION_COUNT,
+    ))
+    .await
+    .expect("root-scope occurrences");
     seed.execute_authority_revalidated_batch("ANALYZE;")
         .await
         .expect("analyze root-scope fixture");
@@ -2199,84 +2205,70 @@ async fn root_scope_browse_pages_from_the_occurrence_index_on_a_large_history() 
         SqlValue::Integer(128),
         SqlValue::Integer(PAGE),
     ];
-    let mut explain_rows = connection
-        .query(
-            &format!("EXPLAIN QUERY PLAN {ROOT_SCOPE_CANDIDATE_QUERY}"),
-            params.clone(),
-        )
-        .await
-        .expect("root scope plan");
-    let mut repaired_plan = Vec::new();
-    while let Some(row) = explain_rows.next().await.expect("plan row") {
-        let detail: String = row.get(3).expect("plan detail");
-        repaired_plan.push(normalize_plan_detail(&detail));
+    let mut page = Vec::new();
+    for sql in [
+        ROOT_SCOPE_CANDIDATE_QUERY,
+        LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY,
+    ] {
+        let mut rows = connection
+            .query(sql, params.clone())
+            .await
+            .expect("root scope page");
+        let mut ids = Vec::new();
+        while let Some(row) = rows.next().await.expect("root scope row") {
+            ids.push(row.get::<String>(0).expect("occurrence id"));
+        }
+        page.push(ids);
     }
-    assert!(
-        repaired_plan
-            .iter()
-            .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
-        "large-history root scope must use the occurrence keyset index: {repaired_plan:?}"
-    );
-    assert!(
-        repaired_plan
-            .iter()
-            .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
-        "large-history root scope must not materialize the project before LIMIT: {repaired_plan:?}"
-    );
-
-    let mut legacy_explain = connection
-        .query(
-            &format!("EXPLAIN QUERY PLAN {LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY}"),
-            params.clone(),
-        )
-        .await
-        .expect("legacy root scope plan");
-    let mut legacy_plan = Vec::new();
-    while let Some(row) = legacy_explain.next().await.expect("legacy plan row") {
-        let detail: String = row.get(3).expect("legacy plan detail");
-        legacy_plan.push(normalize_plan_detail(&detail));
-    }
-    assert!(
-        legacy_plan
-            .iter()
-            .any(|detail| detail.contains("USE TEMP B-TREE FOR ORDER BY"))
-            || !legacy_plan
-                .iter()
-                .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
-        "the generation-first browse is the measured full-window sort: {legacy_plan:?}"
-    );
-
-    let started = Instant::now();
-    let mut rows = connection
-        .query(LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY, params.clone())
-        .await
-        .expect("legacy root scope page");
-    let mut legacy = Vec::new();
-    while let Some(row) = rows.next().await.expect("legacy row") {
-        legacy.push(row.get::<String>(0).expect("occurrence id"));
-    }
-    let legacy_elapsed = started.elapsed();
-
-    let started = Instant::now();
-    let mut rows = connection
-        .query(ROOT_SCOPE_CANDIDATE_QUERY, params)
-        .await
-        .expect("repaired root scope page");
-    let mut repaired = Vec::new();
-    while let Some(row) = rows.next().await.expect("repaired row") {
-        repaired.push(row.get::<String>(0).expect("occurrence id"));
-    }
-    let repaired_elapsed = started.elapsed();
-    assert_eq!(repaired.len(), PAGE as usize, "{repaired:?}");
+    assert_eq!(page[0].len(), PAGE as usize, "{:?}", page[0]);
     assert_eq!(
-        repaired.first().map(String::as_str),
-        Some("root-scope-049999"),
-        "newest occurrence must be first: {repaired:?}"
+        page[0].first().map(String::as_str),
+        Some("root-scope-004999"),
+        "newest occurrence must be first: {:?}",
+        page[0]
     );
-    assert_eq!(legacy, repaired, "both shapes must return the same page");
+    assert_eq!(page[0], page[1], "both shapes must return the same page");
+
+    drop(connection);
+    drop(owner);
+    drop(database);
+    let raw = tracedecay_sql::Connection::open(&database_path).expect("open measured store");
+    let page_steps = |sql: &str| {
+        crate::test_support::statement_vm_steps(
+            &raw,
+            sql,
+            tracedecay_sql::params![
+                "user",
+                Option::<&str>::None,
+                i64::MAX,
+                "",
+                "",
+                128_i64,
+                128_i64,
+                128_i64,
+                1_024_i64,
+                128_i64,
+                PAGE
+            ],
+        )
+    };
+    let base = page_steps(ROOT_SCOPE_CANDIDATE_QUERY);
+    let legacy_base = page_steps(LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY);
+    raw.execute_batch(&format!(
+        "BEGIN; {} ANALYZE; COMMIT;",
+        root_scope_occurrences_sql(BASE_OCCURRENCES, GROWN_OCCURRENCES - 1, SESSION_COUNT)
+    ))
+    .expect("grow the root-scope history tenfold");
+    let grown = page_steps(ROOT_SCOPE_CANDIDATE_QUERY);
+    let legacy_grown = page_steps(LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY);
     assert!(
-        repaired_elapsed.as_millis() < 1_000,
-        "indexed browse must stay on a bounded page, not a full-window sort ({repaired_elapsed:?}; generation-first {legacy_elapsed:?})"
+        legacy_grown >= 4 * legacy_base,
+        "the generation-first browse must show the full-window cost the index avoids: \
+         {legacy_base} -> {legacy_grown} VM steps"
+    );
+    assert!(
+        grown <= 2 * base,
+        "the indexed browse must cost its page, not the history: {base} -> {grown} VM steps"
     );
 }
 

@@ -2980,10 +2980,15 @@ async fn occurrence_replay_accepts_existing_full_text_and_rejects_changed_conten
         i64::try_from(text.len()).unwrap()
     );
     drop(rows);
-    transaction.execute(
-        "UPDATE session_occurrences SET index_text = index_text || 'corrupt' WHERE session_id = ?1",
-        params![session_id.as_str()],
-    ).await.unwrap();
+    // A bound value, not `index_text || ...`: see
+    // turso-bugs/virtual-column-before-its-source-fails-not-null-on-update.md.
+    transaction
+        .execute(
+            "UPDATE session_occurrences SET index_text = ?2 WHERE session_id = ?1",
+            params![session_id.as_str(), format!("{text}corrupt")],
+        )
+        .await
+        .unwrap();
     super::persist::persist_occurrences(&transaction, &batch, &ExecutionControl::default())
         .await
         .expect_err("matching digest cannot excuse changed stored text");
