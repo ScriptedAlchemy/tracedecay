@@ -1241,6 +1241,63 @@ mod tests {
         );
     }
 
+    async fn foreign_key_violation_with(rows: &str) -> bool {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        let connection = tracedecay_sql::Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "PRAGMA foreign_keys = OFF;
+                 CREATE TABLE parent (id TEXT NOT NULL PRIMARY KEY, owner TEXT NOT NULL);
+                 CREATE UNIQUE INDEX parent_owner ON parent(id, owner);
+                 CREATE TABLE child (
+                    id INTEGER PRIMARY KEY,
+                    parent_id TEXT,
+                    owner TEXT,
+                    FOREIGN KEY(parent_id, owner) REFERENCES parent(id, owner)
+                 );
+                 CREATE TABLE implicit_child (
+                    id INTEGER PRIMARY KEY,
+                    parent_id TEXT REFERENCES parent
+                 );
+                 INSERT INTO parent(id, owner) VALUES ('a', 'x'), ('b', 'y');
+                 INSERT INTO child(id, parent_id, owner)
+                 VALUES (1, 'a', 'x'), (2, NULL, 'z'), (3, 'b', NULL);
+                 INSERT INTO implicit_child(id, parent_id) VALUES (1, 'b');
+                 {rows}"
+            ))
+            .unwrap();
+        drop(connection);
+        foreign_key_violation_exists_read_only(&TestConnection::open(&database_path))
+            .await
+            .unwrap()
+    }
+
+    /// Catches an audit that counts a key with a NULL column as an orphan,
+    /// matches composite key columns one at a time, or resolves an implicit
+    /// primary-key reference to anything but the parent's primary key.
+    #[tokio::test]
+    async fn foreign_key_audit_matches_whole_keys_and_skips_null_columns() {
+        assert!(
+            !foreign_key_violation_with("").await,
+            "every key either matches a parent row or has a NULL column"
+        );
+        assert!(
+            foreign_key_violation_with(
+                "INSERT INTO child(id, parent_id, owner) VALUES (4, 'a', 'y');"
+            )
+            .await,
+            "('a', 'y') matches no parent row, though each column matches some row"
+        );
+        assert!(
+            foreign_key_violation_with(
+                "INSERT INTO implicit_child(id, parent_id) VALUES (2, 'missing');"
+            )
+            .await,
+            "an implicit primary-key reference to a missing parent is a violation"
+        );
+    }
+
     #[tokio::test]
     async fn foreign_key_audit_resumes_after_last_durable_table() {
         let directory = TempDir::new().unwrap();
