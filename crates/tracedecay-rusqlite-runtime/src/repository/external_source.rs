@@ -865,11 +865,10 @@ fn retire_superseded_history(
     projections: &[&str],
 ) -> tracedecay_sql::Result<()> {
     let mut frontiers = BTreeSet::new();
-    let mut collect_frontiers = |rows: tracedecay_sql::Rows<'_>| -> tracedecay_sql::Result<()> {
-        for row in rows.mapped(|row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))) {
-            let (predecessor, successor) = row?;
-            frontiers.insert(predecessor);
-            frontiers.insert(successor);
+    let mut collect_frontiers = |mut rows: tracedecay_sql::Rows<'_>| -> tracedecay_sql::Result<()> {
+        while let Some(row) = rows.next()? {
+            frontiers.insert(row.get::<_, String>(0)?);
+            frontiers.insert(row.get::<_, String>(1)?);
         }
         Ok(())
     };
