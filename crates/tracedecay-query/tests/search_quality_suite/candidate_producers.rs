@@ -1144,7 +1144,9 @@ const SECOND_OPENER_STAGING: &str = "TRACEDECAY_QUERY_SUITE_SECOND_OPENER_STAGIN
 /// A builder that has sealed its staging file, including the canonical
 /// rewrite that replaced the file under it, still keeps every other process
 /// out: on the native engine the second opener is refused as owned
-/// elsewhere. SQLite has no such lock and admits it.
+/// elsewhere. The seal removed the WAL, so only the engine's lock on the
+/// main file refuses it, and closing any other descriptor of that file
+/// would release it. SQLite has no such lock and admits the opener.
 #[test]
 fn sealed_staging_stays_owned_by_its_live_builder() {
     use tracedecay_sql::ErrorExt;

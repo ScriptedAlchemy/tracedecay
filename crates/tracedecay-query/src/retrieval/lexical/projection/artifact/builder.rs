@@ -7661,57 +7661,6 @@ mod tests {
         ));
     }
 
-    const SECOND_OPENER_STAGING: &str = "TRACEDECAY_QUERY_SECOND_OPENER_STAGING";
-
-    /// A live builder keeps every other process out of its staging file,
-    /// which is what lets the artifact carry no mutation gate: on the native
-    /// engine a second process's open is refused as owned elsewhere, even
-    /// after the builder has rebound the staging path to its file. SQLite has
-    /// no such lock and admits the opener.
-    #[test]
-    fn a_second_process_cannot_open_live_staging() {
-        use tracedecay_sql::ErrorExt;
-
-        if let Ok(path) = std::env::var(SECOND_OPENER_STAGING) {
-            match Connection::open(&path) {
-                Ok(_) => println!("OUTCOME=opened"),
-                Err(error) => println!("OUTCOME={:?}", error.kind()),
-            }
-            return;
-        }
-        let directory = tempfile::tempdir().expect("artifact tempdir");
-        let path = directory.path().join("live.staging");
-        let builder =
-            CodeLexicalArtifactBuilderV1::create(&path, test_metadata()).expect("create staging");
-        builder
-            .progress(&ActiveControl)
-            .expect("rebind the staging path");
-        let module = module_path!()
-            .split_once("::")
-            .map_or(module_path!(), |(_, module)| module);
-        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
-            .args([
-                "--exact",
-                &format!("{module}::a_second_process_cannot_open_live_staging"),
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(SECOND_OPENER_STAGING, &path)
-            .output()
-            .expect("run the second opener");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(output.status.success(), "second opener failed: {stdout}");
-        let expected = match tracedecay_sql::ENGINE {
-            tracedecay_sql::Engine::Native => "OUTCOME=OwnedElsewhere",
-            tracedecay_sql::Engine::Sqlite => "OUTCOME=opened",
-        };
-        assert!(
-            stdout.contains(expected),
-            "expected {expected}, the second opener printed: {stdout}"
-        );
-        drop(builder);
-    }
-
     #[test]
     fn interrupted_staging_initialization_leaves_no_resumable_path() {
         let directory = tempfile::tempdir().expect("private staging directory");
