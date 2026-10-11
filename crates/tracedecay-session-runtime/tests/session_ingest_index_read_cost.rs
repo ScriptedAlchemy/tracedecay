@@ -9,8 +9,8 @@ pub mod support;
 use std::sync::Arc;
 use support::{
     BASE_SESSIONS, DrainFixture, GROWN_SESSIONS, MEDIAN_PROBE_MESSAGES, MESSAGES_PER_SESSION,
-    ingest_live_messages, median_streamed_message_reads, refresh_until_idle, seed_sessions,
-    session_cursor, session_store_tree_depths,
+    ingest_live_messages, lookup_growth, median_streamed_message_reads, refresh_until_idle,
+    seed_sessions, session_cursor, session_store_tree_depths,
 };
 use tracedecay_session_runtime::session_sync::test_harness::SessionTemporalRefreshWakeState;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -105,11 +105,7 @@ async fn streamed_message_ingest_reads_grow_only_with_index_depth() {
             deepened.push((tree.as_str(), base));
         }
     }
-    let shallowest = deepened
-        .iter()
-        .map(|(_, base)| *base)
-        .min()
-        .unwrap_or(u32::MAX);
+    let (deeper, shallower) = lookup_growth(&base_depths, &grown_depths);
     eprintln!(
         "8x store streamed message ingest read bytes: base={base_read} grown={grown_read}; \
          trees that gained a level (base depth): {deepened:?}"
@@ -119,9 +115,8 @@ async fn streamed_message_ingest_reads_grow_only_with_index_depth() {
         "an 8x larger store must deepen a tree"
     );
     assert!(
-        grown_read * u64::from(shallowest) <= base_read * u64::from(shallowest + 1),
+        grown_read * shallower <= base_read * deeper,
         "an 8x larger store must grow a streamed message's reads by at most \
-         (d + 1) / d for the shallowest deepened tree d={shallowest}: \
-         base={base_read} grown={grown_read}"
+         the deepest tree growth {deeper}/{shallower}: base={base_read} grown={grown_read}"
     );
 }

@@ -9,7 +9,7 @@ pub mod support;
 use std::sync::Arc;
 use support::{
     DrainFixture, PROMPT_TITLE_WORDS, SEED_TIMESTAMP, capture, drain, ingest_live_messages,
-    message_requests, refresh_until_idle, session_cursor,
+    lookup_growth, message_requests, refresh_until_idle, session_cursor, session_store_tree_depths,
 };
 use tracedecay_session_runtime::session_sync::test_harness::SessionTemporalRefreshWakeState;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -46,6 +46,7 @@ async fn streamed_message_ingest_work_does_not_grow_with_the_live_session() {
     )
     .await;
     assert_eq!(live.next_ordinal, BASE_LENGTH);
+    let base_depths = session_store_tree_depths(&fixture);
 
     let (project, scope) = (fixture.project.as_path(), fixture.scope());
     capture(
@@ -90,14 +91,19 @@ async fn streamed_message_ingest_work_does_not_grow_with_the_live_session() {
         i64::try_from(8 * BASE_LENGTH).unwrap(),
     );
 
+    let (deeper, shallower) = lookup_growth(&base_depths, &session_store_tree_depths(&fixture));
+
     eprintln!(
         "live-session streamed message ingest: read bytes base={base_read} \
-         grown={grown_read}; writer VM steps base={base_steps} grown={grown_steps}"
+         grown={grown_read}; writer VM steps base={base_steps} grown={grown_steps}; \
+         lookup growth {deeper}/{shallower}"
     );
+    // A seek is one VM step at any depth, so only the reads follow depth.
     assert!(
-        grown_read * 5 <= base_read * 6,
+        grown_read * 5 * shallower <= base_read * 6 * deeper,
         "an 8x longer live session must keep each streamed message's ingest reads \
-         within 1.2x: base={base_read} grown={grown_read}"
+         within 1.2x times the deepest tree growth {deeper}/{shallower}: \
+         base={base_read} grown={grown_read}"
     );
     assert!(
         grown_steps * 5 <= base_steps * 6,

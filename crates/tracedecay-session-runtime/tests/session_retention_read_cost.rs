@@ -7,15 +7,16 @@
 pub mod support;
 
 use support::{
-    BASE_SESSIONS, DrainFixture, GROWN_SESSIONS, SEED_TIMESTAMP, probe_one_message,
-    retention_tick_read_bytes, seed_sessions,
+    BASE_SESSIONS, DrainFixture, GROWN_SESSIONS, SEED_TIMESTAMP, lookup_growth, probe_one_message,
+    retention_tick_read_bytes, seed_sessions, session_store_tree_depths,
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 /// Every retention tick after the store settles follows the messages streamed
 /// since the previous tick. Payload GC, observation release, session
 /// retention, and observability pruning each select from their own cursors or
-/// candidate indexes, so an 8x larger store costs the same tick.
+/// candidate indexes, so an 8x larger store costs the same lookups, each at
+/// most one level deeper.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retention_tick_reads_do_not_scale_with_the_session_store() {
     const STREAMED: u64 = 64;
@@ -41,6 +42,7 @@ async fn retention_tick_reads_do_not_scale_with_the_session_store() {
         .await;
     }
     let base_read = retention_tick_read_bytes(database).await;
+    let base_depths = session_store_tree_depths(&fixture);
 
     seed_sessions(&facade, project, &scope, BASE_SESSIONS..GROWN_SESSIONS).await;
     retention_tick_read_bytes(database).await;
@@ -55,11 +57,16 @@ async fn retention_tick_reads_do_not_scale_with_the_session_store() {
         .await;
     }
     let grown_read = retention_tick_read_bytes(database).await;
+    let (deeper, shallower) = lookup_growth(&base_depths, &session_store_tree_depths(&fixture));
 
-    eprintln!("retention tick read bytes: base={base_read} grown={grown_read}");
+    eprintln!(
+        "retention tick read bytes: base={base_read} grown={grown_read}; \
+         lookup growth {deeper}/{shallower}"
+    );
     assert!(
-        grown_read * 10 <= base_read * 12,
+        grown_read * 10 * shallower <= base_read * 12 * deeper,
         "one retention tick on an 8x larger session store must stay within 1.2x of the \
-         base store's reads: base={base_read} grown={grown_read}"
+         base store's reads times the deepest tree growth {deeper}/{shallower}: \
+         base={base_read} grown={grown_read}"
     );
 }

@@ -311,8 +311,18 @@ pub struct DrainFixture {
 }
 
 impl DrainFixture {
+    /// The fixture lives on tmpfs when the host has one. These relations
+    /// count reads and VM steps, which are the same on any filesystem, while
+    /// a disk's per-commit fsync would set the run's wall time; production
+    /// stores keep their full sync.
     pub async fn open() -> Self {
-        let tmp = TempDir::new().unwrap();
+        let shm = Path::new("/dev/shm");
+        let tmp = if shm.is_dir() {
+            TempDir::new_in(shm)
+        } else {
+            TempDir::new()
+        }
+        .unwrap();
         let project = tmp.path().join("drain-read-cost");
         std::fs::create_dir_all(&project).unwrap();
         run_git(&project, &["init", "-b", "main"]);
@@ -729,6 +739,29 @@ pub fn session_store_tree_depths(fixture: &DrainFixture) -> BTreeMap<String, u32
             }
         })
         .collect()
+}
+
+/// How much the store's growth may raise work made of point lookups, as the
+/// fraction `(numerator, denominator)`. A lookup in a tree of d levels reads
+/// d pages, so work over any mix of trees grows by at most the largest
+/// grown/base depth ratio among them: O(log n) per lookup, where a scan of
+/// a store-sized range grows with n.
+pub fn lookup_growth(base: &BTreeMap<String, u32>, grown: &BTreeMap<String, u32>) -> (u64, u64) {
+    grown
+        .iter()
+        .map(|(tree, grown)| {
+            (
+                u64::from(*grown),
+                u64::from(base.get(tree).copied().unwrap_or(1)),
+            )
+        })
+        .fold((1, 1), |(num, den), (grown, base)| {
+            if grown * den > num * base {
+                (grown, base)
+            } else {
+                (num, den)
+            }
+        })
 }
 
 /// Median over `windows` consecutive probes of `MEDIAN_PROBE_MESSAGES` streamed

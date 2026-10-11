@@ -1,0 +1,91 @@
+--- a/index_method/fts/mod.rs
++++ b/index_method/fts/mod.rs
+@@ -37,7 +37,7 @@
+ };
+ use parking_lot::Mutex;
+ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+-use std::collections::BTreeSet;
++use std::collections::{BTreeMap, BTreeSet};
+ use std::path::PathBuf;
+ use std::{
+     cell::RefCell,
+@@ -2273,19 +2273,33 @@
+     /// Which visible segments the write-path merge should rewrite (B2):
+     /// - a segment at least half tombstoned is always a candidate —
+     ///   rewriting reclaims its dead space no matter how big it is;
+-    /// - otherwise candidates are every clean segment at or below the
+-    ///   smallest size layer holding at least two of them, so one huge
+-    ///   segment is not rewritten on every trigger.
++    /// - otherwise candidates are the clean segments of the smallest size
++    ///   tier holding `FTS_MERGE_FACTOR` of them. Tier `k` holds segments
++    ///   larger than `FTS_MERGE_FLOOR_BYTES * FTS_MERGE_FACTOR^(k-1)` and
++    ///   at most `FTS_MERGE_FLOOR_BYTES * FTS_MERGE_FACTOR^k`, so merging a
++    ///   full tier above the floor lands at least one tier up. A document
++    ///   is rewritten once per tier, O(log n) times over the index's life.
++    ///   Cumulative layers (every segment up to a ceiling) instead rewrote
++    ///   the largest segment under the ceiling with each batch of small
++    ///   ones, and every segment up to 100 MiB whenever the lower layers
++    ///   held no pair, which grows each insert's share with the index.
+     ///
+-    /// Returns an empty set when nothing is worth rewriting (no pair of
+-    /// mergeable clean segments and no tombstone-heavy segment).
++    /// Returns an empty set when nothing is worth rewriting (no full tier
++    /// and no tombstone-heavy segment).
+     fn auto_merge_candidates(&self) -> HashSet<SegmentId> {
+-        /// ParadeDB-style size layers. Segments at or past the last
+-        /// boundary never merge on size grounds.
+-        const FTS_MERGE_LAYER_BYTES: [u64; 4] = [100 << 10, 1 << 20, 100 << 20, 1 << 30];
++        const FTS_MERGE_FACTOR: usize = 4;
++        const FTS_MERGE_FLOOR_BYTES: u64 = 16 << 10;
+         fn segment_bytes(segment: &LoadedSegment) -> u64 {
+             segment.descriptor.files.iter().map(|file| file.size).sum()
+         }
++        fn tier(bytes: u64) -> u32 {
++            let (mut tier, mut ceiling) = (0, FTS_MERGE_FLOOR_BYTES);
++            while bytes > ceiling {
++                ceiling = ceiling.saturating_mul(FTS_MERGE_FACTOR as u64);
++                tier += 1;
++            }
++            tier
++        }
+ 
+         let mut candidates: HashSet<SegmentId> = self
+             .segments
+@@ -2296,22 +2310,23 @@
+             })
+             .map(LoadedSegment::id)
+             .collect();
+-        for ceiling in FTS_MERGE_LAYER_BYTES {
+-            let group: Vec<SegmentId> = self
+-                .segments
+-                .iter()
+-                .filter(|segment| {
+-                    !candidates.contains(&segment.id()) && segment_bytes(segment) <= ceiling
+-                })
+-                .map(LoadedSegment::id)
+-                .collect();
+-            if group.len() >= 2 {
+-                candidates.extend(group);
+-                return candidates;
++        let mut tiers: BTreeMap<u32, Vec<SegmentId>> = BTreeMap::new();
++        for segment in &self.segments {
++            if !candidates.contains(&segment.id()) {
++                tiers
++                    .entry(tier(segment_bytes(segment)))
++                    .or_default()
++                    .push(segment.id());
+             }
+         }
+-        // No clean tier is mergeable; rewriting only pays off if a
+-        // tombstone-heavy segment reclaims space.
++        if let Some(group) = tiers
++            .into_values()
++            .find(|group| group.len() >= FTS_MERGE_FACTOR)
++        {
++            candidates.extend(group);
++        }
++        // With no full tier, rewriting only pays off if a tombstone-heavy
++        // segment reclaims space.
+         candidates
+     }
+ 

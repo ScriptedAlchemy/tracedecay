@@ -424,6 +424,7 @@ impl Database {
             transaction_control_denied: Cell::new(false),
             read_only,
             cache: RefCell::default(),
+            control: RefCell::default(),
             compiles: Cell::new(0),
             database: self.clone(),
         };
@@ -544,6 +545,10 @@ pub struct Connection {
     read_only: bool,
     /// Compiled non-DDL statements and whether each writes.
     cache: RefCell<HashMap<(Capability, String), (turso_core::Statement, bool)>>,
+    /// Driver-issued SQL by text: transaction control runs at every
+    /// transaction and savepoint boundary, and its texts are a fixed set
+    /// (savepoint names follow nesting depth).
+    control: RefCell<HashMap<String, turso_core::Statement>>,
     /// Programs compiled on this connection, cached or not.
     compiles: Cell<u64>,
     database: Database,
@@ -815,18 +820,17 @@ impl Connection {
     /// Runs driver-issued SQL (transaction control, the format stamp) without
     /// the capability verdict.
     pub(crate) fn execute_unchecked(&self, sql: &str) -> Result<()> {
-        let mut statement = self.compile(parse_single(sql)?, sql)?;
+        let mut statement = self.control_statement(sql)?;
         self.guard.start()?;
         while self.drive(&mut statement)? {}
+        self.recycle_control(sql, statement);
         Ok(())
     }
 
     /// Runs driver-issued SQL with every guard off: COMMIT and rollback must
     /// not be interrupted once they start.
     fn execute_suspended(&self, sql: &str) -> std::result::Result<(), Settlement> {
-        let mut statement = self
-            .compile(parse_single(sql).map_err(Settlement::Refused)?, sql)
-            .map_err(Settlement::Refused)?;
+        let mut statement = self.control_statement(sql).map_err(Settlement::Refused)?;
         let previous = self.guard.set_suspended(true);
         let result = loop {
             match self.drive(&mut statement) {
@@ -836,7 +840,25 @@ impl Connection {
             }
         };
         self.guard.set_suspended(previous);
+        if result.is_ok() {
+            self.recycle_control(sql, statement);
+        }
         result
+    }
+
+    fn control_statement(&self, sql: &str) -> Result<turso_core::Statement> {
+        if let Some(statement) = self.control.borrow_mut().remove(sql) {
+            return Ok(statement);
+        }
+        self.compile(parse_single(sql)?, sql)
+    }
+
+    /// Keeps a driver-issued statement that ran to completion; one that
+    /// failed is dropped and compiles again on its next use.
+    fn recycle_control(&self, sql: &str, mut statement: turso_core::Statement) {
+        if statement.reset().is_ok() {
+            self.control.borrow_mut().insert(sql.to_owned(), statement);
+        }
     }
 
     fn pragma_u32(&self, name: &str) -> Result<u32> {
@@ -1084,6 +1106,7 @@ impl InterruptHandle {
 impl Drop for Connection {
     fn drop(&mut self) {
         self.cache.get_mut().clear();
+        self.control.get_mut().clear();
         if let Err(error) = self.rollback_transaction() {
             tracing::error!(%error, "native transaction cleanup failed; releasing the connection rolls back remaining state");
         }

@@ -67,6 +67,7 @@ crate.annotation(
     patch_tool = "patch",
     patches = [
         "//scripts:bazel/patches/turso-core-fts-segment-budget.patch",
+        "//scripts:bazel/patches/turso-core-fts-size-tiered-merge.patch",
         "//scripts:bazel/patches/turso-core-rollback-keeps-prepared-statements.patch",
     ],
     version = "0.8.0",

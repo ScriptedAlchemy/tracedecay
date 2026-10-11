@@ -1202,4 +1202,154 @@ mod driver {
             .unwrap();
         assert!(temp_wide(), "the cached program saw the old temp schema");
     }
+
+    /// Catches transaction control compiled on every use: the driver issues
+    /// BEGIN, COMMIT, ROLLBACK, SAVEPOINT and RELEASE for every transaction
+    /// and savepoint, so a driver that compiles them each time pays a
+    /// compile per boundary on every write. Cached control must still end
+    /// each transaction the way it was asked, including after DDL rolled
+    /// back under it.
+    #[test]
+    fn transaction_control_compiles_once_per_connection() {
+        let (_directory, _path, mut connection) = open();
+        connection
+            .execute_batch("CREATE TABLE t(a INTEGER)")
+            .unwrap();
+        let round = |connection: &mut Connection, value: i64| {
+            let transaction = connection.transaction().unwrap();
+            transaction
+                .prepare_cached("INSERT INTO t VALUES (?1)")
+                .unwrap()
+                .execute([value])
+                .unwrap();
+            transaction.commit().unwrap();
+
+            let transaction = connection.transaction().unwrap();
+            transaction
+                .prepare_cached("INSERT INTO t VALUES (?1)")
+                .unwrap()
+                .execute([-value])
+                .unwrap();
+            transaction.rollback().unwrap();
+
+            let mut transaction = connection.transaction().unwrap();
+            let mut kept = transaction.savepoint().unwrap();
+            kept.prepare_cached("INSERT INTO t VALUES (?1)")
+                .unwrap()
+                .execute([value + 1_000])
+                .unwrap();
+            kept.commit().unwrap();
+            let mut undone = transaction.savepoint().unwrap();
+            undone
+                .prepare_cached("INSERT INTO t VALUES (?1)")
+                .unwrap()
+                .execute([-value - 1_000])
+                .unwrap();
+            undone.rollback().unwrap();
+            undone.finish().unwrap();
+            transaction.commit().unwrap();
+        };
+        round(&mut connection, 1);
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute_batch("CREATE TABLE gone(a); INSERT INTO gone VALUES (1)")
+            .unwrap();
+        transaction.rollback().unwrap();
+        round(&mut connection, 2);
+
+        let before = connection.compiled_statements();
+        for value in 3..13 {
+            round(&mut connection, value);
+        }
+        assert_eq!(
+            connection.compiled_statements() - before,
+            0,
+            "transaction control compiled again on a warm connection"
+        );
+        let rows: Vec<i64> = connection
+            .prepare("SELECT a FROM t ORDER BY a")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let expected: Vec<i64> = (1..13).chain(1_001..1_013).collect();
+        assert_eq!(
+            rows, expected,
+            "a cached control program ended a transaction the wrong way"
+        );
+        let gone: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name = 'gone'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(gone, 0, "rolled-back DDL survived");
+    }
+
+    /// Catches a write-path FTS merge that rewrites more of the index per
+    /// insert as the index grows. Each one-row INSERT flushes one segment,
+    /// and past `fts_merge_threshold` segments the flush merges some of
+    /// them. A size-tiered policy rewrites each document once per tier, so
+    /// an insert's share of merge work grows with log n; merging every
+    /// segment under a fixed byte ceiling rewrites the largest of them with
+    /// each small batch. A merge reads exactly the segments it rewrites,
+    /// and the rewrite is what reaches the log, so the log bytes each insert
+    /// appends measure that work while a warm page cache hides the reads.
+    #[test]
+    fn fts_insert_merge_work_grows_logarithmically_with_the_index() {
+        const BASE: u64 = 128;
+        const GROWTH: u64 = 8;
+        const WORDS: u64 = 48;
+        let (_directory, path, connection) = open();
+        connection
+            .execute_batch(
+                "CREATE TABLE docs(id INTEGER PRIMARY KEY, body TEXT NOT NULL); \
+                 CREATE INDEX docs_fts ON docs USING fts (body)",
+            )
+            .unwrap();
+        let mut wal = path.clone().into_os_string();
+        wal.push("-wal");
+        let log_bytes = || std::fs::metadata(&wal).map_or(0, |metadata| metadata.len());
+        let insert = |from: u64, to: u64| {
+            let before = log_bytes();
+            for id in from..to {
+                let body = (0..WORDS)
+                    .map(|word| format!("shared{} unique{id}x{word}", word % 7))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                connection
+                    .prepare_cached("INSERT INTO docs(id, body) VALUES (?1, ?2)")
+                    .unwrap()
+                    .execute((i64::try_from(id).unwrap(), body))
+                    .unwrap();
+            }
+            (log_bytes() - before) / (to - from)
+        };
+        insert(0, BASE);
+        let base = insert(BASE, 2 * BASE);
+        insert(2 * BASE, GROWTH * BASE);
+        let grown = insert(GROWTH * BASE, 2 * GROWTH * BASE);
+        let hits: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM docs WHERE fts_match(body, 'unique77x5')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "the merged index lost or duplicated a document");
+
+        // log2 of the index size at the end of each window.
+        let (base_log, grown_log) = (
+            u64::from((2 * BASE).ilog2()),
+            u64::from((2 * GROWTH * BASE).ilog2()),
+        );
+        eprintln!("fts log bytes per insert: base={base} grown={grown}");
+        assert!(
+            grown * base_log <= base * grown_log,
+            "an {GROWTH}x larger FTS index must grow each insert's merge work by at most \
+             log2 {grown_log} / log2 {base_log}: base={base} grown={grown}"
+        );
+    }
 }
