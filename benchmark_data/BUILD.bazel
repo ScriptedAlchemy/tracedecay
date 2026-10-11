@@ -13,6 +13,16 @@ exports_files(["claude-observation/workload-v1.json"],
 )
 
 filegroup(
+    name = "index-bench",
+    srcs = glob(["index-bench/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["index-bench/README.md"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "runtime_fixtures_project_src",
     srcs = glob(["runtime/fixtures/project/src/**"]),
     visibility = ["//visibility:public"],

@@ -208,26 +208,6 @@ pub fn cost_to_expand_verified(
     })
 }
 
-pub fn line_for_byte_offset(source: &str, byte_offset: u64) -> Result<u32> {
-    let offset = usize::try_from(byte_offset).map_err(|_| {
-        graph_symbol_corrupt("graph evidence byte offset exceeds this platform".to_owned())
-    })?;
-    if offset > source.len() {
-        return Err(graph_symbol_corrupt(format!(
-            "graph evidence byte offset {offset} exceeds source length {}",
-            source.len()
-        )));
-    }
-    // Newline count = separator count, so one less than the split segments.
-    u32::try_from(
-        source.as_bytes()[..offset]
-            .split(|byte| *byte == b'\n')
-            .count()
-            .saturating_sub(1),
-    )
-    .map_err(|_| graph_symbol_corrupt("graph evidence line exceeds u32".to_owned()))
-}
-
 pub fn graph_symbol_corrupt(detail: String) -> TraceDecayError {
     TraceDecayError::ProjectRoute {
         reason_code: "verified-code-graph-symbol-corrupt".to_owned(),

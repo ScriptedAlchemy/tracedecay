@@ -433,6 +433,11 @@ impl OwnedPrimitiveRuntime {
     ) -> PrimitiveDispatchFuture<'_> {
         Box::pin(tracing::Instrument::instrument(
             async move {
+                if invocation.request.application_operation()?.as_ref()
+                    != Some(&invocation.operation)
+                {
+                    return invalid_request(&context, &invocation.operation);
+                }
                 if let Some(problem) = admission_problem(
                     &self.scope,
                     &self.access,

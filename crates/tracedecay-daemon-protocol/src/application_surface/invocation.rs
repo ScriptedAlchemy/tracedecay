@@ -189,10 +189,10 @@ fn daemon_invocation_request(
     page: PageRequest,
     deadline: tracedecay_contracts::Deadline,
     cancellation: tracedecay_contracts::CancellationContext,
-) -> DaemonInvocationRequest {
+) -> Result<DaemonInvocationRequest, DaemonInvocationProblem> {
     let request_id = request_id.as_str();
     let observed_at = now_micros();
-    match request {
+    Ok(match request {
         ApplicationSurfaceRequest::GitRead(request) => DaemonInvocationRequest::git_read(
             request_id,
             operation,
@@ -254,14 +254,16 @@ fn daemon_invocation_request(
         ApplicationSurfaceRequest::FeedbackProximity(request) => {
             DaemonInvocationRequest::feedback_proximity(request_id, request, deadline, cancellation)
         }
-        ApplicationSurfaceRequest::TestResults(_) => DaemonInvocationRequest::primitive(
-            request_id,
-            operation,
-            PrimitiveRequest::RecentTestResults(page),
-            observed_at,
-            deadline,
-            cancellation,
-        ),
+        ApplicationSurfaceRequest::TestResults(_) => {
+            return DaemonInvocationRequest::primitive(
+                request_id,
+                operation,
+                PrimitiveRequest::RecentTestResults(page),
+                observed_at,
+                deadline,
+                cancellation,
+            );
+        }
         ApplicationSurfaceRequest::CallableCode(request) => DaemonInvocationRequest::callable_code(
             request_id,
             operation,
@@ -282,14 +284,16 @@ fn daemon_invocation_request(
                 cancellation,
             )
         }
-        ApplicationSurfaceRequest::Primitive(request) => DaemonInvocationRequest::primitive(
-            request_id,
-            operation,
-            request,
-            observed_at,
-            deadline,
-            cancellation,
-        ),
+        ApplicationSurfaceRequest::Primitive(request) => {
+            return DaemonInvocationRequest::primitive(
+                request_id,
+                operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            );
+        }
         ApplicationSurfaceRequest::ObservatoryRead(request) => {
             DaemonInvocationRequest::observatory_read(
                 request_id,
@@ -359,7 +363,7 @@ fn daemon_invocation_request(
             deadline,
             cancellation,
         ),
-    }
+    })
 }
 
 /// Execute one surface invocation through `executor`'s daemon transport.
@@ -427,6 +431,7 @@ pub async fn invoke_application_surface<E: DaemonInvocationExecutor + ?Sized>(
             deadline.clone(),
             cancellation.context(),
         )
+        .map_err(|_| InvocationError::InvalidRequest)?
         .with_resolved_scope(target.resolved().cloned())
         .map_err(|_| InvocationError::InvalidRequest)?,
     }

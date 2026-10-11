@@ -70,6 +70,9 @@ required-features = ["production"]
 name = "index_bench_workload"
 required-features = ["production"]
 
+[package.metadata.bazel.test_sizes]
+index_bench_workload = "large"
+
 # Daemon-free search-lane query latency workload over a published artifact.
 [[bin]]
 name = "tracedecay-search-bench"

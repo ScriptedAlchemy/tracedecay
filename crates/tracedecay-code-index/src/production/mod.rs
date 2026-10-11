@@ -2155,6 +2155,7 @@ where
             &chunker,
             &request.repository_parse_identity,
             &validated.snapshot,
+            parent.as_ref(),
             &captured_files,
             control,
         )?;
@@ -2337,6 +2338,7 @@ where
         chunker: &DeterministicCodeChunker,
         repository_parse_identity: &CodeIndexRepositoryParseIdentityV1,
         snapshot: &SanitizedCodeSnapshotV1,
+        parent: Option<&SealedParentGenerationV1>,
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<StagedGenerationV1, CodeIndexProductionErrorV1> {
@@ -2351,19 +2353,18 @@ where
         let extracted = {
             let _span = tracing::trace_span!("code_index.collect.materialize_full").entered();
             collect_bounded_ordered(&present_files, |file| {
-                extract_file(
+                materialize_present_file(
                     config,
                     physical_artifacts,
                     retained_parses,
-                    false,
                     intake,
                     capability,
                     manifest,
                     extractor,
                     chunker,
                     repository_parse_identity,
+                    parent,
                     file,
-                    None,
                     captured_files,
                     control,
                 )
@@ -2389,6 +2390,93 @@ fn interruption_error(control: &dyn CodeIndexExecutionControlV1) -> CodeIndexPro
     } else {
         CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
     }
+}
+
+/// Materialize one present file for a cold build: extract captured bytes,
+/// or carry the sealed parent file when the snapshot row is unchanged.
+///
+/// A watched refresh captures only the files the edit changed. When the
+/// increment must resolve whole (Go method sets, moved name lookups), the
+/// parent still authenticates every unchanged file, so those bytes are not
+/// recaptured. A present file that is neither captured nor carryable is
+/// [`CodeIndexInputErrorV1::MissingCapturedFile`].
+#[allow(clippy::too_many_arguments)]
+fn materialize_present_file(
+    config: &CodeIndexProductionConfigV1,
+    physical_artifacts: &SharedPhysicalCodeArtifactPoolV1,
+    retained_parses: &SharedRetainedParsePool,
+    intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
+    capability: &SanitizedSnapshotCapabilityV1,
+    manifest: &CodeGenerationManifestV1,
+    extractor: &TreeSitterExtractor,
+    chunker: &DeterministicCodeChunker,
+    repository_parse_identity: &CodeIndexRepositoryParseIdentityV1,
+    parent: Option<&SealedParentGenerationV1>,
+    file: &SanitizedCodeFileV1,
+    captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<
+    (
+        ManifestDigest,
+        Arc<FileGenerationArtifactsV1>,
+        ClonePayloadBuildStatsV1,
+    ),
+    CodeIndexProductionErrorV1,
+> {
+    if captured_files.contains_key(&file.file_occurrence_id) {
+        return extract_file(
+            config,
+            physical_artifacts,
+            retained_parses,
+            false,
+            intake,
+            capability,
+            manifest,
+            extractor,
+            chunker,
+            repository_parse_identity,
+            file,
+            None,
+            captured_files,
+            control,
+        );
+    }
+    let Some(parent) = parent else {
+        return Err(CodeIndexInputErrorV1::MissingCapturedFile.into());
+    };
+    let Some(carried) =
+        parent.carry_unchanged_file(file, &manifest.generation_id, &manifest.snapshot_digest)?
+    else {
+        return Err(CodeIndexInputErrorV1::MissingCapturedFile.into());
+    };
+    let language = file.language.as_ref().ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract(
+            "present snapshot file has no declared language".to_owned(),
+        )
+    })?;
+    let descriptor = intake.registry().descriptor(language).ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract(
+            "validated snapshot language has no descriptor".to_owned(),
+        )
+    })?;
+    let sensitivity = carried
+        .artifacts
+        .chunks
+        .chunks
+        .first()
+        .map(|chunk| chunk.sensitivity.level)
+        .unwrap_or(SensitivityLevelV1::Public);
+    let physical_reuse_key = physical_reuse_key(config, file, descriptor, sensitivity)?;
+    let reused = u64::try_from(carried.artifacts.clone_bodies.len()).unwrap_or(u64::MAX);
+    physical_artifacts.record_clone_payloads(reused, 0);
+    Ok((
+        physical_reuse_key,
+        carried,
+        ClonePayloadBuildStatsV1 {
+            reused,
+            computed: 0,
+        },
+    ))
 }
 
 /// Extract one file's generation artifacts, returning the physical reuse

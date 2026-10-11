@@ -89,14 +89,15 @@ fn collect_corpus(
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("stat {}: {error}", path.display()))?;
-        if file_type.is_dir() {
+        // Bazel test runfiles materialize tree files as symlinks.
+        // `DirEntry::file_type` does not follow them, so a corpus walk
+        // that required a regular file admitted an empty tree under
+        // `bazel test` while `bazel run` still saw the source files.
+        if path.is_dir() {
             collect_corpus(root, &path, registry, files)?;
             continue;
         }
-        if !file_type.is_file() {
+        if !path.is_file() {
             continue;
         }
         let Some(extension) = path.extension().and_then(std::ffi::OsStr::to_str) else {

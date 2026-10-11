@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.85](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.84...v1.0.0-beta.85) (2026-10-11)
+
+
+### Bug Fixes
+
+* **index:** carry unchanged parent files on cold increment ([5deddaa](https://github.com/ScriptedAlchemy/tracedecay/commit/5deddaae97ff3f985b3e839a35a35b76e1a73422))
+* **index:** carry unchanged parent files on cold increment ([a4f7273](https://github.com/ScriptedAlchemy/tracedecay/commit/a4f7273d35cb5592f6a4a08e708e332219378f24)), closes [#3492](https://github.com/ScriptedAlchemy/tracedecay/issues/3492)
+* **index:** import SanitizedCodeFileV1 for parent carry ([690d24c](https://github.com/ScriptedAlchemy/tracedecay/commit/690d24c4cf69695ca35d2dcdc998ac884428f894))
+* **primitives:** validate operation identity before admission ([352ee38](https://github.com/ScriptedAlchemy/tracedecay/commit/352ee3875fa35dd9795becb857a6a542ade94ab2))
+* **primitives:** validate operation identity before admission ([9bc050c](https://github.com/ScriptedAlchemy/tracedecay/commit/9bc050ca94cb3df3914d51ea2e58d1173dd5e205))
+* **query:** follow runfile symlinks in the index-bench walk ([1fdba2c](https://github.com/ScriptedAlchemy/tracedecay/commit/1fdba2cc4349f741b8fca5e4baa19e8634b4b5d4))
+* **source:** reject incomplete UTF-16 code units ([7a5ffb3](https://github.com/ScriptedAlchemy/tracedecay/commit/7a5ffb3a775ec9f610d611045835c055b97cb6e1))
+* **source:** reject incomplete UTF-16 code units ([70dbda2](https://github.com/ScriptedAlchemy/tracedecay/commit/70dbda26df712e0d3d3fe01478a98cb4b82b0d5a))
+
 ## [1.0.0-beta.84](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.83...v1.0.0-beta.84) (2026-10-11)
 
 ### Features

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use tracedecay_domain::{
     CodeGenerationId, CodeGenerationManifestV1, FileOccurrenceId, ManifestDigest,
-    SanitizedCodeSnapshotV1,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
 };
 
 use super::file_evidence_rows::PersistedFileEvidenceV1;
@@ -221,6 +221,44 @@ impl SealedParentGenerationV1 {
             &self.generation.manifest.generation_id,
             &self.generation.manifest.snapshot_digest,
         )
+    }
+
+    /// Carry an unchanged present file from the sealed parent into a
+    /// successor that must build cold.
+    ///
+    /// Content and language equality are the reuse authority: a path whose
+    /// content or parser changed is not carried, so omitted bytes still fail
+    /// closed with [`super::CodeIndexInputErrorV1::MissingCapturedFile`].
+    pub(super) fn carry_unchanged_file(
+        &self,
+        file: &SanitizedCodeFileV1,
+        generation_id: &CodeGenerationId,
+        snapshot_digest: &ManifestDigest,
+    ) -> Result<Option<Arc<FileGenerationArtifactsV1>>, CodeIndexProductionErrorV1> {
+        let Some(parent_file) = self
+            .snapshot()
+            .files
+            .iter()
+            .find(|parent| parent.logical_path == file.logical_path)
+        else {
+            return Ok(None);
+        };
+        if parent_file.content_digest != file.content_digest
+            || parent_file.disposition != file.disposition
+            || parent_file.language != file.language
+        {
+            return Ok(None);
+        }
+        let Some(descriptor) = self.file_segment(&file.logical_path) else {
+            return Ok(None);
+        };
+        self.decode_file(
+            descriptor,
+            &file.file_occurrence_id,
+            generation_id,
+            snapshot_digest,
+        )
+        .map(Some)
     }
 
     pub(super) fn file_evidence(

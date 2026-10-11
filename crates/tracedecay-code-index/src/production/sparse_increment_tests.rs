@@ -23,6 +23,22 @@ fn occurrence(path: &str, source: &[u8]) -> FileOccurrenceId {
     ))
 }
 
+fn request_capturing(
+    files: &[(&str, &str, &str)],
+    capture: &[&str],
+    sealed_at: i64,
+) -> CodeIndexBuildRequestV1 {
+    let mut request = request(files, sealed_at);
+    request.captured_files.retain(|captured| {
+        request.snapshot.files.iter().any(|file| {
+            file.file_occurrence_id == captured.file_occurrence_id
+                && capture.contains(&file.logical_path.as_str())
+        })
+    });
+    request.changed_files = capture.iter().map(|path| (*path).to_owned()).collect();
+    request
+}
+
 fn request(files: &[(&str, &str, &str)], sealed_at: i64) -> CodeIndexBuildRequestV1 {
     let mut rows = files
         .iter()
@@ -607,4 +623,98 @@ fn sparse_local_shadowing_preserves_gaps_and_the_generic_ambiguity_census() {
             1
         );
     }
+}
+
+fn symbol_query(store: &MemorySealedPublicationStoreV1, name: &str) -> Vec<String> {
+    let generation = store
+        .decode_active(&scope())
+        .expect("active generation decodes")
+        .expect("an active generation");
+    let mut hits = generation
+        .symbols()
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.simple_name == name)
+        .map(|symbol| symbol.qualified_name.clone())
+        .collect::<Vec<_>>();
+    hits.sort();
+    hits
+}
+
+#[test]
+fn a_go_method_set_edit_seals_cold_from_changed_bytes_only() {
+    let wrong =
+        "package calc\n\ntype Wrong struct{}\n\nfunc (Wrong) Add(a, b int) int { return a + b }\n";
+    let edited = go_tree(wrong, GO_UTIL);
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut incremental = owner(&store);
+    publish(&mut incremental, &go_tree(GO_WRONG, GO_UTIL), 1_100_000);
+    let successor = incremental
+        .build_and_publish(
+            request_capturing(&edited, &["calc/wrong.go"], 1_200_000),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect("cold successor from the edited file's bytes");
+    assert_eq!(
+        successor.cold_reason(),
+        Some(CodeIndexColdBuildReasonV1::MovesGoMethodSets)
+    );
+
+    let cold_store = MemorySealedPublicationStoreV1::default();
+    publish(&mut owner(&cold_store), &edited, 1_200_000);
+    assert_eq!(answers(&store), answers(&cold_store));
+    for name in ["Add", "Util", "Adder"] {
+        assert_eq!(
+            symbol_query(&store, name),
+            symbol_query(&cold_store, name),
+            "spot-checked query {name}"
+        );
+        assert!(
+            !symbol_query(&store, name).is_empty(),
+            "spot-checked query {name} must hit"
+        );
+    }
+}
+
+#[test]
+fn a_changed_file_without_captured_bytes_is_refused() {
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut incremental = owner(&store);
+    publish(&mut incremental, &rust_tree(UTIL, MAIN), 1_100_000);
+    let util = format!("{UTIL}// edit\n");
+    let error = incremental
+        .build_and_publish(
+            request_capturing(&rust_tree(&util, MAIN), &[], 1_200_000),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect_err("changed bytes that were never captured");
+    assert!(matches!(
+        error,
+        CodeIndexProductionErrorV1::Input(CodeIndexInputErrorV1::MissingCapturedFile)
+    ));
+}
+
+#[test]
+fn a_language_changed_file_without_captured_bytes_is_refused() {
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut incremental = owner(&store);
+    let mut before = go_tree(GO_WRONG, GO_UTIL);
+    before.push(("config.h", "c", "// shared header\n"));
+    publish(&mut incremental, &before, 1_100_000);
+
+    let wrong =
+        "package calc\n\ntype Wrong struct{}\n\nfunc (Wrong) Add(a, b int) int { return a + b }\n";
+    let mut edited = go_tree(wrong, GO_UTIL);
+    edited.push(("config.h", "cpp", "// shared header\n"));
+    let error = match incremental.build_and_publish(
+        request_capturing(&edited, &["calc/wrong.go"], 1_200_000),
+        &UninterruptibleCodeIndexControlV1,
+    ) {
+        Ok(_) => panic!("a language change requires captured bytes despite equal content"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        CodeIndexProductionErrorV1::Input(CodeIndexInputErrorV1::MissingCapturedFile)
+    ));
 }
