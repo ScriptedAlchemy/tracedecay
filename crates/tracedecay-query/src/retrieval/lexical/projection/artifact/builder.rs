@@ -3631,6 +3631,17 @@ fn derive_clone_fingerprint_postings(
     transaction: &Transaction<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    // Heap-staged during append; one merge index replaces a filesort of the
+    // full posting-page table. Dropped with the table after the seal.
+    transaction
+        .execute_batch(
+            "CREATE INDEX clone_fingerprint_postings_pages_merge
+             ON clone_fingerprint_postings_pages(
+                 language, class, normalization_revision, fingerprint,
+                 occurrence_ordinal, token_position
+             )",
+        )
+        .map_err(sqlite_error)?;
     let mut select = transaction
         .prepare(
             "SELECT language, class, normalization_revision, fingerprint, occurrence_ordinal, token_position
@@ -4736,6 +4747,15 @@ fn derive_term_postings(
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let subtoken = field_code(LexicalFieldV1::Subtoken);
+    // PK is `(page_ordinal, term, field)` so catch-up stays the table order.
+    // Finalization reads the serving key first; the merge index is created
+    // here so append never maintains it.
+    transaction
+        .execute_batch(
+            "CREATE INDEX term_posting_runs_merge
+             ON term_posting_runs(term, field, page_ordinal)",
+        )
+        .map_err(sqlite_error)?;
     let mut select = transaction
         .prepare(
             "SELECT term, field, postings FROM term_posting_runs ORDER BY term, field, page_ordinal",
@@ -4816,6 +4836,12 @@ fn derive_exact_postings(
     transaction: &Transaction<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
+    transaction
+        .execute_batch(
+            "CREATE INDEX exact_posting_runs_merge
+             ON exact_posting_runs(term_id, field, page_ordinal)",
+        )
+        .map_err(sqlite_error)?;
     let mut select = transaction
         .prepare(
             "SELECT term_id, field, documents FROM exact_posting_runs ORDER BY term_id, field, page_ordinal",
@@ -7230,6 +7256,38 @@ mod tests {
             )),
             0,
             "source-page catch-up must be the maintained table order"
+        );
+    }
+
+    #[test]
+    fn merge_index_built_at_finalization_avoids_a_temp_sort() {
+        let connection = Connection::open_in_memory().expect("open artifact database");
+        create_mutable_test_schema(&connection);
+        for (page_ordinal, term) in [(0i64, "omega"), (0, "zeta"), (1, "alpha"), (1, "beta")] {
+            connection
+                .execute(
+                    "INSERT INTO term_posting_runs(page_ordinal, term, field, postings) VALUES (?1, ?2, 4, X'02')",
+                    params![page_ordinal, term],
+                )
+                .expect("seed page-ordered term run");
+        }
+        connection
+            .execute_batch(
+                "CREATE INDEX term_posting_runs_merge
+                 ON term_posting_runs(term, field, page_ordinal)",
+            )
+            .expect("create merge index");
+        let merge_order =
+            "SELECT term, field, postings FROM term_posting_runs ORDER BY term, field, page_ordinal";
+        assert_eq!(
+            super::super::temporary_sorts(&super::super::query_plan(
+                &connection,
+                merge_order,
+                []
+            )),
+            0,
+            "finalization merge must follow the merge index: {:?}",
+            super::super::query_plan(&connection, merge_order, [])
         );
     }
 

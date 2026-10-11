@@ -697,9 +697,11 @@ impl Connection {
     }
 
     fn compile(&self, command: Cmd, sql: &str) -> Result<turso_core::Statement> {
-        self.inner
-            .prepare_translated_cmd(command, sql)
-            .map_err(classify_prepare)
+        super::profile::compile(|| {
+            self.inner
+                .prepare_translated_cmd(command, sql)
+                .map_err(classify_prepare)
+        })
     }
 
     /// Returns a statement to the cache. Statements that changed the schema
@@ -807,6 +809,10 @@ impl Connection {
     }
 
     fn drive(&self, statement: &mut turso_core::Statement) -> Result<bool> {
+        super::profile::drive(|| self.drive_inner(statement))
+    }
+
+    fn drive_inner(&self, statement: &mut turso_core::Statement) -> Result<bool> {
         loop {
             match statement.step() {
                 Ok(StepResult::Row) => return Ok(true),
