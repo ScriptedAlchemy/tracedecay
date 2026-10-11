@@ -75,3 +75,4 @@ required-features = ["production"]
 name = "tracedecay-search-bench"
 path = "src/bin/tracedecay_search_bench.rs"
 test = false
+required-features = ["production"]

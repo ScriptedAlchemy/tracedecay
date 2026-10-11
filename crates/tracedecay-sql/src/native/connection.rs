@@ -209,10 +209,14 @@ impl GuardSlot {
     }
 
     fn check(&self) -> Result<()> {
-        self.check_with(ExecutionGuard::verify)
+        self.check_with(ExecutionGuard::verify, true)
     }
 
-    fn check_with(&self, verify: impl Fn(&ExecutionGuard) -> Result<()>) -> Result<()> {
+    fn check_with(
+        &self,
+        verify: impl Fn(&ExecutionGuard) -> Result<()>,
+        verify_identity: bool,
+    ) -> Result<()> {
         let guards = {
             let state = self.state();
             if state.suspended {
@@ -221,16 +225,22 @@ impl GuardSlot {
             state.guards.clone()
         };
         guards.iter().try_for_each(verify)?;
-        self.fence.as_ref().map_or(Ok(()), Fence::verify)
+        match &self.fence {
+            Some(fence) if verify_identity => fence.verify(),
+            _ => Ok(()),
+        }
     }
 
     /// Admits a statement about to start: its budget restarts and the guards
     /// are checked. A scope's interrupt poll is not: as on SQLite, only a
     /// running statement is polled, so a statement that finishes within one
-    /// progress interval is never interrupted.
-    fn start(&self) -> Result<()> {
+    /// progress interval is never interrupted. The file identity is checked
+    /// when `verify_identity`: every statement that starts a transaction, so
+    /// a statement inside an open transaction relies on the check that
+    /// opened it and on the progress ticks.
+    fn start(&self, verify_identity: bool) -> Result<()> {
         self.state().ticks = 0;
-        self.check_with(ExecutionGuard::verify_admission)
+        self.check_with(ExecutionGuard::verify_admission, verify_identity)
     }
 
     fn progress(&self) -> bool {
@@ -404,6 +414,7 @@ impl Database {
             text,
             OpenOptions::new(policy::dialect()).storage(storage),
         )?;
+        confined.claim_temp()?;
         let database = Self {
             shared: Arc::new(Shared {
                 slot: OnceLock::new(),
@@ -508,7 +519,8 @@ impl Database {
         inner.set_busy_timeout(DEFAULT_BUSY_TIMEOUT);
         // The runtime's checkpoint lane is the only checkpoint scheduler.
         inner.wal_auto_actions_disable();
-        // Spilling to a temp file would need a path outside the confinement.
+        // Sorts stay in memory unless a connection opts into the store's
+        // private temporary directory with `PRAGMA temp_store = FILE`.
         inner.set_temp_store(turso_core::TempStore::Memory);
         let guard = Arc::new(GuardSlot {
             state: Mutex::default(),
@@ -632,6 +644,14 @@ pub(crate) struct Prepared {
     ddl: bool,
     /// INSERT, UPDATE or DELETE: interrupting one ends its transaction.
     write: bool,
+    pub(crate) columns: Arc<[String]>,
+}
+
+/// A compiled non-DDL statement waiting in the cache for its SQL text.
+struct Cached {
+    statement: turso_core::Statement,
+    write: bool,
+    columns: Arc<[String]>,
 }
 
 /// Exclusively owned by one thread: the writer actor or one reader worker.
@@ -643,8 +663,9 @@ pub struct Connection {
     /// capability scope fails even if its operation swallowed the error.
     transaction_control_denied: Cell<bool>,
     read_only: bool,
-    /// Compiled non-DDL statements and whether each writes.
-    cache: RefCell<HashMap<(Capability, String), (turso_core::Statement, bool)>>,
+    /// Compiled non-DDL statements by `(capability, sql)`, nested so a hit
+    /// moves the owned SQL key out instead of allocating a lookup key.
+    cache: RefCell<HashMap<Capability, HashMap<String, Cached>>>,
     database: Database,
 }
 
@@ -734,17 +755,19 @@ impl Connection {
     pub(crate) fn prepare(&self, sql: &str, cached: bool) -> Result<Prepared> {
         let capability = self.capability();
         if cached
-            && let Some((statement, write)) = self
+            && let Some((sql, hit)) = self
                 .cache
                 .borrow_mut()
-                .remove(&(capability, sql.to_owned()))
+                .get_mut(&capability)
+                .and_then(|statements| statements.remove_entry(sql))
         {
             return Ok(Prepared {
-                statement,
-                sql: sql.to_owned(),
+                statement: hit.statement,
+                sql,
                 capability,
                 ddl: false,
-                write,
+                write: hit.write,
+                columns: hit.columns,
             });
         }
         validate_request(sql, &[])?;
@@ -753,12 +776,16 @@ impl Connection {
         let ddl = policy::is_ddl(&command);
         let write = policy::is_write(&command);
         let statement = self.compile(command, sql)?;
+        let columns = (0..statement.num_columns())
+            .map(|index| statement.get_column_name(index).into_owned())
+            .collect();
         Ok(Prepared {
             statement,
             sql: sql.to_owned(),
             capability,
             ddl,
             write,
+            columns,
         })
     }
 
@@ -776,16 +803,25 @@ impl Connection {
         }
         prepared.statement.clear_bindings();
         let mut cache = self.cache.borrow_mut();
-        if cache.len() >= STATEMENT_CACHE_CAPACITY {
+        if cache.values().map(HashMap::len).sum::<usize>() >= STATEMENT_CACHE_CAPACITY {
             cache.clear();
         }
         cache
-            .entry((prepared.capability, prepared.sql))
-            .or_insert((prepared.statement, prepared.write));
+            .entry(prepared.capability)
+            .or_default()
+            .entry(prepared.sql)
+            .or_insert(Cached {
+                statement: prepared.statement,
+                write: prepared.write,
+                columns: prepared.columns,
+            });
     }
 
     /// Readmits a statement before it runs: a statement compiled under
-    /// another capability is re-authorized, and the guards are checked.
+    /// another capability is re-authorized, and the guards are checked. The
+    /// file identity is checked only when the statement starts a transaction,
+    /// since a `stat` per statement of a bulk transaction is measurable
+    /// writer-thread time (#3491).
     pub(crate) fn admit(&self, prepared: &mut Prepared) -> Result<()> {
         let capability = self.capability();
         if prepared.capability != capability {
@@ -793,11 +829,15 @@ impl Connection {
             prepared.capability = capability;
         }
         prepared.statement.reset()?;
-        self.guard.start()
+        self.guard.start(self.inner.get_auto_commit())
     }
 
-    pub(crate) fn bind(&self, prepared: &mut Prepared, values: &[Value]) -> Result<()> {
-        validate_request(&prepared.sql, values)?;
+    pub(crate) fn bind(
+        &self,
+        prepared: &mut Prepared,
+        values: Vec<turso_core::Value>,
+    ) -> Result<()> {
+        validate_request(&prepared.sql, &values)?;
         let expected = prepared.statement.parameters_count();
         if expected != values.len() {
             return Err(Error::InvalidOperation(format!(
@@ -805,10 +845,10 @@ impl Connection {
                 values.len()
             )));
         }
-        for (index, value) in values.iter().enumerate() {
+        for (index, value) in values.into_iter().enumerate() {
             let position = NonZeroUsize::new(index + 1)
                 .ok_or_else(|| Error::InvalidOperation("parameter index overflow".to_owned()))?;
-            prepared.statement.bind_at(position, value.to_native()?)?;
+            prepared.statement.bind_at(position, value)?;
         }
         Ok(())
     }
@@ -911,7 +951,7 @@ impl Connection {
             let ddl = policy::is_ddl(&command);
             let write = policy::is_write(&command);
             let mut statement = self.compile(command, input)?;
-            self.guard.start()?;
+            self.guard.start(true)?;
             while self
                 .drive(&mut statement)
                 .map_err(|error| self.end_interrupted_write(&mut statement, write, error))?
@@ -928,7 +968,7 @@ impl Connection {
     /// the capability verdict.
     pub(crate) fn execute_unchecked(&self, sql: &str) -> Result<()> {
         let mut statement = self.compile(parse_single(sql)?, sql)?;
-        self.guard.start()?;
+        self.guard.start(true)?;
         while self.drive(&mut statement)? {}
         Ok(())
     }
@@ -1040,7 +1080,7 @@ impl Connection {
         self.guarded(guard, |connection| {
             let mut prepared = connection.prepare(sql, false)?;
             connection.admit(&mut prepared)?;
-            connection.bind(&mut prepared, parameters)?;
+            connection.bind(&mut prepared, native_values(parameters)?)?;
             while connection.step(&mut prepared)? {}
             u64::try_from(prepared.statement.n_change()).map_err(|_| {
                 Error::InvalidOperation("negative native changed-row count".to_owned())
@@ -1057,7 +1097,7 @@ impl Connection {
         self.guarded(guard, |connection| {
             let mut prepared = connection.prepare(sql, false)?;
             connection.admit(&mut prepared)?;
-            connection.bind(&mut prepared, parameters)?;
+            connection.bind(&mut prepared, native_values(parameters)?)?;
             let mut rows = Rows {
                 columns: (0..prepared.statement.num_columns())
                     .map(|index| prepared.statement.get_column_name(index).into_owned())
@@ -1242,12 +1282,21 @@ fn parse_batch(sql: &str) -> Result<Vec<(Cmd, &str)>> {
     Ok(statements)
 }
 
-fn validate_request(sql: &str, parameters: &[Value]) -> Result<()> {
+fn native_values(parameters: &[Value]) -> Result<Vec<turso_core::Value>> {
+    parameters.iter().cloned().map(Value::into_native).collect()
+}
+
+fn validate_request(sql: &str, parameters: &[turso_core::Value]) -> Result<()> {
     if sql.len() > MAX_SQL_BYTES || parameters.len() > MAX_SQL_PARAMETERS {
         return Err(Error::RequestLimitExceeded);
     }
     let bytes = parameters.iter().fold(sql.len(), |total, value| {
-        total.saturating_add(std::mem::size_of::<Value>() + value.payload_len())
+        let payload = match value {
+            turso_core::Value::Text(text) => text.as_str().len(),
+            turso_core::Value::Blob(blob) => blob.len(),
+            _ => 0,
+        };
+        total.saturating_add(std::mem::size_of::<Value>() + payload)
     });
     if bytes > MAX_REQUEST_BYTES {
         return Err(Error::RequestLimitExceeded);

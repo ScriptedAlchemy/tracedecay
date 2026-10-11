@@ -228,7 +228,7 @@ fn verified_graph_db_schema(
 }
 
 /// Verifies the project graph database under `profile_root` and deletes it
-/// with its WAL/SHM sidecars only when refused (a real SQLite database whose
+/// with its sidecars and temporary directory only when refused (a real SQLite database whose
 /// version or exact relational shape this binary does not accept). A database
 /// already at the canonical schema and exact shape is a typed error, so this
 /// cannot wipe a healthy store. When `other_reset_pending` names another
@@ -272,9 +272,15 @@ fn reset_refused_project_graph_store(
             ),
         });
     }
-    for sidecar_suffix in ["", "-wal", "-shm"] {
+    // The verification open above already cleared and removed a native
+    // store's temporary directory, so only the files remain.
+    for suffix in std::iter::once("").chain(
+        tracedecay_store::StoreFile::SIDECAR_SUFFIXES
+            .iter()
+            .copied(),
+    ) {
         let mut path = graph_db_path.clone().into_os_string();
-        path.push(sidecar_suffix);
+        path.push(suffix);
         let path = PathBuf::from(path);
         match std::fs::remove_file(&path) {
             Ok(()) => {}
@@ -619,11 +625,20 @@ mod reset_project_store_tests {
         let profile_root = temp.path().join("profile");
         let db_path = write_store_with_user_version(&profile_root, "proj_refused_v18", 18);
         // WAL/SHM sidecars and durable transcript inputs share the store dir.
-        let wal_path = db_path.with_file_name(format!(
-            "{}-wal",
-            tracedecay_store::StoreFile::Project.file_name()
-        ));
-        std::fs::write(&wal_path, b"wal").unwrap();
+        let member = |suffix: &str| {
+            let mut path = db_path.clone().into_os_string();
+            path.push(suffix);
+            PathBuf::from(path)
+        };
+        // The native engine leaves its WAL behind on close; SQLite does not.
+        let wal_path = member("-wal");
+        if !wal_path.exists() {
+            std::fs::write(&wal_path, b"wal").unwrap();
+        }
+        // A dead native process's spill directory belongs to the store.
+        let spill = member("-tmp");
+        std::fs::create_dir_all(spill.join("dead-sort")).unwrap();
+        std::fs::write(spill.join("dead-sort").join("tursodb_temp_file"), b"rows").unwrap();
         let data_root = db_path.parent().unwrap().to_path_buf();
         let sessions_path =
             data_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name());
@@ -643,6 +658,12 @@ mod reset_project_store_tests {
         assert_eq!(outcome.reset_graph_db.as_ref().unwrap().path, db_path);
         assert!(!db_path.exists(), "refused graph database must be removed");
         assert!(!wal_path.exists(), "WAL sidecar must be removed");
+        let native = matches!(tracedecay_sql::ENGINE, tracedecay_sql::Engine::Native);
+        assert_eq!(
+            spill.exists(),
+            !native,
+            "only the compiled engine's temporary directory is a family member"
+        );
         assert!(
             sessions_path.exists(),
             "the session archive is a durable re-ingest input and must survive"

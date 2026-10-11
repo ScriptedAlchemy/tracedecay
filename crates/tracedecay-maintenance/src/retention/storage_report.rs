@@ -1011,6 +1011,11 @@ fn database_family_bytes(database_path: &Path) -> u64 {
             total_bytes = total_bytes.saturating_add(metadata.len());
         }
     }
+    for suffix in StoreFile::TEMP_DIR_SUFFIXES {
+        total_bytes = total_bytes.saturating_add(super::orphan_stores::dir_size_bytes(
+            &sqlite_family_member(database_path, suffix),
+        ));
+    }
     total_bytes
 }
 
@@ -1684,6 +1689,35 @@ mod tests {
 
         assert_eq!(report.user_sessions_db_bytes, 5_120);
         assert_eq!(total.user_sessions_db_bytes, 5_120);
+    }
+
+    /// Catches a report that drops the spill directory a crashed native
+    /// process left beside a profile store: its bytes are the store's, and
+    /// a name the compiled engine never writes is not.
+    #[tokio::test]
+    async fn storage_report_counts_a_lingering_engine_temp_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        seed_global_db(&profile_root, &[]).await;
+        std::fs::write(
+            StoreFile::ProfileSessions.path(&profile_root),
+            vec![1u8; 4_096],
+        )
+        .unwrap();
+        let spill = profile_root
+            .join(format!("{}-tmp", StoreFile::ProfileSessions.file_name()))
+            .join("dead-sort");
+        std::fs::create_dir_all(&spill).unwrap();
+        std::fs::write(spill.join("tursodb_temp_file"), vec![2u8; 2_048]).unwrap();
+
+        let report = build_storage_report(&profile_root).await.unwrap();
+
+        let native = matches!(tracedecay_sql::ENGINE, tracedecay_sql::Engine::Native);
+        assert_eq!(
+            report.user_sessions_db_bytes,
+            if native { 6_144 } else { 4_096 }
+        );
     }
 
     #[tokio::test]

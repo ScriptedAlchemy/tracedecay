@@ -1,0 +1,41 @@
+diff --git a/storage/mod.rs b/storage/mod.rs
+index fdfe774..068eb5c 100644
+--- a/storage/mod.rs
++++ b/storage/mod.rs
+@@ -20,6 +20,7 @@ pub(crate) mod journal_mode;
+ pub mod page_cache;
+ #[cfg(not(feature = "aristo-instr"))]
+ pub(crate) mod page_cache;
++pub use page_cache::page_cache_entries_walked;
+ pub(crate) mod page_transform;
+ #[allow(clippy::arc_with_non_send_sync)]
+ pub(crate) mod pager;
+diff --git a/storage/page_cache.rs b/storage/page_cache.rs
+index 1576339..ab41725 100644
+--- a/storage/page_cache.rs
++++ b/storage/page_cache.rs
+@@ -26,6 +26,16 @@ pub const MINIMUM_PAGE_CACHE_SIZE_IN_PAGES: usize = 200;
+ /// The spill threshold as a fraction of capacity.
+ const DEFAULT_SPILL_THRESHOLD_PERCENT: usize = 90;
+ 
++crate::thread::thread_local! {
++    static ENTRIES_WALKED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
++}
++
++/// Cache entries the spill check's full recount has walked on the calling
++/// thread: a cycle-free measure of that O(n) work for tests.
++pub fn page_cache_entries_walked() -> u64 {
++    ENTRIES_WALKED.with(std::cell::Cell::get)
++}
++
+ #[derive(Debug, Copy, Eq, Hash, PartialEq, Clone)]
+ #[repr(transparent)]
+ pub struct PageCacheKey(usize);
+@@ -494,6 +504,7 @@ impl PageCache {
+         aristo::instrument::expose_pub(as = "inspect_count_evictable_pages")
+     )]
+     fn count_evictable_pages(&self) -> usize {
++        ENTRIES_WALKED.with(|walked| walked.set(walked.get() + self.map.len() as u64));
+         self.map
+             .values()
+             .filter(|&&entry_ptr| {

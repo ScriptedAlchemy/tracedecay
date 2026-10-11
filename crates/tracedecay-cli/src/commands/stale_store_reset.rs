@@ -286,6 +286,7 @@ mod tests {
         for dir in [
             format!(".{sessions}.host-admission"),
             format!("{sessions}.delivery-settlement-spool-v1"),
+            format!("{sessions}-tmp"),
             "code-index-v1".to_owned(),
         ] {
             std::fs::create_dir(root.join(&dir)).expect("create store directory");
@@ -294,7 +295,7 @@ mod tests {
 
         assert_eq!(
             remove_store_family(root, StoreFile::ProjectSessions).unwrap(),
-            6
+            7
         );
         assert_eq!(remove_store_family(root, StoreFile::Profile).unwrap(), 3);
 
