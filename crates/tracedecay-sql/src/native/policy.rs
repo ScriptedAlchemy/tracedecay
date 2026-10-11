@@ -138,6 +138,15 @@ pub(crate) fn is_ddl(command: &Cmd) -> bool {
         )
 }
 
+/// Whether `command` is an INSERT, UPDATE or DELETE.
+pub(crate) fn is_write(command: &Cmd) -> bool {
+    matches!(command, Cmd::Stmt(_))
+        && matches!(
+            statement(command),
+            Stmt::Insert { .. } | Stmt::Delete { .. } | Stmt::Update(_)
+        )
+}
+
 /// The AST verdict: a pure function of the parsed statement and the
 /// capability, mirroring the SQLite arm's authorizers. `EXPLAIN` is judged by
 /// the statement it explains.
