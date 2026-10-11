@@ -330,14 +330,23 @@ async fn empty_memory_table_does_not_block_collection() {
     .await;
     {
         let connection = tracedecay_sql::Connection::open(data_root.join("graph.db")).unwrap();
+        let search_index = match tracedecay_sql::ENGINE {
+            tracedecay_sql::Engine::Sqlite => {
+                "CREATE VIRTUAL TABLE memory_facts_fts USING fts5(content);"
+            }
+            tracedecay_sql::Engine::Native => {
+                "CREATE INDEX memory_facts_fts ON memory_facts USING fts (content);"
+            }
+        };
         connection
-            .execute_batch(
+            .execute_batch(&format!(
                 "CREATE TABLE memory_facts (
                     fact_id INTEGER PRIMARY KEY,
                     content TEXT NOT NULL
                  );
-                 CREATE VIRTUAL TABLE memory_facts_fts USING fts5(content);",
-            )
+                 {search_index}
+                 PRAGMA wal_checkpoint(TRUNCATE);"
+            ))
             .unwrap();
     }
 
@@ -602,15 +611,21 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
         connection
             .execute_batch(
                 "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
-                 INSERT INTO memory_facts (fact_id, content) VALUES (1, 'durable fact');",
+                 INSERT INTO memory_facts (fact_id, content) VALUES (1, 'durable fact');
+                 PRAGMA wal_checkpoint(TRUNCATE);",
             )
             .unwrap();
     }
-    filetime::set_file_mtime(
-        dir.join(tracedecay_store::StoreFile::Project.file_name()),
-        filetime::FileTime::from_unix_time(base - 100 * DAY, 0),
-    )
-    .unwrap();
+    for member in tracedecay_store::StoreFile::Project.family_names() {
+        let member = dir.join(member);
+        if member.exists() {
+            filetime::set_file_mtime(
+                member,
+                filetime::FileTime::from_unix_time(base - 100 * DAY, 0),
+            )
+            .unwrap();
+        }
+    }
 
     let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, true)
         .await

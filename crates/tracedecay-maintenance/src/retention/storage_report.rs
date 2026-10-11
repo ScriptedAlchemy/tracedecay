@@ -268,11 +268,14 @@ impl StorageReport {
         }
 
         // Store rows size every file under `projects/<id>/`. Profile-level
-        // files beside `global.db` and `user-sessions.db` (spools, daemon
-        // state) are only sized by the full census, so this total is a floor.
-        let mut excluded_families = vec![
-            "profile-level files outside global.db, user-sessions.db, and projects/".to_owned(),
-        ];
+        // files beside the profile and profile-sessions stores (spools,
+        // daemon state) are only sized by the full census, so this total is a
+        // floor.
+        let mut excluded_families = vec![format!(
+            "profile-level files outside {}, {}, and projects/",
+            StoreFile::Profile.file_name(),
+            StoreFile::ProfileSessions.file_name()
+        )];
         if self.coverage.state == StorageReportCoverageState::Partial {
             excluded_families.push("registered stores beyond this page".to_owned());
         }
@@ -1207,10 +1210,14 @@ mod tests {
         let total = report.profile_total_size();
         assert_eq!(total.state, ProfileTotalCoverageStateV1::Partial);
         assert_eq!(total.accounted_bytes, 500);
+        let profile_files = match tracedecay_sql::ENGINE {
+            tracedecay_sql::Engine::Sqlite => "global.db, user-sessions.db",
+            tracedecay_sql::Engine::Native => "global.tdb, user-sessions.tdb",
+        };
         assert_eq!(
             total.excluded_families,
             vec![
-                "profile-level files outside global.db, user-sessions.db, and projects/".to_owned(),
+                format!("profile-level files outside {profile_files}, and projects/"),
                 "2 unreadable entries under registered stores".to_owned(),
             ]
         );
@@ -1275,8 +1282,12 @@ mod tests {
             data_root.join(tracedecay_store::StoreFile::Project.file_name()),
         )
         .unwrap();
+        // An idle store: its owner checkpointed every frame before closing.
         connection
-            .execute_batch("CREATE TABLE fixture (id INTEGER PRIMARY KEY);")
+            .execute_batch(
+                "CREATE TABLE fixture (id INTEGER PRIMARY KEY);
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
             .unwrap();
     }
 
@@ -1734,7 +1745,11 @@ mod tests {
             }
             let wal = sqlite_family_member(&global_db, "-wal");
             assert_eq!(wal.metadata().unwrap().len() == 0, checkpointed);
-            assert!(sqlite_family_member(&global_db, "-shm").is_file());
+            assert_eq!(
+                sqlite_family_member(&global_db, "-shm").is_file(),
+                StoreFile::SIDECAR_SUFFIXES.contains(&"-shm"),
+                "a live store keeps exactly its engine's sidecars"
+            );
             seed_graph_db(&profile_root, "proj_a");
             let before = sqlite_family_bytes(&global_db);
             let profile_listing = directory_listing(&profile_root);
@@ -1763,9 +1778,13 @@ mod tests {
                 profile_listing,
                 "reporting must never leave a copy or scratch file in the profile"
             );
+            writer
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
             drop(writer);
             let closed = sqlite_family_bytes(&global_db);
-            assert!(!sqlite_family_member(&global_db, "-wal").exists());
+            let wal = sqlite_family_member(&global_db, "-wal");
+            assert!(!wal.exists() || wal.metadata().unwrap().len() == 0);
             assert!(!sqlite_family_member(&global_db, "-shm").exists());
             let report = build_storage_report(&profile_root).await.unwrap();
             assert_eq!(report.stores.len(), 1);
@@ -1820,9 +1839,14 @@ mod tests {
         assert!(report.stores[0].total_bytes > 0);
 
         assert_eq!(report.stores.len(), 1);
+        let family_bytes: u64 = StoreFile::Project
+            .family_names()
+            .iter()
+            .filter_map(|name| std::fs::metadata(graph_db.with_file_name(name)).ok())
+            .map(|metadata| metadata.len())
+            .sum();
         assert_eq!(
-            report.stores[0].total_bytes,
-            std::fs::metadata(&graph_db).unwrap().len(),
+            report.stores[0].total_bytes, family_bytes,
             "size must come from filesystem metadata"
         );
         assert!(
