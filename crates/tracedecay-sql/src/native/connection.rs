@@ -730,8 +730,12 @@ impl Connection {
         self.guard.start(self.inner.get_auto_commit())
     }
 
-    pub(crate) fn bind(&self, prepared: &mut Prepared, values: &[Value]) -> Result<()> {
-        validate_request(&prepared.sql, values)?;
+    pub(crate) fn bind(
+        &self,
+        prepared: &mut Prepared,
+        values: Vec<turso_core::Value>,
+    ) -> Result<()> {
+        validate_request(&prepared.sql, &values)?;
         let expected = prepared.statement.parameters_count();
         if expected != values.len() {
             return Err(Error::InvalidOperation(format!(
@@ -739,10 +743,10 @@ impl Connection {
                 values.len()
             )));
         }
-        for (index, value) in values.iter().enumerate() {
+        for (index, value) in values.into_iter().enumerate() {
             let position = NonZeroUsize::new(index + 1)
                 .ok_or_else(|| Error::InvalidOperation("parameter index overflow".to_owned()))?;
-            prepared.statement.bind_at(position, value.to_native()?)?;
+            prepared.statement.bind_at(position, value)?;
         }
         Ok(())
     }
@@ -974,7 +978,7 @@ impl Connection {
         self.guarded(guard, |connection| {
             let mut prepared = connection.prepare(sql, false)?;
             connection.admit(&mut prepared)?;
-            connection.bind(&mut prepared, parameters)?;
+            connection.bind(&mut prepared, native_values(parameters)?)?;
             while connection.step(&mut prepared)? {}
             u64::try_from(prepared.statement.n_change()).map_err(|_| {
                 Error::InvalidOperation("negative native changed-row count".to_owned())
@@ -991,7 +995,7 @@ impl Connection {
         self.guarded(guard, |connection| {
             let mut prepared = connection.prepare(sql, false)?;
             connection.admit(&mut prepared)?;
-            connection.bind(&mut prepared, parameters)?;
+            connection.bind(&mut prepared, native_values(parameters)?)?;
             let mut rows = Rows {
                 columns: (0..prepared.statement.num_columns())
                     .map(|index| prepared.statement.get_column_name(index).into_owned())
@@ -1176,12 +1180,21 @@ fn parse_batch(sql: &str) -> Result<Vec<(Cmd, &str)>> {
     Ok(statements)
 }
 
-fn validate_request(sql: &str, parameters: &[Value]) -> Result<()> {
+fn native_values(parameters: &[Value]) -> Result<Vec<turso_core::Value>> {
+    parameters.iter().cloned().map(Value::into_native).collect()
+}
+
+fn validate_request(sql: &str, parameters: &[turso_core::Value]) -> Result<()> {
     if sql.len() > MAX_SQL_BYTES || parameters.len() > MAX_SQL_PARAMETERS {
         return Err(Error::RequestLimitExceeded);
     }
     let bytes = parameters.iter().fold(sql.len(), |total, value| {
-        total.saturating_add(std::mem::size_of::<Value>() + value.payload_len())
+        let payload = match value {
+            turso_core::Value::Text(text) => text.as_str().len(),
+            turso_core::Value::Blob(blob) => blob.len(),
+            _ => 0,
+        };
+        total.saturating_add(std::mem::size_of::<Value>() + payload)
     });
     if bytes > MAX_REQUEST_BYTES {
         return Err(Error::RequestLimitExceeded);

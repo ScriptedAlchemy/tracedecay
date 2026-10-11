@@ -1,5 +1,9 @@
 use super::{Error, Result};
 
+pub(crate) fn native_blob(bytes: &[u8]) -> Result<turso_core::Value> {
+    turso_core::Value::from_slice(bytes).map_err(|error| Error::InvalidOperation(error.to_string()))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Null,
@@ -24,14 +28,13 @@ impl Value {
         }
     }
 
-    pub(crate) fn to_native(&self) -> Result<turso_core::Value> {
+    pub(crate) fn into_native(self) -> Result<turso_core::Value> {
         Ok(match self {
             Self::Null => turso_core::Value::Null,
-            Self::Integer(value) => turso_core::Value::from_i64(*value),
-            Self::Real(value) => turso_core::Value::from_f64(*value),
-            Self::Text(value) => turso_core::Value::build_text(value.clone()),
-            Self::Blob(value) => turso_core::Value::from_slice(value)
-                .map_err(|error| Error::InvalidOperation(error.to_string()))?,
+            Self::Integer(value) => turso_core::Value::from_i64(value),
+            Self::Real(value) => turso_core::Value::from_f64(value),
+            Self::Text(value) => turso_core::Value::build_text(value),
+            Self::Blob(value) => native_blob(&value)?,
         })
     }
 
