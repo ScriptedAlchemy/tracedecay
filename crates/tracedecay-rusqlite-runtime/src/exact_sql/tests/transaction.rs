@@ -244,8 +244,7 @@ fn attach_and_detach_are_denied_on_every_exact_sql_lane() {
         ),
         ("DETACH DATABASE denied_input", vec![]),
     ];
-    let transaction = channel.begin_immediate().unwrap();
-    for (sql, params) in denied {
+    for (sql, params) in denied.clone() {
         assert_not_authorized(
             "one-shot writer",
             sql,
@@ -255,14 +254,19 @@ fn attach_and_detach_are_denied_on_every_exact_sql_lane() {
             assert_not_authorized("writer batch", sql, channel.execute_batch(sql.to_owned()));
         }
         assert_not_authorized(
-            "writer transaction",
-            sql,
-            transaction.execute(statement(sql, params.clone())),
-        );
-        assert_not_authorized(
             "reader",
             sql,
             channel.query(statement(sql, params), Duration::from_secs(1)),
+        );
+    }
+    // The transaction holds the writer lease, so one-shot writes must not run
+    // while it is open.
+    let transaction = channel.begin_immediate().unwrap();
+    for (sql, params) in denied {
+        assert_not_authorized(
+            "writer transaction",
+            sql,
+            transaction.execute(statement(sql, params)),
         );
     }
     let databases = transaction
