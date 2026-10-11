@@ -27,7 +27,8 @@ pub(super) use persist::persist_session_temporal_projection_batch_in_transaction
 use receipts::full_projection_coverage;
 pub(super) use receipts::validate_final_projection_receipt;
 pub(crate) use receipts::{
-    ProjectionSegmentReads, base_source_frontier, digest_bytes, load_projection_segment_reads,
+    ProjectionReceiptSegmentRow, ProjectionSegmentReads, base_source_frontier, digest_bytes,
+    load_projection_segment_reads,
 };
 pub use receipts::{record_canonical_observation_effect, request_session_temporal_reset};
 

@@ -44,11 +44,17 @@ fn observation_envelope(
     level = "trace",
     skip_all
 )]
+/// Persists one projected batch inside the caller's transaction and returns
+/// its receipt with the committed item count the inserted receipt row
+/// carries. `reads` is a begin segment's preloaded rows; when present the
+/// session-scoped receipt reads resolve in memory while everything the item
+/// itself writes stays on the live connection.
 pub async fn persist_session_temporal_projection_batch_in_transaction(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
     control: &ExecutionControl,
-) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
+    reads: Option<&crate::refresh::BeginSegmentReads>,
+) -> SessionStoreResult<(SessionTemporalProjectionBatchReceiptV1, u64)> {
     checkpoint_relation_rebuild_control(control)?;
     let generation = read_generation(
         conn,
@@ -76,10 +82,21 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
     }
 
     let batch_digest = canonical_batch_digest(batch)?;
-    if let Some(receipt) = read_projection_receipt(conn, batch, batch_digest.as_str()).await? {
-        return Ok(receipt);
+    let session_key = batch.session_id().as_str();
+    if let Some((receipt, committed_item_count)) = match reads {
+        Some(reads) => resolve_receipt_segment(
+            batch,
+            batch_digest.as_str(),
+            reads.receipt_rows(session_key),
+        ),
+        None => read_projection_receipt(conn, batch, batch_digest.as_str()).await,
+    }? {
+        return Ok((receipt, committed_item_count));
     }
-    require_contiguous_checkpoint(conn, batch).await?;
+    match reads {
+        Some(reads) => contiguous_checkpoint_segment(batch, reads.receipt_rows(session_key)),
+        None => require_contiguous_checkpoint(conn, batch).await,
+    }?;
 
     persist_occurrences(conn, batch, control).await?;
     for copy in batch.copies() {
@@ -103,28 +120,48 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
     // Only the terminal receipt claims whole-generation coverage: the base
     // generation's coverage plus the rows this candidate added and minus the
     // versions it superseded. Activation recomputes that delta before the CAS.
+    // The coverage fold reads the candidate rows this item just persisted,
+    // so it runs on the live transaction even when a segment preload exists.
     let coverage = if terminal {
         candidate_projection_coverage(conn, batch.session_id(), batch.generation(), control, None)
             .await?
     } else {
         empty_projection_coverage()
     };
-    insert_projection_receipt(
+    let counts = match reads {
+        Some(reads) => {
+            let base = reads.projection.base_coverage(
+                session_key,
+                generation_i64(batch.generation(), PERSIST_OPERATION)?,
+            )?;
+            Some(progress_counts_segment(
+                batch,
+                reads.receipt_rows(session_key),
+                &base,
+            )?)
+        }
+        None => None,
+    };
+    let committed_item_count = insert_projection_receipt(
         conn,
         batch,
         batch_digest.as_str(),
         &coverage,
         committed_at.0,
+        counts,
     )
     .await?;
-    SessionTemporalProjectionBatchReceiptV1::applied(
-        batch,
-        batch_digest,
-        batch.occurrences().len(),
-        batch.copies().len(),
-        batch.assertions().len(),
-        committed_at,
-    )
+    Ok((
+        SessionTemporalProjectionBatchReceiptV1::applied(
+            batch,
+            batch_digest,
+            batch.occurrences().len(),
+            batch.copies().len(),
+            batch.assertions().len(),
+            committed_at,
+        )?,
+        committed_item_count,
+    ))
 }
 
 struct CanonicalOccurrenceProjection {

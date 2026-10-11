@@ -91,7 +91,7 @@ pub async fn validate_final_projection_receipt(
             (
                 row.source_through,
                 row.projection_through,
-                row.coverage.clone(),
+                row.coverage,
             )
         }
         None => {
@@ -575,15 +575,121 @@ pub(super) fn canonical_batch_digest(
     SessionTemporalDigestV1::new(digest_bytes(&encoded))
 }
 
+/// One `session_temporal_projection_receipts` row a begin segment resolves
+/// in memory: the fields `read_projection_receipt`,
+/// `require_contiguous_checkpoint` and `projection_progress_counts` read.
+pub(crate) struct ProjectionReceiptSegmentRow {
+    pub(crate) generation: i64,
+    pub(crate) batch_ordinal: i64,
+    pub(crate) batch_digest: String,
+    pub(crate) frozen_watermarks_json: String,
+    pub(crate) source_through: i64,
+    pub(crate) projection_through: i64,
+    pub(crate) committed_at: i64,
+    pub(crate) committed_item_count: i64,
+    pub(crate) committed_copy_count: i64,
+}
+
+/// The immutable-receipt check `read_projection_receipt` performs on the
+/// row it selected for `(session, generation, ordinal)`.
+fn resolve_receipt_row(
+    batch: &SessionTemporalProjectionBatchV1,
+    batch_digest: &str,
+    actual: &ProjectionReceiptSegmentRow,
+) -> SessionStoreResult<(SessionTemporalProjectionBatchReceiptV1, u64)> {
+    if actual.batch_digest != batch_digest
+        || actual.frozen_watermarks_json
+            != encode_watermarks(batch.watermarks(), PERSIST_OPERATION)?
+        || u64::try_from(actual.source_through).ok() != Some(batch.source_through())
+        || u64::try_from(actual.projection_through).ok() != Some(batch.projection_through())
+    {
+        return Err(storage_message(
+            PERSIST_OPERATION,
+            "projection batch ordinal conflicts with its immutable receipt",
+        ));
+    }
+    let batch_digest = SessionTemporalDigestV1::new(actual.batch_digest.clone())?;
+    let existing = SessionTemporalProjectionBatchReceiptV1::applied(
+        batch,
+        batch_digest.clone(),
+        batch.occurrences().len(),
+        batch.copies().len(),
+        batch.assertions().len(),
+        tracedecay_domain::UtcMicros(actual.committed_at),
+    )?;
+    let receipt = SessionTemporalProjectionBatchReceiptV1::exact_replay(
+        batch,
+        batch_digest,
+        &existing,
+        tracedecay_domain::UtcMicros(actual.committed_at),
+    )?;
+    let committed_item_count = u64::try_from(actual.committed_item_count)
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    Ok((receipt, committed_item_count))
+}
+
+/// The contiguity check `require_contiguous_checkpoint` performs on the
+/// latest `(batch_ordinal, source_through, projection_through)` receipt for
+/// `(session, generation)` — `None` only allows ordinal zero.
+fn check_contiguous_checkpoint(
+    batch: &SessionTemporalProjectionBatchV1,
+    previous: Option<(i64, i64, i64)>,
+) -> SessionStoreResult<()> {
+    match previous {
+        None if batch.batch_ordinal() == 0 => Ok(()),
+        Some((ordinal, source, projection)) => {
+            let expected = u64::try_from(ordinal)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?
+                .saturating_add(1);
+            if batch.batch_ordinal() != expected
+                || u64::try_from(source)
+                    .ok()
+                    .is_none_or(|value| value > batch.source_through())
+                || u64::try_from(projection)
+                    .ok()
+                    .is_none_or(|value| value > batch.projection_through())
+            {
+                return Err(storage_message(
+                    PERSIST_OPERATION,
+                    "projection batch checkpoint is not contiguous and monotonic",
+                ));
+            }
+            Ok(())
+        }
+        None => Err(storage_message(
+            PERSIST_OPERATION,
+            "projection batch checkpoint must start at ordinal zero",
+        )),
+    }
+}
+
+/// The accumulate step `projection_progress_counts` performs on the prior
+/// batch's committed totals.
+fn combine_progress_counts(
+    prior_items: usize,
+    prior_copies: usize,
+    batch: &SessionTemporalProjectionBatchV1,
+) -> SessionStoreResult<(usize, usize)> {
+    Ok((
+        prior_items
+            .checked_add(batch.item_count())
+            .ok_or_else(|| storage_message(PERSIST_OPERATION, "committed item count overflow"))?,
+        prior_copies
+            .checked_add(batch.copies().len())
+            .ok_or_else(|| storage_message(PERSIST_OPERATION, "committed copy count overflow"))?,
+    ))
+}
+
 pub(super) async fn read_projection_receipt(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
     batch_digest: &str,
-) -> SessionStoreResult<Option<SessionTemporalProjectionBatchReceiptV1>> {
+) -> SessionStoreResult<Option<(SessionTemporalProjectionBatchReceiptV1, u64)>> {
     let mut rows = conn
         .query(
             "SELECT batch_digest, frozen_watermarks_json, source_through,
-                    projection_through, committed_at
+                    projection_through, committed_at, committed_item_count,
+                    committed_copy_count
              FROM session_temporal_projection_receipts
              WHERE session_id = ?1 AND generation = ?2 AND batch_ordinal = ?3",
             params![
@@ -639,31 +745,24 @@ pub(super) async fn read_projection_receipt(
     let committed_at: i64 = row
         .get(4)
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    if actual_digest != batch_digest
-        || actual_watermarks != encode_watermarks(batch.watermarks(), PERSIST_OPERATION)?
-        || u64::try_from(actual_source).ok() != Some(batch.source_through())
-        || u64::try_from(actual_projection).ok() != Some(batch.projection_through())
-    {
-        return Err(storage_message(
-            PERSIST_OPERATION,
-            "projection batch ordinal conflicts with its immutable receipt",
-        ));
-    }
-    let batch_digest = SessionTemporalDigestV1::new(actual_digest)?;
-    let existing = SessionTemporalProjectionBatchReceiptV1::applied(
-        batch,
-        batch_digest.clone(),
-        batch.occurrences().len(),
-        batch.copies().len(),
-        batch.assertions().len(),
-        tracedecay_domain::UtcMicros(committed_at),
-    )?;
-    Ok(Some(SessionTemporalProjectionBatchReceiptV1::exact_replay(
-        batch,
-        batch_digest,
-        &existing,
-        tracedecay_domain::UtcMicros(committed_at),
-    )?))
+    let committed_item_count: i64 = row
+        .get(5)
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let committed_copy_count: i64 = row
+        .get(6)
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let actual = ProjectionReceiptSegmentRow {
+        generation: generation_i64(batch.generation(), PERSIST_OPERATION)?,
+        batch_ordinal: frontier_i64(batch.batch_ordinal(), PERSIST_OPERATION)?,
+        batch_digest: actual_digest,
+        frozen_watermarks_json: actual_watermarks,
+        source_through: actual_source,
+        projection_through: actual_projection,
+        committed_at,
+        committed_item_count,
+        committed_copy_count,
+    };
+    resolve_receipt_row(batch, batch_digest, &actual).map(Some)
 }
 
 pub(super) async fn require_contiguous_checkpoint(
@@ -687,41 +786,18 @@ pub(super) async fn require_contiguous_checkpoint(
         .next()
         .await
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    match previous {
-        None if batch.batch_ordinal() == 0 => Ok(()),
-        Some(row) => {
-            let ordinal: i64 = row
-                .get(0)
-                .map_err(|error| storage(PERSIST_OPERATION, error))?;
-            let source: i64 = row
-                .get(1)
-                .map_err(|error| storage(PERSIST_OPERATION, error))?;
-            let projection: i64 = row
-                .get(2)
-                .map_err(|error| storage(PERSIST_OPERATION, error))?;
-            let expected = u64::try_from(ordinal)
-                .map_err(|error| storage(PERSIST_OPERATION, error))?
-                .saturating_add(1);
-            if batch.batch_ordinal() != expected
-                || u64::try_from(source)
-                    .ok()
-                    .is_none_or(|value| value > batch.source_through())
-                || u64::try_from(projection)
-                    .ok()
-                    .is_none_or(|value| value > batch.projection_through())
-            {
-                return Err(storage_message(
-                    PERSIST_OPERATION,
-                    "projection batch checkpoint is not contiguous and monotonic",
-                ));
-            }
-            Ok(())
-        }
-        None => Err(storage_message(
-            PERSIST_OPERATION,
-            "projection batch checkpoint must start at ordinal zero",
+    let previous = match previous {
+        Some(row) => Some((
+            row.get::<i64>(0)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            row.get::<i64>(1)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            row.get::<i64>(2)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
         )),
-    }
+        None => None,
+    };
+    check_contiguous_checkpoint(batch, previous)
 }
 
 /// Order-independent digest of a row multiset: each row's canonical
@@ -1362,13 +1438,16 @@ impl ProjectionSegmentReads {
             .max_by_key(|row| (row.generation, row.batch_ordinal))
     }
 
-    fn base_coverage(
+    /// `base_projection_coverage` resolved against the segment's rows:
+    /// newest settled-generation receipt below `generation` past the
+    /// session's reset point, or empty coverage.
+    pub(crate) fn base_coverage(
         &self,
         session_id: &str,
         generation: i64,
     ) -> SessionStoreResult<ProjectionCoverage> {
         Ok(match self.base_row(session_id, generation) {
-            Some(row) => row.coverage.clone(),
+            Some(row) => row.coverage,
             None => empty_projection_coverage(),
         })
     }
@@ -1684,15 +1763,21 @@ async fn fold_coverage_rows_grouped(
     Ok(())
 }
 
+/// Writes the batch's projection receipt and returns its committed item
+/// count — the same value `projection_receipt_committed_items` would
+/// re-read from the row just inserted.
 pub(super) async fn insert_projection_receipt(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
     batch_digest: &str,
     coverage: &ProjectionCoverage,
     committed_at: i64,
-) -> SessionStoreResult<()> {
-    let (committed_item_count, committed_copy_count) =
-        projection_progress_counts(conn, batch).await?;
+    counts: Option<(usize, usize)>,
+) -> SessionStoreResult<u64> {
+    let (committed_item_count, committed_copy_count) = match counts {
+        Some(counts) => counts,
+        None => projection_progress_counts(conn, batch).await?,
+    };
     conn.execute(
         "INSERT INTO session_temporal_projection_receipts (
             session_id, generation, batch_ordinal, batch_digest,
@@ -1746,7 +1831,7 @@ pub(super) async fn insert_projection_receipt(
     )
     .await
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    Ok(())
+    u64::try_from(committed_item_count).map_err(|error| storage(PERSIST_OPERATION, error))
 }
 
 async fn projection_progress_counts(
@@ -1805,14 +1890,87 @@ async fn projection_progress_counts(
             (base.record_count(), base.copies.count())
         }
     };
-    Ok((
-        prior_items
-            .checked_add(batch.item_count())
-            .ok_or_else(|| storage_message(PERSIST_OPERATION, "committed item count overflow"))?,
-        prior_copies
-            .checked_add(batch.copies().len())
-            .ok_or_else(|| storage_message(PERSIST_OPERATION, "committed copy count overflow"))?,
-    ))
+    combine_progress_counts(prior_items, prior_copies, batch)
+}
+
+/// `read_projection_receipt` resolved against the segment's preloaded
+/// receipt rows for this session — identical selection and checks.
+pub(crate) fn resolve_receipt_segment(
+    batch: &SessionTemporalProjectionBatchV1,
+    batch_digest: &str,
+    rows: &[ProjectionReceiptSegmentRow],
+) -> SessionStoreResult<Option<(SessionTemporalProjectionBatchReceiptV1, u64)>> {
+    let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
+    let ordinal = frontier_i64(batch.batch_ordinal(), PERSIST_OPERATION)?;
+    let Some(row) = rows
+        .iter()
+        .find(|row| row.generation == generation && row.batch_ordinal == ordinal)
+    else {
+        if rows
+            .iter()
+            .any(|row| row.generation == generation && row.batch_digest == batch_digest)
+        {
+            return Err(storage_message(
+                PERSIST_OPERATION,
+                "projection batch digest is already bound to a different ordinal",
+            ));
+        }
+        return Ok(None);
+    };
+    resolve_receipt_row(batch, batch_digest, row).map(Some)
+}
+
+/// `require_contiguous_checkpoint` resolved against the segment's rows.
+pub(crate) fn contiguous_checkpoint_segment(
+    batch: &SessionTemporalProjectionBatchV1,
+    rows: &[ProjectionReceiptSegmentRow],
+) -> SessionStoreResult<()> {
+    let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
+    let previous = rows
+        .iter()
+        .filter(|row| row.generation == generation)
+        .max_by_key(|row| row.batch_ordinal)
+        .map(|row| {
+            (
+                row.batch_ordinal,
+                row.source_through,
+                row.projection_through,
+            )
+        });
+    check_contiguous_checkpoint(batch, previous)
+}
+
+/// `projection_progress_counts` resolved against the segment's rows; the
+/// ordinal-zero arm takes the base generation's coverage, which the
+/// preloaded `ProjectionSegmentReads` computes with the same settled/reset
+/// filters as `base_projection_coverage`.
+pub(crate) fn progress_counts_segment(
+    batch: &SessionTemporalProjectionBatchV1,
+    rows: &[ProjectionReceiptSegmentRow],
+    base: &ProjectionCoverage,
+) -> SessionStoreResult<(usize, usize)> {
+    let (prior_items, prior_copies) = if batch.batch_ordinal() == 0 {
+        (base.record_count(), base.copies.count())
+    } else {
+        let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
+        let ordinal = frontier_i64(batch.batch_ordinal().saturating_sub(1), PERSIST_OPERATION)?;
+        let row = rows
+            .iter()
+            .find(|row| row.generation == generation && row.batch_ordinal == ordinal)
+            .ok_or_else(|| {
+                storage_message(
+                    PERSIST_OPERATION,
+                    "prior projection batch receipt is unavailable",
+                )
+            })?;
+        (
+            usize::try_from(row.committed_item_count)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            usize::try_from(row.committed_copy_count)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?,
+        )
+    };
+    combine_progress_counts(prior_items, prior_copies, batch)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

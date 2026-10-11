@@ -21,8 +21,9 @@ use tracing::Instrument as _;
 
 use super::cursor_keys::ensure_active_session_cursor_key_in_transaction;
 use super::projection::{
-    ProjectionSegmentReads, digest_bytes, load_projection_segment_reads,
-    persist_session_temporal_projection_batch_in_transaction, validate_final_projection_receipt,
+    ProjectionReceiptSegmentRow, ProjectionSegmentReads, digest_bytes,
+    load_projection_segment_reads, persist_session_temporal_projection_batch_in_transaction,
+    validate_final_projection_receipt,
 };
 use super::query::{
     decode_generation_i64, discard_candidate_rows, discard_session_rows, encode_watermarks,
@@ -232,8 +233,9 @@ async fn begin_session_refresh_in_transaction(
     transaction: &impl SessionTemporalWriteTxn,
     request: SessionRefreshBeginOrJoinRequestV1,
     accepted_at: UtcMicros,
+    reads: Option<&BeginSegmentReads>,
 ) -> SessionStoreResult<SessionRefreshBeginTxnOutcome> {
-    apply_requested_reset(transaction, request.session_id()).await?;
+    apply_requested_reset(transaction, request.session_id(), reads).await?;
     let request = match read_active_generation(transaction, request.session_id()).await? {
         Some((_, active_watermarks)) => {
             rebase_on_committed_frontier(request, active_watermarks.projection_frontier())?
@@ -243,20 +245,25 @@ async fn begin_session_refresh_in_transaction(
     let reset_generation = read_reset_generation(transaction, request.session_id()).await?;
     let request_digest = refresh_binding_digest(&request, reset_generation)?;
 
-    if let Some(existing) =
-        read_joinable_operation_by_digest(transaction, request.session_id(), &request_digest)
-            .await?
-    {
+    let session_key = request.session_id().as_str();
+    if let Some(existing) = match reads {
+        Some(reads) => begin_joinable_by_digest(reads, session_key, &request_digest)?,
+        None => {
+            read_joinable_operation_by_digest(transaction, request.session_id(), &request_digest)
+                .await?
+        }
+    } {
         return Ok(SessionRefreshBeginTxnOutcome::Joined {
             operation_id: existing.operation_id,
             target_frontier: request.target_frontier(),
             created_at: existing.created_at,
         });
     }
-    if read_running_operation(transaction, request.session_id())
-        .await?
-        .is_some()
-    {
+    let running = match reads {
+        Some(reads) => begin_running_operation(reads, session_key),
+        None => read_running_operation(transaction, request.session_id()).await?,
+    };
+    if running.is_some() {
         return Err(SessionStoreError::IdempotencyConflict {
             context: "session refresh busy",
         });
@@ -280,8 +287,20 @@ async fn begin_session_refresh_in_transaction(
         frozen_watermarks = frozen_watermarks.with_cursor_key(provisioned_cursor_key);
     }
     let frozen_watermarks_json = encode_watermarks(&frozen_watermarks, BEGIN_REFRESH)?;
-    let attempt =
-        next_operation_attempt(transaction, request.session_id(), &request_digest).await?;
+    let attempt = match reads {
+        Some(reads) => {
+            let count = reads
+                .operations
+                .get(session_key)
+                .into_iter()
+                .flatten()
+                .filter(|row| row.request_digest == request_digest)
+                .count()
+                .saturating_add(1);
+            u64::try_from(count).map_err(|error| storage(BEGIN_REFRESH, error))?
+        }
+        None => next_operation_attempt(transaction, request.session_id(), &request_digest).await?,
+    };
     let operation_id = operation_id_for_digest(&request_digest, attempt)?;
 
     // The running-operation and attempt reads above share this writer transaction, so
@@ -543,6 +562,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             &transaction,
             request,
             now_micros(BEGIN_REFRESH)?,
+            None,
         )
         .await?
         {
@@ -655,6 +675,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 &transaction,
                 request,
                 now_micros(BEGIN_REFRESH)?,
+                None,
             )
             .await;
             let outcome = match outcome {
@@ -678,9 +699,13 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 SessionRefreshBeginTxnOutcome::Joined { .. } => SessionRefreshBeginPlanV1::Joined,
             });
         }
-        let outcome =
-            begin_session_refresh_in_transaction(&transaction, request, now_micros(BEGIN_REFRESH)?)
-                .await;
+        let outcome = begin_session_refresh_in_transaction(
+            &transaction,
+            request,
+            now_micros(BEGIN_REFRESH)?,
+            None,
+        )
+        .await;
         let plan = match outcome? {
             SessionRefreshBeginTxnOutcome::Joined { .. } => SessionRefreshBeginPlanV1::Joined,
             SessionRefreshBeginTxnOutcome::Started {
@@ -754,7 +779,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             operation_id,
             binding,
             ..
-        } = begin_session_refresh_in_transaction(&transaction, request.clone(), accepted_at)
+        } = begin_session_refresh_in_transaction(&transaction, request.clone(), accepted_at, None)
             .await?
         else {
             transaction
@@ -783,6 +808,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         }
         let persisted = persist_begin_batch_in_transaction(
             &transaction,
+            None,
             &binding,
             &progress,
             &batch,
@@ -814,7 +840,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                     .await
                     .map_err(|error| storage(BEGIN_REFRESH, error))?;
                 let outcome =
-                    begin_session_refresh_in_transaction(&transaction, request, accepted_at)
+                    begin_session_refresh_in_transaction(&transaction, request, accepted_at, None)
                         .await?;
                 transaction
                     .commit()
@@ -849,19 +875,30 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .await
             .map_err(|error| storage(PERSIST_REFRESH, error))?;
         let mut outcomes = Vec::with_capacity(items.len());
-        for (index, item) in items.iter().enumerate() {
-            match commit_begin_batch_item_in_transaction(
-                &transaction,
-                index,
-                item,
-                &execution_control,
-            )
-            .await
-            {
-                Ok(outcome) => outcomes.push(outcome),
-                Err(boundary_error) => {
-                    return abort_grouped_transaction(transaction, boundary_error, PERSIST_REFRESH)
+        for range in unique_session_ranges(items, |item: &SessionRefreshBeginBatchItemV1| {
+            item.request.session_id()
+        }) {
+            let reads =
+                load_begin_segment(&transaction, &items[range.clone()], &execution_control).await?;
+            for (index, item) in items[range.clone()].iter().enumerate() {
+                match commit_begin_batch_item_in_transaction(
+                    &transaction,
+                    range.start + index,
+                    item,
+                    &execution_control,
+                    Some(&reads),
+                )
+                .await
+                {
+                    Ok(outcome) => outcomes.push(outcome),
+                    Err(boundary_error) => {
+                        return abort_grouped_transaction(
+                            transaction,
+                            boundary_error,
+                            PERSIST_REFRESH,
+                        )
                         .await;
+                    }
                 }
             }
         }
@@ -925,10 +962,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         {
             if progress_logically_equal(&existing, &progress) {
                 require_progress_batch_ordinal(&progress, batch.batch_ordinal())?;
-                let receipt = persist_session_temporal_projection_batch_in_transaction(
+                let (receipt, _) = persist_session_temporal_projection_batch_in_transaction(
                     &transaction,
                     &batch,
                     &execution_control,
+                    None,
                 )
                 .await?;
                 require_batch_binding(
@@ -957,18 +995,21 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         // genuinely new progress.
         require_progress_timestamp(&progress, authoritative_validation_time)?;
 
-        let receipt = persist_session_temporal_projection_batch_in_transaction(
-            &transaction,
-            &batch,
-            &execution_control,
-        )
-        .await?;
+        let (receipt, materialized_records) =
+            persist_session_temporal_projection_batch_in_transaction(
+                &transaction,
+                &batch,
+                &execution_control,
+                None,
+            )
+            .await?;
         validate_next_progress(
             &transaction,
+            None,
             &progress,
-            batch.generation(),
             batch.batch_ordinal(),
             batch.item_count(),
+            materialized_records,
         )
         .await?;
         validate_progress_binding(&binding, &progress)?;
@@ -1044,12 +1085,20 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             batch_ordinal,
         )
         .await?;
-        validate_next_progress(
+        let materialized_records = projection_receipt_committed_items(
             &transaction,
-            &progress,
+            progress.session_id(),
             binding.generation,
             batch_ordinal,
+        )
+        .await?;
+        validate_next_progress(
+            &transaction,
+            None,
+            &progress,
+            batch_ordinal,
             batch_items,
+            materialized_records,
         )
         .await?;
         insert_progress(&transaction, &progress, batch_ordinal).await?;
@@ -1853,6 +1902,49 @@ async fn read_running_operation(
         .transpose()
 }
 
+/// The row `read_running_operation` would select for this session from the
+/// segment's operation rows.
+fn begin_running_operation(reads: &BeginSegmentReads, session_id: &str) -> Option<String> {
+    reads
+        .operations
+        .get(session_id)
+        .into_iter()
+        .flatten()
+        .find(|row| row.state == "running")
+        .map(|row| row.operation_id.clone())
+}
+
+/// The row `read_joinable_operation_by_digest` would select: digest match,
+/// `running` before `complete`, then earliest `created_at`/`operation_id`.
+fn begin_joinable_by_digest(
+    reads: &BeginSegmentReads,
+    session_id: &str,
+    digest: &str,
+) -> SessionStoreResult<Option<OperationRow>> {
+    let existing = reads
+        .operations
+        .get(session_id)
+        .into_iter()
+        .flatten()
+        .filter(|row| row.request_digest == digest)
+        .filter(|row| row.state == "running" || row.state == "complete")
+        .min_by(|a, b| {
+            (a.state != "running", a.created_at, a.operation_id.as_str()).cmp(&(
+                b.state != "running",
+                b.created_at,
+                b.operation_id.as_str(),
+            ))
+        });
+    existing
+        .map(|row| {
+            Ok(OperationRow {
+                operation_id: SessionRefreshOperationIdV1::new(&row.operation_id)?,
+                created_at: UtcMicros(row.created_at),
+            })
+        })
+        .transpose()
+}
+
 async fn read_active_generation(
     conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
@@ -1985,9 +2077,14 @@ async fn session_reset_is_pending(
 async fn apply_requested_reset(
     conn: &impl crate::handle::SessionTemporalExec,
     session_id: &SessionId,
+    reads: Option<&BeginSegmentReads>,
 ) -> SessionStoreResult<()> {
     let requested = session_reset_is_pending(conn, session_id).await?;
-    if !requested || read_running_operation(conn, session_id).await?.is_some() {
+    let running = match reads {
+        Some(reads) => begin_running_operation(reads, session_id.as_str()),
+        None => read_running_operation(conn, session_id).await?,
+    };
+    if !requested || running.is_some() {
         return Ok(());
     }
     require_no_open_candidate(conn, session_id, None, BEGIN_REFRESH).await?;
@@ -2276,12 +2373,16 @@ fn validate_progress_binding(
     Ok(())
 }
 
+/// `materialized_records` is the `committed_item_count` the batch receipt
+/// insert just computed — the value `projection_receipt_committed_items`
+/// would re-read from the row this transaction just wrote.
 async fn validate_next_progress(
     conn: &impl crate::handle::SessionTemporalQuery,
+    reads: Option<&BeginSegmentReads>,
     progress: &SessionRefreshProgressV1,
-    generation: SessionProjectionGenerationV1,
     batch_ordinal: u64,
     batch_items: usize,
+    materialized_records: u64,
 ) -> SessionStoreResult<()> {
     if progress.committed_batches() != batch_ordinal.saturating_add(1) {
         return Err(SessionStoreError::InvalidStateTransition {
@@ -2290,9 +2391,15 @@ async fn validate_next_progress(
     }
     let batch_items =
         u64::try_from(batch_items).map_err(|error| storage(PERSIST_REFRESH, error))?;
-    if let Some(previous) =
-        read_progress(conn, progress.session_id(), progress.operation_id()).await?
-    {
+    let progress_key = (
+        progress.session_id().as_str().to_owned(),
+        progress.operation_id().as_str().to_owned(),
+    );
+    let previous = match reads {
+        Some(reads) => reads.progress.get(&progress_key).cloned(),
+        None => read_progress(conn, progress.session_id(), progress.operation_id()).await?,
+    };
+    if let Some(previous) = previous {
         previous.validate_successor(progress)?;
         if progress.committed_batches() != previous.committed_batches().saturating_add(1)
             || progress.committed_records()
@@ -2303,19 +2410,10 @@ async fn validate_next_progress(
                 context: "refresh progress projection accounting",
             });
         }
-    } else {
-        let materialized_records = projection_receipt_committed_items(
-            conn,
-            progress.session_id(),
-            generation,
-            batch_ordinal,
-        )
-        .await?;
-        if batch_ordinal != 0 || progress.committed_records() != materialized_records {
-            return Err(SessionStoreError::InvalidStateTransition {
-                context: "initial refresh progress projection accounting",
-            });
-        }
+    } else if batch_ordinal != 0 || progress.committed_records() != materialized_records {
+        return Err(SessionStoreError::InvalidStateTransition {
+            context: "initial refresh progress projection accounting",
+        });
     }
     Ok(())
 }
@@ -3162,6 +3260,7 @@ fn decode_refresh_state(
 
 async fn persist_begin_batch_in_transaction(
     transaction: &impl SessionTemporalWriteTxn,
+    reads: Option<&BeginSegmentReads>,
     binding: &RefreshBinding,
     progress: &SessionRefreshProgressV1,
     batch: &SessionTemporalProjectionBatchV1,
@@ -3169,18 +3268,20 @@ async fn persist_begin_batch_in_transaction(
     execution_control: &ExecutionControl,
 ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
     require_progress_timestamp(progress, authoritative_validation_time)?;
-    let receipt = persist_session_temporal_projection_batch_in_transaction(
+    let (receipt, materialized_records) = persist_session_temporal_projection_batch_in_transaction(
         transaction,
         batch,
         execution_control,
+        reads,
     )
     .await?;
     validate_next_progress(
         transaction,
+        reads,
         progress,
-        batch.generation(),
         batch.batch_ordinal(),
         batch.item_count(),
+        materialized_records,
     )
     .await?;
     validate_progress_binding(binding, progress)?;
@@ -3243,7 +3344,7 @@ fn segment_sessions_json<'a, T>(
             .map(|item| session_id(item).as_str())
             .collect::<Vec<_>>(),
     )
-    .map_err(|error| storage_message(COMPLETE_REFRESH, &error.to_string()))
+    .map_err(|error| storage_message(COMPLETE_REFRESH, error.to_string()))
 }
 
 /// Rows a completion segment resolves once inside its group transaction for
@@ -3266,7 +3367,7 @@ async fn load_completion_segment(
 ) -> SessionStoreResult<CompletionSegmentReads> {
     let sessions =
         segment_sessions_json(items, |(request, _)| request.session_id()).map_err(|error| {
-            storage_message(COMPLETE_REFRESH, &format!("segment session list: {error}"))
+            storage_message(COMPLETE_REFRESH, format!("segment session list: {error}"))
         })?;
     let operation = COMPLETE_REFRESH;
     let mut receipts = std::collections::HashMap::new();
@@ -3290,9 +3391,9 @@ async fn load_completion_segment(
         let receipt = decode_receipt(
             &row,
             SessionRefreshOperationIdV1::new(&operation_id)
-                .map_err(|error| storage_message(operation, &error.to_string()))?,
+                .map_err(|error| storage_message(operation, error.to_string()))?,
             SessionId::new(&session_id)
-                .map_err(|error| storage_message(operation, &error.to_string()))?,
+                .map_err(|error| storage_message(operation, error.to_string()))?,
         )?;
         receipts.insert((session_id, operation_id), receipt);
     }
@@ -3325,14 +3426,75 @@ async fn load_completion_segment(
         bindings.insert((session_id, operation_id), (state, binding));
     }
     drop(rows);
-    let mut progress =
-        std::collections::HashMap::<(String, String), (i64, SessionRefreshProgressV1)>::new();
+    let progress = load_segment_progress_map(conn, &sessions).await?;
+    let mut pairs: Vec<(String, i64)> = Vec::with_capacity(items.len());
+    for (request, _) in items {
+        let key = (
+            request.session_id().as_str().to_owned(),
+            request.operation_id().as_str().to_owned(),
+        );
+        if let Some((_, Ok(binding))) = bindings.get(&key) {
+            pairs.push((key.0, generation_i64(binding.generation, operation)?));
+        }
+    }
+    let pairs_json = serde_json::to_string(&pairs)
+        .map_err(|error| storage_message(operation, error.to_string()))?;
+    let projection =
+        load_projection_segment_reads(conn, &sessions, &pairs_json, execution_control).await?;
+    Ok(CompletionSegmentReads {
+        receipts,
+        bindings,
+        progress,
+        projection,
+    })
+}
+
+/// One `session_refresh_operations` row a begin segment resolves in memory.
+struct BeginOperationRow {
+    operation_id: String,
+    request_digest: String,
+    state: String,
+    created_at: i64,
+}
+
+/// Rows a begin segment resolves once inside its group transaction. Only
+/// tables that are session-scoped and never written earlier by the same
+/// item are preloaded: operations, progress and projection receipts.
+/// Generations, resets, cursor keys, checkpoints and coverage rows an item
+/// writes mid-flight stay per-item so every read still sees its own writes;
+/// relation/copy rows that can span sessions stay per-item as well.
+pub(crate) struct BeginSegmentReads {
+    operations: std::collections::HashMap<String, Vec<BeginOperationRow>>,
+    progress: std::collections::HashMap<(String, String), SessionRefreshProgressV1>,
+    receipts: std::collections::HashMap<String, Vec<ProjectionReceiptSegmentRow>>,
+    pub(crate) projection: ProjectionSegmentReads,
+}
+
+impl BeginSegmentReads {
+    /// The session's preloaded receipt rows — empty when the session has
+    /// none, identical to what the per-item scoped selects would return.
+    pub(crate) fn receipt_rows(&self, session_id: &str) -> &[ProjectionReceiptSegmentRow] {
+        self.receipts
+            .get(session_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
+
+async fn load_begin_segment(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    items: &[SessionRefreshBeginBatchItemV1],
+    execution_control: &ExecutionControl,
+) -> SessionStoreResult<BeginSegmentReads> {
+    let operation = PERSIST_REFRESH;
+    let sessions = segment_sessions_json(items, |item| item.request.session_id())
+        .map_err(|error| storage_message(operation, format!("segment session list: {error}")))?;
+    let mut operations: std::collections::HashMap<String, Vec<BeginOperationRow>> =
+        std::collections::HashMap::new();
     let mut rows = conn
         .query(
-            "SELECT frontier_json, coverage_json, committed_batches,
-                    committed_records, recorded_at, progress_ordinal,
-                    session_id, operation_id
-             FROM session_refresh_progress
+            "SELECT operation_id, request_digest, state, created_at, session_id
+             FROM session_refresh_operations
              WHERE session_id IN (SELECT value FROM json_each(?1))",
             params![sessions.as_str()],
         )
@@ -3343,15 +3505,113 @@ async fn load_completion_segment(
         .await
         .map_err(|error| storage(operation, error))?
     {
-        let session_id: String = row.get(6).map_err(|error| storage(operation, error))?;
-        let operation_id: String = row.get(7).map_err(|error| storage(operation, error))?;
-        let ordinal: i64 = row.get(5).map_err(|error| storage(operation, error))?;
+        let session_id: String = row.get(4).map_err(|error| storage(operation, error))?;
+        operations
+            .entry(session_id)
+            .or_default()
+            .push(BeginOperationRow {
+                operation_id: row.get(0).map_err(|error| storage(operation, error))?,
+                request_digest: row.get(1).map_err(|error| storage(operation, error))?,
+                state: row.get(2).map_err(|error| storage(operation, error))?,
+                created_at: row.get(3).map_err(|error| storage(operation, error))?,
+            });
+    }
+    drop(rows);
+    let progress = load_segment_progress_map(conn, &sessions).await?;
+    let mut receipts: std::collections::HashMap<String, Vec<ProjectionReceiptSegmentRow>> =
+        std::collections::HashMap::new();
+    let mut rows = conn
+        .query(
+            "SELECT session_id, generation, batch_ordinal, batch_digest,
+                    frozen_watermarks_json, source_through, projection_through,
+                    committed_item_count, committed_copy_count, committed_at
+             FROM session_temporal_projection_receipts
+             WHERE session_id IN (SELECT value FROM json_each(?1))",
+            params![sessions.as_str()],
+        )
+        .await
+        .map_err(|error| storage(operation, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(operation, error))?
+    {
+        let session_id: String = row.get(0).map_err(|error| storage(operation, error))?;
+        receipts
+            .entry(session_id)
+            .or_default()
+            .push(ProjectionReceiptSegmentRow {
+                generation: row.get(1).map_err(|error| storage(operation, error))?,
+                batch_ordinal: row.get(2).map_err(|error| storage(operation, error))?,
+                batch_digest: row.get(3).map_err(|error| storage(operation, error))?,
+                frozen_watermarks_json: row.get(4).map_err(|error| storage(operation, error))?,
+                source_through: row.get(5).map_err(|error| storage(operation, error))?,
+                projection_through: row.get(6).map_err(|error| storage(operation, error))?,
+                committed_item_count: row.get(7).map_err(|error| storage(operation, error))?,
+                committed_copy_count: row.get(8).map_err(|error| storage(operation, error))?,
+                committed_at: row.get(9).map_err(|error| storage(operation, error))?,
+            });
+    }
+    drop(rows);
+    let mut pairs: Vec<(String, i64)> = Vec::with_capacity(items.len());
+    for item in items {
+        pairs.push((
+            item.batch.session_id().as_str().to_owned(),
+            generation_i64(item.batch.generation(), operation)?,
+        ));
+    }
+    let pairs_json = serde_json::to_string(&pairs)
+        .map_err(|error| storage_message(operation, error.to_string()))?;
+    let projection =
+        load_projection_segment_reads(conn, &sessions, &pairs_json, execution_control).await?;
+    Ok(BeginSegmentReads {
+        operations,
+        progress,
+        receipts,
+        projection,
+    })
+}
+
+/// The grouped progress rows `read_progress` selects one key at a time:
+/// newest `progress_ordinal` per `(session_id, operation_id)` across the
+/// segment's sessions.
+async fn load_segment_progress_map(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    sessions: &str,
+) -> SessionStoreResult<std::collections::HashMap<(String, String), SessionRefreshProgressV1>> {
+    let mut progress =
+        std::collections::HashMap::<(String, String), (i64, SessionRefreshProgressV1)>::new();
+    let mut rows = conn
+        .query(
+            "SELECT frontier_json, coverage_json, committed_batches,
+                    committed_records, recorded_at, progress_ordinal,
+                    session_id, operation_id
+             FROM session_refresh_progress
+             WHERE session_id IN (SELECT value FROM json_each(?1))",
+            params![sessions],
+        )
+        .await
+        .map_err(|error| storage(PERSIST_REFRESH, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_REFRESH, error))?
+    {
+        let session_id: String = row
+            .get(6)
+            .map_err(|error| storage(PERSIST_REFRESH, error))?;
+        let operation_id: String = row
+            .get(7)
+            .map_err(|error| storage(PERSIST_REFRESH, error))?;
+        let ordinal: i64 = row
+            .get(5)
+            .map_err(|error| storage(PERSIST_REFRESH, error))?;
         let decoded = decode_progress(
             &row,
             SessionRefreshOperationIdV1::new(&operation_id)
-                .map_err(|error| storage_message(operation, &error.to_string()))?,
+                .map_err(|error| storage_message(PERSIST_REFRESH, error.to_string()))?,
             SessionId::new(&session_id)
-                .map_err(|error| storage_message(operation, &error.to_string()))?,
+                .map_err(|error| storage_message(PERSIST_REFRESH, error.to_string()))?,
         )?;
         match progress.entry((session_id, operation_id)) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
@@ -3364,29 +3624,10 @@ async fn load_completion_segment(
             }
         }
     }
-    let mut pairs: Vec<(String, i64)> = Vec::with_capacity(items.len());
-    for (request, _) in items {
-        let key = (
-            request.session_id().as_str().to_owned(),
-            request.operation_id().as_str().to_owned(),
-        );
-        if let Some((_, Ok(binding))) = bindings.get(&key) {
-            pairs.push((key.0, generation_i64(binding.generation, operation)?));
-        }
-    }
-    let pairs_json = serde_json::to_string(&pairs)
-        .map_err(|error| storage_message(operation, &error.to_string()))?;
-    let projection =
-        load_projection_segment_reads(conn, &sessions, &pairs_json, execution_control).await?;
-    Ok(CompletionSegmentReads {
-        receipts,
-        bindings,
-        progress: progress
-            .into_iter()
-            .map(|(key, (_, decoded))| (key, decoded))
-            .collect(),
-        projection,
-    })
+    Ok(progress
+        .into_iter()
+        .map(|(key, (_, decoded))| (key, decoded))
+        .collect())
 }
 
 async fn complete_session_refresh_in_transaction(
@@ -3558,6 +3799,7 @@ async fn commit_begin_batch_item_in_transaction(
     index: usize,
     item: &SessionRefreshBeginBatchItemV1,
     execution_control: &ExecutionControl,
+    reads: Option<&BeginSegmentReads>,
 ) -> SessionStoreResult<SessionStoreResult<SessionRefreshBeginBatchOutcomeV1>> {
     let savepoint = format!("refresh_begin_item_{index}");
     let SessionRefreshBeginBatchItemV1 {
@@ -3578,6 +3820,7 @@ async fn commit_begin_batch_item_in_transaction(
         transaction,
         request.clone(),
         *accepted_at,
+        reads,
     )
     .await
     {
@@ -3607,6 +3850,7 @@ async fn commit_begin_batch_item_in_transaction(
     }
     match persist_begin_batch_in_transaction(
         transaction,
+        reads,
         &binding,
         progress,
         batch,
@@ -3634,10 +3878,16 @@ async fn commit_begin_batch_item_in_transaction(
                 .map_err(|error| storage(PERSIST_REFRESH, error))?;
             // On the ungrouped path a crash between batch rollback and
             // begin commit leaves exactly this durable begin, so replay
-            // must not depend on which path wrote it.
-            let outcome =
-                begin_session_refresh_in_transaction(transaction, request.clone(), *accepted_at)
-                    .await;
+            // must not depend on which path wrote it. The segment preload
+            // predates this item's own operation insert, so the replay
+            // reads the live transaction rows.
+            let outcome = begin_session_refresh_in_transaction(
+                transaction,
+                request.clone(),
+                *accepted_at,
+                None,
+            )
+            .await;
             Ok(match outcome {
                 Err(error) => {
                     rollback_begin_item_savepoint(transaction, &alone).await?;
