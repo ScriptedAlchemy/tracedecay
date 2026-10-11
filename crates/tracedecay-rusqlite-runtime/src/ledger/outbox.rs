@@ -98,8 +98,13 @@ pub(super) fn record(
         return Err(LedgerError::OutboxEffectConflict);
     }
     let binding = submission.binding();
-    let current = outbox_entry(transaction, &binding, &desired.identity.effect_id)?
-        .ok_or(LedgerError::OutboxEffectConflict)?;
+    let current = match outbox_entry(transaction, &binding, &desired.identity.effect_id)? {
+        Some(entry) => entry,
+        None if desired.state == OutboxEffectStateV1::Dispatched => {
+            return Err(LedgerError::DispatchedOutboxWithoutPending);
+        }
+        None => return Err(LedgerError::OutboxEffectConflict),
+    };
     if current.identity != desired.identity
         || current.effect != desired.effect
         || current.enqueued_at != desired.enqueued_at

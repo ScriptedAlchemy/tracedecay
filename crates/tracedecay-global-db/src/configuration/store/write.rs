@@ -5,11 +5,11 @@ use super::codec::{
     StoredConfigurationPlanPayload, StoredConfigurationSnapshotEntryV1,
 };
 use super::{
-    CandidateDispositionV1, ConfigurationCandidateV1, ConfigurationLayerIdV1,
-    ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId, ConfigurationSnapshotV1,
-    ConfigurationStoreError, ConfigurationStoreResult, ConfigurationValueV1, Executor, SettingKey,
-    invalid_store_data, params, unavailable_store,
+    ConfigurationCandidateV1, ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId,
+    ConfigurationSnapshotV1, ConfigurationStoreError, ConfigurationStoreResult,
+    ConfigurationValueV1, Executor, SettingKey, invalid_store_data, params, unavailable_store,
 };
+use tracedecay_rusqlite_runtime::repository::configuration_entry_layer;
 
 fn encode_snapshot_entry(
     value: Option<ConfigurationValueV1>,
@@ -21,31 +21,6 @@ fn encode_snapshot_entry(
         provenance,
     })
     .map_err(|error| invalid_store_data(format!("encode configuration snapshot entry: {error}")))
-}
-
-fn snapshot_entry_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static str, Option<String>) {
-    let layer = provenance
-        .iter()
-        .find(|candidate| {
-            matches!(
-                candidate.disposition,
-                CandidateDispositionV1::Winning | CandidateDispositionV1::Defaulted
-            )
-        })
-        .or_else(|| provenance.first())
-        .map(|candidate| &candidate.layer);
-    match layer {
-        Some(ConfigurationLayerIdV1::Default) | None => ("default", None),
-        Some(ConfigurationLayerIdV1::UserProfile { profile_id }) => {
-            ("user_profile", Some(profile_id.as_str().to_owned()))
-        }
-        Some(ConfigurationLayerIdV1::Project { project_id }) => {
-            ("project", Some(project_id.as_str().to_owned()))
-        }
-        Some(ConfigurationLayerIdV1::Collection { collection_id }) => {
-            ("collection", Some(collection_id.as_str().to_owned()))
-        }
-    }
 }
 
 pub(super) async fn insert_snapshot_entries(
@@ -62,7 +37,7 @@ pub(super) async fn insert_snapshot_entries(
     for key in keys {
         let value = snapshot.effective_values.get(&key).cloned();
         let provenance = snapshot.provenance.get(&key).cloned().unwrap_or_default();
-        let (layer_kind, layer_id) = snapshot_entry_layer(&provenance);
+        let (layer_kind, layer_id) = configuration_entry_layer(&provenance);
         let encoded_entry = encode_snapshot_entry(value, provenance)?;
         transaction
             .execute(
