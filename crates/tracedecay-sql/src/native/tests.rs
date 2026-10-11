@@ -664,6 +664,56 @@ fn identity_fence_interrupts_a_running_statement() {
     std::fs::rename(&staged, &path).unwrap();
 }
 
+/// Catches a file-backed sort that cannot spill inside the confinement or
+/// whose temporary directory outlives the store: a sort larger than the
+/// engine's buffer completes under `temp_store = FILE` by spilling into the
+/// store's `-tmp` directory, and closing the store removes it.
+#[test]
+fn file_sorts_spill_inside_the_store_and_leave_nothing_behind() {
+    let (directory, database) = database();
+    let temp = std::fs::canonicalize(directory.path())
+        .unwrap()
+        .join("native.tdb-tmp");
+    let guard = execution_guard();
+    let connection = database
+        .connect_with(Capability::Maintenance, false)
+        .unwrap();
+    connection
+        .execute("PRAGMA temp_store = 1", &[], &guard)
+        .unwrap();
+    connection
+        .execute("CREATE TABLE t(k INTEGER, body TEXT)", &[], &guard)
+        .unwrap();
+    let body = "x".repeat(1000);
+    for batch in 0..8 {
+        let rows = (batch * 500..(batch + 1) * 500)
+            .map(|k| format!("({k}, '{body}')"))
+            .collect::<Vec<_>>();
+        connection
+            .execute(
+                &format!("INSERT INTO t VALUES {}", rows.join(",")),
+                &[],
+                &guard,
+            )
+            .unwrap();
+    }
+    let sorted = connection
+        .query("SELECT k FROM t ORDER BY body DESC, k DESC", &[], &guard)
+        .unwrap()
+        .values;
+    assert_eq!(sorted.len(), 4000);
+    assert_eq!(sorted[0], vec![Value::Integer(3999)]);
+    assert_eq!(sorted[3999], vec![Value::Integer(0)]);
+    assert!(temp.is_dir(), "the sort spilled into {}", temp.display());
+    drop(connection);
+    drop(database);
+    assert!(
+        !temp.exists(),
+        "closing the store removes {}",
+        temp.display()
+    );
+}
+
 /// (voluntary context switches, CPU clock ticks) of the calling thread.
 #[cfg(target_os = "linux")]
 fn thread_scheduling() -> (u64, u64) {

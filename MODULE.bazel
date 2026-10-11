@@ -65,7 +65,10 @@ crate.annotation(
     crate = "turso_core",
     patch_args = ["-p1"],
     patch_tool = "patch",
-    patches = ["//scripts:bazel/patches/turso_core-evictable-count-on-commit.patch"],
+    patches = [
+        "//scripts:bazel/patches/turso_core-evictable-count-on-commit.patch",
+        "//scripts:bazel/patches/turso_core-io-temp-dir.patch",
+    ],
     version = "0.8.0",
 )
 

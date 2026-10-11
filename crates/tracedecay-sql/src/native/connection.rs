@@ -332,6 +332,7 @@ impl Database {
             text,
             OpenOptions::new(policy::dialect()).storage(storage),
         )?;
+        confined.claim_temp()?;
         let database = Self {
             shared: Arc::new(Shared {
                 identity: OnceLock::new(),
@@ -432,7 +433,8 @@ impl Database {
         inner.set_busy_timeout(DEFAULT_BUSY_TIMEOUT);
         // The runtime's checkpoint lane is the only checkpoint scheduler.
         inner.wal_auto_actions_disable();
-        // Spilling to a temp file would need a path outside the confinement.
+        // Sorts stay in memory unless a connection opts into the store's
+        // private temporary directory with `PRAGMA temp_store = FILE`.
         inner.set_temp_store(turso_core::TempStore::Memory);
         let guard = Arc::new(GuardSlot {
             state: Mutex::default(),

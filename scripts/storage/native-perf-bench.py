@@ -23,6 +23,7 @@ then run:
 
 import argparse
 import json
+import os
 import pathlib
 import statistics
 import subprocess
@@ -117,9 +118,14 @@ def run_once(binary, mode, corpus, extra):
         while main_thread is None and bench.poll() is None:
             children = pathlib.Path(f"/proc/{bench.pid}/task/{bench.pid}/children")
             pids = children.read_text().split() if children.exists() else []
-            main_thread = pids[0] if pids else None
+            # perf's forked child becomes the bench only once it execs.
+            try:
+                if pids and os.readlink(f"/proc/{pids[0]}/exe") == str(binary.resolve()):
+                    main_thread = pids[0]
+            except OSError:
+                pass
         writer = subprocess.Popen(
-            ["perf", "stat", "-x,", "-e", "cycles:u,instructions:u,task-clock", "-t",
+            ["perf", "stat", "-x,", "-e", "cycles:u,instructions:u,task-clock", "--no-inherit", "-t",
              main_thread, "-o", writer_counters.name],
             stderr=subprocess.DEVNULL,
         )
