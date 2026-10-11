@@ -30,6 +30,7 @@ allowed=(
   -g '!crates/tracedecay/tests/runtime_acceptance_suite/hermes_state_fixture.rs'
   -g '!crates/tracedecay/Cargo.toml'
   -g '!crates/tracedecay-cli/tests/c_library_allocator.rs'
+  -g '!crates/tracedecay-cli/Cargo.toml'
 )
 
 # Code paths (`rusqlite::`, `use rusqlite;`, `extern crate rusqlite`) and

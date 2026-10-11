@@ -541,7 +541,7 @@ fn scan_materialized_page(
             budget,
         ));
     }
-    let reader = tracedecay_rusqlite_runtime::open_verified_read_snapshot(&source.source_path)
+    let reader = super::sqlite_reader::open_verified_read_snapshot(&source.source_path)
         .map_err(|error| scan_error("open OpenCode page snapshot", &source.source_path, error))?;
     if reader.file_identity() != source_file_identity {
         return Err(TranscriptIngestError::ScanGenerationChanged {

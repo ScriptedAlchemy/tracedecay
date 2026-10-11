@@ -713,7 +713,7 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
 pub async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String> {
     let owned = path.to_path_buf();
     let opened = tokio::task::spawn_blocking(move || {
-        tracedecay_rusqlite_runtime::open_immutable_reader(&owned)
+        super::super::sqlite_reader::open_immutable_reader(&owned)
     })
     .await
     .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))?;
