@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance Improvements
+
+* **sql:** spill native Turso sorts to a confined `{main}-tmp` directory, read result rows in place, and keep file identity off the per-statement writer path so lexical ingest/search no longer force an in-memory temp store ([#3491](https://github.com/ScriptedAlchemy/tracedecay/issues/3491))
+
 ### Bug Fixes
 
 * **test:** set untrusted-ctime fixture mtimes with `fs::set_times` so Windows `SetFileTime` receives `FILE_WRITE_ATTRIBUTES` ([#3347](https://github.com/ScriptedAlchemy/tracedecay/issues/3347))

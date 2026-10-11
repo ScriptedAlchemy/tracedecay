@@ -10,7 +10,6 @@ use std::{
     ops::{BitOr, Deref, DerefMut},
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
-    rc::Rc,
     sync::{Arc, Mutex, PoisonError},
 };
 
@@ -1244,7 +1243,7 @@ pub struct Statement<'c> {
     connection: &'c Connection,
     prepared: Option<Prepared>,
     cached: bool,
-    columns: Rc<[String]>,
+    columns: Arc<[String]>,
     /// The engine's lifetime counters when last taken. A cached program
     /// keeps counting across uses, so only the difference is this caller's.
     counted: Cell<StatementCounters>,
@@ -1262,7 +1261,7 @@ impl fmt::Debug for Statement<'_> {
 impl<'c> Statement<'c> {
     fn new(connection: &'c Connection, prepared: Prepared, cached: bool) -> Self {
         let counted = Cell::new(engine_counters(&prepared));
-        let columns = Rc::clone(&prepared.columns);
+        let columns = Arc::clone(&prepared.columns);
         Self {
             connection,
             prepared: Some(prepared),
@@ -1315,7 +1314,7 @@ impl<'c> Statement<'c> {
     pub fn query<P: Params>(&mut self, params: P) -> Result<Rows<'_>> {
         let connection = self.connection;
         let core = &connection.core;
-        let columns = Rc::clone(&self.columns);
+        let columns = Arc::clone(&self.columns);
         let prepared = self.start(params)?;
         Ok(Rows {
             core,
@@ -1409,7 +1408,7 @@ impl DerefMut for CachedStatement<'_> {
 pub struct Rows<'s> {
     core: &'s super::Connection,
     prepared: &'s mut Prepared,
-    columns: Rc<[String]>,
+    columns: Arc<[String]>,
     current: Option<Row<'s>>,
     done: bool,
 }
@@ -1427,7 +1426,7 @@ impl<'s> Rows<'s> {
                     super::Error::InvalidOperation("native row missing after row step".to_owned())
                 })?;
                 self.current = Some(Row {
-                    columns: Rc::clone(&self.columns),
+                    columns: Arc::clone(&self.columns),
                     current: std::ptr::from_ref(row),
                     _statement: PhantomData,
                 });
@@ -1472,7 +1471,7 @@ where
 
 /// The statement's current result row, read in place rather than copied.
 pub struct Row<'s> {
-    columns: Rc<[String]>,
+    columns: Arc<[String]>,
     /// Valid until the statement steps again, which needs the `&mut Rows`
     /// that every `&Row` borrows.
     current: *const turso_core::Row,

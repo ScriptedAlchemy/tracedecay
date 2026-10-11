@@ -4,7 +4,6 @@ use std::{
     io::Read,
     num::NonZeroUsize,
     path::{Path, PathBuf},
-    rc::Rc,
     sync::{
         Arc, LazyLock, Mutex, OnceLock, PoisonError, Weak,
         atomic::{AtomicBool, Ordering},
@@ -548,14 +547,14 @@ pub(crate) struct Prepared {
     ddl: bool,
     /// INSERT, UPDATE or DELETE: interrupting one ends its transaction.
     write: bool,
-    pub(crate) columns: Rc<[String]>,
+    pub(crate) columns: Arc<[String]>,
 }
 
 /// A compiled non-DDL statement waiting in the cache for its SQL text.
 struct Cached {
     statement: turso_core::Statement,
     write: bool,
-    columns: Rc<[String]>,
+    columns: Arc<[String]>,
 }
 
 /// Exclusively owned by one thread: the writer actor or one reader worker.
