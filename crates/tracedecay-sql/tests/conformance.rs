@@ -11,7 +11,6 @@ use tracedecay_sql::{
     OptionalExtension, Result, TransactionBehavior, params, params_from_iter, types::Value,
 };
 
-/// Burned down by U6. Each entry names the conformance case it excuses.
 const NATIVE_PENDING: &[&str] = &[
     "busy_is_classified",
     "capability_scope_denies_and_restores",
@@ -31,7 +30,6 @@ fn run(name: &str, case: fn() -> Result<()>) {
                 ErrorKind::Unsupported,
                 "{name} is pending on native but failed with {error}"
             );
-            println!("NATIVE_PENDING {name}: {error}");
         }
         Err(error) => panic!("{name}: {error}"),
     }

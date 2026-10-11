@@ -370,8 +370,6 @@ fn native_pinned_file_identity_rejects_replacement_and_unlink_recreate() {
     writer
         .execute("INSERT INTO entries(body) VALUES('original')", &[], &guard)
         .unwrap();
-    // The temporary renamed file exists solely while exercising replacement,
-    // and TempDir removes the entire isolated fixture at the end of this test.
     let staged = directory.path().join("renamed.db");
     std::fs::rename(&path, &staged).unwrap();
     std::fs::write(&path, b"replacement must never become the held database").unwrap();

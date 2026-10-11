@@ -2,7 +2,6 @@
 
 use std::{fs::File, io};
 
-/// The owned-store engine compiled into this binary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
     Sqlite,
@@ -28,7 +27,6 @@ pub trait ErrorExt {
     fn kind(&self) -> ErrorKind;
 }
 
-/// What statements compiled on a connection may do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Capability {
     /// Queries and read-only introspection pragmas.
@@ -72,7 +70,6 @@ pub struct FileIdentity {
 }
 
 pub trait ConnectionControl {
-    /// Installs `capability` as this connection's statement policy.
     fn set_capability(&self, capability: Capability) -> crate::Result<()>;
 
     /// Runs `operation` under `scoped`, then reinstalls `base` and drops cached

@@ -14,8 +14,7 @@ use tracedecay_runtime_core::db::engine::TestConnection;
 use crate::tests::harness::open_registered_test_database_fixture;
 
 /// FTS5 tables still installed on the `SQLite` engine. Each has a native
-/// `USING fts` replacement; this list empties when the native engine becomes
-/// the only engine.
+/// `USING fts` replacement.
 const FTS5_ALLOWLIST: [&str; 4] = [
     "memory_v2_assertion_payloads_fts",
     "lcm_raw_messages_fts",
@@ -23,7 +22,6 @@ const FTS5_ALLOWLIST: [&str; 4] = [
     "session_summary_nodes_fts",
 ];
 
-/// Tables that were `WITHOUT ROWID` before the native cutover.
 const CONVERTED_TABLES: [&str; 11] = [
     "td_runtime_writer_checkpoint_v1",
     "td_runtime_writer_idempotency_v2",
@@ -56,8 +54,6 @@ async fn installed_sessions_store(
     open_read_only(&path)
 }
 
-/// Returns every construct the native engine cannot carry with identical
-/// semantics.
 fn portability_violations(connection: &Connection) -> Vec<String> {
     let mut violations = Vec::new();
     let mut tables = connection
@@ -281,8 +277,6 @@ fn run(connection: &Connection, sql: &str, values: &[Value]) -> Outcome {
     }
 }
 
-/// Runs the key-semantics script against one engine shape and returns every
-/// step's outcome plus the final rows in key order.
 fn key_semantics_script(
     connection: &Connection,
     table: &KeyedTable,
