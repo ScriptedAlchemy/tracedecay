@@ -55,6 +55,7 @@ pub trait ErrorExt {
             ErrorKind::ForeignFormat => 26,
             ErrorKind::NoRows
             | ErrorKind::Unsupported
+            | ErrorKind::OwnedElsewhere
             | ErrorKind::Other
             | ErrorKind::CommitOutcomeUnknown => return None,
         };
