@@ -2,7 +2,6 @@
 //! handshake handling, resources, and `tools/call` execution.
 
 use std::collections::BTreeMap;
-use std::path::Component;
 
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -11,7 +10,7 @@ use tracedecay_mcp::server::{
     DispatchSettlement, DispatchToolPolicy, PreparedDispatchControl, dispatch_cancelled_error,
 };
 use tracedecay_mcp::tools::response_trailers::{
-    ToolTokenAccounting, record_token_accounting, response_token_count,
+    self, ToolTokenAccounting, record_token_accounting, response_tokens,
 };
 use tracedecay_mcp::{
     ToolResult, mark_semantic_tool_error, semantic_failure_reason, server::resources_list_result,
@@ -950,6 +949,8 @@ impl McpServer {
                 .filter(|path| !path.is_empty() && !token_map.contains_key(path.as_str()))
                 .cloned()
                 .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
         };
         if uncached_files.is_empty() {
             return cached_tokens;
@@ -957,23 +958,7 @@ impl McpServer {
 
         let project_root = project_root.to_path_buf();
         let uncached_tokens = tokio::task::spawn_blocking(move || {
-            uncached_files
-                .into_iter()
-                .filter_map(|path| {
-                    let relative = Path::new(&path);
-                    if relative.is_absolute()
-                        || relative
-                            .components()
-                            .any(|component| matches!(component, Component::ParentDir))
-                    {
-                        return None;
-                    }
-                    std::fs::metadata(project_root.join(relative))
-                        .ok()
-                        .filter(std::fs::Metadata::is_file)
-                        .map(|metadata| metadata.len() / 4)
-                })
-                .fold(0_u64, u64::saturating_add)
+            response_trailers::raw_file_tokens(&project_root, &uncached_files)
         })
         .await
         .unwrap_or_else(|error| {
@@ -1010,10 +995,8 @@ impl McpServer {
         cg: &TraceDecay,
         result: &mut ToolResult,
     ) -> ToolTokenAccounting {
-        // Real served-output count, before any banners/metrics lines are appended.
-        let Some(response_tokens) = response_token_count(result) else {
-            return ToolTokenAccounting::default();
-        };
+        // Served output, before any banners/metrics lines are appended.
+        let response_tokens = response_tokens(result);
         // "Before" counterfactual: reading every referenced file raw,
         // in full. Counters credit only the net saving per call,
         // before minus what this response actually delivered.

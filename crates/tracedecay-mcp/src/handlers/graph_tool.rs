@@ -598,12 +598,10 @@ mod tests {
             ),
             "{blocks:?}"
         );
-        let after =
-            tracedecay_tokenizer::count_ordinary_tokens(&format!("{}{}", blocks[0], blocks[1]))
-                .expect("tokenizer");
+        let after = (blocks[0].len() + blocks[1].len()) / 4;
         assert_eq!(
             blocks[2],
-            format!("\ntracedecay_metrics: before=200 after={after}")
+            format!("\ntracedecay_metrics: before=200 after={after} unit=bytes/4")
         );
         assert_eq!(rendered.touched_files, vec!["src/lib.rs".to_owned()]);
     }
@@ -845,10 +843,12 @@ mod tests {
         crate::tools::response_trailers::account_tool_result(Some(root.path()), &mut rendered);
         let blocks = texts(&rendered);
         assert_eq!(blocks.len(), 2, "{blocks:?}");
-        let after = tracedecay_tokenizer::count_ordinary_tokens(&blocks[0]).expect("tokenizer");
         assert_eq!(
             blocks[1],
-            format!("\ntracedecay_metrics: before=10 after={after}")
+            format!(
+                "\ntracedecay_metrics: before=10 after={} unit=bytes/4",
+                blocks[0].len() / 4
+            )
         );
     }
 }

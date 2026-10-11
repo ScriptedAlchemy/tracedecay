@@ -18,7 +18,7 @@ pub const CODE_GRAPH_FRESHNESS_TRAILER_PREFIX: &str = "code_graph_freshness:";
 pub const REQUEST_COST_TRAILER_PREFIX: &str = "tracedecay_cost:";
 
 /// Token estimate for one rendered result: reading its touched files raw
-/// versus the response it actually delivered.
+/// versus the response it actually delivered, both in [`estimated_tokens`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ToolTokenAccounting {
     pub raw_file_tokens: u64,
@@ -134,22 +134,25 @@ fn seated_generation_age_label(sealed_at: tracedecay_domain::UtcMicros) -> Strin
     }
 }
 
-/// Real `o200k_base` token count across the result's text blocks.
-///
-/// Returns `None` only when the tokenizer cannot initialize. Never estimates.
-pub fn response_token_count(result: &ToolResult) -> Option<u64> {
-    let text = result
+/// The footer's one unit: UTF-8 bytes / 4. The raw-read side is priced from
+/// file metadata, so the response side uses the same estimate; tokenizing it
+/// would subtract real tokens from estimated ones.
+pub const fn estimated_tokens(bytes: u64) -> u64 {
+    bytes / 4
+}
+
+/// [`estimated_tokens`] across the result's text blocks.
+pub fn response_tokens(result: &ToolResult) -> u64 {
+    let bytes = result
         .value
         .get("content")
         .and_then(|content| content.as_array())
         .into_iter()
         .flatten()
         .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
-        .collect::<Vec<_>>()
-        .join("");
-    tracedecay_tokenizer::count_ordinary_tokens(&text)
-        .inspect_err(|error| tracing::error!(%error, "tokenizer initialization failed"))
-        .ok()
+        .map(|text| text.len() as u64)
+        .fold(0, u64::saturating_add);
+    estimated_tokens(bytes)
 }
 
 /// Raw-read counterfactual: every touched project file read in full.
@@ -170,7 +173,7 @@ pub fn raw_file_tokens(project_root: &Path, touched_files: &[String]) -> u64 {
             std::fs::metadata(project_root.join(relative))
                 .ok()
                 .filter(std::fs::Metadata::is_file)
-                .map(|metadata| metadata.len() / 4)
+                .map(|metadata| estimated_tokens(metadata.len()))
         })
         .fold(0, u64::saturating_add)
 }
@@ -178,13 +181,10 @@ pub fn raw_file_tokens(project_root: &Path, touched_files: &[String]) -> u64 {
 /// Accounts a rendered result's tokens, records the figures on the result, and
 /// appends the footer when the touched files cost anything to read raw.
 pub fn account_tool_result(project_root: Option<&Path>, result: &mut ToolResult) {
-    let Some(response_tokens) = response_token_count(result) else {
-        return;
-    };
     let accounting = ToolTokenAccounting {
         raw_file_tokens: project_root
             .map_or(0, |root| raw_file_tokens(root, &result.touched_files)),
-        response_tokens,
+        response_tokens: response_tokens(result),
     };
     record_token_accounting(result, accounting);
 }
@@ -203,7 +203,8 @@ pub fn record_token_accounting(result: &mut ToolResult, accounting: ToolTokenAcc
             .and_then(|content| content.as_array_mut())
     {
         content.push(json!({"type": "text", "text": format!(
-            "\n{TOKEN_ACCOUNTING_FOOTER_PREFIX} before={raw_file_tokens} after={response_tokens}"
+            "\n{TOKEN_ACCOUNTING_FOOTER_PREFIX} before={raw_file_tokens} after={response_tokens} \
+             unit=bytes/4"
         )}));
     }
     result.set_token_accounting(accounting);
@@ -314,15 +315,31 @@ mod tests {
         std::fs::write(root.path().join("lib.rs"), "x".repeat(400)).expect("source");
         let mut result = text_result(&"y".repeat(40), vec!["lib.rs".to_owned()]);
         account_tool_result(Some(root.path()), &mut result);
-        let after = tracedecay_tokenizer::count_ordinary_tokens(&"y".repeat(40)).unwrap();
-        let footer = format!("\ntracedecay_metrics: before=100 after={after}");
-        assert_eq!(block(&result, 1), Some(footer.as_str()));
+        assert_eq!(
+            block(&result, 1),
+            Some("\ntracedecay_metrics: before=100 after=10 unit=bytes/4")
+        );
         assert_eq!(
             result.token_accounting(),
             Some(ToolTokenAccounting {
                 raw_file_tokens: 100,
-                response_tokens: after,
+                response_tokens: 10,
             })
+        );
+    }
+
+    #[test]
+    fn serving_a_touched_file_whole_saves_nothing() {
+        let root = tempfile::tempdir().expect("root");
+        let source = "x".repeat(400);
+        std::fs::write(root.path().join("lib.rs"), &source).expect("source");
+        let mut result = text_result(&source, vec!["lib.rs".to_owned()]);
+        account_tool_result(Some(root.path()), &mut result);
+        let accounting = result.token_accounting().expect("accounted");
+        assert_eq!(accounting.net_saved_tokens(), 0, "{accounting:?}");
+        assert_eq!(
+            block(&result, 1),
+            Some("\ntracedecay_metrics: before=100 after=100 unit=bytes/4")
         );
     }
 
@@ -342,13 +359,12 @@ mod tests {
             ],
         );
         account_tool_result(Some(&project), &mut result);
-        let after = tracedecay_tokenizer::count_ordinary_tokens("body").unwrap();
         assert_eq!(result.value["content"].as_array().map(Vec::len), Some(1));
         assert_eq!(
             result.token_accounting(),
             Some(ToolTokenAccounting {
                 raw_file_tokens: 0,
-                response_tokens: after,
+                response_tokens: 1,
             })
         );
     }

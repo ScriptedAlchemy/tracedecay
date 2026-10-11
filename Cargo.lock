@@ -6314,7 +6314,6 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-store-runtime",
  "tracedecay-temporal-query",
- "tracedecay-tokenizer",
  "tracedecay-tool-catalog",
  "tracing",
  "tree-sitter",
