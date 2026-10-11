@@ -45,6 +45,11 @@ struct PreviewSource {
     snippets: SnippetBody,
 }
 
+/// Lines a large-file loop covers between full deadline checks. Cancellation
+/// is an atomic load and still lands every line; the deadline is a clock
+/// read, so it is sampled on this stride instead of once per newline.
+const WALK_CHECK_STRIDE: usize = 4_096;
+
 struct PreviewWalkControl {
     cancelled: Arc<AtomicBool>,
     cancellation: Option<CancellationSignal>,
@@ -62,6 +67,12 @@ impl PreviewWalkControl {
                 self.budget,
             ));
         }
+        self.check_cancelled()
+    }
+
+    /// Cancellation alone: atomic loads cheap enough to run per line inside
+    /// one file. The deadline clock read stays in `check`.
+    fn check_cancelled(&self) -> Result<()> {
         if self.cancelled.load(Ordering::Acquire)
             || self
                 .cancellation
@@ -76,18 +87,38 @@ impl PreviewWalkControl {
         }
         Ok(())
     }
+
+    /// Control inside one file's line loops: cancellation lands every
+    /// iteration, the deadline is sampled every [`WALK_CHECK_STRIDE`], so a
+    /// cancelled or expired request still stops mid-file without reading the
+    /// clock once per newline.
+    fn check_iter(&self, iteration: usize) -> Result<()> {
+        if iteration.is_multiple_of(WALK_CHECK_STRIDE) {
+            self.check()
+        } else {
+            self.check_cancelled()
+        }
+    }
+
+    #[cfg(test)]
+    fn never_cancelled() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            cancellation: None,
+            deadline: None,
+            budget: crate::tools::dispatch_ceiling::TOOL_DISPATCH_CEILING,
+        }
+    }
 }
 
 impl PreviewSource {
     /// Builds the newline index once from the canonical decode.
-    fn from_decoded(decoded: DecodedSourceFile) -> Self {
+    fn from_decoded(decoded: DecodedSourceFile, control: &PreviewWalkControl) -> Result<Self> {
         let mut line_starts = vec![0];
-        line_starts.extend(
-            decoded
-                .text
-                .match_indices('\n')
-                .map(|(offset, _)| offset + 1),
-        );
+        for (iteration, (offset, _)) in decoded.text.match_indices('\n').enumerate() {
+            control.check_iter(iteration)?;
+            line_starts.push(offset + 1);
+        }
         let snippets = match decoded.encoding {
             SourceTextEncoding::Utf8 { leading_bom: false } => SnippetBody::Canonical,
             SourceTextEncoding::Utf8 { leading_bom: true } => {
@@ -98,28 +129,37 @@ impl PreviewSource {
             }
             SourceTextEncoding::Utf16Le | SourceTextEncoding::Utf16Be => SnippetBody::Absent,
         };
-        Self {
+        Ok(Self {
             text: decoded.text,
             line_starts,
             snippets,
-        }
+        })
     }
 
     #[cfg(test)]
     fn from_canonical_utf8(text: String) -> Self {
-        Self::from_decoded(DecodedSourceFile {
-            text,
-            encoding: SourceTextEncoding::Utf8 { leading_bom: false },
-        })
+        Self::from_decoded(
+            DecodedSourceFile {
+                text,
+                encoding: SourceTextEncoding::Utf8 { leading_bom: false },
+            },
+            &PreviewWalkControl::never_cancelled(),
+        )
+        .unwrap()
     }
 
-    fn snippet_lines(&self) -> Option<Vec<&str>> {
+    fn snippet_lines(&self, control: &PreviewWalkControl) -> Result<Option<Vec<&str>>> {
         let body = match &self.snippets {
             SnippetBody::Canonical => self.text.as_str(),
             SnippetBody::LeadingBom(raw) => raw.as_str(),
-            SnippetBody::Absent => return None,
+            SnippetBody::Absent => return Ok(None),
         };
-        Some(body.lines().collect())
+        let mut lines = Vec::new();
+        for (iteration, line) in body.lines().enumerate() {
+            control.check_iter(iteration)?;
+            lines.push(line);
+        }
+        Ok(Some(lines))
     }
 
     #[cfg(test)]
@@ -256,8 +296,8 @@ impl PreviewFileWalk {
             self.control.check()?;
             // One decoded buffer and its newline index, dropped before the
             // next file so the preview does not retain every touched source.
-            let source = PreviewSource::from_decoded(decoded);
-            let lines = source.snippet_lines();
+            let source = PreviewSource::from_decoded(decoded, &self.control)?;
+            let lines = source.snippet_lines(&self.control)?;
             if file == self.result.node.file {
                 decl_snippet = lines.as_ref().and_then(|lines| {
                     lines
@@ -267,6 +307,7 @@ impl PreviewFileWalk {
                 });
             }
             while let Some(input) = reference_inputs.next_if(|input| input.file == file) {
+                self.control.check()?;
                 let line = source.line_for_byte_offset(input.evidence_start_byte)?;
                 let snippet = lines.as_deref().and_then(|lines| {
                     reference_line_snippet(lines, Some(line), &self.result.symbol)
@@ -284,12 +325,13 @@ impl PreviewFileWalk {
                     },
                 ));
             }
-            let total = lines.as_ref().map_or(0, |lines| {
-                lines
-                    .iter()
-                    .map(|line| count_identifier_occurrences(line, &self.result.symbol))
-                    .sum::<usize>()
-            });
+            let mut total = 0;
+            if let Some(lines) = &lines {
+                for (iteration, line) in lines.iter().enumerate() {
+                    self.control.check_iter(iteration)?;
+                    total += count_identifier_occurrences(line, &self.result.symbol);
+                }
+            }
             let graph = self.graph_counts.get(&file).copied().unwrap_or(0);
             let text_only = total.saturating_sub(graph);
             if text_only > 0 {
@@ -458,7 +500,11 @@ pub async fn compute_rename_preview(
 
 #[cfg(test)]
 mod tests {
-    use super::PreviewSource;
+    use super::{PreviewSource, PreviewWalkControl};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use tracedecay_contracts::Deadline;
+    use tracedecay_domain::UtcMicros;
     use tracedecay_runtime_core::sync::{DecodedSourceFile, SourceTextEncoding};
 
     #[test]
@@ -495,22 +541,75 @@ mod tests {
 
     #[test]
     fn snippets_keep_a_utf8_bom_and_omit_utf16_bodies() {
-        let bom = PreviewSource::from_decoded(DecodedSourceFile {
-            text: "pub fn reserve_stock() {}\nnext\n".to_owned(),
-            encoding: SourceTextEncoding::Utf8 { leading_bom: true },
-        });
-        let lines = bom.snippet_lines().expect("utf-8 bom still has raw lines");
+        let control = PreviewWalkControl::never_cancelled();
+        let bom = PreviewSource::from_decoded(
+            DecodedSourceFile {
+                text: "pub fn reserve_stock() {}\nnext\n".to_owned(),
+                encoding: SourceTextEncoding::Utf8 { leading_bom: true },
+            },
+            &control,
+        )
+        .unwrap();
+        let lines = bom
+            .snippet_lines(&control)
+            .unwrap()
+            .expect("utf-8 bom still has raw lines");
         assert_eq!(lines[0], "\u{feff}pub fn reserve_stock() {}");
         assert_eq!(lines[1], "next");
         assert_eq!(bom.line_for_byte_offset(0).unwrap(), 0);
 
         for encoding in [SourceTextEncoding::Utf16Le, SourceTextEncoding::Utf16Be] {
-            let utf16 = PreviewSource::from_decoded(DecodedSourceFile {
-                text: "pub fn reserve_stock() {}\n".to_owned(),
-                encoding,
-            });
-            assert!(utf16.snippet_lines().is_none());
+            let utf16 = PreviewSource::from_decoded(
+                DecodedSourceFile {
+                    text: "pub fn reserve_stock() {}\n".to_owned(),
+                    encoding,
+                },
+                &control,
+            )
+            .unwrap();
+            assert!(utf16.snippet_lines(&control).unwrap().is_none());
             assert_eq!(utf16.line_for_byte_offset(0).unwrap(), 0);
         }
+    }
+
+    #[test]
+    fn check_iter_observes_cancellation_every_line_and_the_deadline_on_stride() {
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let control = PreviewWalkControl {
+            cancelled,
+            cancellation: None,
+            deadline: None,
+            budget: crate::tools::dispatch_ceiling::TOOL_DISPATCH_CEILING,
+        };
+        // Cancellation is an atomic load and lands even off-stride.
+        assert!(control.check_iter(1).is_err());
+
+        let control = PreviewWalkControl {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            cancellation: None,
+            deadline: Some(Deadline {
+                expires_at: UtcMicros(0),
+            }),
+            budget: crate::tools::dispatch_ceiling::TOOL_DISPATCH_CEILING,
+        };
+        // The deadline is a clock read, sampled on the stride boundary only.
+        assert!(control.check_iter(0).is_err());
+        assert!(control.check_iter(1).is_ok());
+    }
+
+    #[test]
+    fn a_cancelled_walk_stops_inside_one_file() {
+        let control = PreviewWalkControl {
+            cancelled: Arc::new(AtomicBool::new(true)),
+            cancellation: None,
+            deadline: None,
+            budget: crate::tools::dispatch_ceiling::TOOL_DISPATCH_CEILING,
+        };
+        let decoded = DecodedSourceFile {
+            text: "fn a() {}\n".repeat(super::WALK_CHECK_STRIDE + 10),
+            encoding: SourceTextEncoding::Utf8 { leading_bom: false },
+        };
+        // Without in-file checks the newline index would finish and return Ok.
+        assert!(PreviewSource::from_decoded(decoded, &control).is_err());
     }
 }
