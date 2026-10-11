@@ -176,17 +176,10 @@ fn is_read_only_introspection_pragma(name: &str) -> bool {
     .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
-fn is_safe_writer_pragma(name: &str, value: &str) -> bool {
-    [
-        "busy_timeout",
-        "incremental_vacuum",
-        "wal_autocheckpoint",
-        "wal_checkpoint",
-    ]
-    .iter()
-    .any(|candidate| name.eq_ignore_ascii_case(candidate))
-        || (name.eq_ignore_ascii_case("auto_vacuum")
-            && (value.eq_ignore_ascii_case("incremental") || value == "2"))
+fn is_safe_writer_pragma(name: &str) -> bool {
+    ["busy_timeout", "wal_autocheckpoint", "wal_checkpoint"]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
 fn authorize(capability: Capability, action: &AuthAction<'_>) -> Authorization {
@@ -216,10 +209,9 @@ fn authorize(capability: Capability, action: &AuthAction<'_>) -> Authorization {
     ) || matches!(action, AuthAction::Function { function_name } if function_name.eq_ignore_ascii_case("load_extension"))
         || matches!(
             action,
-            AuthAction::Pragma { pragma_name, pragma_value: Some(pragma_value) }
+            AuthAction::Pragma { pragma_name, pragma_value: Some(_) }
             if !is_read_only_introspection_pragma(pragma_name)
-                && (capability != Capability::Writer
-                    || !is_safe_writer_pragma(pragma_name, pragma_value))
+                && (capability != Capability::Writer || !is_safe_writer_pragma(pragma_name))
         )
         || (capability == Capability::Reader
             && matches!(

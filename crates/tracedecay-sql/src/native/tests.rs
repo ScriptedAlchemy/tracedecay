@@ -94,8 +94,8 @@ fn capability_verdicts_match_the_sqlite_authorizers() {
         ),
         (
             "PRAGMA auto_vacuum = 'incremental'",
-            &[Writer, Maintenance],
-            &[Reader],
+            &[Maintenance],
+            &[Reader, Writer],
         ),
         ("PRAGMA query_only = OFF", &[Maintenance], &[Reader, Writer]),
         (

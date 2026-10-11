@@ -261,12 +261,10 @@ fn authorize_pragma(name: &str, body: Option<&PragmaBody>, capability: Capabilit
     }
     let allowed = match body {
         None => true,
-        Some(PragmaBody::Equals(value) | PragmaBody::Call(value)) => {
-            let value = value.to_string();
-            let value = value.trim_matches(|c| c == '\'' || c == '"');
+        Some(PragmaBody::Equals(_) | PragmaBody::Call(_)) => {
             capability == Capability::Maintenance
                 || INTROSPECTION.iter().any(is)
-                || (capability == Capability::Writer && is_safe_writer_pragma(name, value))
+                || (capability == Capability::Writer && is_safe_writer_pragma(name))
         }
     };
     if allowed {
@@ -278,15 +276,8 @@ fn authorize_pragma(name: &str, body: Option<&PragmaBody>, capability: Capabilit
     }
 }
 
-fn is_safe_writer_pragma(name: &str, value: &str) -> bool {
-    [
-        "busy_timeout",
-        "incremental_vacuum",
-        "wal_autocheckpoint",
-        "wal_checkpoint",
-    ]
-    .iter()
-    .any(|candidate| name.eq_ignore_ascii_case(candidate))
-        || (name.eq_ignore_ascii_case("auto_vacuum")
-            && (value.eq_ignore_ascii_case("incremental") || value == "2"))
+fn is_safe_writer_pragma(name: &str) -> bool {
+    ["busy_timeout", "wal_autocheckpoint", "wal_checkpoint"]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
