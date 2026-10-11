@@ -50,8 +50,10 @@ scripts/run-storage-contention-benchmark.sh --native   # native Turso engine
 The runner refuses a dirty tree outside this directory. Each run calls
 `bazel test //crates/tracedecay-rusqlite-runtime:storage_contention
 --test_arg=--bench` uncached, with the commit SHA and host name in the test
-environment. It appends the JSON lines to [results.jsonl](results.jsonl) and
-regenerates [MEASUREMENTS.md](MEASUREMENTS.md) from every recorded row.
+environment. A passing run appends its JSON lines to
+[results.jsonl](results.jsonl); a failed run appends nothing and stops the
+runner. The runner then regenerates [MEASUREMENTS.md](MEASUREMENTS.md) from
+every recorded row.
 
 Each row records the source SHA, the host, the engine compiled into the
 binary, OS, architecture, CPU count, and debug assertions. It also records

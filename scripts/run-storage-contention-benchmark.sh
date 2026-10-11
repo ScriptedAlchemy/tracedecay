@@ -28,11 +28,13 @@ host="$(hostname)"
 
 for run in $(seq "$runs"); do
   echo "run $run/$runs at $sha" >&2
-  "${BAZEL:-bazel}" test "${config[@]}" //crates/tracedecay-rusqlite-runtime:storage_contention \
+  # A failed run records nothing, so every recorded run covers every shape.
+  rows="$("${BAZEL:-bazel}" test "${config[@]}" //crates/tracedecay-rusqlite-runtime:storage_contention \
     --nocache_test_results --test_output=streamed --test_arg=--bench \
     --test_env=TRACEDECAY_BENCH_SOURCE_SHA="$sha" \
     --test_env=TRACEDECAY_BENCH_HOST="$host" |
-    grep '^{' >>"$data/results.jsonl"
+    grep '^{')"
+  printf '%s\n' "$rows" >>"$data/results.jsonl"
 done
 
 python3 - "$data" <<'PY'
