@@ -353,7 +353,10 @@ fn run_prompt_with_optional_execution(
                     .map_or(config.timeout, |execution| execution.timeout),
             );
             drop(child);
-            let _ = stdout_reader.join();
+            // The outcome is already decided. A descendant that escaped the
+            // tree kill can hold stdout open for as long as it lives, and
+            // joining would leave the caller's run unsettled until then.
+            drop(stdout_reader);
             outcome
         }
     }
@@ -1242,6 +1245,78 @@ mod tests {
         assert_eq!(launch_receipt.started_at(), None);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn work_app_server_cmd_launcher_completes_a_turn() {
+        // Real Windows Codex launches through a `.cmd` shim that execs its
+        // interpreter; the batch itself never parses stdin. Drive the shipped
+        // `cmd /D /C` path through that shape: the interpreter answers
+        // initialize, the `initialized` notification, thread/start, and
+        // turn/start in order, with stdin held open until turn/completed.
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temporary = tempfile::tempdir().expect("temporary app-server directory");
+        let executable = temporary.path().join("fake-codex.cmd");
+        let helper = temporary.path().join("fake-codex-helper.py");
+        std::fs::write(
+            &helper,
+            concat!(
+                "import sys\n",
+                "for line in sys.stdin:\n",
+                "    if '\"id\":0' in line:\n",
+                "        print('{\"id\":0,\"result\":{}}', flush=True)\n",
+                "    elif '\"id\":1' in line:\n",
+                "        print('{\"id\":1,\"result\":{\"thread\":{\"id\":\"cmd-thread\"}}}', flush=True)\n",
+                "    elif '\"id\":2' in line:\n",
+                "        print('{\"method\":\"item/completed\",\"params\":{\"item\":{\"content\":[{\"type\":\"output_text\",\"text\":\"cmd lifecycle result\"}]}}}', flush=True)\n",
+                "        print('{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"cmd-turn\"}}}', flush=True)\n",
+                "        sys.exit(0)\n",
+            ),
+        )
+        .expect("write helper interpreter");
+        let script =
+            "@echo off\r\npython \"%~dp0fake-codex-helper.py\" %*\r\nexit /b %ERRORLEVEL%\r\n";
+        std::fs::write(&executable, script).expect("write fake app-server");
+
+        // The spawn clears the environment before admitting caller values, so
+        // the interpreter inside the shim resolves only through the admitted
+        // PATH, as a real deployment's node inside `codex.cmd` does.
+        let mut admitted_environment = BTreeMap::new();
+        for key in ["PATH", "PATHEXT", "SYSTEMROOT", "WINDIR"] {
+            if let Some(value) = std::env::var_os(key) {
+                admitted_environment.insert(key.to_owned(), value);
+            }
+        }
+        let config = CodexAppServerSummaryConfig {
+            codex_bin: executable.to_string_lossy().into_owned(),
+            model: None,
+            timeout: Duration::from_secs(30),
+        };
+        let launch_receipt = CodexAppServerLaunchReceipt::default();
+        let summary = run_work_with_codex_app_server(
+            "Return a work result.",
+            &config,
+            "tracedecay_work_attempt",
+            CodexAppServerWorkExecution {
+                cancellation: &CodexAppServerCancellation::default(),
+                cwd: temporary.path(),
+                timeout: Duration::from_secs(30),
+                admitted_environment: &admitted_environment,
+                launch_receipt: &launch_receipt,
+                approval: WorkApprovalPolicy::Never,
+                filesystem: WorkFilesystemPolicy::ReadOnly,
+                egress: WorkEgressPolicy::Deny,
+            },
+        );
+
+        assert_eq!(
+            summary.map(|summary| summary.text),
+            Ok("cmd lifecycle result".to_owned())
+        );
+        assert!(launch_receipt.started_at().is_some());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn work_app_server_held_open_for_writing_is_refused_on_the_first_attempt() {
@@ -1281,6 +1356,49 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(80),
             "the refusal must not wait for the writer to go away: {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn work_app_server_returns_while_an_escaped_descendant_holds_stdout() {
+        const SIGKILL: i32 = 9;
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temporary = tempfile::tempdir().expect("temporary app-server directory");
+        let holder_pid = temporary.path().join("holder.pid");
+        let executable = temporary.path().join("fake-codex");
+        let script = format!(
+            "#!/bin/sh\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"id\":0'*) printf '%s\\n' '{{\"id\":0,\"result\":{{}}}}' ;;\n    *'\"id\":1'*) printf '%s\\n' '{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"work-thread\"}}}}}}' ;;\n    *'\"id\":2'*) python3 -c 'import os, sys, time; os.setsid(); f = open(sys.argv[1], \"w\"); f.write(str(os.getpid())); f.close(); time.sleep(60)' {holder_pid} &\n      while [ ! -s {holder_pid} ]; do sleep 0.01; done\n      printf '%s\\n' '{{\"method\":\"item/completed\",\"params\":{{\"item\":{{\"content\":[{{\"type\":\"output_text\",\"text\":\"work result\"}}]}}}}}}'; printf '%s\\n' '{{\"method\":\"turn/completed\",\"params\":{{\"turn\":{{\"id\":\"work-turn\"}}}}}}'; exit 0 ;;\n  esac\ndone\n",
+            holder_pid = holder_pid.display(),
+        );
+        write_executable_script(&executable, script).expect("write fake app-server");
+
+        let summary = run_read_only_work(
+            &executable,
+            temporary.path(),
+            Duration::from_secs(30),
+            &CodexAppServerLaunchReceipt::default(),
+        );
+        let holder: i32 = std::fs::read_to_string(&holder_pid)
+            .expect("the fake app-server started its stdout holder")
+            .trim()
+            .parse()
+            .expect("holder pid");
+        assert_eq!(
+            unsafe { kill(holder, 0) },
+            0,
+            "the turn must return while the escaped descendant still holds stdout"
+        );
+        unsafe { kill(holder, SIGKILL) };
+
+        assert_eq!(
+            summary.map(|summary| summary.text),
+            Ok("work result".to_owned())
         );
     }
 

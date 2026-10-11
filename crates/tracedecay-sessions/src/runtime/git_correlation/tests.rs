@@ -105,6 +105,103 @@ fn normalize_worktree_preserves_root_and_removes_aliases() {
 }
 
 #[test]
+fn canonical_worktree_key_folds_os_aliases_and_preserves_missing_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let lexical = normalize_worktree(&root.path().to_string_lossy());
+    let canonical = std::fs::canonicalize(root.path()).unwrap();
+    // Two spellings of one directory (an OS alias and the canonical name)
+    // resolve to one identity.
+    assert_eq!(
+        canonical_worktree_key(&lexical).unwrap(),
+        normalize_worktree(&canonical.to_string_lossy())
+    );
+    // A missing historical path keeps its recorded spelling untouched.
+    let missing = normalize_worktree(&root.path().join("deleted").to_string_lossy());
+    assert_eq!(canonical_worktree_key(&missing).unwrap(), missing);
+}
+
+#[test]
+fn canonical_worktree_key_reresolves_a_path_created_after_the_miss() {
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join("worktree");
+    let spelling = normalize_worktree(&worktree.to_string_lossy());
+    // First operation: the path does not exist, the spelling stays lexical.
+    assert_eq!(canonical_worktree_key(&spelling).unwrap(), spelling);
+    // Next operation after the directory is created resolves the canonical
+    // identity — a stale miss may not be retained across operations.
+    std::fs::create_dir(&worktree).unwrap();
+    let canonical = std::fs::canonicalize(&worktree).unwrap();
+    assert_eq!(
+        canonical_worktree_key(&spelling).unwrap(),
+        normalize_worktree(&canonical.to_string_lossy())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_worktree_key_reresolves_a_retargeted_link() {
+    let root = tempfile::tempdir().unwrap();
+    let target_a = root.path().join("target-a");
+    let target_b = root.path().join("target-b");
+    std::fs::create_dir(&target_a).unwrap();
+    std::fs::create_dir(&target_b).unwrap();
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&target_a, &link).unwrap();
+    let spelling = normalize_worktree(&link.to_string_lossy());
+    assert_eq!(
+        canonical_worktree_key(&spelling).unwrap(),
+        normalize_worktree(&std::fs::canonicalize(&target_a).unwrap().to_string_lossy())
+    );
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&target_b, &link).unwrap();
+    assert_eq!(
+        canonical_worktree_key(&spelling).unwrap(),
+        normalize_worktree(&std::fs::canonicalize(&target_b).unwrap().to_string_lossy())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_worktree_key_rejects_a_canonical_identity_outside_utf8() {
+    use std::os::unix::ffi::OsStringExt;
+    let root = tempfile::tempdir().unwrap();
+    // A UTF-8 link name pointing into a non-UTF-8 directory: the resolved
+    // identity cannot be stored byte-exactly, so the spelling must fail
+    // typed rather than silently keep the caller's alias.
+    let target = root
+        .path()
+        .join(std::ffi::OsString::from_vec(b"non-\xff-utf8".to_vec()));
+    std::fs::create_dir(&target).unwrap();
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let spelling = normalize_worktree(&link.to_string_lossy());
+    assert!(canonical_worktree_key(&spelling).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_worktree_key_reports_non_not_found_failures() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("file.txt");
+    std::fs::write(&file, "x").unwrap();
+    // A file where a directory should be fails with an error other than
+    // NotFound: it must surface as a typed failure, not a lexical fallback
+    // that would silently rekey the row.
+    let bad = normalize_worktree(&file.join("nested").to_string_lossy());
+    assert!(canonical_worktree_key(&bad).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn canonical_worktree_key_reports_non_not_found_failures() {
+    // A colon inside a component is an invalid name on Windows: resolving
+    // it fails with an error other than NotFound, which must surface as a
+    // typed failure rather than a silent lexical fallback.
+    let bad = normalize_worktree(r"C:\invalid:component\sub");
+    assert!(canonical_worktree_key(&bad).is_err());
+}
+
+#[test]
 fn git_ref_filter_parses_and_validates_kinds() {
     assert_eq!(
         GitRefFilter::parse("worktree", r"C:\repo\\").unwrap(),

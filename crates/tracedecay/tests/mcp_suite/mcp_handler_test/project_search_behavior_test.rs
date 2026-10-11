@@ -13,6 +13,7 @@ use tracedecay::mcp::McpServer;
 use tracedecay_domain::ProjectId;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
 use crate::support::{
     TestEnv, TestTempDir, TestTraceDecay, extract_real_server_text, handle_real_server_tool_call,
@@ -119,13 +120,9 @@ async fn open_search_fixture() -> SearchFixture {
     .await;
     active.head_branch = Some(ACTIVE_HEAD);
 
-    let registry_path = registry_dir
-        .path()
-        .join("global.db")
-        .canonicalize()
-        .expect("registry database")
-        .display()
-        .to_string();
+    let registry_path = canonical_root_identity(&registry_dir.path().join("global.db"))
+        .to_string_lossy()
+        .into_owned();
     let server = McpServer::new_with_host_admission_test_runtime_for_test(
         TraceDecay::open_with_options(cg.project_root(), crate::support::graph_open_options(&cg))
             .await

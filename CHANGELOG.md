@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+* **index:** release a parked worktree's seated decode once a running owner pass settles instead of holding it for the idle window ([#3347](https://github.com/ScriptedAlchemy/tracedecay/issues/3347))
+* **sessions:** return a finished Codex turn without waiting for a descendant that escaped the tree kill and still holds the app-server's stdout ([#3347](https://github.com/ScriptedAlchemy/tracedecay/issues/3347))
 * **test:** set untrusted-ctime fixture mtimes with `fs::set_times` so Windows `SetFileTime` receives `FILE_WRITE_ATTRIBUTES` ([#3347](https://github.com/ScriptedAlchemy/tracedecay/issues/3347))
 * **session:** name each provider's historical ingest blocker instead of the first retryable failure in rotation ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))
 * **session:** classify SQLITE_CORRUPT / SQLITE_NOTADB as blocked `projection_store_corrupt` instead of retrying a malformed page ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))

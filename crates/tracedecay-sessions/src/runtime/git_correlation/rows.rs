@@ -17,7 +17,7 @@ use super::attribution::{
 use super::{
     CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth, CorrelationIndexPresence,
     GitCorrelationError, GitRefFilter, GitScopeFilter, SessionGitCorrelationHit, SessionGitSpan,
-    SessionsForQuery, SpanObservation, canonical_providers, commit_hits,
+    SessionsForQuery, SpanObservation, canonical_providers, canonical_worktree_key, commit_hits,
     commit_identities_with_producer_fallback, commit_record_matches_query, commit_record_order,
     digest_bytes, intersect_id_maps, normalize_worktree, parse_commit_sha, scope_session_ids,
     session_provider_identities, sessions_for_limit, span_hits, span_identities,
@@ -214,8 +214,12 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
         provider: &str,
         session_id: &str,
     ) -> Result<(), GitCorrelationError> {
-        let (spans, commits) =
-            load_session_rows(self.transaction, &BTreeSet::from([session_id.to_owned()])).await?;
+        let (spans, commits) = load_session_rows(
+            self.transaction,
+            &BTreeSet::from([session_id.to_owned()]),
+            &mut HashMap::new(),
+        )
+        .await?;
         let mut cleared = BTreeSet::new();
         for span in spans.values().filter(|span| {
             span.provider == provider
@@ -333,11 +337,29 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
             return Ok(GitEvidenceWrite::default());
         }
         let GitEvidenceBatch {
-            observations,
-            spans: incoming_spans,
-            commits: incoming_commits,
+            mut observations,
+            spans: mut incoming_spans,
+            commits: mut incoming_commits,
             merge_gap_secs,
         } = batch;
+        // Resolve each worktree spelling at intake: a host may report an
+        // OS alias (8.3 short name, symlinked root) where git reports the
+        // canonical name, and the fold keys on one worktree. Stored rows
+        // resolve at load so an older alias heals on write. The map lives
+        // only for this transaction: a spelling resolves once here and a
+        // later operation sees the path as it then exists.
+        let mut worktree_keys = HashMap::new();
+        for observation in &mut observations {
+            observation.worktree = keyed_worktree(&mut worktree_keys, &observation.worktree)?;
+        }
+        for span in &mut incoming_spans {
+            span.worktree = keyed_worktree(&mut worktree_keys, &span.worktree)?;
+        }
+        for record in &mut incoming_commits {
+            if let Some(worktree) = record.worktree.take() {
+                record.worktree = Some(keyed_worktree(&mut worktree_keys, &worktree)?);
+            }
+        }
         let session_ids = observations
             .iter()
             .map(|observation| observation.session_id.clone())
@@ -349,7 +371,7 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
             )
             .collect::<BTreeSet<_>>();
         let (mut stored_spans, mut stored_commits) =
-            load_session_rows(self.transaction, &session_ids).await?;
+            load_session_rows(self.transaction, &session_ids, &mut worktree_keys).await?;
         let mut spans = group_by_session(stored_spans.values().cloned(), |span| &span.session_id);
         // A newly captured observation can invalidate the inferred window.
         // Retract that inference before merging, so the capture keeps its
@@ -395,7 +417,7 @@ impl<'t, T: Executor + ?Sized> GitEvidenceWriter<'t, T> {
         }
         if !invalidated.is_empty() {
             (stored_spans, stored_commits) =
-                load_session_rows(self.transaction, &session_ids).await?;
+                load_session_rows(self.transaction, &session_ids, &mut worktree_keys).await?;
             spans = group_by_session(stored_spans.values().cloned(), |span| &span.session_id);
         }
 
@@ -620,6 +642,7 @@ type StoredCommits = BTreeMap<(String, String), CommitSessionRecord>;
 async fn load_session_rows(
     conn: &(impl QueryExecutor + ?Sized),
     session_ids: &BTreeSet<String>,
+    worktree_keys: &mut HashMap<String, String>,
 ) -> Result<(StoredSpans, StoredCommits), GitCorrelationError> {
     let ids = serde_json::to_string(session_ids)?;
     let mut spans = BTreeMap::new();
@@ -649,7 +672,32 @@ async fn load_session_rows(
             record,
         );
     }
+    for span in spans.values_mut() {
+        span.worktree = keyed_worktree(worktree_keys, &span.worktree)?;
+    }
+    for record in commits.values_mut() {
+        if let Some(worktree) = record.worktree.take() {
+            record.worktree = Some(keyed_worktree(worktree_keys, &worktree)?);
+        }
+    }
     Ok((spans, commits))
+}
+
+/// The worktree identity the fold keys on, resolved once per distinct
+/// lexical spelling inside one operation. The cache is never shared across
+/// operations: a path created after an earlier miss, or a retargeted link,
+/// resolves to its new identity on the next transaction.
+fn keyed_worktree(
+    cache: &mut HashMap<String, String>,
+    spelling: &str,
+) -> Result<String, GitCorrelationError> {
+    let key = normalize_worktree(spelling);
+    if let Some(resolved) = cache.get(&key) {
+        return Ok(resolved.clone());
+    }
+    let resolved = canonical_worktree_key(&key)?;
+    cache.insert(key, resolved.clone());
+    Ok(resolved)
 }
 
 fn decode_record<T: serde::de::DeserializeOwned>(row: &Row) -> Result<T, GitCorrelationError> {
@@ -871,7 +919,8 @@ impl<Q: QueryExecutor + ?Sized> GitEvidenceView<'_, Q> {
         if session_ids.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
-        let (spans, commits) = load_session_rows(self.conn, session_ids).await?;
+        let (spans, commits) =
+            load_session_rows(self.conn, session_ids, &mut HashMap::new()).await?;
         Ok((
             spans.into_values().collect(),
             commits.into_values().collect(),
