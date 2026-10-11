@@ -140,7 +140,7 @@ flate2 = "1"
 futures-util = "0.3.33"
 hex = "0.4"
 rayon = "1"
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+rusqlite = { version = "0.40.1", default-features = false }
 self-replace = "1"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
