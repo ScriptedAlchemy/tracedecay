@@ -107,7 +107,7 @@ async fn seed_store(
     let data_root = profile_root.join("stores").join(store_id);
     std::fs::create_dir_all(&data_root).unwrap();
     // A real (schema-empty) SQLite file, not raw bytes: the durable-memory
-    // guard opens this file through `sqlite_read_snapshot` before any
+    // guard reads this file in place before any
     // collection, so the fixture must be a database the guard can actually
     // inspect and prove carries no `memory_facts`/etc. rows.
     rusqlite::Connection::open(data_root.join("graph.db")).unwrap();

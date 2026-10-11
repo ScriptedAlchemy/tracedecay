@@ -75,7 +75,7 @@ cannot diverge after crashes or retries.
   partial, stale-owner, or dead-letter batch cannot advance the checkpoint.
 - Project facts and sessions remain project-wide; user sessions remain
   profile-wide; code graphs retain exact repository/worktree/ref scope.
-- Real Doctor, backup, integrity, and recovery operations use the same daemon
+- Real Doctor, integrity, and recovery operations use the same daemon
   authority and return typed findings/receipts. They never heal by opening an
   alternate writer.
 
