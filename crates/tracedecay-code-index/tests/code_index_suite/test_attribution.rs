@@ -2,6 +2,9 @@ use std::borrow::Borrow;
 
 use tracedecay_code_index::generations::GenerationPlanner;
 use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
+use tracedecay_code_index::provider::{
+    GenerationProviderContractErrorV1, GenerationProviderCoverageV1, GenerationProviderReadV1,
+};
 use tracedecay_code_index::test_attribution::{
     GenerationTestJoinCoverageV1, GenerationTestJoinDispositionV1, GenerationTestJoinErrorV1,
     GenerationTestJoinV1, TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1,
@@ -9,8 +12,8 @@ use tracedecay_code_index::test_attribution::{
 };
 use tracedecay_domain::{
     CodeGenerationManifestV1, ContentDigest, GenerationTestAttributionV1, ManifestDigest,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1,
-    TestAttributionEvidenceClassV1, UtcMicros,
+    ProviderEvaluationStateV1, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SnapshotFileDispositionV1, TestAttributionEvidenceClassV1, UtcMicros,
 };
 
 use super::support::{id, registry};
@@ -442,4 +445,56 @@ fn join_checks_missing_test_and_covered_occurrences_without_content_drift() {
             },
         );
     }
+}
+
+#[test]
+fn provider_read_state_cannot_overclaim_coverage_or_evidence() {
+    let complete = GenerationProviderCoverageV1::Complete {
+        examined: 1,
+        eligible: 1,
+        excluded: 0,
+    };
+    for (state, coverage, evidence) in [
+        (
+            ProviderEvaluationStateV1::SupportedCompletedComplete,
+            complete.clone(),
+            None,
+        ),
+        (
+            ProviderEvaluationStateV1::Partial,
+            complete.clone(),
+            Some(()),
+        ),
+        (
+            ProviderEvaluationStateV1::Unavailable,
+            GenerationProviderCoverageV1::Unavailable,
+            Some(()),
+        ),
+    ] {
+        assert_eq!(
+            GenerationProviderReadV1::new(state, coverage, evidence),
+            Err(GenerationProviderContractErrorV1::StateCoverageMismatch),
+            "{state:?} must not claim more than its coverage and evidence prove"
+        );
+    }
+    assert_eq!(
+        GenerationProviderReadV1::new(
+            ProviderEvaluationStateV1::SupportedCompletedComplete,
+            GenerationProviderCoverageV1::Complete {
+                examined: 2,
+                eligible: 1,
+                excluded: 0,
+            },
+            Some(()),
+        ),
+        Err(GenerationProviderContractErrorV1::InvalidCoverage)
+    );
+    assert!(
+        GenerationProviderReadV1::new(
+            ProviderEvaluationStateV1::SupportedCompletedComplete,
+            complete,
+            Some(())
+        )
+        .is_ok()
+    );
 }

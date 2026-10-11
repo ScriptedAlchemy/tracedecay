@@ -3,11 +3,10 @@
 //! This crate owns intake validation, language registry, extraction,
 //! chunks, and capability emission port traits, plus the generation engine:
 //! immutable generation planning/sealing, increment planning, symbol lineage
-//! resolution, projection receipt construction, and read-side joins over the
-//! existing Git, managed-diagnostic, graph-impact, and test authorities. No
-//! parser acquisition, filesystem access, storage, or scheduling lives here;
-//! capture owns intake snapshots, the owning stores retain evidence, and the
-//! projector composition owns publication.
+//! resolution, projection receipt construction, and the generation-bound
+//! test-attribution join. No parser acquisition, filesystem access, storage,
+//! or scheduling lives here; capture owns intake snapshots, the owning stores
+//! retain evidence, and the projector composition owns publication.
 //!
 //! Contract constructors in this tree validate canonical identities built
 //! from controlled formats; the `expect` on those constructor calls documents
@@ -18,14 +17,11 @@ pub mod ast_grep_search;
 pub mod capabilities;
 pub mod chunks;
 pub mod clones;
-pub mod diagnostics;
 pub mod extract;
 pub mod generations;
-pub mod git_join;
 pub mod git_projection;
 pub mod graph_projection;
 pub mod grep_search;
-pub mod impact_join;
 pub mod incremental;
 pub mod intake;
 pub mod languages;

@@ -491,8 +491,15 @@ impl EffectUnknownFixture {
         self.project.path().join("src/locked/a.rs")
     }
 
-    fn destination_path(&self) -> std::path::PathBuf {
+    pub(super) fn destination_path(&self) -> std::path::PathBuf {
         self.project.path().join("src/b.rs")
+    }
+
+    pub(super) fn transaction_store(&self) -> std::path::PathBuf {
+        self.graph
+            .store_layout()
+            .data_root
+            .join("source-edit-transactions-v1")
     }
 
     pub(super) fn write_partial_postimage(&self) {
