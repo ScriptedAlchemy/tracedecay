@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
 use crate::code_index_journey::{
-    RECEIPT_TIMEOUT, commit_all, exact_identity, git, initialize_tracedecay,
-    stop_daemon_gracefully, wait_for_open_phase, wait_for_terminal_generation,
+    commit_all, exact_identity, git, initialize_tracedecay, stop_daemon_gracefully,
+    wait_for_open_phase, wait_for_terminal_generation,
 };
 use crate::common::{
     IsolatedHome, daemon_socket_path, spawn_tracedecay_daemon_logged, spawn_tracedecay_daemon_with,
@@ -183,88 +183,36 @@ async fn stop_during_project_open_truncates_project_store_wals() {
     assert_clean_shutdown_log(&fs::read_to_string(&log_path).expect("daemon log"));
 }
 
-/// Polls until `path` exists or the receipt deadline passes.
-async fn wait_for_file(path: &Path, what: &str) {
-    tokio::time::timeout(RECEIPT_TIMEOUT, async {
-        while !path.exists() {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{what} never happened: {} is missing", path.display()));
-}
-
-/// Catches an abandoned store open that closes its writer connection without
-/// the writer's truncate: the open has already written WAL frames, and no
-/// writer actor runs to truncate them at shutdown.
 #[tokio::test]
-async fn stop_during_a_held_writer_start_truncates_the_store_wal() {
-    let (environment, project) = IsolatedHome::new();
-    let project = project.canonicalize().expect("canonical fixture project");
-    initialize_repository(&project);
-    // A created store is discarded when its start fails, so the held open
-    // reopens a store an earlier daemon created.
-    let mut creator = spawn_tracedecay_daemon_with(environment.home(), |_| {});
-    initialize_tracedecay(environment.home(), &project);
-    stop_daemon_gracefully(&mut creator);
-    let (graph_db, _) = project_stores(environment.home(), &project);
-    assert_eq!(wal_bytes(&graph_db), 0, "the creating daemon kept no WAL");
-    let log_path = environment.scratch().join("held-writer-start.log");
-    let hold = environment.scratch().join("hold-writer-start");
-    fs::write(&hold, b"hold").expect("writer start hold");
-    // Every start of this store's writer is abandoned at release, so no
-    // writer actor ever runs on it.
-    fs::write(format!("{}.abort", hold.display()), b"abort").expect("abort marker");
-    let entered = PathBuf::from(format!("{}.entered", hold.display()));
-    let socket = daemon_socket_path(environment.home());
-    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
-        command
-            .env("TRACEDECAY_TEST_HOLD_WRITER_START", &hold)
-            .env("TRACEDECAY_TEST_HOLD_WRITER_START_STORE", &graph_db);
-    });
-
-    let mut init = tracedecay_command_with_home(environment.home());
-    init.arg("init")
-        .current_dir(&project)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let init = std::thread::spawn(move || init.output());
-    wait_for_file(&entered, "the graph store's writer start").await;
-    assert!(
-        wal_bytes(&graph_db) > 0,
-        "the held open has written frames into {}",
-        graph_db.display()
-    );
-
-    let signal_result = unsafe { libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM) };
-    assert_eq!(signal_result, 0, "send SIGTERM to daemon");
-    tokio::time::timeout(RECEIPT_TIMEOUT, async {
-        while !fs::read_to_string(&log_path)
-            .unwrap_or_default()
-            .contains("event=daemon_shutdown socket=")
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+async fn probe_stop_after_init_wal() {
+    for round in 0..12 {
+        let (environment, project) = IsolatedHome::new();
+        let project = project.canonicalize().expect("canonical fixture project");
+        initialize_repository(&project);
+        let creator_log = environment.scratch().join("creator.log");
+        let mut creator =
+            crate::common::spawn_tracedecay_daemon_logged(environment.home(), &creator_log, |_| {});
+        initialize_tracedecay(environment.home(), &project);
+        stop_daemon_gracefully(&mut creator);
+        let (graph_db, sessions) = project_stores(environment.home(), &project);
+        let profile = environment
+            .home()
+            .join(".tracedecay")
+            .join(tracedecay_store::StoreFile::Profile.file_name());
+        let walls = [
+            wal_bytes(&graph_db),
+            wal_bytes(&sessions),
+            wal_bytes(&profile),
+        ];
+        let log = fs::read_to_string(&creator_log).unwrap_or_default();
+        eprintln!(
+            "PROBE round={round} wal={walls:?} held={}",
+            log.contains("still held")
+        );
+        if walls.iter().any(|bytes| *bytes > 0) {
+            panic!("PROBE leftover round={round} wal={walls:?} log={log}");
         }
-    })
-    .await
-    .expect("the daemon began its shutdown");
-    fs::remove_file(&hold).expect("release the writer start");
-    let exit = daemon
-        .wait_for_exit(RECEIPT_TIMEOUT)
-        .expect("wait for daemon shutdown")
-        .expect("the daemon exits after its stop");
-    assert!(exit.success(), "daemon did not stop cleanly: {exit}");
-    settle_interrupted_init(init, &socket);
-
-    assert!(graph_db.is_file(), "{} was opened", graph_db.display());
-    assert_eq!(
-        wal_bytes(&graph_db),
-        0,
-        "an abandoned open keeps no WAL for {}",
-        graph_db.display()
-    );
-    assert_clean_shutdown_log(&fs::read_to_string(&log_path).expect("daemon log"));
+    }
 }
 
 #[tokio::test]

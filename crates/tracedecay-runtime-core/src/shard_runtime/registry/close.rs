@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tracedecay_store::{RuntimeMaintenanceStateV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
-use super::capacity::drain_and_close_physical;
+use super::capacity::{EvictionReservation, drain_and_close_physical};
 use super::{
     EvictingRuntime, RegistryEntry, StoreRuntimeKey, StoreRuntimeOwnerAttachment,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
@@ -41,6 +41,40 @@ impl ClosedStoreRuntime {
     }
 }
 
+/// The runtimes a shutdown close found held. Logged once the close gives up
+/// on them: when its last scan still finds them, or when the shutdown
+/// deadline drops the wait for their leases.
+#[derive(Default)]
+struct HeldAtShutdown(Vec<String>);
+
+impl HeldAtShutdown {
+    fn log(&mut self) {
+        for held in self.0.drain(..) {
+            tracing::warn!(%held, "store runtime still held at shutdown; its WAL is not truncated");
+        }
+    }
+}
+
+impl Drop for HeldAtShutdown {
+    fn drop(&mut self) {
+        self.log();
+    }
+}
+
+/// A blocker that clears when its holder drops a lease.
+fn is_lease(blocker: &ShardRuntimeEvictionBlocker) -> bool {
+    matches!(
+        blocker,
+        ShardRuntimeEvictionBlocker::GeneralReaderLeases { .. }
+            | ShardRuntimeEvictionBlocker::HealthReaderLeases { .. }
+            | ShardRuntimeEvictionBlocker::SnapshotLeases { .. }
+            | ShardRuntimeEvictionBlocker::WatcherLeases { .. }
+            | ShardRuntimeEvictionBlocker::SchedulerLeases { .. }
+            | ShardRuntimeEvictionBlocker::ClientLeases { .. }
+            | ShardRuntimeEvictionBlocker::OperationLeases { .. }
+    )
+}
+
 struct CloseReservation {
     key: StoreRuntimeKey,
     attempt: u64,
@@ -53,9 +87,13 @@ impl StoreRuntimeRegistry {
     /// checkpoint. The daemon process exits with this registry reachable, so
     /// no destructor closes these attachments otherwise. In-flight opens are
     /// cancelled and joined first, so none publishes or keeps a physical
-    /// handle after the scan. Held runtimes stay mounted and are logged with
-    /// their blockers. Each reserved runtime owns its own writer and readers,
-    /// so they close concurrently and the shutdown waits for the slowest
+    /// handle after the scan. A runtime held only by leases, such as the
+    /// owners of an open the stop cancelled that are still being dropped, is
+    /// closed once its last lease is released; the caller's shutdown deadline
+    /// bounds that wait. Runtimes still held when the scan ends, or when the
+    /// deadline drops the wait, stay mounted and are logged with their
+    /// blockers. Each reserved runtime owns its own writer and readers, so
+    /// they close concurrently and the shutdown waits for the slowest
     /// checkpoint rather than their sum. Returns the number of runtimes
     /// closed.
     #[tracing::instrument(
@@ -65,51 +103,88 @@ impl StoreRuntimeRegistry {
     )]
     pub async fn close_idle_for_shutdown(&self) -> Result<usize, StoreRuntimeRegistryFailure> {
         self.cancel_and_join_opens_for_shutdown().await;
-        let (reservations, reserve_failure) = {
-            let mut state = self.lock_state();
-            let mut idle = Vec::new();
-            for (key, entry) in &state.entries {
-                let RegistryEntry::Ready(ready) = entry else {
-                    continue;
-                };
-                let mut blockers = ready
-                    .owner
-                    .runtime()
-                    .eviction_eligibility(Duration::ZERO)
-                    .blockers;
-                blockers.retain(|blocker| {
-                    !matches!(blocker, ShardRuntimeEvictionBlocker::PinnedProfile)
-                });
-                let profile_pins = state.profile_pin_tokens.get(key).map_or(0, BTreeSet::len);
-                let graph_leases = state
-                    .graph_publications
-                    .get(key)
-                    .map_or(0, |retained| retained.lease_tokens.len());
-                if blockers.is_empty() && profile_pins == 0 && graph_leases == 0 {
-                    idle.push(key.clone());
-                } else {
-                    tracing::warn!(
-                        path = %ready.owner.locator().path().display(),
-                        ?blockers,
-                        profile_pins,
-                        graph_leases,
-                        "store runtime still held at shutdown; its WAL is not truncated"
-                    );
+        let mut held = HeldAtShutdown::default();
+        let mut closed = 0;
+        loop {
+            let (reservations, reserve_failure, releases) =
+                self.reserve_idle_for_shutdown(&mut held);
+            closed += self.close_reserved(reservations, reserve_failure).await?;
+            if releases.is_empty() {
+                return Ok(closed);
+            }
+            // A release, or a runtime dropped from under its subscription,
+            // changes what the next scan finds.
+            let mut waits = tokio::task::JoinSet::new();
+            for mut release in releases {
+                waits.spawn(async move { release.changed().await });
+            }
+            waits.join_next().await;
+        }
+    }
+
+    /// Reserves every idle runtime and records the held ones. Returns a
+    /// release subscription for each runtime held by nothing but leases,
+    /// taken before its blockers were read.
+    fn reserve_idle_for_shutdown(
+        &self,
+        held: &mut HeldAtShutdown,
+    ) -> (
+        Vec<EvictionReservation>,
+        Option<StoreRuntimeRegistryFailure>,
+        Vec<tokio::sync::watch::Receiver<u64>>,
+    ) {
+        let mut state = self.lock_state();
+        let mut idle = Vec::new();
+        let mut releases = Vec::new();
+        held.0.clear();
+        for (key, entry) in &state.entries {
+            let RegistryEntry::Ready(ready) = entry else {
+                continue;
+            };
+            let runtime = ready.owner.runtime();
+            let release = runtime.subscribe_lease_releases();
+            let mut blockers = runtime.eviction_eligibility(Duration::ZERO).blockers;
+            blockers
+                .retain(|blocker| !matches!(blocker, ShardRuntimeEvictionBlocker::PinnedProfile));
+            let profile_pins = state.profile_pin_tokens.get(key).map_or(0, BTreeSet::len);
+            let graph_leases = state
+                .graph_publications
+                .get(key)
+                .map_or(0, |retained| retained.lease_tokens.len());
+            if blockers.is_empty() && profile_pins == 0 && graph_leases == 0 {
+                idle.push(key.clone());
+                continue;
+            }
+            if profile_pins == 0 && graph_leases == 0 && blockers.iter().all(is_lease) {
+                releases.push(release);
+            }
+            held.0.push(format!(
+                "path={} blockers={blockers:?} profile_pins={profile_pins} graph_leases={graph_leases}",
+                ready.owner.locator().path().display()
+            ));
+        }
+        if releases.is_empty() {
+            held.log();
+        }
+        let mut reservations = Vec::with_capacity(idle.len());
+        let mut reserve_failure = None;
+        for key in idle {
+            match Self::reserve_eviction(&mut state, key) {
+                Ok(reservation) => reservations.extend(reservation),
+                Err(failure) => {
+                    reserve_failure = Some(failure);
+                    break;
                 }
             }
-            let mut reservations = Vec::with_capacity(idle.len());
-            let mut reserve_failure = None;
-            for key in idle {
-                match Self::reserve_eviction(&mut state, key) {
-                    Ok(reservation) => reservations.extend(reservation),
-                    Err(failure) => {
-                        reserve_failure = Some(failure);
-                        break;
-                    }
-                }
-            }
-            (reservations, reserve_failure)
-        };
+        }
+        (reservations, reserve_failure, releases)
+    }
+
+    async fn close_reserved(
+        &self,
+        reservations: Vec<EvictionReservation>,
+        reserve_failure: Option<StoreRuntimeRegistryFailure>,
+    ) -> Result<usize, StoreRuntimeRegistryFailure> {
         let closes = reservations
             .into_iter()
             .map(|reservation| {
