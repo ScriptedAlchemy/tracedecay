@@ -647,8 +647,7 @@ history retain their existing lifecycles and are never exported as adoption
 analytics.
 
 Optional local detail expires after 30 days, local rollups after 395 days, and
-share staging within 24 hours after opt-out; backup copies expire within 30
-days. Local cells below five eligible units are suppressed. Rates require 20
+share staging within 24 hours after opt-out. No backup copies exist. Local cells below five eligible units are suppressed. Rates require 20
 eligible units and 90% coverage; route/model comparisons require 30 eligible
 outcomes, 90% coverage, at most 10% censoring, and no unresolved cohort shift.
 Shared cells require 100 contribution windows, at most four dimensions, and
@@ -970,8 +969,7 @@ decision with collision, ambiguity, and maintenance review.
 - Adoption fixtures prove `Off` and `LocalOnly` make no network request,
   shared cells meet suppression/contribution caps, all rates satisfy support
   and coverage floors, opt-out blocks egress before its receipt and purges
-  staging transactionally, deletion and backup expiry meet their 24-hour and
-  30-day bounds, and activity-only vanity metrics cannot render as useful
+  staging transactionally, deletion meets its 24-hour bound, and activity-only vanity metrics cannot render as useful
   outcomes.
 - Resource fixtures reconcile scheduled-arrival latency, every span, RSS,
   tokens/cost evidence class, and effect state; no-progress fixtures prove a
