@@ -578,17 +578,33 @@ mod tests {
             .expect("inspect persisted privacy purge receipts")
     }
 
-    async fn orphaned_payload_fts_rows(database: &tracedecay_runtime_core::db::Database) -> i64 {
+    /// Entries the payload full-text index still returns for `term`. On
+    /// SQLite this reads the FTS5 index without joining its content table,
+    /// so an entry left behind for a purged row counts; the native index
+    /// lives inside the payload table.
+    async fn payload_index_matches(
+        database: &tracedecay_runtime_core::db::Database,
+        term: &str,
+    ) -> i64 {
+        use tracedecay_runtime_core::db::engine::{BackendKind, QueryExecutor as _};
+        use tracedecay_runtime_core::db::native_search::SearchIndex;
+
+        let index = SearchIndex::MemoryPayload;
+        let sql = match database.read_connection().backend_kind() {
+            BackendKind::Sqlite => format!(
+                "SELECT COUNT(*) FROM {0} WHERE {0} MATCH ?1",
+                index.index_name()
+            ),
+            BackendKind::NativeTurso => format!(
+                "SELECT COUNT(*) FROM {} WHERE fts_match({}, ?1)",
+                index.table_name(),
+                index.columns().join(", ")
+            ),
+        };
         database
-            .query_scalar_i64(
-                "inspect at-rest privacy FTS cleanup",
-                "SELECT COUNT(*)
-                 FROM memory_v2_assertion_payloads_fts AS fts
-                 LEFT JOIN memory_v2_assertion_payloads AS payloads ON payloads.rowid = fts.rowid
-                 WHERE payloads.rowid IS NULL",
-            )
+            .query_scalar_i64_with_text("inspect the payload full-text index", &sql, term)
             .await
-            .expect("inspect payload FTS cleanup")
+            .expect("inspect the payload full-text index")
     }
 
     struct LegacyPayloadRow {
@@ -965,13 +981,18 @@ mod tests {
             "the canonical correction boundary must purge the detector-flagged predecessor"
         );
         assert_eq!(assertion_payload_purge_receipts(&database).await, 1);
-        assert_eq!(orphaned_payload_fts_rows(&database).await, 0);
+        assert_eq!(payload_index_matches(&database, "credential").await, 0);
 
         restore_pre_purge_superseded_payload(&database, &legacy_payload).await;
         assert_eq!(
             persisted_payload_rows_containing(&database, &secret()).await,
             1,
             "the rollout fixture must contain one pre-existing superseded secret"
+        );
+        assert_eq!(
+            payload_index_matches(&database, "credential").await,
+            1,
+            "the full-text index must find the restored secret before remediation"
         );
         assert_eq!(assertion_payload_purge_receipts(&database).await, 0);
 
@@ -996,7 +1017,7 @@ mod tests {
             0
         );
         assert_eq!(assertion_payload_purge_receipts(&database).await, 1);
-        assert_eq!(orphaned_payload_fts_rows(&database).await, 0);
+        assert_eq!(payload_index_matches(&database, "credential").await, 0);
     }
 
     #[tokio::test]
