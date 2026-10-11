@@ -691,10 +691,41 @@ fn confined_io_admits_only_the_main_file_its_wal_and_its_temp_directory() {
     );
 }
 
-/// Catches a writable open sharing a read-only engine, whose commits would
-/// land in its in-memory log and vanish.
+/// Catches a writable open sharing a read-only engine that logs to memory,
+/// whose commits would vanish with that log.
 #[test]
-fn writable_open_refuses_a_store_held_read_only() {
+fn writable_open_refuses_a_store_held_read_only_with_a_memory_log() {
+    let (directory, database) = database();
+    let path = directory.path().join("native.tdb");
+    let guard = execution_guard();
+    let mut writer = database.connect(Access::Writer).unwrap();
+    writer
+        .execute("CREATE TABLE entries(body TEXT)", &[], &guard)
+        .unwrap();
+    writer.checkpoint(&guard).unwrap();
+    drop(writer);
+    drop(database);
+    std::fs::remove_file(directory.path().join("native.tdb-wal")).unwrap();
+
+    let read_only = Database::open_path(&path, false).unwrap();
+    assert!(
+        matches!(Database::open(&path), Err(Error::InvalidOperation(_))),
+        "a writable open shared the read-only engine's memory log"
+    );
+    drop(read_only);
+    Database::open(&path)
+        .unwrap()
+        .connect(Access::Writer)
+        .unwrap()
+        .execute("INSERT INTO entries VALUES('kept')", &[], &guard)
+        .unwrap();
+}
+
+/// Catches a refusal broader than the memory log: a reader pool opened
+/// read-only before its store's writer must not lock that writer out when the
+/// engine logs to the WAL on disk, and the writer's commits must persist.
+#[test]
+fn writable_open_shares_a_read_only_engine_logging_to_disk() {
     let (directory, database) = database();
     let path = directory.path().join("native.tdb");
     let guard = execution_guard();
@@ -704,19 +735,27 @@ fn writable_open_refuses_a_store_held_read_only() {
         .execute("CREATE TABLE entries(body TEXT)", &[], &guard)
         .unwrap();
     drop(database);
+    assert!(directory.path().join("native.tdb-wal").exists());
 
     let read_only = Database::open_path(&path, false).unwrap();
-    assert!(
-        matches!(Database::open(&path), Err(Error::InvalidOperation(_))),
-        "a writable open shared the read-only engine"
-    );
-    drop(read_only);
-    Database::open(&path)
-        .unwrap()
+    let writable = Database::open(&path).unwrap();
+    writable
         .connect(Access::Writer)
         .unwrap()
         .execute("INSERT INTO entries VALUES('kept')", &[], &guard)
         .unwrap();
+    drop(writable);
+    drop(read_only);
+    assert_eq!(
+        Database::open(&path)
+            .unwrap()
+            .connect(Access::Reader)
+            .unwrap()
+            .query("SELECT body FROM entries", &[], &guard)
+            .unwrap()
+            .values,
+        vec![vec![Value::Text("kept".to_owned())]]
+    );
 }
 
 /// Catches a connection that keeps using a store whose pathname now names a

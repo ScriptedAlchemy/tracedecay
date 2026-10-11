@@ -62,8 +62,12 @@ impl ConfinedIo {
         })
     }
 
-    pub(crate) fn is_read_only(&self) -> bool {
-        self.read_only_wal.is_some()
+    /// Whether the engine logs to the in-memory WAL of a read-only store,
+    /// where a writer's commits would be lost.
+    pub(crate) fn logs_to_memory(&self) -> bool {
+        self.read_only_wal
+            .as_ref()
+            .is_some_and(|memory| memory.open_file(&self.wal, OpenFlags::None, false).is_ok())
     }
 
     /// Takes the temporary directory once the engine holds the store's lock,

@@ -323,8 +323,8 @@ impl Database {
         Self::open_path(path, true)
     }
 
-    /// A read-only open never creates the file, and its engine may log to
-    /// memory, so a writable open cannot share it.
+    /// A read-only open never creates the file, and its engine logs to memory
+    /// when no WAL is on disk, so a writable open cannot share it then.
     pub(crate) fn open_path(path: &Path, writable: bool) -> Result<Self> {
         if path.as_os_str() == ":memory:" {
             return Self::open_memory();
@@ -376,14 +376,14 @@ impl Database {
         identity: FileIdentity,
         writable: bool,
     ) -> Result<Self> {
-        let read_only = shared
+        let logs_to_memory = shared
             .engine
             .as_ref()
             .and_then(|engine| engine.confined.as_ref())
-            .is_some_and(|io| io.is_read_only());
-        if writable && read_only {
+            .is_some_and(|io| io.logs_to_memory());
+        if writable && logs_to_memory {
             return Err(Error::InvalidOperation(
-                "native database is open read-only in this process".to_owned(),
+                "native database is open read-only in this process with no WAL on disk".to_owned(),
             ));
         }
         Ok(Self {
