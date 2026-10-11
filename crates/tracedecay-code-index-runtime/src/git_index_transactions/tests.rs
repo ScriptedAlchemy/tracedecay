@@ -783,10 +783,7 @@ fn tracked_worktree_digest_hidden_content_with_untrusted_ctime() {
     let (directory, runner) = committed_file("source.rs", b"original\n");
     let path = directory.path().join("source.rs");
     let mtime = std::time::SystemTime::now() - Duration::from_secs(30);
-    fs::File::open(&path)
-        .expect("source file")
-        .set_modified(mtime)
-        .expect("historical mtime");
+    fs::set_times(&path, fs::FileTimes::new().set_modified(mtime)).expect("historical mtime");
     for args in [
         vec!["config", "--local", "core.trustctime", "false"],
         vec!["add", "--", "source.rs"],
@@ -807,10 +804,7 @@ fn tracked_worktree_digest_hidden_content_with_untrusted_ctime() {
             .expect("canonical raw-byte manifest")
     );
     fs::write(&path, b"modified\n").expect("same-size edit");
-    fs::File::open(&path)
-        .expect("edited file")
-        .set_modified(mtime)
-        .expect("restored mtime");
+    fs::set_times(&path, fs::FileTimes::new().set_modified(mtime)).expect("restored mtime");
     assert_git_diff_head_hides(directory.path(), "source.rs");
     assert_ne!(
         before,

@@ -315,14 +315,25 @@ pub(crate) const SERVE_LONG_ABOUT: &str = "\
 Runs the MCP server on stdin/stdout for a single client. This is the command \
 agent hosts execute from their MCP configuration, you rarely run it by hand \
 except to debug the protocol. For ad-hoc tool calls from a shell, use \
-`tracedecay tool` instead; both dispatch the same tool registry.";
+`tracedecay tool` instead; both dispatch the same tool registry. Default \
+`tools/list` is a core set plus `tracedecay_tool_search` (no stubs). Search \
+ranks an exact name first, loads matches into the session list, announces \
+`notifications/tools/list_changed`, and returns full schemas in the result \
+text. Every tool answers a direct `tools/call` by name. \
+`--claude-code-tool-search` (or TRACEDECAY_MCP_CLAUDE_CODE_TOOL_SEARCH=1) \
+serves the full catalog with `_meta[\"anthropic/alwaysLoad\"]` on the core \
+tools so Claude Code's native tool search can defer the rest, and replaces \
+initialize instructions with a short tool-category guide. Drop that flag \
+when using ANTHROPIC_BASE_URL proxies, Foundry, or \
+CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, which disable Claude Code's native \
+tool search.";
 
 pub(crate) const SERVE_AFTER_HELP: &str = "\
 Examples:
   tracedecay serve                               Stdio MCP server for the cwd project
   tracedecay serve --path /path/to/repo          Pin the project explicitly
   tracedecay serve --timings                     Annotate responses with handler time
-
+  tracedecay serve --claude-code-tool-search     Full list + alwaysLoad (Claude Code plugin)
 Related: tracedecay tool (same tools from the shell), tracedecay install
 (writes this command into agent MCP config), tracedecay daemon.";
 

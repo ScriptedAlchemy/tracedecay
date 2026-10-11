@@ -521,11 +521,12 @@ mod tests {
     use serde_json::json;
     use tracedecay_contracts::retrieval::DerivesSymbolV1;
     use tracedecay_contracts::retrieval::{
-        CodeGraphReadFreshnessV1, ContextExtensionPointV1, ContextModeV1, ContextPlanV1,
-        ContextResultV1, ContextRetrievalPlanV1, ContextRetrievalRouteV1, ContextStageV1,
-        PrimitiveFreshnessStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
-        PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
-        PrimitiveSymbolLocationV1, ServedCodeGraphGenerationV1, TodoMarkerV1, TodosResultV1,
+        CodeGraphReadFreshnessV1, ContextCodeBlockV1, ContextExtensionPointV1, ContextModeV1,
+        ContextPlanV1, ContextResultV1, ContextRetrievalPlanV1, ContextRetrievalRouteV1,
+        ContextSearchMatchV1, ContextStageV1, PrimitiveFreshnessStateV1, PrimitiveLaneCompleteV1,
+        PrimitiveLaneStatusV1, PrimitiveRecallV1, PrimitiveSearchCoverageV1,
+        PrimitiveSearchFreshnessV1, PrimitiveSymbolLocationV1, ServedCodeGraphGenerationV1,
+        TodoMarkerV1, TodosResultV1,
     };
     use tracedecay_contracts::{ContextMemoryAnalyticsV1, InvocationAnalyticsV1};
     use tracedecay_domain::UtcMicros;
@@ -598,12 +599,10 @@ mod tests {
             ),
             "{blocks:?}"
         );
-        let after =
-            tracedecay_tokenizer::count_ordinary_tokens(&format!("{}{}", blocks[0], blocks[1]))
-                .expect("tokenizer");
+        let after = (blocks[0].len() + blocks[1].len()) / 4;
         assert_eq!(
             blocks[2],
-            format!("\ntracedecay_metrics: before=200 after={after}")
+            format!("\ntracedecay_metrics: before=200 after={after} unit=bytes/4")
         );
         assert_eq!(rendered.touched_files, vec!["src/lib.rs".to_owned()]);
     }
@@ -662,6 +661,67 @@ mod tests {
                 memory: ContextStageV1::Unavailable,
             },
         }
+    }
+
+    #[test]
+    fn context_preview_keeps_symbols_whole_and_retains_full_response() {
+        let root = tempfile::tempdir().expect("response handles");
+        let small = "pub fn small() -> &'static str { \"café\" }";
+        let large = format!(
+            "pub fn large() {{\n{}    finish();\n}}",
+            "    process();\n".repeat(2_000)
+        );
+        let mut context = plan_context();
+        context.code = vec![
+            ContextCodeBlockV1 {
+                node_id: "symbol.small".to_owned(),
+                file: "src/lib.rs".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                code: small.to_owned(),
+            },
+            ContextCodeBlockV1 {
+                node_id: "symbol.large".to_owned(),
+                file: "src/lib.rs".to_owned(),
+                start_line: 3,
+                end_line: 2_005,
+                code: large.clone(),
+            },
+        ];
+        let rendered = render_graph_tool(
+            Some(root.path()),
+            &json!({}),
+            GraphToolCompletionV1 {
+                result: GraphToolResultV1::Context(Box::new(context)),
+                touched_files: Vec::new(),
+                code_graph: None,
+                analytics: None,
+                cost: None,
+            },
+        )
+        .expect("context preview");
+        let text = texts(&rendered).join("");
+        assert!(
+            text.contains(small),
+            "the small symbol must remain byte-exact"
+        );
+        assert!(
+            !text.contains("pub fn large()"),
+            "the preview must omit an oversized symbol rather than split its body"
+        );
+        assert!(text.contains("### Extension Points"));
+        let handle = text
+            .split("handle `")
+            .nth(1)
+            .and_then(|tail| tail.split('`').next())
+            .expect("retrieval handle");
+        let stored = retrieve_response_handle(root.path(), handle, current_timestamp())
+            .expect("stored full context");
+        let ResponseHandleLookup::Found(record) = stored else {
+            panic!("the omitted symbol must remain retrievable");
+        };
+        assert!(record.content.contains(small));
+        assert!(record.content.contains(&large));
     }
 
     #[test]
@@ -737,6 +797,57 @@ mod tests {
         );
         assert!(payload.get("context_memory").is_none(), "{payload}");
         assert!(payload.get("analytics").is_none(), "{payload}");
+    }
+
+    #[test]
+    fn json_context_returns_every_search_match_without_storing_a_trimmed_tail() {
+        let mut context = plan_context();
+        context.symbols = Vec::new();
+        context.search_matches = (1..=10)
+            .map(|rank| ContextSearchMatchV1 {
+                anchor_id: format!("code-symbol:m{rank}"),
+                name: format!("m{rank}"),
+                qualified_name: format!("crate::m{rank}"),
+                kind: "function".to_owned(),
+                file: "src/lib.rs".to_owned(),
+                exact_class: "exact_message".to_owned(),
+                rank,
+                utility_micros: if rank <= 3 { 2_000_000 } else { 1_000_000 },
+            })
+            .collect();
+        let root = tempfile::tempdir().expect("response handles");
+        let render = |args: Value| {
+            let completion = GraphToolCompletionV1 {
+                result: GraphToolResultV1::Context(Box::new(context.clone())),
+                touched_files: Vec::new(),
+                code_graph: None,
+                analytics: None,
+                cost: None,
+            };
+            texts(&render_graph_tool(Some(root.path()), &args, completion).expect("context"))
+                .join("")
+        };
+        let stored_handles = || std::fs::read_dir(root.path()).expect("handle root").count();
+
+        let payload: Value =
+            serde_json::from_str(&render(json!({"format": "json"}))).expect("json");
+        assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(10));
+        assert_eq!(
+            stored_handles(),
+            0,
+            "a JSON call must not store a trimmed tail"
+        );
+
+        let markdown = render(json!({}));
+        assert!(
+            markdown.contains("- _Trimmed 7 lower-ranked results"),
+            "{markdown}"
+        );
+        assert_ne!(
+            stored_handles(),
+            0,
+            "the markdown trim stores its tail here"
+        );
     }
 
     fn fresh_worktree_seat() -> ServedCodeGraphGenerationV1 {
@@ -845,10 +956,12 @@ mod tests {
         crate::tools::response_trailers::account_tool_result(Some(root.path()), &mut rendered);
         let blocks = texts(&rendered);
         assert_eq!(blocks.len(), 2, "{blocks:?}");
-        let after = tracedecay_tokenizer::count_ordinary_tokens(&blocks[0]).expect("tokenizer");
         assert_eq!(
             blocks[1],
-            format!("\ntracedecay_metrics: before=10 after={after}")
+            format!(
+                "\ntracedecay_metrics: before=10 after={} unit=bytes/4",
+                blocks[0].len() / 4
+            )
         );
     }
 }

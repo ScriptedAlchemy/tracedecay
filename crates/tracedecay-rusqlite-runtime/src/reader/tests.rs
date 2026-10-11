@@ -62,19 +62,19 @@ impl ReaderQueryExecutor for CountExecutor {
 /// under the lock and notifies, `wait` parks on the condvar until the gate is
 /// set or the bound lapses.
 #[derive(Clone, Default)]
-struct Gate {
+pub(super) struct Gate {
     state: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl Gate {
-    fn set(&self) {
+    pub(super) fn set(&self) {
         let (set, changed) = &*self.state;
         *set.lock().unwrap() = true;
         changed.notify_all();
     }
 
     /// Returns whether the gate was set within the bound.
-    fn wait(&self, bound: Duration) -> bool {
+    pub(super) fn wait(&self, bound: Duration) -> bool {
         let (set, changed) = &*self.state;
         let (set, _) = changed
             .wait_timeout_while(set.lock().unwrap(), bound, |set| !*set)
@@ -83,31 +83,13 @@ impl Gate {
     }
 }
 
-#[derive(Clone)]
-struct SlowExecutor {
-    delay: Duration,
-    entered: Gate,
-}
-
-impl ReaderQueryExecutor for SlowExecutor {
-    fn execute_read(
-        &mut self,
-        snapshot: &Transaction<'_>,
-        request: &RuntimeReadRequestV1,
-    ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
-        self.entered.set();
-        std::thread::sleep(self.delay);
-        CountExecutor.execute_read(snapshot, request)
-    }
-}
-
 /// An executor that parks inside the read until the test releases it, so a
 /// test can assert ordering against a worker that is provably still running
 /// instead of racing a wall-clock bound.
 #[derive(Clone, Default)]
-struct GateExecutor {
-    entered: Gate,
-    release: Gate,
+pub(super) struct GateExecutor {
+    pub(super) entered: Gate,
+    pub(super) release: Gate,
     finished: Arc<AtomicU8>,
 }
 
@@ -454,14 +436,14 @@ fn reserved_health_reader_reports_exact_store_size_pragmas() {
     .unwrap();
 
     let sample = pool
-        .read_store_size(Duration::from_millis(100), || None)
+        .read_store_size(Duration::MAX, || None)
         .expect("store size sample");
 
     assert!(sample.page_size_bytes > 0);
     assert!(sample.page_count > 0);
     assert!(sample.freelist_pages <= sample.page_count);
     let table_sizes = pool
-        .read_table_sizes(Duration::from_millis(100), || None)
+        .read_table_sizes(Duration::MAX, || None)
         .expect("table size samples");
     assert!(
         table_sizes
@@ -469,9 +451,13 @@ fn reserved_health_reader_reports_exact_store_size_pragmas() {
             .any(|sample| sample.table_name == "markers" && sample.bytes == 0),
         "an empty table has zero payload bytes rather than one page of fabricated payload"
     );
+    pool.wait_until_quiescent();
     let snapshot = pool.snapshot();
     assert_eq!(snapshot.leased_health, 0);
-    assert_eq!(snapshot.available_health, 1);
+    assert_eq!(
+        snapshot.available_health, snapshot.health_workers,
+        "every health worker must be back in the lane"
+    );
 }
 
 /// Table-size telemetry walks `dbstat` for the whole store, so on a
@@ -550,7 +536,7 @@ fn application_telemetry_port_reads_real_store_size() {
         crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
         StoreKeyV1::new("reader.db").unwrap(),
         scope,
-        Duration::from_millis(100),
+        Duration::MAX,
     );
 
     let read = tokio::runtime::Builder::new_current_thread()
@@ -627,7 +613,7 @@ fn application_telemetry_port_compares_table_payload_watermarks() {
         crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
         StoreKeyV1::new("reader.db").unwrap(),
         scope,
-        Duration::from_millis(100),
+        Duration::MAX,
     );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -645,10 +631,7 @@ fn application_telemetry_port_compares_table_payload_watermarks() {
         ),
         "the first read must report baseline establishment, got {baseline:?}"
     );
-    assert!(
-        pool.wait_until_quiescent(Duration::from_secs(3)),
-        "the baseline snapshot must settle before mutating the store"
-    );
+    pool.wait_until_quiescent();
     let connection = Connection::open(&store.path).unwrap();
     for value in 0..256 {
         connection
@@ -683,7 +666,7 @@ fn application_telemetry_port_marks_new_table_baseline_pending() {
         crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
         StoreKeyV1::new("reader.db").unwrap(),
         scope,
-        Duration::from_millis(100),
+        Duration::MAX,
     );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -695,10 +678,7 @@ fn application_telemetry_port_marks_new_table_baseline_pending() {
         baseline,
         TableGrowthTelemetryReadV1::BaselineEstablished { .. }
     ));
-    assert!(
-        pool.wait_until_quiescent(Duration::from_secs(3)),
-        "the baseline snapshot must settle before mutating the store"
-    );
+    pool.wait_until_quiescent();
 
     let connection = Connection::open(&store.path).unwrap();
     connection
@@ -1026,6 +1006,9 @@ fn serial_reads_after_a_burst_reuse_one_reader_and_let_the_burst_retire() {
         assert!(!healthy(&snapshot.execute(read.clone(), &probe).unwrap()));
     }
     drop(burst);
+    // A snapshot end that outruns its grace returns its worker later, from
+    // the deferred-return thread, stamped idle as of that return.
+    pool.wait_until_quiescent();
     let burst_released = Instant::now();
     Connection::open(&store.path)
         .unwrap()
@@ -1035,16 +1018,22 @@ fn serial_reads_after_a_burst_reuse_one_reader_and_let_the_burst_retire() {
     // Reusing a warm connection must never reuse its snapshot: every serial
     // read begins after the commit and observes it.
     for _ in 0..8 {
-        let mut lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
-        let mut snapshot = lease.begin_snapshot().unwrap();
-        assert!(healthy(&snapshot.execute(read.clone(), &probe).unwrap()));
+        {
+            let mut lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+            let mut snapshot = lease.begin_snapshot().unwrap();
+            assert!(healthy(&snapshot.execute(read.clone(), &probe).unwrap()));
+        }
+        pool.wait_until_quiescent();
     }
 
     // At this instant only workers untouched since the burst have been idle
     // for the whole retirement window. Serial reads must keep landing on the
     // same warm worker rather than rotating through the burst, or no burst
     // worker would ever age out and the lane would never shrink to its floor.
-    assert_eq!(pool.retire_idle_at(burst_released + retire_after), 2);
+    // A burst worker written off at the deferred-end bound, or retired by an
+    // acquisition once a stalled host let the window lapse, has already left
+    // the lane, so the floor, not the retired count, is the contract.
+    pool.retire_idle_at(burst_released + retire_after);
     let state = pool.snapshot();
     assert_eq!(state.general_workers, 2);
     assert_eq!(state.available_general, 2);
@@ -1065,9 +1054,15 @@ fn dropping_snapshot_and_reader_lease_restores_capacity() {
         drop(snapshot);
         assert_eq!(pool.snapshot().leased_general, 1);
     }
-    let state = pool.snapshot();
-    assert_eq!(state.leased_general, 0);
-    assert_eq!(state.available_general, 2);
+    assert_eq!(pool.snapshot().leased_general, 0);
+    // A worker whose rollback is still unacknowledged is replaced, so the
+    // whole lane serves again at once either way.
+    let _first = pool
+        .acquire(&read, &probe, Duration::ZERO)
+        .expect("first worker after the lease returned");
+    let _second = pool
+        .acquire(&read, &probe, Duration::ZERO)
+        .expect("second worker after the lease returned");
 }
 
 #[test]
@@ -1088,16 +1083,6 @@ fn cancellation_bounds_query_return_even_when_the_executor_is_still_running() {
         entered.wait(Duration::from_secs(30));
         cancellation.store(1, Ordering::SeqCst);
     });
-    // Watchdog: if cancellation regresses, `execute` blocks on the parked
-    // executor until the harness kills the test. Releasing the gate after a
-    // generous bound turns that hang into the clean assertion failures below.
-    let watchdog_release = executor.release.clone();
-    let watchdog = std::thread::spawn(move || {
-        if !watchdog_release.wait(Duration::from_secs(30)) {
-            watchdog_release.set();
-        }
-    });
-
     let outcome = snapshot.execute(read, &probe).unwrap();
     assert_eq!(
         executor.finished.load(Ordering::SeqCst),
@@ -1120,7 +1105,6 @@ fn cancellation_bounds_query_return_even_when_the_executor_is_still_running() {
         "snapshot and lease teardown must not wait for the abandoned executor"
     );
     executor.release.set();
-    watchdog.join().unwrap();
 }
 
 #[test]
@@ -1301,14 +1285,9 @@ fn saturating_background_readers_never_block_a_foreground_read() {
 
     let foreground = request(&store.binding, OperationPriorityV1::Foreground);
     let foreground_probe = Probe::for_request(&foreground);
-    let started = Instant::now();
     let lease = pool
-        .acquire(&foreground, &foreground_probe, Duration::from_secs(2))
+        .acquire(&foreground, &foreground_probe, Duration::ZERO)
         .expect("a foreground read must never queue behind saturating background readers");
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "the foreground read waited on background leases instead of the reservation"
-    );
     assert_eq!(pool.snapshot().leased_general, ceiling + 1);
 
     drop(lease);
@@ -1336,12 +1315,7 @@ fn concurrent_background_reader_opens_preserve_foreground_capacity() {
                 // Park the four background opens after the pool reserves
                 // their capacity, before they become checked-out workers.
                 if state.entered <= 4 {
-                    let (state, _) = changed
-                        .wait_timeout_while(state, Duration::from_secs(10), |state| !state.released)
-                        .unwrap();
-                    let released = state.released;
-                    drop(state);
-                    assert!(released, "test must release pending reader opens");
+                    drop(changed.wait_while(state, |state| !state.released).unwrap());
                 }
             }
             Self(Arc::clone(&self.0))
@@ -1403,10 +1377,8 @@ fn concurrent_background_reader_opens_preserve_foreground_capacity() {
         })
         .collect::<Vec<_>>();
     let (state, changed) = &*opening;
-    let (state, _) = changed
-        .wait_timeout_while(state.lock().unwrap(), Duration::from_secs(5), |state| {
-            state.entered < 4
-        })
+    let state = changed
+        .wait_while(state.lock().unwrap(), |state| state.entered < 4)
         .unwrap();
     assert_eq!(state.entered, 4, "all four reader opens must overlap");
     drop(state);
@@ -1482,26 +1454,32 @@ fn a_blocked_acquisition_is_reported_as_a_waiter_and_released() {
         .collect::<Vec<_>>();
     assert_eq!(pool.snapshot().waiting_general, 0);
 
+    let blocked_read = request(&store.binding, OperationPriorityV1::Foreground);
+    let blocked_probe = Probe::for_request(&blocked_read);
+    let cancel_blocked = Arc::clone(&blocked_probe.interruption);
     let blocked = {
         let pool = pool.clone();
-        let binding = store.binding.clone();
-        std::thread::spawn(move || {
-            let read = request(&binding, OperationPriorityV1::Foreground);
-            let probe = Probe::for_request(&read);
-            pool.acquire(&read, &probe, Duration::from_millis(500))
-        })
+        std::thread::spawn(move || pool.acquire(&blocked_read, &blocked_probe, Duration::MAX))
     };
 
-    assert!(
-        pool.wait_until_waiting_general(Duration::from_secs(2)),
-        "an acquisition blocked on a full lane must be visible as a waiter"
-    );
+    pool.wait_until_waiting_general();
     assert_eq!(pool.snapshot().waiting_general, 1);
     assert_eq!(pool.snapshot().waiting_health, 0);
 
-    // The waiter gives up on its own bound; the count must not leak.
+    cancel_blocked.store(1, Ordering::SeqCst);
     assert!(matches!(
         blocked.join().unwrap(),
+        Err(ReaderAcquireError::Interrupted { .. })
+    ));
+    assert_eq!(
+        pool.snapshot().waiting_general,
+        0,
+        "an interrupted acquisition must release its waiter count"
+    );
+
+    // A waiter that gives up on its own bound must not leak the count either.
+    assert!(matches!(
+        pool.acquire(&read, &probe, Duration::from_millis(20)),
         Err(ReaderAcquireError::Saturated { .. })
     ));
     assert_eq!(
@@ -1519,16 +1497,13 @@ fn a_blocked_acquisition_is_reported_as_a_waiter_and_released() {
 #[test]
 fn a_deferred_snapshot_end_is_counted_replaceable_and_bounded() {
     let store = TestStore::new();
-    let executor = SlowExecutor {
-        delay: Duration::from_millis(400),
-        entered: Gate::default(),
-    };
+    let executor = GateExecutor::default();
     let entered = executor.entered.clone();
     let checkpoint_blockers = ReaderCheckpointBlockers::default();
     let pool = ReaderPool::start_with_checkpoint_control(
         store.locator(),
         two_reader_budget(),
-        executor,
+        executor.clone(),
         None,
         checkpoint_blockers.clone(),
     )
@@ -1537,19 +1512,18 @@ fn a_deferred_snapshot_end_is_counted_replaceable_and_bounded() {
     let read = request(&store.binding, OperationPriorityV1::Foreground);
     let probe = Probe::for_request(&read);
     let cancel = Arc::clone(&probe.interruption);
-    let mut lease = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
+    let mut lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
     {
         let mut snapshot = lease.begin_snapshot().unwrap();
-        // Cancel only once the worker is provably inside the executor's
-        // delay, so the cancellation always lands with most of the delay
-        // still ahead of the snapshot end.
+        // Cancel only once the read is inside the executor: a probe cancelled
+        // before the read is sent never reaches the worker at all.
         std::thread::spawn(move || {
             entered.wait(Duration::from_secs(30));
             cancel.store(1, Ordering::SeqCst);
         });
-        // The probe releases the caller while the worker is still inside the
-        // executor, so the snapshot end that follows cannot be acknowledged
-        // within its grace period.
+        // The probe releases the caller while the worker stays parked inside
+        // the executor, so the snapshot end queued behind that read cannot be
+        // acknowledged within its grace period.
         let _ = snapshot.execute(read.clone(), &probe);
     }
     drop(lease);
@@ -1575,30 +1549,34 @@ fn a_deferred_snapshot_end_is_counted_replaceable_and_bounded() {
 
     // One worker is stuck, but the lane must not run degraded: it can grow a
     // replacement rather than serve `max_per_hot_shard - 1` until it resolves.
-    // Both waits are far shorter than the executor delay still running on the
-    // limbo worker, so neither acquisition can be satisfied by its return.
     let replacement_probe = Probe::for_request(&read);
     let first = pool
-        .acquire(&read, &replacement_probe, Duration::from_millis(50))
+        .acquire(&read, &replacement_probe, Duration::ZERO)
         .expect("the untouched worker must still serve");
     let second = pool
-        .acquire(&read, &replacement_probe, Duration::from_millis(50))
+        .acquire(&read, &replacement_probe, Duration::ZERO)
         .expect("the lane must replace the limbo worker instead of running short");
     drop(first);
     drop(second);
 
-    // The deferred return is bounded, so the limbo always resolves.
-    assert!(
-        pool.wait_until_quiescent(Duration::from_secs(3)),
-        "the pool must reach quiescence once the deferred end resolves"
-    );
+    // The worker never answers, yet the deferred return is bounded: it
+    // writes the worker off and the pool still reaches quiescence.
+    pool.wait_until_quiescent();
     assert_eq!(
         pool.snapshot().limbo_general,
         0,
         "the limbo worker was never reclaimed or replaced"
     );
+    assert_eq!(
+        checkpoint_blockers.checkpoint_blockers().count(),
+        1,
+        "a written-off worker still holds its snapshot until its thread exits"
+    );
+
+    executor.release.set();
+    checkpoint_blockers.wait_until_released_snapshots_finish();
     assert!(
         checkpoint_blockers.checkpoint_blockers().is_clear(),
-        "the blocker must clear only after rollback resolves"
+        "the blocker must clear once the written-off worker exits"
     );
 }

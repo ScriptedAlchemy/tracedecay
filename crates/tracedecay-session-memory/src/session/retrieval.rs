@@ -500,9 +500,8 @@ fn map_report(
         SessionDataFreshness::Partial { generation_lag } => generation_lag.max(1),
         SessionDataFreshness::Fresh | SessionDataFreshness::Stored { .. } => 0,
     };
-    let omitted = coverage_omitted
-        .max(explicit_omitted)
-        .max(freshness_omitted);
+    let record_omitted = coverage_omitted.max(explicit_omitted);
+    let omitted = record_omitted.max(freshness_omitted);
     let has_partial_coverage =
         omitted != 0 || !omissions.is_empty() || !result.summary_omissions.is_empty();
     if result.ranked.is_empty() {
@@ -573,6 +572,7 @@ fn map_report(
                 items: vec![result],
                 freshness,
                 omitted,
+                record_omitted,
             };
         }
         if has_partial_coverage || result.next_cursor.is_some() || coverage.visible != 0 {
@@ -600,6 +600,7 @@ fn map_report(
             items: vec![result],
             freshness,
             omitted,
+            record_omitted,
         };
     }
     SessionRetrievalOutcome::Complete {
@@ -636,6 +637,7 @@ fn map_execution_error(
             items: Vec::new(),
             freshness,
             omitted: generation_lag.max(1),
+            record_omitted: 0,
         },
         SessionTemporalExecutionError::Empty { freshness } => {
             SessionRetrievalOutcome::CompleteZero { freshness }
@@ -1632,6 +1634,7 @@ mod tests {
                 items: Vec::new(),
                 freshness,
                 omitted: 1,
+                record_omitted: 0,
             }
         );
     }

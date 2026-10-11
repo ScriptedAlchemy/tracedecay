@@ -597,6 +597,8 @@ async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_
         "distinct_tools_called",
         "defined_tool_count",
         "zero_call_tools",
+        "maximal_defined_tool_count",
+        "unavailable_public_call_names",
     ] {
         assert!(
             tools.get(retired).is_none(),
@@ -610,9 +612,6 @@ async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_
     let available_defined_tool_count = tools["available_defined_tool_count"]
         .as_i64()
         .expect("available defined tool count");
-    let maximal_defined_tool_count = tools["maximal_defined_tool_count"]
-        .as_i64()
-        .expect("maximal defined tool count");
     let zero_call_count = tools["zero_call_available_defined_tools"]["count"]
         .as_i64()
         .expect("zero-call available defined tool count");
@@ -624,7 +623,6 @@ async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_
             + zero_call_count,
         "available catalog membership must partition into called and zero-call tools"
     );
-    assert!(maximal_defined_tool_count >= available_defined_tool_count);
 
     assert_eq!(
         tools["aliased_call_names"],
@@ -720,7 +718,6 @@ async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_
         "- **mcp__tracedecay__tracedecay_context** → **tracedecay_context** - 1 calls, 0 errors",
         "- **tracedecay_admin_cli** - 1 calls, 0 errors",
         "- **tracedecay_removed_tool** - 1 calls, 1 errors",
-        "#### Unavailable Public Call Names\n_None._",
     ] {
         assert!(text.contains(line), "missing `{line}` in:\n{text}");
     }
@@ -731,7 +728,7 @@ async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn analytics_keeps_host_unavailable_public_routes_out_of_internal_calls() {
+async fn analytics_counts_a_rewrite_call_as_an_available_tool() {
     let fixture = production_composition_fixture().await;
     let project_id = RegisteredGlobalDb::canonical_project_key(&fixture.project_root);
     let timestamp = current_timestamp() - 60;
@@ -745,7 +742,7 @@ async fn analytics_keeps_host_unavailable_public_routes_out_of_internal_calls() 
         .harness
         .append_profile_analytics_events_for_test(&[event])
         .await
-        .expect("seeding a maximal public route event should succeed");
+        .expect("seeding a public route event should succeed");
     let server = fixture
         .harness
         .server(&fixture.project_root)
@@ -759,34 +756,15 @@ async fn analytics_keeps_host_unavailable_public_routes_out_of_internal_calls() 
     .await;
     let payload = extract_json(&response);
     let tools = &payload["tools"];
-    let ast_grep_rewrite_is_available = tracedecay_mcp::get_tool_definitions()
-        .expect("available tool definitions")
-        .iter()
-        .any(|definition| definition.name == "tracedecay_ast_grep_rewrite");
-
-    if ast_grep_rewrite_is_available {
-        assert_eq!(
-            tools["called_available_defined_tool_count"].as_i64(),
-            Some(1)
-        );
-        assert_eq!(tools["unavailable_public_call_names"], json!([]));
-    } else {
-        assert_eq!(
-            tools["called_available_defined_tool_count"].as_i64(),
-            Some(0)
-        );
-        assert_eq!(
-            tools["unavailable_public_call_names"],
-            json!([{
-                "event_name": "tracedecay_ast_grep_rewrite",
-                "canonical_tool_name": "tracedecay_ast_grep_rewrite",
-                "calls": 1,
-                "errors": 1,
-            }])
-        );
-    }
-    assert_eq!(tools["bound_internal_call_names"], json!([]));
-    assert_eq!(tools["unknown_or_retired_call_names"], json!([]));
+    assert_eq!(
+        tools["top_tools"],
+        json!([{
+            "tool_name": "tracedecay_ast_grep_rewrite",
+            "tier": "edit",
+            "calls": 1,
+            "errors": 1,
+        }])
+    );
 
     drop(server);
     fixture.harness.shutdown().await;

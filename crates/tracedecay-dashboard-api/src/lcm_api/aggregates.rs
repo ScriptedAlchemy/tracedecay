@@ -95,6 +95,7 @@ where
                 "limit": limit,
                 "counts": {
                     "message_count": page.stats.message_count,
+                    "unpublished_message_count": page.stats.unpublished_message_count,
                     "summary_node_count": page.stats.summary_node_count,
                     "summary_token_count": page.stats.summary_token_count,
                     "source_token_count": page.stats.source_token_count

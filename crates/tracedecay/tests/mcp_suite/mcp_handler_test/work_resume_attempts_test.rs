@@ -6,7 +6,8 @@
 //! process is gone. A live provider holder is a conflict, and a settled
 //! attempt is left sealed. Shutdown would run the cancellation ladder and
 //! settle the child recovery is supposed to find still open, so the live
-//! daemon is a separate process stopped with SIGKILL.
+//! daemon is a separate process stopped with SIGKILL. Its provider must die
+//! with it rather than keep running after recovery fences the attempt.
 
 use crate::common::die_with_test_process;
 use crate::common::fixture::git_capture;
@@ -48,6 +49,7 @@ const CRASH_ROOT_ENV: &str = "TRACEDECAY_WORK_RESUME_ATTEMPTS_ROOT";
 const CRASH_READY_FILE: &str = "resume-attempts-ready";
 const CRASH_EVIDENCE_FILE: &str = "resume-attempts-evidence.json";
 const CRASH_LOG_FILE: &str = "resume-attempts-child.log";
+const PROVIDER_PID_FILE: &str = "resume-attempts-provider.pid";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LiveDaemonEvidence {
@@ -312,6 +314,8 @@ async fn kill_live_daemon(isolation: &Path) -> LiveDaemonEvidence {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    #[cfg(target_os = "linux")]
+    let provider = held_provider(isolation);
     assert_eq!(
         kill_process_group(child.id()),
         0,
@@ -324,6 +328,8 @@ async fn kill_live_daemon(isolation: &Path) -> LiveDaemonEvidence {
         "the live daemon must die by SIGKILL so shutdown cannot settle the open attempt: {status}; {}",
         child_log(&log_path)
     );
+    #[cfg(target_os = "linux")]
+    assert_provider_died_with_daemon(&provider);
     let bytes = std::fs::read(isolation.join(CRASH_EVIDENCE_FILE)).unwrap_or_else(|error| {
         panic!(
             "lost the live daemon's MCP evidence ({error}): {}",
@@ -351,6 +357,9 @@ async fn hold_provider_until_killed() {
         .expect("write MCP evidence");
     evidence_file.sync_all().expect("sync MCP evidence");
     drop(evidence_file);
+    while recorded_provider_pid(&isolation).is_none() {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     std::fs::write(isolation.join(CRASH_READY_FILE), b"held").expect("ready file");
     // The parent SIGKILLs this process. Dropping the harness here would shut
     // the daemon down and settle the attempt recovery has to find still open.
@@ -371,6 +380,61 @@ fn kill_process_group(pid: u32) -> i32 {
         return 0;
     }
     panic!("could not SIGKILL process group {pgid}: {error}");
+}
+
+/// The pid the held provider wrote once it was running, complete only after
+/// its trailing newline.
+fn recorded_provider_pid(isolation: &Path) -> Option<i32> {
+    std::fs::read_to_string(isolation.join(PROVIDER_PID_FILE))
+        .ok()?
+        .strip_suffix('\n')?
+        .parse()
+        .ok()
+}
+
+/// A pidfd pins the provider itself, so a recycled pid can never answer for it.
+#[cfg(target_os = "linux")]
+fn held_provider(isolation: &Path) -> std::os::fd::OwnedFd {
+    use std::os::fd::FromRawFd;
+    let pid =
+        recorded_provider_pid(isolation).expect("the crash child waited for the provider pid");
+    // SAFETY: pidfd_open takes a pid and flags and returns a new descriptor.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    assert!(
+        fd >= 0,
+        "pidfd_open({pid}) on the held provider: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `fd` is a freshly opened descriptor that nothing else owns.
+    unsafe { std::os::fd::OwnedFd::from_raw_fd(i32::try_from(fd).expect("pidfd fits RawFd")) }
+}
+
+/// A daemon killed outright runs no cleanup, so only the kernel can stop the
+/// provider it was supervising. Ten seconds is far past signal delivery.
+#[cfg(target_os = "linux")]
+fn assert_provider_died_with_daemon(provider: &std::os::fd::OwnedFd) {
+    use std::os::fd::AsRawFd;
+    let mut exited = libc::pollfd {
+        fd: provider.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd for the duration of the call.
+    let ready = unsafe { libc::poll(&mut exited, 1, 10_000) };
+    if ready == 1 {
+        return;
+    }
+    // SAFETY: signals exactly the pidfd's process, never a reused pid.
+    unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            provider.as_raw_fd(),
+            libc::SIGKILL,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        );
+    }
+    panic!("the held provider outlived its SIGKILLed daemon (poll returned {ready})");
 }
 
 fn child_log(path: &Path) -> String {
@@ -697,7 +761,11 @@ async fn configure_hold_provider(
     project_root: &Path,
     isolation_root: &Path,
 ) {
-    let script = b"#!/bin/sh\ninput=$(cat)\ncase \"$input\" in\n  *resume-hold*)\n    while :; do sleep 30; done;;\nesac\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\"}'\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}'\nexit 0\n";
+    let script = format!(
+        "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in\n  *resume-hold*)\n    printf '%s\\n' $$ > '{}'\n    while :; do sleep 30; done;;\nesac\nprintf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\"}}'\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}}'\nexit 0\n",
+        isolation_root.join(PROVIDER_PID_FILE).display()
+    );
+    let script = script.as_bytes();
     let executable_path = isolation_root.join("work-resume-provider");
     write_executable_script(&executable_path, script).expect("write hold provider");
     let executable_path = executable_path

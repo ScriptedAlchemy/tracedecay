@@ -39,7 +39,7 @@ fn catch_up_state(kind: CatchUp) -> Arc<SessionTemporalRefreshWakeState> {
         }
         CatchUp::Blocked => {
             state.record_history_outcome(SessionHistoricalIngestOutcome::Blocked {
-                reason_code: "invalid_observation_contract",
+                reason_code: "invalid_observation_contract".to_owned(),
                 made_progress: false,
             });
         }

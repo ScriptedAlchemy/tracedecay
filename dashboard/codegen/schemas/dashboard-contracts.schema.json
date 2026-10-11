@@ -12947,10 +12947,15 @@
             "integer",
             "null"
           ]
+        },
+        "unpublished_message_count": {
+          "format": "int64",
+          "type": "integer"
         }
       },
       "required": [
         "message_count",
+        "unpublished_message_count",
         "summary_node_count",
         "summary_token_count",
         "source_token_count",
@@ -15773,10 +15778,15 @@
             "integer",
             "null"
           ]
+        },
+        "unpublished_message_count": {
+          "format": "int64",
+          "type": "integer"
         }
       },
       "required": [
         "message_count",
+        "unpublished_message_count",
         "summary_node_count",
         "summary_token_count",
         "source_token_count"

@@ -43,7 +43,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-agent-hosts__+token-counting__ddc3d1b81b0",
+    name = "tracedecay-agent-hosts__+token-counting__dbd99c2c9bd",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_agent_hosts",
@@ -60,7 +60,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-agent-hosts__d9a06115b1d",
+    name = "tracedecay-agent-hosts__da0499c23c0",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_agent_hosts",

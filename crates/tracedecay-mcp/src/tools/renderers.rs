@@ -336,10 +336,6 @@ fn append_analytics_tools(md: &mut Md, tools: &Value) {
         "available defined tool count",
         &render::field_i64(tools, "available_defined_tool_count").to_string(),
     );
-    md.field(
-        "maximal defined tool count",
-        &render::field_i64(tools, "maximal_defined_tool_count").to_string(),
-    );
     if let Some(tiers) = tools.get("tiers").and_then(Value::as_array) {
         md.blank().heading(4, "By Tier");
         for tier in tiers {
@@ -394,11 +390,6 @@ fn append_analytics_tools(md: &mut Md, tools: &Value) {
             "bound_internal_call_names",
             "Bound Internal Call Names",
             false,
-        ),
-        (
-            "unavailable_public_call_names",
-            "Unavailable Public Call Names",
-            true,
         ),
         (
             "unknown_or_retired_call_names",

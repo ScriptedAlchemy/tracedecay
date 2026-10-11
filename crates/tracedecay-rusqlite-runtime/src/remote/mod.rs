@@ -887,8 +887,7 @@ fn validate_final_schema(handle: &ExactSqlHandle) -> Result<(), RemoteSqliteStor
              ORDER BY name"
         ),
         contract_tables.clone(),
-    )
-    .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
+    )?;
     let names = rows
         .rows
         .iter()
@@ -910,8 +909,7 @@ fn validate_final_schema(handle: &ExactSqlHandle) -> Result<(), RemoteSqliteStor
              ORDER BY tables.name, columns.cid"
         ),
         contract_tables,
-    )
-    .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
+    )?;
     let columns = columns
         .rows
         .iter()
@@ -929,8 +927,7 @@ fn validate_final_schema(handle: &ExactSqlHandle) -> Result<(), RemoteSqliteStor
         handle,
         "SELECT contract_id FROM remote_store_contract WHERE singleton = 1",
         Vec::new(),
-    )
-    .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
+    )?;
     match marker.rows.as_slice() {
         [row]
             if matches!(

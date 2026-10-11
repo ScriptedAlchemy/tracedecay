@@ -1,6 +1,6 @@
 use std::{
     sync::atomic::{AtomicUsize, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use tempfile::TempDir;
@@ -16,7 +16,7 @@ use crate::{
     reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
 };
 
-use super::*;
+use super::{clock::fake::FakeClock, *};
 
 struct AtomicWriteAuthority(Arc<AtomicBool>);
 
@@ -30,50 +30,55 @@ impl ExactSqlWriteAuthority for AtomicWriteAuthority {
     }
 }
 
-/// Drives the writer thread's fake lease clock from inside the lease it
-/// probes: authority verification is the only test code that runs on the
-/// writer thread. `run_transaction` verifies with `Execute` intent exactly
-/// twice per bounded step, before and after execution, so every even check
-/// is the pre-step hook.
-struct LeaseClockAdvancingAuthority {
-    step: Duration,
-    execute_checks: AtomicUsize,
+/// Puts the writer thread on `clock`, so the test holding `clock` decides when
+/// every writer-side deadline passes. Authority verification is the only test
+/// code that runs on the writer thread, and a transaction's begin check runs
+/// before the writer computes its lease deadlines.
+///
+/// `advance`, when set, moves the clock at every check of its intent. The
+/// writer checks a command's lease before that verification and computes the
+/// statement's own deadline after it.
+struct FakeClockAuthority {
+    clock: Arc<FakeClock>,
+    advance: Option<(ExactSqlWriteIntent, Duration)>,
 }
 
-impl LeaseClockAdvancingAuthority {
-    fn fake_elapsed(&self) -> Duration {
-        let steps = self.execute_checks.load(Ordering::Acquire).div_ceil(2);
-        self.step * u32::try_from(steps).unwrap()
+impl FakeClockAuthority {
+    fn installing(clock: &Arc<FakeClock>) -> Arc<Self> {
+        Arc::new(Self {
+            clock: Arc::clone(clock),
+            advance: None,
+        })
     }
 }
 
-impl ExactSqlWriteAuthority for LeaseClockAdvancingAuthority {
+impl ExactSqlWriteAuthority for FakeClockAuthority {
     fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
-        if intent == ExactSqlWriteIntent::Execute
-            && self
-                .execute_checks
-                .fetch_add(1, Ordering::AcqRel)
-                .is_multiple_of(2)
+        self.clock.install();
+        if let Some((advance_intent, by)) = self.advance
+            && advance_intent == intent
         {
-            command::lease_clock::advance(self.step);
+            self.clock.advance(by);
         }
         Ok(())
     }
 }
 
 struct SlowSchemaAuthority {
+    clock: Arc<FakeClock>,
     execute_batch_checks: AtomicUsize,
 }
 
 impl ExactSqlWriteAuthority for SlowSchemaAuthority {
     fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
-        // Three slow checks must push the whole batch past the ordinary
-        // per-statement deadline, whatever the test-mode limit is calibrated
-        // to, so the revalidated batch provably carries no guessed deadline.
+        self.clock.install();
+        // The check before the batch and two from its progress callbacks
+        // together pass the ordinary per-statement deadline, so the
+        // revalidated batch provably carries none.
         if intent == ExactSqlWriteIntent::ExecuteBatch
             && self.execute_batch_checks.fetch_add(1, Ordering::AcqRel) < 3
         {
-            std::thread::sleep(EXACT_SQL_EXECUTION_LIMIT / 2);
+            self.clock.advance(EXACT_SQL_EXECUTION_LIMIT / 2);
         }
         Ok(())
     }

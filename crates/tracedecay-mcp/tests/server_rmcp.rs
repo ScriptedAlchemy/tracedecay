@@ -85,7 +85,7 @@ impl McpConnectionContext for TestContext {
             let id = request.cloned_id()?;
             let result = match request.method() {
                 "initialize" => {
-                    tracedecay_mcp::server::initialize_result("9.8.7", "RMCP transport test")
+                    tracedecay_mcp::server::initialize_result("9.8.7", "RMCP transport test", None)
                 }
                 "tools/list" => json!({"tools": []}),
                 "resources/list" => json!({"resources": []}),

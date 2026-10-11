@@ -135,22 +135,6 @@ fn diagnostics_public_name_preserves_one_shipped_flat_request_schema() {
 }
 
 #[test]
-fn ast_grep_rewrite_discovery_matches_host_availability() {
-    let tools = get_tool_definitions().expect("tool definitions");
-    let tool_names = tools
-        .iter()
-        .map(|tool| tool.name.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-
-    assert!(tool_names.contains("tracedecay_ast_grep_search"));
-    assert_eq!(
-        tool_names.contains("tracedecay_ast_grep_rewrite"),
-        tracedecay_mcp::ast_grep_available(),
-        "CLI-backed rewrite discovery must match host availability"
-    );
-}
-
-#[test]
 fn fact_store_curate_exposes_only_caller_owned_bounds() {
     let tools = get_tool_definitions().expect("tool definitions");
     let tool = tools
@@ -249,9 +233,6 @@ fn work_definitions_cover_the_canonical_operation_registry() {
 fn format_capable_tools_advertise_markdown_json_without_tables() {
     let tools = get_tool_definitions().expect("tool definitions");
     for tool_name in tracedecay_mcp::format_capable_tool_names() {
-        if *tool_name == "tracedecay_ast_grep_rewrite" && !tracedecay_mcp::ast_grep_available() {
-            continue;
-        }
         let tool = tools
             .iter()
             .find(|tool| tool.name == *tool_name)

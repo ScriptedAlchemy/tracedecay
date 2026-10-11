@@ -17,7 +17,14 @@ use super::{
 };
 
 async fn mounted_registry(fixture: &GitFixture, store: &TempDir) -> CodeIndexSchedulerRegistryV1 {
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    mount_registry(CodeIndexSchedulerRegistryV1::new(1), fixture, store).await
+}
+
+async fn mount_registry(
+    registry: CodeIndexSchedulerRegistryV1,
+    fixture: &GitFixture,
+    store: &TempDir,
+) -> CodeIndexSchedulerRegistryV1 {
     registry
         .mount_worktree(
             test_project_id(),
@@ -120,7 +127,19 @@ async fn cancelled_generation_wait_rolls_back_prepared_branch_metadata() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let project_id = test_project_id();
-    let registry = mounted_registry(&fixture, &store).await;
+    let registry = mount_registry(
+        CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1),
+        &fixture,
+        &store,
+    )
+    .await;
+    // Keep the branch's generation from building, so the cancellation always
+    // lands before the publication can finish.
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold the branch generation at its dequeue point");
     std::fs::write(
         fixture.path().join("src/lib.rs"),
         b"pub fn changed_after_mount() {}\n",
@@ -175,6 +194,7 @@ async fn cancelled_generation_wait_rolls_back_prepared_branch_metadata() {
             .is_some_and(|meta| !meta.is_tracked("cancelled-publication")),
         "cancelled generation wait must roll back prepared metadata"
     );
+    drop(admission);
     registry.shutdown().await;
 }
 

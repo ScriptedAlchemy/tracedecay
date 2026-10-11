@@ -952,22 +952,20 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
         }),
     });
 
-    if ast_grep_on_path() {
-        groups.push(ToolGroup {
-            tool: "tracedecay_ast_grep_rewrite",
-            queries: five(|i| {
-                let path = scratch(&format!("rewrite_{i}.rs"));
-                Query::write(
-                    "replace_call",
-                    "tracedecay_ast_grep_rewrite",
-                    json!({"path": path, "pattern": "old()", "rewrite": "new()", "format": "json"}),
-                    path.clone(),
-                    "fn run() { old(); }\n".to_owned(),
-                    "fn run() { new(); }\n".to_owned(),
-                )
-            }),
-        });
-    }
+    groups.push(ToolGroup {
+        tool: "tracedecay_ast_grep_rewrite",
+        queries: five(|i| {
+            let path = scratch(&format!("rewrite_{i}.rs"));
+            Query::write(
+                "replace_call",
+                "tracedecay_ast_grep_rewrite",
+                json!({"path": path, "pattern": "old()", "rewrite": "new()", "format": "json"}),
+                path.clone(),
+                "fn run() { old(); }\n".to_owned(),
+                "fn run() { new(); }\n".to_owned(),
+            )
+        }),
+    });
     let queries = (0..5)
         .filter_map(|i| {
             ast_search_args(ctx, i)
@@ -981,18 +979,4 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
         });
     }
     groups
-}
-
-/// Mirrors `tracedecay_mcp::ast_grep_available` without depending on
-/// internal-module visibility: shells out to `ast-grep --version`. Cached
-/// for the lifetime of the bench process.
-fn ast_grep_on_path() -> bool {
-    use std::sync::OnceLock;
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        std::process::Command::new("ast-grep")
-            .arg("--version")
-            .output()
-            .is_ok_and(|o| o.status.success())
-    })
 }

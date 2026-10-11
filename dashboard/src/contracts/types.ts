@@ -2361,6 +2361,7 @@ export type ExplorerSessionCountsV1 = {
   summary_node_count: number;
   summary_token_count: number | null;
   token_estimate_total: number | null;
+  unpublished_message_count: number;
 };
 
 export type ExplorerSessionSizeV1 = {
@@ -2985,6 +2986,7 @@ export type LcmSessionCountsV1 = {
   source_token_count: number | null;
   summary_node_count: number;
   summary_token_count: number | null;
+  unpublished_message_count: number;
 };
 
 export type LcmSessionPayloadV1 = {
