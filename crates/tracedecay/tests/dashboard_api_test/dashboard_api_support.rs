@@ -85,6 +85,25 @@ pub(crate) struct DashboardFixture {
     pub(crate) server: DashboardServer,
 }
 
+/// Dashboard store and host runtime before the HTTP server opens readers.
+/// Large-history tests seed here so live dashboard connections cannot pin WAL
+/// across thousands of fixture writes.
+pub(crate) struct PreparedDashboardFixture {
+    tmp: TempDir,
+    pub(crate) project_id: String,
+    pub(crate) global_db_path: std::path::PathBuf,
+    pub(crate) project_root: std::path::PathBuf,
+    pub(crate) host_runtime: Arc<DashboardTestRuntimeV1>,
+    project_graphs: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
+    cg: TraceDecay,
+    mount_configuration_runtime: bool,
+    delivery_authority: Option<FakeDeliveryAuthority>,
+    git_correlation_authority: Option<
+        Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>,
+    >,
+    project_open: Option<ProjectOpenPublication>,
+}
+
 impl Drop for DashboardFixture {
     fn drop(&mut self) {
         self.server.stop();
@@ -1093,11 +1112,19 @@ for line in sys.stdin:
 }
 
 pub(crate) async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
-    start_dashboard_fixture_with_options(seed_lcm, true, false).await
+    serve_prepared_dashboard_fixture(prepare_dashboard_fixture(seed_lcm).await).await
 }
 
 pub(crate) async fn start_dashboard_fixture_without_memory() -> DashboardFixture {
-    start_dashboard_fixture_with_options(false, false, false).await
+    serve_prepared_dashboard_fixture(prepare_dashboard_fixture_without_memory().await).await
+}
+
+pub(crate) async fn prepare_dashboard_fixture(seed_lcm: bool) -> PreparedDashboardFixture {
+    prepare_dashboard_fixture_with_options(seed_lcm, true, false).await
+}
+
+pub(crate) async fn prepare_dashboard_fixture_without_memory() -> PreparedDashboardFixture {
+    prepare_dashboard_fixture_with_options(false, false, false).await
 }
 
 pub(crate) async fn start_dashboard_configuration_fixture() -> DashboardFixture {
@@ -1115,13 +1142,16 @@ pub(crate) async fn start_dashboard_retained_memory_fixture() -> DashboardFixtur
 pub(crate) async fn start_dashboard_fixture_with_delivery_authority(
     delivery_authority: FakeDeliveryAuthority,
 ) -> DashboardFixture {
-    start_dashboard_fixture_with_options_and_delivery(
-        false,
-        false,
-        false,
-        Some(delivery_authority),
-        None,
-        None,
+    serve_prepared_dashboard_fixture(
+        prepare_dashboard_fixture_with_options_and_delivery(
+            false,
+            false,
+            false,
+            Some(delivery_authority),
+            None,
+            None,
+        )
+        .await,
     )
     .await
 }
@@ -1132,13 +1162,16 @@ pub(crate) async fn start_dashboard_fixture_with_delivery_authority(
 pub(crate) async fn start_dashboard_fixture_while_opening(
     project_open: ProjectOpenPublication,
 ) -> DashboardFixture {
-    start_dashboard_fixture_with_options_and_delivery(
-        true,
-        false,
-        false,
-        None,
-        None,
-        Some(project_open),
+    serve_prepared_dashboard_fixture(
+        prepare_dashboard_fixture_with_options_and_delivery(
+            true,
+            false,
+            false,
+            None,
+            None,
+            Some(project_open),
+        )
+        .await,
     )
     .await
 }
@@ -1148,13 +1181,16 @@ pub(crate) async fn start_dashboard_fixture_while_opening(
 pub(crate) async fn start_dashboard_fixture_with_git_correlation_authority(
     git_correlation_authority: Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>,
 ) -> DashboardFixture {
-    start_dashboard_fixture_with_options_and_delivery(
-        false,
-        false,
-        false,
-        None,
-        Some(git_correlation_authority),
-        None,
+    serve_prepared_dashboard_fixture(
+        prepare_dashboard_fixture_with_options_and_delivery(
+            false,
+            false,
+            false,
+            None,
+            Some(git_correlation_authority),
+            None,
+        )
+        .await,
     )
     .await
 }
@@ -1164,7 +1200,23 @@ async fn start_dashboard_fixture_with_options(
     seed_memory: bool,
     mount_configuration_runtime: bool,
 ) -> DashboardFixture {
-    start_dashboard_fixture_with_options_and_delivery(
+    serve_prepared_dashboard_fixture(
+        prepare_dashboard_fixture_with_options(
+            seed_lcm,
+            seed_memory,
+            mount_configuration_runtime,
+        )
+        .await,
+    )
+    .await
+}
+
+async fn prepare_dashboard_fixture_with_options(
+    seed_lcm: bool,
+    seed_memory: bool,
+    mount_configuration_runtime: bool,
+) -> PreparedDashboardFixture {
+    prepare_dashboard_fixture_with_options_and_delivery(
         seed_lcm,
         seed_memory,
         mount_configuration_runtime,
@@ -1175,7 +1227,7 @@ async fn start_dashboard_fixture_with_options(
     .await
 }
 
-async fn start_dashboard_fixture_with_options_and_delivery(
+async fn prepare_dashboard_fixture_with_options_and_delivery(
     seed_lcm: bool,
     seed_memory: bool,
     mount_configuration_runtime: bool,
@@ -1184,7 +1236,7 @@ async fn start_dashboard_fixture_with_options_and_delivery(
         Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>,
     >,
     project_open: Option<ProjectOpenPublication>,
-) -> DashboardFixture {
+) -> PreparedDashboardFixture {
     let tmp = tempdir_or_panic();
     let tmp_root = canonical_existing_identity(tmp.path())
         .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
@@ -1228,6 +1280,38 @@ async fn start_dashboard_fixture_with_options_and_delivery(
     if seed_lcm {
         seed_lcm_fixture(&host_runtime, &project_root).await;
     }
+
+    PreparedDashboardFixture {
+        tmp,
+        project_id,
+        global_db_path,
+        project_root,
+        host_runtime,
+        project_graphs,
+        cg,
+        mount_configuration_runtime,
+        delivery_authority,
+        git_correlation_authority,
+        project_open,
+    }
+}
+
+pub(crate) async fn serve_prepared_dashboard_fixture(
+    prepared: PreparedDashboardFixture,
+) -> DashboardFixture {
+    let PreparedDashboardFixture {
+        tmp,
+        project_id,
+        global_db_path,
+        project_root,
+        host_runtime,
+        project_graphs,
+        cg,
+        mount_configuration_runtime,
+        delivery_authority,
+        git_correlation_authority,
+        project_open,
+    } = prepared;
     let port = pick_free_port();
     let (access, base_url) = dashboard_access_for(port);
     let server = spawn_dashboard_server_with_runner(
