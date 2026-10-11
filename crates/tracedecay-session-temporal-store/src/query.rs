@@ -376,6 +376,7 @@ pub(super) async fn read_observations(
                 return Err(error);
             }
         };
+        let mut page = Vec::new();
         while let Some(row) = rows
             .next()
             .await
@@ -392,11 +393,76 @@ pub(super) async fn read_observations(
             let encoded: String = row
                 .get(2)
                 .map_err(|error| storage(PERSIST_OPERATION, error))?;
-            let observation = decode_stored_observation(conn, &encoded, PERSIST_OPERATION).await?;
+            page.push((observation_id, sequence, encoded));
+        }
+        let mut page_hashes = HashSet::new();
+        for (_, _, encoded) in &page {
+            for hash in
+                collect_body_refs(encoded).map_err(|error| storage(PERSIST_OPERATION, error))?
+            {
+                page_hashes.insert(hash);
+            }
+        }
+        let bodies =
+            load_canonical_bodies(conn, &page_hashes, PERSIST_OPERATION).await?;
+        for (observation_id, sequence, encoded) in page {
+            let observation = parse_stored_observation(&encoded, |hash| {
+                bodies
+                    .get(hash)
+                    .cloned()
+                    .ok_or_else(|| CanonicalBodyError::Missing {
+                        content_hash: hash.to_owned(),
+                    })
+            })
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
             observations.insert(observation_id, (sequence, observation));
         }
     }
     Ok(observations)
+}
+
+/// Loads every distinct canonical body a page of observations references in
+/// one query instead of one query per body per observation. Bodies are keyed
+/// by content hash, so the returned map holds exactly the rows the equivalent
+/// per-hash selects would have produced; a hash absent from the map surfaces
+/// as the same `CanonicalBodyError::Missing` during the caller's decode.
+async fn load_canonical_bodies(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    hashes: &HashSet<String>,
+    operation: &'static str,
+) -> SessionStoreResult<HashMap<String, Vec<u8>>> {
+    let mut bodies = HashMap::new();
+    if hashes.is_empty() {
+        return Ok(bodies);
+    }
+    let hash_list = hashes.iter().cloned().collect::<Vec<_>>();
+    let hashes_json =
+        serde_json::to_string(&hash_list).map_err(|error| storage(operation, error))?;
+    let mut rows = conn
+        .query(
+            "SELECT content_hash, encoding, body, uncompressed_bytes
+             FROM session_canonical_bodies
+             WHERE content_hash IN (SELECT value FROM json_each(?1))",
+            params![hashes_json.as_str()],
+        )
+        .await
+        .map_err(|error| storage(operation, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(operation, error))?
+    {
+        let hash: String = row.get(0).map_err(|error| storage(operation, error))?;
+        let encoding: String = row.get(1).map_err(|error| storage(operation, error))?;
+        let blob: Vec<u8> = row.get(2).map_err(|error| storage(operation, error))?;
+        let uncompressed: i64 = row.get(3).map_err(|error| storage(operation, error))?;
+        bodies.insert(
+            hash.clone(),
+            unpack_body(&hash, &encoding, &blob, uncompressed)
+                .map_err(|error| storage(operation, error))?,
+        );
+    }
+    Ok(bodies)
 }
 
 fn observation_prefetch_exceeded_materialization_limit(error: &SessionStoreError) -> bool {
