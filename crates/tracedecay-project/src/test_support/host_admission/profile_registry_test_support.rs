@@ -12,24 +12,29 @@ impl HostAdmissionTestRuntimeV1 {
         self.profile_database.checkpoint().await;
     }
 
-    /// Writes a standalone copy of the live profile database for inspection.
+    /// Every row one read-only statement returns from the live session
+    /// database, read through its registered reader.
     #[doc(hidden)]
-    pub async fn snapshot_profile_database_for_test(&self, destination: &Path) -> Result<()> {
-        vacuum_into_for_test(self.profile_database.db_path(), destination).await
-    }
-
-    /// Writes a standalone copy of the live session database for inspection.
-    #[doc(hidden)]
-    pub async fn snapshot_session_database_for_test(
+    pub async fn read_session_database_for_test(
         &self,
         scope: HostAdmissionScope,
-        destination: &Path,
-    ) -> Result<()> {
-        vacuum_into_for_test(
-            self.session_database_for_test(scope)?.db_path(),
-            destination,
-        )
-        .await
+        sql: &str,
+    ) -> Result<Vec<tracedecay_runtime_core::db::engine::Row>> {
+        let database_error =
+            |error: tracedecay_runtime_core::db::engine::Error| TraceDecayError::Database {
+                operation: "read registered session database".to_owned(),
+                message: error.to_string(),
+            };
+        let snapshot = self
+            .session_database_for_test(scope)?
+            .read_snapshot()
+            .await?;
+        let mut rows = snapshot.query(sql, ()).await.map_err(database_error)?;
+        let mut collected = Vec::new();
+        while let Some(row) = rows.next().await.map_err(database_error)? {
+            collected.push(row);
+        }
+        Ok(collected)
     }
 
     #[doc(hidden)]
@@ -320,31 +325,4 @@ fn registered_registry_reap_entry(
         missing_path: entry.missing_path.clone(),
         project_id: entry.project_id.clone(),
     }
-}
-
-/// `VACUUM INTO` over a read-only connection: one read transaction yields a
-/// consistent standalone image of the live WAL database without the writer.
-async fn vacuum_into_for_test(source: &Path, destination: &Path) -> Result<()> {
-    let source = source.to_path_buf();
-    let destination = destination.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let connection = tracedecay_sql::Connection::open_with_flags(
-            &source,
-            tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        connection.execute(
-            "VACUUM INTO ?1",
-            [destination.to_string_lossy().into_owned()],
-        )?;
-        Ok::<(), tracedecay_sql::Error>(())
-    })
-    .await
-    .map_err(|error| TraceDecayError::Database {
-        operation: "join test database copy".to_owned(),
-        message: error.to_string(),
-    })?
-    .map_err(|error| TraceDecayError::Database {
-        operation: "copy test database".to_owned(),
-        message: error.to_string(),
-    })
 }

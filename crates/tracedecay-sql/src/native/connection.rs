@@ -36,12 +36,59 @@ const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
 /// One engine instance per file per process. POSIX record locks do not
 /// exclude the same process, so a second in-process open of a file shares the
-/// live instance instead of starting another engine on it.
-static OPEN_IDENTITIES: LazyLock<Mutex<HashMap<FileIdentity, Weak<Shared>>>> =
+/// live instance instead of starting another engine on it. This lock only
+/// finds a file's [`Slot`]; opens run under the slot, so a slow open holds up
+/// only opens of its own file.
+static OPEN_IDENTITIES: LazyLock<Mutex<HashMap<FileIdentity, Weak<Slot>>>> =
     LazyLock::new(Mutex::default);
 
-fn registry() -> std::sync::MutexGuard<'static, HashMap<FileIdentity, Weak<Shared>>> {
-    lock(&OPEN_IDENTITIES)
+/// One file's place in the registry. Its lock serializes the opens and the
+/// last close of that file.
+struct Slot {
+    identity: FileIdentity,
+    live: Mutex<Weak<Shared>>,
+}
+
+impl Slot {
+    fn for_identity(identity: FileIdentity) -> Arc<Self> {
+        let mut slots = lock(&OPEN_IDENTITIES);
+        if let Some(slot) = slots.get(&identity).and_then(Weak::upgrade) {
+            return slot;
+        }
+        let slot = Arc::new(Self {
+            identity,
+            live: Mutex::default(),
+        });
+        slots.insert(identity, Arc::downgrade(&slot));
+        slot
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut slots = lock(&OPEN_IDENTITIES);
+        if slots
+            .get(&self.identity)
+            .is_some_and(|slot| slot.strong_count() == 0)
+        {
+            slots.remove(&self.identity);
+        }
+    }
+}
+
+#[cfg(test)]
+type AdmitPause = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
+#[cfg(test)]
+thread_local! {
+    static ADMIT_PAUSE: RefCell<Option<AdmitPause>> = const { RefCell::new(None) };
+}
+
+/// The next format admission on this thread reports `entered`, then waits for
+/// `release`.
+#[cfg(test)]
+pub(super) fn pause_next_admit_on_this_thread(pause: AdmitPause) {
+    ADMIT_PAUSE.with(|slot| *slot.borrow_mut() = Some(pause));
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -231,7 +278,7 @@ pub struct Database {
 
 struct Shared {
     /// Set once the store is admitted and registered.
-    identity: OnceLock<FileIdentity>,
+    slot: OnceLock<Arc<Slot>>,
     engine: Option<Engine>,
     /// `(WAL checkpoint sequence, frames copied back)` after the driver's
     /// last checkpoint; the engine keeps its backfill count private.
@@ -247,20 +294,14 @@ struct Engine {
 impl Drop for Shared {
     fn drop(&mut self) {
         // An unregistered instance is dropped by its opener, which already
-        // holds the registry.
-        let Some(&identity) = self.identity.get() else {
+        // holds its slot.
+        let Some(slot) = self.slot.get() else {
             return;
         };
-        // The engine's descriptors close while the registry is held, so no
-        // reopen can lock the file before this instance has released it.
-        let mut registry = registry();
+        // The engine's descriptors close while the slot is held, so no reopen
+        // can lock the file before this instance has released it.
+        let _live = lock(&slot.live);
         drop(self.engine.take());
-        if registry
-            .get(&identity)
-            .is_some_and(|entry| entry.strong_count() == 0)
-        {
-            registry.remove(&identity);
-        }
     }
 }
 
@@ -270,7 +311,9 @@ impl Database {
         Self::open_path(path, true)
     }
 
-    pub(crate) fn open_path(path: &Path, create: bool) -> Result<Self> {
+    /// A read-only open never creates the file, and its engine may log to
+    /// memory, so a writable open cannot share it.
+    pub(crate) fn open_path(path: &Path, writable: bool) -> Result<Self> {
         if path.as_os_str() == ":memory:" {
             return Self::open_memory();
         }
@@ -278,24 +321,54 @@ impl Database {
         let text = path.to_str().ok_or_else(|| {
             Error::InvalidOperation("native database path is not UTF-8".to_owned())
         })?;
-        let mut registry = registry();
-        if let Ok(identity) = confined_io::path_identity(text)
-            && let Some(shared) = registry.get(&identity).and_then(Weak::upgrade)
-        {
-            return Ok(Self { shared });
-        }
-        let file = confined_io::open_regular(&path, create).map_err(|error| {
-            Error::InvalidOperation(format!("open native database {}: {error}", path.display()))
-        })?;
-        let identity = confined_io::held_identity(&file)?;
-        if let Some(shared) = registry.get(&identity).and_then(Weak::upgrade) {
+        let open = || {
+            let file = confined_io::open_regular(&path, writable).map_err(|error| {
+                Error::InvalidOperation(format!("open native database {}: {error}", path.display()))
+            })?;
+            let identity = confined_io::held_identity(&file)?;
+            Ok::<_, Error>((file, identity))
+        };
+        // A live store is found before a second descriptor on it could drop
+        // its locks.
+        let (file, identity) = if let Ok(identity) = confined_io::path_identity(text) {
+            let slot = Slot::for_identity(identity);
+            let mut live = lock(&slot.live);
+            if let Some(shared) = live.upgrade() {
+                drop(live);
+                return Self { shared }.shared_for(writable);
+            }
+            let (file, held) = open()?;
+            if held == identity {
+                return Self::start(&slot, &mut live, file, identity, text, writable);
+            }
+            (file, held)
+        } else {
+            open()?
+        };
+        let slot = Slot::for_identity(identity);
+        let mut live = lock(&slot.live);
+        if let Some(shared) = live.upgrade() {
+            drop(live);
             // ponytail: the path was renamed onto a live store between stat
             // and open. Closing this descriptor would drop that store's lock.
             std::mem::forget(file);
-            return Ok(Self { shared });
+            return Self { shared }.shared_for(writable);
         }
+        Self::start(&slot, &mut live, file, identity, text, writable)
+    }
+
+    /// Starts the engine for a file no instance in this process holds, under
+    /// that file's slot.
+    fn start(
+        slot: &Arc<Slot>,
+        live: &mut Weak<Shared>,
+        file: std::fs::File,
+        identity: FileIdentity,
+        text: &str,
+        writable: bool,
+    ) -> Result<Self> {
         let header = preflight(&file)?;
-        let confined = Arc::new(ConfinedIo::new(text.to_owned(), file, identity)?);
+        let confined = Arc::new(ConfinedIo::new(text.to_owned(), file, identity, writable)?);
         let io: Arc<dyn turso_core::IO> = confined.clone();
         #[cfg(all(unix, feature = "test-helpers"))]
         let io = super::crash_io::wrap(io);
@@ -308,7 +381,7 @@ impl Database {
         )?;
         let database = Self {
             shared: Arc::new(Shared {
-                identity: OnceLock::new(),
+                slot: OnceLock::new(),
                 engine: Some(Engine {
                     database,
                     io,
@@ -318,9 +391,23 @@ impl Database {
             }),
         };
         database.admit_format(header)?;
-        let _ = database.shared.identity.set(identity);
-        registry.insert(identity, Arc::downgrade(&database.shared));
+        let _ = database.shared.slot.set(Arc::clone(slot));
+        *live = Arc::downgrade(&database.shared);
         Ok(database)
+    }
+
+    fn shared_for(self, writable: bool) -> Result<Self> {
+        let read_only = self
+            .engine()
+            .confined
+            .as_ref()
+            .is_some_and(|io| io.is_read_only());
+        if writable && read_only {
+            return Err(Error::InvalidOperation(
+                "native database is open read-only in this process".to_owned(),
+            ));
+        }
+        Ok(self)
     }
 
     fn open_memory() -> Result<Self> {
@@ -332,7 +419,7 @@ impl Database {
         )?;
         Ok(Self {
             shared: Arc::new(Shared {
-                identity: OnceLock::new(),
+                slot: OnceLock::new(),
                 engine: Some(Engine {
                     database,
                     io,
@@ -348,6 +435,11 @@ impl Database {
     /// unstamped first page straight to the main file, and the preflight reads
     /// only the main file.
     fn admit_format(&self, header: Header) -> Result<()> {
+        #[cfg(test)]
+        if let Some((entered, release)) = ADMIT_PAUSE.with(RefCell::take) {
+            let _ = entered.send(());
+            let _ = release.recv();
+        }
         let connection = self.connect_with(Capability::Maintenance, false)?;
         let application_id = connection.pragma_u32("application_id")?;
         if application_id == APPLICATION_ID && header == Header::Stamped {

@@ -1983,9 +1983,11 @@ fn selected_block_finds_both_containment_directions_without_indexing_subtrees() 
             .saturating_mul(70),
         "containment must exercise the ratio that whole-body matching rejects"
     );
-    let connection =
-        tracedecay_sql::Connection::open(directory.path().join("clone-artifact-v16.sqlite"))
-            .expect("inspect clone artifact");
+    let connection = tracedecay_sql::Connection::open_with_flags(
+        directory.path().join("clone-artifact-v16.sqlite"),
+        tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("inspect clone artifact");
     assert_eq!(
         connection
             .query_row("SELECT COUNT(*) FROM clone_occurrences", [], |row| row

@@ -19,8 +19,14 @@ fn store_manifest_roundtrips_from_profile_sharded_layout() {
     assert_eq!(manifest.project_id.as_deref(), Some("proj_123"));
     assert_eq!(manifest.storage_mode, StorageMode::ProfileSharded);
     assert_eq!(manifest.data_root, layout.data_root);
-    assert_eq!(manifest.graph_db_relpath, Path::new("tracedecay.db"));
-    assert_eq!(manifest.sessions_db_relpath, Path::new("sessions.db"));
+    assert_eq!(
+        manifest.graph_db_relpath,
+        Path::new(tracedecay_store::StoreFile::Project.file_name())
+    );
+    assert_eq!(
+        manifest.sessions_db_relpath,
+        Path::new(tracedecay_store::StoreFile::ProjectSessions.file_name())
+    );
     assert_eq!(manifest.branch_meta_relpath, Path::new("branch-meta.json"));
 }
 

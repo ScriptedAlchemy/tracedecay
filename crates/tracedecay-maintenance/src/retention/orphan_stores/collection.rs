@@ -9,6 +9,7 @@ use tracedecay_contracts::storage::is_retired_branch_store_path;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_private_fs::capability_dir::{remove_open_dir_all_nofollow, sync_directory};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
+use tracedecay_store::StoreFile;
 
 use super::fence::{
     StoreContentFence, StoreDirectoryFence, capture_store_content_fence_in_dir_controlled,
@@ -987,13 +988,45 @@ async fn check_manifestless_store_durable_memory(
     DurableMemoryCheck::Empty
 }
 
-/// Finds only regular `.db` files below a store and never follows symlinks.
-/// The manifestless path deliberately does not guess a single filename, so a
-/// custom legacy graph cannot be mistaken for payload-only debris. Any other
-/// file shape is an unverifiable durable-data candidate, not disposable dust.
-/// Files of the retired `branches/` store layout are old data with no current
-/// owner: they are neither candidates nor unrecognized payload, and they are
-/// deleted with the directory.
+/// How a manifestless store file is treated by the durable-data inventory.
+enum ManifestlessFile {
+    /// A database under the compiled engine's main-file extension.
+    Candidate,
+    /// An engine sidecar beside its candidate; the candidate's read covers it.
+    Sidecar,
+    Unrecognized,
+}
+
+/// Classifies `path` by the compiled engine's owned-store names: any file
+/// with the main-file extension of [`StoreFile`] (`.tdb` native, `.db`
+/// SQLite) is a candidate, and a [`StoreFile::SIDECAR_SUFFIXES`] file is a
+/// sidecar only while its main file exists beside it.
+fn classify_manifestless_file(path: &Path) -> ManifestlessFile {
+    let main_extension = Path::new(StoreFile::Project.file_name()).extension();
+    if path.extension() == main_extension {
+        return ManifestlessFile::Candidate;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return ManifestlessFile::Unrecognized;
+    };
+    let main = StoreFile::SIDECAR_SUFFIXES
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix));
+    match main.map(|main| path.with_file_name(main)) {
+        Some(main) if main.extension() == main_extension && main.is_file() => {
+            ManifestlessFile::Sidecar
+        }
+        _ => ManifestlessFile::Unrecognized,
+    }
+}
+
+/// Finds only regular database files below a store and never follows
+/// symlinks. The manifestless path deliberately does not guess a single
+/// filename, so a custom legacy graph cannot be mistaken for payload-only
+/// debris. Any other file shape is an unverifiable durable-data candidate,
+/// not disposable dust. Files of the retired `branches/` store layout are old
+/// data with no current owner: they are neither candidates nor unrecognized
+/// payload, and they are deleted with the directory.
 fn collect_sqlite_candidates(
     root: &Path,
     current: &Path,
@@ -1020,10 +1053,16 @@ fn collect_sqlite_candidates(
         if file_type.is_dir() {
             collect_sqlite_candidates(root, &path, output, control)?;
         } else if file_type.is_file() && is_retired_branch_store_path(relative) {
-        } else if file_type.is_file()
-            && path.extension().and_then(|extension| extension.to_str()) == Some("db")
-        {
-            output.push(relative.to_path_buf());
+        } else if file_type.is_file() {
+            match classify_manifestless_file(&path) {
+                ManifestlessFile::Candidate => output.push(relative.to_path_buf()),
+                ManifestlessFile::Sidecar => {}
+                ManifestlessFile::Unrecognized => {
+                    return Err(std::io::Error::other(
+                        "manifestless store contains an unrecognized payload",
+                    ));
+                }
+            }
         } else {
             return Err(std::io::Error::other(
                 "manifestless store contains an unrecognized payload",

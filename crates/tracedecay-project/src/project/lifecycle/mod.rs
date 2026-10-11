@@ -1127,7 +1127,9 @@ mod tests {
         let profile_alias = profile.join("nested").join("..");
         let options = TraceDecayOpenOptions {
             profile_root: Some(profile_alias.clone()),
-            global_db_path: Some(profile_alias.join("global.db")),
+            global_db_path: Some(
+                profile_alias.join(tracedecay_store::StoreFile::Profile.file_name()),
+            ),
         };
 
         let opened = TraceDecay::init_with_options(&project, options)

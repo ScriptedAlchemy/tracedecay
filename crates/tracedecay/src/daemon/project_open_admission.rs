@@ -1243,7 +1243,7 @@ mod refused_store_invalidation_tests {
     fn route_for(profile_root: &Path, project_root: &Path) -> ProjectRouteKey {
         ProjectRouteKey {
             profile_root: profile_root.to_path_buf(),
-            global_db_path: profile_root.join("global.db"),
+            global_db_path: profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
             project_path: project_root.to_path_buf(),
             scope_prefix: None,
         }
@@ -1366,7 +1366,8 @@ mod status_tests {
     fn route(name: &str) -> ProjectRouteKey {
         ProjectRouteKey {
             profile_root: PathBuf::from(format!("/profiles/{name}")),
-            global_db_path: PathBuf::from(format!("/profiles/{name}/global.db")),
+            global_db_path: PathBuf::from(format!("/profiles/{name}"))
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_path: PathBuf::from(format!("/projects/{name}")),
             scope_prefix: None,
         }

@@ -225,7 +225,8 @@ fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
 fn synchronous_table_growth_is_bounded_by_observed_store_size() {
     let sample = |bytes| StorageTelemetryReadV1::Observed {
         sample: StoreSizeSampleV1 {
-            store: StoreKeyV1::new("sessions.db").unwrap(),
+            store: StoreKeyV1::new(tracedecay_store::StoreFile::ProjectSessions.file_name())
+                .unwrap(),
             page_size_bytes: 4096,
             page_count: bytes / 4096,
             freelist_pages: 0,
@@ -241,7 +242,8 @@ fn synchronous_table_growth_is_bounded_by_observed_store_size() {
     )));
     assert!(!permits_synchronous_table_growth(
         &StorageTelemetryReadV1::Unknown {
-            store: StoreKeyV1::new("sessions.db").unwrap(),
+            store: StoreKeyV1::new(tracedecay_store::StoreFile::ProjectSessions.file_name())
+                .unwrap(),
         }
     ));
 }

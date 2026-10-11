@@ -122,7 +122,13 @@ async fn graceful_stop_truncates_profile_and_project_store_wals() {
     .await;
 
     let (graph_db, _) = project_stores(environment.home(), &project);
-    let stores = [environment.home().join(".tracedecay/global.db"), graph_db];
+    let stores = [
+        environment
+            .home()
+            .join(".tracedecay")
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
+        graph_db,
+    ];
     for store in &stores {
         assert!(
             wal_bytes(store) > 0,

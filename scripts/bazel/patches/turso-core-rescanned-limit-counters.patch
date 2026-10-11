@@ -1,0 +1,114 @@
+diff --git a/translate/compound_select.rs b/translate/compound_select.rs
+index 43b9d38ea..7983a2669 100644
+--- a/translate/compound_select.rs
++++ b/translate/compound_select.rs
+@@ -7,7 +7,7 @@ use crate::translate::emitter::{
+     LimitCtx, Resolver, TranslateCtx,
+ };
+ use crate::translate::eqp::{EqpCompoundOp, EqpDetail, EqpSortMethod};
+-use crate::translate::expr::translate_expr;
++use crate::translate::expr::{translate_expr_no_constant_opt, NoConstantOptReason};
+ use crate::translate::order_by::{custom_type_comparator, sorter_insert};
+ use crate::translate::plan::{CompoundOrderByKey, Plan, QueryDestination, SelectPlan};
+ use crate::translate::result_row::emit_columns_to_destination;
+@@ -77,7 +77,14 @@ pub fn emit_program_for_compound_select(
+                         }
+                     }
+                     _ => {
+-                        _ = translate_expr(program, None, limit, reg, &right_most_ctx.resolver);
++                        _ = translate_expr_no_constant_opt(
++                            program,
++                            None,
++                            limit,
++                            reg,
++                            &right_most_ctx.resolver,
++                            NoConstantOptReason::RegisterReuse,
++                        );
+                         program.add_comment(program.offset(), "LIMIT counter");
+                         program.emit_insn(Insn::MustBeInt {
+                             reg,
+@@ -109,12 +116,13 @@ pub fn emit_program_for_compound_select(
+                         }
+                     }
+                     _ => {
+-                        _ = translate_expr(
++                        _ = translate_expr_no_constant_opt(
+                             program,
+                             None,
+                             offset_expr,
+                             reg,
+                             &right_most_ctx.resolver,
++                            NoConstantOptReason::RegisterReuse,
+                         );
+                     }
+                 }
+@@ -1031,7 +1039,14 @@ fn emit_compound_order_by(
+                     }
+                 }
+                 _ => {
+-                    _ = translate_expr(program, None, limit_expr, reg, &right_most_ctx.resolver);
++                    _ = translate_expr_no_constant_opt(
++                        program,
++                        None,
++                        limit_expr,
++                        reg,
++                        &right_most_ctx.resolver,
++                        NoConstantOptReason::RegisterReuse,
++                    );
+                     program.add_comment(program.offset(), "LIMIT counter");
+                     program.emit_insn(Insn::MustBeInt {
+                         reg,
+@@ -1058,7 +1073,14 @@ fn emit_compound_order_by(
+                     }
+                 }
+                 _ => {
+-                    _ = translate_expr(program, None, offset_expr, reg, &right_most_ctx.resolver);
++                    _ = translate_expr_no_constant_opt(
++                        program,
++                        None,
++                        offset_expr,
++                        reg,
++                        &right_most_ctx.resolver,
++                        NoConstantOptReason::RegisterReuse,
++                    );
+                 }
+             }
+             program.add_comment(program.offset(), "OFFSET counter");
+diff --git a/translate/emitter/mod.rs b/translate/emitter/mod.rs
+index 9a6e59ff4..15d29de63 100644
+--- a/translate/emitter/mod.rs
++++ b/translate/emitter/mod.rs
+@@ -1883,7 +1883,16 @@ pub(crate) fn init_limit(
+                 _ => {
+                     let r = limit_ctx.reg_limit;
+ 
+-                    _ = translate_expr(program, None, expr, r, &t_ctx.resolver)?;
++                    // The counter counts down in place and a rescanned
++                    // subquery reloads it, so its load must not be hoisted.
++                    _ = translate_expr_no_constant_opt(
++                        program,
++                        None,
++                        expr,
++                        r,
++                        &t_ctx.resolver,
++                        NoConstantOptReason::RegisterReuse,
++                    )?;
+                     program.emit_insn(Insn::MustBeInt {
+                         reg: r,
+                         target_pc: None,
+@@ -1918,7 +1927,14 @@ pub(crate) fn init_limit(
+                     _ => unreachable!("parse_numeric_literal only returns Integer or Float"),
+                 },
+                 _ => {
+-                    _ = translate_expr(program, None, expr, offset_reg, &t_ctx.resolver)?;
++                    _ = translate_expr_no_constant_opt(
++                        program,
++                        None,
++                        expr,
++                        offset_reg,
++                        &t_ctx.resolver,
++                        NoConstantOptReason::RegisterReuse,
++                    )?;
+                 }
+             }
+             program.add_comment(program.offset(), "OFFSET counter");

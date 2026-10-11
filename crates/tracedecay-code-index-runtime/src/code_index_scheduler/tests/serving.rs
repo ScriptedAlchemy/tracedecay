@@ -958,14 +958,17 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
     );
     assert!(observation.resources.peak_scratch_memory_bytes.is_some());
     let artifact_path = active_text_artifact_path(store.path());
-    let revision: u32 = tracedecay_sql::Connection::open(&artifact_path)
-        .expect("open sealed artifact")
-        .query_row(
-            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("read sealed revision");
+    let revision: u32 = tracedecay_sql::Connection::open_with_flags(
+        &artifact_path,
+        tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open sealed artifact")
+    .query_row(
+        "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )
+    .expect("read sealed revision");
     assert_eq!(
         observation.artifact_format_revision,
         Some(revision),
@@ -974,6 +977,12 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
     let metadata = latest
         .text_projection_metadata()
         .expect("projection metadata");
+    // The served file stays open read-only, so the revision checks run on a
+    // copy of its bytes.
+    let copy_root = TempDir::new().expect("artifact copy root");
+    let artifact_path = copy_root.path().join("artifact.bin");
+    std::fs::copy(active_text_artifact_path(store.path()), &artifact_path)
+        .expect("copy sealed artifact");
     let control = UninterruptibleCodeIndexControlV1;
     CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
         &artifact_path,

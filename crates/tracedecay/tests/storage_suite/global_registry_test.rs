@@ -167,7 +167,9 @@ fn project_column_exists(db_path: &Path, column: &str) -> bool {
 async fn registered_profile_runtime_refuses_non_canonical_project_rows_without_mutation() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
+    let db_path = dir
+        .path()
+        .join(tracedecay_store::StoreFile::Profile.file_name());
     let project_root = dir.path().join("repo");
     std::fs::create_dir_all(&project_root).unwrap();
     let legacy_key = project_root.join(".").to_string_lossy().to_string();
@@ -934,7 +936,11 @@ async fn observation_store_resolver_rejects_symlinked_store_artifacts() {
     let outside_store = dir.path().join("outside-store");
     fs::create_dir_all(&outside_store).unwrap();
     fs::write(outside_store.join("store_manifest.json"), b"{}").unwrap();
-    fs::write(outside_store.join("sessions.db"), b"").unwrap();
+    fs::write(
+        outside_store.join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        b"",
+    )
+    .unwrap();
     symlink(&outside_store, &store_root).unwrap();
     let error = db
         .resolve_project_observation_store(&project_root)
@@ -1024,7 +1030,9 @@ async fn registry_remote_resolution_is_conservative_when_ambiguous() {
 async fn project_tokens_saved_schema_and_queries_still_work() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("global.db");
+    let db_path = dir
+        .path()
+        .join(tracedecay_store::StoreFile::Profile.file_name());
     let project_one = dir.path().join("repo-one");
     let project_two = dir.path().join("repo-two");
     std::fs::create_dir_all(&project_one).unwrap();

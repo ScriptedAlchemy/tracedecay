@@ -1142,7 +1142,9 @@ async fn project_retirement_cancels_and_awaits_an_inflight_projector() {
         registered_test_database(&temp, "project-retirement", HostAdmissionScope::Project).await;
     let owner = StoreOwnerKey {
         profile_root: temp.path().to_path_buf(),
-        global_db_path: temp.path().join("global.db"),
+        global_db_path: temp
+            .path()
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_id: Some("project.retire".to_string()),
         store_root: temp.path().join("store"),
         graph_db_path: temp.path().join("store/graph.db"),
@@ -1490,7 +1492,9 @@ async fn project_rekey_retires_old_owner_before_rebinding_wake() {
         registered_test_database(&temp, "new-project", HostAdmissionScope::Project).await;
     let old_owner = StoreOwnerKey {
         profile_root: temp.path().to_path_buf(),
-        global_db_path: temp.path().join("global.db"),
+        global_db_path: temp
+            .path()
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_id: Some("project".to_string()),
         store_root: temp.path().join("old"),
         graph_db_path: temp.path().join("old/graph.db"),

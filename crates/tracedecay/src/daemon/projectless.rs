@@ -682,7 +682,10 @@ mod projectless_admission_tests {
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
             .expect("pin profile identity");
         let administration = StoreAdministration::default().with_profile_identity(identity);
-        let client = DaemonClientIdentity::new(linked_root.clone(), linked_root.join("global.db"));
+        let client = DaemonClientIdentity::new(
+            linked_root.clone(),
+            linked_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+        );
 
         admit_projectless_connection(&client, &administration)
             .expect("a symlinked spelling of the pinned profile root must be admitted");
@@ -698,8 +701,10 @@ mod projectless_admission_tests {
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
             .expect("pin profile identity");
         let administration = StoreAdministration::default().with_profile_identity(identity);
-        let client =
-            DaemonClientIdentity::new(foreign_root.clone(), foreign_root.join("global.db"));
+        let client = DaemonClientIdentity::new(
+            foreign_root.clone(),
+            foreign_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+        );
 
         let Err(error) = admit_projectless_connection(&client, &administration) else {
             panic!("an unrelated profile root must stay refused")
@@ -720,7 +725,10 @@ mod projectless_admission_tests {
             .expect("pin profile identity");
         let administration = StoreAdministration::default().with_profile_identity(identity);
         let missing = temp.path().join("never-created").join(".tracedecay");
-        let client = DaemonClientIdentity::new(missing.clone(), missing.join("global.db"));
+        let client = DaemonClientIdentity::new(
+            missing.clone(),
+            missing.join(tracedecay_store::StoreFile::Profile.file_name()),
+        );
 
         let Err(error) = admit_projectless_connection(&client, &administration) else {
             panic!("a profile root that resolves to nothing must stay refused")
@@ -758,7 +766,10 @@ mod projectless_admission_tests {
             "projectless-retargeted-hermes-test",
         )
         .expect("enter fixture database scope");
-        let client = DaemonClientIdentity::new(linked_root.clone(), linked_root.join("global.db"));
+        let client = DaemonClientIdentity::new(
+            linked_root.clone(),
+            linked_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+        );
         let connection = admit_projectless_connection(&client, &administration)
             .expect("admit symlinked client profile");
 

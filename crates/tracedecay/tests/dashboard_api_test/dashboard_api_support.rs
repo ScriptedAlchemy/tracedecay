@@ -1190,7 +1190,8 @@ async fn start_dashboard_fixture_with_options_and_delivery(
         .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
     let project_root = tmp_root.join("project");
     let profile_root = tmp_root.join("profile").join(".tracedecay");
-    let requested_global_db_path = profile_root.join("global.db");
+    let requested_global_db_path =
+        profile_root.join(tracedecay_store::StoreFile::Profile.file_name());
     // Skill lifecycle endpoints re-export managed skills into agent configs
     // under the profile's home; the fixture's own home keeps tests away from
     // the developer's real agent installations.

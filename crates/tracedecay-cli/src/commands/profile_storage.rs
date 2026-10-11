@@ -594,7 +594,8 @@ mod reset_project_store_tests {
         let connection = tracedecay_sql::Connection::open(db_path).expect("create store");
         connection
             .execute_batch(&format!(
-                "PRAGMA user_version = {version}; CREATE TABLE anchor (id INTEGER);"
+                "PRAGMA user_version = {version}; CREATE TABLE anchor (id INTEGER);
+                 PRAGMA wal_checkpoint(TRUNCATE);"
             ))
             .expect("stamp store");
         drop(connection);
@@ -618,10 +619,14 @@ mod reset_project_store_tests {
         let profile_root = temp.path().join("profile");
         let db_path = write_store_with_user_version(&profile_root, "proj_refused_v18", 18);
         // WAL/SHM sidecars and durable transcript inputs share the store dir.
-        let wal_path = db_path.with_file_name("tracedecay.db-wal");
+        let wal_path = db_path.with_file_name(format!(
+            "{}-wal",
+            tracedecay_store::StoreFile::Project.file_name()
+        ));
         std::fs::write(&wal_path, b"wal").unwrap();
         let data_root = db_path.parent().unwrap().to_path_buf();
-        let sessions_path = data_root.join("sessions.db");
+        let sessions_path =
+            data_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name());
         std::fs::write(&sessions_path, b"session archive").unwrap();
 
         let outcome =
@@ -672,7 +677,9 @@ mod reset_project_store_tests {
                 &project_root,
                 tracedecay_project::project::TraceDecayOpenOptions {
                     profile_root: Some(profile_root.clone()),
-                    global_db_path: Some(profile_root.join("global.db")),
+                    global_db_path: Some(
+                        profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+                    ),
                 },
                 &lifecycle,
             )

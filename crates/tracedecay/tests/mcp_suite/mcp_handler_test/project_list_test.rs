@@ -107,7 +107,10 @@ async fn project_list_returns_the_registry_page_the_caller_asked_for() {
             .upsert_store_artifact(StoreArtifactUpsert {
                 store_id: store.store_id,
                 artifact_kind: "graph_db".to_string(),
-                relpath: "projects/proj_alpha/tracedecay.db".to_string(),
+                relpath: format!(
+                    "projects/proj_alpha/{}",
+                    tracedecay_store::StoreFile::Project.file_name()
+                ),
                 size_bytes: Some(128),
                 schema_version: Some("1".to_string()),
                 updated_at: Some(1_700_000_006),

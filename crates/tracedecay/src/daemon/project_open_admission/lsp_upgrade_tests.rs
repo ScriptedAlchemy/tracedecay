@@ -10,7 +10,8 @@ use tracedecay_domain::errors::TraceDecayError;
 fn route(project_path: &str, scope_prefix: Option<&str>) -> ProjectRouteKey {
     ProjectRouteKey {
         profile_root: PathBuf::from("/profile"),
-        global_db_path: PathBuf::from("/profile/global.db"),
+        global_db_path: PathBuf::from("/profile")
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_path: PathBuf::from(project_path),
         scope_prefix: scope_prefix.map(str::to_owned),
     }

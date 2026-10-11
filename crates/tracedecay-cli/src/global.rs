@@ -482,7 +482,12 @@ mod gather_tests {
         let child = cwd.join("child");
         for root in [&cwd, &child] {
             fs::create_dir_all(root.join(".tracedecay")).unwrap();
-            fs::write(root.join(".tracedecay/tracedecay.db"), b"").unwrap();
+            fs::write(
+                root.join(".tracedecay")
+                    .join(tracedecay_store::StoreFile::Project.file_name()),
+                b"",
+            )
+            .unwrap();
         }
 
         let out = gather_local_projects_from(profile, &cwd);

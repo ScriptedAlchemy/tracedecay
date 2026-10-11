@@ -8,7 +8,9 @@ fn dashboard_three_request_chain_cannot_enable_and_run_a_shell_command() {
         let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
-        let global_db_path = tmp_root.join("global").join("global.db");
+        let global_db_path = tmp_root
+            .join("global")
+            .join(tracedecay_store::StoreFile::Profile.file_name());
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let marker = tmp_root.join("dashboard-command-ran");
         let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
@@ -93,7 +95,9 @@ fn automation_jobs_crud_and_manual_run_are_dashboard_controllable() {
         let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
-        let global_db_path = tmp_root.join("global").join("global.db");
+        let global_db_path = tmp_root
+            .join("global")
+            .join(tracedecay_store::StoreFile::Profile.file_name());
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);
 
@@ -199,7 +203,7 @@ fn dashboard_user_job_history_appears_only_after_retained_settlement() {
         let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
-        let global_db_path = tmp_root.join("global").join("global.db");
+        let global_db_path = tmp_root.join("global").join(tracedecay_store::StoreFile::Profile.file_name());
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let backend_started = tmp_root.join("user-job-backend-started");
         let release_backend = tmp_root.join("release-user-job-backend");
@@ -416,7 +420,7 @@ fn dashboard_user_job_failure_reports_the_codex_error_code_class() {
         let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
-        let global_db_path = tmp_root.join("global").join("global.db");
+        let global_db_path = tmp_root.join("global").join(tracedecay_store::StoreFile::Profile.file_name());
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let spawns = tmp_root.join("user-job-backend-spawns");
         let profile = ProfileRoot::new(&profile_root).with_global_db_override(&global_db_path);

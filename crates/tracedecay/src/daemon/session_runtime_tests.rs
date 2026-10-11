@@ -25,7 +25,9 @@ async fn evicted_project_owner_releases_temporal_scheduler() {
         .expect("registered temporal test database");
     let owner = StoreOwnerKey {
         profile_root: temp.path().to_path_buf(),
-        global_db_path: temp.path().join("global.db"),
+        global_db_path: temp
+            .path()
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_id: Some("project.evict-owner".to_string()),
         store_root: temp.path().join("store"),
         graph_db_path: temp.path().join("store/graph.db"),

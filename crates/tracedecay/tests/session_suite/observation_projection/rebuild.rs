@@ -176,14 +176,18 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     assert_eq!(rebuilt_empty.skipped_observations(), 0);
     assert_eq!(projection_counts(&tmp).await, (1, 0, 0, 1, 0, 3));
     assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 0);
-    assert_eq!(table_count(&tmp, "lcm_raw_messages_fts").await, 0);
+    assert!(
+        search_session_messages(&tmp, "frontier", 10)
+            .await
+            .is_empty()
+    );
 
     let rebuilt_full = rebuild_projection_to_completion(&store, 3).await;
     assert_eq!(rebuilt_full.projected_rows(), 3);
     assert_eq!(rebuilt_full.skipped_observations(), 0);
     assert_eq!(projection_counts(&tmp).await, (1, 3, 3, 1, 0, 0));
     assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 3);
-    assert_eq!(table_count(&tmp, "lcm_raw_messages_fts").await, 3);
+    assert_eq!(search_session_messages(&tmp, "frontier", 10).await.len(), 3);
     assert_eq!(
         projected_message_texts(&tmp).await,
         incrementally_projected_texts

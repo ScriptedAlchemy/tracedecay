@@ -378,7 +378,7 @@ async fn a_dead_path_with_a_surviving_store_is_retained_not_reaped() {
         .unwrap();
     let store_root = profile_root.join("projects").join("proj_with_store");
     std::fs::create_dir_all(&store_root).unwrap();
-    let evidence = store_root.join("sessions.db");
+    let evidence = store_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     std::fs::write(&evidence, b"irreplaceable").unwrap();
     std::fs::remove_dir_all(&deleted).unwrap();
 

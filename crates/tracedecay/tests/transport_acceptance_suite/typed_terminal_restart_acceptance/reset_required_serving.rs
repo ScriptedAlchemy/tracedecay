@@ -76,7 +76,9 @@ fn wait_for_code_index_hit(home: &Path, project: &Path, symbol: &str) {
 /// a released binary recorded, leaving every other byte of its shape as this
 /// binary wrote it.
 fn stamp_profile_sessions_git_correlation_version(home: &Path, version: i64) {
-    let db_path = home.join(".tracedecay/user-sessions.db");
+    let db_path = home
+        .join(".tracedecay")
+        .join(tracedecay_store::StoreFile::ProfileSessions.file_name());
     assert!(
         db_path.is_file(),
         "the daemon should have created the profile session store at {}",
@@ -257,7 +259,7 @@ fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
     let project_store = profile_root
         .join("projects")
         .join(tracedecay_runtime_core::storage::default_profile_project_id(&project_path))
-        .join("sessions.db");
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
 
     let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
     super::initialize_project(&home_path, &project_path, "session-temporal-reset");
@@ -267,10 +269,12 @@ fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
         .expect("stop the daemon that wrote the profile");
 
     let previous = SESSION_TEMPORAL_SCHEMA_VERSION - 1;
-    record_session_generation(&profile_root.join("user-sessions.db"));
+    record_session_generation(
+        &profile_root.join(tracedecay_store::StoreFile::ProfileSessions.file_name()),
+    );
     for store in [
-        profile_root.join("global.db"),
-        profile_root.join("user-sessions.db"),
+        profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+        profile_root.join(tracedecay_store::StoreFile::ProfileSessions.file_name()),
         project_store.clone(),
     ] {
         stamp_session_temporal_version(&store, previous);
@@ -329,16 +333,26 @@ fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
             "{context}"
         );
     }
+    // A live daemon owns its stores exclusively, so they are read once it
+    // stops: serving the refusals left every stamp as it was.
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon serving the refusals");
     assert_eq!(
-        session_temporal_version(&profile_root.join("global.db")),
+        session_temporal_version(
+            &profile_root.join(tracedecay_store::StoreFile::Profile.file_name())
+        ),
         SESSION_TEMPORAL_SCHEMA_VERSION
     );
     assert_eq!(session_temporal_version(&project_store), previous);
     assert_eq!(
-        session_temporal_version(&profile_root.join("user-sessions.db")),
+        session_temporal_version(
+            &profile_root.join(tracedecay_store::StoreFile::ProfileSessions.file_name())
+        ),
         previous
     );
 
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
     let (reset_status, reset_output) =
         super::run_scoped_reset(&home_path, &project_path, &mut daemon, || {});
     assert!(
@@ -360,18 +374,22 @@ fn copying_session_temporal_store_is_served_typed_until_its_named_reset() {
         );
     }
     assert_eq!(
-        session_temporal_version(&project_store),
-        SESSION_TEMPORAL_SCHEMA_VERSION
-    );
-    assert_eq!(
-        session_temporal_version(&profile_root.join("user-sessions.db")),
-        SESSION_TEMPORAL_SCHEMA_VERSION
-    );
-    assert_eq!(
         status_reset_required_stores(&home_path, &project_path),
         json!([]),
         "the reset store serves again"
     );
 
-    let _ = daemon.kill_and_wait();
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon that recreated the stores");
+    assert_eq!(
+        session_temporal_version(&project_store),
+        SESSION_TEMPORAL_SCHEMA_VERSION
+    );
+    assert_eq!(
+        session_temporal_version(
+            &profile_root.join(tracedecay_store::StoreFile::ProfileSessions.file_name())
+        ),
+        SESSION_TEMPORAL_SCHEMA_VERSION
+    );
 }

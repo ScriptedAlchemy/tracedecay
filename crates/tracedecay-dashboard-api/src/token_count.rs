@@ -482,7 +482,8 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().expect("create token-count test directory");
         let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
-            &dir.path().join("sessions.db"),
+            &dir.path()
+                .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
         );
         (dir, conn)
     }

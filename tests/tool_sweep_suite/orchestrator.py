@@ -245,7 +245,6 @@ def _phase_environment(root: Path, *, temp_root: Path | None = None) -> dict[str
             "TEMP": str(tmp_root),
             "TRACEDECAY_PROFILE_DIR": str(root / "profile"),
             "TRACEDECAY_DATA_DIR": str(root / "profile"),
-            "TRACEDECAY_GLOBAL_DB": str(root / "profile" / "global.db"),
             "TRACEDECAY_DAEMON_SOCKET": str(root / "daemon.sock"),
             "PYTHONDONTWRITEBYTECODE": "1",
         }

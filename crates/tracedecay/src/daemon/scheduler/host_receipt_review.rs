@@ -325,7 +325,9 @@ mod tests {
             .expect("project source");
         let options = tracedecay_project::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
-            global_db_path: Some(profile_root.join("global.db")),
+            global_db_path: Some(
+                profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+            ),
         };
         let writable = tracedecay_project::project::TraceDecay::init_with_options_for_test(
             &project_root,
@@ -377,7 +379,7 @@ mod tests {
             allow_initialize_root_routing: false,
             client_identity: DaemonClientIdentity::new(
                 profile_root.clone(),
-                profile_root.join("global.db"),
+                profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
             ),
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
             client_instance_id: "client.context-failure".to_owned(),

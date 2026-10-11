@@ -968,45 +968,44 @@ fn point_read_observes_sealed_store_installed_before_staging_gate_acquisition() 
         let reader_snapshot = commit.snapshot.clone();
         let reader_identity = identity.clone();
         let reader = std::thread::spawn(move || {
-            tracing::subscriber::with_default(
-                PauseSnapshotRead {
+            // Another test thread reaching the lock-wait span first must not
+            // cache it as uninteresting for this thread's subscriber.
+            let _capture =
+                tracedecay_domain::test_fixtures::set_tracing_capture(PauseSnapshotRead {
                     reached: reached_tx,
                     resume: std::sync::Mutex::new(resume_rx),
                     paused: AtomicBool::new(false),
-                },
-                || {
-                    if read_relation {
-                        let relation = reader_snapshot
-                            .relation(
-                                &GraphRelationRef::new(
-                                    reader_identity,
-                                    GraphRelationId::new("relation:a-b").unwrap(),
-                                ),
-                                Arc::new(TestCancellation),
-                            )?
-                            .expect("the adopted relation must resolve");
-                        assert_eq!(relation.from.identity.as_str(), "entity:a");
-                        assert_eq!(relation.to.identity.as_str(), "entity:b");
-                    } else {
-                        let entity = reader_snapshot
-                            .entity(
-                                &GraphEntityRef::new(
-                                    reader_identity,
-                                    GraphEntityId::new("entity:a").unwrap(),
-                                ),
-                                Arc::new(TestCancellation),
-                            )?
-                            .expect("the adopted entity must resolve");
-                        assert_eq!(
-                            entity
-                                .properties
-                                .get(&GraphPropertyName::new("marker").unwrap()),
-                            Some(&GraphProperty::String("adopted".to_owned()))
-                        );
-                    }
-                    Ok::<_, GraphDbError>(())
-                },
-            )
+                });
+            if read_relation {
+                let relation = reader_snapshot
+                    .relation(
+                        &GraphRelationRef::new(
+                            reader_identity,
+                            GraphRelationId::new("relation:a-b").unwrap(),
+                        ),
+                        Arc::new(TestCancellation),
+                    )?
+                    .expect("the adopted relation must resolve");
+                assert_eq!(relation.from.identity.as_str(), "entity:a");
+                assert_eq!(relation.to.identity.as_str(), "entity:b");
+            } else {
+                let entity = reader_snapshot
+                    .entity(
+                        &GraphEntityRef::new(
+                            reader_identity,
+                            GraphEntityId::new("entity:a").unwrap(),
+                        ),
+                        Arc::new(TestCancellation),
+                    )?
+                    .expect("the adopted entity must resolve");
+                assert_eq!(
+                    entity
+                        .properties
+                        .get(&GraphPropertyName::new("marker").unwrap()),
+                    Some(&GraphProperty::String("adopted".to_owned()))
+                );
+            }
+            Ok::<_, GraphDbError>(())
         });
         reached_rx
             .recv_timeout(std::time::Duration::from_secs(5))

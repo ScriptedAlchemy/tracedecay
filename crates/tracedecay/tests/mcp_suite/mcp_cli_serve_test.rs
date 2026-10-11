@@ -164,7 +164,7 @@ async fn create_read_only_project_db(
     pin_fixture_repository_identity(&project_root, project_id).unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
-        global_db_path: Some(profile_root.join("global.db")),
+        global_db_path: Some(profile_root.join(tracedecay_store::StoreFile::Profile.file_name())),
     };
     let cg = TraceDecay::init_with_options(&project_root, open_options)
         .await
@@ -599,7 +599,11 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
     );
     assert_eq!(handshake["allow_initialize_root_routing"], json!(false));
     assert!(
-        !home.path().join(".tracedecay/global.db").exists(),
+        !home
+            .path()
+            .join(".tracedecay")
+            .join(tracedecay_store::StoreFile::Profile.file_name())
+            .exists(),
         "the stdio proxy must not open the global database"
     );
     assert!(
@@ -853,7 +857,9 @@ async fn explicit_read_only_open_reports_and_guards_read_only_store() {
     let project = TempDir::new().unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root(home.path())),
-        global_db_path: Some(profile_root(home.path()).join("global.db")),
+        global_db_path: Some(
+            profile_root(home.path()).join(tracedecay_store::StoreFile::Profile.file_name()),
+        ),
     };
     fs::create_dir_all(project.path().join("src")).unwrap();
     fs::write(

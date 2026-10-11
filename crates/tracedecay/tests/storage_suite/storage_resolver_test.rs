@@ -104,7 +104,9 @@ async fn init_with_maintenance(
         project_root,
         TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
-            global_db_path: Some(profile_root.join("global.db")),
+            global_db_path: Some(
+                profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+            ),
         },
         &lifecycle,
     )
@@ -132,7 +134,9 @@ async fn open_with_maintenance(
         project_root,
         TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
-            global_db_path: Some(profile_root.join("global.db")),
+            global_db_path: Some(
+                profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+            ),
         },
         &lifecycle,
     )
@@ -191,7 +195,7 @@ async fn register_observation_store(
     .await
     .unwrap();
     let store_root = profile_root.join(format!("projects/{project_id}"));
-    let database_path = store_root.join("sessions.db");
+    let database_path = store_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     fs::create_dir_all(&store_root).unwrap();
     write_store_manifest_to_path(
         &store_root.join(STORE_MANIFEST_FILENAME),
@@ -202,8 +206,10 @@ async fn register_observation_store(
             storage_mode: StorageMode::ProfileSharded,
             project_root: project_root.to_path_buf(),
             data_root: store_root.clone(),
-            graph_db_relpath: PathBuf::from("tracedecay.db"),
-            sessions_db_relpath: PathBuf::from("sessions.db"),
+            graph_db_relpath: PathBuf::from(tracedecay_store::StoreFile::Project.file_name()),
+            sessions_db_relpath: PathBuf::from(
+                tracedecay_store::StoreFile::ProjectSessions.file_name(),
+            ),
             branch_meta_relpath: PathBuf::from("branch-meta.json"),
             sessions_schema_digest: None,
         },

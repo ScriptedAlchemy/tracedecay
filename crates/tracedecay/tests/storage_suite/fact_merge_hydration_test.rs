@@ -44,14 +44,9 @@ struct TestDb {
 async fn setup_db() -> TestDb {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("test.db");
-    crate::support::seed_latest_graph_db(&db_path).await;
-    let (db, migrated) = crate::common::open_test_database(&db_path)
+    let (db, _) = crate::common::initialize_test_database(&db_path)
         .await
-        .expect("failed to open template database");
-    assert!(
-        !migrated,
-        "fresh test database should not require migration"
-    );
+        .expect("failed to initialize test database");
     TestDb { db, _dir: dir }
 }
 
