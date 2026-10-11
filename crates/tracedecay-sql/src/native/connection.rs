@@ -110,7 +110,15 @@ impl ExecutionGuard {
     }
 
     pub fn verify(&self) -> Result<()> {
-        if self.cancelled.load(Ordering::Acquire) || self.interrupt.as_ref().is_some_and(|f| f()) {
+        if self.interrupt.as_ref().is_some_and(|f| f()) {
+            return Err(Error::Cancelled);
+        }
+        self.verify_admission()
+    }
+
+    /// [`Self::verify`] without the interrupt poll.
+    fn verify_admission(&self) -> Result<()> {
+        if self.cancelled.load(Ordering::Acquire) {
             return Err(Error::Cancelled);
         }
         if self
@@ -154,6 +162,10 @@ impl GuardSlot {
     }
 
     fn check(&self) -> Result<()> {
+        self.check_with(ExecutionGuard::verify)
+    }
+
+    fn check_with(&self, verify: impl Fn(&ExecutionGuard) -> Result<()>) -> Result<()> {
         let guards = {
             let state = self.state();
             if state.suspended {
@@ -161,15 +173,17 @@ impl GuardSlot {
             }
             state.guards.clone()
         };
-        guards.iter().try_for_each(ExecutionGuard::verify)?;
+        guards.iter().try_for_each(verify)?;
         self.confined.as_ref().map_or(Ok(()), |io| io.verify())
     }
 
     /// Admits a statement about to start: its budget restarts and the guards
-    /// are checked.
+    /// are checked. A scope's interrupt poll is not: as on SQLite, only a
+    /// running statement is polled, so a statement that finishes within one
+    /// progress interval is never interrupted.
     fn start(&self) -> Result<()> {
         self.state().ticks = 0;
-        self.check()
+        self.check_with(ExecutionGuard::verify_admission)
     }
 
     fn progress(&self) -> bool {
@@ -514,6 +528,8 @@ pub(crate) struct Prepared {
     sql: String,
     capability: Capability,
     ddl: bool,
+    /// INSERT, UPDATE or DELETE: interrupting one ends its transaction.
+    write: bool,
 }
 
 /// Exclusively owned by one thread: the writer actor or one reader worker.
@@ -525,6 +541,7 @@ pub struct Connection {
     /// capability scope fails even if its operation swallowed the error.
     transaction_control_denied: Cell<bool>,
     read_only: bool,
+    /// Compiled non-DDL statements and whether each writes.
     cache: RefCell<HashMap<(Capability, String), (turso_core::Statement, bool)>>,
     database: Database,
 }
@@ -615,7 +632,7 @@ impl Connection {
     pub(crate) fn prepare(&self, sql: &str, cached: bool) -> Result<Prepared> {
         let capability = self.capability();
         if cached
-            && let Some((statement, ddl)) = self
+            && let Some((statement, write)) = self
                 .cache
                 .borrow_mut()
                 .remove(&(capability, sql.to_owned()))
@@ -624,19 +641,22 @@ impl Connection {
                 statement,
                 sql: sql.to_owned(),
                 capability,
-                ddl,
+                ddl: false,
+                write,
             });
         }
         validate_request(sql, &[])?;
         let command = parse_single(sql)?;
         self.authorize(&command, capability)?;
         let ddl = policy::is_ddl(&command);
+        let write = policy::is_write(&command);
         let statement = self.compile(command, sql)?;
         Ok(Prepared {
             statement,
             sql: sql.to_owned(),
             capability,
             ddl,
+            write,
         })
     }
 
@@ -659,7 +679,7 @@ impl Connection {
         }
         cache
             .entry((prepared.capability, prepared.sql))
-            .or_insert((prepared.statement, false));
+            .or_insert((prepared.statement, prepared.write));
     }
 
     /// Readmits a statement before it runs: a statement compiled under
@@ -693,11 +713,52 @@ impl Connection {
 
     /// Steps until the next row (`true`) or completion (`false`).
     pub(crate) fn step(&self, prepared: &mut Prepared) -> Result<bool> {
-        let row = self.drive(&mut prepared.statement)?;
+        let row = match self.drive(&mut prepared.statement) {
+            Ok(row) => row,
+            Err(error) => {
+                return Err(self.end_interrupted_write(
+                    &mut prepared.statement,
+                    prepared.write,
+                    error,
+                ));
+            }
+        };
         if !row && prepared.ddl {
             self.clear_cache();
         }
         Ok(row)
+    }
+
+    /// SQLite rolls back the whole transaction when it interrupts an INSERT,
+    /// UPDATE or DELETE inside one; the engine leaves it open, so the driver
+    /// does it. Callers rely on an interrupted write taking its transaction
+    /// with it.
+    fn end_interrupted_write(
+        &self,
+        statement: &mut turso_core::Statement,
+        write: bool,
+        error: Error,
+    ) -> Error {
+        let interrupted = matches!(
+            error,
+            Error::Cancelled
+                | Error::DeadlineExceeded
+                | Error::Authority(_)
+                | Error::OperationLimitExceeded
+                | Error::Engine(LimboError::Interrupt)
+        );
+        if !write || !interrupted {
+            return error;
+        }
+        // The engine refuses to roll back under a statement still in progress.
+        let rolled_back = statement
+            .reset()
+            .map_err(Error::from)
+            .and_then(|()| self.rollback_transaction());
+        if let Err(rollback) = rolled_back {
+            tracing::error!(%rollback, "rollback after an interrupted write failed");
+        }
+        error
     }
 
     fn drive(&self, statement: &mut turso_core::Statement) -> Result<bool> {
@@ -746,9 +807,14 @@ impl Connection {
         }
         for (command, input) in statements {
             let ddl = policy::is_ddl(&command);
+            let write = policy::is_write(&command);
             let mut statement = self.compile(command, input)?;
             self.guard.start()?;
-            while self.drive(&mut statement)? {}
+            while self
+                .drive(&mut statement)
+                .map_err(|error| self.end_interrupted_write(&mut statement, write, error))?
+            {
+            }
             if ddl {
                 self.clear_cache();
             }

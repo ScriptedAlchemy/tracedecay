@@ -46,6 +46,7 @@ conformance!(
     deferred_constraint_at_commit_is_a_refusal_that_rolls_back,
     busy_checkpoint_reports_the_wal_it_could_not_reset,
     a_copied_back_wal_starts_over_on_the_next_write,
+    an_interrupted_write_ends_its_transaction,
 );
 
 mod cases {
@@ -341,6 +342,38 @@ mod cases {
         assert_eq!(interrupted.kind(), ErrorKind::Interrupted, "{interrupted}");
         let after: i64 = connection.query_row("SELECT 1", [], |row| row.get(0))?;
         assert_eq!(after, 1, "the guard is removed when the scope ends");
+        Ok(())
+    }
+
+    /// An interrupted INSERT inside a transaction takes the transaction with
+    /// it, as SQLite's interrupt does; the runtime's writer relies on that.
+    pub(super) fn an_interrupted_write_ends_its_transaction() -> Result<()> {
+        let (_directory, _path, mut connection) = file_database();
+        items(&connection)?;
+        connection.execute("INSERT INTO items (name) VALUES ('before')", [])?;
+        let transaction = connection.transaction()?;
+        transaction.execute("INSERT INTO items (name) VALUES ('inside')", [])?;
+        let interrupted = transaction
+            .guard_scope(
+                || true,
+                |connection| {
+                    connection.execute_batch(
+                        "INSERT INTO items (name)
+                         WITH RECURSIVE n(i) AS (
+                            SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000000
+                         )
+                         SELECT 'row-' || i FROM n",
+                    )
+                },
+            )?
+            .expect_err("an always-true guard interrupts the insert");
+        assert_eq!(interrupted.kind(), ErrorKind::Interrupted, "{interrupted}");
+        assert!(
+            transaction.is_autocommit(),
+            "the interrupted write ended its transaction"
+        );
+        drop(transaction);
+        assert_eq!(names(&connection)?, ["before"]);
         Ok(())
     }
 
