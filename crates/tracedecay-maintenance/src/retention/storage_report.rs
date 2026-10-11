@@ -4,36 +4,28 @@
 //! from `tracedecay storage report` without a live daemon or any
 //! [`tracedecay_global_db::RegisteredGlobalDb`] writer authority.
 //!
-//! # Why this does not snapshot stores in place
+//! # Nothing is copied
 //!
-//! The registry read does, because it is one small file and needs a
-//! consistent view of `code_projects`. The *per-store size sampling*
-//! deliberately does not. [`tracedecay_runtime_core::sqlite_read_snapshot`] freezes a database
-//! family by reflinking it, falling back to a **full byte copy** when the
-//! filesystem cannot reflink, and any graph database a live daemon has open
-//! is WAL-backed and therefore takes that path. Running this report over the
-//! profile it was written for would have copied every registered store to
-//! read three pragmas off it. The owner's profile was 91GB, on a command
-//! whose entire promise is being cheap enough to run on a full profile.
+//! A report never copies, snapshots, or materializes a store. Sizes come from
+//! filesystem metadata (exact, no locks, no I/O beyond `stat`) and free-page
+//! counts from a short read-only connection. If a free-page connection fails
+//! because the store is busy, corrupt, or a WAL database with no `-shm` to map
+//! read-only, its fields are `None` rather than guessed at, and the store
+//! still reports its size.
 //!
-//! So sizes come from filesystem metadata (exact, no locks, no I/O beyond
-//! `stat`) and free-page counts from a short read-only connection. The one
-//! registry snapshot uses an OS-temporary scratch directory, never a child of
-//! the profile it inspects. If a free-page connection fails because the store
-//! is busy, corrupt, or a WAL database with no `-shm` to map read-only, its
-//! fields are `None` rather than guessed at, and the store still reports its
-//! size.
+//! The offline registry read opens `global.db` immutable, which reads only the
+//! main file and writes nothing beside it. A `global.db` with outstanding WAL
+//! frames belongs to a live or crashed owner, so the offline report refuses
+//! it and the daemon-brokered report answers from the owner's own handle.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
     CodeGenerationId, CursorBindingMismatchV1, CursorBindingV1, decode_bound_cursor,
     encode_bound_cursor,
-};
-use tracedecay_runtime_core::sqlite_read_snapshot::{
-    BOUNDED_PROBE_BUSY_TIMEOUT, open_read_only_probe, pragma_u64,
 };
 
 use tracedecay_code_index_retention::code_index_generations::{
@@ -363,7 +355,7 @@ pub struct CodeGenerationRetentionAvailabilityEntry {
 /// registered project's graph database, then scanning `projects/` bottom-up
 /// for directories with no matching registry row. Read-only throughout.
 ///
-/// Filesystem sizing, `SQLite` family copy, and per-store probes run on the
+/// Filesystem sizing, the registry read, and per-store probes run on the
 /// blocking pool so this CLI path matches the daemon-paged sibling and does
 /// not stall the async runtime.
 #[tracing::instrument(name = "maintenance.storage_report.build", level = "trace", skip_all)]
@@ -380,13 +372,13 @@ pub async fn build_storage_report(
         tokio::task::spawn_blocking(move || scan_full_profile_size(&full_profile_root))
             .await
             .map_err(|error| report_error("join full profile size scan", error))?;
-    let registered_projects = if global_db_path.exists() {
-        load_registered_project_rows(profile_root, &global_db_path).await?
-    } else {
-        Vec::new()
-    };
     let profile_root_buf = profile_root.to_path_buf();
     let sampled = tokio::task::spawn_blocking(move || {
+        let registered_projects = if global_db_path.exists() {
+            read_registered_project_rows(&global_db_path)?
+        } else {
+            Vec::new()
+        };
         sample_registered_storage(&profile_root_buf, &global_db_path, registered_projects)
     })
     .await
@@ -416,72 +408,19 @@ struct SampledRegisteredStorage {
     user_sessions_db_bytes: u64,
 }
 
-/// Copies `global.db` off-profile on the blocking pool, then lists registered
-/// project rows over the async snapshot reader.
-async fn load_registered_project_rows(
-    profile_root: &Path,
+/// Lists registered project rows straight from a quiesced `global.db`.
+fn read_registered_project_rows(
     global_db_path: &Path,
 ) -> tracedecay_domain::errors::Result<Vec<(String, String)>> {
-    let profile_root = profile_root.to_path_buf();
-    let global_db_path = global_db_path.to_path_buf();
-    let (scratch, snapshot_source) = tokio::task::spawn_blocking(move || {
-        let scratch = tempfile::tempdir()
-            .map_err(|error| report_error("create external read-snapshot scratch", error))?;
-        validate_external_scratch(&profile_root, scratch.path())
-            .map_err(|error| report_error("validate read-snapshot scratch placement", error))?;
-        // The live family stays untouched: a read-only SQLite open against a
-        // WAL database can still materialize a missing SHM sidecar, and any
-        // snapshot lock or scratch must stay outside the profile being
-        // reported. The copy is a private throwaway, not a managed TraceDecay
-        // database, so Foreign/read-only snapshot policy is the truthful
-        // authority: Owned would demand managed-daemon or exclusive-maintenance
-        // on a path that can never hold either.
-        let snapshot_source = scratch.path().join(GLOBAL_DB_FILENAME);
-        copy_sqlite_family(&global_db_path, &snapshot_source)
-            .map_err(|error| report_error("copy global.db family for read-only report", error))?;
-        Ok::<_, tracedecay_domain::errors::TraceDecayError>((scratch, snapshot_source))
-    })
-    .await
-    .map_err(|error| report_error("join global.db family copy", error))??;
-    // This clone has no live writer holding its copied SHM. Normalize only
-    // the owned scratch family before snapshot validation: a SQLite reader
-    // would otherwise rebuild that transient SHM and invalidate its own read.
-    tracedecay_runtime_core::sqlite_read_snapshot::materialize(
-        &snapshot_source,
-        tracedecay_runtime_core::sqlite_read_snapshot::SnapshotReadControl::unlimited(),
-    )
-    .await
-    .map_err(|error| report_error("materialize private global.db family", error))?;
-    let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open_foreign_in(
-        &snapshot_source,
-        scratch.path(),
-        tracedecay_runtime_core::sqlite_read_snapshot::SnapshotReadControl::unlimited(),
-    )
-    .await
-    .map_err(|error| report_error("open global.db read snapshot", error))?;
-    let connection = snapshot.connection();
-    let mut rows = connection
-        .query(
-            "SELECT project_id, canonical_root FROM code_projects ORDER BY project_id",
-            (),
-        )
-        .await
+    let connection = super::quiesced_sqlite::open_quiesced(global_db_path)
+        .map_err(|error| report_error("open quiesced global.db for read-only report", error))?;
+    let mut statement = connection
+        .prepare("SELECT project_id, canonical_root FROM code_projects ORDER BY project_id")
         .map_err(|error| report_error("list registered projects", error))?;
-    let mut projects = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| report_error("read registered project row", error))?
-    {
-        let project_id: String = row
-            .get::<String>(0)
-            .map_err(|error| report_error("decode project id", error))?;
-        let canonical_root: String = row
-            .get::<String>(1)
-            .map_err(|error| report_error("decode canonical root", error))?;
-        projects.push((project_id, canonical_root));
-    }
-    Ok(projects)
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .and_then(Iterator::collect)
+        .map_err(|error| report_error("read registered project row", error))
 }
 
 fn sample_registered_storage(
@@ -1039,33 +978,6 @@ fn database_family_bytes(database_path: &Path) -> u64 {
     total_bytes
 }
 
-/// Copies a `SQLite` main/WAL/SHM family without opening the source path. The
-/// caller opens only `destination`, which prevents reporting from creating
-/// sidecars under the profile it is inspecting.
-fn copy_sqlite_family(source: &Path, destination: &Path) -> std::io::Result<()> {
-    let generation =
-        tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration::capture(source)?;
-    for suffix in ["", "-wal", "-shm"] {
-        let source_member = sqlite_family_member(source, suffix);
-        if !source_member.is_file() {
-            continue;
-        }
-        std::fs::copy(&source_member, sqlite_family_member(destination, suffix))?;
-    }
-    generation.validate()
-}
-
-fn validate_external_scratch(profile_root: &Path, scratch_root: &Path) -> std::io::Result<()> {
-    let profile = profile_root.canonicalize()?;
-    let scratch = scratch_root.canonicalize()?;
-    if scratch.starts_with(profile) {
-        return Err(std::io::Error::other(
-            "read-snapshot scratch must be outside the inspected profile",
-        ));
-    }
-    Ok(())
-}
-
 fn sqlite_family_member(database_path: &Path, suffix: &str) -> PathBuf {
     if suffix.is_empty() {
         database_path.to_path_buf()
@@ -1076,15 +988,28 @@ fn sqlite_family_member(database_path: &Path, suffix: &str) -> PathBuf {
     }
 }
 
-/// Reads the free-page pragmas over the shared bounded read-only probe.
+/// Reads the free-page pragmas over a bounded read-only probe.
 /// Returns `None` on any failure, a store held by a busy writer, a corrupt
 /// file, or a WAL database whose `-shm` cannot be mapped read-only. A report
 /// must degrade, never block and never repair.
 fn sample_free_pages(graph_db_path: &Path) -> Option<(u64, f64)> {
-    let connection = open_read_only_probe(graph_db_path, BOUNDED_PROBE_BUSY_TIMEOUT).ok()?;
-    let page_size = pragma_u64(&connection, "page_size")?;
-    let page_count = pragma_u64(&connection, "page_count")?;
-    let freelist = pragma_u64(&connection, "freelist_count")?;
+    // `NO_MUTEX` is sound: `rusqlite::Connection` is not `Sync`, so the probe
+    // stays owned by this one thread.
+    let connection = rusqlite::Connection::open_with_flags(
+        graph_db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    connection.busy_timeout(Duration::from_millis(200)).ok()?;
+    let pragma_u64 = |pragma: &str| {
+        connection
+            .query_row(&format!("PRAGMA {pragma}"), [], |row| row.get::<_, i64>(0))
+            .ok()
+            .and_then(|value| u64::try_from(value).ok())
+    };
+    let page_size = pragma_u64("page_size")?;
+    let page_count = pragma_u64("page_count")?;
+    let freelist = pragma_u64("freelist_count")?;
     if page_size == 0 || page_count == 0 {
         return None;
     }
@@ -1776,16 +1701,31 @@ mod tests {
             assert!(sqlite_family_member(&global_db, "-shm").is_file());
             seed_graph_db(&profile_root, "proj_a");
             let before = sqlite_family_bytes(&global_db);
+            let profile_listing = directory_listing(&profile_root);
 
-            let report = build_storage_report(&profile_root).await.unwrap();
+            let report = build_storage_report(&profile_root).await;
 
-            assert_eq!(report.stores.len(), 1);
-            assert_eq!(report.stores[0].project_id, "proj_a");
-            assert_eq!(report.stores[0].canonical_root, "/repos/a");
+            if checkpointed {
+                let report = report.unwrap();
+                assert_eq!(report.stores.len(), 1);
+                assert_eq!(report.stores[0].project_id, "proj_a");
+                assert_eq!(report.stores[0].canonical_root, "/repos/a");
+            } else {
+                let error = report.unwrap_err().to_string();
+                assert!(
+                    error.contains("un-checkpointed WAL frames"),
+                    "an offline report must refuse a live WAL rather than copy it: {error}"
+                );
+            }
             assert_eq!(
                 sqlite_family_bytes(&global_db),
                 before,
                 "reporting must never create, change, or delete a source SQLite family member"
+            );
+            assert_eq!(
+                directory_listing(&profile_root),
+                profile_listing,
+                "reporting must never leave a copy or scratch file in the profile"
             );
             drop(writer);
             let closed = sqlite_family_bytes(&global_db);
@@ -1797,27 +1737,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn scratch_validation_rejects_a_transient_directory_inside_the_profile() {
-        let root = tempfile::tempdir().unwrap();
-        let profile = root.path().join("profile");
-        let transient = profile.join("transient");
-        std::fs::create_dir_all(&transient).unwrap();
-
-        let rejected = validate_external_scratch(&profile, &transient).unwrap_err();
-        assert_eq!(rejected.kind(), std::io::ErrorKind::Other);
-        assert_eq!(
-            rejected.to_string(),
-            "read-snapshot scratch must be outside the inspected profile"
-        );
-        let outside = root.path().join("outside");
-        std::fs::create_dir_all(&outside).unwrap();
-        assert_eq!(validate_external_scratch(&profile, &outside).unwrap(), ());
+    /// Every file under `root` with its bytes, so any copy, scratch file, or
+    /// sidecar a report leaves behind shows up as a difference.
+    fn directory_listing(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut listing = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let bytes = std::fs::read(&path).unwrap();
+                    listing.insert(path, bytes);
+                }
+            }
+        }
+        listing
     }
 
-    /// The report must never freeze a store family to size it: a snapshot
-    /// reflinks or, when the filesystem cannot, fully copies the database.
-    /// Sizing must come from metadata and leave no scratch behind.
+    /// The report must never copy a store family to size it. Catches a
+    /// snapshot, reflink, or scratch copy: the size must come from metadata
+    /// and the profile listing must be byte-identical afterwards.
     #[tokio::test]
     async fn sizing_a_store_copies_nothing_and_leaves_no_scratch() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1831,8 +1772,16 @@ mod tests {
             .join("proj_a")
             .join(tracedecay_runtime_core::config::DB_FILENAME);
         let before = std::fs::metadata(&graph_db).unwrap().modified().unwrap();
+        let profile_listing = directory_listing(&profile_root);
 
         let report = build_storage_report(&profile_root).await.unwrap();
+
+        assert_eq!(
+            directory_listing(&profile_root),
+            profile_listing,
+            "sizing must not create, change, or delete any profile file"
+        );
+        assert!(report.stores[0].total_bytes > 0);
 
         assert_eq!(report.stores.len(), 1);
         assert_eq!(

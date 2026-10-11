@@ -41,6 +41,7 @@ pub mod incident_debris;
 /// profile-sharded store directories whose project identity no longer resolves
 /// to a live repository root (plan 38, §2).
 pub mod orphan_stores;
+mod quiesced_sqlite;
 /// Registered session-store retention across its canonical owner kernels.
 pub mod registered_store;
 /// Read-only, cheap-to-query per-store size and free-page-ratio reporting,

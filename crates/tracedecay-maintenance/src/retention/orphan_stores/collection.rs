@@ -52,20 +52,6 @@ impl<'a> CollectionControl<'a> {
         }
     }
 
-    /// Adapt the retention admission to the canonical `SQLite` read-snapshot
-    /// control. The snapshot layer may copy/materialize a foreign database in
-    /// `spawn_blocking`, so it must observe the same live cancellation and
-    /// deadline rather than an unbounded root-shim control.
-    pub(crate) fn snapshot_read_control(
-        self,
-    ) -> tracedecay_runtime_core::sqlite_read_snapshot::SnapshotReadControl {
-        let cancellation = (*self.cancellation).clone();
-        tracedecay_runtime_core::sqlite_read_snapshot::SnapshotReadControl::new(
-            self.deadline.instant(),
-            move || cancellation.is_cancelled(),
-        )
-    }
-
     /// Race an awaitable inspection or `SQLite` command against the admission's
     /// cancellation/deadline. Losing the race never authorizes the following
     /// destructive phase; a later pass inspects the store afresh.
@@ -408,15 +394,14 @@ pub(super) async fn collect_registered_finding(
         profile_root,
         &finding.data_root,
         finding.expected_manifest_bytes.as_deref(),
-        &durable_check_scratch_root(profile_root),
         control,
     )
     .await;
     if let Some(step) = durable_memory_step(check, control) {
         return Ok(step);
     }
-    // The durable inventory can take a private snapshot and therefore leaves
-    // a window for a concurrent replacement.
+    // The durable inventory is not a deletion lock and leaves a window for a
+    // concurrent replacement.
     if let Some(step) = payload_fence_step(
         registered_payload_fence_matches(finding, profile_root, control),
         control,
@@ -693,7 +678,6 @@ pub(super) async fn check_store_durable_memory(
     profile_root: &Path,
     data_root: &Path,
     manifest_bytes: Option<&[u8]>,
-    scratch_root: &Path,
     control: CollectionControl<'_>,
 ) -> DurableMemoryCheck {
     if control.completion().is_some() {
@@ -705,22 +689,10 @@ pub(super) async fn check_store_durable_memory(
     match durable_database_inventory(manifest_bytes, store_relpath, control) {
         DurableDatabaseInventoryV1::Interrupted => DurableMemoryCheck::Interrupted,
         DurableDatabaseInventoryV1::Resolved(relpath) => {
-            check_durable_memory_rows(profile_root, &relpath, scratch_root, control).await
+            check_durable_memory_rows(profile_root, &relpath, control).await
         }
         DurableDatabaseInventoryV1::Unverifiable => DurableMemoryCheck::Unverifiable,
     }
-}
-
-/// The read-snapshot scratch directory for durable-memory checks.
-///
-/// It lives under the *profile* root, never inside the store being examined.
-/// Two reasons, both load-bearing: the store is a deletion candidate, and
-/// writing into it bumps the newest mtime that
-/// [`walk_store_stats`] uses as the revival fence, a store that failed one
-/// check would have its age reset by the check itself and could never mature
-/// past the retention window again.
-pub(super) fn durable_check_scratch_root(profile_root: &Path) -> PathBuf {
-    profile_root.join("scratch").join("sqlite-read")
 }
 
 /// Checks whether the database at `root` joined with `db_relpath` carries
@@ -728,13 +700,14 @@ pub(super) fn durable_check_scratch_root(profile_root: &Path) -> PathBuf {
 /// from the schema instead of maintaining a fixed list: both legacy memory and
 /// Memory V2 add durable tables, and a newly added table must be protected
 /// automatically.
-/// Side-effect-free with respect to the store: opens the database through
-/// [`tracedecay_runtime_core::sqlite_read_snapshot`], so the live store is never mutated or
-/// locked against a concurrent writer.
+/// Side-effect-free with respect to the store: the database is read in place
+/// through [`open_quiesced`], never copied, locked, or given a sidecar, so the
+/// census fences and the revival mtime stay exactly as they were. A store with
+/// outstanding WAL frames cannot be read that way and is `Unverifiable`, which
+/// protects it.
 async fn check_durable_memory_rows(
     root: &Path,
     db_relpath: &Path,
-    scratch_root: &Path,
     control: CollectionControl<'_>,
 ) -> DurableMemoryCheck {
     if control.completion().is_some() {
@@ -756,98 +729,57 @@ async fn check_durable_memory_rows(
         }
         Err(_) => return DurableMemoryCheck::Unverifiable,
     }
-    // The snapshot layer creates only the final scratch component, so its
-    // parent must exist first. Without this the snapshot fails NotFound, the
-    // check fails closed as `Unverifiable`, and because `Unverifiable` is
-    // treated exactly like `Present`, *every* collection is refused. That is
-    // safe, but it silently disables orphan reclamation entirely.
-    if control.completion().is_some() || std::fs::create_dir_all(scratch_root).is_err() {
-        return if control.completion().is_some() {
-            DurableMemoryCheck::Interrupted
-        } else {
-            DurableMemoryCheck::Unverifiable
-        };
+    let inspection = tokio::task::spawn_blocking(move || memory_rows_present(&graph_db_path));
+    match control.race(inspection).await {
+        Err(_) => DurableMemoryCheck::Interrupted,
+        Ok(Ok(Some(true))) => DurableMemoryCheck::Present,
+        Ok(Ok(Some(false))) if control.completion().is_some() => DurableMemoryCheck::Interrupted,
+        Ok(Ok(Some(false))) => DurableMemoryCheck::Empty,
+        Ok(Ok(None) | Err(_)) => DurableMemoryCheck::Unverifiable,
     }
-    let snapshot = match control
-        .race(
-            tracedecay_runtime_core::sqlite_read_snapshot::open_foreign_in(
-                &graph_db_path,
-                scratch_root,
-                control.snapshot_read_control(),
-            ),
-        )
-        .await
-    {
-        Err(_) => return DurableMemoryCheck::Interrupted,
-        Ok(Ok(snapshot)) => snapshot,
-        Ok(Err(_)) => return DurableMemoryCheck::Unverifiable,
-    };
-    if control.completion().is_some() {
-        return DurableMemoryCheck::Interrupted;
-    }
-    let connection = snapshot.connection();
-    let mut rows = match control
-        .race(connection.query(
+}
+
+/// Whether any canonical `memory_*` table of a quiesced database has a row,
+/// or `None` when that cannot be read. A change to the file during the read
+/// is caught by the census fence the caller re-checks before deleting.
+fn memory_rows_present(database: &Path) -> Option<bool> {
+    let connection = super::super::quiesced_sqlite::open_quiesced(database).ok()?;
+    let tables = connection
+        .prepare(
             "SELECT name
              FROM pragma_table_list
              WHERE schema = 'main'
                AND type = 'table'
                AND name LIKE ?1 ESCAPE '\\'
              ORDER BY name",
-            tracedecay_runtime_core::db::engine::params!["memory\\_%"],
-        ))
-        .await
-    {
-        Err(_) => return DurableMemoryCheck::Interrupted,
-        Ok(Ok(rows)) => rows,
-        Ok(Err(_)) => return DurableMemoryCheck::Unverifiable,
-    };
-    let mut present_tables = Vec::new();
-    loop {
-        let next = match control.race(rows.next()).await {
-            Err(_) => return DurableMemoryCheck::Interrupted,
-            Ok(Ok(next)) => next,
-            Ok(Err(_)) => return DurableMemoryCheck::Unverifiable,
-        };
-        match next {
-            Some(row) => match row.get::<String>(0) {
-                Ok(name) => present_tables.push(name),
-                Err(_) => return DurableMemoryCheck::Unverifiable,
-            },
-            None => break,
-        }
-    }
-    drop(rows);
-    for table in present_tables {
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map(["memory\\_%"], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .ok()?;
+    for table in tables {
         // `pragma_table_list.type = 'table'` intentionally excludes FTS
         // virtual/shadow tables, whose internal config rows are derived and
         // exist even when there is no durable memory. Identifiers cannot be
         // SQL parameters, so only interpolate TraceDecay's canonical shape;
         // an unexpected name fails closed rather than becoming SQL text.
         if !is_memory_table_identifier(&table) {
-            return DurableMemoryCheck::Unverifiable;
+            return None;
         }
-        let probe_sql = format!("SELECT 1 FROM \"{table}\" LIMIT 1");
-        let mut probe_rows = match control.race(connection.query(&probe_sql, ())).await {
-            Err(_) => return DurableMemoryCheck::Interrupted,
-            Ok(Ok(rows)) => rows,
-            Ok(Err(_)) => return DurableMemoryCheck::Unverifiable,
-        };
-        match control.race(probe_rows.next()).await {
-            Err(_) => return DurableMemoryCheck::Interrupted,
-            Ok(Ok(Some(_))) => return DurableMemoryCheck::Present,
-            Ok(Ok(None)) => {}
-            Ok(Err(_)) => return DurableMemoryCheck::Unverifiable,
+        let present = connection
+            .query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM \"{table}\")"),
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .ok()?;
+        if present {
+            return Some(true);
         }
     }
-    if control.completion().is_some() {
-        return DurableMemoryCheck::Interrupted;
-    }
-    if snapshot.validate_source().is_err() {
-        // The file changed under us mid-check: cannot trust an empty result.
-        return DurableMemoryCheck::Unverifiable;
-    }
-    DurableMemoryCheck::Empty
+    Some(false)
 }
 
 fn is_memory_table_identifier(table: &str) -> bool {
@@ -939,7 +871,6 @@ pub(super) async fn collect_unregistered_finding(
         Err(completion) => return Ok(FindingStep::Interrupted(completion)),
     }
 
-    let scratch_root = durable_check_scratch_root(profile_root);
     // An unreadable manifest must not be swallowed into "no manifest": the
     // inventory then fails closed instead of checking a guessed database. A
     // manifestless directory is different: only an exact empty-tree inventory
@@ -955,14 +886,12 @@ pub(super) async fn collect_unregistered_finding(
                 profile_root,
                 &finding.data_root,
                 Some(&manifest_bytes),
-                &scratch_root,
                 control,
             )
             .await
         }
         RegularFileSnapshot::Missing => {
-            check_manifestless_store_durable_memory(&finding.data_root, &scratch_root, control)
-                .await
+            check_manifestless_store_durable_memory(&finding.data_root, control).await
         }
         RegularFileSnapshot::Unverifiable => DurableMemoryCheck::Unverifiable,
     };
@@ -1030,7 +959,6 @@ pub(super) async fn collect_unregistered_finding(
 /// possible durable authority and inspected fail-closed.
 async fn check_manifestless_store_durable_memory(
     data_root: &Path,
-    scratch_root: &Path,
     control: CollectionControl<'_>,
 ) -> DurableMemoryCheck {
     let mut databases = Vec::new();
@@ -1051,7 +979,7 @@ async fn check_manifestless_store_durable_memory(
         if control.completion().is_some() {
             return DurableMemoryCheck::Interrupted;
         }
-        match check_durable_memory_rows(data_root, &relpath, scratch_root, control).await {
+        match check_durable_memory_rows(data_root, &relpath, control).await {
             DurableMemoryCheck::Empty => {}
             protected => return protected,
         }

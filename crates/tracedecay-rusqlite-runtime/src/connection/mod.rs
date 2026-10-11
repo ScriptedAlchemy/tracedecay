@@ -503,8 +503,7 @@ impl VerifiedReader {
 }
 
 pub(crate) fn open(path: &Path, mode: ConnectionMode) -> Result<Connection, ConnectionPolicyError> {
-    let (connection, fresh_writer) = open_raw(path, mode)?;
-    finish_open(connection, mode, fresh_writer)
+    finish_open(open_raw(path, mode)?, mode)
 }
 
 pub(crate) fn open_writer(
@@ -512,15 +511,14 @@ pub(crate) fn open_writer(
     opened_database: Option<&OpenedDatabaseFile>,
     canonical_path: &Path,
 ) -> Result<Connection, WriterOpenError> {
-    let (connection, fresh_writer) =
-        open_raw(path, ConnectionMode::Writer).map_err(WriterOpenError::Policy)?;
+    let connection = open_raw(path, ConnectionMode::Writer).map_err(WriterOpenError::Policy)?;
     if let Some(opened_database) = opened_database {
         opened_database
             .verify_connection(&connection, canonical_path)
             .map_err(WriterOpenError::Identity)?;
     }
-    let connection = finish_open(connection, ConnectionMode::Writer, fresh_writer)
-        .map_err(WriterOpenError::Policy)?;
+    let connection =
+        finish_open(connection, ConnectionMode::Writer).map_err(WriterOpenError::Policy)?;
     if let Some(opened_database) = opened_database {
         opened_database
             .verify_connection(&connection, canonical_path)
@@ -612,15 +610,10 @@ fn device_stem(component: &str) -> bool {
         .any(|device| stem.eq_ignore_ascii_case(device))
 }
 
-fn open_raw(
-    path: &Path,
-    mode: ConnectionMode,
-) -> Result<(Connection, bool), ConnectionPolicyError> {
+fn open_raw(path: &Path, mode: ConnectionMode) -> Result<Connection, ConnectionPolicyError> {
     {
         let _span = tracing::trace_span!("rusqlite.connection.open").entered();
         {
-            let fresh_writer = mode == ConnectionMode::Writer
-                && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0);
             let path = sqlite_host_path(path);
             let flags = match mode {
                 ConnectionMode::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -629,10 +622,7 @@ fn open_raw(
                 }
             } | OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
-            let connection = Connection::open_with_flags(&path, flags)
-                .map_err(|source| policy("open", source))?;
-
-            Ok((connection, fresh_writer))
+            Connection::open_with_flags(&path, flags).map_err(|source| policy("open", source))
         }
     }
 }
@@ -644,12 +634,11 @@ fn open_raw(
 fn finish_open(
     connection: Connection,
     mode: ConnectionMode,
-    fresh_writer: bool,
 ) -> Result<Connection, ConnectionPolicyError> {
     {
         let _span = tracing::trace_span!("rusqlite.connection.configure").entered();
         {
-            apply_pragmas(&connection, mode, fresh_writer)?;
+            apply_pragmas(&connection, mode)?;
             assert_compile_options(&connection)?;
             apply_limits(&connection, mode)?;
             connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
@@ -697,7 +686,7 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
                 | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
             let connection =
                 Connection::open_with_flags(uri, flags).map_err(|source| policy("open", source))?;
-            apply_pragmas(&connection, ConnectionMode::Reader, false)?;
+            apply_pragmas(&connection, ConnectionMode::Reader)?;
             assert_compile_options(&connection)?;
             apply_limits(&connection, ConnectionMode::Reader)?;
             connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
@@ -771,7 +760,6 @@ fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {
 fn apply_pragmas(
     connection: &Connection,
     mode: ConnectionMode,
-    fresh_writer: bool,
 ) -> Result<(), ConnectionPolicyError> {
     // SQLite must never wait past the runtime's own queue/deadline authority.
     connection
@@ -788,12 +776,6 @@ fn apply_pragmas(
         .map_err(|source| policy("trusted schema", source))?;
 
     if mode == ConnectionMode::Writer {
-        if fresh_writer {
-            connection
-                .pragma_update(None, "auto_vacuum", "INCREMENTAL")
-                .map_err(|source| policy("fresh auto-vacuum", source))?;
-            verify_pragma_i64(connection, "auto_vacuum", 2)?;
-        }
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(|source| policy("WAL journal", source))?;
@@ -1062,13 +1044,10 @@ fn is_read_only_introspection_pragma(pragma_name: &str) -> bool {
         .any(|candidate| pragma_name.eq_ignore_ascii_case(candidate))
 }
 
-fn is_safe_writer_pragma(pragma_name: &str, pragma_value: &str) -> bool {
+fn is_safe_writer_pragma(pragma_name: &str) -> bool {
     pragma_name.eq_ignore_ascii_case("busy_timeout")
-        || pragma_name.eq_ignore_ascii_case("incremental_vacuum")
         || pragma_name.eq_ignore_ascii_case("wal_autocheckpoint")
         || pragma_name.eq_ignore_ascii_case("wal_checkpoint")
-        || (pragma_name.eq_ignore_ascii_case("auto_vacuum")
-            && (pragma_value.eq_ignore_ascii_case("incremental") || pragma_value == "2"))
 }
 
 fn authorize(mode: ConnectionMode, context: AuthContext<'_>) -> Authorization {
@@ -1106,11 +1085,10 @@ fn authorize(mode: ConnectionMode, context: AuthContext<'_>) -> Authorization {
             context.action,
             AuthAction::Pragma {
                 pragma_name,
-                pragma_value: Some(pragma_value),
+                pragma_value: Some(_),
             }
             if !is_read_only_introspection_pragma(pragma_name)
-                && (mode != ConnectionMode::Writer
-                    || !is_safe_writer_pragma(pragma_name, pragma_value))
+                && (mode != ConnectionMode::Writer || !is_safe_writer_pragma(pragma_name))
         )
         || (mode == ConnectionMode::Reader
             && matches!(

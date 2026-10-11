@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use super::collection::{
     DurableDatabaseInventoryV1, DurableMemoryCheck, FindingStep, check_store_durable_memory,
-    collect_registered_finding, collect_unregistered_finding, durable_check_scratch_root,
-    durable_database_inventory, open_verified_store, unbounded_deadline,
+    collect_registered_finding, collect_unregistered_finding, durable_database_inventory,
+    open_verified_store, unbounded_deadline,
 };
 use super::fence::{capture_store_content_fence, capture_store_directory_fence};
 use super::pages::walk_store_stats;
