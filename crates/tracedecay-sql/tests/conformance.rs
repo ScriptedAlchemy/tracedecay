@@ -49,6 +49,7 @@ conformance!(
     a_copied_back_wal_starts_over_on_the_next_write,
     read_only_open_reads_without_creating_a_wal,
     an_interrupted_write_ends_its_transaction,
+    bound_limit_and_offset_restart_on_every_subquery_rescan,
 );
 
 mod cases {
@@ -871,6 +872,80 @@ mod cases {
             names(&reopened)?.is_empty(),
             "close rolled back the open write"
         );
+        Ok(())
+    }
+
+    /// Each statement runs a nested query again for every outer row. The
+    /// CROSS JOIN keeps the CTE on the inner side, and its unindexable join
+    /// key keeps Turso from materializing it once into a seek index; the
+    /// correlated subquery reruns per row by definition. A bound LIMIT or
+    /// OFFSET must count from its bound value on every run, as a literal does
+    /// (turso-bugs/cte-limit-parameter-drops-groups.md).
+    pub(super) fn bound_limit_and_offset_restart_on_every_subquery_rescan() -> Result<()> {
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "CREATE TABLE facts (obs TEXT NOT NULL, ord INTEGER NOT NULL);
+             INSERT INTO facts VALUES ('a', 1), ('a', 2), ('b', 3);",
+        )?;
+        let joined = |subquery: &str| {
+            format!(
+                "WITH m AS ({subquery})
+                 SELECT f.ord, m.obs FROM facts f CROSS JOIN m
+                 WHERE m.obs || '' = f.obs ORDER BY f.ord"
+            )
+        };
+        let grouped = "SELECT obs, MIN(ord) AS first FROM facts GROUP BY obs ORDER BY first";
+        let compound = "SELECT obs, ord FROM facts WHERE ord = 1
+             UNION ALL SELECT obs, ord FROM facts WHERE ord = 3";
+        let cases: [(String, &[i64], &[(i64, &str)]); 5] = [
+            (
+                joined(&format!("{grouped} LIMIT ?1")),
+                &[4],
+                &[(1, "a"), (2, "a"), (3, "b")],
+            ),
+            (
+                joined(&format!("{grouped} LIMIT ?1 OFFSET ?2")),
+                &[1, 1],
+                &[(3, "b")],
+            ),
+            (
+                joined(&format!("{compound} LIMIT ?1 OFFSET ?2")),
+                &[1, 1],
+                &[(3, "b")],
+            ),
+            (
+                joined(&format!("{compound} ORDER BY 2 LIMIT ?1 OFFSET ?2")),
+                &[1, 1],
+                &[(3, "b")],
+            ),
+            (
+                "SELECT f.ord, COALESCE((SELECT g.obs FROM facts g WHERE g.ord >= f.ord
+                     ORDER BY g.ord LIMIT ?1 OFFSET ?2), '-')
+                 FROM facts f ORDER BY f.ord"
+                    .to_owned(),
+                &[1, 1],
+                &[(1, "a"), (2, "b"), (3, "-")],
+            ),
+        ];
+        let mut mismatches = Vec::new();
+        for (sql, bound, expected) in cases {
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement
+                .query_map(params_from_iter(bound.iter()), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>>>()?;
+            let expected = expected
+                .iter()
+                .map(|&(ord, obs)| (ord, obs.to_owned()))
+                .collect::<Vec<_>>();
+            if rows != expected {
+                mismatches.push(format!(
+                    "{sql}\n  bound {bound:?}: got {rows:?}, want {expected:?}"
+                ));
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
         Ok(())
     }
 }
