@@ -6657,19 +6657,17 @@ mod tests {
     /// sequence and must accept and refuse exactly what a `WITHOUT ROWID`
     /// table does, ending with only the upserted row. The expected outcomes
     /// are spelled out because the native engine has no `WITHOUT ROWID`
-    /// twin to compare against.
+    /// twin to compare against. The page-ordered staging runs carry no key:
+    /// their merges refuse a repeated run instead.
     #[test]
     fn rowid_tables_keep_without_rowid_key_semantics() {
-        const CONVERTED: [&str; 11] = [
+        const CONVERTED: [&str; 8] = [
             "row_chunks",
-            "term_posting_runs",
             "term_postings",
             "field_stats",
             "field_stats_staging",
-            "exact_posting_runs",
             "exact_postings",
             "ngram_postings",
-            "row_dictionary_pages",
             "clone_exact_postings",
             "clone_fingerprint_postings",
         ];
@@ -7217,22 +7215,26 @@ mod tests {
             !table_exists(&connection, "ngram_posting_pages").expect("table probe"),
             "n-gram lists are rebuilt from rows and never staged"
         );
-        for table in ["term_posting_runs", "exact_posting_runs", "row_chunk_pages"] {
-            let secondary_indexes: i64 = connection
+        for table in [
+            "term_posting_runs",
+            "exact_posting_runs",
+            "row_dictionary_pages",
+            "row_chunk_pages",
+        ] {
+            let indexes: i64 = connection
                 .query_row(
-                    "SELECT COUNT(*) FROM pragma_index_list(?1) WHERE origin != 'pk'",
+                    "SELECT COUNT(*) FROM pragma_index_list(?1)",
                     [table],
                     |row| row.get(0),
                 )
                 .expect("inspect staging indexes");
             assert_eq!(
-                secondary_indexes, 0,
-                "{table}: serving-key maintenance must remain absent during catch-up"
+                indexes, 0,
+                "{table}: catch-up appends to the table alone, with no key or serving index"
             );
         }
 
-        let staging_order =
-            "SELECT page_ordinal, term FROM term_posting_runs ORDER BY page_ordinal, term, field";
+        let staging_order = "SELECT page_ordinal, term FROM term_posting_runs ORDER BY rowid";
         let rows = connection
             .prepare(staging_order)
             .expect("prepare staging-order scan")
@@ -7251,14 +7253,109 @@ mod tests {
                 (1, "beta".to_owned())
             ]
         );
+    }
+
+    /// A staging run repeated under the same page and key, which the dropped
+    /// staging keys used to refuse at insert, must fail its merge closed
+    /// instead of sealing a list that names its documents twice.
+    #[test]
+    fn repeated_staging_runs_fail_their_merges_closed() {
+        let generation = test_metadata().generation;
+        let authority = ServingIndexStepAuthorityV1 {
+            generation: &generation,
+            ngram_memory_bytes: 1024 * 1024,
+        };
+        for (ordinal, seed) in [
+            (
+                1,
+                "INSERT INTO term_posting_runs(page_ordinal, term, field, postings) VALUES (0, 'render', 4, ?1)",
+            ),
+            (
+                2,
+                "INSERT INTO exact_posting_runs(page_ordinal, term_id, field, documents) VALUES (0, 9, 1, ?1)",
+            ),
+        ] {
+            let mut connection = Connection::open_in_memory().expect("open artifact database");
+            create_schema(&connection).expect("create artifact schema");
+            let run = encoded_postings(ordinal == 1, &[(1, 1), (2, 1)]);
+            for _ in 0..2 {
+                connection
+                    .execute(seed, params![run])
+                    .expect("staging accepts the repeated run");
+            }
+            let transaction = connection.transaction().expect("merge transaction");
+            let error = build_serving_index_step(&transaction, ordinal, &authority, &ActiveControl)
+                .expect_err("a repeated run must not seal");
+            assert!(
+                matches!(&error, CodeLexicalArtifactErrorV1::Corrupt(message)
+                    if message == "lexical artifact staged posting runs overlap"),
+                "step {ordinal}: unexpected error {error:?}"
+            );
+            let sealed: i64 = transaction
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM term_postings) + (SELECT COUNT(*) FROM exact_postings)",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count sealed lists");
+            assert_eq!(sealed, 0, "step {ordinal}: no list may be sealed");
+        }
+    }
+
+    /// A fingerprint section walked one row per wake resumes inside a family
+    /// and across family boundaries, and folds exactly the rows and digest
+    /// of one unbounded walk.
+    #[test]
+    fn bounded_fingerprint_walks_cross_families_like_one_walk() {
+        let mut connection = Connection::open_in_memory().expect("open artifact database");
+        create_schema(&connection).expect("create artifact schema");
+        for (language, class, fingerprint) in [
+            ("go", 1i64, 5i64),
+            ("go", 1, 9),
+            ("rust", 1, 3),
+            ("rust", 1, 7),
+            ("rust", 2, 1),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, posting_count, postings) VALUES (?1, ?2, 1, ?3, 1, X'00')",
+                    params![language, class, fingerprint],
+                )
+                .expect("seed fingerprint list");
+        }
+        let transaction = connection.transaction().expect("walk transaction");
+        let section = FinalizationSectionV1::CloneFingerprintPostings;
+        let walk = |budget: usize| {
+            let mut state = PersistedFinalizationStateV1::new(
+                0,
+                ManifestDigest::from_sha256_bytes(&[0u8; 32]).expect("digest"),
+                CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1,
+                PersistedFinalizationPhaseV1::Digest,
+            )
+            .expect("finalization state");
+            state.section_accumulator = initial_section_accumulator(section.name())
+                .expect("initial accumulator")
+                .to_vec();
+            let mut wakes = 0;
+            while advance_section_rows(&transaction, section, &mut state, budget, &ActiveControl)
+                .expect("advance fingerprint section")
+                > 0
+            {
+                wakes += 1;
+            }
+            (state.section_row_count, state.section_accumulator, wakes)
+        };
+        let (rows, digest, wakes) = walk(1);
         assert_eq!(
-            super::super::temporary_sorts(&super::super::query_plan(
-                &connection,
-                staging_order,
-                []
-            )),
-            0,
-            "source-page catch-up must be the maintained table order"
+            (rows, wakes),
+            (5, 5),
+            "one row per wake reaches every family"
+        );
+        let (whole_rows, whole_digest, _) = walk(100);
+        assert_eq!(whole_rows, 5);
+        assert_eq!(
+            digest, whole_digest,
+            "resumed walks fold the same rows in key order"
         );
     }
 
