@@ -282,7 +282,7 @@ async fn stop_after_init_joins_the_code_index_worker_and_truncates_wals() {
             assert_eq!(
                 wal_bytes(store),
                 0,
-                "round {round}: a stop after init keeps no WAL for {}",
+                "round {round}: a stop after init keeps no WAL for {}; log={log}",
                 store.display()
             );
         }
