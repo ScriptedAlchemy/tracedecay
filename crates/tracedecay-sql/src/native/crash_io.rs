@@ -86,14 +86,6 @@ pub(crate) fn wrap(io: Arc<dyn IO>) -> Arc<dyn IO> {
     }
 }
 
-pub(crate) fn wrap_file(path: &Path, file: Arc<dyn turso_core::File>) -> Arc<dyn turso_core::File> {
-    if armed() {
-        CrashFile::track(path, file)
-    } else {
-        file
-    }
-}
-
 /// Undo state since the last completed sync of one file.
 struct Tracked {
     path: PathBuf,
