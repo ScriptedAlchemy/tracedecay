@@ -1,0 +1,5 @@
+column session_schema_migrations.applied_at: schema install stamps each migration with the wall clock
+column session_temporal_schema_migrations.applied_at: schema install stamps each migration with the wall clock
+column remote_spool_frames.nonce: each spooled frame is sealed under a fresh random nonce
+column remote_spool_frames.ciphertext: ciphertext depends on the random nonce
+path <store temp dir>: replaced with $STORE in errors and text values
