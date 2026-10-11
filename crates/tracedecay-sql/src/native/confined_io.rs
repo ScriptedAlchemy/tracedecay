@@ -10,7 +10,7 @@ use std::{
 };
 
 use turso_core::{
-    IO, LimboError, OpenFlags,
+    IO, LimboError, MemoryIO, OpenFlags,
     io::{
         Clock, FileId,
         clock::{MonotonicInstant, WallClockInstant},
@@ -29,17 +29,51 @@ pub(crate) struct ConfinedIo {
     /// of a file drops every POSIX record lock this process holds on it,
     /// including the engine's exclusive lock. The main file is first.
     held: Mutex<Vec<File>>,
+    /// Set for a read-only store. SQLite opens one without creating a `-wal`
+    /// beside it; when none exists the engine reads an empty in-memory log.
+    read_only_wal: Option<MemoryIO>,
 }
 
 impl ConfinedIo {
-    pub(crate) fn new(main: String, file: File, identity: FileIdentity) -> Result<Self> {
+    pub(crate) fn new(
+        main: String,
+        file: File,
+        identity: FileIdentity,
+        writable: bool,
+    ) -> Result<Self> {
         Ok(Self {
             delegate: turso_core::Database::io_for_path(&main)?,
             wal: format!("{main}-wal"),
             main,
             identity,
             held: Mutex::new(vec![file]),
+            read_only_wal: (!writable).then(MemoryIO::new),
         })
+    }
+
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.read_only_wal.is_some()
+    }
+
+    /// The in-memory log of a read-only store with no WAL on disk, once the
+    /// engine asks for its WAL.
+    fn memory_wal(
+        &self,
+        flags: OpenFlags,
+        direct: bool,
+    ) -> turso_core::Result<Option<Arc<dyn turso_core::File>>> {
+        let Some(memory) = &self.read_only_wal else {
+            return Ok(None);
+        };
+        if let Ok(file) = memory.open_file(&self.wal, OpenFlags::None, direct) {
+            return Ok(Some(file));
+        }
+        match fs::symlink_metadata(&self.wal) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => memory
+                .open_file(&self.wal, flags | OpenFlags::Create, direct)
+                .map(Some),
+            _ => Ok(None),
+        }
     }
 
     #[cfg_attr(not(td_engine = "native"), allow(dead_code))]
@@ -163,6 +197,11 @@ impl IO for ConfinedIo {
         flags: OpenFlags,
         direct: bool,
     ) -> turso_core::Result<Arc<dyn turso_core::File>> {
+        if path == self.wal
+            && let Some(file) = self.memory_wal(flags, direct)?
+        {
+            return Ok(file);
+        }
         let mut held = self.held();
         if path == self.main {
             self.verify().map_err(limbo)?;

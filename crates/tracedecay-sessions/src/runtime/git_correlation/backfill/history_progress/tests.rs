@@ -82,7 +82,9 @@ fn consulted_ref_seal_is_byte_exact_canonical_and_rejects_bad_entries() {
 #[tokio::test]
 async fn progress_survives_reopen_and_cas_enforces_two_pass_source_seal() {
     let directory = tempfile::tempdir().expect("temporary sessions database");
-    let path = directory.path().join("sessions.db");
+    let path = directory
+        .path()
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     let key = GitHistoryProgressKey { source_rowid: 7 };
     let initial = progress(key);
     {
@@ -233,7 +235,11 @@ async fn progress_survives_reopen_and_cas_enforces_two_pass_source_seal() {
 #[tokio::test]
 async fn stable_source_key_preserves_the_older_active_candidate() {
     let directory = tempfile::tempdir().expect("temporary sessions database");
-    let conn = TestConnection::open(&directory.path().join("sessions.db"));
+    let conn = TestConnection::open(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+    );
     ensure_git_correlation_receipt_schema_in_transaction(&conn)
         .await
         .expect("fresh schema");
@@ -256,7 +262,11 @@ async fn stable_source_key_preserves_the_older_active_candidate() {
 #[tokio::test]
 async fn exact_reset_cascades_children_and_transaction_rollback_leaves_no_state() {
     let directory = tempfile::tempdir().expect("temporary sessions database");
-    let conn = TestConnection::open(&directory.path().join("sessions.db"));
+    let conn = TestConnection::open(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+    );
     ensure_git_correlation_receipt_schema_in_transaction(&conn)
         .await
         .expect("fresh schema");

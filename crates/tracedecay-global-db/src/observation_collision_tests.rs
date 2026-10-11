@@ -1087,7 +1087,7 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
     );
     let first_dispatch_trace = Arc::new(ObservationDispatchTrace::default());
     let first_trace_guard =
-        tracedecay_runtime_core::logging::set_tracing_capture(ObservationDispatchSubscriber {
+        tracedecay_domain::test_fixtures::set_tracing_capture(ObservationDispatchSubscriber {
             trace: Arc::clone(&first_dispatch_trace),
         });
     let first = store
@@ -1125,7 +1125,7 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
     // candidate with its now-stale expected cursor.
     let dispatch_trace = Arc::new(ObservationDispatchTrace::default());
     let trace_guard =
-        tracedecay_runtime_core::logging::set_tracing_capture(ObservationDispatchSubscriber {
+        tracedecay_domain::test_fixtures::set_tracing_capture(ObservationDispatchSubscriber {
             trace: Arc::clone(&dispatch_trace),
         });
     let second = store

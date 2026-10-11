@@ -980,7 +980,7 @@ pub(crate) mod tests {
             data_root: root.join(".tracedecay"),
             graph_db_path: root.join("graph.db"),
             branch_meta_path: root.join("branch-meta.json"),
-            sessions_db_path: root.join("sessions.db"),
+            sessions_db_path: root.join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
             response_handle_root: root.join("handles"),
             lcm_payload_root: root.join("lcm"),
             dashboard_root: root.join("dashboard"),

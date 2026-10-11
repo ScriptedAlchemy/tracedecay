@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::fs::File;
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
@@ -73,6 +73,8 @@ use crate::retrieval::lexical::LexicalFieldV1;
 
 use super::super::{CodeLexicalProjectionMetadataV1, normalized_search_text};
 
+const SQLITE_HEADER_COMMIT_COUNTER_OFFSETS: [u64; 2] = [24, 92];
+const SEALED_HEADER_COMMIT_COUNTER: u32 = 1;
 const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, next_cursor \
      FROM source_page_cursors ORDER BY page_ordinal DESC LIMIT 1";
 const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -1651,16 +1653,27 @@ impl CodeLexicalArtifactBuilderV1 {
         Ok(())
     }
 
-    /// Leave the sealed artifact as one durable file. Its header needs no
-    /// rewrite: the canonical rewrite starts a fresh file, so the commit and
-    /// schema counters SQLite keeps there (offsets 24, 40 and 92) count the
-    /// same commits for one content whatever history staged it. The native
-    /// engine never advances the commit counters, and rewriting its schema
-    /// cookie behind a live engine fails that engine's next statement.
+    /// Leave the sealed artifact as one durable file whose bytes are a
+    /// function of its content. Two things otherwise keep the history that
+    /// staged it:
+    /// - SQLite's file change counter (header offset 24) and
+    ///   version-valid-for number (offset 92) count commits; both are set to
+    ///   one value. The native engine never advances them. The schema cookie
+    ///   (offset 40) is left alone: rewriting it behind a live native engine
+    ///   fails its next statement.
+    /// - The pages the seal frees (the finalization state, which binds the
+    ///   building worktree's source) keep their old bytes; they are zeroed.
     fn seal_file(&self) -> Result<(), CodeLexicalArtifactErrorV1> {
         self.verify_path_binding()?;
         fold_journal(&self.connection, &self.path)?;
-        self.private_file.sync_all().map_err(private_staging_error)
+        let mut file = &self.private_file;
+        for offset in SQLITE_HEADER_COMMIT_COUNTER_OFFSETS {
+            file.seek(SeekFrom::Start(offset))
+                .and_then(|_| file.write_all(&SEALED_HEADER_COMMIT_COUNTER.to_be_bytes()))
+                .map_err(private_staging_error)?;
+        }
+        zero_free_pages(file)?;
+        file.sync_all().map_err(private_staging_error)
     }
 
     #[tracing::instrument(name = "query.artifact.finalize", level = "trace", skip_all)]
@@ -2000,6 +2013,70 @@ fn open_bound_builder_connection(
         ));
     }
     Ok((connection, private_file, identity))
+}
+
+/// Zero every byte of a folded database file's freelist that is not freelist
+/// structure: whole leaf pages, and each trunk page past its leaf list.
+fn zero_free_pages(mut file: &File) -> Result<(), CodeLexicalArtifactErrorV1> {
+    use std::io::Read;
+    let corrupt = |detail: &str| {
+        CodeLexicalArtifactErrorV1::Corrupt(format!("lexical artifact freelist {detail}"))
+    };
+    let mut read = |offset: u64, buffer: &mut [u8]| {
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.read_exact(buffer))
+            .map_err(private_staging_error)
+    };
+    let mut header = [0u8; 40];
+    read(0, &mut header)?;
+    let page_len = match u16::from_be_bytes([header[16], header[17]]) {
+        1 => 65_536,
+        size => usize::from(size),
+    };
+    let page_size = page_len as u64;
+    let word = |bytes: &[u8], at: usize| {
+        u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    };
+    let free_pages = word(&header, 36);
+    let mut trunk = word(&header, 32);
+    let mut seen = 0u32;
+    let mut zeroed = Vec::new();
+    while trunk != 0 {
+        let mut page = vec![0u8; page_len];
+        read(u64::from(trunk - 1) * page_size, &mut page)?;
+        let leaves = word(&page, 4);
+        let leaf_bytes = usize::try_from(leaves)
+            .ok()
+            .and_then(|leaves| leaves.checked_mul(4)?.checked_add(8))
+            .filter(|end| *end <= page.len())
+            .ok_or_else(|| corrupt("trunk lists more leaves than its page holds"))?;
+        seen = seen
+            .checked_add(1)
+            .and_then(|seen| seen.checked_add(leaves))
+            .filter(|seen| *seen <= free_pages)
+            .ok_or_else(|| corrupt("holds more pages than its header counts"))?;
+        zeroed.push((
+            u64::from(trunk - 1) * page_size + leaf_bytes as u64,
+            page.len() - leaf_bytes,
+        ));
+        for leaf in 0..leaves as usize {
+            let leaf = word(&page, 8 + 4 * leaf);
+            if leaf == 0 {
+                return Err(corrupt("names page 0"));
+            }
+            zeroed.push((u64::from(leaf - 1) * page_size, page.len()));
+        }
+        trunk = word(&page, 0);
+    }
+    if seen != free_pages {
+        return Err(corrupt("holds fewer pages than its header counts"));
+    }
+    for (offset, length) in zeroed {
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.write_all(&vec![0u8; length]))
+            .map_err(private_staging_error)?;
+    }
+    Ok(())
 }
 
 /// Name the compacted sibling the staging path. Windows replaces a file only

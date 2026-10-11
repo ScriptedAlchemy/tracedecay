@@ -1124,9 +1124,11 @@ mod tests {
         .unwrap();
 
         for owned in [
-            default_root.join("global.db"),
-            shard.join("sessions.db"),
-            relocated.join("missing").join("user-sessions.db"),
+            default_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+            shard.join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+            relocated
+                .join("missing")
+                .join(tracedecay_store::StoreFile::ProfileSessions.file_name()),
         ] {
             assert!(
                 require_foreign_sqlite_path(&owned).is_err(),

@@ -274,7 +274,9 @@ mod tests {
         let cg = TraceDecay::init_with_options_for_test(
             &project_root,
             tracedecay_project::project::TraceDecayOpenOptions {
-                global_db_path: Some(profile_root.join("global.db")),
+                global_db_path: Some(
+                    profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
+                ),
                 profile_root: Some(profile_root),
             },
         )

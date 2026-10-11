@@ -74,7 +74,11 @@ async fn stored_activity(conn: &TestConnection) -> Option<i64> {
 #[tokio::test]
 async fn receipt_upsert_never_regresses_or_downgrades_a_seal() {
     let directory = tempfile::tempdir().unwrap();
-    let conn = TestConnection::open(&directory.path().join("sessions.db"));
+    let conn = TestConnection::open(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+    );
     ensure_git_correlation_receipt_schema_in_transaction(&conn)
         .await
         .unwrap();
@@ -104,7 +108,11 @@ async fn receipt_upsert_never_regresses_or_downgrades_a_seal() {
 #[tokio::test]
 async fn stale_failure_cannot_resurrect_after_newer_success_frontier() {
     let directory = tempfile::tempdir().unwrap();
-    let store = TestStore::open(&directory.path().join("sessions.db"));
+    let store = TestStore::open(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+    );
     ensure_git_correlation_receipt_schema_in_transaction(&store.connection)
         .await
         .unwrap();
@@ -146,7 +154,11 @@ async fn stale_failure_cannot_resurrect_after_newer_success_frontier() {
 #[tokio::test]
 async fn activity_time_positions_migrate_to_a_full_rescan_once() {
     let directory = tempfile::tempdir().unwrap();
-    let conn = TestConnection::open(&directory.path().join("sessions.db"));
+    let conn = TestConnection::open(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+    );
     ensure_git_correlation_receipt_schema_in_transaction(&conn)
         .await
         .unwrap();

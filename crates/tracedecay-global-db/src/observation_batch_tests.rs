@@ -90,7 +90,7 @@ async fn persist_with_work_census(
     writes: Vec<AnchoredObservationWrite>,
 ) -> (Vec<ObservationBatchPersistOutcome>, u64, u64) {
     let trace = Arc::new(ObservationWorkTrace::default());
-    let _guard = tracedecay_runtime_core::logging::set_tracing_capture(ObservationWorkSubscriber {
+    let _guard = tracedecay_domain::test_fixtures::set_tracing_capture(ObservationWorkSubscriber {
         trace: Arc::clone(&trace),
     });
     let outcomes = store.persist_observations(writes).await.unwrap();
