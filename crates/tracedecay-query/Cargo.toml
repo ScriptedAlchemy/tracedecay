@@ -71,7 +71,10 @@ name = "index_bench_workload"
 required-features = ["production"]
 
 # Daemon-free search-lane query latency workload over a published artifact.
+# Same production grammar tier as `tracedecay-index-bench`: the committed
+# index-bench corpus includes Go and Java, which the bare crate omits.
 [[bin]]
 name = "tracedecay-search-bench"
 path = "src/bin/tracedecay_search_bench.rs"
 test = false
+required-features = ["production"]

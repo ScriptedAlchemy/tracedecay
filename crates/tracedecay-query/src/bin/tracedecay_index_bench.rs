@@ -602,13 +602,16 @@ fn build_request(
             content_digest: digest,
             disposition: SnapshotFileDispositionV1::Present,
         });
-        if changed_files.contains(&file.logical_path) {
-            captured_files.push(CodeIndexCapturedFileV1 {
-                file_occurrence_id,
-                sanitized_bytes: Arc::clone(&file.bytes),
-                sensitivity_level: SensitivityLevelV1::Public,
-            });
-        }
+        // Increment may fall through to a cold rebuild (Go method sets,
+        // name-lookup moves). That path extracts every present snapshot row,
+        // so the bench supplies every file's bytes the way daemon reconcile
+        // recaptures on a cold successor. `changed_files` still names only
+        // the edited paths so a reusable parent stays a sparse increment.
+        captured_files.push(CodeIndexCapturedFileV1 {
+            file_occurrence_id,
+            sanitized_bytes: Arc::clone(&file.bytes),
+            sensitivity_level: SensitivityLevelV1::Public,
+        });
     }
     let snapshot = SanitizedCodeSnapshotV1 {
         repository: repository.clone(),
