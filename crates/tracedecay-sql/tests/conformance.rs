@@ -47,6 +47,7 @@ conformance!(
     deferred_constraint_at_commit_is_a_refusal_that_rolls_back,
     busy_checkpoint_reports_the_wal_it_could_not_reset,
     a_copied_back_wal_starts_over_on_the_next_write,
+    read_only_open_reads_without_creating_a_wal,
 );
 
 mod cases {
@@ -790,6 +791,34 @@ mod cases {
         let children: i64 =
             connection.query_row("SELECT count(*) FROM child", [], |row| row.get(0))?;
         assert_eq!(children, 0);
+        Ok(())
+    }
+
+    /// Catches a read-only open that leaves a `-wal` beside a sealed file,
+    /// which content-addressed inventories refuse as an unknown file.
+    pub(super) fn read_only_open_reads_without_creating_a_wal() -> Result<()> {
+        let (_directory, path, connection) = file_database();
+        items(&connection)?;
+        connection.execute("INSERT INTO items (name) VALUES ('sealed')", [])?;
+        connection.checkpoint(CheckpointMode::Truncate)?;
+        drop(connection);
+        let mut wal = path.clone().into_os_string();
+        wal.push("-wal");
+        let wal = std::path::PathBuf::from(wal);
+        if wal.exists() {
+            assert_eq!(std::fs::metadata(&wal).expect("wal").len(), 0);
+            std::fs::remove_file(&wal).expect("remove the folded WAL");
+        }
+
+        let reader = Connection::open_with_flags(
+            &path,
+            tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | tracedecay_sql::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        assert_eq!(names(&reader)?, ["sealed"]);
+        assert!(!wal.exists(), "an open read-only store has no WAL file");
+        drop(reader);
+        assert!(!wal.exists(), "a closed read-only store left a WAL file");
         Ok(())
     }
 

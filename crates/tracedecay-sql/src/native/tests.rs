@@ -552,7 +552,7 @@ fn confined_io_admits_only_the_main_file_and_its_wal() {
     let file = confined_io::open_regular(&main, true).unwrap();
     let identity = confined_io::held_identity(&file).unwrap();
     let main = main.to_str().unwrap().to_owned();
-    let io = confined_io::ConfinedIo::new(main.clone(), file, identity).unwrap();
+    let io = confined_io::ConfinedIo::new(main.clone(), file, identity, true).unwrap();
     let elsewhere = directory.path().join("elsewhere");
     for path in [
         elsewhere.to_str().unwrap().to_owned(),
@@ -583,6 +583,37 @@ fn confined_io_admits_only_the_main_file_and_its_wal() {
     io.open_file(&format!("{main}-wal"), OpenFlags::Create, false)
         .unwrap();
     io.remove_file(&format!("{main}-wal")).unwrap();
+}
+
+/// Catches a writable open sharing a read-only engine, whose commits would
+/// land in its in-memory log and vanish.
+#[test]
+fn writable_open_refuses_a_store_held_read_only() {
+    use crate::ConnectionControl;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.tdb");
+    let guard = execution_guard();
+    let creator = crate::Connection::open(&path).unwrap();
+    creator
+        .execute_batch("CREATE TABLE entries(body TEXT)")
+        .unwrap();
+    let folded = creator.checkpoint(crate::CheckpointMode::Truncate).unwrap();
+    assert!(!folded.busy);
+    drop(creator);
+    std::fs::remove_file(directory.path().join("native.tdb-wal")).unwrap();
+
+    let read_only = Database::open_path(&path, false).unwrap();
+    assert!(
+        matches!(Database::open(&path), Err(Error::InvalidOperation(_))),
+        "a writable open shared the read-only engine"
+    );
+    drop(read_only);
+    let writable = Database::open(&path).unwrap();
+    let mut writer = writable.connect(Access::Writer).unwrap();
+    writer
+        .execute("INSERT INTO entries VALUES('kept')", &[], &guard)
+        .unwrap();
+    assert!(directory.path().join("native.tdb-wal").exists());
 }
 
 /// Catches a connection that keeps using a store whose pathname now names a

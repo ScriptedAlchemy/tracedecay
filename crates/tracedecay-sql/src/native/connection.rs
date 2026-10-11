@@ -256,7 +256,9 @@ impl Database {
         Self::open_path(path, true)
     }
 
-    pub(crate) fn open_path(path: &Path, create: bool) -> Result<Self> {
+    /// A read-only open never creates the file, and its engine may log to
+    /// memory, so a writable open cannot share it.
+    pub(crate) fn open_path(path: &Path, writable: bool) -> Result<Self> {
         if path.as_os_str() == ":memory:" {
             return Self::open_memory();
         }
@@ -268,9 +270,9 @@ impl Database {
         if let Ok(identity) = confined_io::path_identity(text)
             && let Some(shared) = registry.get(&identity).and_then(Weak::upgrade)
         {
-            return Ok(Self { shared });
+            return Self { shared }.shared_for(writable);
         }
-        let file = confined_io::open_regular(&path, create).map_err(|error| {
+        let file = confined_io::open_regular(&path, writable).map_err(|error| {
             Error::InvalidOperation(format!("open native database {}: {error}", path.display()))
         })?;
         let identity = confined_io::held_identity(&file)?;
@@ -278,10 +280,10 @@ impl Database {
             // ponytail: the path was renamed onto a live store between stat
             // and open. Closing this descriptor would drop that store's lock.
             std::mem::forget(file);
-            return Ok(Self { shared });
+            return Self { shared }.shared_for(writable);
         }
         let header = preflight(&file)?;
-        let confined = Arc::new(ConfinedIo::new(text.to_owned(), file, identity)?);
+        let confined = Arc::new(ConfinedIo::new(text.to_owned(), file, identity, writable)?);
         let io: Arc<dyn turso_core::IO> = confined.clone();
         #[cfg(all(unix, feature = "test-helpers"))]
         let io = super::crash_io::wrap(io);
@@ -307,6 +309,20 @@ impl Database {
         let _ = database.shared.identity.set(identity);
         registry.insert(identity, Arc::downgrade(&database.shared));
         Ok(database)
+    }
+
+    fn shared_for(self, writable: bool) -> Result<Self> {
+        let read_only = self
+            .engine()
+            .confined
+            .as_ref()
+            .is_some_and(|io| io.is_read_only());
+        if writable && read_only {
+            return Err(Error::InvalidOperation(
+                "native database is open read-only in this process".to_owned(),
+            ));
+        }
+        Ok(self)
     }
 
     fn open_memory() -> Result<Self> {
