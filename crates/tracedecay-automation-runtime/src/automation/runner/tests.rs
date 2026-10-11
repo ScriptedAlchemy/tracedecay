@@ -173,6 +173,7 @@ fn temporal_automation_evidence_fails_closed_for_non_complete_outcomes() {
                 items: Vec::new(),
                 freshness: tracedecay_session_memory::session::SessionDataFreshness::Fresh,
                 omitted: 1,
+                record_omitted: 1,
             },
             "session_evidence_partial",
         ),

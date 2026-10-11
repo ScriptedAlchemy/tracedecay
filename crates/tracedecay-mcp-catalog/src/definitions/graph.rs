@@ -201,7 +201,7 @@ mod search_schema_tests {
     };
 
     fn search_schema() -> serde_json::Value {
-        crate::get_maximal_tool_definitions()
+        crate::get_tool_definitions()
             .expect("tool definitions")
             .into_iter()
             .find(|definition| definition.name == "tracedecay_search")

@@ -79,6 +79,7 @@ describe('Session transcript drill-down', () => {
         sessionPage({
           counts: {
             message_count: 1,
+            unpublished_message_count: 0,
             source_token_count: null,
             summary_node_count: 0,
             summary_token_count: null,
@@ -176,6 +177,7 @@ describe('Session transcript drill-down', () => {
         sessionPage({
           counts: {
             message_count: 478,
+            unpublished_message_count: 0,
             source_token_count: null,
             summary_node_count: 0,
             summary_token_count: null,
@@ -195,6 +197,39 @@ describe('Session transcript drill-down', () => {
     expect(screen.getByText(/does not establish that every stored message is represented/)).toBeTruthy();
     expect(screen.getByRole('list', { name: 'Transcript messages' })).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Next page' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('names the stored messages the transcript has not published yet', async () => {
+    renderTranscript(
+      fixtureEnvelope(
+        sessionPage({
+          counts: {
+            message_count: 478,
+            unpublished_message_count: 188,
+            source_token_count: null,
+            summary_node_count: 0,
+            summary_token_count: null,
+          },
+          messages: [message('available canonical message')],
+          next_cursor: null,
+        }),
+      ),
+    );
+
+    expect(await screen.findByText('available canonical message')).toBeTruthy();
+    expect(screen.getByText('stored messages')).toBeTruthy();
+    expect(screen.getByText('478')).toBeTruthy();
+    const pageStatus = screen.getByText(/1 on this page/);
+    expect(pageStatus.textContent).toContain('last available page');
+    expect(pageStatus.textContent).not.toContain('478');
+    expect(
+      screen.getByText(
+        '188 stored messages are not yet published to the transcript, so no page can show them until the projection catches up.',
+      ),
+    ).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Next page' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
   });
 });
 
@@ -334,6 +369,7 @@ function sessionPage(over: Record<string, unknown> = {}) {
     limit: 100,
     counts: {
       message_count: 1,
+      unpublished_message_count: 0,
       source_token_count: 0,
       summary_node_count: 0,
       summary_token_count: 0,

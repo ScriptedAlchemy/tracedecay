@@ -94,8 +94,8 @@ pub struct AstGrepResult {
     pub file_path: String,
     pub pattern: String,
     pub rewrite: String,
-    /// True when this was a dry run: the rewrite was resolved (via the built-in
-    /// literal fallback or an ast-grep preview run) but nothing was written.
+    /// True when this was a dry run: the rewrite was resolved but nothing was
+    /// written.
     #[serde(default, skip_serializing_if = "is_false")]
     pub dry_run: bool,
     /// Bounded preview of the would-be change. Populated only on a successful

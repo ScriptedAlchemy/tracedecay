@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::Duration;
 
 use tracedecay_rusqlite_runtime::{
     CheckpointBlockers, CheckpointOutcome, CheckpointPressure, CheckpointRequest, CheckpointStatus,
@@ -142,7 +141,7 @@ fn drain_rejects_new_work_but_joins_after_accepted_work_replies() {
         let probe = TestProbe::fixed(&accepted);
         let task = tokio::spawn(async move { task_writer.submit(accepted, probe).await });
         tokio::task::yield_now().await;
-        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        entered_rx.recv().unwrap();
         writer.begin_drain();
         assert_eq!(writer.state(), WriterState::Draining);
 

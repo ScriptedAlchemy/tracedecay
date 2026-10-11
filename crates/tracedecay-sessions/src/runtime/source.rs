@@ -452,7 +452,8 @@ mod jsonl;
 
 pub use discovery::{FileDiscoveryLimit, FileDiscoveryReport, TranscriptDiscoveryBounds};
 pub use discovery::{
-    bound_path_list, collect_files_with_ext_bounded, os_str_byte_len, path_byte_len,
+    bound_path_list, collect_files_with_ext_bounded, collect_files_with_ext_matching,
+    os_str_byte_len, path_byte_len,
 };
 
 pub use crate::runtime::jsonl_io::{JsonlChangeKind, JsonlIoAccounting};

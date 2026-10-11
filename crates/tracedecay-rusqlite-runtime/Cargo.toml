@@ -32,6 +32,7 @@ tracedecay-store = { path = "../tracedecay-store" }
 tracing = "0.1"
 
 [dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["macros", "test-util"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 tempfile = "3"
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }

@@ -118,8 +118,8 @@ mod admitted;
 mod contract;
 mod primitive;
 pub use admitted::{
-    LcmRawStoreIdsFutureV1, SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1,
-    UnavailableSessionApplicationRetrievalV1,
+    LcmRawStoreIdsFutureV1, LcmSessionRawStatsFutureV1, SessionApplicationRetrievalFutureV1,
+    SessionApplicationRetrievalPortV1, UnavailableSessionApplicationRetrievalV1,
 };
 pub use contract::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
@@ -645,11 +645,13 @@ impl DaemonSessionRetrievalService {
                 items,
                 freshness,
                 omitted,
+                record_omitted,
             } => match self.page(items).await {
                 Ok((page, _, rendering_omitted)) => SessionRetrievalServiceOutcome::Partial {
                     page,
                     freshness,
                     omitted: omitted.saturating_add(rendering_omitted),
+                    record_omitted: record_omitted.saturating_add(rendering_omitted),
                 },
                 Err(error) => self.rendering_error(error),
             },
@@ -1119,6 +1121,9 @@ fn complete_page_outcome(
             page,
             freshness,
             omitted,
+            // Every skipped hydration slot is a genuine missing record; the
+            // lag flag never folds into this path's count.
+            record_omitted: omitted,
         }
     }
 }

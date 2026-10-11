@@ -4512,12 +4512,14 @@ export const ExplorerSessionCountsV1Schema: z.ZodObject<{
   summary_node_count: z.ZodType<number, unknown>;
   summary_token_count: z.ZodType<number | null, unknown>;
   token_estimate_total: z.ZodType<number | null, unknown>;
+  unpublished_message_count: z.ZodType<number, unknown>;
 }> = z.object({
   message_count: z.number().int(),
   source_token_count: z.number().int().nullable(),
   summary_node_count: z.number().int(),
   summary_token_count: z.number().int().nullable(),
   token_estimate_total: z.number().int().nullable(),
+  unpublished_message_count: z.number().int(),
 });
 
 export const ExplorerSessionSizeV1Schema: z.ZodObject<{
@@ -5520,11 +5522,13 @@ export const LcmSessionCountsV1Schema: z.ZodObject<{
   source_token_count: z.ZodType<number | null, unknown>;
   summary_node_count: z.ZodType<number, unknown>;
   summary_token_count: z.ZodType<number | null, unknown>;
+  unpublished_message_count: z.ZodType<number, unknown>;
 }> = z.object({
   message_count: z.number().int(),
   source_token_count: z.number().int().nullable(),
   summary_node_count: z.number().int(),
   summary_token_count: z.number().int().nullable(),
+  unpublished_message_count: z.number().int(),
 });
 
 export const LcmSessionPayloadV1Schema: z.ZodObject<{

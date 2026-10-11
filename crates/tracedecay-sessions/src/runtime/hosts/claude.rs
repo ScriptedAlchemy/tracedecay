@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use crate::runtime::shared::{ProjectMembership, ProjectRootMatcherCache, TranscriptScopeMatcher};
 use crate::runtime::source::{
     FileDiscoveryLimit, FileDiscoveryReport, JsonlFrameDeferral, TranscriptDiscoveryBounds,
-    bound_path_list, collect_files_with_ext_bounded, path_byte_len,
+    bound_path_list, collect_files_with_ext_matching, path_byte_len,
 };
 use tracedecay_privacy::protect_sensitive_structural_id;
 mod cursor;
@@ -213,8 +213,31 @@ impl ClaudeSource {
         {
             return discover_claude_session_scoped_paths(&self.projects_dir, session_id, bounds);
         }
-        collect_files_with_ext_bounded(&self.projects_dir, "jsonl", MAX_SCAN_DEPTH, bounds)
+        collect_claude_session_transcripts(&self.projects_dir, MAX_SCAN_DEPTH, bounds)
     }
+}
+
+/// Workflow `journal.jsonl` is a run roster, not a Claude Code session
+/// transcript. Every journal shares the file-stem identity `journal`, so
+/// treating them as sources collides cursors and steals the catch-up window
+/// from real `{session}.jsonl` / `agent-*.jsonl` files.
+pub fn is_claude_session_transcript(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| !name.eq_ignore_ascii_case("journal.jsonl"))
+}
+
+fn collect_claude_session_transcripts(
+    dir: &Path,
+    max_depth: u8,
+    bounds: TranscriptDiscoveryBounds,
+) -> FileDiscoveryReport {
+    collect_files_with_ext_matching(
+        dir,
+        "jsonl",
+        max_depth,
+        bounds,
+        &is_claude_session_transcript,
+    )
 }
 
 /// Profile ingestion through an already registered host-admission facade.
@@ -310,9 +333,8 @@ fn discover_claude_session_scoped_paths(
             truncated = Some(FileDiscoveryLimit::FileCount);
             break;
         }
-        let subagents = collect_files_with_ext_bounded(
+        let subagents = collect_claude_session_transcripts(
             &project.join(session_id).join("subagents"),
-            "jsonl",
             MAX_SCAN_DEPTH,
             subagent_bounds,
         );

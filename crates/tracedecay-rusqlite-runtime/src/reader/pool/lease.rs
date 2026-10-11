@@ -280,6 +280,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
     }
 
     fn start_snapshot(&mut self) -> Result<(), ReaderWorkerError> {
+        self.settle_deferred_end()?;
         if self.snapshot_active
             || !self
                 .checkout
@@ -298,6 +299,37 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         }
         self.snapshot_active = true;
         Ok(())
+    }
+
+    fn settle_deferred_end(&mut self) -> Result<(), ReaderWorkerError> {
+        let Some(receive) = self.checkout.deferred_end.take() else {
+            return Ok(());
+        };
+        let error = match receive.recv_timeout(DEFERRED_SNAPSHOT_END_LIMIT) {
+            Ok(Ok(())) => {
+                self.checkout
+                    .inner
+                    .checkpoint_blockers
+                    .finish(self.checkout.worker.id);
+                return Ok(());
+            }
+            Ok(Err(error)) => error,
+            Err(RecvTimeoutError::Disconnected) => ReaderWorkerError::WorkerClosed,
+            Err(RecvTimeoutError::Timeout) => {
+                self.checkout.deferred_end = Some(receive);
+                ReaderWorkerError::WorkerClosed
+            }
+        };
+        self.checkout.retire = true;
+        Err(error)
+    }
+
+    fn defer_snapshot_end(&mut self, receive: Receiver<Result<(), ReaderWorkerError>>) {
+        self.checkout
+            .inner
+            .checkpoint_blockers
+            .release(self.checkout.worker.id);
+        self.checkout.deferred_end = Some(receive);
     }
 
     fn finish_snapshot(&mut self) {
@@ -321,13 +353,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
             Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => {
                 self.checkout.retire = true;
             }
-            Err(RecvTimeoutError::Timeout) => {
-                self.checkout
-                    .inner
-                    .checkpoint_blockers
-                    .release(self.checkout.worker.id);
-                self.checkout.deferred_end = Some(receive);
-            }
+            Err(RecvTimeoutError::Timeout) => self.defer_snapshot_end(receive),
         }
     }
 }
@@ -466,15 +492,29 @@ mod deferred_return_spawn_tests {
 
 #[cfg(test)]
 mod snapshot_return_tests {
-    use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
-    use tracedecay_store::OperationPriorityV1;
+    use tracedecay_sql::Connection;
+    use tracedecay_store::{OperationPriorityV1, RuntimeReadResultV1};
 
     use crate::checkpoint::CheckpointBlockerSource;
-    use crate::reader::ReaderPool;
     use crate::reader::tests::{CountExecutor, Probe, TestStore, request, two_reader_budget};
+    use crate::reader::{ReaderPool, ReaderQueryExecutor};
+
+    /// Completes a snapshot end that outran its grace the way `finish_snapshot`
+    /// completes one acknowledged in time, so the test does not race the 5ms
+    /// grace.
+    fn acknowledge_deferred_end<E: ReaderQueryExecutor>(lease: &mut super::ReaderLease<E>) {
+        if let Some(end) = lease.checkout.deferred_end.take() {
+            end.recv().unwrap().unwrap();
+            lease
+                .checkout
+                .inner
+                .checkpoint_blockers
+                .finish(lease.checkout.worker.id);
+        }
+    }
 
     #[test]
     fn completed_checkout_return_does_not_touch_snapshot_blockers_again() {
@@ -490,6 +530,7 @@ mod snapshot_return_tests {
             .unwrap()
             .execute(read.clone(), &probe)
             .unwrap();
+        acknowledge_deferred_end(&mut lease);
         assert!(
             pool.inner
                 .checkpoint_blockers
@@ -501,18 +542,9 @@ mod snapshot_return_tests {
         // the shared authority to prove its return does not try to clear a
         // blocker after publishing the worker to another borrower.
         let blockers = pool.inner.checkpoint_blockers.active.lock().unwrap();
-        let (done, returned) = mpsc::channel();
-        let returning = thread::spawn(move || {
-            drop(lease);
-            done.send(()).unwrap();
-        });
-        let completed = returned.recv_timeout(Duration::from_secs(1)).is_ok();
+        // A return that touched the held authority would deadlock this join.
+        thread::spawn(move || drop(lease)).join().unwrap();
         drop(blockers);
-        returning.join().unwrap();
-        assert!(
-            completed,
-            "a completed checkout touched relinquished snapshot authority"
-        );
 
         let mut next = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
         assert_eq!(next.checkout.worker.id, reader_id);
@@ -553,14 +585,11 @@ mod snapshot_return_tests {
         drop(blockers);
 
         let state = pool.inner.state.lock().unwrap();
-        let (state, _) = pool
+        let state = pool
             .inner
             .capacity_changed
-            .wait_timeout_while(state, Duration::from_secs(3), |state| {
-                state.limbo_general != 0
-            })
+            .wait_while(state, |state| state.limbo_general != 0)
             .unwrap();
-        assert_eq!(state.limbo_general, 0, "rollback return never settled");
         drop(state);
         assert!(
             unavailable,
@@ -575,6 +604,7 @@ mod snapshot_return_tests {
             1
         );
         drop(snapshot);
+        acknowledge_deferred_end(&mut next);
         assert!(
             pool.inner
                 .checkpoint_blockers
@@ -582,5 +612,40 @@ mod snapshot_return_tests {
                 .is_clear()
         );
         drop(other);
+    }
+
+    #[test]
+    fn lease_begins_a_new_snapshot_after_a_deferred_end() {
+        let store = TestStore::new();
+        let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+        let read = request(&store.binding, OperationPriorityV1::Foreground);
+        let probe = Probe::for_request(&read);
+        let mut lease = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
+        lease.start_snapshot().unwrap();
+        let receive = lease.checkout.worker.client.begin_end().unwrap();
+        lease.snapshot_active = false;
+        lease.defer_snapshot_end(receive);
+
+        let mut snapshot = lease.begin_snapshot().unwrap();
+        assert_eq!(
+            snapshot.execute(read.clone(), &probe).unwrap().value(),
+            Some(&RuntimeReadResultV1::GraphQuickCheck { healthy: false })
+        );
+        Connection::open(pool.path())
+            .unwrap()
+            .execute("INSERT INTO markers(value) VALUES (1)", [])
+            .unwrap();
+        assert_eq!(
+            snapshot.execute(read.clone(), &probe).unwrap().value(),
+            Some(&RuntimeReadResultV1::GraphQuickCheck { healthy: false }),
+            "the reused snapshot must stay on the view it opened"
+        );
+        drop(snapshot);
+
+        let mut next = lease.begin_snapshot().unwrap();
+        assert_eq!(
+            next.execute(read, &probe).unwrap().value(),
+            Some(&RuntimeReadResultV1::GraphQuickCheck { healthy: true })
+        );
     }
 }

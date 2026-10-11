@@ -29,7 +29,6 @@ use crate::context_headings::{
 };
 use tracedecay_application::tracedecay::project_memory_owner_from_layout_id;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::text::utf8_prefix_at_or_before;
 use tracedecay_session_memory::fact_store::{ProjectFactStore, ProjectMemoryDbHandle};
 use tracedecay_session_memory::memory::MemoryApplication;
 
@@ -42,18 +41,18 @@ pub(super) fn context_markdown_lane_preview(markdown: &str) -> String {
     let mut preview = String::with_capacity(markdown.len().min(24_000));
     let mut lane = String::new();
     let mut lane_key = String::new();
-    let mut in_fence = false;
+    let mut fence = crate::tools::render::MarkdownFence::default();
 
     for line in markdown.split_inclusive('\n') {
-        if !in_fence && let Some(key) = context_lane_key(line) {
+        if !fence.is_open()
+            && let Some(key) = context_lane_key(line)
+        {
             push_context_lane_preview(&mut preview, &lane_key, &lane);
             lane.clear();
             lane_key = key.to_string();
         }
         lane.push_str(line);
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-        }
+        fence.observe(line);
     }
     push_context_lane_preview(&mut preview, &lane_key, &lane);
     preview
@@ -76,11 +75,8 @@ fn push_context_lane_preview(preview: &mut String, lane_key: &str, lane: &str) {
         preview.push_str(lane);
         return;
     }
-    let prefix = utf8_prefix_at_or_before(lane, budget);
+    let prefix = crate::tools::render::whole_markdown_prefix(lane, budget);
     preview.push_str(prefix);
-    if crate::tools::render::has_open_markdown_fence(prefix) {
-        preview.push_str("\n```\n");
-    }
     preview.push_str(CONTEXT_LANE_TRUNCATED_NOTE);
 }
 

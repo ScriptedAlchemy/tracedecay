@@ -26,7 +26,7 @@ use status::*;
 use super::types::LcmStoreTokenCoverage;
 use super::types::{
     LcmGrepOutcome, LcmLifecycleStatus, LcmPayloadCoverage, LcmPayloadCoverageState,
-    LcmPayloadGcStatus, LcmPayloadStatus, LcmRedactionStatus,
+    LcmPayloadGcStatus, LcmPayloadStatus, LcmRedactionStatus, LcmSessionRawStats,
 };
 use super::{
     LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS, LCM_DEFAULT_FRESH_TAIL_COUNT,
@@ -301,6 +301,8 @@ pub async fn describe(
         Some(store) => store.messages,
         None => count_raw_messages(conn, provider, Some(session_id)).await?,
     };
+    let unpublished_message_count =
+        count_unpublished_raw_messages(conn, provider, session_id).await?;
     let summary_node_count = count_summary_nodes(conn, provider, Some(session_id)).await?;
     let external_payload_count = count_external_payloads(conn, provider, Some(session_id)).await?;
     let (first_store_id, last_store_id) = raw_store_bounds(conn, provider, session_id).await?;
@@ -340,6 +342,7 @@ pub async fn describe(
         provider: provider.to_string(),
         session_id: session_id.to_string(),
         raw_message_count,
+        unpublished_message_count,
         summary_node_count,
         external_payload_count,
         first_store_id,
@@ -675,6 +678,24 @@ async fn count_raw_messages(
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
     util::count_by_provider_session(conn, "lcm_raw_messages", provider, session_id).await
+}
+
+async fn count_unpublished_raw_messages(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+) -> Result<i64, LcmError> {
+    util::fetch_i64(
+        conn,
+        &format!(
+            "SELECT COUNT(*) FROM lcm_raw_messages raw
+             WHERE raw.provider = ?1 AND raw.session_id = ?2 AND {}",
+            schema::RAW_MESSAGE_UNPUBLISHED_SQL
+        ),
+        params![provider, session_id],
+        "unpublished raw message count query returned no rows",
+    )
+    .await
 }
 
 async fn count_summary_nodes(

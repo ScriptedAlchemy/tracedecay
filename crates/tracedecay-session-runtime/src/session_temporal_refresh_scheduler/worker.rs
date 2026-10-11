@@ -35,7 +35,9 @@ use tracedecay_session_temporal_store::{
 const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
 
 fn history_allows_summary_convergence(outcome: Option<SessionHistoricalIngestOutcome>) -> bool {
-    !outcome.is_some_and(SessionHistoricalIngestOutcome::needs_another_pass)
+    !outcome
+        .as_ref()
+        .is_some_and(SessionHistoricalIngestOutcome::needs_another_pass)
 }
 
 /// Consecutive history-priority passes after which the one-shot
@@ -136,14 +138,22 @@ enum HistoryRelease {
 }
 
 impl HistoryRelease {
-    async fn released(&mut self, admission: &tokio::sync::Semaphore) {
+    /// Resolves once the refused capacity frees. An admission wait returns the
+    /// permit its queue turn granted: dropping it and retrying admission would
+    /// hand the turn to the next waiter, so the next history pass runs under it.
+    async fn released<'a>(
+        &mut self,
+        admission: &'a tokio::sync::Semaphore,
+    ) -> Option<tokio::sync::SemaphorePermit<'a>> {
         match self {
-            Self::Admission => {
-                if admission.acquire().await.is_err() {
-                    std::future::pending::<()>().await;
-                }
+            Self::Admission => match admission.acquire().await {
+                Ok(permit) => Some(permit),
+                Err(_) => std::future::pending().await,
+            },
+            Self::Capacity(release) => {
+                release.released().await;
+                None
             }
-            Self::Capacity(release) => release.released().await,
         }
     }
 }
@@ -219,6 +229,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
     let mut summary_retry_attempt = 0u32;
     let mut history_priority_passes = 0u32;
     let mut history_release = None;
+    let mut granted_history_admission = None;
     let _instrumentation = SessionTemporalRefreshWorkerInstrumentation::new(&state);
     state.mark_running();
     loop {
@@ -244,9 +255,14 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             }
             state.begin_pass();
             state.pass_count.fetch_add(1, Ordering::AcqRel);
+            // A granted turn this iteration does not spend on history is
+            // returned before the summary page queues for a permit of its own.
+            let granted = granted_history_admission
+                .take()
+                .filter(|_| history_requested);
             let history_outcome = if history_requested {
                 let (outcome, release) = tracing::Instrument::instrument(
-                    session_history_refresh(&history, &history_admission),
+                    session_history_refresh(&history, &history_admission, granted),
                     tracing::trace_span!("daemon.scheduler.session_temporal.history"),
                 )
                 .await;
@@ -262,8 +278,8 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 projection_requested = true;
                 state.pass_count.fetch_add(1, Ordering::AcqRel);
             }
-            if let Some(outcome) = history_outcome {
-                state.record_history_outcome(outcome);
+            if let Some(outcome) = &history_outcome {
+                state.record_history_outcome(outcome.clone());
             }
             if matches!(
                 history_outcome,
@@ -272,7 +288,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             {
                 return;
             }
-            match history_outcome {
+            match &history_outcome {
                 Some(SessionHistoricalIngestOutcome::Retryable { reason_code, .. }) => {
                     tracing::debug!(
                         reason_code,
@@ -293,6 +309,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 history_outcome,
                 Some(SessionHistoricalIngestOutcome::Complete)
             ) || history_outcome
+                .as_ref()
                 .is_some_and(SessionHistoricalIngestOutcome::made_progress);
             let report = if projection_requested
                 || state.has_requests()
@@ -324,7 +341,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     made_progress: true,
                 })
             } else {
-                history_outcome
+                history_outcome.clone()
             };
             let convergence_admission =
                 lcm_convergence_admission(convergence_outcome, &mut history_priority_passes);
@@ -460,7 +477,9 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 || report.completed > 0
                 || report.failed > 0
                 || report.cancelled > 0
-                || history_outcome.is_some_and(SessionHistoricalIngestOutcome::made_progress)
+                || history_outcome
+                    .as_ref()
+                    .is_some_and(SessionHistoricalIngestOutcome::made_progress)
                 || summary_convergence_made_progress;
             if let Some(backlog) = report.backlog {
                 state.record_pass(
@@ -552,15 +571,16 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
         let release = async {
             match history_release.as_mut() {
                 Some(release) if state.history_retry_pending() => {
-                    release.released(&history_admission).await;
+                    release.released(&history_admission).await
                 }
-                _ => std::future::pending::<()>().await,
+                _ => std::future::pending().await,
             }
         };
         tokio::select! {
             () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.idle_cancel")) => return,
             () = wake => {}
-            () = tracing::Instrument::instrument(release, tracing::trace_span!("daemon.scheduler.session_temporal.history_release_wait")) => {
+            granted = tracing::Instrument::instrument(release, tracing::trace_span!("daemon.scheduler.session_temporal.history_release_wait")) => {
+                granted_history_admission = granted;
                 state.update_history_retry_state(false);
                 state.wake_history();
             }
@@ -607,12 +627,14 @@ fn stop_worker(state: &SessionTemporalRefreshWakeState) {
 /// `MAX_CONCURRENT_HISTORICAL_INGEST_PASSES` passes run concurrently across
 /// every mounted project and the profile. A saturated admission defers this
 /// worker's pass as typed retryable state rather than queueing behind it:
-/// the worker's projection serving continues, and the release wait
-/// re-attempts admission once a permit frees. The capacity-release signals
-/// are subscribed before the pass runs, so a release during it is not lost.
+/// the worker's projection serving continues while the release wait queues
+/// for a permit, and the next pass runs under the permit that wait was
+/// `granted`. The capacity-release signals are subscribed before the pass
+/// runs, so a release during it is not lost.
 async fn session_history_refresh(
     history: &Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
     admission: &tokio::sync::Semaphore,
+    granted: Option<tokio::sync::SemaphorePermit<'_>>,
 ) -> (SessionHistoricalIngestOutcome, Option<HistoryRelease>) {
     let history = history
         .read()
@@ -620,10 +642,10 @@ async fn session_history_refresh(
         .clone();
     match history {
         Some(history) => {
-            let Ok(_permit) = admission.try_acquire() else {
+            let Some(_permit) = granted.or_else(|| admission.try_acquire().ok()) else {
                 return (
                     SessionHistoricalIngestOutcome::Retryable {
-                        reason_code: HISTORY_ADMISSION_SATURATED_REASON,
+                        reason_code: HISTORY_ADMISSION_SATURATED_REASON.to_owned(),
                         made_progress: false,
                     },
                     Some(HistoryRelease::Admission),
@@ -637,7 +659,7 @@ async fn session_history_refresh(
         }
         None => (
             SessionHistoricalIngestOutcome::Blocked {
-                reason_code: "history_ingestor_missing",
+                reason_code: "history_ingestor_missing".to_owned(),
                 made_progress: false,
             },
             None,
@@ -1438,7 +1460,7 @@ mod tests {
         );
         assert_eq!(
             history_continuation(Some(SessionHistoricalIngestOutcome::Retryable {
-                reason_code: "ingest_pass_backpressured",
+                reason_code: "ingest_pass_backpressured".to_owned(),
                 made_progress: true,
             })),
             HistoryContinuation::Immediate,
@@ -1446,7 +1468,7 @@ mod tests {
         );
         assert_eq!(
             history_continuation(Some(SessionHistoricalIngestOutcome::Retryable {
-                reason_code: "history_admission_saturated",
+                reason_code: "history_admission_saturated".to_owned(),
                 made_progress: false,
             })),
             HistoryContinuation::AwaitRelease
@@ -1548,7 +1570,7 @@ mod tests {
         )));
         assert!(!history_allows_summary_convergence(Some(
             SessionHistoricalIngestOutcome::Retryable {
-                reason_code: "provider_busy",
+                reason_code: "provider_busy".to_owned(),
                 made_progress: false,
             },
         )));
@@ -1557,7 +1579,7 @@ mod tests {
         )));
         assert!(history_allows_summary_convergence(Some(
             SessionHistoricalIngestOutcome::Blocked {
-                reason_code: "invalid_observation_contract",
+                reason_code: "invalid_observation_contract".to_owned(),
                 made_progress: false,
             },
         )));
@@ -1609,7 +1631,8 @@ mod tests {
                 "a perpetually pending history lane starved the range rewrite for \
                  {passes} passes"
             );
-            let admission = lcm_convergence_admission(pending, &mut history_priority_passes);
+            let admission =
+                lcm_convergence_admission(pending.clone(), &mut history_priority_passes);
             assert_ne!(
                 admission,
                 LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full),

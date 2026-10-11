@@ -909,7 +909,7 @@ fn run_audit(
         dispatch_success_is_not_functionality: true,
         ..AuditReport::default()
     };
-    report.catalog_tools = match tracedecay_mcp::get_maximal_tool_definitions() {
+    report.catalog_tools = match tracedecay_mcp::get_tool_definitions() {
         Ok(definitions) => definitions
             .into_iter()
             .map(|definition| definition.name)
@@ -1668,7 +1668,7 @@ fn audit_preflight_failure(controls: Option<&AuditControls>, reason: String) -> 
         dispatch_success_is_not_functionality: true,
         ..AuditReport::default()
     };
-    report.catalog_tools = match tracedecay_mcp::get_maximal_tool_definitions() {
+    report.catalog_tools = match tracedecay_mcp::get_tool_definitions() {
         Ok(definitions) => definitions
             .into_iter()
             .map(|definition| definition.name)

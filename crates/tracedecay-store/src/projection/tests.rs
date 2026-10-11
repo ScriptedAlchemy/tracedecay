@@ -192,3 +192,49 @@ fn provenance_is_shared_across_every_output_of_one_observation() {
     assert_eq!(first.provenance(), &expected);
     assert_eq!(second.provenance(), &expected);
 }
+
+#[test]
+fn storage_constructor_classifies_sqlite_corrupt_as_its_own_variant() {
+    let error = ProjectionStoreError::storage(
+        "update projection output state",
+        std::io::Error::other("SQLite execute failed: database disk image is malformed"),
+    );
+    assert!(
+        matches!(error, ProjectionStoreError::Corrupt { .. }),
+        "SQLITE_CORRUPT must not stay a retryable Storage error, got {error:?}"
+    );
+    assert!(error.is_sqlite_disk_image_corrupt());
+}
+
+#[test]
+fn storage_constructor_classifies_sqlite_notadb_as_corrupt() {
+    let error = ProjectionStoreError::storage(
+        "update projection output state",
+        std::io::Error::other("SQLite execute failed: file is not a database"),
+    );
+    assert!(matches!(error, ProjectionStoreError::Corrupt { .. }));
+    assert!(error.is_sqlite_disk_image_corrupt());
+}
+
+#[test]
+fn storage_constructor_classifies_malformed_schema_as_corrupt() {
+    let error = ProjectionStoreError::storage(
+        "update projection output state",
+        std::io::Error::other("SQLite execute failed: malformed database schema (observations)"),
+    );
+    assert!(
+        matches!(error, ProjectionStoreError::Corrupt { .. }),
+        "SQLITE_CORRUPT schema damage must not stay retryable Storage, got {error:?}"
+    );
+    assert!(error.is_sqlite_disk_image_corrupt());
+}
+
+#[test]
+fn storage_constructor_keeps_transient_reader_pool_errors_as_storage() {
+    let error = ProjectionStoreError::storage(
+        "dispatch observation projection runtime operation",
+        std::io::Error::other("reader acquisition saturated: ReaderPool"),
+    );
+    assert!(matches!(error, ProjectionStoreError::Storage { .. }));
+    assert!(!error.is_sqlite_disk_image_corrupt());
+}

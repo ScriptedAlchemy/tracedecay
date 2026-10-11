@@ -1,0 +1,73 @@
+{
+  "tail_start": [
+    {
+      "case": "strong head, weak tail",
+      "query": "exact class",
+      "rows": [{"utility": 2000000}, {"utility": 2000000}, {"utility": 2000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}],
+      "start": 3
+    },
+    {
+      "case": "all equal",
+      "query": "exact class",
+      "rows": [{"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}],
+      "start": null
+    },
+    {
+      "case": "all zero",
+      "query": "exact class",
+      "rows": [{"utility": 0}, {"utility": 0}, {"utility": 0}, {"utility": 0}, {"utility": 0}, {"utility": 0}, {"utility": 0}, {"utility": 0}, {"utility": 0}, {"utility": 0}],
+      "start": null
+    },
+    {
+      "case": "anchored weak row",
+      "query": "exact class",
+      "rows": [{"utility": 2000000}, {"utility": 2000000}, {"utility": 2000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000, "anchored": true}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}],
+      "start": 7
+    },
+    {
+      "case": "weak row naming every query word",
+      "query": "exact class",
+      "rows": [{"utility": 2000000}, {"utility": 2000000}, {"utility": 2000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000, "name": "Exact_Class_rank"}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}],
+      "start": 6
+    },
+    {
+      "case": "weak row naming only some query words",
+      "query": "exact class",
+      "rows": [{"utility": 2000000}, {"utility": 2000000}, {"utility": 2000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000, "name": "exact_rank"}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}],
+      "start": 3
+    },
+    {
+      "case": "rows at exactly half the best are weak",
+      "query": "exact class",
+      "rows": [{"utility": 2000000}, {"utility": 2000000}, {"utility": 2000000}, {"utility": 1000001}, {"utility": 1000000}, {"utility": 1000000}],
+      "start": 4
+    },
+    {
+      "case": "strong row after weak ones",
+      "query": "exact class",
+      "rows": [{"utility": 2000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 2000000}, {"utility": 1000000}, {"utility": 1000000}],
+      "start": 4
+    },
+    {
+      "case": "one weak trailing row",
+      "query": "exact class",
+      "rows": [{"utility": 2000000}, {"utility": 2000000}, {"utility": 2000000}, {"utility": 2000000}, {"utility": 2000000}, {"utility": 1000000}],
+      "start": null
+    },
+    {
+      "case": "fewer than four rows",
+      "query": "exact class",
+      "rows": [{"utility": 2000000}, {"utility": 1000000}, {"utility": 1000000}],
+      "start": null
+    }
+  ],
+  "names_every_query_word": [
+    {"name": "exact_class_rank", "query": "exact_class", "answers": true},
+    {"name": "ExactClass", "query": "exact_class", "answers": true},
+    {"name": "store_response_handle", "query": "store response handle", "answers": true},
+    {"name": "store", "query": "store response handle", "answers": false},
+    {"name": "größe_überprüfen", "query": "Größe", "answers": true},
+    {"name": "store", "query": "", "answers": false},
+    {"name": "store", "query": "!! ::", "answers": false}
+  ]
+}

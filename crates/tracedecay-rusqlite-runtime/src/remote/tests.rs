@@ -574,6 +574,35 @@ fn runtime_attachment_admits_the_registered_runtime_writer_ledger() {
 }
 
 #[test]
+fn runtime_attachment_reports_an_unreadable_store_as_sql_not_reset() {
+    let Fixture {
+        _directory,
+        _writer,
+        _readers,
+        handle,
+    } = fixture();
+    drop(_readers);
+
+    let attached = RemoteSqliteStorageV1::from_retained_exact_sql(
+        RetainedExactSqlCapability::from_authorized_handle_with_guard(handle.clone(), handle),
+        Arc::new(TestKeyring(Arc::new(
+            RemoteSpoolKeyV1::from_secret_bytes(7, vec![7; 32]).unwrap(),
+        ))),
+    );
+
+    assert!(
+        matches!(
+            attached,
+            Err(RemoteSqliteStorageErrorV1::Sql(
+                ExactSqlError::ReaderUnavailable(_)
+            ))
+        ),
+        "a schema read that never ran must not demand a reset: {:?}",
+        attached.err()
+    );
+}
+
+#[test]
 fn spool_key_rejects_zero_revision_and_wrong_size() {
     assert!(matches!(
         RemoteSpoolKeyV1::from_secret_bytes(0, vec![7; 32]),

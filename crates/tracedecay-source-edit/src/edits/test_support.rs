@@ -110,6 +110,7 @@ impl CodeGraphProjectionReadPort for FixtureCodeGraphReadPort {
                 self.scope.clone(),
                 store,
                 tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+                None,
             )
         })
     }

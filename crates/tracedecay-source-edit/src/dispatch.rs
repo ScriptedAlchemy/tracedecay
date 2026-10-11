@@ -222,7 +222,7 @@ mod tests {
             let store = Arc::clone(&self.store);
             let freshness = self.freshness;
             let scope = request.context.scope().clone();
-            Box::pin(async move { VerifiedCodeGraphRead::new(scope, store, freshness) })
+            Box::pin(async move { VerifiedCodeGraphRead::new(scope, store, freshness, None) })
         }
     }
 

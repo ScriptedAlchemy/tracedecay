@@ -23,7 +23,6 @@ fn bootstrap_tools_list_payload(node_count: Option<u64>, budget: u8) -> Result<s
         &profile_id,
         &authority,
         &project_catalog_discovery_scope(),
-        ToolRegistryMode::HostAvailable,
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!("MCP bootstrap catalog is unavailable: {error}"),
@@ -140,7 +139,12 @@ pub(super) fn daemon_bootstrap_response(
 ) -> Option<Option<JsonRpcResponse>> {
     match classify_mcp_method(&request.method) {
         McpMethod::Initialize => Some(request.id.clone().map(|id| {
-            let mut response = match initialize_result(SERVER_INSTRUCTIONS) {
+            let requested_protocol = request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("protocolVersion"))
+                .and_then(serde_json::Value::as_str);
+            let mut response = match initialize_result(SERVER_INSTRUCTIONS, requested_protocol) {
                 Ok(result) => JsonRpcResponse::success(id, result),
                 Err(error) => {
                     return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());

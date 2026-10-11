@@ -50,15 +50,11 @@ const CHECKOUT_DIFF: &str = "\
  fn reserve_stock(sku: &str, qty: i32) {}
  // reserve_stock(sku, 0) stays in the comment";
 
-const NO_MATCH_MESSAGE: &str = "ast-grep failed (exit 1). stdout: []";
+const NO_MATCH_MESSAGE: &str =
+    "pattern \"missing_call($X)\" matched no syntax nodes in src/checkout.rs";
+const NO_GRAMMAR_MESSAGE: &str = "no structural grammar for 'src/notes.txt' in this build; \
+     use tracedecay_str_replace for text edits";
 const OPERATION: &str = "use-case.application.source-edit.ast-grep-rewrite";
-
-fn require_ast_grep() {
-    assert!(
-        tracedecay_mcp::ast_grep_available(),
-        "structural rewrite proof requires the host ast-grep CLI"
-    );
-}
 
 async fn open_project(files: &[(&str, &str)]) -> (ProductionSourceEditFixture, TestTempDir) {
     let dir = test_temp_dir();
@@ -143,7 +139,6 @@ fn assert_effect(parsed: &Value, outcome: &str, payload_success: bool, payload_m
 
 #[tokio::test]
 async fn ast_grep_rewrite_dry_run_then_apply_swaps_every_call_and_leaves_the_rest() {
-    require_ast_grep();
     let (fixture, _dir) = open_project(&[(CHECKOUT, CHECKOUT_BEFORE), (OTHER, OTHER_SOURCE)]).await;
 
     let preview = call_rewrite(
@@ -256,7 +251,6 @@ async fn ast_grep_rewrite_dry_run_then_apply_swaps_every_call_and_leaves_the_res
 
 #[tokio::test]
 async fn ast_grep_rewrite_exact_retry_replays_and_a_different_input_conflicts() {
-    require_ast_grep();
     let (fixture, _dir) = open_project(&[(CHECKOUT, CHECKOUT_BEFORE)]).await;
     let preview = call_rewrite(
         &fixture,
@@ -392,7 +386,6 @@ async fn ast_grep_rewrite_exact_retry_replays_and_a_different_input_conflicts() 
 
 #[tokio::test]
 async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() {
-    require_ast_grep();
     let (fixture, dir) = open_project(&[
         (CHECKOUT, CHECKOUT_BEFORE),
         ("src/notes.txt", "reserve_stock(sku, 0);\n"),
@@ -485,7 +478,7 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
     );
     assert_eq!(
         prose_json["message"],
-        json!(NO_MATCH_MESSAGE),
+        json!(NO_GRAMMAR_MESSAGE),
         "{prose_json}"
     );
     assert_file(&fixture, "src/notes.txt", "reserve_stock(sku, 0);\n");

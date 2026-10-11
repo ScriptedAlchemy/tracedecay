@@ -104,6 +104,7 @@ fn map_outcome(
             page,
             freshness,
             omitted,
+            ..
         } => partial_outcome(page, freshness, omitted, request, finished_at),
         SessionRetrievalServiceOutcome::ResetRequired { .. } => {
             Err(TemporalRetrievalFailure::ResetRequired)

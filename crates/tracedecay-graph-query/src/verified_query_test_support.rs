@@ -94,7 +94,7 @@ impl CodeGraphProjectionReadPort for ImmediateProjection {
         let scope = self.scope.clone();
         let store = Arc::clone(&self.store);
         Box::pin(async move {
-            VerifiedCodeGraphRead::new(scope, store, super::CodeGraphReadFreshnessV1::Current)
+            VerifiedCodeGraphRead::new(scope, store, super::CodeGraphReadFreshnessV1::Current, None)
         })
     }
 }

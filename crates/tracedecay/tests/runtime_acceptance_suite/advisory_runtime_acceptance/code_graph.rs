@@ -66,6 +66,7 @@ impl CodeGraphProjectionReadPort for HermeticAdvisoryCodeGraphV1 {
                 self.scope.clone(),
                 Arc::clone(&self.store),
                 tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+                None,
             )
         })
     }

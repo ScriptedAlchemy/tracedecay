@@ -780,8 +780,7 @@ mod tests {
     use tracedecay_daemon_protocol::RequestedOutputFormat;
     use tracedecay_domain::errors::TraceDecayError;
     use tracedecay_domain::{ProjectId, RepositoryId, UtcMicros, WorktreeId};
-    use tracedecay_mcp::ToolResult;
-    use tracedecay_mcp::tools::response_trailers::{account_tool_result, response_token_count};
+    use tracedecay_mcp::tools::response_trailers::account_tool_result;
     use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, SchemaId};
 
     use super::{complete_protocol_controls, render_application_result, settle_graph_tool_result};
@@ -984,19 +983,10 @@ mod tests {
                 ),
                 "{format:?}: {blocks:?}"
             );
-            let after = response_token_count(&ToolResult::new(
-                json!({
-                    "content": [
-                        {"type": "text", "text": blocks[0]},
-                        {"type": "text", "text": blocks[1]},
-                    ]
-                }),
-                Vec::new(),
-            ))
-            .expect("tokenizer");
+            let after = (blocks[0].len() + blocks[1].len()) / 4;
             assert_eq!(
                 blocks[2],
-                format!("\ntracedecay_metrics: before=200 after={after}"),
+                format!("\ntracedecay_metrics: before=200 after={after} unit=bytes/4"),
                 "{format:?}"
             );
         }

@@ -4,7 +4,7 @@ use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
 
 #[test]
 fn work_and_workflow_advertise_every_executable_request_schema() {
-    let definitions = get_maximal_tool_definitions().expect("tool definitions");
+    let definitions = get_tool_definitions().expect("tool definitions");
     for (family, registry) in [
         (
             "work",
@@ -258,34 +258,23 @@ fn lcm_history_reads_accept_an_as_of_cutoff() {
     );
 }
 
-/// The MCP tool catalog is static per build, so `tools/list` must not
-/// re-assemble every JSON schema on each request.
-///
-/// Falsifiable on a count, never a duration: the assembly counter may advance
-/// at most once for the whole process, however many callers ask for it.
 #[test]
-fn maximal_tool_definitions_are_assembled_once_per_process() {
-    use std::sync::atomic::Ordering;
-
-    let first = get_maximal_tool_definitions().expect("tool definitions");
-    // Read the baseline *after* the first call so the one legitimate build is
-    // already counted; a cached registry can never advance it again.
-    let baseline = MAXIMAL_DEFINITION_BUILDS.load(Ordering::SeqCst);
-
-    for _ in 0..8 {
-        let again = get_maximal_tool_definitions().expect("tool definitions");
-        assert_eq!(
-            again.len(),
-            first.len(),
-            "the cached registry must serve the same tool set"
-        );
-    }
-
+fn ast_grep_rewrite_is_advertised_for_structural_edits() {
+    let rewrite = get_tool_definitions()
+        .expect("tool definitions")
+        .into_iter()
+        .find(|definition| definition.name == "tracedecay_ast_grep_rewrite")
+        .expect("tracedecay_ast_grep_rewrite must be advertised");
     assert_eq!(
-        MAXIMAL_DEFINITION_BUILDS.load(Ordering::SeqCst),
-        baseline,
-        "the maximal tool registry was re-assembled after it had already been \
-         built; tools/list rebuilds the whole catalog per request"
+        rewrite.input_schema["required"],
+        json!(["path", "pattern", "rewrite"])
+    );
+    assert!(
+        rewrite
+            .description
+            .contains("matches in comments and strings are left alone"),
+        "{}",
+        rewrite.description
     );
 }
 

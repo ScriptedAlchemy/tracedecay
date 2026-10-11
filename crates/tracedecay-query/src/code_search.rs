@@ -421,10 +421,18 @@ pub enum CodeIndexSearchSiteV1 {
     /// An attested byte window over the file's sanitized source. Serving
     /// verifies the current file still carries exactly those bytes at
     /// exactly that range before mapping the site to lines.
-    ArtifactWindow {
-        source_span: tracedecay_domain::SourceSpan,
-        sanitized_text: tracedecay_domain::BoundedSanitizedText,
-    },
+    ArtifactWindow(CodeIndexSearchWindowV1),
+}
+
+impl CodeIndexSearchSiteV1 {
+    /// The attested byte window this site can serve as code, if any.
+    /// `SymbolLines` may omit one; `ArtifactWindow` always carries it.
+    pub fn code_window(&self) -> Option<&CodeIndexSearchWindowV1> {
+        match self {
+            Self::SymbolLines { code_window, .. } => code_window.as_ref(),
+            Self::ArtifactWindow(window) => Some(window),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -883,5 +891,39 @@ mod tests {
         assert_eq!(reason.as_str(), "generation_unverified");
         let coverage = CodeIndexSearchCoverageV1::unavailable(lane_reason::GENERATION_REBUILDING);
         assert_eq!(coverage.degraded_or_fail(reason), Err(reason));
+    }
+
+    #[test]
+    fn a_site_exposes_its_attested_code_window() {
+        let window = CodeIndexSearchWindowV1 {
+            source_span: tracedecay_domain::SourceSpan {
+                start_byte: 0,
+                end_byte: 4,
+            },
+            sanitized_text: tracedecay_domain::BoundedSanitizedText::new("fn x")
+                .expect("bounded window"),
+        };
+        assert_eq!(
+            CodeIndexSearchSiteV1::ArtifactWindow(window.clone()).code_window(),
+            Some(&window)
+        );
+        assert_eq!(
+            CodeIndexSearchSiteV1::SymbolLines {
+                start_line: 0,
+                end_line: 0,
+                code_window: Some(window.clone()),
+            }
+            .code_window(),
+            Some(&window)
+        );
+        assert_eq!(
+            CodeIndexSearchSiteV1::SymbolLines {
+                start_line: 0,
+                end_line: 0,
+                code_window: None,
+            }
+            .code_window(),
+            None
+        );
     }
 }

@@ -614,15 +614,21 @@ impl CodeGraphProjectionStore {
         self.await_rewarm_for(budget, CodeGraphReadinessRequirement::Catalog)
     }
 
-    /// Retains the catalog before waiting so a concurrent warm cannot publish
-    /// a ready catalog that a parked release evicts before the reader opens.
-    /// Cold or failed stores still answer their typed state through the reader.
-    pub fn await_catalog_and_retain(
+    /// Catalog reads retain the catalog before waiting so a parked release
+    /// cannot evict a newly warmed catalog before the reader opens. Engine
+    /// reads wait only for the engine and do not retain the catalog.
+    pub fn await_rewarm_and_retain_for(
         &self,
         budget: Duration,
-    ) -> Result<Arc<InteractiveCatalogReaderLeaseV1>, CodeGraphRewarmPendingV1> {
-        let retain = InteractiveCatalogReaderLeaseV1::retain(&self.interactive_catalog);
-        self.await_rewarm_for(budget, CodeGraphReadinessRequirement::Catalog)?;
+        requirement: CodeGraphReadinessRequirement,
+    ) -> Result<Option<Arc<InteractiveCatalogReaderLeaseV1>>, CodeGraphRewarmPendingV1> {
+        let retain = match requirement {
+            CodeGraphReadinessRequirement::Catalog => Some(
+                InteractiveCatalogReaderLeaseV1::retain(&self.interactive_catalog),
+            ),
+            CodeGraphReadinessRequirement::Engine => None,
+        };
+        self.await_rewarm_for(budget, requirement)?;
         Ok(retain)
     }
 

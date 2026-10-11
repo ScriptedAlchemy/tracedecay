@@ -142,14 +142,18 @@ impl Fixture {
     }
 
     /// Block until the worker has had no pass in flight for `window`.
+    ///
+    /// A pass gives up its owner-pass guard before its graph tail (prepare,
+    /// activation, seat), so only a finished pass, tail included, is quiet.
     async fn settle_for(&self, window: Duration) {
         let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
         let mut quiet_since: Option<tokio::time::Instant> = None;
         while tokio::time::Instant::now() < deadline {
             if self
                 .registry
-                .reconcile_in_progress_for_test(&self.project)
+                .subscribe_owner_activity(&self.project)
                 .await
+                .is_some_and(|activity| !activity.pass_finished())
             {
                 quiet_since = None;
             } else {
