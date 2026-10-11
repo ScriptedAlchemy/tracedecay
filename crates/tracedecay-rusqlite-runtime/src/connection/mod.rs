@@ -911,10 +911,12 @@ impl WriterPageCache {
         connection
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
             .map_err(|source| policy("page cache authorizer", source))?;
+        crate::sql_census::trace(connection, ConnectionMode::Maintenance);
         let resized = connection.pragma_update(None, "cache_size", pages);
         connection
             .authorizer(Some(authorize_writer))
             .map_err(|source| policy("restore writer authorizer", source))?;
+        crate::sql_census::trace(connection, ConnectionMode::Writer);
         resized.map_err(|source| policy("page cache size", source))?;
         self.fitted_schema_version = Some(schema_version);
         Ok(())
@@ -1012,6 +1014,7 @@ fn install_authorizer(
         ConnectionMode::Reader => connection.authorizer(Some(authorize_reader)),
         ConnectionMode::Maintenance => connection.authorizer(Some(authorize_maintenance)),
     };
+    crate::sql_census::trace(connection, mode);
     result.map_err(|source| policy("authorizer", source))
 }
 
@@ -1023,7 +1026,7 @@ pub(crate) fn authorize_reader(context: AuthContext<'_>) -> Authorization {
     authorize(ConnectionMode::Reader, context)
 }
 
-fn authorize_maintenance(context: AuthContext<'_>) -> Authorization {
+pub(crate) fn authorize_maintenance(context: AuthContext<'_>) -> Authorization {
     if matches!(
         context.action,
         AuthAction::Attach { .. }

@@ -26,6 +26,7 @@ pub mod reader;
 pub mod remote;
 pub mod repository;
 pub mod runtime;
+mod sql_census;
 mod telemetry;
 #[cfg(test)]
 mod test_support;

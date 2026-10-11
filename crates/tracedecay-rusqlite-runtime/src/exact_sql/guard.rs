@@ -18,13 +18,15 @@ use rusqlite::{
     hooks::{AuthAction, Authorization},
 };
 
+use crate::sql_census::CensusCapability;
+
 use super::{
     EXACT_SQL_EXECUTION_LIMIT, EXACT_SQL_PROGRESS_INTERVAL_OPS, ExactSqlError,
     ExactSqlWriteAuthority, ExactSqlWriteIntent, sqlite_error,
 };
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn with_exact_sql_guard<T, F>(
+pub(crate) fn with_exact_sql_guard<T, F>(
     connection: &Connection,
     allow_savepoints: bool,
     allow_transactions: bool,
@@ -55,6 +57,16 @@ where
             }
         }))
         .map_err(|error| sqlite_error("install transaction-control guard", error))?;
+    if exact_sql_writer {
+        crate::sql_census::trace(
+            connection,
+            if allow_savepoints {
+                CensusCapability::ExactSqlSavepoints
+            } else {
+                CensusCapability::ExactSql
+            },
+        );
+    }
     let deadline = if enforce_statement_limit {
         let operation_deadline = Instant::now() + EXACT_SQL_EXECUTION_LIMIT;
         Some(
@@ -89,6 +101,9 @@ where
         }),
     ) {
         let _ = connection.authorizer(Some(canonical_authorizer));
+        if exact_sql_writer {
+            crate::sql_census::trace(connection, CensusCapability::Writer);
+        }
         return Err(sqlite_error("install execution guard", error));
     }
 
@@ -96,6 +111,9 @@ where
     let clear_progress =
         connection.progress_handler(EXACT_SQL_PROGRESS_INTERVAL_OPS, None::<fn() -> bool>);
     let restore_authorizer = connection.authorizer(Some(canonical_authorizer));
+    if exact_sql_writer {
+        crate::sql_census::trace(connection, CensusCapability::Writer);
+    }
     let cleanup = clear_progress
         .map_err(|error| sqlite_error("clear execution guard", error))
         .and_then(|()| {

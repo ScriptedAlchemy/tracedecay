@@ -64,7 +64,7 @@ pub use types::*;
 pub(crate) use command::{WriterCommand, reject_writer_command, run_writer_command};
 
 use command::{TransactionCommand, TransactionLeaseState};
-use guard::with_exact_sql_guard;
+pub(crate) use guard::with_exact_sql_guard;
 
 type ExactSqlQuery = dyn Fn(ExactSqlStatement, OperationPriorityV1, Duration) -> Result<ExactSqlRows, ExactSqlError>
     + Send
