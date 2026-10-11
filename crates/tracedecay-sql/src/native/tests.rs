@@ -131,6 +131,107 @@ fn capability_verdicts_match_the_sqlite_authorizers() {
     );
 }
 
+/// Catches exact SQL verdicts that diverge from the SQLite arm's exact SQL
+/// authorizers: caller SQL that begins or ends the runtime's transaction, a
+/// savepoint without a lease, and pragmas outside the allowlist.
+#[test]
+fn exact_sql_verdicts_match_the_sqlite_authorizers() {
+    const LEASED: Capability = Capability::ExactSql { savepoints: true };
+    const UNLEASED: Capability = Capability::ExactSql { savepoints: false };
+    const READ: Capability = Capability::ExactSqlRead;
+    let cases: &[(&str, &[Capability], &[Capability])] = &[
+        ("SELECT 1", &[READ, UNLEASED, LEASED], &[]),
+        ("INSERT INTO t VALUES (1)", &[UNLEASED, LEASED], &[READ]),
+        ("CREATE TEMP TABLE s (x)", &[UNLEASED, LEASED], &[READ]),
+        ("CREATE INDEX temp.i ON s (x)", &[UNLEASED, LEASED], &[READ]),
+        (
+            "CREATE TRIGGER g AFTER INSERT ON t BEGIN SELECT 1; END",
+            &[UNLEASED, LEASED],
+            &[READ],
+        ),
+        (
+            "CREATE TEMP TRIGGER g AFTER INSERT ON t BEGIN SELECT 1; END",
+            &[],
+            &[READ, UNLEASED, LEASED],
+        ),
+        ("CREATE TEMP VIEW v AS SELECT 1", &[], &[READ, UNLEASED]),
+        ("DROP TABLE t", &[UNLEASED, LEASED], &[READ]),
+        ("ATTACH ':memory:' AS other", &[], &[READ, UNLEASED, LEASED]),
+        ("PRAGMA table_info(t)", &[READ, UNLEASED, LEASED], &[]),
+        ("PRAGMA cache_size", &[READ, UNLEASED], &[]),
+        ("PRAGMA cache_size = 10", &[], &[READ, UNLEASED]),
+        ("PRAGMA wal_checkpoint(TRUNCATE)", &[], &[READ, UNLEASED]),
+        ("PRAGMA user_version = 3", &[UNLEASED], &[READ]),
+        ("PRAGMA foreign_keys = ON", &[UNLEASED], &[READ]),
+        ("PRAGMA foreign_keys = OFF", &[], &[READ, UNLEASED]),
+    ];
+    for (sql, allowed, denied) in cases {
+        for capability in *allowed {
+            assert_eq!(
+                verdict(sql, *capability),
+                Ok(()),
+                "{sql} under {capability:?}"
+            );
+        }
+        for capability in *denied {
+            assert!(
+                verdict(sql, *capability).is_err(),
+                "{sql} must be denied under {capability:?}"
+            );
+        }
+    }
+    let transaction_control = |sql: &str, capability| {
+        verdict(sql, capability).is_err_and(|error| error.contains("transaction control"))
+    };
+    for sql in ["BEGIN", "COMMIT", "ROLLBACK"] {
+        for capability in [READ, UNLEASED, LEASED] {
+            assert!(
+                transaction_control(sql, capability),
+                "{sql} under {capability:?}"
+            );
+        }
+    }
+    for sql in ["SAVEPOINT s", "RELEASE s", "ROLLBACK TO s"] {
+        assert_eq!(verdict(sql, LEASED), Ok(()), "{sql} under a lease");
+        for capability in [READ, UNLEASED] {
+            assert!(
+                transaction_control(sql, capability),
+                "{sql} under {capability:?}"
+            );
+        }
+    }
+}
+
+/// Catches a connection that lowers commit durability: at NORMAL a power
+/// loss drops acknowledged commits, so no capability may change it.
+#[test]
+fn no_capability_lowers_commit_durability() {
+    for capability in [
+        Capability::Reader,
+        Capability::Writer,
+        Capability::Maintenance,
+        Capability::ExactSql { savepoints: true },
+    ] {
+        for sql in ["PRAGMA synchronous = NORMAL", "PRAGMA synchronous = OFF"] {
+            assert!(
+                verdict(sql, capability).is_err(),
+                "{sql} must be denied under {capability:?}"
+            );
+        }
+    }
+    assert_eq!(verdict("PRAGMA synchronous", Capability::Reader), Ok(()));
+    let (_directory, database) = database();
+    let mut connection = database.connect(Access::Writer).unwrap();
+    assert_eq!(
+        connection
+            .query("PRAGMA synchronous", &[], &execution_guard())
+            .unwrap()
+            .values,
+        vec![vec![Value::Integer(2)]],
+        "connections open at FULL"
+    );
+}
+
 /// Catches a dialect that resolves extension loading or a catalog object
 /// outside the allowlist, in direct SQL or a stored trigger body.
 #[test]
@@ -406,10 +507,7 @@ fn foreign_files_are_refused_before_the_engine_touches_them() {
     for path in [sqlite, short, garbage] {
         let before = std::fs::read(&path).unwrap();
         assert!(
-            matches!(
-                Database::open(&path),
-                Err(Error::Engine(turso_core::LimboError::NotADB))
-            ),
+            matches!(Database::open(&path), Err(Error::ForeignFormat)),
             "{} must be refused",
             path.display()
         );
@@ -460,10 +558,7 @@ fn foreign_files_are_refused_before_the_engine_touches_them() {
     assert_eq!(&std::fs::read(&path).unwrap()[68..72], b"TDN1");
     unstamp(&path);
     assert!(
-        matches!(
-            Database::open(&path),
-            Err(Error::Engine(turso_core::LimboError::NotADB))
-        ),
+        matches!(Database::open(&path), Err(Error::ForeignFormat)),
         "an unstamped store with content is not adopted"
     );
 }
@@ -670,7 +765,11 @@ fn compiled_statements_are_readmitted_under_the_current_capability() {
 mod driver {
     use std::time::Duration;
 
-    use crate::{Capability, CheckpointMode, Connection, ConnectionControl, ErrorExt, ErrorKind};
+    use crate::{
+        Capability, CheckpointMode, Connection, ConnectionControl, EnginePolicy, Error, ErrorExt,
+        ErrorKind, StatementControl, TransactionBehavior, TransactionControl,
+        types::{FromSql, ValueRef},
+    };
 
     fn open() -> (tempfile::TempDir, std::path::PathBuf, Connection) {
         let directory = tempfile::tempdir().unwrap();
@@ -847,5 +946,242 @@ mod driver {
             .unwrap();
         let error = Connection::open(&path).err().unwrap();
         assert_eq!(error.kind(), ErrorKind::ForeignFormat, "{error}");
+    }
+
+    /// Catches engine damage reported as an unclassified failure, which the
+    /// lexical artifact and doctor would not recognize as corruption.
+    #[test]
+    fn engine_corruption_is_classified_corrupt() {
+        use turso_core::LimboError;
+        for error in [
+            LimboError::Corrupt("bad page".to_owned()),
+            LimboError::NotADB,
+        ] {
+            assert_eq!(Error::from(error).kind(), ErrorKind::Corrupt);
+        }
+    }
+
+    /// Catches an exact SQL scope that lets caller SQL end the runtime's
+    /// transaction, or hides the denial when the caller swallows the
+    /// statement's error.
+    #[test]
+    fn exact_sql_scope_reports_transaction_control_and_restores_the_base() {
+        let (_directory, _path, connection) = open();
+        connection
+            .execute_batch("CREATE TABLE items (value INTEGER)")
+            .unwrap();
+        connection.set_capability(Capability::Writer).unwrap();
+        for (capability, sql) in [
+            (
+                Capability::ExactSql { savepoints: false },
+                "BEGIN IMMEDIATE",
+            ),
+            (
+                Capability::ExactSql { savepoints: false },
+                "SAVEPOINT nested",
+            ),
+            (Capability::ExactSql { savepoints: true }, "COMMIT"),
+            (Capability::ExactSqlRead, "SAVEPOINT nested"),
+        ] {
+            let error = connection
+                .with_capability(capability, Capability::Writer, |connection| {
+                    let _ = connection.execute_batch(sql);
+                    Ok(())
+                })
+                .expect_err("transaction control is denied");
+            assert_eq!(
+                error.kind(),
+                ErrorKind::TransactionControlDenied,
+                "{capability:?} `{sql}`: {error}"
+            );
+        }
+        connection.execute_batch("BEGIN").unwrap();
+        connection
+            .with_capability(
+                Capability::ExactSql { savepoints: true },
+                Capability::Writer,
+                |connection| connection.execute_batch("SAVEPOINT nested; RELEASE nested;"),
+            )
+            .expect("a leased savepoint is allowed");
+        connection.execute_batch("COMMIT").unwrap();
+        let denied = connection
+            .execute_batch("CREATE TEMP TABLE scratch (value INTEGER)")
+            .expect_err("the restored writer denies temp tables");
+        assert_eq!(denied.kind(), ErrorKind::Denied, "{denied}");
+    }
+
+    /// Catches a runaway statement the engine policy does not bound, and a
+    /// budget that leaks from one statement into the next.
+    #[test]
+    fn engine_policy_bounds_vm_operations_per_statement() {
+        let (_directory, _path, connection) = open();
+        connection.apply_engine_policy().unwrap();
+        let error = connection
+            .query_row(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) \
+                 SELECT count(*) FROM n",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::LimitExceeded, "{error}");
+        for _ in 0..3 {
+            let count: i64 = connection
+                .query_row(
+                    "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n \
+                     WHERE i < 100000) SELECT count(*) FROM n",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 100_000);
+        }
+    }
+
+    /// Catches an engine policy that leaves the five-second busy wait in
+    /// place, so a contended writer blocks past the runtime's own deadline.
+    #[test]
+    fn engine_policy_never_waits_on_a_busy_store() {
+        let (_directory, path, mut holder) = open();
+        holder.execute_batch("CREATE TABLE t(x)").unwrap();
+        let held = holder
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        held.execute("INSERT INTO t VALUES (1)", []).unwrap();
+        let mut contender = Connection::open(&path).unwrap();
+        contender.apply_engine_policy().unwrap();
+        let started = std::time::Instant::now();
+        let error = contender
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), ErrorKind::Busy, "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "waited {:?}",
+            started.elapsed()
+        );
+        drop(held);
+    }
+
+    /// Catches a NOOP checkpoint that copies frames back, or one that cannot
+    /// report the WAL's size, which the checkpoint lane samples after every
+    /// batch.
+    #[test]
+    fn noop_checkpoint_reports_frames_without_copying_them() {
+        let (_directory, path, connection) = open();
+        connection
+            .execute_batch("CREATE TABLE t(payload BLOB)")
+            .unwrap();
+        connection.checkpoint(CheckpointMode::Truncate).unwrap();
+        let main_len = || std::fs::metadata(&path).unwrap().len();
+        let before = main_len();
+        let mut insert = connection.prepare("INSERT INTO t VALUES (?1)").unwrap();
+        for _ in 0..50 {
+            insert.execute([vec![0_u8; 4_000]]).unwrap();
+        }
+        drop(insert);
+        let noop = connection.checkpoint(CheckpointMode::Noop).unwrap();
+        assert!(noop.log_frames >= 50, "{noop:?}");
+        assert_eq!(noop.checkpointed_frames, 0, "{noop:?}");
+        assert_eq!(main_len(), before, "NOOP copied frames back");
+        let passive = connection.checkpoint(CheckpointMode::Passive).unwrap();
+        assert_eq!(
+            passive.checkpointed_frames, passive.log_frames,
+            "{passive:?}"
+        );
+        let after = connection.checkpoint(CheckpointMode::Noop).unwrap();
+        assert_eq!(
+            (after.log_frames, after.checkpointed_frames),
+            (passive.log_frames, passive.log_frames)
+        );
+        connection.checkpoint(CheckpointMode::Truncate).unwrap();
+        let truncated = connection.checkpoint(CheckpointMode::Noop).unwrap();
+        assert_eq!(
+            (truncated.log_frames, truncated.checkpointed_frames),
+            (0, 0)
+        );
+    }
+
+    /// Catches counters that report a cached program's earlier uses again, or
+    /// that never move.
+    #[test]
+    fn statement_counters_report_each_use_once() {
+        let (_directory, _path, connection) = open();
+        connection
+            .execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2), (5), (4)")
+            .unwrap();
+        let sql = "SELECT x FROM t ORDER BY x DESC";
+        let read = |statement: &mut crate::Statement<'_>| {
+            statement
+                .query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let mut statement = connection.prepare_cached(sql).unwrap();
+        assert_eq!(read(&mut statement), [5, 4, 3, 2, 1]);
+        let first = statement.take_counters();
+        assert!(first.vm_steps > 0, "{first:?}");
+        assert!(first.fullscan_steps > 0, "{first:?}");
+        assert!(first.sort_steps > 0, "{first:?}");
+        assert_eq!(statement.take_counters().vm_steps, 0);
+        drop(statement);
+        let reused = connection.prepare_cached(sql).unwrap();
+        assert_eq!(
+            reused.take_counters().vm_steps,
+            0,
+            "earlier use counted again"
+        );
+    }
+
+    /// Catches a transaction progress guard that cannot interrupt, or that
+    /// stays installed after its scope.
+    #[test]
+    fn transaction_guard_scope_interrupts_and_is_removed() {
+        let (_directory, _path, mut connection) = open();
+        let mut transaction = connection.transaction().unwrap();
+        let error = transaction
+            .guard_scope_mut(
+                || true,
+                |transaction| {
+                    transaction.query_row(
+                        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n \
+                         WHERE i < 100000) SELECT count(*) FROM n",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                },
+            )
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Interrupted, "{error}");
+        let count: i64 = transaction
+            .query_row(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n \
+                 WHERE i < 100000) SELECT count(*) FROM n",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 100_000);
+    }
+
+    /// Catches a statement without its column count, and `FromSql` failures
+    /// that `?` cannot carry into the driver's error.
+    #[test]
+    fn statements_report_columns_and_conversions_carry_into_errors() {
+        let (_directory, _path, connection) = open();
+        let statement = connection.prepare("SELECT 1 AS a, 2 AS b").unwrap();
+        assert_eq!(statement.column_count(), 2);
+        let narrow = |value: ValueRef<'_>| -> crate::Result<u8> { Ok(u8::column_result(value)?) };
+        assert!(matches!(
+            narrow(ValueRef::Integer(300)),
+            Err(Error::IntegralValueOutOfRange(_, 300))
+        ));
+        assert!(matches!(
+            narrow(ValueRef::Text(b"x")),
+            Err(Error::FromSqlConversionFailure(..))
+        ));
     }
 }

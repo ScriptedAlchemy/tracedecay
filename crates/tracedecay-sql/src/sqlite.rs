@@ -65,6 +65,7 @@ impl ErrorExt for Error {
             Some(ErrorCode::ReadOnly) => ErrorKind::ReadOnly,
             Some(ErrorCode::SchemaChanged) => ErrorKind::Schema,
             Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase) => ErrorKind::Corrupt,
+            Some(ErrorCode::TooBig) => ErrorKind::LimitExceeded,
             Some(ErrorCode::AuthorizationForStatementDenied) => ErrorKind::Denied,
             _ => ErrorKind::Other,
         }
@@ -196,6 +197,13 @@ impl EnginePolicy for Connection {
         self.busy_timeout(Duration::ZERO)?;
         self.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
         self.pragma_update(None, "trusted_schema", false)?;
+        self.pragma_update(None, "synchronous", "NORMAL")?;
+        let synchronous: i64 = self.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+        if synchronous != 1 {
+            return Err(policy_violation(format!(
+                "synchronous={synchronous}, expected 1"
+            )));
+        }
         if !self.db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE)? {
             return Err(policy_violation(
                 "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE=false, expected true",

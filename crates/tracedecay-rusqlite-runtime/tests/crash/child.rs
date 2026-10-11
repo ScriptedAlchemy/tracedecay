@@ -139,8 +139,8 @@ fn watch_watermark(attachment: &RepositoryRuntimePhysicalAttachment, stop: &Atom
 
 fn driver_workload(path: &Path, plan: &Plan) {
     // Native policy denies caller `PRAGMA synchronous`, so this runs at the
-    // driver's default durability; power-loss modes hold it to the
-    // acknowledged-commit bar anyway.
+    // driver's default durability, an fsync per commit; power-loss modes hold
+    // it to the acknowledged-commit bar.
     let mut connection = Connection::open(path).unwrap();
     for index in 0..plan.requests {
         let transaction = connection.transaction().unwrap();

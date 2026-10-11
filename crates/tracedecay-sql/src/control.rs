@@ -33,6 +33,9 @@ pub enum ErrorKind {
     /// COMMIT was stepped and then failed: the transaction may or may not be
     /// durable. Callers settle by receipt lookup.
     CommitOutcomeUnknown,
+    /// A statement or request exceeded an engine resource limit, such as the
+    /// VM-operation budget.
+    LimitExceeded,
 }
 
 pub trait ErrorExt {
@@ -46,7 +49,11 @@ pub trait ErrorExt {
             ErrorKind::Busy => 5,
             ErrorKind::Interrupted => 9,
             ErrorKind::ReadOnly => 8,
+            ErrorKind::CommitOutcomeUnknown => 10,
+            ErrorKind::Corrupt => 11,
             ErrorKind::Schema => 17,
+            ErrorKind::LimitExceeded => 18,
+            ErrorKind::ForeignFormat => 26,
             ErrorKind::Constraint => 19,
             ErrorKind::Denied | ErrorKind::TransactionControlDenied => 23,
             ErrorKind::NoRows | ErrorKind::Unsupported | ErrorKind::Other => return None,
@@ -154,9 +161,9 @@ pub trait TransactionControl {
     ) -> crate::Result<T>;
 }
 
-/// Engine settings every owned-store connection carries: zero busy wait, no
-/// checkpoint on close, resource limits, the statement-cache size and the
-/// engine build checks.
+/// Engine settings every owned-store connection carries: zero busy wait, the
+/// engine's commit durability, no checkpoint on close, resource limits, the
+/// statement-cache size and the engine build checks.
 pub trait EnginePolicy {
     fn apply_engine_policy(&self) -> crate::Result<()>;
 }

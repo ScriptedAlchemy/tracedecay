@@ -41,9 +41,11 @@ static OPEN_IDENTITIES: LazyLock<Mutex<HashMap<FileIdentity, Weak<Shared>>>> =
     LazyLock::new(Mutex::default);
 
 fn registry() -> std::sync::MutexGuard<'static, HashMap<FileIdentity, Weak<Shared>>> {
-    OPEN_IDENTITIES
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+    lock(&OPEN_IDENTITIES)
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The facade's connection policy. Deleted with the runtime-core facade.
@@ -138,6 +140,12 @@ struct SlotState {
     suspended: bool,
     /// Why the progress handler interrupted the running statement.
     tripped: Option<Error>,
+    /// Progress ticks one statement may run; `None` is unbounded.
+    tick_budget: Option<u64>,
+    /// Progress ticks since the running statement started.
+    // ponytail: one counter per connection, so two statements stepped in
+    // alternation share a budget; per-statement counters if that matters.
+    ticks: u64,
 }
 
 impl GuardSlot {
@@ -157,8 +165,25 @@ impl GuardSlot {
         self.confined.as_ref().map_or(Ok(()), |io| io.verify())
     }
 
+    /// Admits a statement about to start: its budget restarts and the guards
+    /// are checked.
+    fn start(&self) -> Result<()> {
+        self.state().ticks = 0;
+        self.check()
+    }
+
     fn progress(&self) -> bool {
-        match self.check() {
+        let over_budget = {
+            let mut state = self.state();
+            state.ticks += 1;
+            !state.suspended && state.tick_budget.is_some_and(|budget| state.ticks > budget)
+        };
+        let verdict = if over_budget {
+            Err(Error::OperationLimitExceeded)
+        } else {
+            self.check()
+        };
+        match verdict {
             Ok(()) => false,
             Err(error) => {
                 self.state().tripped = Some(error);
@@ -194,6 +219,9 @@ struct Shared {
     /// Set once the store is admitted and registered.
     identity: OnceLock<FileIdentity>,
     engine: Option<Engine>,
+    /// `(WAL checkpoint sequence, frames copied back)` after the driver's
+    /// last checkpoint; the engine keeps its backfill count private.
+    checkpointed: Mutex<Option<(u32, u64)>>,
 }
 
 struct Engine {
@@ -272,6 +300,7 @@ impl Database {
                     io,
                     confined: Some(confined),
                 }),
+                checkpointed: Mutex::default(),
             }),
         };
         database.admit_format(header)?;
@@ -295,6 +324,7 @@ impl Database {
                     io,
                     confined: None,
                 }),
+                checkpointed: Mutex::default(),
             }),
         })
     }
@@ -350,7 +380,10 @@ impl Database {
         }
         let inner = engine.database.connect()?;
         inner.set_foreign_keys_enabled(true);
-        inner.set_sync_mode(turso_core::SyncMode::Normal);
+        // A commit is acknowledged only after its WAL frames are fsynced: at
+        // NORMAL a power loss drops acknowledged commits. Policy denies
+        // changing it.
+        inner.set_sync_mode(turso_core::SyncMode::Full);
         inner.set_busy_timeout(DEFAULT_BUSY_TIMEOUT);
         // The runtime's checkpoint lane is the only checkpoint scheduler.
         inner.wal_auto_actions_disable();
@@ -371,6 +404,7 @@ impl Database {
             capability: Cell::new(capability),
             read_only,
             cache: RefCell::default(),
+            transaction_control_denied: Cell::new(false),
             database: self.clone(),
         };
         connection.set_capability(capability);
@@ -418,7 +452,7 @@ fn canonical(path: &Path) -> Result<PathBuf> {
 }
 
 fn foreign_format() -> Error {
-    Error::Engine(LimboError::NotADB)
+    Error::ForeignFormat
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -484,14 +518,62 @@ pub struct Connection {
     capability: Cell<Capability>,
     read_only: bool,
     cache: RefCell<HashMap<(Capability, String), (turso_core::Statement, bool)>>,
+    /// Set when a statement's transaction control was denied, so a capability
+    /// scope reports it even if the caller swallowed the statement's error.
+    transaction_control_denied: Cell<bool>,
     database: Database,
 }
 
 impl Connection {
     pub(crate) fn set_capability(&self, capability: Capability) {
         self.capability.set(capability);
-        self.inner
-            .set_query_only(self.read_only || capability == Capability::Reader);
+        self.inner.set_query_only(
+            self.read_only || matches!(capability, Capability::Reader | Capability::ExactSqlRead),
+        );
+    }
+
+    fn authorize(&self, command: &Cmd, capability: Capability) -> Result<()> {
+        let verdict = policy::authorize(command, capability);
+        if matches!(verdict, Err(Error::TransactionControlDenied)) {
+            self.transaction_control_denied.set(true);
+        }
+        verdict
+    }
+
+    pub(crate) fn take_transaction_control_denied(&self) -> bool {
+        self.transaction_control_denied.replace(false)
+    }
+
+    /// Bounds every statement to `ops` VM operations, counted at the progress
+    /// interval; `None` lifts the bound.
+    pub(crate) fn set_op_budget(&self, ops: Option<u64>) {
+        let interval = u64::from(PROGRESS_INTERVAL_OPS.unsigned_abs());
+        self.guard.state().tick_budget = ops.map(|ops| ops.div_ceil(interval));
+    }
+
+    /// SQLite's NOOP checkpoint: `(WAL frames, frames already copied back)`,
+    /// copying nothing.
+    pub(crate) fn wal_frames(&self) -> Result<(u64, u64)> {
+        if self.database.engine().confined.is_none() {
+            return Ok((0, 0));
+        }
+        let state = self.inner.wal_state()?;
+        let checkpointed = match *lock(&self.database.shared.checkpointed) {
+            Some((sequence, frames)) if sequence == state.checkpoint_seq_no => frames,
+            _ => 0,
+        };
+        Ok((state.max_frame, checkpointed.min(state.max_frame)))
+    }
+
+    /// Records what a checkpoint copied back, for [`Connection::wal_frames`].
+    /// A restarted WAL has a new checkpoint sequence and starts from zero.
+    pub(crate) fn record_checkpoint(&self, checkpointed: u64) -> Result<()> {
+        if self.database.engine().confined.is_none() {
+            return Ok(());
+        }
+        let sequence = self.inner.wal_state()?.checkpoint_seq_no;
+        *lock(&self.database.shared.checkpointed) = Some((sequence, checkpointed));
+        Ok(())
     }
 
     pub(crate) fn capability(&self) -> Capability {
@@ -542,7 +624,7 @@ impl Connection {
         }
         validate_request(sql, &[])?;
         let command = parse_single(sql)?;
-        policy::authorize(&command, capability)?;
+        self.authorize(&command, capability)?;
         let ddl = policy::is_ddl(&command);
         let statement = self.compile(command, sql)?;
         Ok(Prepared {
@@ -580,11 +662,11 @@ impl Connection {
     pub(crate) fn admit(&self, prepared: &mut Prepared) -> Result<()> {
         let capability = self.capability();
         if prepared.capability != capability {
-            policy::authorize(&parse_single(&prepared.sql)?, capability)?;
+            self.authorize(&parse_single(&prepared.sql)?, capability)?;
             prepared.capability = capability;
         }
         prepared.statement.reset()?;
-        self.guard.check()
+        self.guard.start()
     }
 
     pub(crate) fn bind(&self, prepared: &mut Prepared, values: &[Value]) -> Result<()> {
@@ -655,12 +737,12 @@ impl Connection {
         let statements = parse_batch(sql)?;
         let capability = self.capability();
         for (command, _) in &statements {
-            policy::authorize(command, capability)?;
+            self.authorize(command, capability)?;
         }
         for (command, input) in statements {
             let ddl = policy::is_ddl(&command);
             let mut statement = self.compile(command, input)?;
-            self.guard.check()?;
+            self.guard.start()?;
             while self.drive(&mut statement)? {}
             if ddl {
                 self.clear_cache();
@@ -673,7 +755,7 @@ impl Connection {
     /// the capability verdict.
     pub(crate) fn execute_unchecked(&self, sql: &str) -> Result<()> {
         let mut statement = self.compile(parse_single(sql)?, sql)?;
-        self.guard.check()?;
+        self.guard.start()?;
         while self.drive(&mut statement)? {}
         Ok(())
     }

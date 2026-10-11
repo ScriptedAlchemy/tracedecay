@@ -697,9 +697,6 @@ fn apply_policy(
         connection
             .pragma_update(None, "wal_autocheckpoint", 0_i64)
             .map_err(|source| policy("WAL auto-checkpoint", source))?;
-        connection
-            .pragma_update(None, "synchronous", "NORMAL")
-            .map_err(|source| policy("synchronous mode", source))?;
     }
     // Applied after the journal mode is settled, on the writer: it owns every
     // checkpoint. Readers never reset a log, so bounding one there would be
@@ -718,7 +715,6 @@ fn apply_policy(
         ConnectionMode::Writer => {
             verify_pragma_text(connection, "journal_mode", "wal")?;
             verify_pragma_i64(connection, "wal_autocheckpoint", 0)?;
-            verify_pragma_i64(connection, "synchronous", 1)?;
             verify_pragma_i64(connection, "journal_size_limit", RETAINED_WAL_BYTES)?;
         }
         ConnectionMode::Reader => verify_pragma_i64(connection, "query_only", 1)?,

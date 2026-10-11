@@ -31,9 +31,11 @@ fn sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
     sidecar.into()
 }
 
-/// Production writer policy: WAL, `synchronous=NORMAL`, and no automatic
-/// checkpoint. This is the durability contract; it does not consult any
-/// process environment variable.
+/// Production writer policy: WAL, the engine's commit durability
+/// (`synchronous=NORMAL` on SQLite, an fsync per commit on native), and no
+/// automatic checkpoint. This is the durability contract; it does not consult
+/// any process environment variable. Catches a native writer that loses
+/// acknowledged commits on power loss because it runs at NORMAL.
 #[test]
 fn writer_mode_applies_wal_integrity_and_write_policy() {
     let file = database();
@@ -44,7 +46,11 @@ fn writer_mode_applies_wal_integrity_and_write_policy() {
         .expect("journal mode");
     assert_eq!(journal.to_ascii_lowercase(), "wal");
     assert_eq!(pragma_i64(&connection, "wal_autocheckpoint"), 0);
-    assert_eq!(pragma_i64(&connection, "synchronous"), 1);
+    let synchronous = match tracedecay_sql::ENGINE {
+        tracedecay_sql::Engine::Sqlite => 1,
+        tracedecay_sql::Engine::Native => 2,
+    };
+    assert_eq!(pragma_i64(&connection, "synchronous"), synchronous);
     assert_eq!(pragma_i64(&connection, "foreign_keys"), 1);
     assert_eq!(pragma_i64(&connection, "trusted_schema"), 0);
     connection
