@@ -210,9 +210,6 @@ pub struct ShardRuntime {
     /// telemetry observation for this shard takes this one lock, so it is the
     /// per-shard serialization point under concurrent operation load.
     state: std::sync::Mutex<ShardRuntimeState>,
-    /// Advances after every lease release; see
-    /// [`ShardRuntime::subscribe_lease_releases`].
-    lease_releases: tokio::sync::watch::Sender<u64>,
 }
 
 /// Hand-written so the state behind the lock is never printed: formatting it
@@ -277,7 +274,6 @@ impl ShardRuntime {
                 last_activity: Instant::now(),
                 health: ShardRuntimeHealth::Unknown,
             }),
-            lease_releases: tokio::sync::watch::Sender::new(0),
         }
     }
 
@@ -554,18 +550,6 @@ impl ShardRuntime {
         Ok(token)
     }
 
-    /// Advances after every lease release. Subscribe before reading the
-    /// eviction blockers, so a release between the read and the wait still
-    /// wakes the waiter.
-    pub(crate) fn subscribe_lease_releases(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.lease_releases.subscribe()
-    }
-
-    fn signal_lease_release(&self) {
-        self.lease_releases
-            .send_modify(|releases| *releases = releases.wrapping_add(1));
-    }
-
     #[cfg(test)]
     pub(crate) fn queue_work(
         &self,
@@ -599,33 +583,25 @@ impl ShardRuntime {
     }
 
     fn release_lease(&self, kind: ShardRuntimeLeaseKind) {
-        {
-            let mut state = self.lock_state();
-            state.release_lease(kind);
-            state.touch();
-        }
-        self.signal_lease_release();
+        let mut state = self.lock_state();
+        state.release_lease(kind);
+        state.touch();
     }
 
     fn release_lifetime_lease(&self, resource: ShardRuntimeResource, token: u64) {
-        {
-            let mut state = self.lock_state();
-            let released = match resource {
-                ShardRuntimeResource::Client => {
-                    state.client_lifetime_leases.remove(&token).is_some()
-                }
-                ShardRuntimeResource::Operation => {
-                    state.operation_lifetime_leases.remove(&token).is_some()
-                }
-                _ => false,
-            };
-            if released {
-                state.touch();
-            } else {
-                debug_assert!(false, "lifetime token may only release once");
+        let mut state = self.lock_state();
+        let released = match resource {
+            ShardRuntimeResource::Client => state.client_lifetime_leases.remove(&token).is_some(),
+            ShardRuntimeResource::Operation => {
+                state.operation_lifetime_leases.remove(&token).is_some()
             }
+            _ => false,
+        };
+        if released {
+            state.touch();
+        } else {
+            debug_assert!(false, "lifetime token may only release once");
         }
-        self.signal_lease_release();
     }
 
     #[cfg(test)]

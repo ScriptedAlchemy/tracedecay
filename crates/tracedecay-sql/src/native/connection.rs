@@ -285,7 +285,6 @@ struct Shared {
     /// `(WAL checkpoint sequence, frames copied back)` after the driver's
     /// last checkpoint; the engine keeps its backfill count private.
     checkpointed: Mutex<Option<(u32, u64)>>,
-    opened_by: String,
 }
 
 struct Engine {
@@ -338,7 +337,6 @@ impl Database {
             let mut live = lock(&slot.live);
             if let Some(shared) = live.upgrade() {
                 drop(live);
-                debug_shared(&shared, text);
                 return Self::share(shared, text, identity, writable);
             }
             let (file, held) = open()?;
@@ -415,7 +413,6 @@ impl Database {
                     confined: Some(confined),
                 }),
                 checkpointed: Mutex::default(),
-                opened_by: format!("{text}\n{}", std::backtrace::Backtrace::force_capture()),
             }),
             fence: Some(Fence::new(text, identity)),
         };
@@ -441,7 +438,6 @@ impl Database {
                     confined: None,
                 }),
                 checkpointed: Mutex::default(),
-                opened_by: String::new(),
             }),
             fence: None,
         })
@@ -534,26 +530,6 @@ impl Database {
         };
         connection.set_capability(capability);
         Ok(connection)
-    }
-}
-
-fn debug_shared(shared: &Shared, text: &str) {
-    if shared.opened_by.is_empty() || shared.opened_by.starts_with(&format!("{text}\n")) {
-        return;
-    }
-    let line = format!(
-        "TDDEBUG reopened at {text}\nFIRST:\n{}\nNOW:\n{}\n",
-        shared.opened_by,
-        std::backtrace::Backtrace::force_capture()
-    );
-    let out = std::env::var("TEST_UNDECLARED_OUTPUTS_DIR").unwrap_or_else(|_| "/tmp".to_owned());
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(format!("{out}/tddebug-{}.log", std::process::id()))
-    {
-        let _ = f.write_all(line.as_bytes());
     }
 }
 

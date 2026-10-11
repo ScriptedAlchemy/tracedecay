@@ -184,38 +184,6 @@ async fn stop_during_project_open_truncates_project_store_wals() {
 }
 
 #[tokio::test]
-async fn probe_stop_after_init_wal() {
-    for round in 0..12 {
-        let (environment, project) = IsolatedHome::new();
-        let project = project.canonicalize().expect("canonical fixture project");
-        initialize_repository(&project);
-        let creator_log = environment.scratch().join("creator.log");
-        let mut creator =
-            crate::common::spawn_tracedecay_daemon_logged(environment.home(), &creator_log, |_| {});
-        initialize_tracedecay(environment.home(), &project);
-        stop_daemon_gracefully(&mut creator);
-        let (graph_db, sessions) = project_stores(environment.home(), &project);
-        let profile = environment
-            .home()
-            .join(".tracedecay")
-            .join(tracedecay_store::StoreFile::Profile.file_name());
-        let walls = [
-            wal_bytes(&graph_db),
-            wal_bytes(&sessions),
-            wal_bytes(&profile),
-        ];
-        let log = fs::read_to_string(&creator_log).unwrap_or_default();
-        eprintln!(
-            "PROBE round={round} wal={walls:?} held={}",
-            log.contains("still held")
-        );
-        if walls.iter().any(|bytes| *bytes > 0) {
-            panic!("PROBE leftover round={round} wal={walls:?} log={log}");
-        }
-    }
-}
-
-#[tokio::test]
 async fn stop_cancels_an_admitted_project_open() {
     let (environment, project) = IsolatedHome::new();
     let project = project.canonicalize().expect("canonical fixture project");

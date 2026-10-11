@@ -452,44 +452,6 @@ async fn failed_blocking_drain_restores_fault_and_wakes_reserved_open_joiners() 
     ));
 }
 
-/// Catches a shutdown close that gives up on a runtime whose last client
-/// lease is dropped after the close began, as the owners of a project open a
-/// stop cancelled are: the runtime stays mounted and its writer never runs
-/// the shutdown truncate.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shutdown_close_closes_a_runtime_once_its_last_lease_drops() {
-    let publisher = Arc::new(AttachmentPublisher::default());
-    let registry = StoreRuntimeRegistry::with_config(
-        Arc::new(TestResolver::default()),
-        publisher.clone(),
-        StoreRuntimeRegistryConfig::new(2).unwrap(),
-    )
-    .unwrap();
-    let pin = profile_pin(&registry).await;
-    let held = open_published(&registry, code_request("worktree.shutdown-held", &pin)).await;
-    let binding = held.binding().clone();
-    let control = publisher.control(1);
-
-    let closing = registry.clone();
-    let close = tokio::spawn(async move { closing.close_idle_for_shutdown().await });
-    for _ in 0..64 {
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        control.close_calls.load(Ordering::SeqCst),
-        0,
-        "a runtime is not closed under a live client lease"
-    );
-    drop(held);
-
-    assert_eq!(close.await.unwrap().unwrap(), 1);
-    assert_eq!(control.close_calls.load(Ordering::SeqCst), 1);
-    assert!(matches!(
-        registry.lookup(&binding),
-        StoreRuntimeLookup::Missing { .. }
-    ));
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_close_drains_every_idle_runtime_concurrently() {
     let publisher = Arc::new(AttachmentPublisher::default());
