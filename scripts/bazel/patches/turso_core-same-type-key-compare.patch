@@ -1,7 +1,7 @@
-diff --git a/types.rs b/types.rs
+diff --git a/.tmp_git_root/core/types.rs b/.tmp_git_root/core/types.rs
 index a8d6518..1994163 100644
---- a/types.rs
-+++ b/types.rs
+--- a/.tmp_git_root/core/types.rs
++++ b/.tmp_git_root/core/types.rs
 @@ -3147,6 +3147,45 @@ where
          header_pos += bytes_read;
  

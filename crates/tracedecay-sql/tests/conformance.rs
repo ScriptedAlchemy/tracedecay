@@ -50,6 +50,7 @@ conformance!(
     an_interrupted_write_ends_its_transaction,
     unique_index_entries_stay_findable_under_every_conflict_mode,
     composite_keys_order_and_find_rows_by_every_field_type,
+    a_reprepared_statement_probes_with_the_replacing_index,
     a_statement_that_failed_part_way_reruns_from_the_start,
     statements_follow_schema_changes_inside_a_write_transaction,
 );
@@ -970,6 +971,41 @@ mod cases {
             let missing: i64 = find.query_row(params![n, t, near], |row| row.get(0))?;
             assert_eq!(missing, 0, "a longer blob is a different key");
         }
+        Ok(())
+    }
+
+    /// A prepared insert keeps refusing duplicates after its unique index is
+    /// replaced by one with a case-folding collation: the reprepared statement
+    /// probes with the new index's key description. A key description kept
+    /// from the replaced index lets a case variant in.
+    pub(super) fn a_reprepared_statement_probes_with_the_replacing_index() -> Result<()> {
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "CREATE TABLE handles (id INTEGER PRIMARY KEY, handle TEXT NOT NULL);
+             CREATE UNIQUE INDEX handles_handle ON handles (handle);",
+        )?;
+        let mut insert = connection.prepare("INSERT INTO handles (handle) VALUES (?1)")?;
+        insert.execute(["alice"])?;
+        insert.execute(["Bob"])?;
+        connection.execute_batch(
+            "DROP INDEX handles_handle;
+             CREATE UNIQUE INDEX handles_handle ON handles (handle COLLATE NOCASE);",
+        )?;
+        let variant = insert
+            .execute(["ALICE"])
+            .expect_err("the case-folding index refuses a case variant");
+        assert_eq!(variant.kind(), ErrorKind::Constraint, "{variant}");
+        insert.execute(["carol"])?;
+        let refused = insert
+            .execute(["bob"])
+            .expect_err("the case-folding index refuses a case variant");
+        assert_eq!(refused.kind(), ErrorKind::Constraint, "{refused}");
+        drop(insert);
+        let mut select = connection.prepare("SELECT handle FROM handles ORDER BY id")?;
+        let handles = select
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>>>()?;
+        assert_eq!(handles, ["alice", "Bob", "carol"]);
         Ok(())
     }
 
