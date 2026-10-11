@@ -14,7 +14,9 @@ use tracedecay_domain::errors::Result;
 use super::super::{MemoryV2Executor, db_error};
 
 /// Companion table plus the lookup index and the immutability / cascade
-/// triggers.
+/// triggers. The cascade runs BEFORE the payload delete: native Turso checks
+/// the digest's foreign key when the parent row goes, before AFTER triggers
+/// run (turso-bugs/fk-checked-before-after-delete-trigger.md).
 pub(super) const PAYLOAD_DIGESTS_SCHEMA: &str =
     "CREATE TABLE IF NOT EXISTS memory_v2_assertion_payload_digests (
             payload_rowid INTEGER PRIMARY KEY,
@@ -42,7 +44,7 @@ pub(super) const PAYLOAD_DIGESTS_SCHEMA: &str =
             SELECT RAISE(ABORT, 'memory_v2 assertion payload digests are immutable');
         END;
         CREATE TRIGGER IF NOT EXISTS memory_v2_payloads_digest_delete
-        AFTER DELETE ON memory_v2_assertion_payloads BEGIN
+        BEFORE DELETE ON memory_v2_assertion_payloads BEGIN
             DELETE FROM memory_v2_assertion_payload_digests
             WHERE payload_rowid = OLD.rowid;
         END;";
