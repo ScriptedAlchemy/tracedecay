@@ -7701,6 +7701,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-storage-parity"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracedecay-contracts",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-runtime-core",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-sql",
+ "tracedecay-store",
+]
+
+[[package]]
 name = "tracedecay-store"
 version = "0.1.0"
 dependencies = [

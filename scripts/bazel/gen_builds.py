@@ -1466,6 +1466,7 @@ def main():
     for package, sources in {
         "scripts": {"2024": {'["bazel/rust_test_environment_probe.rs"]'}},
         "sdks/codegen": {"2024": {'["dashboard_schema.rs"]'}},
+        "tools/storage/parity": {"2024": {'["regen.rs"]'}},
     }.items():
         path = REPO / package / "BUILD.bazel"
         rules = formatting_rules(package, sources)

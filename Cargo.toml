@@ -48,6 +48,7 @@ members = [
     "crates/tracedecay-rusqlite-runtime",
     "crates/tracedecay-sql",
     "crates/tracedecay-store",
+    "crates/tracedecay-storage-parity",
     "crates/tracedecay-store-runtime",
     "crates/tracedecay-tool-catalog",
     "crates/tracedecay-tokenizer",
