@@ -475,6 +475,34 @@ mod wipe_safety_tests {
             "a dangling symlink remains a namespace entry"
         );
     }
+
+    /// Catches a complete wipe that leaves behind the spill directory a dead
+    /// native process left beside a profile store, and one that deletes a
+    /// name the compiled engine never writes.
+    #[test]
+    fn complete_wipe_removes_a_lingering_engine_temp_directory() {
+        let profile = tempfile::TempDir::new().expect("create temporary profile");
+        let root = profile.path().canonicalize().expect("canonical profile");
+        let mut spills = Vec::new();
+        for store in tracedecay_store::StoreFile::PROFILE_ROOT {
+            std::fs::write(root.join(store.file_name()), b"store").expect("write store");
+            let spill = root.join(format!("{}-tmp", store.file_name()));
+            std::fs::create_dir_all(spill.join("dead-sort")).expect("create spill");
+            std::fs::write(spill.join("dead-sort").join("tursodb_temp_file"), b"rows")
+                .expect("write spill");
+            spills.push(spill);
+        }
+
+        wipe_complete_profile_database_state(&root).expect("wipe the profile");
+
+        let native = matches!(tracedecay_sql::ENGINE, tracedecay_sql::Engine::Native);
+        for store in tracedecay_store::StoreFile::PROFILE_ROOT {
+            assert!(!root.join(store.file_name()).exists());
+        }
+        for spill in spills {
+            assert_eq!(spill.exists(), !native, "{}", spill.display());
+        }
+    }
 }
 
 /// Handles the `wipe` and `wipe --all` commands.

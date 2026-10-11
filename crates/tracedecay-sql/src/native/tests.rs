@@ -543,9 +543,12 @@ fn foreign_files_are_refused_before_the_engine_touches_them() {
     );
 }
 
-/// Catches the engine reaching a path other than its main file and WAL.
+/// Catches the engine reaching a path other than its main file, its WAL and
+/// the files it makes in its own temporary directory, and a temporary
+/// directory a dead process left behind that survives the claim or outlives
+/// the store.
 #[test]
-fn confined_io_admits_only_the_main_file_and_its_wal() {
+fn confined_io_admits_only_the_main_file_its_wal_and_its_temp_directory() {
     use turso_core::{IO, OpenFlags};
     let directory = tempfile::tempdir().unwrap();
     let main = directory.path().join("store.tdb");
@@ -583,6 +586,47 @@ fn confined_io_admits_only_the_main_file_and_its_wal() {
     io.open_file(&format!("{main}-wal"), OpenFlags::Create, false)
         .unwrap();
     io.remove_file(&format!("{main}-wal")).unwrap();
+
+    let temp = std::path::PathBuf::from(format!("{main}-tmp"));
+    let dead_sort = temp.join("dead-sort");
+    std::fs::create_dir_all(&dead_sort).unwrap();
+    std::fs::write(
+        dead_sort.join("tursodb_temp_file"),
+        b"a dead process's spill",
+    )
+    .unwrap();
+    assert_eq!(
+        io.temp_dir(),
+        None,
+        "before the store lock is held the directory may be another process's"
+    );
+    assert!(dead_sort.exists(), "nothing is cleared before the claim");
+    io.claim_temp().unwrap();
+    assert!(!temp.exists(), "the claim clears what a dead process left");
+    assert_eq!(io.temp_dir(), Some(temp.clone()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&temp).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "the temporary directory is private");
+    }
+    std::fs::create_dir(temp.join("sort")).unwrap();
+    let spill = temp.join("sort").join("tursodb_temp_file");
+    let spill = spill.to_str().unwrap();
+    drop(io.open_file(spill, OpenFlags::Create, false).unwrap());
+    let loose = temp.join("loose");
+    assert!(
+        io.open_file(loose.to_str().unwrap(), OpenFlags::Create, false)
+            .is_err(),
+        "only files in engine-made subdirectories are admitted"
+    );
+    assert!(!loose.exists());
+    assert!(io.remove_file(spill).is_err());
+    drop(io);
+    assert!(
+        !temp.exists(),
+        "closing the store removes its temporary directory"
+    );
 }
 
 /// Catches a connection that keeps using a store whose pathname now names a
@@ -711,6 +755,47 @@ fn file_sorts_spill_inside_the_store_and_leave_nothing_behind() {
         !temp.exists(),
         "closing the store removes {}",
         temp.display()
+    );
+}
+
+/// Catches a commit that leaves the page cache's evictable count short of the
+/// pages it cleaned (`turso_core-evictable-count-on-commit.patch`): every
+/// later page allocation then falls to the spill check's full recount of the
+/// cache, so that work jumps after the first commit and stays there as the
+/// store grows instead of matching the first commit.
+#[test]
+fn spill_check_work_per_commit_stays_flat_as_the_store_grows() {
+    const CACHE_PAGES: u64 = 200;
+    let (_directory, database) = database();
+    let guard = execution_guard();
+    let mut connection = database
+        .connect_with(Capability::Maintenance, false)
+        .unwrap();
+    connection
+        .execute(&format!("PRAGMA cache_size = {CACHE_PAGES}"), &[], &guard)
+        .unwrap();
+    connection
+        .execute("CREATE TABLE t(body TEXT)", &[], &guard)
+        .unwrap();
+    // One row per page, three cache-fulls per commit.
+    let row = format!("('{}')", "x".repeat(3_000));
+    let insert = format!(
+        "INSERT INTO t VALUES {}",
+        vec![row; 3 * CACHE_PAGES as usize].join(",")
+    );
+    let walked = (0..6)
+        .map(|_| {
+            let before = page_cache_entries_walked();
+            connection.execute(&insert, &[], &guard).unwrap();
+            page_cache_entries_walked() - before
+        })
+        .collect::<Vec<_>>();
+    let first = walked[0];
+    assert!(
+        walked
+            .iter()
+            .all(|&commit| commit <= 2 * first + 2 * CACHE_PAGES),
+        "entries walked per commit grew with the store: {walked:?}"
     );
 }
 

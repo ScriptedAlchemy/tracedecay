@@ -22,5 +22,12 @@ pub use connection::{
 pub use error::{Error, Result};
 pub use value::{Rows, Value};
 
+/// Page-cache entries the engine's spill-check recount has walked on the
+/// calling thread, a cycle-free measure of that O(n) work.
+#[cfg(feature = "test-helpers")]
+pub fn page_cache_entries_walked() -> u64 {
+    turso_core::page_cache_entries_walked()
+}
+
 #[cfg(test)]
 mod tests;

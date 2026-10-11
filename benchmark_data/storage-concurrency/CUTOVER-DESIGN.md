@@ -34,7 +34,12 @@ Inputs are the arena candidates (`/fast/tmp/turso-arena/c{1,2,3}`), the cross-ju
   4. The statement cache is keyed by `(Capability, sql)` and cleared after DDL. Authority is never baked into a compiled program.
   5. The final-shape inventory pins the exact text of every trigger and view.
 - **Proof of parity.** `testdata/policy.tsv` records the SQLite authorizer's verdict for each capability, generated while SQLite still runs. `testdata/census.tsv` lists every statement the full suite executes, captured with `trace_v2`. The native gate has zero tolerance: every census statement must prepare and be allowed, and no SQLite denial may become an allow.
-- **IO confinement.** `ConfinedIo` replaces the pass-through in `PinnedIo` (`pinned_io.rs:115-131`). It admits only the pinned main file and `<main>-wal`, opened with O_NOFOLLOW, and every other open or remove fails. Windows keeps parity with SQLite: path open plus (volume serial, file index) identity checks before open, after open and on each connect. There is no Windows descriptor adoption.
+- **IO confinement.** `ConfinedIo` replaces the pass-through in `PinnedIo` (`pinned_io.rs:115-131`). It admits only the pinned main file, `<main>-wal` and the files the engine makes in its own subdirectories of `<main>-tmp/`. The main file and WAL are opened with O_NOFOLLOW. The only remove it allows is of the WAL, and every other open or remove fails.
+  - `<main>-tmp/` is where sorts and ephemeral tables spill under `temp_store = FILE`. A carried turso patch (`scripts/bazel/patches/turso_core-io-temp-dir.patch`) adds `IO::temp_dir`, so the engine creates each temporary file in its own subdirectory there instead of the system temporary directory.
+  - The directory is private: it is created with mode 0700 on the first spill.
+  - The engine uses it only once it holds the store's exclusive lock. `claim_temp` then clears whatever a dead process left there. Before the claim, `temp_dir` returns `None` and spills go to the system temporary directory, because the directory may still be another process's.
+  - Dropping the `ConfinedIo`, which closes the store, removes the directory. A crash can leave it behind. It never holds durable data, so it belongs to the store family (`StoreFile::TEMP_DIR_SUFFIXES`): the storage report counts its bytes, the orphan scan never treats it as foreign payload, and a wipe or reset removes it with the store.
+- **Windows IO identity.** Windows keeps parity with SQLite: path open plus (volume serial, file index) identity checks before open, after open and on each connect. There is no Windows descriptor adoption.
 
 ## Schema
 
@@ -46,7 +51,7 @@ Inputs are the arena candidates (`/fast/tmp/turso-arena/c{1,2,3}`), the cross-ju
 
 ## On-disk layout and the fresh start (Zack ruling)
 
-- **`StoreFile`.** A table in `tracedecay-store` is the single owner of store file names: native `<stem>.tdb` with sidecar `<stem>.tdb-wal`, and legacy `<stem>.db` with `-wal`, `-shm` and `-journal`. The duplicate constants are deleted. `Database::open` accepts only the `OwnedStorePath` newtype, which only `StoreFile` constructs.
+- **`StoreFile`.** A table in `tracedecay-store` is the single owner of store file names: native `<stem>.tdb` with sidecar `<stem>.tdb-wal` and temporary directory `<stem>.tdb-tmp/`, and legacy `<stem>.db` with `-wal`, `-shm` and `-journal`. The duplicate constants are deleted. `Database::open` accepts only the `OwnedStorePath` newtype, which only `StoreFile` constructs.
 - **Fresh start.** When the native runtime first opens a profile, it deletes the legacy owned SQLite families (exactly the `StoreFile` legacy names under the canonical roots, nothing else). It does this under the profile lifecycle authority, after daemon ownership is established. No conversion or backup takes place. The memory artifacts that the existing complete-wipe CLI misses are also deleted.
 - **Foreign SQLite.** The foreign rusqlite adapter (`tracedecay-sessions/runtime/{shared.rs,hosts/**}`) refuses any path under a TraceDecay data root.
 

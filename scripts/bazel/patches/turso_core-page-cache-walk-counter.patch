@@ -1,0 +1,41 @@
+diff --git a/lib.rs b/lib.rs
+index aa5e5df..09b977a 100644
+--- a/lib.rs
++++ b/lib.rs
+@@ -161,6 +161,7 @@ pub use storage::{
+     buffer_pool::BufferPool,
+     database::{DatabaseStorage, IOContext},
+     encryption::{CipherMode, EncryptionContext, EncryptionKey},
++    page_cache::page_cache_entries_walked,
+     page_transform::{PageCodec, PageCodecContext, PageCodecHeaderInfo, PageCodecId, PageLocation},
+     pager::{Page, PageRef, Pager},
+     wal::{CheckpointMode, CheckpointResult, Wal, WalAutoActions, WalFile, WalFileShared},
+diff --git a/storage/page_cache.rs b/storage/page_cache.rs
+index 1576339..ab41725 100644
+--- a/storage/page_cache.rs
++++ b/storage/page_cache.rs
+@@ -26,6 +26,16 @@ pub const MINIMUM_PAGE_CACHE_SIZE_IN_PAGES: usize = 200;
+ /// The spill threshold as a fraction of capacity.
+ const DEFAULT_SPILL_THRESHOLD_PERCENT: usize = 90;
+ 
++crate::thread::thread_local! {
++    static ENTRIES_WALKED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
++}
++
++/// Cache entries the spill check's full recount has walked on the calling
++/// thread: a cycle-free measure of that O(n) work for tests.
++pub fn page_cache_entries_walked() -> u64 {
++    ENTRIES_WALKED.with(std::cell::Cell::get)
++}
++
+ #[derive(Debug, Copy, Eq, Hash, PartialEq, Clone)]
+ #[repr(transparent)]
+ pub struct PageCacheKey(usize);
+@@ -494,6 +504,7 @@ impl PageCache {
+         aristo::instrument::expose_pub(as = "inspect_count_evictable_pages")
+     )]
+     fn count_evictable_pages(&self) -> usize {
++        ENTRIES_WALKED.with(|walked| walked.set(walked.get() + self.map.len() as u64));
+         self.map
+             .values()
+             .filter(|&&entry_ptr| {
