@@ -1,6 +1,7 @@
 mod access;
 mod connection;
 pub mod engine;
+pub use tracedecay_sql::engine_probe_counts;
 mod row_codec;
 pub use row_codec::{decode_stored_json, encode_stored_json, optional_text_column, text_column};
 mod external_source;

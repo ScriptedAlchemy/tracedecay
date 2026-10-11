@@ -2983,6 +2983,8 @@ mod verified_graph_runtime_port_contract_tests;
 
 #[cfg(test)]
 mod graph_shutdown_contract_tests;
+#[cfg(test)]
+mod open_cost_probe_tests;
 
 #[cfg(test)]
 mod project_memory_relation_graph_contract_tests;

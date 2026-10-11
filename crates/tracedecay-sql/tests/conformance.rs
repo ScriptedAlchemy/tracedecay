@@ -49,6 +49,8 @@ conformance!(
     a_copied_back_wal_starts_over_on_the_next_write,
     read_only_open_reads_without_creating_a_wal,
     an_interrupted_write_ends_its_transaction,
+    schema_edits_reach_every_connection_without_touching_their_snapshots,
+    temp_tables_stay_private_to_their_connection,
 );
 
 mod cases {
@@ -870,6 +872,95 @@ mod cases {
         assert!(
             names(&reopened)?.is_empty(),
             "close rolled back the open write"
+        );
+        Ok(())
+    }
+
+    fn ranked(connection: &Connection) -> Result<Vec<(String, i64)>> {
+        connection
+            .prepare("SELECT title, rank FROM notes WHERE rank >= 1 ORDER BY rank")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect()
+    }
+
+    fn column_names(connection: &Connection, table: &str) -> Result<Vec<String>> {
+        let statement = connection.prepare(&format!("SELECT * FROM {table}"))?;
+        Ok(statement
+            .column_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// Catches a catalog copy that lets one connection's schema edit reach
+    /// another connection's snapshot in place, or that refuses to edit a
+    /// table or index another connection's snapshot still shares.
+    pub(super) fn schema_edits_reach_every_connection_without_touching_their_snapshots()
+    -> Result<()> {
+        let (_directory, path, first) = file_database();
+        let second = Connection::open(&path)?;
+        first.execute_batch(
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT, body TEXT, rank INTEGER);
+             CREATE INDEX notes_rank ON notes(rank);
+             INSERT INTO notes (title, body, rank) VALUES ('a', 'x', 2), ('b', 'y', 1);",
+        )?;
+        let before = [("b".to_owned(), 1), ("a".to_owned(), 2)];
+        assert_eq!(ranked(&second)?, before);
+        let held = second.prepare("SELECT title, body FROM notes WHERE id = 1")?;
+
+        // Dropping a column ahead of the indexed one rewrites the table and
+        // the index entries both connections' catalogs hold.
+        first.execute_batch("ALTER TABLE notes DROP COLUMN body")?;
+        for connection in [&first, &second] {
+            assert_eq!(ranked(connection)?, before);
+            assert_eq!(column_names(connection, "notes")?, ["id", "title", "rank"]);
+        }
+        drop(held);
+
+        second.execute_batch("ALTER TABLE notes ADD COLUMN tag TEXT DEFAULT 't'")?;
+        assert_eq!(
+            column_names(&first, "notes")?,
+            ["id", "title", "rank", "tag"]
+        );
+        let tag: String =
+            first.query_row("SELECT tag FROM notes WHERE id = 2", [], |row| row.get(0))?;
+        assert_eq!(tag, "t");
+        Ok(())
+    }
+
+    /// Catches a temp catalog shared between connections: each connection's
+    /// temp tables must be invisible to every other connection on the store.
+    pub(super) fn temp_tables_stay_private_to_their_connection() -> Result<()> {
+        let (_directory, path, first) = file_database();
+        let second = Connection::open(&path)?;
+        first.execute_batch(
+            "CREATE TEMP TABLE scratch (owner TEXT); INSERT INTO scratch VALUES ('first');",
+        )?;
+        let unseen = second.query_row("SELECT count(*) FROM scratch", [], |row| {
+            row.get::<_, i64>(0)
+        });
+        assert!(
+            unseen.is_err(),
+            "another connection's temp table is not visible"
+        );
+        second
+            .execute_batch("CREATE TEMP TABLE scratch (left_side INTEGER, right_side INTEGER)")?;
+        assert_eq!(column_names(&first, "scratch")?, ["owner"]);
+        assert_eq!(
+            column_names(&second, "scratch")?,
+            ["left_side", "right_side"]
+        );
+        let owner: String = first.query_row("SELECT owner FROM scratch", [], |row| row.get(0))?;
+        assert_eq!(owner, "first");
+        let rows: i64 = second.query_row("SELECT count(*) FROM scratch", [], |row| row.get(0))?;
+        assert_eq!(rows, 0);
+        let third = Connection::open(&path)?;
+        assert!(
+            third
+                .query_row("SELECT count(*) FROM scratch", [], |row| row
+                    .get::<_, i64>(0))
+                .is_err(),
+            "a new connection starts with an empty temp catalog"
         );
         Ok(())
     }

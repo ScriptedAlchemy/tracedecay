@@ -1,0 +1,175 @@
+diff --git a/connection.rs b/connection.rs
+index 7087619..b49b4c4 100644
+--- a/connection.rs
++++ b/connection.rs
+@@ -1070,6 +1070,7 @@ impl Connection {
+         sql: impl AsRef<str>,
+         origin: StatementOrigin,
+     ) -> Result<Statement> {
++        crate::open_probe::bump(6);
+         if self.is_closed() {
+             return Err(LimboError::InternalError("Connection closed".to_string()));
+         }
+@@ -1382,6 +1383,7 @@ impl Connection {
+     /// extension load, vacuum). The genuinely non-blocking callers (MVCC
+     /// bootstrap, the open-db state machine) drive `*_nonblock` directly.
+     pub(crate) fn reparse_schema(self: &Arc<Connection>) -> Result<()> {
++        crate::open_probe::bump(7);
+         let io = self.pager.load().io.clone();
+         let mut state = ReparseSchemaState::default();
+         io.block(|| self.reparse_schema_nonblock(&mut state))
+diff --git a/database.rs b/database.rs
+index 173d75b..5851ae1 100644
+--- a/database.rs
++++ b/database.rs
+@@ -2471,6 +2471,7 @@ impl Database {
+         page_codec: Option<Arc<dyn PageCodec>>,
+         stats: StatsRefresh,
+     ) -> Result<Arc<Connection>> {
++        crate::open_probe::bump(5);
+         if self.page_codec_id.is_some() && page_codec.is_none() {
+             return Err(LimboError::InvalidArgument(
+                 "database requires an external page codec".to_string(),
+diff --git a/lib.rs b/lib.rs
+index aa5e5df..53137a2 100644
+--- a/lib.rs
++++ b/lib.rs
+@@ -12,6 +12,20 @@
+ )]
+ #![recursion_limit = "256"]
+ 
++pub mod open_probe {
++    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
++    pub const NAMES: [&str; 8] = ["schema_new", "schema_clone", "make_mut_clone", "btree_table_clone", "index_clone", "connect", "prepare", "reparse"];
++    pub static COUNTS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
++    pub fn cow() -> bool {
++        static COW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++        *COW.get_or_init(|| std::env::var_os("TURSO_SCHEMA_COW").is_some())
++    }
++    pub fn bump(slot: usize) { COUNTS[slot].fetch_add(1, Relaxed); }
++    pub fn counts() -> Vec<(&'static str, u64)> {
++        NAMES.iter().zip(COUNTS.iter()).map(|(n, c)| (*n, c.load(Relaxed))).collect()
++    }
++}
++
+ pub mod alloc;
+ pub mod busy;
+ pub mod cdc;
+diff --git a/mvcc/database/checkpoint_state_machine.rs b/mvcc/database/checkpoint_state_machine.rs
+index c7ff58e..e98c07d 100644
+--- a/mvcc/database/checkpoint_state_machine.rs
++++ b/mvcc/database/checkpoint_state_machine.rs
+@@ -1662,7 +1662,10 @@ impl<Clock: LogicalClock, A: ConcurrentAllocator> CheckpointStateMachine<Clock,
+         for (name, table) in schema.tables.iter_mut() {
+             #[cfg(not(feature = "conn_raw_api"))]
+             let _ = name;
+-            let table = Arc::get_mut(table).expect("this should be the only reference");
++            if !table.btree().is_some_and(|btree| btree.root_page < 0) {
++                continue;
++            }
++            let table = Arc::make_mut(table);
+             let Some(btree_table) = table.btree_mut() else {
+                 continue;
+             };
+diff --git a/schema.rs b/schema.rs
+index 748fa0f..d521354 100644
+--- a/schema.rs
++++ b/schema.rs
+@@ -862,6 +862,7 @@ impl Schema {
+         enable_custom_types: bool,
+         dialect: &dyn crate::dialect::Dialect,
+     ) -> crate::Result<Self> {
++        crate::open_probe::bump(0);
+         let mut tables: HashMap<String, Arc<Table>> = HashMap::default();
+         #[cfg(feature = "conn_raw_api")]
+         let mut table_names_by_root_page = HashMap::default();
+@@ -2640,6 +2641,7 @@ impl Schema {
+     #[turso_macros::allocation_site(crate::alloc::SchemaAllocationSite::MakeMut)]
+     pub(crate) fn try_make_mut(schema: &mut Arc<Self>) -> Result<&mut Self, TryReserveError> {
+         if Arc::get_mut(schema).is_none() {
++            crate::open_probe::bump(2);
+             *schema = Arc::new(schema.as_ref().try_clone()?);
+         }
+         Ok(Arc::get_mut(schema).expect("schema was made unique above"))
+@@ -2679,6 +2681,7 @@ impl TryClone for BTreeTable {
+     type Error = TryReserveError;
+ 
+     fn try_clone(&self) -> Result<Self, Self::Error> {
++        crate::open_probe::bump(3);
+         Ok(Self {
+             root_page: self.root_page,
+             name: self.name.clone(),
+@@ -2745,6 +2748,7 @@ impl TryClone for Index {
+     type Error = TryReserveError;
+ 
+     fn try_clone(&self) -> Result<Self, Self::Error> {
++        crate::open_probe::bump(4);
+         Ok(Self {
+             name: self.name.clone(),
+             table_name: self.table_name.clone(),
+@@ -2760,6 +2764,32 @@ impl TryClone for Index {
+     }
+ }
+ 
++impl Schema {
++    fn shallow_clone(&self) -> Result<Self, TryReserveError> {
++        Ok(Self {
++            tables: self.tables.iter().map(|(n, t)| (n.clone(), t.clone())).try_collect()?,
++            #[cfg(feature = "conn_raw_api")]
++            table_names_by_root_page: self.table_names_by_root_page.try_clone()?,
++            materialized_view_names: self.materialized_view_names.try_clone()?,
++            materialized_view_sql: self.materialized_view_sql.try_clone()?,
++            incremental_views: self.incremental_views.iter().map(|(n, v)| (n.clone(), v.clone())).try_collect()?,
++            views: self.views.iter().map(|(n, v)| (n.clone(), v.clone())).try_collect()?,
++            triggers: self.triggers.iter().map(|(n, t)| (n.clone(), t.clone())).try_collect()?,
++            indexes: self.indexes.iter().map(|(n, i)| (n.clone(), i.clone())).try_collect()?,
++            has_indexes: self.has_indexes.try_clone()?,
++            schema_version: self.schema_version,
++            analyze_stats: self.analyze_stats.clone(),
++            table_to_materialized_views: self.table_to_materialized_views.try_clone()?,
++            incompatible_views: self.incompatible_views.try_clone()?,
++            broken_views: self.broken_views.try_clone()?,
++            dropped_root_pages: self.dropped_root_pages.try_clone()?,
++            type_registry: self.type_registry.try_clone()?,
++            generated_columns_enabled: self.generated_columns_enabled,
++            sequences: self.sequences.try_clone()?,
++        })
++    }
++}
++
+ impl TryClone for Schema {
+     /// Copying a `Schema` requires deep cloning of all internal tables and indexes, even though they are wrapped in `Arc`.
+     /// Simply copying the `Arc` pointers would result in multiple `Schema` instances sharing the same underlying tables and indexes,
+@@ -2768,6 +2798,10 @@ impl TryClone for Schema {
+     type Error = TryReserveError;
+ 
+     fn try_clone(&self) -> Result<Self, Self::Error> {
++        crate::open_probe::bump(1);
++        if crate::open_probe::cow() {
++            return self.shallow_clone();
++        }
+         let tables = self
+             .tables
+             .iter()
+diff --git a/vdbe/execute.rs b/vdbe/execute.rs
+index ac7d2ec..33c7e50 100644
+--- a/vdbe/execute.rs
++++ b/vdbe/execute.rs
+@@ -17237,7 +17237,7 @@ pub fn op_drop_column(
+             .get_mut(&normalized_table_name)
+             .expect("table being renamed should be in schema");
+ 
+-        let table = Arc::get_mut(table).expect("this should be the only strong reference");
++        let table = Arc::make_mut(table);
+ 
+         let Table::BTree(btree) = table else {
+             panic!("only btree tables can be renamed");
+@@ -17280,7 +17280,7 @@ pub fn op_drop_column(
+     conn.with_database_schema_mut(*db, |schema| -> Result<()> {
+         if let Some(indexes) = schema.indexes.get_mut(&normalized_table_name) {
+             for index in indexes {
+-                let index = Arc::get_mut(index).expect("this should be the only strong reference");
++                let index = Arc::make_mut(index);
+                 for index_column in index.columns.iter_mut() {
+                     if index_column.pos_in_table != EXPR_INDEX_SENTINEL
+                         && index_column.pos_in_table > *column_index

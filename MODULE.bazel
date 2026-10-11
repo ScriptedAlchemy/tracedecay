@@ -59,6 +59,16 @@ crate.annotation(
     version = "0.45.0",
 )
 
+crate.annotation(
+    crate = "turso_core",
+    patch_args = ["-p1"],
+    patch_tool = "patch",
+    patches = [
+        "//scripts:bazel/patches/turso_core-probe-open-counters.patch",
+    ],
+    version = "0.8.0",
+)
+
 # .cargo/config.toml's [env] LIBSQLITE3_FLAGS, which Cargo hands every build
 # script and Bazel does not: bundled SQLite's worker-thread cap and disabled
 # memory status counters.

@@ -26,3 +26,11 @@ pub use engine::{
 pub use sqlite::params;
 
 pub const ENGINE: Engine = engine::ENGINE;
+
+/// PROBE (measurement only): turso schema and connection counters.
+pub fn engine_probe_counts() -> Vec<(&'static str, u64)> {
+    #[cfg(td_engine = "native")]
+    return turso_core::open_probe::counts();
+    #[cfg(not(td_engine = "native"))]
+    Vec::new()
+}
