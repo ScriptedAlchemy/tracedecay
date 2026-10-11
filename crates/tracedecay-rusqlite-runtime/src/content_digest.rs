@@ -8,9 +8,9 @@
 
 use std::path::Path;
 
-use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest as _, Sha256};
+use tracedecay_sql::types::ValueRef;
+use tracedecay_sql::{Connection, OpenFlags};
 
 /// Failure while computing a whole-database canonical content digest.
 ///
@@ -27,7 +27,7 @@ pub struct CanonicalContentDigestError {
 }
 
 impl CanonicalContentDigestError {
-    fn new(operation: &'static str, error: rusqlite::Error) -> Self {
+    fn new(operation: &'static str, error: tracedecay_sql::Error) -> Self {
         Self {
             operation,
             message: error.to_string(),
@@ -70,7 +70,7 @@ pub fn canonical_session_domain_content_sha256(
     let tables = table_statement
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(|error| CanonicalContentDigestError::new("query session table inventory", error))?
-        .collect::<rusqlite::Result<Vec<_>>>()
+        .collect::<tracedecay_sql::Result<Vec<_>>>()
         .map_err(|error| CanonicalContentDigestError::new("read session table inventory", error))?;
     drop(table_statement);
 
@@ -132,7 +132,7 @@ fn unique_declaration_prefix_len(
             ))
         })
         .map_err(|error| CanonicalContentDigestError::new("query session table info", error))?
-        .collect::<rusqlite::Result<Vec<_>>>()
+        .collect::<tracedecay_sql::Result<Vec<_>>>()
         .map_err(|error| CanonicalContentDigestError::new("read session table info", error))?;
     drop(info);
     let mut pk = columns
@@ -175,7 +175,7 @@ fn unique_index_declaration_prefix_len(
             ))
         })
         .map_err(|error| CanonicalContentDigestError::new("query session index list", error))?
-        .collect::<rusqlite::Result<Vec<_>>>()
+        .collect::<tracedecay_sql::Result<Vec<_>>>()
         .map_err(|error| CanonicalContentDigestError::new("read session index list", error))?;
     drop(list);
     let mut best = None;
@@ -192,7 +192,7 @@ fn unique_index_declaration_prefix_len(
         let cids = info
             .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
             .map_err(|error| CanonicalContentDigestError::new("query session index info", error))?
-            .collect::<rusqlite::Result<Vec<_>>>()
+            .collect::<tracedecay_sql::Result<Vec<_>>>()
             .map_err(|error| CanonicalContentDigestError::new("read session index info", error))?;
         drop(info);
         if cids.is_empty() || cids.iter().any(|(_, cid)| *cid < 0) {
@@ -230,7 +230,7 @@ fn digest_ordered_sql(
 
 fn digest_query_rows(
     digest: &mut Sha256,
-    statement: &mut rusqlite::Statement<'_>,
+    statement: &mut tracedecay_sql::Statement<'_>,
 ) -> Result<(), CanonicalContentDigestError> {
     let column_count = statement.column_count();
     let mut rows = statement
@@ -282,8 +282,8 @@ fn digest_len_prefixed(digest: &mut Sha256, value: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
     use sha2::Sha256;
+    use tracedecay_sql::Connection;
 
     use super::*;
     use crate::telemetry::take_observed_vm;

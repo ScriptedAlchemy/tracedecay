@@ -4,21 +4,21 @@
 //! row it hangs off, the anchors its evidence references, and the current-fact
 //! projection its lineage events fold into.
 
-use rusqlite::{OptionalExtension, Savepoint, params};
 use tracedecay_domain::{
     FactCurationActionV1, FactEventId, FactId, FactIdentityMaterialV1, FactLineageEventKindV1,
     FactLineageEventV1, FactOwnerV1, PayloadAccessState, RetrievalAnchorRecord,
 };
+use tracedecay_sql::{OptionalExtension, Savepoint, params};
 use tracedecay_store::FactWriteBatch;
 
 use super::super::support::{decode, encode, invalid};
 use super::OwnerColumns;
 
 pub(super) fn current_last_event(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     owner: &OwnerColumns,
     fact_id: &FactId,
-) -> rusqlite::Result<Option<FactEventId>> {
+) -> tracedecay_sql::Result<Option<FactEventId>> {
     connection
         .query_row(
             "SELECT last_event_id FROM memory_v2_current_facts
@@ -36,7 +36,7 @@ pub(super) fn ensure_fact(
     savepoint: &Savepoint<'_>,
     owner: &OwnerColumns,
     batch: &FactWriteBatch,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let stored = savepoint
         .query_row(
             "SELECT owner_json, identity_json
@@ -88,7 +88,7 @@ pub(super) fn insert_anchor(
     savepoint: &Savepoint<'_>,
     owner: &OwnerColumns,
     anchor: &RetrievalAnchorRecord,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let encoded = encode(anchor)?;
     let stored = savepoint
         .query_row(
@@ -135,7 +135,7 @@ pub(super) fn publish_projection(
     savepoint: &Savepoint<'_>,
     owner: &OwnerColumns,
     batch: &FactWriteBatch,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     if batch.events().iter().enumerate().any(|(index, event)| {
         index + 1 != batch.events().len()
             && matches!(

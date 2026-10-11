@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use rusqlite::{Connection, Savepoint};
 use tempfile::TempDir;
 use tracedecay_contracts::{
     AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
@@ -21,6 +20,7 @@ use tracedecay_rusqlite_runtime::repository::{
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
 };
+use tracedecay_sql::{Connection, Savepoint};
 use tracedecay_store::runtime::ScopeSetCasOutcomeV1;
 use tracedecay_store::{
     AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
@@ -44,7 +44,7 @@ impl StorageOperationExecutor for NoTypedWrites {
         &mut self,
         _savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         unreachable!("scope sets use only the registered exact SQL channel")
     }
 }
@@ -55,7 +55,7 @@ struct NoTypedReads;
 impl ReaderQueryExecutor for NoTypedReads {
     fn execute_read(
         &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
+        _snapshot: &tracedecay_sql::Transaction<'_>,
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
         unreachable!("scope sets use only the registered exact SQL channel")
@@ -335,7 +335,7 @@ fn public_scope_set_store_rejects_invalid_revision_and_payload_edges() {
                 "INSERT INTO authorized_scope_sets_v1
                      (scope_set_id, revision, digest, canonical_payload)
                  VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![
+                tracedecay_sql::params![
                     canonical.scope_set_id().as_str(),
                     revision,
                     canonical.digest().as_str(),
@@ -371,7 +371,7 @@ fn public_scope_set_store_rejects_invalid_revision_and_payload_edges() {
             "INSERT INTO authorized_scope_sets_v1
                  (scope_set_id, revision, digest, canonical_payload)
              VALUES (?1, 1, ?2, ?3)",
-            rusqlite::params![
+            tracedecay_sql::params![
                 canonical.scope_set_id().as_str(),
                 canonical.digest().as_str(),
                 b"{".as_slice(),
@@ -459,7 +459,7 @@ fn registered_scope_set_store_rejects_zero_negative_and_corrupt_rows() {
                     "INSERT INTO authorized_scope_sets_v1
                          (scope_set_id, revision, digest, canonical_payload)
                      VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![id, revision, digest, payload],
+                    tracedecay_sql::params![id, revision, digest, payload],
                 )
                 .unwrap();
         });
@@ -479,7 +479,7 @@ fn registered_scope_set_store_rejects_zero_negative_and_corrupt_rows() {
                 "INSERT INTO authorized_scope_sets_v1
                      (scope_set_id, revision, digest, canonical_payload)
                  VALUES (?1, 1, ?2, ?3)",
-                rusqlite::params![id, digest, b"{".as_slice()],
+                tracedecay_sql::params![id, digest, b"{".as_slice()],
             )
             .unwrap();
     });

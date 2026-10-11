@@ -1,15 +1,15 @@
 use std::fmt::Display;
 
 use crate::exact_sql::{decode_json, encode_json};
-use rusqlite::types::{ToSqlOutput, Type, Value, ValueRef};
-use rusqlite::{OptionalExtension, ToSql};
 use serde::{Serialize, de::DeserializeOwned};
+use tracedecay_sql::types::{ToSqlOutput, Type, Value, ValueRef};
+use tracedecay_sql::{OptionalExtension, ToSql};
 
-pub(super) fn encode<T: Serialize + ?Sized>(value: &T) -> rusqlite::Result<String> {
+pub(super) fn encode<T: Serialize + ?Sized>(value: &T) -> tracedecay_sql::Result<String> {
     encode_json(value, |error| conversion(error.to_string()))
 }
 
-pub(super) fn decode<T: DeserializeOwned>(value: String) -> rusqlite::Result<T> {
+pub(super) fn decode<T: DeserializeOwned>(value: String) -> tracedecay_sql::Result<T> {
     decode_json(&value, |error| conversion(error.to_string()))
 }
 
@@ -30,19 +30,19 @@ pub(super) fn same_json(stored: &str, expected: &str) -> bool {
     }
 }
 
-pub(super) fn conversion(error: impl Display) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(0, Type::Text, error.to_string().into())
+pub(super) fn conversion(error: impl Display) -> tracedecay_sql::Error {
+    tracedecay_sql::Error::FromSqlConversionFailure(0, Type::Text, error.to_string().into())
 }
 
-pub(super) fn invalid(error: impl Display) -> rusqlite::Error {
-    rusqlite::Error::InvalidParameterName(error.to_string())
+pub(super) fn invalid(error: impl Display) -> tracedecay_sql::Error {
+    tracedecay_sql::Error::InvalidParameterName(error.to_string())
 }
 
-pub(super) fn usize_to_i64(value: usize, field: &'static str) -> rusqlite::Result<i64> {
+pub(super) fn usize_to_i64(value: usize, field: &'static str) -> tracedecay_sql::Result<i64> {
     i64::try_from(value).map_err(|_| invalid(format!("{field} exceeds SQLite integer range")))
 }
 
-pub(super) fn u64_to_i64(value: u64, field: &'static str) -> rusqlite::Result<i64> {
+pub(super) fn u64_to_i64(value: u64, field: &'static str) -> tracedecay_sql::Result<i64> {
     i64::try_from(value).map_err(|_| invalid(format!("{field} exceeds SQLite integer range")))
 }
 
@@ -93,7 +93,7 @@ impl<T: Into<ColumnValue>> From<Option<T>> for ColumnValue {
 }
 
 impl ToSql for ColumnValue {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+    fn to_sql(&self) -> tracedecay_sql::Result<ToSqlOutput<'_>> {
         Ok(match self {
             Self::Text(value) => ToSqlOutput::Borrowed(ValueRef::Text(value.as_bytes())),
             Self::Integer(value) => ToSqlOutput::Owned(Value::Integer(*value)),
@@ -114,11 +114,11 @@ fn bindings<'a>(columns: &'a [Column<'a>]) -> impl Iterator<Item = &'a ColumnVal
 }
 
 fn insert(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     conflict_clause: &str,
     table: &str,
     columns: &[Column<'_>],
-) -> rusqlite::Result<usize> {
+) -> tracedecay_sql::Result<usize> {
     let placeholders = (1..=columns.len())
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()
@@ -128,7 +128,7 @@ fn insert(
             "INSERT{conflict_clause} INTO {table} ({}) VALUES ({placeholders})",
             column_names(columns).join(", ")
         ),
-        rusqlite::params_from_iter(bindings(columns)),
+        tracedecay_sql::params_from_iter(bindings(columns)),
     )
 }
 
@@ -138,10 +138,10 @@ fn insert(
 /// A constraint violation here is a real defect and surfaces as the driver's
 /// error rather than being swallowed.
 pub(super) fn insert_row(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     table: &str,
     columns: &[Column<'_>],
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     insert(connection, "", table, columns).map(|_| ())
 }
 
@@ -153,11 +153,11 @@ pub(super) fn insert_row(
 /// binding landing in an `INTEGER` column, say, still compares equal to what
 /// the caller wrote, and so one comparison covers every storage class.
 pub(super) fn stored_row_matches(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     table: &str,
     keys: &[Column<'_>],
     values: &[Column<'_>],
-) -> rusqlite::Result<Option<bool>> {
+) -> tracedecay_sql::Result<Option<bool>> {
     let projection = values
         .iter()
         .map(|(name, _)| format!("CAST({name} AS TEXT)"))
@@ -172,11 +172,11 @@ pub(super) fn stored_row_matches(
     let stored = connection
         .query_row(
             &format!("SELECT {projection} FROM {table} WHERE {predicate}"),
-            rusqlite::params_from_iter(bindings(keys)),
+            tracedecay_sql::params_from_iter(bindings(keys)),
             |row| {
                 (0..values.len())
                     .map(|index| row.get::<_, Option<String>>(index))
-                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .collect::<tracedecay_sql::Result<Vec<_>>>()
             },
         )
         .optional()?;
@@ -202,14 +202,14 @@ pub(super) fn stored_row_matches(
 /// the read-back always finds the conflicting row; when it would not, every
 /// caller here keys on the primary key, satisfies its `CHECK`s by construction,
 /// and foreign-key violations are not swallowed by `OR IGNORE` at all, the
-/// missing row surfaces as [`rusqlite::Error::QueryReturnedNoRows`].
+/// missing row surfaces as [`tracedecay_sql::Error::QueryReturnedNoRows`].
 pub(super) fn idempotent_insert(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     table: &str,
     keys: &[Column<'_>],
     values: &[Column<'_>],
     conflict: &str,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let changed = insert(connection, " OR IGNORE", table, &[keys, values].concat())?;
     if changed == 1 {
         return Ok(());
@@ -217,6 +217,6 @@ pub(super) fn idempotent_insert(
     match stored_row_matches(connection, table, keys, values)? {
         Some(true) => Ok(()),
         Some(false) => Err(invalid(conflict)),
-        None => Err(rusqlite::Error::QueryReturnedNoRows),
+        None => Err(tracedecay_sql::Error::QueryReturnedNoRows),
     }
 }

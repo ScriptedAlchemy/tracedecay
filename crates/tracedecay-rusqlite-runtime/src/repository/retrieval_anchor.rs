@@ -1,5 +1,5 @@
-use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_domain::{FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecord};
+use tracedecay_sql::{OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_store::{
     AnchorDerivativeKindV1, AnchorDispositionStateV1, RetrievalAnchorDerivativeV1,
     RetrievalAnchorDispositionRecordV1, RetrievalAnchorReadOperationV1,
@@ -16,7 +16,7 @@ impl RetrievalAnchorExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         record: &RetrievalAnchorDispositionRecordV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         record.validate().map_err(invalid)?;
         let owner_json = encode(record.owner())?;
         let record_json = encode(record)?;
@@ -79,7 +79,7 @@ impl RetrievalAnchorExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         derivative: &RetrievalAnchorDerivativeV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         derivative.validate().map_err(invalid)?;
         let owner_json = encode(derivative.owner())?;
         if !AnchorDispositionStateV1::serves_derivatives(current_state(
@@ -116,7 +116,7 @@ impl RetrievalAnchorExecutor {
         &mut self,
         snapshot: &Transaction<'_>,
         operation: &RetrievalAnchorReadOperationV1,
-    ) -> rusqlite::Result<RetrievalAnchorReadResultV1> {
+    ) -> tracedecay_sql::Result<RetrievalAnchorReadResultV1> {
         match operation {
             RetrievalAnchorReadOperationV1::AnchorById { anchor_id, owner } => {
                 read_anchor(snapshot, anchor_id, owner).map(RetrievalAnchorReadResultV1::Anchor)
@@ -161,10 +161,10 @@ impl RetrievalAnchorExecutor {
 }
 
 fn read_anchor(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     anchor_id: &RetrievalAnchorId,
     owner: &FactOwnerV1,
-) -> rusqlite::Result<Option<RetrievalAnchorRecord>> {
+) -> tracedecay_sql::Result<Option<RetrievalAnchorRecord>> {
     let owner_json = encode(owner)?;
     if !AnchorDispositionStateV1::serves_derivatives(current_state(
         connection,
@@ -197,21 +197,21 @@ fn read_anchor(
 }
 
 fn current_state(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     anchor_id: &RetrievalAnchorId,
     owner: &FactOwnerV1,
     owner_json: &str,
-) -> rusqlite::Result<Option<AnchorDispositionStateV1>> {
+) -> tracedecay_sql::Result<Option<AnchorDispositionStateV1>> {
     current_record(connection, anchor_id, owner, owner_json)
         .map(|record| record.map(|record| record.state()))
 }
 
 fn current_record(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     anchor_id: &RetrievalAnchorId,
     owner: &FactOwnerV1,
     owner_json: &str,
-) -> rusqlite::Result<Option<RetrievalAnchorDispositionRecordV1>> {
+) -> tracedecay_sql::Result<Option<RetrievalAnchorDispositionRecordV1>> {
     connection
         .query_row(
             "SELECT disposition_id, state, superseded_by, reason_class,
@@ -259,10 +259,10 @@ fn current_record(
 }
 
 fn read_derivatives(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     anchor_id: &RetrievalAnchorId,
     owner: &FactOwnerV1,
-) -> rusqlite::Result<Vec<RetrievalAnchorDerivativeV1>> {
+) -> tracedecay_sql::Result<Vec<RetrievalAnchorDerivativeV1>> {
     let owner_json = encode(owner)?;
     if !AnchorDispositionStateV1::serves_derivatives(current_state(
         connection,
@@ -333,7 +333,7 @@ mod tests {
         RetrievalAnchorId::new(value).unwrap()
     }
 
-    fn install(connection: &rusqlite::Connection) {
+    fn install(connection: &tracedecay_sql::Connection) {
         // The anchors table comes from the canonical production DDL so this
         // executor is exercised against the constraints the live table has,
         // rather than a relaxed local restatement of its columns.
@@ -389,7 +389,7 @@ mod tests {
             .unwrap();
     }
 
-    fn insert_anchor(connection: &rusqlite::Connection, anchor_id: &RetrievalAnchorId) {
+    fn insert_anchor(connection: &tracedecay_sql::Connection, anchor_id: &RetrievalAnchorId) {
         connection
             .execute(
                 "INSERT INTO retrieval_anchors (
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn deleted_disposition_atomically_suppresses_derivatives_and_returns_safe_tombstone() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
         install(&connection);
         let source = anchor("retrieval.source.fixture");
         insert_anchor(&connection, &source);
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn disposition_replay_accepts_identical_material_and_rejects_conflict() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
         install(&connection);
         let source = anchor("retrieval.source.fixture");
         insert_anchor(&connection, &source);
@@ -538,7 +538,7 @@ mod tests {
 
     #[test]
     fn unavailable_disposition_can_recover_without_permanent_derivative_tombstones() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
         install(&connection);
         let source = anchor("retrieval.source.fixture");
         insert_anchor(&connection, &source);
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn anchor_resolution_rejects_tampered_persisted_record() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
         install(&connection);
         let source = anchor("retrieval.source.fixture");
         insert_anchor(&connection, &source);
@@ -624,7 +624,7 @@ mod tests {
 
     #[test]
     fn disposition_reads_reject_physical_column_tampering() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let mut connection = tracedecay_sql::Connection::open_in_memory().unwrap();
         install(&connection);
         let source = anchor("retrieval.source.fixture");
         insert_anchor(&connection, &source);

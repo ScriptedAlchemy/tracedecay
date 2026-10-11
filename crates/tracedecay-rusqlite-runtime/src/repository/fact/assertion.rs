@@ -4,12 +4,12 @@
 //! row an insert writes and the row a replay is compared against cannot drift
 //! apart.
 
-use rusqlite::{OptionalExtension, Savepoint, params, params_from_iter};
 use serde::Serialize;
 use tracedecay_domain::{
     FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactId, FactOwnerV1, PayloadAccessState,
     UtcMicros,
 };
+use tracedecay_sql::{OptionalExtension, Savepoint, params, params_from_iter};
 
 use super::super::support::{
     Column, ColumnValue, decode, encode, idempotent_insert, insert_row, invalid,
@@ -29,7 +29,7 @@ struct StoredAssertionHeaderV1<'a> {
     actor_id: Option<&'a tracedecay_domain::ActorId>,
 }
 
-fn assertion_header_json(assertion: &FactAssertionV1) -> rusqlite::Result<String> {
+fn assertion_header_json(assertion: &FactAssertionV1) -> tracedecay_sql::Result<String> {
     let payload_reference = assertion.payload().payload_reference().map_err(invalid)?;
     encode(&StoredAssertionHeaderV1 {
         assertion_id: assertion.assertion_id(),
@@ -62,7 +62,7 @@ struct PersistedAssertion<'a> {
 type EvidenceRow = (String, String, String, String);
 
 impl<'a> PersistedAssertion<'a> {
-    fn derive(owner: &OwnerColumns, assertion: &FactAssertionV1) -> rusqlite::Result<Self> {
+    fn derive(owner: &OwnerColumns, assertion: &FactAssertionV1) -> tracedecay_sql::Result<Self> {
         let payload_reference = assertion.payload().payload_reference().map_err(invalid)?;
         Ok(Self {
             scope: vec![
@@ -111,7 +111,7 @@ impl<'a> PersistedAssertion<'a> {
                         evidence.anchor_id().as_str().to_owned(),
                     ))
                 })
-                .collect::<rusqlite::Result<Vec<_>>>()?,
+                .collect::<tracedecay_sql::Result<Vec<_>>>()?,
         })
     }
 
@@ -128,7 +128,7 @@ pub(super) fn insert_assertion(
     savepoint: &Savepoint<'_>,
     owner: &OwnerColumns,
     assertion: &FactAssertionV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let persisted = PersistedAssertion::derive(owner, assertion)?;
     if let Some(header_matches) = stored_row_matches(
         savepoint,
@@ -225,11 +225,11 @@ fn superseded_assertions(kind: &FactAssertionKindV1) -> Vec<&FactAssertionId> {
 /// reused assertion id with different content is a collision, rather than a raw
 /// primary-key violation from the driver.
 fn assertion_children_match(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     owner: &OwnerColumns,
     fact_id: &FactId,
     persisted: &PersistedAssertion<'_>,
-) -> rusqlite::Result<bool> {
+) -> tracedecay_sql::Result<bool> {
     let mut supersession = connection.prepare_cached(
         "SELECT superseded_assertion_id FROM memory_v2_assertion_supersession
          WHERE assertion_id = ?1 AND fact_id = ?2
@@ -239,7 +239,7 @@ fn assertion_children_match(
         .query_map(params_from_iter(persisted.scope_bindings()), |row| {
             row.get::<_, String>(0)
         })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<tracedecay_sql::Result<Vec<_>>>()?;
     if stored_supersession != persisted.supersession {
         return Ok(false);
     }
@@ -281,17 +281,17 @@ fn assertion_children_match(
                 row.get::<_, String>(3)?,
             ))
         })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<tracedecay_sql::Result<Vec<_>>>()?;
     Ok(stored_evidence == persisted.evidence)
 }
 
 /// A missing payload row is only consistent with a purged projection, matching
 /// the root engine's allowance for `Quarantined` and `Deleted` access states.
 fn payload_is_purged_projection(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     owner: &OwnerColumns,
     fact_id: &FactId,
-) -> rusqlite::Result<bool> {
+) -> tracedecay_sql::Result<bool> {
     let access = connection
         .query_row(
             "SELECT current.payload_access

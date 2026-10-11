@@ -1,6 +1,6 @@
 //! Workflow source-journal, effect-journal, and handoff tables on the registered writer.
 
-use rusqlite::Connection;
+use tracedecay_sql::Connection;
 
 pub const WORKFLOW_SCHEMA_VERSION_V1: i64 = 1;
 pub const WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1: &str =
@@ -523,7 +523,7 @@ pub const WORKFLOW_TABLE_CONTRACTS_V1: &[WorkflowTableContractV1] = &[
     },
 ];
 
-pub fn install_workflow_schema(connection: &Connection) -> rusqlite::Result<()> {
+pub fn install_workflow_schema(connection: &Connection) -> tracedecay_sql::Result<()> {
     let mut sql = String::new();
     for table in WORKFLOW_TABLE_CONTRACTS_V1 {
         sql.push_str(table.sql);

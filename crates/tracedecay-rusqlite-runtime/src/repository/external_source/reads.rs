@@ -6,9 +6,9 @@ use super::*;
     skip_all
 )]
 pub(super) fn load_next_pending_projection(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding: &SourceBindingIdentityV1,
-) -> rusqlite::Result<Option<SourcePendingProjectionV1>> {
+) -> tracedecay_sql::Result<Option<SourcePendingProjectionV1>> {
     let pending = connection
         .prepare_cached(
             "SELECT pending.predecessor_frontier_digest,
@@ -107,8 +107,8 @@ pub(super) fn load_next_pending_projection(
     skip_all
 )]
 pub(super) fn load_next_pending_projection_any(
-    connection: &rusqlite::Connection,
-) -> rusqlite::Result<Option<SourcePendingProjectionV1>> {
+    connection: &tracedecay_sql::Connection,
+) -> tracedecay_sql::Result<Option<SourcePendingProjectionV1>> {
     let binding = connection
         .prepare_cached(
             "SELECT revisions.binding_json
@@ -142,10 +142,10 @@ pub(super) fn load_next_pending_projection_any(
     skip_all
 )]
 pub(super) fn load_commit_receipt_summary(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding: &SourceBindingIdentityV1,
     key: &tracedecay_domain::ManifestDigest,
-) -> rusqlite::Result<Option<SourceCommitReceiptSummaryV1>> {
+) -> tracedecay_sql::Result<Option<SourceCommitReceiptSummaryV1>> {
     let row = connection
         .prepare_cached(
             "SELECT request_digest, receipt_digest, mutation_digests_json
@@ -182,10 +182,10 @@ pub(super) fn load_commit_receipt_summary(
     skip_all
 )]
 pub(super) fn load_commit_receipt_by_digest(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding: &SourceBindingIdentityV1,
     digest: &str,
-) -> rusqlite::Result<Option<SourceCommitReceiptV1>> {
+) -> tracedecay_sql::Result<Option<SourceCommitReceiptV1>> {
     load_slim_optional(
         connection,
         "SELECT receipt_json FROM external_source_retained_receipts_v1
@@ -203,10 +203,10 @@ pub(super) fn load_commit_receipt_by_digest(
     skip_all
 )]
 pub(super) fn load_authority_receipt(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding: &SourceBindingIdentityV1,
     key: &tracedecay_domain::ManifestDigest,
-) -> rusqlite::Result<Option<SourceAuthorityPublicationReceiptV1>> {
+) -> tracedecay_sql::Result<Option<SourceAuthorityPublicationReceiptV1>> {
     load_encoded_optional(
         connection,
         "SELECT receipt_json FROM external_source_authority_receipts_v1
@@ -222,10 +222,10 @@ pub(super) fn load_authority_receipt(
     skip_all
 )]
 pub(super) fn load_projection_receipt(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding: &SourceBindingIdentityV1,
     digest: &tracedecay_domain::ManifestDigest,
-) -> rusqlite::Result<Option<SourceProjectionCommitV1>> {
+) -> tracedecay_sql::Result<Option<SourceProjectionCommitV1>> {
     load_projection_receipt_by_digest(connection, binding, digest.as_str())
 }
 
@@ -235,10 +235,10 @@ pub(super) fn load_projection_receipt(
     skip_all
 )]
 pub(super) fn load_projection_receipt_by_digest(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding: &SourceBindingIdentityV1,
     digest: &str,
-) -> rusqlite::Result<Option<SourceProjectionCommitV1>> {
+) -> tracedecay_sql::Result<Option<SourceProjectionCommitV1>> {
     load_slim_optional(
         connection,
         "SELECT receipt_json FROM external_source_projection_publications_v2
@@ -252,11 +252,11 @@ pub(super) fn load_projection_receipt_by_digest(
 
 /// The stored slim encoding of one receipt row, before hydration.
 fn load_slim_optional(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     sql: &str,
     binding_id: &str,
     key: &str,
-) -> rusqlite::Result<Option<String>> {
+) -> tracedecay_sql::Result<Option<String>> {
     connection
         .prepare_cached(sql)?
         .query_row(params![binding_id, key], |row| row.get::<_, String>(0))
@@ -269,11 +269,11 @@ fn load_slim_optional(
     skip_all
 )]
 fn load_encoded_optional<T: serde::de::DeserializeOwned>(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     sql: &str,
     binding_id: &str,
     key: &str,
-) -> rusqlite::Result<Option<T>> {
+) -> tracedecay_sql::Result<Option<T>> {
     connection
         .prepare_cached(sql)?
         .query_row(params![binding_id, key], |row| {
@@ -287,14 +287,14 @@ fn load_encoded_optional<T: serde::de::DeserializeOwned>(
     level = "trace",
     skip_all
 )]
-pub(super) fn verify_encoded_row<K: rusqlite::ToSql + ?Sized>(
-    connection: &rusqlite::Connection,
+pub(super) fn verify_encoded_row<K: tracedecay_sql::ToSql + ?Sized>(
+    connection: &tracedecay_sql::Connection,
     sql: &str,
     binding_id: &str,
     key: &K,
     expected: &str,
     collision: &'static str,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let stored: String = connection.query_row(sql, params![binding_id, key], |row| row.get(0))?;
     if same_json(&stored, expected) {
         Ok(())

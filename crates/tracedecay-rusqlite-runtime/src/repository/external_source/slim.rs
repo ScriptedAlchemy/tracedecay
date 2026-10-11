@@ -19,9 +19,9 @@
 //! mutation that disagrees with its row keeps its own value and fails its
 //! domain validation instead of silently adopting the row's.
 
-use rusqlite::{OptionalExtension, params};
 use serde_json::{Map, Value};
 use tracedecay_domain::SourceBindingIdentityV1;
+use tracedecay_sql::{OptionalExtension, params};
 use tracedecay_store::{SourceCommitReceiptV1, SourceObjectMutationV1, SourceProjectionCommitV1};
 
 use super::super::support::invalid;
@@ -51,7 +51,7 @@ pub(super) struct MutationRowKeys<'a> {
 pub(super) fn slim_mutation(
     mutation: &SourceObjectMutationV1,
     binding: &SourceBindingIdentityV1,
-) -> rusqlite::Result<String> {
+) -> tracedecay_sql::Result<String> {
     let mut value = serde_json::to_value(mutation).map_err(|error| invalid(error.to_string()))?;
     let binding = serde_json::to_value(binding).map_err(|error| invalid(error.to_string()))?;
     let root = object(&mut value)?;
@@ -103,7 +103,7 @@ pub(super) fn hydrate_mutation(
     slim: &str,
     binding: &SourceBindingIdentityV1,
     keys: MutationRowKeys<'_>,
-) -> rusqlite::Result<SourceObjectMutationV1> {
+) -> tracedecay_sql::Result<SourceObjectMutationV1> {
     serde_json::from_value(hydrate_mutation_value(slim, binding, keys)?)
         .map_err(|error| invalid(error.to_string()))
 }
@@ -112,7 +112,7 @@ fn hydrate_mutation_value(
     slim: &str,
     binding: &SourceBindingIdentityV1,
     keys: MutationRowKeys<'_>,
-) -> rusqlite::Result<Value> {
+) -> tracedecay_sql::Result<Value> {
     let mut value: Value =
         serde_json::from_str(slim).map_err(|error| invalid(error.to_string()))?;
     let binding = serde_json::to_value(binding).map_err(|error| invalid(error.to_string()))?;
@@ -147,7 +147,7 @@ fn hydrate_mutation_value(
 fn nested<'a>(
     root: &'a mut Map<String, Value>,
     field: &str,
-) -> rusqlite::Result<&'a mut Map<String, Value>> {
+) -> tracedecay_sql::Result<&'a mut Map<String, Value>> {
     root.get_mut(field)
         .and_then(Value::as_object_mut)
         .ok_or_else(|| invalid("external source mutation encoding is missing an object field"))
@@ -173,7 +173,7 @@ pub(super) struct SlimReceiptV1 {
 
 pub(super) fn slim_commit_receipt(
     receipt: &SourceCommitReceiptV1,
-) -> rusqlite::Result<SlimReceiptV1> {
+) -> tracedecay_sql::Result<SlimReceiptV1> {
     let mut value = serde_json::to_value(receipt).map_err(|error| invalid(error.to_string()))?;
     let frontiers = detach_frontiers(&mut value, &COMMIT_FRONTIERS)?;
     detach_mutations(&mut value)?;
@@ -185,7 +185,7 @@ pub(super) fn slim_commit_receipt(
 
 pub(super) fn slim_projection_receipt(
     projection: &SourceProjectionCommitV1,
-) -> rusqlite::Result<SlimReceiptV1> {
+) -> tracedecay_sql::Result<SlimReceiptV1> {
     let mut value = serde_json::to_value(projection).map_err(|error| invalid(error.to_string()))?;
     let frontiers = detach_frontiers(&mut value, &PROJECTION_FRONTIERS)?;
     detach_mutations(&mut value)?;
@@ -199,10 +199,10 @@ pub(super) fn slim_projection_receipt(
 }
 
 pub(super) fn hydrate_commit_receipt(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding: &SourceBindingIdentityV1,
     slim: &str,
-) -> rusqlite::Result<SourceCommitReceiptV1> {
+) -> tracedecay_sql::Result<SourceCommitReceiptV1> {
     let binding_id = binding.binding_id.as_str();
     let mut value: Value =
         serde_json::from_str(slim).map_err(|error| invalid(error.to_string()))?;
@@ -212,10 +212,10 @@ pub(super) fn hydrate_commit_receipt(
 }
 
 pub(super) fn hydrate_projection_receipt(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding: &SourceBindingIdentityV1,
     slim: &str,
-) -> rusqlite::Result<SourceProjectionCommitV1> {
+) -> tracedecay_sql::Result<SourceProjectionCommitV1> {
     let binding_id = binding.binding_id.as_str();
     let mut value: Value =
         serde_json::from_str(slim).map_err(|error| invalid(error.to_string()))?;
@@ -236,18 +236,21 @@ pub(super) fn hydrate_projection_receipt(
             serde_json::from_str::<Value>(&row.get::<_, String>(0)?)
                 .map_err(|error| invalid(error.to_string()))
         })?
-        .collect::<rusqlite::Result<Vec<Value>>>()?;
+        .collect::<tracedecay_sql::Result<Vec<Value>>>()?;
     object(&mut value)?.insert(EFFECTS.to_owned(), Value::Array(effects));
     serde_json::from_value(value).map_err(|error| invalid(error.to_string()))
 }
 
-fn object(value: &mut Value) -> rusqlite::Result<&mut serde_json::Map<String, Value>> {
+fn object(value: &mut Value) -> tracedecay_sql::Result<&mut serde_json::Map<String, Value>> {
     value
         .as_object_mut()
         .ok_or_else(|| invalid("external source receipt encoding is not a JSON object"))
 }
 
-fn detach_frontiers(value: &mut Value, fields: &[&str]) -> rusqlite::Result<Vec<(String, String)>> {
+fn detach_frontiers(
+    value: &mut Value,
+    fields: &[&str],
+) -> tracedecay_sql::Result<Vec<(String, String)>> {
     let mut frontiers = Vec::with_capacity(fields.len());
     let object = object(value)?;
     for field in fields {
@@ -270,7 +273,7 @@ fn detach_frontiers(value: &mut Value, fields: &[&str]) -> rusqlite::Result<Vec<
     Ok(frontiers)
 }
 
-fn detach_mutations(value: &mut Value) -> rusqlite::Result<()> {
+fn detach_mutations(value: &mut Value) -> tracedecay_sql::Result<()> {
     let object = object(value)?;
     let Some(Value::Array(mutations)) = object.get(MUTATIONS) else {
         return Err(invalid("external source receipt has no mutation list"));
@@ -284,17 +287,17 @@ fn detach_mutations(value: &mut Value) -> rusqlite::Result<()> {
                 .map(|digest| Value::String(digest.to_owned()))
                 .ok_or_else(|| invalid("external source mutation has no digest"))
         })
-        .collect::<rusqlite::Result<Vec<Value>>>()?;
+        .collect::<tracedecay_sql::Result<Vec<Value>>>()?;
     object.insert(MUTATIONS.to_owned(), Value::Array(digests));
     Ok(())
 }
 
 fn attach_frontiers(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding_id: &str,
     value: &mut Value,
     fields: &[&str],
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let object = object(value)?;
     for field in fields {
         let Some(Value::String(digest)) = object.get(*field) else {
@@ -318,10 +321,10 @@ fn attach_frontiers(
 }
 
 fn attach_mutations(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     binding: &SourceBindingIdentityV1,
     value: &mut Value,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let object = object(value)?;
     let Some(Value::Array(digests)) = object.get(MUTATIONS) else {
         return Err(invalid("external source receipt has no mutation list"));

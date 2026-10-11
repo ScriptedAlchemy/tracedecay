@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rusqlite::Transaction;
+use tracedecay_sql::Transaction;
 use tracedecay_store::{
     AdmissionConfigV1, ConsistencyModeV1, FrozenWatermarkCoverageV1, FrozenWatermarkVectorV1,
     RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
@@ -944,7 +944,7 @@ mod tests {
     }
 
     fn create_identity_database(path: &std::path::Path, value: &str) {
-        let connection = rusqlite::Connection::open(path).unwrap();
+        let connection = tracedecay_sql::Connection::open(path).unwrap();
         connection
             .execute_batch("CREATE TABLE identity_probe (value TEXT NOT NULL)")
             .unwrap();
@@ -991,11 +991,11 @@ mod tests {
         };
         assert!(matches!(error, RepositoryAttachmentStartError::Writer(_)));
 
-        let canonical_value: String = rusqlite::Connection::open(&path)
+        let canonical_value: String = tracedecay_sql::Connection::open(&path)
             .unwrap()
             .query_row("SELECT value FROM identity_probe", [], |row| row.get(0))
             .unwrap();
-        let replacement_value: String = rusqlite::Connection::open(&replacement)
+        let replacement_value: String = tracedecay_sql::Connection::open(&replacement)
             .unwrap()
             .query_row("SELECT value FROM identity_probe", [], |row| row.get(0))
             .unwrap();
@@ -1007,7 +1007,7 @@ mod tests {
     fn real_sqlite_attachment_drains_pending_wal_reopens_and_rejects_stale_handles() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("repository.sqlite3");
-        let connection = rusqlite::Connection::open(&path).unwrap();
+        let connection = tracedecay_sql::Connection::open(&path).unwrap();
         let journal_mode: String = connection
             .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
             .unwrap();
@@ -1093,7 +1093,7 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(read_error, ExactSqlError::ReaderUnavailable(_)));
 
-            let reopened = rusqlite::Connection::open(&path).unwrap();
+            let reopened = tracedecay_sql::Connection::open(&path).unwrap();
             let count: i64 = reopened
                 .query_row("SELECT COUNT(*) FROM runtime_lifecycle", [], |row| {
                     row.get(0)
@@ -1153,7 +1153,7 @@ mod tests {
 
     fn attach_wal_database(directory: &TempDir) -> RepositoryRuntimePhysicalAttachment {
         let path = directory.path().join("maintenance.sqlite3");
-        let connection = rusqlite::Connection::open(&path).unwrap();
+        let connection = tracedecay_sql::Connection::open(&path).unwrap();
         let journal_mode: String = connection
             .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
             .unwrap();
@@ -1175,7 +1175,7 @@ mod tests {
     fn hard_wal_pressure_queues_further_writes_until_the_snapshot_releases() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("hard-pressure.sqlite3");
-        let connection = rusqlite::Connection::open(&path).unwrap();
+        let connection = tracedecay_sql::Connection::open(&path).unwrap();
         let journal_mode: String = connection
             .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
             .unwrap();
@@ -1568,7 +1568,7 @@ mod tests {
                 PathBuf::from(format!("{}-wal", state.database_path.display())),
             )
         };
-        let mut pinned = rusqlite::Connection::open(&database_path).unwrap();
+        let mut pinned = tracedecay_sql::Connection::open(&database_path).unwrap();
         let pinned_snapshot = pinned.transaction().unwrap();
         let pinned_rows: i64 = pinned_snapshot
             .query_row("SELECT COUNT(*) FROM maintenance_probe", [], |row| {

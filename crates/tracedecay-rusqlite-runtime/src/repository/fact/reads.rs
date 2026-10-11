@@ -1,20 +1,20 @@
 //! The two fact read operations.
 
-use rusqlite::types::Value;
-use rusqlite::{OptionalExtension, params, params_from_iter};
 use tracedecay_domain::{
     Confidence, FactAssertionId, FactEventId, FactLineageEventV1, FactOwnerV1, FactPayloadV1,
     PayloadAccessState, UtcMicros,
 };
+use tracedecay_sql::types::Value;
+use tracedecay_sql::{OptionalExtension, params, params_from_iter};
 use tracedecay_store::{FactCurrentQuery, FactLineageQuery, StoredFactV1};
 
 use super::super::support::{decode, invalid, usize_to_i64};
 use super::OwnerColumns;
 
 pub(super) fn read_current(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     query: &FactCurrentQuery,
-) -> rusqlite::Result<Option<StoredFactV1>> {
+) -> tracedecay_sql::Result<Option<StoredFactV1>> {
     let owner = OwnerColumns::new(query.owner())?;
     let row = connection
         .query_row(
@@ -78,9 +78,9 @@ pub(super) fn read_current(
 }
 
 pub(super) fn read_lineage(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     query: &FactLineageQuery,
-) -> rusqlite::Result<Vec<FactLineageEventV1>> {
+) -> tracedecay_sql::Result<Vec<FactLineageEventV1>> {
     let owner = OwnerColumns::new(query.owner())?;
     let limit = usize_to_i64(query.limit(), "fact lineage limit")?;
     let mut bindings = vec![

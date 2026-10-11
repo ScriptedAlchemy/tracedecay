@@ -1,4 +1,4 @@
-use rusqlite::{Savepoint, Transaction};
+use tracedecay_sql::{Savepoint, Transaction};
 use tracedecay_store::{
     AnchoredObservationWrite, FactWriteBatch, ObservationCursorAdvance, ProjectReadOperationV1,
     ProjectReadResultV1, RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1,
@@ -31,7 +31,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         batch: &FactWriteBatch,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         self.fact.execute_write(savepoint, batch)
     }
 
@@ -50,7 +50,7 @@ impl ProjectExecutor {
             write.observation().source().session_id().as_str(),
         )
         .map_err(|(operation, detail)| {
-            rusqlite::Error::InvalidParameterName(format!("{operation}: {detail}"))
+            tracedecay_sql::Error::InvalidParameterName(format!("{operation}: {detail}"))
         })?;
         Ok(())
     }
@@ -81,7 +81,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         install: &RemoteWriterFenceInstallV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         install_writer_fence(savepoint, install)
     }
 
@@ -97,7 +97,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         snapshot: &SanitizedCleanDiagnosticSnapshotV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         self.diagnostics.execute_write(savepoint, snapshot)
     }
 
@@ -105,7 +105,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         commit: &SourceCommitV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         self.external_source.execute_write(savepoint, commit)
     }
 
@@ -113,7 +113,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         commits: &[SourceCommitV1],
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         for commit in commits {
             self.external_source.execute_write(savepoint, commit)?;
         }
@@ -124,7 +124,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         projection: &SourceProjectionCommitV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         self.external_source
             .execute_projection_write(savepoint, projection)
     }
@@ -133,7 +133,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         command: &SourceAcquisitionQueueCasV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         self.external_source
             .execute_acquisition_state_cas(savepoint, command)
     }
@@ -142,7 +142,7 @@ impl ProjectExecutor {
         &mut self,
         snapshot: &Transaction<'_>,
         operation: &tracedecay_store::ExternalSourceReadOperationV1,
-    ) -> rusqlite::Result<tracedecay_store::ExternalSourceReadResultV1> {
+    ) -> tracedecay_sql::Result<tracedecay_store::ExternalSourceReadResultV1> {
         self.external_source.execute_read(snapshot, operation)
     }
 
@@ -150,7 +150,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         record: &RetrievalAnchorDispositionRecordV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         self.retrieval_anchor
             .execute_disposition_write(savepoint, record)
     }
@@ -159,7 +159,7 @@ impl ProjectExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         derivative: &RetrievalAnchorDerivativeV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         self.retrieval_anchor
             .execute_derivative_write(savepoint, derivative)
     }
@@ -168,7 +168,7 @@ impl ProjectExecutor {
         &mut self,
         snapshot: &Transaction<'_>,
         operation: &ProjectReadOperationV1,
-    ) -> rusqlite::Result<ProjectReadResultV1> {
+    ) -> tracedecay_sql::Result<ProjectReadResultV1> {
         match operation {
             ProjectReadOperationV1::Fact(operation) => self
                 .fact

@@ -4,10 +4,10 @@
 //! attachment, migration scheduling, and daemon authority remain with their
 //! existing owners.
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 use tracedecay_contracts::{AuthorizedScopeSet, AuthorizedScopeSetError};
 use tracedecay_domain::{ManifestDigest, ScopeSetId, ScopeSetRevision};
+use tracedecay_sql::{Connection, OptionalExtension, TransactionBehavior, params};
 use tracedecay_store::runtime::{
     AuthorizedScopeSetRecordV1, ScopeSetCasOutcomeV1, ScopeSetCompareAndSwapV1,
     ScopeSetStoreContractError,
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS authorized_scope_sets_v1 (
 #[derive(Debug, Error)]
 pub enum AuthorizedScopeSetStoreError {
     #[error("authorized scope-set SQLite operation failed")]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(#[from] tracedecay_sql::Error),
     #[error("authorized scope-set serialization failed")]
     Serialization(#[from] serde_json::Error),
     #[error("authorized scope-set application contract failed: {0}")]

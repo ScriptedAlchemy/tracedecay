@@ -1,4 +1,3 @@
-use rusqlite::Connection;
 use tempfile::TempDir;
 use tracedecay_domain::{
     BrainId, CodeGenerationId, LocatorDigest, ProjectId, UserProfileId, UtcMicros,
@@ -7,6 +6,7 @@ use tracedecay_rusqlite_runtime::StorageOperationExecutor;
 use tracedecay_rusqlite_runtime::repository::{
     ConcreteRepositoryWriteExecutor, RepositoryPhysicalAttachmentFactory,
 };
+use tracedecay_sql::Connection;
 use tracedecay_store::{
     AdmissionConfigV1, ConsistencyModeV1, DiagnosticReadOperationV1, DiagnosticReadResultV1,
     GENERATION_DIAGNOSTICS_SCHEMA_DDL, OperationPriorityV1, ProjectReadOperationV1,

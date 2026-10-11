@@ -4,7 +4,7 @@ use tracedecay_store::{StorageRuntimeContractErrorV1, StoreAuthorityEpochV1};
 
 #[derive(Debug)]
 pub(crate) enum LedgerError {
-    Sqlite(rusqlite::Error),
+    Sqlite(tracedecay_sql::Error),
     InvalidRequest(StorageRuntimeContractErrorV1),
     Encoding {
         value: &'static str,
@@ -97,8 +97,8 @@ impl std::error::Error for LedgerError {
     }
 }
 
-impl From<rusqlite::Error> for LedgerError {
-    fn from(error: rusqlite::Error) -> Self {
+impl From<tracedecay_sql::Error> for LedgerError {
+    fn from(error: tracedecay_sql::Error) -> Self {
         Self::Sqlite(error)
     }
 }

@@ -93,9 +93,10 @@ impl RemoteSqliteStorageV1 {
         expected_brain: &BrainId,
         expected_profile: &UserProfileId,
     ) -> Result<BrainNodeId, RemoteSqliteStorageErrorV1> {
-        let connection = rusqlite::Connection::open_with_flags(
+        let connection = tracedecay_sql::Connection::open_with_flags(
             path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | tracedecay_sql::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|_| RemoteSqliteStorageErrorV1::Unavailable)?;
         let (brain_id, profile_id, node_id): (String, String, String) = connection

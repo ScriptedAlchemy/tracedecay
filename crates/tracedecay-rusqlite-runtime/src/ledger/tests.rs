@@ -1,10 +1,10 @@
-use rusqlite::Connection;
+use tracedecay_sql::Connection;
 
 use super::*;
 use crate::test_support::{binding, metadata, outbox, scope};
 
 fn commit(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &tracedecay_sql::Transaction<'_>,
     metadata: &tracedecay_store::StoreOperationMetadataV1,
 ) -> tracedecay_store::StoreCommitReceiptV1 {
     match record_commit(transaction, metadata, &scope(metadata), None).unwrap() {
@@ -202,7 +202,7 @@ fn at_authority(
     metadata
 }
 
-fn idempotency_rows(transaction: &rusqlite::Transaction<'_>) -> Vec<(i64, i64)> {
+fn idempotency_rows(transaction: &tracedecay_sql::Transaction<'_>) -> Vec<(i64, i64)> {
     transaction
         .prepare(
             "SELECT incarnation, authority_epoch FROM td_runtime_writer_idempotency_v2

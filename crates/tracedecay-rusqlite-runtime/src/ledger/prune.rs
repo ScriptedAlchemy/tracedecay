@@ -20,7 +20,7 @@
 //! same key with no bound on how much later it can arrive. Only supersession by
 //! authority is a provable end to the duplicate window.
 
-use rusqlite::params;
+use tracedecay_sql::params;
 
 use super::{
     LedgerError,
