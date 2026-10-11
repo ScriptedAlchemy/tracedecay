@@ -19,7 +19,7 @@ pub use final_shape::{
 };
 
 const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
-        key TEXT PRIMARY KEY,
+        key TEXT NOT NULL PRIMARY KEY,
         value TEXT NOT NULL
     );
 
@@ -49,7 +49,9 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
 /// receipts, keeps full external-source receipts only while retained, and
 /// stores each external-source mutation without what its row already says.
 /// v39 drops the handoff grant table, which lives in the project session store.
-pub const SCHEMA_VERSION: u32 = 39;
+/// v40 stores the writer-ledger and external-source keyed tables as rowid
+/// tables, a layout every storage engine supports.
+pub const SCHEMA_VERSION: u32 = 40;
 
 /// Verifies that a rusqlite connection sees the exact final relational shape
 /// this binary creates. This is query-only and shares the daemon's schema

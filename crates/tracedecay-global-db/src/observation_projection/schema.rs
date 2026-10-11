@@ -20,7 +20,7 @@ const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );
         CREATE TABLE IF NOT EXISTS observation_projection_checkpoints (
-            projector_version TEXT PRIMARY KEY,
+            projector_version TEXT NOT NULL PRIMARY KEY,
             last_sequence INTEGER NOT NULL CHECK(last_sequence >= 0)
         );
         CREATE TABLE IF NOT EXISTS observation_projection_aliases (
@@ -176,7 +176,7 @@ const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
                 ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS observation_projection_rebuilds (
-            projector_version TEXT PRIMARY KEY,
+            projector_version TEXT NOT NULL PRIMARY KEY,
             generation TEXT NOT NULL,
             frontier_sequence INTEGER NOT NULL CHECK(frontier_sequence >= 0),
             aliases_staged_through INTEGER NOT NULL DEFAULT 0
@@ -297,11 +297,11 @@ const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
             generation TEXT NOT NULL,
             start_offset INTEGER NOT NULL CHECK(start_offset >= 0),
             PRIMARY KEY(source_key, observation_id)
-        ) WITHOUT ROWID;
+        );
         -- A rewrite of a source that has not yet been read to its end. Records
         -- the new generation does not offer by then are retired.
         CREATE TABLE IF NOT EXISTS observation_source_rewrites (
-            source_key TEXT PRIMARY KEY,
+            source_key TEXT NOT NULL PRIMARY KEY,
             generation TEXT NOT NULL,
             retained_through INTEGER NOT NULL CHECK(retained_through >= 0)
         );";
@@ -600,7 +600,7 @@ mod tests {
         conn.execute_batch(
             "DROP TABLE observation_projection_rebuilds;
              CREATE TABLE observation_projection_rebuilds (
-                projector_version TEXT PRIMARY KEY,
+                projector_version TEXT NOT NULL PRIMARY KEY,
                 generation TEXT NOT NULL,
                 frontier_sequence INTEGER NOT NULL CHECK(frontier_sequence >= 0),
                 staged_through INTEGER NOT NULL DEFAULT 0 CHECK(staged_through >= 0),

@@ -26,7 +26,7 @@ pub const ENCODING_DEFLATE: &str = "deflate";
 
 pub const CANONICAL_BODIES_TABLE_SQL: &str = "
         CREATE TABLE IF NOT EXISTS session_canonical_bodies (
-            content_hash TEXT PRIMARY KEY,
+            content_hash TEXT NOT NULL PRIMARY KEY,
             encoding TEXT NOT NULL CHECK(encoding IN ('identity', 'deflate')),
             body BLOB NOT NULL,
             uncompressed_bytes INTEGER NOT NULL CHECK(uncompressed_bytes >= 0)

@@ -100,12 +100,12 @@ pub async fn ensure_workflow_index_schema(conn: &impl Executor) -> Result<(), Wo
     }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS session_schema_migrations (
-            name TEXT PRIMARY KEY,
+            name TEXT NOT NULL PRIMARY KEY,
             version INTEGER NOT NULL,
             applied_at INTEGER NOT NULL DEFAULT (unixepoch())
         );
         CREATE TABLE IF NOT EXISTS workflow_runs (
-            run_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL PRIMARY KEY,
             parent_session_id TEXT NOT NULL DEFAULT '',
             name TEXT,
             description TEXT,
@@ -141,7 +141,7 @@ pub async fn ensure_workflow_index_schema(conn: &impl Executor) -> Result<(), Wo
         CREATE INDEX IF NOT EXISTS idx_workflow_agents_run
             ON workflow_agents(run_id, phase);
         CREATE TABLE IF NOT EXISTS workflow_index_meta (
-            key TEXT PRIMARY KEY,
+            key TEXT NOT NULL PRIMARY KEY,
             value INTEGER NOT NULL,
             updated_at INTEGER NOT NULL DEFAULT (unixepoch())
         );",

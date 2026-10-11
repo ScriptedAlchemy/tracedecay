@@ -404,12 +404,12 @@ pub async fn ensure_lcm_schema_in_transaction(
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS session_schema_migrations (
-            name TEXT PRIMARY KEY,
+            name TEXT NOT NULL PRIMARY KEY,
             version INTEGER NOT NULL,
             applied_at INTEGER NOT NULL DEFAULT (unixepoch())
         );
         CREATE TABLE IF NOT EXISTS session_canonical_bodies (
-            content_hash TEXT PRIMARY KEY,
+            content_hash TEXT NOT NULL PRIMARY KEY,
             encoding TEXT NOT NULL CHECK(encoding IN ('identity', 'deflate')),
             body BLOB NOT NULL,
             uncompressed_bytes INTEGER NOT NULL CHECK(uncompressed_bytes >= 0)
@@ -466,7 +466,7 @@ pub async fn ensure_lcm_schema_in_transaction(
         CREATE INDEX IF NOT EXISTS idx_lcm_raw_timestamp
             ON lcm_raw_messages(timestamp);
         CREATE TABLE IF NOT EXISTS lcm_external_payloads (
-            payload_ref TEXT PRIMARY KEY,
+            payload_ref TEXT NOT NULL PRIMARY KEY,
             provider TEXT NOT NULL,
             session_id TEXT NOT NULL,
             message_id TEXT NOT NULL,
@@ -481,13 +481,13 @@ pub async fn ensure_lcm_schema_in_transaction(
                 REFERENCES sessions(provider, session_id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS lcm_gc_marks (
-            payload_ref TEXT PRIMARY KEY,
+            payload_ref TEXT NOT NULL PRIMARY KEY,
             state TEXT NOT NULL CHECK(state IN ('unreferenced', 'missing')),
             first_seen_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL DEFAULT (unixepoch())
         );
         CREATE TABLE IF NOT EXISTS lcm_gc_meta (
-            key TEXT PRIMARY KEY,
+            key TEXT NOT NULL PRIMARY KEY,
             value TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS lcm_lifecycle_state (
@@ -834,7 +834,7 @@ mod tests {
         let conn = TestConnection::open(&temp.path().join("sessions.db"));
         conn.execute_batch(&format!(
             "CREATE TABLE session_schema_migrations (
-                name TEXT PRIMARY KEY,
+                name TEXT NOT NULL PRIMARY KEY,
                 version INTEGER NOT NULL,
                 applied_at INTEGER NOT NULL DEFAULT (unixepoch())
             );
@@ -905,7 +905,7 @@ mod tests {
                 PRIMARY KEY(provider, message_id)
             );
             CREATE TABLE session_schema_migrations (
-                name TEXT PRIMARY KEY,
+                name TEXT NOT NULL PRIMARY KEY,
                 version INTEGER NOT NULL,
                 applied_at INTEGER NOT NULL DEFAULT (unixepoch())
             );
@@ -992,7 +992,7 @@ mod tests {
                 PRIMARY KEY(provider, message_id)
             );
             CREATE TABLE session_schema_migrations (
-                name TEXT PRIMARY KEY,
+                name TEXT NOT NULL PRIMARY KEY,
                 version INTEGER NOT NULL,
                 applied_at INTEGER NOT NULL DEFAULT (unixepoch())
             );",

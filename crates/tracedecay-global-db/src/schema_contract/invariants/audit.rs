@@ -57,7 +57,7 @@ pub(super) async fn ensure_audit_checkpoint_schema(
     validate_existing_audit_checkpoint_baseline(conn).await?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS authority_audit_checkpoints (
-            audit_name TEXT PRIMARY KEY,
+            audit_name TEXT NOT NULL PRIMARY KEY,
             audit_version INTEGER NOT NULL,
             receipt_rowid INTEGER NOT NULL,
             observation_sequence INTEGER NOT NULL,
@@ -75,7 +75,7 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             bounded_passes_since_exhaustive INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS authority_foreign_key_audit_progress (
-            audit_name TEXT PRIMARY KEY,
+            audit_name TEXT NOT NULL PRIMARY KEY,
             last_table TEXT NOT NULL
         );",
     )
@@ -1789,7 +1789,7 @@ mod tests {
         connection
             .execute_batch(
                 "CREATE TABLE authority_audit_checkpoints (
-                    audit_name TEXT PRIMARY KEY,
+                    audit_name TEXT NOT NULL PRIMARY KEY,
                     audit_version INTEGER NOT NULL,
                     receipt_rowid INTEGER NOT NULL,
                     observation_sequence INTEGER NOT NULL,

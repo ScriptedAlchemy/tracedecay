@@ -23,7 +23,9 @@ fn encode_snapshot_entry(
     .map_err(|error| invalid_store_data(format!("encode configuration snapshot entry: {error}")))
 }
 
-fn snapshot_entry_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static str, Option<String>) {
+/// The default layer has no identifier; it is stored as the empty string
+/// because every primary-key column is `NOT NULL`.
+fn snapshot_entry_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static str, String) {
     let layer = provenance
         .iter()
         .find(|candidate| {
@@ -35,15 +37,15 @@ fn snapshot_entry_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static st
         .or_else(|| provenance.first())
         .map(|candidate| &candidate.layer);
     match layer {
-        Some(ConfigurationLayerIdV1::Default) | None => ("default", None),
+        Some(ConfigurationLayerIdV1::Default) | None => ("default", String::new()),
         Some(ConfigurationLayerIdV1::UserProfile { profile_id }) => {
-            ("user_profile", Some(profile_id.as_str().to_owned()))
+            ("user_profile", profile_id.as_str().to_owned())
         }
         Some(ConfigurationLayerIdV1::Project { project_id }) => {
-            ("project", Some(project_id.as_str().to_owned()))
+            ("project", project_id.as_str().to_owned())
         }
         Some(ConfigurationLayerIdV1::Collection { collection_id }) => {
-            ("collection", Some(collection_id.as_str().to_owned()))
+            ("collection", collection_id.as_str().to_owned())
         }
     }
 }

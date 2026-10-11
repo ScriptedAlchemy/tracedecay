@@ -32,7 +32,7 @@ use super::support::{decode, encode, invalid, same_json};
 // the effects table.
 pub const EXTERNAL_SOURCE_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS external_source_states_v1 (
-    binding_id TEXT PRIMARY KEY,
+    binding_id TEXT NOT NULL PRIMARY KEY,
     source_id TEXT NOT NULL,
     owner_kind TEXT NOT NULL CHECK (owner_kind IN ('project', 'profile')),
     owner_id TEXT NOT NULL,
@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS external_source_commit_receipts_v2 (
     receipt_digest TEXT NOT NULL,
     mutation_digests_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, idempotency_key)
-) WITHOUT ROWID;
+);
 CREATE TABLE IF NOT EXISTS external_source_retained_receipts_v1 (
     binding_id TEXT NOT NULL,
     receipt_digest TEXT NOT NULL,
@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS external_source_retained_receipts_v1 (
     successor_frontier_digest TEXT NOT NULL,
     receipt_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, receipt_digest)
-) WITHOUT ROWID;
+);
 CREATE INDEX IF NOT EXISTS idx_external_source_retained_receipts_predecessor_v1
     ON external_source_retained_receipts_v1(binding_id, predecessor_frontier_digest);
 CREATE INDEX IF NOT EXISTS idx_external_source_retained_receipts_successor_v1
@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS external_source_objects_v2 (
     partition_digest TEXT NOT NULL,
     mutation_digest TEXT NOT NULL,
     PRIMARY KEY (binding_id, native_object_digest)
-) WITHOUT ROWID;
+);
 CREATE TABLE IF NOT EXISTS external_source_pending_projections_v1 (
     binding_id TEXT NOT NULL,
     predecessor_frontier_digest TEXT NOT NULL,
@@ -166,9 +166,9 @@ CREATE TABLE IF NOT EXISTS external_source_projected_objects_v2 (
     native_object_digest TEXT NOT NULL,
     mutation_digest TEXT NOT NULL,
     PRIMARY KEY (binding_id, native_object_digest)
-) WITHOUT ROWID;
+);
 CREATE TABLE IF NOT EXISTS external_source_acquisition_queue_v1 (
-    binding_id TEXT PRIMARY KEY,
+    binding_id TEXT NOT NULL PRIMARY KEY,
     state_digest TEXT NOT NULL,
     not_before_micros INTEGER,
     state_json TEXT NOT NULL

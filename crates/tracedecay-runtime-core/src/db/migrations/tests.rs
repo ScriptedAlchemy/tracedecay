@@ -188,7 +188,7 @@ async fn the_graph_store_has_no_handoff_table_and_refuses_the_v38_shape_that_did
         (authority.as_str(), reason.as_str()),
         (
             "SQLite store",
-            "database schema v38 is not the v39 shape this binary creates; this store was \
+            "database schema v38 is not the v40 shape this binary creates; this store was \
              created by an incompatible binary and cannot be upgraded in place. Remove the \
              store directory and let this binary create a fresh one."
         )

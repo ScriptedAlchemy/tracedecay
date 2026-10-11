@@ -16,7 +16,7 @@ pub async fn ensure_native_integration_schema(
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS native_integration_previews (
-                preview_id TEXT PRIMARY KEY,
+                preview_id TEXT NOT NULL PRIMARY KEY,
                 preview_digest TEXT NOT NULL UNIQUE,
                 repository_id TEXT NOT NULL,
                 destination_ref TEXT NOT NULL,
@@ -25,7 +25,7 @@ pub async fn ensure_native_integration_schema(
                 preview_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS native_integration_approvals (
-                approval_id TEXT PRIMARY KEY,
+                approval_id TEXT NOT NULL PRIMARY KEY,
                 approval_digest TEXT NOT NULL UNIQUE,
                 preview_id TEXT NOT NULL,
                 preview_digest TEXT NOT NULL,
@@ -35,7 +35,7 @@ pub async fn ensure_native_integration_schema(
                 approval_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS native_integration_transactions (
-                transaction_id TEXT PRIMARY KEY,
+                transaction_id TEXT NOT NULL PRIMARY KEY,
                 approval_id TEXT NOT NULL UNIQUE,
                 preview_id TEXT NOT NULL,
                 preview_digest TEXT NOT NULL,
@@ -54,7 +54,7 @@ pub async fn ensure_native_integration_schema(
                     ON DELETE RESTRICT
             );
             CREATE TABLE IF NOT EXISTS native_integration_receipts (
-                transaction_id TEXT PRIMARY KEY,
+                transaction_id TEXT NOT NULL PRIMARY KEY,
                 receipt_digest TEXT NOT NULL UNIQUE,
                 preview_id TEXT NOT NULL,
                 outcome TEXT NOT NULL,
@@ -75,7 +75,7 @@ pub async fn ensure_native_integration_schema(
                     ON DELETE RESTRICT
             );
             CREATE TABLE IF NOT EXISTS native_worktree_cleanup_transactions (
-                confirmation_digest TEXT PRIMARY KEY,
+                confirmation_digest TEXT NOT NULL PRIMARY KEY,
                 inspection_digest TEXT NOT NULL,
                 confirmed_at INTEGER NOT NULL,
                 scope_set_id TEXT NOT NULL,
@@ -92,7 +92,7 @@ pub async fn ensure_native_integration_schema(
                 transaction_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS native_worktree_cleanup_receipts (
-                confirmation_digest TEXT PRIMARY KEY,
+                confirmation_digest TEXT NOT NULL PRIMARY KEY,
                 receipt_digest TEXT NOT NULL UNIQUE,
                 outcome TEXT NOT NULL,
                 completed_at INTEGER NOT NULL,

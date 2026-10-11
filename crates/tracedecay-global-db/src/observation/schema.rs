@@ -112,10 +112,10 @@ async fn observation_rows_exist(
 /// Canonical observation-authority DDL.
 const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
     "CREATE TABLE IF NOT EXISTS global_schema_migrations (
-            migration TEXT PRIMARY KEY
+            migration TEXT NOT NULL PRIMARY KEY
         );
         CREATE TABLE IF NOT EXISTS sanitization_receipts (
-            receipt_id TEXT PRIMARY KEY,
+            receipt_id TEXT NOT NULL PRIMARY KEY,
             sanitizer_version TEXT NOT NULL,
             payload_digest TEXT NOT NULL,
             receipt_json TEXT NOT NULL
@@ -152,13 +152,13 @@ const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
             UNIQUE(enrollment_id, node_id, capture_sequence)
         ) STRICT;
         CREATE TABLE IF NOT EXISTS observation_retrieval_anchors (
-            observation_id TEXT PRIMARY KEY,
+            observation_id TEXT NOT NULL PRIMARY KEY,
             anchor_id TEXT NOT NULL UNIQUE,
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
             FOREIGN KEY(anchor_id) REFERENCES retrieval_anchors(anchor_id)
         );
         CREATE TABLE IF NOT EXISTS observation_repository_provenance (
-            observation_id TEXT PRIMARY KEY,
+            observation_id TEXT NOT NULL PRIMARY KEY,
             availability_json TEXT NOT NULL CHECK(json_valid(availability_json)),
             capture_json TEXT CHECK(capture_json IS NULL OR json_valid(capture_json)),
             retrieval_anchor_id TEXT UNIQUE,
@@ -170,11 +170,11 @@ const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
                 REFERENCES retrieval_anchors(anchor_id, owner_json)
         );
         CREATE TABLE IF NOT EXISTS observation_repository_captures (
-            capture_id TEXT PRIMARY KEY,
+            capture_id TEXT NOT NULL PRIMARY KEY,
             capture_json TEXT NOT NULL CHECK(json_valid(capture_json))
         );
         CREATE TABLE IF NOT EXISTS session_canonical_bodies (
-            content_hash TEXT PRIMARY KEY,
+            content_hash TEXT NOT NULL PRIMARY KEY,
             encoding TEXT NOT NULL CHECK(encoding IN ('identity', 'deflate')),
             body BLOB NOT NULL,
             uncompressed_bytes INTEGER NOT NULL CHECK(uncompressed_bytes >= 0)
@@ -227,7 +227,7 @@ const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
             SELECT RAISE(ABORT, 'observation admission refusals are immutable');
         END;
         CREATE TABLE IF NOT EXISTS projection_queue (
-            observation_id TEXT PRIMARY KEY,
+            observation_id TEXT NOT NULL PRIMARY KEY,
             observation_sequence INTEGER NOT NULL UNIQUE,
             attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
             next_retry_at_micros INTEGER NOT NULL DEFAULT 0 CHECK(next_retry_at_micros >= 0),

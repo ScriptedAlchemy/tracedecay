@@ -13,12 +13,10 @@ CREATE TABLE IF NOT EXISTS td_runtime_writer_checkpoint_v1 (
     durability_json TEXT NOT NULL,
     committed_at_micros INTEGER NOT NULL,
     PRIMARY KEY (shard_json, incarnation)
-) WITHOUT ROWID;
+);
 
 -- The receipt and transaction scope are rebuilt from these columns and the
--- key: every other field they carry is the row's binding. A row of about
--- 0.5 KB fits an index b-tree leaf, so the key is the table and no separate
--- unique index repeats it.
+-- key: every other field they carry is the row's binding.
 CREATE TABLE IF NOT EXISTS td_runtime_writer_idempotency_v2 (
     shard_json TEXT NOT NULL,
     incarnation INTEGER NOT NULL CHECK (incarnation > 0),
@@ -33,7 +31,7 @@ CREATE TABLE IF NOT EXISTS td_runtime_writer_idempotency_v2 (
     opened_at_micros INTEGER NOT NULL,
     committed_at_micros INTEGER NOT NULL,
     PRIMARY KEY (shard_json, incarnation, authority_epoch, idempotency_key)
-) WITHOUT ROWID;
+);
 
 CREATE TABLE IF NOT EXISTS td_runtime_writer_outbox_v1 (
     source_shard_json TEXT NOT NULL,
@@ -52,7 +50,7 @@ CREATE TABLE IF NOT EXISTS td_runtime_writer_outbox_v1 (
     durability_json TEXT NOT NULL,
     updated_at_micros INTEGER NOT NULL,
     PRIMARY KEY (source_shard_json, source_incarnation, source_authority_epoch, effect_id)
-) WITHOUT ROWID;
+);
 
 CREATE INDEX IF NOT EXISTS td_runtime_writer_outbox_ordering_v1
 ON td_runtime_writer_outbox_v1 (
@@ -88,7 +86,7 @@ CREATE TABLE IF NOT EXISTS td_runtime_writer_inbox_v1 (
     receipt_json TEXT NOT NULL,
     committed_at_micros INTEGER NOT NULL,
     PRIMARY KEY (target_shard_json, target_incarnation, target_authority_epoch, effect_id)
-) WITHOUT ROWID;
+);
 
 CREATE INDEX IF NOT EXISTS td_runtime_writer_inbox_ordering_v1
 ON td_runtime_writer_inbox_v1 (

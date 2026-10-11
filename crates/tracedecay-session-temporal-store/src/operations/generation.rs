@@ -789,7 +789,7 @@ mod tests {
                 source_id TEXT NOT NULL
              );
              CREATE TABLE session_summary_nodes (
-                summary_id TEXT PRIMARY KEY,
+                summary_id TEXT NOT NULL PRIMARY KEY,
                 provider TEXT NOT NULL,
                 conversation_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,

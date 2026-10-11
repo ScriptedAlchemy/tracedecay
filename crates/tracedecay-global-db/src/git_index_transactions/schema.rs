@@ -13,7 +13,7 @@ pub async fn ensure_git_index_transaction_schema(
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS git_index_preview_inputs (
-                preview_id TEXT PRIMARY KEY,
+                preview_id TEXT NOT NULL PRIMARY KEY,
                 input_digest TEXT NOT NULL UNIQUE,
                 project_id TEXT NOT NULL,
                 repository_id TEXT NOT NULL,
@@ -30,7 +30,7 @@ pub async fn ensure_git_index_transaction_schema(
                 )
             );
             CREATE TABLE IF NOT EXISTS git_index_preview_commitments (
-                preview_id TEXT PRIMARY KEY,
+                preview_id TEXT NOT NULL PRIMARY KEY,
                 preview_digest TEXT NOT NULL UNIQUE,
                 repository_id TEXT NOT NULL,
                 worktree_id TEXT,
@@ -41,7 +41,7 @@ pub async fn ensure_git_index_transaction_schema(
                 preview_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS git_index_transaction_inputs (
-                idempotency_key TEXT PRIMARY KEY,
+                idempotency_key TEXT NOT NULL PRIMARY KEY,
                 input_digest TEXT NOT NULL,
                 transaction_id TEXT NOT NULL UNIQUE,
                 preview_id TEXT NOT NULL,
@@ -55,7 +55,7 @@ pub async fn ensure_git_index_transaction_schema(
                     ON DELETE RESTRICT
             );
             CREATE TABLE IF NOT EXISTS git_index_transaction_journals (
-                transaction_id TEXT PRIMARY KEY,
+                transaction_id TEXT NOT NULL PRIMARY KEY,
                 idempotency_key TEXT NOT NULL UNIQUE,
                 preview_id TEXT NOT NULL,
                 preview_digest TEXT NOT NULL,
@@ -79,7 +79,7 @@ pub async fn ensure_git_index_transaction_schema(
                     ON DELETE RESTRICT
             );
             CREATE TABLE IF NOT EXISTS git_index_transaction_receipts (
-                transaction_id TEXT PRIMARY KEY,
+                transaction_id TEXT NOT NULL PRIMARY KEY,
                 receipt_id TEXT NOT NULL UNIQUE,
                 preview_id TEXT NOT NULL,
                 receipt_digest TEXT NOT NULL UNIQUE,

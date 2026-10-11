@@ -26,7 +26,7 @@ const MIGRATION_NAME: &str = "git_correlation";
 /// Schema version of the Git evidence rows, convergence receipts and
 /// watermarks. A store recorded at any other version is refused with a typed
 /// reset; nothing converts an older shape.
-pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 9;
+pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 10;
 pub const DEFAULT_SPAN_MERGE_GAP_SECS: i64 = 30 * 60;
 pub const DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS: i64 = 30;
 // The scope value type and session cap are owned by the LCM engine crate so
@@ -932,12 +932,12 @@ pub async fn ensure_git_correlation_receipt_schema_in_transaction(
 ) -> Result<(), GitCorrelationError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS session_schema_migrations (
-            name TEXT PRIMARY KEY,
+            name TEXT NOT NULL PRIMARY KEY,
             version INTEGER NOT NULL,
             applied_at INTEGER NOT NULL DEFAULT (unixepoch())
         );
         CREATE TABLE IF NOT EXISTS git_correlation_meta (
-            key TEXT PRIMARY KEY,
+            key TEXT NOT NULL PRIMARY KEY,
             value INTEGER NOT NULL,
             updated_at INTEGER NOT NULL DEFAULT (unixepoch())
         );",

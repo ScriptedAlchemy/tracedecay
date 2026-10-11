@@ -21,7 +21,7 @@
 /// `anchor_id` is already unique on its own.
 pub const RETRIEVAL_ANCHORS_SCHEMA_DDL: &str = "
     CREATE TABLE IF NOT EXISTS retrieval_anchors (
-        anchor_id TEXT PRIMARY KEY CHECK(length(anchor_id) > 0),
+        anchor_id TEXT NOT NULL PRIMARY KEY CHECK(length(anchor_id) > 0),
         anchor_json TEXT NOT NULL CHECK(json_valid(anchor_json)),
         owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
         projection_generation TEXT NOT NULL CHECK(length(projection_generation) > 0)

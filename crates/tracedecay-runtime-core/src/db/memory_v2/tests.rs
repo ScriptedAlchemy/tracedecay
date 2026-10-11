@@ -9,7 +9,7 @@ async fn database() -> (TestConnection, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory-v2.db");
     let conn = TestConnection::open(&path);
-    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
         .await
         .unwrap();
     crate::db::migrations::create_schema_connection(&conn)

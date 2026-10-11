@@ -173,7 +173,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "projects",
         [
-            column("path", "TEXT", false, None, 1),
+            column("path", "TEXT", true, None, 1),
             column("tokens_saved", "INTEGER", true, Some("0"), 0),
         ],
         []
@@ -181,7 +181,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "code_projects",
         [
-            column("project_id", "TEXT", false, None, 1),
+            column("project_id", "TEXT", true, None, 1),
             column("canonical_root", "TEXT", true, None, 0),
             column("display_root", "TEXT", true, None, 0),
             column("primary_root_platform", "TEXT", false, None, 0),
@@ -198,7 +198,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "project_aliases",
         [
-            column("alias_path", "TEXT", false, None, 1),
+            column("alias_path", "TEXT", true, None, 1),
             column("project_id", "TEXT", true, None, 0),
             column("last_seen_at", "INTEGER", true, None, 0),
         ],
@@ -212,7 +212,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "store_instances",
         [
-            column("store_id", "TEXT", false, None, 1),
+            column("store_id", "TEXT", true, None, 1),
             column("project_id", "TEXT", true, None, 0),
             column("store_kind", "TEXT", true, None, 0),
             column("storage_mode", "TEXT", true, None, 0),
@@ -232,7 +232,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "graph_scopes",
         [
-            column("graph_scope_id", "TEXT", false, None, 1),
+            column("graph_scope_id", "TEXT", true, None, 1),
             column("project_id", "TEXT", true, None, 0),
             column("store_id", "TEXT", true, None, 0),
             column("branch_name", "TEXT", true, None, 0),
@@ -280,7 +280,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "sanitization_receipts",
         [
-            column("receipt_id", "TEXT", false, None, 1),
+            column("receipt_id", "TEXT", true, None, 1),
             column("sanitizer_version", "TEXT", true, None, 0),
             column("payload_digest", "TEXT", true, None, 0),
             column("receipt_json", "TEXT", true, None, 0),
@@ -349,7 +349,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "retrieval_anchors",
         [
-            column("anchor_id", "TEXT", false, None, 1),
+            column("anchor_id", "TEXT", true, None, 1),
             column("anchor_json", "TEXT", true, None, 0),
             column("owner_json", "TEXT", true, None, 0),
             column("projection_generation", "TEXT", true, None, 0),
@@ -359,7 +359,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "observation_retrieval_anchors",
         [
-            column("observation_id", "TEXT", false, None, 1),
+            column("observation_id", "TEXT", true, None, 1),
             column("anchor_id", "TEXT", true, None, 0),
         ],
         [
@@ -375,7 +375,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "observation_repository_provenance",
         [
-            column("observation_id", "TEXT", false, None, 1),
+            column("observation_id", "TEXT", true, None, 1),
             column("availability_json", "TEXT", true, None, 0),
             column("capture_json", "TEXT", false, None, 0),
             column("retrieval_anchor_id", "TEXT", false, None, 0),
@@ -406,7 +406,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "observation_repository_captures",
         [
-            column("capture_id", "TEXT", false, None, 1),
+            column("capture_id", "TEXT", true, None, 1),
             column("capture_json", "TEXT", true, None, 0),
         ],
         []
@@ -414,7 +414,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "session_canonical_bodies",
         [
-            column("content_hash", "TEXT", false, None, 1),
+            column("content_hash", "TEXT", true, None, 1),
             column("encoding", "TEXT", true, None, 0),
             column("body", "BLOB", true, None, 0),
             column("uncompressed_bytes", "INTEGER", true, None, 0),
@@ -468,7 +468,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "authority_audit_checkpoints",
         [
-            column("audit_name", "TEXT", false, None, 1),
+            column("audit_name", "TEXT", true, None, 1),
             column("audit_version", "INTEGER", true, None, 0),
             column("receipt_rowid", "INTEGER", true, None, 0),
             column("observation_sequence", "INTEGER", true, None, 0),
@@ -496,7 +496,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "projection_queue",
         [
-            column("observation_id", "TEXT", false, None, 1),
+            column("observation_id", "TEXT", true, None, 1),
             column("observation_sequence", "INTEGER", true, None, 0),
             column("attempt_count", "INTEGER", true, Some("0"), 0),
             column("next_retry_at_micros", "INTEGER", true, Some("0"), 0),
@@ -546,7 +546,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "observation_projection_checkpoints",
         [
-            column("projector_version", "TEXT", false, None, 1),
+            column("projector_version", "TEXT", true, None, 1),
             column("last_sequence", "INTEGER", true, None, 0),
         ],
         []
@@ -579,7 +579,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "observation_source_rewrites",
         [
-            column("source_key", "TEXT", false, None, 1),
+            column("source_key", "TEXT", true, None, 1),
             column("generation", "TEXT", true, None, 0),
             column("retained_through", "INTEGER", true, None, 0),
         ],
@@ -744,7 +744,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "observation_projection_rebuilds",
         [
-            column("projector_version", "TEXT", false, None, 1),
+            column("projector_version", "TEXT", true, None, 1),
             column("generation", "TEXT", true, None, 0),
             column("frontier_sequence", "INTEGER", true, None, 0),
             column("aliases_staged_through", "INTEGER", true, Some("0"), 0),
@@ -988,7 +988,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "session_temporal_schema_migrations",
         [
-            column("name", "TEXT", false, None, 1),
+            column("name", "TEXT", true, None, 1),
             column("version", "INTEGER", true, None, 0),
             column("applied_at", "INTEGER", true, None, 0),
         ],
@@ -997,7 +997,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "session_summary_nodes",
         [
-            column("summary_id", "TEXT", false, None, 1),
+            column("summary_id", "TEXT", true, None, 1),
             column("session_id", "TEXT", true, None, 0),
             column("provider", "TEXT", true, None, 0),
             column("conversation_id", "TEXT", true, None, 0),
@@ -1065,7 +1065,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "session_external_payload_manifests",
         [
-            column("payload_ref", "TEXT", false, None, 1),
+            column("payload_ref", "TEXT", true, None, 1),
             column("session_id", "TEXT", true, None, 0),
             column("payload_digest", "TEXT", true, None, 0),
             column("manifest_json", "TEXT", true, None, 0),
@@ -1248,7 +1248,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "session_query_cursor_keys",
         [
-            column("key_id", "TEXT", false, None, 1),
+            column("key_id", "TEXT", true, None, 1),
             column("key_version", "INTEGER", true, None, 0),
             column("key_material", "BLOB", true, None, 0),
             column("created_at", "INTEGER", true, None, 0),
@@ -1274,7 +1274,7 @@ pub(super) const TABLES: &[Table] = &[
     table!(
         "session_temporal_observation_effects",
         [
-            column("observation_id", "TEXT", false, None, 1),
+            column("observation_id", "TEXT", true, None, 1),
             column("observation_sequence", "INTEGER", true, None, 0),
             column("session_id", "TEXT", true, None, 0),
             column("receipt_id", "TEXT", true, None, 0),
