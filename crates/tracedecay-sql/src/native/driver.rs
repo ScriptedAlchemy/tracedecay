@@ -23,11 +23,11 @@ use crate::{
     Capability, CheckpointMode, CheckpointOutcome, ConnectionControl, Engine, EnginePolicy,
     ErrorExt, ErrorKind, PageStats, StatementControl, StatementCounters, TransactionControl,
 };
+use types::{FromSql, FromSqlError, ToSqlOutput, Type, Value, ValueRef};
 
 /// SQLite's `SQLITE_LIMIT_VDBE_OP` on the SQLite arm, as a per-statement
 /// VM-operation budget.
 const VM_OP_BUDGET: u64 = 25_000_000;
-use types::{FromSql, FromSqlError, ToSqlOutput, Type, Value, ValueRef};
 
 pub const ENGINE: Engine = Engine::Native;
 
