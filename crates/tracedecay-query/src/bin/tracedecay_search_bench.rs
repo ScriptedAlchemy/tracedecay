@@ -8,7 +8,7 @@
 //! 1. read the fixture corpus with the same ordered, `.gitignore`-blind walk;
 //! 2. build and seal one clean generation through
 //!    [`CodeIndexProductionOwnerV1::build_and_publish`];
-//! 3. drain the sealed generation and ingest it into an isolated SQLite
+//! 3. drain the sealed generation and ingest it into an isolated engine
 //!    lexical artifact, finalize, and reopen it content-addressed, the
 //!    exact reader shape `ProductionCodeIndexQueryOwnersV1` serves from;
 //! 4. compose the production `ExactLane`/`LexicalLane` over that reader and
@@ -630,11 +630,13 @@ fn outcome_facts<E>(outcome: &RetrieverOutcome<RetrieverBatch<E>>) -> serde_json
             "eligible": batch.coverage.eligible,
             "excluded": batch.coverage.excluded,
             "capped": batch.coverage.capped,
+            "identity": candidate_identity(batch),
         }),
         RetrieverOutcome::Partial { value, .. } => serde_json::json!({
             "outcome": "partial",
             "candidates": value.candidates.len(),
             "examined": value.coverage.examined,
+            "identity": candidate_identity(value),
         }),
         RetrieverOutcome::Stale(_) => serde_json::json!({ "outcome": "stale" }),
         RetrieverOutcome::Cancelled => serde_json::json!({ "outcome": "cancelled" }),
@@ -646,6 +648,23 @@ fn outcome_facts<E>(outcome: &RetrieverOutcome<RetrieverBatch<E>>) -> serde_json
             "detail": format!("{failure:?}"),
         }),
     }
+}
+
+fn candidate_identity<E>(batch: &RetrieverBatch<E>) -> serde_json::Value {
+    serde_json::Value::Array(
+        batch
+            .candidates
+            .iter()
+            .map(|candidate| {
+                serde_json::json!({
+                    "source_occurrence_id": candidate.source_occurrence_id.as_str(),
+                    "logical_evidence_id": candidate.logical_evidence_id.as_str(),
+                    "ordinal_rank": candidate.ordinal_rank,
+                    "raw_score": candidate.raw_score.micros(),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn phase_stats(
