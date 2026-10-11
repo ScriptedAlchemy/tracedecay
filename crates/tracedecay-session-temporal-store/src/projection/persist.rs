@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -10,7 +10,9 @@ use tracedecay_domain::{
     derive_exact_observation_anchor_id,
 };
 use tracedecay_lcm::retrieval_content::{derived_text_for_index, projected_content_hash};
-use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{
+    IntoValue, Value as EngineValue, params, params_from_iter,
+};
 use tracedecay_store::{
     SessionMessageProjection, SessionStoreError, SessionStoreResult,
     SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
@@ -329,6 +331,7 @@ pub(super) async fn persist_occurrences(
         load_output_counts(conn, session_key, source_id_strings.as_slice()).await?;
     let anchors = load_source_anchor_jsons(conn, source_id_strings.as_slice()).await?;
     let mut memo = EnsureMemo::default();
+    let mut pending = Vec::new();
     for occurrences in occurrences_by_source.into_values() {
         checkpoint_relation_rebuild_control(control)?;
         let first = occurrences.first().ok_or_else(|| {
@@ -383,19 +386,21 @@ pub(super) async fn persist_occurrences(
                     "canonical observation has no atomically recorded temporal effect output",
                 )
             })?;
-            persist_occurrence(
-                conn,
-                batch,
-                occurrence,
-                &canonical,
-                output,
-                anchor_json,
-                &mut memo,
-            )
-            .await?;
+            pending.push(
+                prepare_occurrence(
+                    conn,
+                    batch,
+                    occurrence,
+                    &canonical,
+                    output,
+                    anchor_json,
+                    &mut memo,
+                )
+                .await?,
+            );
         }
     }
-    Ok(())
+    insert_prepared_occurrences(conn, batch, &pending).await
 }
 
 /// Tracks the minimum bound values already issued to the `ensure_*` writers
@@ -479,15 +484,33 @@ impl EnsureMemo {
     }
 }
 
-async fn persist_occurrence(
+/// One fully validated occurrence row awaiting the batch's single insert.
+/// Validation (canonical equality, privacy/derivation checks, and the
+/// memo-deduped `ensure_*` writes) already ran; `values` holds the 25 bound
+/// columns in `session_occurrences` column order.
+struct PreparedOccurrence<'a> {
+    occurrence: &'a MessageOccurrenceRecordV1,
+    source_provider: String,
+    text: String,
+    values: Vec<EngineValue>,
+    turn_member: Option<(String, i64)>,
+}
+
+fn bind(value: impl IntoValue) -> SessionStoreResult<EngineValue> {
+    value
+        .into_value()
+        .map_err(|error| storage(PERSIST_OPERATION, error))
+}
+
+async fn prepare_occurrence<'a>(
     conn: &impl crate::handle::SessionTemporalExec,
     batch: &SessionTemporalProjectionBatchV1,
-    occurrence: &MessageOccurrenceRecordV1,
+    occurrence: &'a MessageOccurrenceRecordV1,
     canonical: &CanonicalOccurrenceProjection,
     output: &SessionMessageProjection,
     anchor_json: &str,
     memo: &mut EnsureMemo,
-) -> SessionStoreResult<bool> {
+) -> SessionStoreResult<PreparedOccurrence<'a>> {
     let envelope = &canonical.envelope;
     if output.session().session_id != occurrence.session_id.as_str() {
         return Err(storage_message(
@@ -604,10 +627,84 @@ async fn persist_occurrence(
     // Canonical text stays on the observation/LCM payload.
     let index_text = derived_text_for_index(sanitized_content);
     let relations = envelope.relations();
-    // Occurrences are append-only and keyed per session, so a row the base or
-    // an earlier batch already holds is ignored here and must match exactly.
-    let inserted = conn
-        .execute(
+    Ok(PreparedOccurrence {
+        occurrence,
+        source_provider: output.message().provider.as_str().to_owned(),
+        text: output.message().text.as_str().to_owned(),
+        values: vec![
+            bind(batch.session_id().as_str())?,
+            bind(generation)?,
+            bind(occurrence.occurrence_id.as_str())?,
+            bind(occurrence.source_observation_id.as_str())?,
+            bind(i64::try_from(canonical.source_sequence)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?)?,
+            bind(output.message().provider.as_str())?,
+            bind(i64::from(occurrence.projection_output_ordinal.value()))?,
+            bind(occurrence.retrieval_anchor_id.as_str())?,
+            bind(occurrence
+                .thread_id
+                .as_ref()
+                .map(tracedecay_domain::ThreadId::as_str))?,
+            bind(thread_grouping.as_deref())?,
+            bind(occurrence
+                .turn_id
+                .as_ref()
+                .map(tracedecay_domain::TurnId::as_str))?,
+            bind(turn_grouping.as_deref())?,
+            bind(occurrence
+                .message_id
+                .as_ref()
+                .map(tracedecay_domain::MessageId::as_str))?,
+            bind(occurrence
+                .agent_id
+                .as_ref()
+                .map(tracedecay_domain::AgentInstanceId::as_str))?,
+            bind(relations
+                .parent_message_id()
+                .map(tracedecay_domain::ObservationId::as_str))?,
+            bind(relations
+                .parent_agent_id()
+                .map(tracedecay_domain::ObservationId::as_str))?,
+            bind(relations.parent_session_id().map(SessionId::as_str))?,
+            bind(copied_from_anchor_ids.as_str())?,
+            bind(role.as_str())?,
+            bind(occurrence.knowledge_at.0)?,
+            bind(valid_time.as_str())?,
+            bind(evidence.as_str())?,
+            bind(sanitized_content_digest.as_str())?,
+            bind(sanitized_content_bytes)?,
+            bind(index_text.as_str())?,
+        ],
+        turn_member: occurrence.turn_id.as_ref().map(|turn_id| {
+            (
+                turn_id.as_str().to_owned(),
+                i64::from(occurrence.projection_output_ordinal.value()),
+            )
+        }),
+    })
+}
+
+const OCCURRENCE_ROW_COLUMNS: usize = 25;
+const OCCURRENCE_INSERT_CHUNK_ROWS: usize = 200;
+
+/// Inserts the batch's prepared occurrences as multi-row
+/// `INSERT OR IGNORE … RETURNING` chunks, then runs the exact-row check on
+/// the conflicting ids in one query and the `session_turn_members` inserts
+/// for the newly inserted rows in one statement — the same committed rows
+/// as the previous per-occurrence statement sequence, in the same item
+/// order, inside the same transaction.
+async fn insert_prepared_occurrences(
+    conn: &impl crate::handle::SessionTemporalExec,
+    batch: &SessionTemporalProjectionBatchV1,
+    pending: &[PreparedOccurrence<'_>],
+) -> SessionStoreResult<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
+    let mut inserted = HashSet::<String>::new();
+    for chunk in pending.chunks(OCCURRENCE_INSERT_CHUNK_ROWS) {
+        let mut sql = String::from(
             "INSERT OR IGNORE INTO session_occurrences (
             session_id, generation, occurrence_id, source_observation_id, source_sequence,
             source_provider, projection_output_ordinal, retrieval_anchor_id,
@@ -616,86 +713,169 @@ async fn persist_occurrence(
             copied_from_anchor_ids_json, role, knowledge_at, valid_time_json,
             evidence_json, sanitized_content_digest, sanitized_content_bytes,
             index_text
-         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-            ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
-         )",
-            params![
-                batch.session_id().as_str(),
-                generation,
-                occurrence.occurrence_id.as_str(),
-                occurrence.source_observation_id.as_str(),
-                i64::try_from(canonical.source_sequence)
-                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
-                output.message().provider.as_str(),
-                i64::from(occurrence.projection_output_ordinal.value()),
-                occurrence.retrieval_anchor_id.as_str(),
-                occurrence
-                    .thread_id
-                    .as_ref()
-                    .map(tracedecay_domain::ThreadId::as_str),
-                thread_grouping,
-                occurrence
-                    .turn_id
-                    .as_ref()
-                    .map(tracedecay_domain::TurnId::as_str),
-                turn_grouping,
-                occurrence
-                    .message_id
-                    .as_ref()
-                    .map(tracedecay_domain::MessageId::as_str),
-                occurrence
-                    .agent_id
-                    .as_ref()
-                    .map(tracedecay_domain::AgentInstanceId::as_str),
-                relations
-                    .parent_message_id()
-                    .map(tracedecay_domain::ObservationId::as_str),
-                relations
-                    .parent_agent_id()
-                    .map(tracedecay_domain::ObservationId::as_str),
-                relations.parent_session_id().map(SessionId::as_str),
-                copied_from_anchor_ids,
-                role,
-                occurrence.knowledge_at.0,
-                valid_time,
-                evidence,
-                sanitized_content_digest,
-                sanitized_content_bytes,
-                index_text,
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?
-        == 1;
-    if !inserted {
-        require_exact_occurrence(
-            conn,
-            batch,
-            occurrence,
-            output.message().provider.as_str(),
-            output.message().text.as_str(),
-        )
-        .await?;
-        return Ok(false);
+         ) VALUES ",
+        );
+        for row_index in 0..chunk.len() {
+            if row_index > 0 {
+                sql.push(',');
+            }
+            sql.push('(');
+            for column_index in 0..OCCURRENCE_ROW_COLUMNS {
+                if column_index > 0 {
+                    sql.push(',');
+                }
+                sql.push('?');
+            }
+            sql.push(')');
+        }
+        sql.push_str(" RETURNING occurrence_id");
+        let values = chunk
+            .iter()
+            .flat_map(|row| row.values.iter().cloned())
+            .collect::<Vec<EngineValue>>();
+        let mut rows = conn
+            .query(sql.as_str(), params_from_iter(values))
+            .await
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage(PERSIST_OPERATION, error))?
+        {
+            let occurrence_id: String = row
+                .get(0)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            inserted.insert(occurrence_id);
+        }
     }
-    if let Some(turn_id) = &occurrence.turn_id {
-        conn.execute(
+
+    // Rows later in the batch repeating an id an earlier row already
+    // attempted are conflicts regardless of what the insert returned — the
+    // earlier row claimed the id.
+    let mut attempted = HashSet::<&str>::new();
+    let was_inserted = pending
+        .iter()
+        .map(|row| {
+            attempted.insert(row.occurrence.occurrence_id.as_str())
+                && inserted.contains(row.occurrence.occurrence_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    let conflicts = pending
+        .iter()
+        .zip(was_inserted.iter())
+        .filter(|(_, inserted)| !**inserted)
+        .map(|(row, _)| row)
+        .collect::<Vec<_>>();
+    if !conflicts.is_empty() {
+        // Occurrences are append-only and keyed per session, so a row the base
+        // or an earlier insert already holds must match exactly. Compare every
+        // conflicting id in one query using the same projection of fields the
+        // per-row check reads.
+        let conflict_ids = conflicts
+            .iter()
+            .map(|row| row.occurrence.occurrence_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        let ids_json = serde_json::to_string(&conflict_ids)
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        let mut rows = conn
+            .query(
+                "SELECT occurrence_id, json_object(
+                    'source_observation_id', source_observation_id,
+                    'source_provider', source_provider,
+                    'projection_output_ordinal', projection_output_ordinal,
+                    'retrieval_anchor_id', retrieval_anchor_id,
+                    'thread_id', thread_id,
+                    'thread_grouping_json', json(thread_grouping_json),
+                    'turn_id', turn_id,
+                    'turn_grouping_json', json(turn_grouping_json),
+                    'message_id', message_id,
+                    'agent_id', agent_id,
+                    'role', role,
+                    'knowledge_at', knowledge_at,
+                    'valid_time_json', json(valid_time_json),
+                    'evidence_json', json(evidence_json),
+                    'sanitized_content_digest', sanitized_content_digest,
+                    'sanitized_content_bytes', sanitized_content_bytes,
+                    'snippet_text', snippet_text,
+                    'index_text', index_text
+                 )
+                 FROM session_occurrences
+                 WHERE session_id = ?1 AND +generation <= ?2
+                   AND occurrence_id IN (SELECT value FROM json_each(?3))",
+                params![
+                    batch.session_id().as_str(),
+                    generation,
+                    ids_json.as_str()
+                ],
+            )
+            .await
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        let mut stored = HashMap::<String, String>::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage(PERSIST_OPERATION, error))?
+        {
+            let occurrence_id: String = row
+                .get(0)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let encoded: String = row
+                .get(1)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            stored.insert(occurrence_id, encoded);
+        }
+        for conflict in conflicts {
+            let encoded = stored
+                .get(conflict.occurrence.occurrence_id.as_str())
+                .ok_or_else(|| {
+                    storage_message(
+                        PERSIST_OPERATION,
+                        "occurrence insert was ignored without a row this generation reads",
+                    )
+                })?;
+            require_occurrence_row(
+                encoded,
+                conflict.occurrence,
+                conflict.source_provider.as_str(),
+                conflict.text.as_str(),
+            )?;
+        }
+    }
+
+    let member_rows = pending
+        .iter()
+        .zip(was_inserted.iter())
+        .filter(|(_, inserted)| **inserted)
+        .map(|(row, _)| row)
+        .filter_map(|row| {
+            row.turn_member
+                .as_ref()
+                .map(|(turn_id, ordinal)| (turn_id, &row.occurrence.occurrence_id, ordinal))
+        })
+        .collect::<Vec<_>>();
+    for chunk in member_rows.chunks(OCCURRENCE_INSERT_CHUNK_ROWS) {
+        let mut sql = String::from(
             "INSERT OR IGNORE INTO session_turn_members (
                 session_id, generation, turn_id, occurrence_id, ordinal
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                batch.session_id().as_str(),
-                generation,
-                turn_id.as_str(),
-                occurrence.occurrence_id.as_str(),
-                i64::from(occurrence.projection_output_ordinal.value()),
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+             ) VALUES ",
+        );
+        let mut values = Vec::new();
+        for (row_index, (turn_id, occurrence_id, ordinal)) in chunk.iter().enumerate() {
+            if row_index > 0 {
+                sql.push(',');
+            }
+            sql.push_str("(?, ?, ?, ?, ?)");
+            values.push(bind(batch.session_id().as_str())?);
+            values.push(bind(generation)?);
+            values.push(bind(turn_id.as_str())?);
+            values.push(bind(occurrence_id.as_str())?);
+            values.push(bind(**ordinal)?);
+        }
+        conn.execute(sql.as_str(), params_from_iter(values))
+            .await
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Also returns the anchors the occurrence's anchor record copied from, the
@@ -943,60 +1123,19 @@ pub(super) async fn ensure_agent(
     Ok(())
 }
 
-pub(super) async fn require_exact_occurrence(
-    conn: &impl crate::handle::SessionTemporalExec,
-    batch: &SessionTemporalProjectionBatchV1,
+/// The exact-match half of the occurrence conflict path: `encoded` is the
+/// `json_object` projection of the stored row (fetched by the caller, singly
+/// or in the batched conflict query) and must equal the row the batch tried
+/// to insert. Rows written before the index cap retained the full sanitized
+/// body, so an uncapped body spelling is also accepted.
+fn require_occurrence_row(
+    encoded: &str,
     occurrence: &MessageOccurrenceRecordV1,
     source_provider: &str,
     text: &str,
 ) -> SessionStoreResult<()> {
-    let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
-    let mut rows = conn
-        .query(
-            "SELECT json_object(
-                'source_observation_id', source_observation_id,
-                'source_provider', source_provider,
-                'projection_output_ordinal', projection_output_ordinal,
-                'retrieval_anchor_id', retrieval_anchor_id,
-                'thread_id', thread_id,
-                'thread_grouping_json', json(thread_grouping_json),
-                'turn_id', turn_id,
-                'turn_grouping_json', json(turn_grouping_json),
-                'message_id', message_id,
-                'agent_id', agent_id,
-                'role', role,
-                'knowledge_at', knowledge_at,
-                'valid_time_json', json(valid_time_json),
-                'evidence_json', json(evidence_json),
-                'sanitized_content_digest', sanitized_content_digest,
-                'sanitized_content_bytes', sanitized_content_bytes,
-                'snippet_text', snippet_text,
-                'index_text', index_text
-             )
-             FROM session_occurrences
-             WHERE session_id = ?1 AND occurrence_id = ?3 AND +generation <= ?2",
-            params![
-                batch.session_id().as_str(),
-                generation,
-                occurrence.occurrence_id.as_str()
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let encoded: String = rows
-        .next()
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?
-        .ok_or_else(|| {
-            storage_message(
-                PERSIST_OPERATION,
-                "occurrence insert was ignored without a row this generation reads",
-            )
-        })?
-        .get(0)
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let actual: Value =
-        serde_json::from_str(&encoded).map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let actual: serde_json::Value =
+        serde_json::from_str(encoded).map_err(|error| storage(PERSIST_OPERATION, error))?;
     let role =
         serde_json::to_value(occurrence.role).map_err(|error| storage(PERSIST_OPERATION, error))?;
     let expected = json!({
