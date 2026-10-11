@@ -313,9 +313,26 @@ impl KeyedTable {
 fn run(connection: &Connection, sql: &str, values: &[Value]) -> Outcome {
     match connection.execute(sql, params_from_iter(values)) {
         Ok(changed) => Outcome::Changed(changed),
-        Err(error) if error.kind() == ErrorKind::Constraint => Outcome::Refused(error.to_string()),
+        Err(error) if error.kind() == ErrorKind::Constraint => {
+            Outcome::Refused(refusing_columns(&error.to_string()))
+        }
         Err(error) => panic!("{sql}: {error}"),
     }
+}
+
+/// The constraint kind and the columns it names. SQLite spells a composite
+/// key `t.a, t.b`; Turso spells it `t.(a, b)`.
+fn refusing_columns(message: &str) -> String {
+    let (kind, target) = message.split_once(": ").unwrap_or((message, ""));
+    let columns = match target.split_once(".(") {
+        Some((_, list)) => list.trim_end_matches(')').to_owned(),
+        None => target
+            .split(", ")
+            .map(|column| column.rsplit_once('.').map_or(column, |(_, name)| name))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    format!("{kind}: {columns}")
 }
 
 fn key_semantics_script(

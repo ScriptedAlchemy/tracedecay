@@ -1203,9 +1203,13 @@ pub(super) async fn verify_provenance(
     let message = projection.message();
     let mut rows = conn
         .query(
+            // The key lookup names its index: Turso prefers the covering
+            // output index, which seeks only `projector_version`
+            // (turso-bugs/secondary-index-loses-to-primary-key-prefix.md).
             "SELECT retrieval_anchor_id, receipt_id, output_provider, output_message_id,
                     output_digest
              FROM observation_projection_provenance
+                  INDEXED BY sqlite_autoindex_observation_projection_provenance_1
              WHERE projector_version = ?1 AND observation_id = ?2
                AND output_ordinal = ?3",
             params![

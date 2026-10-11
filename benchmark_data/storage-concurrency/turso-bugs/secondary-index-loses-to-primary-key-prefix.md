@@ -35,6 +35,14 @@ LIMIT ?`), Turso chose `idx_lcm_raw_session_ordinal (provider=? AND
 session_id=?)` plus a sorter over the whole session instead of
 `idx_lcm_raw_session_activity`, which serves the range and the order.
 
+The deciding factor is coverage. Turso prefers an index that covers the
+selected columns over one that seeks more equality columns, in either
+direction: with the same table, an exact primary-key lookup that selects
+`output_provider` runs through `prov_output (projector_version=?)` (20014 VM
+steps) instead of the primary key (16 steps with
+`INDEXED BY sqlite_autoindex_prov_1`), while `COUNT(*)` on the same key picks
+the primary key (17 steps).
+
 ## Workaround
 
 Statements whose bound depends on a secondary index name it with
