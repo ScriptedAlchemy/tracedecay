@@ -160,6 +160,9 @@ jobs:
       - name: Test the real-repository hot-path benchmark harness
         run: python3 scripts/test-bench-hot-paths.py
 
+      - name: Test the unused tool-context matching rules
+        run: python3 scripts/test-measure-unused-tool-context.py
+
       - name: Test the Hermes dashboard embed helpers
         run: python3 -m unittest discover -s dashboard/hermes-wrapper -p 'test_*.py'
 

@@ -115,6 +115,16 @@ fn tokens(bytes: usize) -> u64 {
     u64::try_from(bytes).expect("file size fits") / 4
 }
 
+fn response_after(text: &str) -> u64 {
+    tracedecay_mcp::tools::response_trailers::response_token_count(
+        &tracedecay_mcp::ToolResult::new(
+            json!({"content": [{"type": "text", "text": text}]}),
+            Vec::new(),
+        ),
+    )
+    .expect("tokenizer")
+}
+
 fn assert_json(response: &Value, expected: &Value, touched: &[usize]) {
     assert!(
         response["error"].is_null(),
@@ -135,7 +145,7 @@ fn assert_json(response: &Value, expected: &Value, touched: &[usize]) {
     }
     let footer = format!(
         "\ntracedecay_metrics: before={before} after={}",
-        text.len() / 4
+        response_after(text)
     );
     assert_eq!(content[1]["type"], "text", "{response}");
     assert_eq!(
@@ -163,7 +173,7 @@ fn assert_markdown(response: &Value, text: &str, touched: &[usize]) {
     }
     let footer = format!(
         "\ntracedecay_metrics: before={before} after={}",
-        text.len() / 4
+        response_after(text)
     );
     assert_eq!(content[1]["type"], "text", "{response}");
     assert_eq!(

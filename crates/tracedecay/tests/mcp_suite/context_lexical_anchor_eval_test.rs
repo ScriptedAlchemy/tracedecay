@@ -504,22 +504,20 @@ async fn an_identifier_named_in_the_task_leads_plan_and_explore_context() {
             payload["search_matches"][0]["name"], "run_update_command",
             "{mode}: {payload}"
         );
-        // Without `include_code`, graph enrichment races primary search and
-        // is withheld, typed, when search settles first.
-        match payload["retrieval"]["graph"]["state"].as_str() {
-            Some("unavailable") => {
-                assert_eq!(
-                    payload["verified_graph_evidence"]["reason_code"],
-                    "verified-code-graph-read-unavailable",
-                    "{mode}: {payload}"
-                );
-                assert_eq!(payload["symbols"], json!([]), "{mode}: {payload}");
-            }
-            _ => assert_eq!(
-                payload["symbols"][0]["name"], "run_update_command",
+        // Without `include_code`, graph enrichment can still lose the race
+        // and stay typed-unavailable. Symbols hydrate from the search
+        // matches instead of answering empty.
+        if payload["retrieval"]["graph"]["state"] == "unavailable" {
+            assert_eq!(
+                payload["verified_graph_evidence"]["reason_code"],
+                "verified-code-graph-read-unavailable",
                 "{mode}: {payload}"
-            ),
+            );
         }
+        assert_eq!(
+            payload["symbols"][0]["name"], "run_update_command",
+            "{mode}: {payload}"
+        );
         // Both definitions and both call sites spell the identifier; the
         // page carries two of those sites.
         assert_eq!(
