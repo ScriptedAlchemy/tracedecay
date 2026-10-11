@@ -89,13 +89,12 @@ fn decode_path(prefix: &str, key: &str) -> Result<PathBuf, String> {
             return Err("host discovery queue Windows path has an odd byte count".to_owned());
         }
         let wide = bytes
-            .chunks_exact(2)
-            .map(|chunk| {
-                <[u8; 2]>::try_from(chunk)
-                    .map(u16::from_le_bytes)
-                    .map_err(|_| "host discovery queue Windows path chunk is invalid".to_owned())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .map(u16::from_le_bytes)
+            .collect::<Vec<_>>();
         Ok(std::ffi::OsString::from_wide(&wide).into())
     }
     #[cfg(not(any(unix, windows)))]

@@ -354,8 +354,11 @@ pub(super) fn decode_native_project_path(
         return Err("native Windows project path has odd byte length".to_string());
     }
     let wide = bytes
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .copied()
+        .map(u16::from_le_bytes)
         .collect::<Vec<_>>();
     Ok(PathBuf::from(OsString::from_wide(&wide)))
 }

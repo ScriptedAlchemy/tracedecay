@@ -426,7 +426,7 @@ impl RegisteredGlobalDb {
     /// publisher mints only Test-role authority; this constructor lets a test
     /// drive [`RegisteredGlobalDb::checkpoint_result`] over a
     /// maintenance-scoped publication without bypassing the database facade.
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn from_database_for_wal_maintenance_test(database: Database) -> Self {
         Self::from_database(database)
     }
