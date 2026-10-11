@@ -458,6 +458,7 @@ pub(super) fn sqlite_handles(pid: u32, profile_root: &Path) -> Vec<PathBuf> {
         let rendered = target.to_string_lossy();
         if target.starts_with(profile_root)
             && (rendered.contains(".db")
+                || rendered.contains(".tdb")
                 || rendered.ends_with("-wal")
                 || rendered.ends_with("-shm"))
         {

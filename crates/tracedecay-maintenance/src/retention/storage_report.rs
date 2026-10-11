@@ -416,8 +416,9 @@ struct SampledRegisteredStorage {
 fn read_registered_project_rows(
     global_db_path: &Path,
 ) -> tracedecay_domain::errors::Result<Vec<(String, String)>> {
-    let connection = super::quiesced_store::open_quiesced(global_db_path)
-        .map_err(|error| report_error("open quiesced global.db for read-only report", error))?;
+    let connection = super::quiesced_store::open_quiesced(global_db_path).map_err(|error| {
+        report_error("open quiesced profile database for read-only report", error)
+    })?;
     let mut statement = connection
         .prepare("SELECT project_id, canonical_root FROM code_projects ORDER BY project_id")
         .map_err(|error| report_error("list registered projects", error))?;

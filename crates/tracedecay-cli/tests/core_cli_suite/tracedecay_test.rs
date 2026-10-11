@@ -164,7 +164,7 @@ fn status_and_list_render_a_reset_required_project_registry() {
             .join(tracedecay_store::StoreFile::Profile.file_name()),
     )
     .unwrap()
-    .execute_batch("ALTER TABLE code_projects DROP COLUMN default_branch")
+    .execute_batch("ALTER TABLE code_projects ADD COLUMN unexpected_column TEXT")
     .unwrap();
     common::ensure_tracedecay_daemon(&home_path);
 

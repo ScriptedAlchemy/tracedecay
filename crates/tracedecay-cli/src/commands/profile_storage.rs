@@ -594,7 +594,8 @@ mod reset_project_store_tests {
         let connection = tracedecay_sql::Connection::open(db_path).expect("create store");
         connection
             .execute_batch(&format!(
-                "PRAGMA user_version = {version}; CREATE TABLE anchor (id INTEGER);"
+                "PRAGMA user_version = {version}; CREATE TABLE anchor (id INTEGER);
+                 PRAGMA wal_checkpoint(TRUNCATE);"
             ))
             .expect("stamp store");
         drop(connection);

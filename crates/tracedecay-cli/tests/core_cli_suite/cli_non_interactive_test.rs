@@ -2330,30 +2330,36 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
     #[cfg(unix)]
     std::fs::set_permissions(&identity_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    let database_paths = [
-        profile.join(tracedecay_store::StoreFile::Profile.file_name()),
-        profile.join(tracedecay_store::StoreFile::ProfileSessions.file_name()),
-        profile.join(tracedecay_store::StoreFile::ProfileMemory.file_name()),
-        profile
-            .join("projects/orphan-project")
-            .join(tracedecay_store::StoreFile::Project.file_name()),
-        profile
-            .join("projects/orphan-project")
-            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
-        profile
-            .join("stores/legacy-orphan")
-            .join(tracedecay_store::StoreFile::Project.file_name()),
-        profile
-            .join(format!("remote/nodes/{}", "a".repeat(64)))
-            .join(tracedecay_store::StoreFile::RemoteNode.file_name()),
-    ];
-    for database in &database_paths {
-        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let mut member = database.as_os_str().to_os_string();
-            member.push(suffix);
-            std::fs::write(PathBuf::from(member), b"not a compatible SQLite schema").unwrap();
-        }
+    use tracedecay_store::StoreFile;
+    // Both the SQLite-era family and the compiled engine's family of every
+    // owned store: wipe removes whichever a profile holds.
+    let database_members: Vec<PathBuf> = [
+        (profile.clone(), StoreFile::Profile),
+        (profile.clone(), StoreFile::ProfileSessions),
+        (profile.clone(), StoreFile::ProfileMemory),
+        (profile.join("projects/orphan-project"), StoreFile::Project),
+        (
+            profile.join("projects/orphan-project"),
+            StoreFile::ProjectSessions,
+        ),
+        (profile.join("stores/legacy-orphan"), StoreFile::Project),
+        (
+            profile.join(format!("remote/nodes/{}", "a".repeat(64))),
+            StoreFile::RemoteNode,
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(directory, store)| {
+        store
+            .legacy_names()
+            .iter()
+            .chain(store.family_names())
+            .map(move |name| directory.join(name))
+    })
+    .collect();
+    for member in &database_members {
+        std::fs::create_dir_all(member.parent().unwrap()).unwrap();
+        std::fs::write(member, b"not a compatible SQLite schema").unwrap();
     }
     let grafeo_paths = [
         profile.join("user-sessions.grafeo"),
@@ -2413,15 +2419,8 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
             "wipe --all warning omitted {named_state:?}\nstderr:\n{stderr}"
         );
     }
-    for database in &database_paths {
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let mut member = database.as_os_str().to_os_string();
-            member.push(suffix);
-            assert_namespace_absent(
-                &PathBuf::from(member),
-                "wipe --all left a database family member",
-            );
-        }
+    for member in &database_members {
+        assert_namespace_absent(member, "wipe --all left a database family member");
     }
     for removed_root in ["projects", "stores", "remote"] {
         assert_namespace_absent(
@@ -3580,8 +3579,13 @@ fn storage_report_prints_registered_store_size_and_unregistered_backlog() {
         registered_root.join(tracedecay_store::StoreFile::Project.file_name()),
     )
     .unwrap();
+    // Both fixtures close idle: every frame checkpointed, as their owner
+    // leaves them.
     store_db
-        .execute_batch("CREATE TABLE fixture (id INTEGER PRIMARY KEY);")
+        .execute_batch(
+            "CREATE TABLE fixture (id INTEGER PRIMARY KEY);
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
         .unwrap();
     drop(store_db);
     let global_db = tracedecay_sql::Connection::open(
@@ -3598,6 +3602,9 @@ fn storage_report_prints_registered_store_size_and_unregistered_backlog() {
             "INSERT INTO code_projects (project_id, canonical_root) VALUES ('proj_cli', ?1)",
             tracedecay_sql::params![project.path().display().to_string()],
         )
+        .unwrap();
+    global_db
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .unwrap();
     drop(global_db);
 

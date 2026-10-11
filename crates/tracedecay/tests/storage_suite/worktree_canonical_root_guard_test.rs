@@ -285,7 +285,18 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
         .expect("list project store")
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("db"))
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    [
+                        tracedecay_store::StoreFile::Project,
+                        tracedecay_store::StoreFile::ProjectSessions,
+                    ]
+                    .iter()
+                    .any(|store| store.file_name() == name)
+                })
+        })
         .unwrap_or_else(|| panic!("project store artifact under {}", store_root.display()));
     let artifact_bytes = std::fs::read(&artifact).expect("read store artifact");
     std::fs::write(&artifact, artifact_bytes).expect("bump store artifact mtime");
