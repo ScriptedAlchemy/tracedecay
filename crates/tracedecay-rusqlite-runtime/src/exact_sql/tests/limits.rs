@@ -44,13 +44,16 @@ fn query_execution_time_is_bounded() {
         )
         .unwrap_err();
 
-    assert!(matches!(
-        error,
-        ExactSqlError::Sqlite {
-            kind: ErrorKind::Interrupted,
-            ..
-        }
-    ));
+    // The native engine also bounds every statement's VM operations, so there
+    // the budget may stop the cross join before the deadline does.
+    let stopped = match tracedecay_sql::ENGINE {
+        tracedecay_sql::Engine::Sqlite => &[ErrorKind::Interrupted][..],
+        tracedecay_sql::Engine::Native => &[ErrorKind::Interrupted, ErrorKind::LimitExceeded][..],
+    };
+    assert!(
+        matches!(&error, ExactSqlError::Sqlite { kind, .. } if stopped.contains(kind)),
+        "{error:?}"
+    );
     // The interrupt must land near the execution limit, not multiples beyond.
     assert!(started.elapsed() < EXACT_SQL_EXECUTION_LIMIT * 2);
 }

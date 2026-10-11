@@ -45,6 +45,7 @@ conformance!(
     close_rolls_back_and_path_names_the_store,
     deferred_constraint_at_commit_is_a_refusal_that_rolls_back,
     busy_checkpoint_reports_the_wal_it_could_not_reset,
+    a_copied_back_wal_starts_over_on_the_next_write,
 );
 
 mod cases {
@@ -523,6 +524,30 @@ mod cases {
         let reopened = Connection::open(&path)?;
         let rows: i64 = reopened.query_row("SELECT count(*) FROM items", [], |row| row.get(0))?;
         assert_eq!(rows, 50);
+        Ok(())
+    }
+
+    /// Without a restart the WAL only grows between maintenance truncations,
+    /// however often its frames are copied back.
+    pub(super) fn a_copied_back_wal_starts_over_on_the_next_write() -> Result<()> {
+        let (_directory, _path, connection) = file_database();
+        connection.apply_engine_policy()?;
+        connection.execute_batch("PRAGMA journal_mode = WAL")?;
+        items(&connection)?;
+        let mut insert = connection.prepare("INSERT INTO items (name) VALUES (?1)")?;
+        for index in 0..20 {
+            insert.execute([format!("{index}-{}", "x".repeat(4_000))])?;
+        }
+        drop(insert);
+        let grown = connection.checkpoint(CheckpointMode::Noop)?.log_frames;
+        let passive = connection.checkpoint(CheckpointMode::Passive)?;
+        assert!(!passive.busy, "{passive:?}");
+        connection.execute("INSERT INTO items (name) VALUES ('next')", [])?;
+        let next = connection.checkpoint(CheckpointMode::Noop)?.log_frames;
+        assert!(
+            next < grown,
+            "the WAL kept growing after every frame was copied back: {grown} then {next}"
+        );
         Ok(())
     }
 

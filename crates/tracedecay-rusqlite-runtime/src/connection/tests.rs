@@ -53,7 +53,7 @@ fn writer_mode_applies_wal_integrity_and_write_policy() {
         .execute("INSERT INTO items VALUES (2)", [])
         .expect("ordinary writer DML");
     connection
-        .query_row("PRAGMA wal_checkpoint(NOOP)", [], |_| Ok(()))
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))
         .expect("writer-owned checkpoint observation remains authorized");
     assert!(
         connection

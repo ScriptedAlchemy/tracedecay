@@ -940,6 +940,41 @@ impl ConnectionControl for Connection {
             CheckpointMode::Restart => "RESTART",
             CheckpointMode::Truncate => "TRUNCATE",
         };
+        let outcome = self.run_checkpoint(mode)?;
+        // SQLite's next writer starts the WAL over once every frame is copied
+        // back. The engine ties that restart to its automatic checkpoint, which
+        // every connection disables, so the checkpoint lane restarts the log
+        // here. A reader still using the WAL keeps it: the restart reports busy
+        // and the next checkpoint tries again.
+        if matches!(mode, "PASSIVE" | "FULL")
+            && !outcome.busy
+            && outcome.log_frames > 0
+            && outcome.checkpointed_frames == outcome.log_frames
+        {
+            self.run_checkpoint("RESTART")?;
+        }
+        Ok(outcome)
+    }
+
+    fn page_stats(&self) -> Result<PageStats> {
+        let pragma = |name: &str| {
+            self.pragma_query_value(None, name, |row| row.get::<_, i64>(0))
+                .map(i64::unsigned_abs)
+        };
+        Ok(PageStats {
+            page_size: pragma("page_size")?,
+            page_count: pragma("page_count")?,
+            freelist_count: pragma("freelist_count")?,
+        })
+    }
+
+    fn file_has_moved(&self) -> Result<bool> {
+        Ok(self.core.database().file_has_moved()?)
+    }
+}
+
+impl Connection {
+    fn run_checkpoint(&self, mode: &str) -> Result<CheckpointOutcome> {
         let (busy, log_frames, checkpointed_frames) =
             self.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |row| {
                 Ok((
@@ -966,22 +1001,6 @@ impl ConnectionControl for Connection {
             log_frames,
             checkpointed_frames,
         })
-    }
-
-    fn page_stats(&self) -> Result<PageStats> {
-        let pragma = |name: &str| {
-            self.pragma_query_value(None, name, |row| row.get::<_, i64>(0))
-                .map(i64::unsigned_abs)
-        };
-        Ok(PageStats {
-            page_size: pragma("page_size")?,
-            page_count: pragma("page_count")?,
-            freelist_count: pragma("freelist_count")?,
-        })
-    }
-
-    fn file_has_moved(&self) -> Result<bool> {
-        Ok(self.core.database().file_has_moved()?)
     }
 }
 
