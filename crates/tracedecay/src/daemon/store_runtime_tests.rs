@@ -543,8 +543,9 @@ async fn profile_sessions_mount_uses_the_durable_profile_identity_and_profile_pi
         "profile sessions identity pin",
     )
     .expect("daemon database scope");
-    let user_sessions_path =
-        tracedecay_store::StoreFile::ProfileSessions.path(identity.profile_root());
+    let user_sessions_path = tracedecay_store::StoreFile::ProfileSessions
+        .path(identity.profile_root())
+        .into_path_buf();
 
     let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
