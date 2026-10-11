@@ -1,11 +1,10 @@
-//! The authorizer every exact SQL statement runs under.
+//! The capability and execution guard every exact SQL statement runs under.
 //!
-//! [`with_exact_sql_guard`] installs the hooks for one operation and removes
-//! them again on every exit path, so no statement outside that operation ever
-//! inherits the relaxed exact SQL authority.
+//! [`with_exact_sql_guard`] scopes both to one operation. The driver restores
+//! the connection's base capability and removes the guard on every exit path,
+//! so no statement outside that operation inherits the exact SQL authority.
 
 use std::{
-    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -13,60 +12,27 @@ use std::{
     time::Instant,
 };
 
-use rusqlite::{
-    Connection,
-    hooks::{AuthAction, Authorization},
-};
-
-use crate::sql_census::CensusCapability;
+use tracedecay_sql::{Capability, Connection, ConnectionControl, ErrorExt, ErrorKind};
 
 use super::{
-    EXACT_SQL_EXECUTION_LIMIT, EXACT_SQL_PROGRESS_INTERVAL_OPS, ExactSqlError,
-    ExactSqlWriteAuthority, ExactSqlWriteIntent, sqlite_error,
+    EXACT_SQL_EXECUTION_LIMIT, ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
+    sqlite_error,
 };
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn with_exact_sql_guard<T, F>(
+pub(super) fn with_exact_sql_guard<T, F>(
     connection: &Connection,
-    allow_savepoints: bool,
-    allow_transactions: bool,
+    capability: Capability,
+    base: Capability,
     shutdown_requested: Option<Arc<AtomicBool>>,
     execution_deadline: Option<Instant>,
     enforce_statement_limit: bool,
     repeated_authority: Option<(Arc<dyn ExactSqlWriteAuthority>, ExactSqlWriteIntent)>,
-    canonical_authorizer: for<'a> fn(rusqlite::hooks::AuthContext<'a>) -> Authorization,
-    exact_sql_writer: bool,
     operation: F,
 ) -> Result<T, ExactSqlError>
 where
     F: FnOnce() -> Result<T, ExactSqlError>,
 {
-    let denied = Arc::new(AtomicBool::new(false));
-    let hook_denied = Arc::clone(&denied);
-    connection
-        .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
-            if (!allow_transactions && matches!(context.action, AuthAction::Transaction { .. }))
-                || (!allow_savepoints && matches!(context.action, AuthAction::Savepoint { .. }))
-            {
-                hook_denied.store(true, Ordering::Release);
-                Authorization::Deny
-            } else if exact_sql_writer {
-                authorize_exact_sql_writer(context)
-            } else {
-                canonical_authorizer(context)
-            }
-        }))
-        .map_err(|error| sqlite_error("install transaction-control guard", error))?;
-    if exact_sql_writer {
-        crate::sql_census::trace(
-            connection,
-            if allow_savepoints {
-                CensusCapability::ExactSqlSavepoints
-            } else {
-                CensusCapability::ExactSql
-            },
-        );
-    }
     let deadline = if enforce_statement_limit {
         let operation_deadline = Instant::now() + EXACT_SQL_EXECUTION_LIMIT;
         Some(
@@ -79,178 +45,39 @@ where
     };
     let authority_failure = Arc::new(Mutex::new(None));
     let progress_authority_failure = Arc::clone(&authority_failure);
-    if let Err(error) = connection.progress_handler(
-        EXACT_SQL_PROGRESS_INTERVAL_OPS,
-        Some(move || {
-            if shutdown_requested
-                .as_ref()
-                .is_some_and(|shutdown| shutdown.load(Ordering::Acquire))
-                || deadline.is_some_and(|deadline| Instant::now() >= deadline)
-            {
-                return true;
-            }
-            if let Some((authority, intent)) = repeated_authority.as_ref()
-                && let Err(error) = authority.verify(*intent)
-            {
-                *progress_authority_failure
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
-                return true;
-            }
-            false
-        }),
-    ) {
-        let _ = connection.authorizer(Some(canonical_authorizer));
-        if exact_sql_writer {
-            crate::sql_census::trace(connection, CensusCapability::Writer);
+    let should_interrupt = move || {
+        if shutdown_requested
+            .as_ref()
+            .is_some_and(|shutdown| shutdown.load(Ordering::Acquire))
+            || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return true;
         }
-        return Err(sqlite_error("install execution guard", error));
-    }
-
-    let result = catch_unwind(AssertUnwindSafe(operation));
-    let clear_progress =
-        connection.progress_handler(EXACT_SQL_PROGRESS_INTERVAL_OPS, None::<fn() -> bool>);
-    let restore_authorizer = connection.authorizer(Some(canonical_authorizer));
-    if exact_sql_writer {
-        crate::sql_census::trace(connection, CensusCapability::Writer);
-    }
-    let cleanup = clear_progress
-        .map_err(|error| sqlite_error("clear execution guard", error))
-        .and_then(|()| {
-            restore_authorizer.map_err(|error| sqlite_error("restore connection authorizer", error))
-        });
-    let result = match result {
-        Ok(result) => result,
-        Err(payload) => {
-            let _ = cleanup;
-            resume_unwind(payload);
+        if let Some((authority, intent)) = repeated_authority.as_ref()
+            && let Err(error) = authority.verify(*intent)
+        {
+            *progress_authority_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+            return true;
         }
+        false
     };
-    cleanup?;
+    let guarded = connection.with_capability(capability, base, |connection| {
+        connection.guard_scope(should_interrupt, |_| operation())
+    });
     let authority_error = authority_failure
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
-    if let Some(error) = authority_error {
-        Err(error)
-    } else if denied.load(Ordering::Acquire) {
-        Err(ExactSqlError::TransactionControlDenied)
-    } else {
-        result
-    }
-}
-
-/// Authorizes the exact SQL writer channel.
-///
-/// This channel legitimately builds durable schema, so ordinary `CREATE
-/// TABLE` / `CREATE TRIGGER` is allowed. Temporary **tables and indexes** are
-/// allowed for the same reason and with strictly less reach: a temp object
-/// lives in the connection's own `temp` schema, cannot alias or mutate
-/// anything in `main`, and disappears with the connection. Denying them while
-/// permitting durable DDL inverted the blast radius, and it left derived
-/// per-connection scratch, the projection output-state cache, unable to
-/// exist at all.
-///
-/// Temporary **triggers and views** stay denied. A temp trigger can fire on a
-/// durable table and mutate it outside the invariant trigger contract, which
-/// is exactly the authority this channel must not hand out; temp views have no
-/// caller. `ATTACH`/`DETACH`, `load_extension`, unrecognized actions (SQLite
-/// reports a parameter-bound `ATTACH` filename as one), and non-allowlisted
-/// pragmas are denied unconditionally.
-fn authorize_exact_sql_writer(context: rusqlite::hooks::AuthContext<'_>) -> Authorization {
-    if matches!(
-        context.action,
-        AuthAction::Attach { .. }
-            | AuthAction::Detach { .. }
-            | AuthAction::CreateTempTrigger { .. }
-            | AuthAction::CreateTempView { .. }
-            | AuthAction::DropTempTrigger { .. }
-            | AuthAction::DropTempView { .. }
-            | AuthAction::Unknown { .. }
-    ) || matches!(
-        context.action,
-        AuthAction::Function { function_name }
-            if function_name.eq_ignore_ascii_case("load_extension")
-    ) || matches!(
-        context.action,
-        AuthAction::Pragma {
-            pragma_name,
-            pragma_value,
+    match guarded {
+        Err(error) if error.kind() == ErrorKind::TransactionControlDenied => {
+            Err(authority_error.unwrap_or(ExactSqlError::TransactionControlDenied))
         }
-        if !is_allowed_exact_sql_pragma(pragma_name, pragma_value)
-    ) {
-        Authorization::Deny
-    } else {
-        Authorization::Allow
+        Err(error) => Err(sqlite_error("exact SQL guard scope", error)),
+        Ok(result) => match authority_error {
+            Some(error) => Err(error),
+            None => result,
+        },
     }
-}
-
-fn is_allowed_exact_sql_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
-    is_exact_sql_read_pragma(pragma_name, pragma_value)
-        || (pragma_value.is_none() && pragma_name.eq_ignore_ascii_case("shrink_memory"))
-        || pragma_value.is_some_and(|value| {
-            (pragma_name.eq_ignore_ascii_case("foreign_keys")
-                && (value.eq_ignore_ascii_case("on") || value == "1"))
-                || (pragma_name.eq_ignore_ascii_case("defer_foreign_keys")
-                    && (value.eq_ignore_ascii_case("on") || value == "1"))
-                || (pragma_name.eq_ignore_ascii_case("busy_timeout")
-                    && value.parse::<u32>().is_ok())
-                || (pragma_name.eq_ignore_ascii_case("secure_delete")
-                    && (value.eq_ignore_ascii_case("on") || value == "1"))
-                || (pragma_name.eq_ignore_ascii_case("user_version")
-                    && value.parse::<u32>().is_ok())
-                || (pragma_name.eq_ignore_ascii_case("wal_autocheckpoint")
-                    && value.parse::<u32>().is_ok())
-        })
-}
-
-fn is_exact_sql_read_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
-    const ARGUMENT_SAFE: &[&str] = &[
-        "foreign_key_check",
-        "foreign_key_list",
-        "index_info",
-        "index_list",
-        "index_xinfo",
-        "integrity_check",
-        "quick_check",
-        "table_info",
-        "table_list",
-        "table_xinfo",
-    ];
-    const NO_ARGUMENT_ONLY: &[&str] = &[
-        "application_id",
-        "auto_vacuum",
-        "busy_timeout",
-        "cache_size",
-        "collation_list",
-        "compile_options",
-        "data_version",
-        "database_list",
-        "defer_foreign_keys",
-        "foreign_keys",
-        "freelist_count",
-        "function_list",
-        "journal_mode",
-        "mmap_size",
-        "module_list",
-        "page_count",
-        "page_size",
-        "pragma_list",
-        "query_only",
-        "recursive_triggers",
-        "schema_version",
-        "secure_delete",
-        "synchronous",
-        "temp_store",
-        "user_version",
-        "wal_autocheckpoint",
-    ];
-
-    ARGUMENT_SAFE
-        .iter()
-        .any(|candidate| pragma_name.eq_ignore_ascii_case(candidate))
-        || (pragma_value.is_none()
-            && NO_ARGUMENT_ONLY
-                .iter()
-                .any(|candidate| pragma_name.eq_ignore_ascii_case(candidate)))
 }

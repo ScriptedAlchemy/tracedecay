@@ -1,5 +1,18 @@
 //! Bundled SQLite storage runtime.
 
+#[cfg(feature = "test-helpers")]
+pub mod failpoint;
+#[cfg(feature = "test-helpers")]
+macro_rules! failpoint {
+    ($name:literal) => {
+        crate::failpoint::hit($name)
+    };
+}
+#[cfg(not(feature = "test-helpers"))]
+macro_rules! failpoint {
+    ($name:literal) => {{}};
+}
+
 mod admission;
 mod authority;
 mod checkpoint;
@@ -26,7 +39,6 @@ pub mod reader;
 pub mod remote;
 pub mod repository;
 pub mod runtime;
-mod sql_census;
 mod telemetry;
 #[cfg(test)]
 mod test_support;

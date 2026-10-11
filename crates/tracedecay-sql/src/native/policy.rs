@@ -142,7 +142,7 @@ pub(crate) fn is_ddl(command: &Cmd) -> bool {
 /// capability, mirroring the SQLite arm's authorizers. `EXPLAIN` is judged by
 /// the statement it explains.
 pub(crate) fn authorize(command: &Cmd, capability: Capability) -> Result<()> {
-    use Capability::{Maintenance, Reader, Writer};
+    use Capability::{ExactSql, ExactSqlRead, Maintenance, Reader, Writer};
 
     let temp = |name: &QualifiedName| is_temp(name.db_name.as_ref());
     let allowed = match statement(command) {
@@ -152,23 +152,29 @@ pub(crate) fn authorize(command: &Cmd, capability: Capability) -> Result<()> {
         }
         Stmt::Begin { .. }
         | Stmt::Commit { .. }
-        | Stmt::Rollback { .. }
-        | Stmt::Savepoint { .. }
-        | Stmt::Release { .. } => true,
-        Stmt::Insert { .. } | Stmt::Delete { .. } | Stmt::Update(_) => capability != Reader,
+        | Stmt::Rollback {
+            savepoint_name: None,
+            ..
+        } => return authorize_transaction_control(capability, false),
+        Stmt::Rollback { .. } | Stmt::Savepoint { .. } | Stmt::Release { .. } => {
+            return authorize_transaction_control(capability, true);
+        }
+        Stmt::Insert { .. } | Stmt::Delete { .. } | Stmt::Update(_) | Stmt::Reindex { .. } => {
+            !read_only(capability)
+        }
         Stmt::CreateTable {
             temporary,
             tbl_name,
             ..
         } => match capability {
-            Reader => false,
+            Reader | ExactSqlRead => false,
             Writer => !temporary && !temp(tbl_name),
-            Maintenance => true,
+            ExactSql { .. } | Maintenance => true,
         },
         Stmt::CreateIndex { idx_name, .. } => match capability {
-            Reader => false,
+            Reader | ExactSqlRead => false,
             Writer => !temp(idx_name),
-            Maintenance => true,
+            ExactSql { .. } | Maintenance => true,
         },
         // A temporary trigger can fire on a durable table outside the
         // canonical trigger contract, so no capability may create one.
@@ -194,7 +200,6 @@ pub(crate) fn authorize(command: &Cmd, capability: Capability) -> Result<()> {
         | Stmt::DropIndex { .. }
         | Stmt::DropTable { .. }
         | Stmt::Optimize { .. } => durable_schema(capability),
-        Stmt::Reindex { .. } => capability != Reader,
         // Attachment, in-place VACUUM and the engine's non-SQLite object
         // kinds have no owned-store caller under any capability.
         Stmt::Attach { .. }
@@ -221,8 +226,24 @@ pub(crate) fn authorize(command: &Cmd, capability: Capability) -> Result<()> {
 /// bootstrap's `CREATE TABLE`/`CREATE INDEX`.
 fn durable_schema(capability: Capability) -> bool {
     match capability {
-        Capability::Reader | Capability::Writer => false,
-        Capability::Maintenance => true,
+        Capability::Reader | Capability::ExactSqlRead | Capability::Writer => false,
+        Capability::ExactSql { .. } | Capability::Maintenance => true,
+    }
+}
+
+fn read_only(capability: Capability) -> bool {
+    matches!(capability, Capability::Reader | Capability::ExactSqlRead)
+}
+
+/// Caller-supplied SQL never begins or ends a transaction: the runtime owns
+/// it. Savepoints are allowed only under a transaction lease.
+fn authorize_transaction_control(capability: Capability, savepoint: bool) -> Result<()> {
+    match capability {
+        Capability::ExactSql { savepoints: true } if savepoint => Ok(()),
+        Capability::ExactSqlRead | Capability::ExactSql { .. } => {
+            Err(Error::TransactionControlDenied)
+        }
+        Capability::Reader | Capability::Writer | Capability::Maintenance => Ok(()),
     }
 }
 
@@ -259,9 +280,22 @@ fn authorize_pragma(name: &str, body: Option<&PragmaBody>, capability: Capabilit
             "native Turso does not implement secure deletion".to_owned(),
         ));
     }
-    let allowed = match body {
-        None => true,
-        Some(PragmaBody::Equals(_) | PragmaBody::Call(_)) => {
+    let value = body.map(|(PragmaBody::Equals(value) | PragmaBody::Call(value))| {
+        value
+            .to_string()
+            .trim_matches(|c| c == '\'' || c == '"')
+            .to_owned()
+    });
+    // Commit durability is the driver's: every connection fsyncs on commit.
+    if is(&"synchronous") && value.is_some() {
+        return Err(Error::Denied(
+            "the native driver fixes synchronous at FULL".to_owned(),
+        ));
+    }
+    let allowed = match (capability, value.as_deref()) {
+        (Capability::ExactSql { .. }, value) => is_allowed_exact_sql_pragma(name, value),
+        (_, None) => true,
+        (_, Some(_)) => {
             capability == Capability::Maintenance
                 || INTROSPECTION.iter().any(is)
                 || (capability == Capability::Writer && is_safe_writer_pragma(name))
@@ -280,4 +314,65 @@ fn is_safe_writer_pragma(name: &str) -> bool {
     ["busy_timeout", "wal_autocheckpoint", "wal_checkpoint"]
         .iter()
         .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+/// The SQLite arm's exact SQL pragma allowlist (`sqlite.rs`).
+fn is_allowed_exact_sql_pragma(name: &str, value: Option<&str>) -> bool {
+    const ARGUMENT_SAFE: &[&str] = &[
+        "foreign_key_check",
+        "foreign_key_list",
+        "index_info",
+        "index_list",
+        "index_xinfo",
+        "integrity_check",
+        "quick_check",
+        "table_info",
+        "table_list",
+        "table_xinfo",
+    ];
+    const NO_ARGUMENT_ONLY: &[&str] = &[
+        "application_id",
+        "auto_vacuum",
+        "busy_timeout",
+        "cache_size",
+        "collation_list",
+        "compile_options",
+        "data_version",
+        "database_list",
+        "defer_foreign_keys",
+        "foreign_keys",
+        "freelist_count",
+        "function_list",
+        "journal_mode",
+        "mmap_size",
+        "module_list",
+        "page_count",
+        "page_size",
+        "pragma_list",
+        "query_only",
+        "recursive_triggers",
+        "schema_version",
+        "secure_delete",
+        "synchronous",
+        "temp_store",
+        "user_version",
+        "wal_autocheckpoint",
+    ];
+    const SET_FLAG: &[&str] = &["foreign_keys", "defer_foreign_keys"];
+    const SET_COUNT: &[&str] = &[
+        "busy_timeout",
+        "incremental_vacuum",
+        "user_version",
+        "wal_autocheckpoint",
+    ];
+    let is = |candidate: &&str| name.eq_ignore_ascii_case(candidate);
+    match value {
+        _ if ARGUMENT_SAFE.iter().any(is) => true,
+        None => NO_ARGUMENT_ONLY.iter().any(is) || is(&"shrink_memory"),
+        Some(value) => {
+            (is(&"auto_vacuum") && (value.eq_ignore_ascii_case("incremental") || value == "2"))
+                || (SET_FLAG.iter().any(is) && (value.eq_ignore_ascii_case("on") || value == "1"))
+                || (SET_COUNT.iter().any(is) && value.parse::<u32>().is_ok())
+        }
+    }
 }

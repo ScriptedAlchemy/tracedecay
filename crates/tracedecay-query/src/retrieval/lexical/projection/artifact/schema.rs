@@ -1,5 +1,5 @@
-use rusqlite::{Transaction, params};
 use sha2::{Digest, Sha256};
+use tracedecay_sql::{Transaction, params};
 
 use super::super::LexicalFieldV1;
 use super::prepared::PreparedCodeLexicalArtifactPageV1;
@@ -43,11 +43,13 @@ use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 /// whose rows name each entry so a carried dictionary retires exactly the
 /// entries no page names. Every other revision is refused as incompatible
 /// and rebuilt from the sealed generation. There is no reader for an older
-/// layout. The digest domain is `tracedecay.code-lexical-artifact.v31`.
+/// layout. Every table is an ordinary rowid table with NOT NULL keys, and
+/// no trigger calls a registered function, so the file opens on the native
+/// engine. The digest domain is `tracedecay.code-lexical-artifact.v32`.
 /// Callers take the revision from this constant.
-pub const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 31;
+pub const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 32;
 
-const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v31\0";
+const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v32\0";
 
 const FIELD_SYMBOL_NAME: i64 = 1;
 const FIELD_QUALIFIED_NAME: i64 = 2;
@@ -268,8 +270,8 @@ mod tests {
         field_from_code, require_served_revision,
     };
     use crate::retrieval::lexical::LexicalFieldV1;
-    use rusqlite::Connection;
     use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+    use tracedecay_sql::Connection;
 
     struct ActiveControl;
 

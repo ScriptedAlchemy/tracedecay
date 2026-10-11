@@ -38,7 +38,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-sql__dev",
+    name = "tracedecay-sql__+test-helpers__dev",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_sql",
@@ -51,7 +51,7 @@ rust_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
     rustc_flags = perf_rustc_flags(1) + select({":engine_native": ['--cfg=td_engine="native"'], "//conditions:default": []}),
-    crate_features = [],
+    crate_features = ["test-helpers"],
 )
 
 rust_test(
@@ -60,11 +60,11 @@ rust_test(
     crate_root = "tests/conformance.rs",
     edition = crate_edition(),
     version = "0.1.0",
-    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-sql:tracedecay-sql__dev"],
+    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-sql:tracedecay-sql__+test-helpers__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(1) + select({":engine_native": ['--cfg=td_engine="native"'], "//conditions:default": []}),
-    crate_features = [],
+    crate_features = ["test-helpers"],
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
     data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
@@ -86,8 +86,8 @@ rust_test(
 
 rust_test(
     name = "unit_test",
-    crate = ":tracedecay-sql__dev",
-    crate_features = [],
+    crate = ":tracedecay-sql__+test-helpers__dev",
+    crate_features = ["test-helpers"],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + [],

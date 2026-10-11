@@ -14,6 +14,12 @@ pub enum Error {
     Unsupported(String),
     QueryLimitExceeded,
     RequestLimitExceeded,
+    /// A statement ran past the connection's VM-operation budget.
+    OperationLimitExceeded,
+    /// Transaction control outside the capability's lease.
+    TransactionControlDenied,
+    /// The file is not a TraceDecay native store; the engine never saw it.
+    ForeignFormat,
 }
 
 impl fmt::Display for Error {
@@ -32,6 +38,13 @@ impl fmt::Display for Error {
                 formatter.write_str("native query materialization limit exceeded")
             }
             Self::RequestLimitExceeded => formatter.write_str("native SQL request limit exceeded"),
+            Self::OperationLimitExceeded => {
+                formatter.write_str("native statement exceeded its VM-operation budget")
+            }
+            Self::TransactionControlDenied => formatter
+                .write_str("native SQL denied: transaction control is outside this capability"),
+            Self::ForeignFormat => formatter
+                .write_str("file is not a TraceDecay native store (header or application id)"),
             Self::Unsupported(message) => {
                 write!(formatter, "unsupported native operation: {message}")
             }
@@ -104,6 +117,9 @@ impl Error {
                 | Self::Denied(_)
                 | Self::Unsupported(_)
                 | Self::RequestLimitExceeded
+                | Self::OperationLimitExceeded
+                | Self::TransactionControlDenied
+                | Self::ForeignFormat
                 | Self::Engine(
                     turso_core::LimboError::Constraint(_)
                         | turso_core::LimboError::ForeignKeyConstraint(_)

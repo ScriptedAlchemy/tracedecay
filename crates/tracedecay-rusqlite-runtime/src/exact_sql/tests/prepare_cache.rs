@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use rusqlite::{Connection, StatementStatus};
+use tracedecay_sql::{Connection, StatementControl};
 
 use super::*;
 use crate::runtime_ledger::RUNTIME_LEDGER_SCHEMA;
@@ -11,7 +11,7 @@ const ITERATIONS: usize = 256;
 struct PrepareShare {
     prepare_ns: u128,
     execute_ns: u128,
-    reprepares: i32,
+    reprepares: u64,
 }
 
 impl PrepareShare {
@@ -56,7 +56,7 @@ fn measure_before(connection: &Connection) -> PrepareShare {
         let payload: String = statement.query_row([1_i64], |row| row.get(1)).unwrap();
         execute_ns += started.elapsed().as_nanos();
         assert_eq!(payload, "row");
-        reprepares += statement.reset_status(StatementStatus::RePrepare);
+        reprepares += statement.take_counters().reprepares;
     }
     PrepareShare {
         prepare_ns,
@@ -77,7 +77,7 @@ fn measure_after(connection: &Connection) -> PrepareShare {
         let payload: String = statement.query_row([1_i64], |row| row.get(1)).unwrap();
         execute_ns += started.elapsed().as_nanos();
         assert_eq!(payload, "row");
-        reprepares += statement.reset_status(StatementStatus::RePrepare);
+        reprepares += statement.take_counters().reprepares;
     }
     PrepareShare {
         prepare_ns,
@@ -145,7 +145,7 @@ fn intervening_ddl_reprepares_a_cached_query() {
     let payload: String = statement.query_row([1_i64], |row| row.get(1)).unwrap();
     assert_eq!(payload, "row");
     assert!(
-        statement.reset_status(StatementStatus::RePrepare) > 0,
+        statement.take_counters().reprepares > 0,
         "CREATE TABLE on the same connection must reprepare the cached query"
     );
 }

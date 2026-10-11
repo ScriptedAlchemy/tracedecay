@@ -20,10 +20,14 @@ use super::{
 };
 pub use super::{InterruptHandle, TransactionBehavior};
 use crate::{
-    Capability, CheckpointMode, CheckpointOutcome, ConnectionControl, Engine, ErrorExt, ErrorKind,
-    PageStats,
+    Capability, CheckpointMode, CheckpointOutcome, ConnectionControl, Engine, EnginePolicy,
+    ErrorExt, ErrorKind, PageStats, StatementControl, StatementCounters, TransactionControl,
 };
 use types::{FromSql, FromSqlError, ToSqlOutput, Type, Value, ValueRef};
+
+/// SQLite's `SQLITE_LIMIT_VDBE_OP` on the SQLite arm, as a per-statement
+/// VM-operation budget.
+const VM_OP_BUDGET: u64 = 25_000_000;
 
 pub const ENGINE: Engine = Engine::Native;
 
@@ -129,6 +133,8 @@ impl From<super::Error> for Error {
             | super::Error::DeadlineExceeded
             | super::Error::Authority(_) => ErrorKind::Interrupted,
             super::Error::Denied(_) => ErrorKind::Denied,
+            super::Error::TransactionControlDenied => ErrorKind::TransactionControlDenied,
+            super::Error::ForeignFormat => ErrorKind::ForeignFormat,
             super::Error::Unsupported(_) => ErrorKind::Unsupported,
             super::Error::Engine(engine) => match engine {
                 LimboError::Constraint(_)
@@ -140,12 +146,16 @@ impl From<super::Error> for Error {
                 LimboError::Interrupt => ErrorKind::Interrupted,
                 LimboError::ReadOnly => ErrorKind::ReadOnly,
                 LimboError::SchemaUpdated | LimboError::SchemaConflict => ErrorKind::Schema,
-                LimboError::NotADB => ErrorKind::ForeignFormat,
+                // The driver's preflight already refused foreign files, so an
+                // unreadable header here is damage.
+                LimboError::Corrupt(_) | LimboError::NotADB => ErrorKind::Corrupt,
+                LimboError::TooBig => ErrorKind::LimitExceeded,
                 _ => ErrorKind::Other,
             },
-            super::Error::InvalidOperation(_)
-            | super::Error::QueryLimitExceeded
-            | super::Error::RequestLimitExceeded => ErrorKind::Other,
+            super::Error::QueryLimitExceeded
+            | super::Error::RequestLimitExceeded
+            | super::Error::OperationLimitExceeded => ErrorKind::LimitExceeded,
+            super::Error::InvalidOperation(_) => ErrorKind::Other,
         };
         Self::Engine {
             kind,
@@ -157,6 +167,22 @@ impl From<super::Error> for Error {
 impl From<turso_core::LimboError> for Error {
     fn from(error: turso_core::LimboError) -> Self {
         super::Error::from(error).into()
+    }
+}
+
+/// rusqlite's column for a conversion that happened outside a row read.
+const UNKNOWN_COLUMN: usize = usize::MAX;
+
+/// Mirrors rusqlite, so `?` on a `FromSql` result works in row mappers.
+impl From<FromSqlError> for Error {
+    fn from(error: FromSqlError) -> Self {
+        match error {
+            FromSqlError::OutOfRange(value) => Self::IntegralValueOutOfRange(UNKNOWN_COLUMN, value),
+            FromSqlError::Other(source) => {
+                Self::FromSqlConversionFailure(UNKNOWN_COLUMN, Type::Null, source)
+            }
+            error => Self::FromSqlConversionFailure(UNKNOWN_COLUMN, Type::Null, Box::new(error)),
+        }
     }
 }
 
@@ -698,19 +724,15 @@ impl Connection {
     }
 
     pub fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
-        Ok(Statement {
-            connection: self,
-            prepared: Some(self.core.prepare(sql, false)?),
-            cached: false,
-        })
+        Ok(Statement::new(self, self.core.prepare(sql, false)?, false))
     }
 
     pub fn prepare_cached(&self, sql: &str) -> Result<CachedStatement<'_>> {
-        Ok(CachedStatement(Statement {
-            connection: self,
-            prepared: Some(self.core.prepare(sql, true)?),
-            cached: true,
-        }))
+        Ok(CachedStatement(Statement::new(
+            self,
+            self.core.prepare(sql, true)?,
+            true,
+        )))
     }
 
     pub fn transaction(&mut self) -> Result<Transaction<'_>> {
@@ -804,6 +826,41 @@ fn schema_prefix(schema: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
+fn frames(count: u64) -> Result<i64> {
+    i64::try_from(count).map_err(|error| Error::ToSqlConversionFailure(Box::new(error)))
+}
+
+/// Runs `operation` with `should_interrupt` polled by the connection's
+/// progress handler, removing the poll on every exit path.
+fn polling_scope<T>(
+    core: &super::Connection,
+    should_interrupt: impl FnMut() -> bool + Send + 'static,
+    operation: impl FnOnce() -> T,
+) -> Result<T> {
+    let poll = Mutex::new(should_interrupt);
+    core.push_guard(ExecutionGuard::polling(Arc::new(move || {
+        (poll.lock().unwrap_or_else(PoisonError::into_inner))()
+    })));
+    let result = catch_unwind(AssertUnwindSafe(operation));
+    core.pop_guard();
+    match result {
+        Ok(value) => Ok(value),
+        Err(payload) => resume_unwind(payload),
+    }
+}
+
+impl EnginePolicy for Connection {
+    /// Commit durability needs no setting here: every native connection
+    /// fsyncs on commit from the moment it opens, and policy denies lowering
+    /// it.
+    fn apply_engine_policy(&self) -> Result<()> {
+        // The runtime's own queue and deadline decide how long anything waits.
+        self.core.set_busy_timeout(std::time::Duration::ZERO);
+        self.core.set_op_budget(Some(VM_OP_BUDGET));
+        Ok(())
+    }
+}
+
 impl ConnectionControl for Connection {
     fn set_capability(&self, capability: Capability) -> Result<()> {
         self.core.set_capability(capability);
@@ -816,14 +873,19 @@ impl ConnectionControl for Connection {
         base: Capability,
         operation: impl FnOnce(&Self) -> Result<T>,
     ) -> Result<T> {
+        self.core.take_transaction_control_denied();
         self.core.set_capability(scoped);
         let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
         self.core.clear_cache();
         self.core.set_capability(base);
-        match result {
+        let result = match result {
             Ok(result) => result,
             Err(payload) => resume_unwind(payload),
+        };
+        if self.core.take_transaction_control_denied() {
+            return Err(super::Error::TransactionControlDenied.into());
         }
+        result
     }
 
     fn guard_scope<T>(
@@ -831,33 +893,34 @@ impl ConnectionControl for Connection {
         should_interrupt: impl FnMut() -> bool + Send + 'static,
         operation: impl FnOnce(&Self) -> T,
     ) -> Result<T> {
-        let poll = Mutex::new(should_interrupt);
-        self.core
-            .push_guard(ExecutionGuard::polling(Arc::new(move || {
-                (poll.lock().unwrap_or_else(PoisonError::into_inner))()
-            })));
-        let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
-        self.core.pop_guard();
-        match result {
-            Ok(value) => Ok(value),
-            Err(payload) => resume_unwind(payload),
-        }
+        polling_scope(&self.core, should_interrupt, || operation(self))
     }
 
     fn checkpoint(&self, mode: CheckpointMode) -> Result<CheckpointOutcome> {
         let mode = match mode {
+            CheckpointMode::Noop => {
+                let (log, checkpointed) = self.core.wal_frames()?;
+                return Ok(CheckpointOutcome {
+                    busy: false,
+                    log_frames: frames(log)?,
+                    checkpointed_frames: frames(checkpointed)?,
+                });
+            }
             CheckpointMode::Passive => "PASSIVE",
             CheckpointMode::Full => "FULL",
             CheckpointMode::Restart => "RESTART",
             CheckpointMode::Truncate => "TRUNCATE",
         };
-        self.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |row| {
+        let outcome = self.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |row| {
             Ok(CheckpointOutcome {
                 busy: row.get::<_, i64>(0)? != 0,
                 log_frames: row.get(1)?,
                 checkpointed_frames: row.get(2)?,
             })
-        })
+        })?;
+        self.core
+            .record_checkpoint(outcome.checkpointed_frames.max(0).unsigned_abs())?;
+        Ok(outcome)
     }
 
     fn page_stats(&self) -> Result<PageStats> {
@@ -933,6 +996,17 @@ impl Deref for Transaction<'_> {
     type Target = Connection;
     fn deref(&self) -> &Connection {
         self.connection
+    }
+}
+
+impl TransactionControl for Transaction<'_> {
+    fn guard_scope_mut<T>(
+        &mut self,
+        should_interrupt: impl FnMut() -> bool + Send + 'static,
+        operation: impl FnOnce(&mut Self) -> T,
+    ) -> Result<T> {
+        let connection = self.connection;
+        polling_scope(&connection.core, should_interrupt, || operation(self))
     }
 }
 
@@ -1049,9 +1123,32 @@ pub struct Statement<'c> {
     connection: &'c Connection,
     prepared: Option<Prepared>,
     cached: bool,
+    /// The engine's lifetime counters when last taken. A cached program
+    /// keeps counting across uses, so only the difference is this caller's.
+    counted: Cell<StatementCounters>,
 }
 
 impl<'c> Statement<'c> {
+    fn new(connection: &'c Connection, prepared: Prepared, cached: bool) -> Self {
+        let counted = Cell::new(engine_counters(&prepared));
+        Self {
+            connection,
+            prepared: Some(prepared),
+            cached,
+            counted,
+        }
+    }
+
+    fn prepared(&self) -> &Prepared {
+        self.prepared
+            .as_ref()
+            .expect("a statement holds its program until dropped")
+    }
+
+    pub fn column_count(&self) -> usize {
+        self.prepared().statement.num_columns()
+    }
+
     fn start<P: Params>(&mut self, params: P) -> Result<&mut Prepared> {
         let values = params.bind_values()?;
         let core = &self.connection.core;
@@ -1119,6 +1216,30 @@ impl<'c> Statement<'c> {
 
     pub fn exists<P: Params>(&mut self, params: P) -> Result<bool> {
         Ok(self.query(params)?.next()?.is_some())
+    }
+}
+
+fn engine_counters(prepared: &Prepared) -> StatementCounters {
+    use turso_core::StatementStatusCounter as Counter;
+    let count = |counter| prepared.statement.stmt_status(counter);
+    StatementCounters {
+        vm_steps: count(Counter::VmStep),
+        fullscan_steps: count(Counter::FullscanStep),
+        sort_steps: count(Counter::Sort),
+        reprepares: count(Counter::Reprepare),
+    }
+}
+
+impl StatementControl for Statement<'_> {
+    fn take_counters(&self) -> StatementCounters {
+        let now = engine_counters(self.prepared());
+        let before = self.counted.replace(now);
+        StatementCounters {
+            vm_steps: now.vm_steps.saturating_sub(before.vm_steps),
+            fullscan_steps: now.fullscan_steps.saturating_sub(before.fullscan_steps),
+            sort_steps: now.sort_steps.saturating_sub(before.sort_steps),
+            reprepares: now.reprepares.saturating_sub(before.reprepares),
+        }
     }
 }
 

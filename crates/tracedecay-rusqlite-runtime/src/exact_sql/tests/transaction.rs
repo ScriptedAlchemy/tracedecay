@@ -7,6 +7,16 @@ use std::{
     time::Instant,
 };
 
+/// The first busy error a retry saw; the retry must surface this one.
+#[derive(Debug, PartialEq)]
+struct OriginalLock;
+
+impl ErrorExt for OriginalLock {
+    fn kind(&self) -> ErrorKind {
+        ErrorKind::Busy
+    }
+}
+
 fn busy_begin_connections() -> (TempDir, Connection, Connection) {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("busy-begin.sqlite3");
@@ -72,14 +82,7 @@ fn immediate_begin_busy_retry_is_bounded_and_honors_shutdown() {
     .unwrap_err();
     let elapsed = started.elapsed();
 
-    assert!(matches!(
-        error,
-        rusqlite::Error::SqliteFailure(error, _)
-            if matches!(
-                error.code,
-                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-            )
-    ));
+    assert_eq!(error.kind(), ErrorKind::Busy, "{error}");
     // Must not borrow the transaction idle lease (2s in tests / 30s in prod).
     assert!(
         elapsed < EXACT_SQL_TRANSACTION_IDLE_LIMIT / 2,
@@ -99,14 +102,7 @@ fn immediate_begin_busy_retry_is_bounded_and_honors_shutdown() {
         || false,
     )
     .unwrap_err();
-    assert!(matches!(
-        error,
-        rusqlite::Error::SqliteFailure(error, _)
-            if matches!(
-                error.code,
-                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-            )
-    ));
+    assert_eq!(error.kind(), ErrorKind::Busy, "{error}");
     assert!(
         started.elapsed() < Duration::from_millis(50),
         "shutdown-aware busy acquire stalled for {:?}",
@@ -127,10 +123,7 @@ fn immediate_begin_busy_retry_honors_cancellation() {
             if attempts == 1 {
                 cancelled.store(true, Ordering::Release);
             }
-            Err::<(), _>(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                Some("original database lock".to_owned()),
-            ))
+            Err::<(), _>(OriginalLock)
         },
         &shutdown,
         || cancelled.load(Ordering::Acquire),
@@ -139,12 +132,7 @@ fn immediate_begin_busy_retry_honors_cancellation() {
 
     assert_eq!(attempts, 1);
     assert!(started.elapsed() < Duration::from_millis(50));
-    assert!(matches!(
-        error,
-        rusqlite::Error::SqliteFailure(error, Some(message))
-            if error.code == rusqlite::ErrorCode::DatabaseBusy
-                && message == "original database lock"
-    ));
+    assert_eq!(error, OriginalLock);
 }
 
 #[test]
@@ -157,10 +145,7 @@ fn immediate_begin_shutdown_after_busy_never_publishes_late_success() {
             attempts += 1;
             if attempts == 1 {
                 shutdown.store(true, Ordering::Release);
-                Err(rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                    Some("original database lock".to_owned()),
-                ))
+                Err(OriginalLock)
             } else {
                 Ok(())
             }
@@ -171,12 +156,7 @@ fn immediate_begin_shutdown_after_busy_never_publishes_late_success() {
     .unwrap_err();
 
     assert_eq!(attempts, 1);
-    assert!(matches!(
-        error,
-        rusqlite::Error::SqliteFailure(error, Some(message))
-            if error.code == rusqlite::ErrorCode::DatabaseBusy
-                && message == "original database lock"
-    ));
+    assert_eq!(error, OriginalLock);
 }
 
 #[test]
@@ -222,13 +202,7 @@ fn attach_and_detach_are_denied_on_every_exact_sql_lane() {
     ) {
         let error = result.expect_err("ATTACH/DETACH must be refused");
         assert!(
-            matches!(
-                error,
-                ExactSqlError::Sqlite {
-                    code: Some(rusqlite::ffi::SQLITE_AUTH),
-                    ..
-                }
-            ),
+            matches!(error, ExactSqlError::Sqlite { code: Some(23), .. }),
             "{lane} must deny `{sql}` at the authorizer, got {error:?}"
         );
     }
@@ -335,4 +309,79 @@ fn unpinned_batch_rejects_transaction_control_and_releases_writer() {
     channel
         .execute_batch("CREATE TABLE after_denied_begin (value INTEGER)".to_owned())
         .unwrap();
+}
+
+/// Fails if a leased commit that SQLite refuses leaves its writes behind or
+/// keeps the writer pinned: the refused COMMIT must roll the lease back.
+#[test]
+fn leased_commit_failure_rolls_back_and_releases_writer() {
+    let fixture = fixture('a', 'a');
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    channel
+        .execute_batch(
+            "CREATE TABLE leased_parent(id INTEGER PRIMARY KEY);
+             CREATE TABLE leased_child(id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL,
+                 FOREIGN KEY(parent_id) REFERENCES leased_parent(id)
+                 DEFERRABLE INITIALLY DEFERRED)"
+                .to_owned(),
+        )
+        .unwrap();
+    let transaction = channel.begin_immediate().unwrap();
+    transaction
+        .execute(statement("INSERT INTO leased_child VALUES (1, 9)", vec![]))
+        .unwrap();
+
+    let error = transaction.commit().unwrap_err();
+
+    assert!(
+        matches!(error, ExactSqlError::Sqlite { code: Some(19), .. }),
+        "{error:?}"
+    );
+    let rows = channel
+        .query(
+            statement("SELECT count(*) FROM leased_child", vec![]),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
+    channel
+        .execute(statement("INSERT INTO leased_parent VALUES (9)", vec![]))
+        .unwrap();
+}
+
+/// Fails if a failed rollback after a failed RETURNING write drops the write
+/// error that caused the rollback.
+#[test]
+fn rollback_failure_keeps_the_write_error() {
+    let write = ExactSqlError::Sqlite {
+        operation: "commit returning write transaction",
+        code: Some(19),
+        extended_code: Some(787),
+        message: "FOREIGN KEY constraint failed".to_owned(),
+    };
+    let rollback = ExactSqlError::Sqlite {
+        operation: "rollback write transaction",
+        code: Some(10),
+        extended_code: Some(10),
+        message: "disk I/O error".to_owned(),
+    };
+
+    let error = super::super::command::rollback_failed_after(write, rollback);
+
+    let (operation, code, message) = match error {
+        ExactSqlError::Sqlite {
+            operation,
+            code,
+            message,
+            ..
+        } => (operation, code, message),
+        other => panic!("expected the rollback failure, got {other:?}"),
+    };
+    assert_eq!(operation, "rollback write transaction");
+    assert_eq!(code, Some(10));
+    assert!(message.contains("disk I/O error"), "{message}");
+    assert!(
+        message.contains("FOREIGN KEY constraint failed"),
+        "{message}"
+    );
 }

@@ -62,7 +62,7 @@ impl ExistingReaderLocator {
     }
     pub(crate) fn verify_connection(
         &self,
-        connection: &rusqlite::Connection,
+        connection: &tracedecay_sql::Connection,
     ) -> Result<(), ReaderStartError> {
         self.opened_database.as_deref().map_or(Ok(()), |opened| {
             opened
@@ -96,7 +96,7 @@ pub enum ReaderStartError {
     StartupChannelClosed,
     OpenFailed(ConnectionPolicyError),
     ReadOnlySetupFailed(ConnectionPolicyError),
-    SchemaProbeFailed(rusqlite::Error),
+    SchemaProbeFailed(tracedecay_sql::Error),
     OpenedDatabaseIdentity(OpenedDatabaseFileError),
     OpenedDatabaseIdentityMismatch { expected: u64, actual: u64 },
 }

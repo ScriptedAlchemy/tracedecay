@@ -3,12 +3,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
 
-use rusqlite::{Connection, OptionalExtension, params};
 use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
     CodeSearchChunkId, ExactTechnicalTermKindV1, ExactTechnicalTermV1, FileOccurrenceId,
     LanguageDescriptorRevision, MAX_CHUNK_TEXT_BYTES, SourceSpan, SymbolOccurrenceId,
 };
+use tracedecay_sql::{Connection, OptionalExtension, params};
 
 use super::super::LexicalFieldV1;
 use super::CodeLexicalArtifactErrorV1;
@@ -680,32 +680,32 @@ pub(super) fn canonical_chunk_digest(chunk_id: &str) -> Option<[u8; 32]> {
 
 /// The value `row_chunks.chunk_id` stores: 32 digest bytes for a canonical
 /// chunk id, the literal text otherwise.
-pub(super) fn stored_chunk_key(chunk_id: &str) -> rusqlite::types::Value {
+pub(super) fn stored_chunk_key(chunk_id: &str) -> tracedecay_sql::types::Value {
     canonical_chunk_digest(chunk_id).map_or_else(
-        || rusqlite::types::Value::Text(chunk_id.to_owned()),
-        |digest| rusqlite::types::Value::Blob(digest.to_vec()),
+        || tracedecay_sql::types::Value::Text(chunk_id.to_owned()),
+        |digest| tracedecay_sql::types::Value::Blob(digest.to_vec()),
     )
 }
 
 /// The value `clone_occurrences.symbol_key` stores: 32 digest bytes for an
 /// extractor-minted symbol id, the literal text otherwise.
-pub(super) fn stored_symbol_key(symbol: &str) -> rusqlite::types::Value {
+pub(super) fn stored_symbol_key(symbol: &str) -> tracedecay_sql::types::Value {
     canonical_digest(CANONICAL_SYMBOL_ID_PREFIX, symbol).map_or_else(
-        || rusqlite::types::Value::Text(symbol.to_owned()),
-        |digest| rusqlite::types::Value::Blob(digest.to_vec()),
+        || tracedecay_sql::types::Value::Text(symbol.to_owned()),
+        |digest| tracedecay_sql::types::Value::Blob(digest.to_vec()),
     )
 }
 
 /// Inverse of [`stored_symbol_key`].
 pub(super) fn symbol_id_from_key(
-    key: rusqlite::types::ValueRef<'_>,
+    key: tracedecay_sql::types::ValueRef<'_>,
 ) -> Result<String, CodeLexicalArtifactErrorV1> {
     match key {
-        rusqlite::types::ValueRef::Blob(digest) if digest.len() == 32 => Ok(format!(
+        tracedecay_sql::types::ValueRef::Blob(digest) if digest.len() == 32 => Ok(format!(
             "{CANONICAL_SYMBOL_ID_PREFIX}{}",
             hex::encode(digest)
         )),
-        rusqlite::types::ValueRef::Text(text) => std::str::from_utf8(text)
+        tracedecay_sql::types::ValueRef::Text(text) => std::str::from_utf8(text)
             .map(str::to_owned)
             .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string())),
         _ => Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -1637,9 +1637,8 @@ impl<'a> RowCursorV1<'a> {
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    use rusqlite::{Connection, params};
+    use tracedecay_sql::{Connection, params};
 
     use super::{
         ArtifactRowV1, BlockRowV1, QualifiedNameV1, ROW_BLOCK_MAX_ROWS, RowBlocksV1, RowCursorV1,
@@ -2019,17 +2018,11 @@ mod tests {
         let cache = load_scoring_preface_index(&connection, usize::MAX, || Ok(()))
             .expect("load preface cache");
 
-        let sqlite_steps = Arc::new(AtomicU64::new(0));
-        let observed = Arc::clone(&sqlite_steps);
+        // With the table renamed away, any statement that reads a row block
+        // fails, so warm scoring that succeeds read none.
         connection
-            .progress_handler(
-                1,
-                Some(move || {
-                    observed.fetch_add(1, Ordering::SeqCst);
-                    false
-                }),
-            )
-            .expect("install progress handler");
+            .execute_batch("ALTER TABLE row_blocks RENAME TO row_blocks_hidden")
+            .expect("hide row blocks");
         for _query in 0..2 {
             let row_blocks = RowBlocksV1::new(&connection, &cache);
             for row in &rows {
@@ -2045,23 +2038,17 @@ mod tests {
                 Err(CodeLexicalArtifactErrorV1::Corrupt(_))
             ));
         }
-        assert_eq!(
-            sqlite_steps.load(Ordering::SeqCst),
-            0,
-            "warm scoring must not re-read row block prefaces"
+        assert!(
+            RowBlocksV1::new(&connection, &cache).row(1).is_err(),
+            "a winner's inflation reads its row block, so hiding the table refuses it"
         );
+        connection
+            .execute_batch("ALTER TABLE row_blocks_hidden RENAME TO row_blocks")
+            .expect("restore row blocks");
         let inflated = RowBlocksV1::new(&connection, &cache)
             .row(1)
             .expect("inflate a winner's block");
         assert_eq!(inflated.chunk_id, "chunk.1");
-        assert_ne!(
-            sqlite_steps.load(Ordering::SeqCst),
-            0,
-            "the observer sees the SQLite read a winner's inflation makes"
-        );
-        connection
-            .progress_handler(1, None::<fn() -> bool>)
-            .expect("remove progress handler");
 
         assert!(matches!(
             load_scoring_preface_index(&connection, 256, || Ok(())),

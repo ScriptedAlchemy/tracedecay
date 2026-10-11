@@ -8,6 +8,8 @@ mod confined_io;
 // engine, where only the facade runs.
 #[cfg_attr(not(td_engine = "native"), allow(dead_code))]
 mod connection;
+#[cfg(all(unix, feature = "test-helpers"))]
+pub mod crash_io;
 #[cfg(td_engine = "native")]
 pub(crate) mod driver;
 mod error;

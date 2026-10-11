@@ -1,5 +1,16 @@
 use super::*;
 
+fn returning(
+    channel: &ExactSqlHandle,
+    statement: ExactSqlStatement,
+) -> Result<ExactSqlRows, ExactSqlError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(channel.execute_returning_async(statement))
+}
+
 #[test]
 fn execute_batch_execute_and_query_use_owned_dtos() {
     let fixture = fixture('a', 'a');
@@ -145,18 +156,22 @@ fn insert_returning_identifies_each_writer_result() {
         )
         .unwrap();
 
-    let first = channel_a
-        .execute_returning(statement(
+    let first = returning(
+        &channel_a,
+        statement(
             "INSERT INTO rowids(value) VALUES (?) RETURNING id",
             vec![ExactSqlValue::Text("a".to_owned())],
-        ))
-        .unwrap();
-    let second = channel_b
-        .execute_returning(statement(
+        ),
+    )
+    .unwrap();
+    let second = returning(
+        &channel_b,
+        statement(
             "INSERT INTO rowids(value) VALUES (?) RETURNING id",
             vec![ExactSqlValue::Text("b".to_owned())],
-        ))
-        .unwrap();
+        ),
+    )
+    .unwrap();
     assert_eq!(first.rows[0].values, vec![ExactSqlValue::Integer(1)]);
     assert_eq!(second.rows[0].values, vec![ExactSqlValue::Integer(2)]);
 
@@ -246,20 +261,16 @@ fn execute_returning_commit_failure_rolls_back_and_releases_writer() {
                 .to_owned(),
         )
         .unwrap();
-    let error = channel
-        .execute_returning(statement(
+    let error = returning(
+        &channel,
+        statement(
             "INSERT INTO returning_child VALUES (1, 9) RETURNING id",
             vec![],
-        ))
-        .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            ExactSqlError::Sqlite {
-                code: Some(rusqlite::ffi::SQLITE_CONSTRAINT),
-                ..
-            }
         ),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, ExactSqlError::Sqlite { code: Some(19), .. }),
         "{error:?}"
     );
     let rows = channel
@@ -272,12 +283,14 @@ fn execute_returning_commit_failure_rolls_back_and_releases_writer() {
     channel
         .execute(statement("INSERT INTO returning_parent VALUES (9)", vec![]))
         .unwrap();
-    let rows = channel
-        .execute_returning(statement(
+    let rows = returning(
+        &channel,
+        statement(
             "INSERT INTO returning_child VALUES (1, 9) RETURNING id",
             vec![],
-        ))
-        .unwrap();
+        ),
+    )
+    .unwrap();
     assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(1)]);
 }
 
@@ -302,9 +315,7 @@ fn assert_returning_limit_rolls_back(insert: &str) {
         ))
         .unwrap();
 
-    let error = channel
-        .execute_returning(statement(insert, vec![]))
-        .unwrap_err();
+    let error = returning(&channel, statement(insert, vec![])).unwrap_err();
     assert!(
         matches!(error, ExactSqlError::QueryLimitExceeded),
         "{error:?}"
@@ -317,7 +328,8 @@ fn assert_returning_limit_rolls_back(insert: &str) {
         .unwrap();
     assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
     let reopened =
-        rusqlite::Connection::open(fixture._directory.path().join("exact-sql.sqlite3")).unwrap();
+        tracedecay_sql::Connection::open(fixture._directory.path().join("exact-sql.sqlite3"))
+            .unwrap();
     assert_eq!(
         reopened
             .query_row("SELECT count(*) FROM returning_target", [], |row| {
@@ -327,12 +339,14 @@ fn assert_returning_limit_rolls_back(insert: &str) {
         0
     );
 
-    let next = channel
-        .execute_returning(statement(
+    let next = returning(
+        &channel,
+        statement(
             "INSERT INTO returning_target(id) VALUES (1) RETURNING id",
             vec![],
-        ))
-        .unwrap();
+        ),
+    )
+    .unwrap();
     assert_eq!(next.rows[0].values, vec![ExactSqlValue::Integer(1)]);
     assert_eq!(
         reopened
