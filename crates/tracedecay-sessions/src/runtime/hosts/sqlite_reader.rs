@@ -385,15 +385,20 @@ mod tests {
         entries
     }
 
-    /// Catches a reader that writes beside a host's database or leaves it
-    /// writable, attachable or reconfigurable.
+    /// Catches a reader that creates sidecars beside a host's WAL database or
+    /// leaves it writable, attachable or reconfigurable.
     #[test]
     fn immutable_reader_applies_reader_policy_without_touching_the_host_files() {
         let directory = tempfile::tempdir().unwrap();
         let path = database(directory.path());
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
         let before = listing(directory.path());
 
         let connection = open_immutable_reader(&path).expect("immutable reader policy");
+        assert_eq!(listing(directory.path()), before);
         assert_eq!(pragma_i64(&connection, "query_only"), 1);
         assert_eq!(pragma_i64(&connection, "trusted_schema"), 0);
         assert_eq!(pragma_i64(&connection, "busy_timeout"), 0);
