@@ -536,7 +536,7 @@ pub(super) struct ProjectionOutputState {
 async fn provenance_high_water(conn: &impl Executor) -> ProjectionStoreResult<i64> {
     let mut rowid_rows = conn
         .query(
-            "SELECT COALESCE(MAX(rowid), 0) FROM observation_projection_provenance",
+            "SELECT COALESCE((SELECT MAX(rowid) FROM observation_projection_provenance), 0)",
             (),
         )
         .await

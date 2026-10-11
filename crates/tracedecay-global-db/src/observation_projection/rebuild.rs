@@ -1278,7 +1278,10 @@ fn decode_usize(value: i64, operation: &'static str) -> ProjectionStoreResult<us
 /// connection's read snapshot and hide those subsequent writes.
 async fn read_observation_frontier(conn: &impl QueryExecutor) -> ProjectionStoreResult<u64> {
     let mut rows = conn
-        .query("SELECT COALESCE(MAX(sequence), 0) FROM observations", ())
+        .query(
+            "SELECT COALESCE((SELECT MAX(sequence) FROM observations), 0)",
+            (),
+        )
         .await
         .map_err(|error| storage("read projection rebuild frontier", error))?;
     let frontier = rows

@@ -221,7 +221,8 @@ async fn ensure_payload_gc_candidates(conn: &(impl Executor + ?Sized)) -> Result
         .await?;
         conn.execute(
             "INSERT INTO lcm_gc_meta(key, value)
-             SELECT ?1, CAST(COALESCE(MAX(store_id), 0) AS TEXT) FROM lcm_raw_messages WHERE true
+             SELECT ?1, CAST(COALESCE((SELECT MAX(store_id) FROM lcm_raw_messages), 0) AS TEXT)
+             WHERE true
              ON CONFLICT(key) DO NOTHING",
             params![super::gc::DANGLING_SCAN_CURSOR],
         )

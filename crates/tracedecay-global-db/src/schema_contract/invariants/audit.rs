@@ -535,11 +535,12 @@ impl ProjectionOutputOwnership {
                 .query(
                     "SELECT provenance.output_provider, provenance.output_message_id,
                             COALESCE(SUM(provenance.message_created), 0)
-                     FROM observation_projection_provenance AS provenance
-                     JOIN json_each(?1) AS requested
-                       ON provenance.output_provider =
+                     FROM json_each(?1) AS requested
+                     CROSS JOIN observation_projection_provenance AS provenance
+                       INDEXED BY idx_observation_projection_provenance_global_output
+                     WHERE provenance.output_provider =
                             json_extract(requested.value, '$.provider')
-                      AND provenance.output_message_id =
+                       AND provenance.output_message_id =
                             json_extract(requested.value, '$.message_id')
                      GROUP BY provenance.output_provider, provenance.output_message_id",
                     params![requested.as_str()],
