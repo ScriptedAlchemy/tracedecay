@@ -54,6 +54,7 @@ pub(crate) fn render_context(
         &result.related_symbols,
         result.related_omission.as_ref(),
         &result.code,
+        &result.oversized_symbols,
     ));
     if result.symbols.is_empty() {
         append_context_search_matches(
@@ -106,6 +107,7 @@ fn context_markdown(
     related: &[PrimitiveSymbolLocationV1],
     related_omission: Option<&ContextRelatedOmissionV1>,
     code: &[ContextCodeBlockV1],
+    oversized: &[PrimitiveSymbolLocationV1],
 ) -> String {
     let mut output = format!("# Context for {task}\n\n{CONTEXT_CODE_HEADING}\n");
     if code.is_empty() {
@@ -123,6 +125,14 @@ fn context_markdown(
             code.code("", &block.code);
             output.push_str(&code.render());
         }
+    }
+    for symbol in oversized {
+        let _ = writeln!(
+            output,
+            "- **{}** ({}), {}:{}-{} is larger than one code block; read it with \
+             `tracedecay_source_body` or list its members with `tracedecay_source_outline`.",
+            symbol.name, symbol.kind, symbol.file, symbol.start_line, symbol.end_line,
+        );
     }
     output.push('\n');
     output.push_str(CONTEXT_RELATED_SYMBOLS_HEADING);

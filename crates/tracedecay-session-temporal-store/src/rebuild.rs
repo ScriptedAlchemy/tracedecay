@@ -1,17 +1,19 @@
 use std::collections::BTreeSet;
 
+use tracedecay_graph_db::GraphWatermark;
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
 use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_temporal_query::execution::TemporalPortError;
+use tracing::Instrument as _;
 
 use super::projection::{base_source_frontier, canonical_parent_message_resolver};
 use super::query::{ACTIVATE_OPERATION, now_micros, storage, storage_message};
 use super::relation_projection::candidate_session_relation_projection;
-use super::relation_receipts::{record_relation_receipt, write_relation_projection};
+use super::relation_receipts::{record_relation_receipt, write_relation_projection_on_snapshot};
 use super::relations::{SessionRelationError, SessionRelationProjection};
 use super::store::execution_control_graph_cancellation;
-use crate::handle::{SessionTemporalRegisteredDb, SessionTemporalWriteTxn};
+use crate::handle::{SessionTemporalExec, SessionTemporalRegisteredDb, SessionTemporalWriteTxn};
 
 const MAX_REBUILD_RELATION_PROJECTION_ITEMS: usize = 100_000;
 
@@ -19,6 +21,48 @@ const MAX_REBUILD_RELATION_PROJECTION_ITEMS: usize = 100_000;
 /// transaction that activates the generation.
 #[tracing::instrument(name = "session_temporal.rebuild.relations", level = "trace", skip_all)]
 pub(super) async fn rebuild_candidate_session_relations(
+    database: &impl SessionTemporalRegisteredDb,
+    session_id: &tracedecay_domain::SessionId,
+    generation: tracedecay_domain::SessionProjectionGenerationV1,
+    control: &ExecutionControl,
+    operation: &'static str,
+) -> SessionStoreResult<SessionRelationProjection> {
+    let reconstructed = reconstruct_candidate_session_relations(
+        database, session_id, generation, control, operation,
+    )
+    .await?;
+
+    checkpoint_relation_rebuild_control(control)?;
+    let receipt = database
+        .begin_write_transaction()
+        .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+        .await
+        .map_err(|error| storage(operation, error))?;
+    record_relation_receipt(&receipt, &reconstructed, now_micros(operation)?.0).await?;
+    receipt
+        .commit()
+        .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+        .await
+        .map_err(|error| storage(operation, error))?;
+    checkpoint_relation_rebuild_control(control)?;
+
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| storage(operation, error))?;
+    let applied = apply_candidate_relation_projection(
+        database,
+        &snapshot,
+        &reconstructed,
+        control,
+        operation,
+    )
+    .await;
+    drop(snapshot);
+    applied
+}
+
+pub(super) async fn reconstruct_candidate_session_relations(
     database: &impl SessionTemporalRegisteredDb,
     session_id: &tracedecay_domain::SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
@@ -49,34 +93,109 @@ pub(super) async fn rebuild_candidate_session_relations(
     checkpoint_relation_rebuild_control(control)?;
     let reconstructed = reconstructed?;
     drop(snapshot);
+    Ok(reconstructed)
+}
 
+#[tracing::instrument(
+    name = "session_temporal.txn.record_relation_receipts",
+    level = "trace",
+    skip_all
+)]
+pub(super) async fn record_relation_receipts_group(
+    database: &impl SessionTemporalRegisteredDb,
+    projections: &[SessionRelationProjection],
+    control: &ExecutionControl,
+    operation: &'static str,
+) -> SessionStoreResult<Vec<SessionStoreResult<GraphWatermark>>> {
     checkpoint_relation_rebuild_control(control)?;
-    let receipt = {
-        use tracing::Instrument as _;
+    let transaction = database
+        .begin_write_transaction()
+        .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+        .await
+        .map_err(|error| storage(operation, error))?;
+    let mut outcomes = Vec::with_capacity(projections.len());
+    for (index, projection) in projections.iter().enumerate() {
+        checkpoint_relation_rebuild_control(control)?;
+        let savepoint = format!("relation_receipt_item_{index}");
+        if let Err(error) = transaction
+            .execute(&format!("SAVEPOINT {savepoint}"), ())
+            .await
         {
-            database
-                .begin_write_transaction()
-                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-                .await
-                .map_err(|error| storage(operation, error))?
+            return crate::refresh::abort_grouped_transaction(
+                transaction,
+                storage(operation, error),
+                operation,
+            )
+            .await;
         }
-    };
-    record_relation_receipt(&receipt, &reconstructed, now_micros(operation)?.0).await?;
-    {
-        use tracing::Instrument as _;
-        {
-            receipt
-                .commit()
-                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+        let outcome =
+            record_relation_receipt(&transaction, projection, now_micros(operation)?.0).await;
+        outcomes.push(match outcome {
+            Ok(watermark) => match transaction
+                .execute(&format!("RELEASE {savepoint}"), ())
                 .await
-                .map_err(|error| storage(operation, error))?
-        }
-    };
-    checkpoint_relation_rebuild_control(control)?;
+            {
+                Ok(_) => Ok(watermark),
+                Err(error) => {
+                    return crate::refresh::abort_grouped_transaction(
+                        transaction,
+                        storage(operation, error),
+                        operation,
+                    )
+                    .await;
+                }
+            },
+            Err(item_error) => {
+                let rollback = async {
+                    transaction
+                        .execute(&format!("ROLLBACK TO SAVEPOINT {savepoint}"), ())
+                        .await
+                        .map_err(|error| storage(operation, error))?;
+                    transaction
+                        .execute(&format!("RELEASE {savepoint}"), ())
+                        .await
+                        .map_err(|error| storage(operation, error))?;
+                    Ok::<_, SessionStoreError>(())
+                }
+                .await;
+                match rollback {
+                    Ok(()) => Err(item_error),
+                    Err(rollback_error) => {
+                        return crate::refresh::abort_grouped_transaction(
+                            transaction,
+                            rollback_error,
+                            operation,
+                        )
+                        .await;
+                    }
+                }
+            }
+        });
+    }
+    transaction
+        .commit()
+        .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+        .await
+        .map_err(|error| storage(operation, error))?;
+    Ok(outcomes)
+}
 
+/// `snapshot` already contains the pending receipt.
+pub(super) async fn apply_candidate_relation_projection(
+    database: &impl SessionTemporalRegisteredDb,
+    snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+    projection: &SessionRelationProjection,
+    control: &ExecutionControl,
+    operation: &'static str,
+) -> SessionStoreResult<SessionRelationProjection> {
+    let (scope, relation_store) = database
+        .session_relation_store()
+        .map_err(|error| storage(operation, error))?;
     let apply_cancellation = execution_control_graph_cancellation(control);
     checkpoint_relation_rebuild_control(control)?;
-    let applied = write_relation_projection(database, &reconstructed, apply_cancellation).await;
+    let applied =
+        write_relation_projection_on_snapshot(database, snapshot, projection, apply_cancellation)
+            .await;
     checkpoint_relation_rebuild_control(control)?;
     applied?;
 
@@ -84,15 +203,15 @@ pub(super) async fn rebuild_candidate_session_relations(
     checkpoint_relation_rebuild_control(control)?;
     let loaded = relation_store.load_projection(
         &scope,
-        session_id,
-        generation.value(),
+        &projection.session_id,
+        projection.generation,
         MAX_REBUILD_RELATION_PROJECTION_ITEMS,
         MAX_REBUILD_RELATION_PROJECTION_ITEMS,
         load_cancellation,
     );
     checkpoint_relation_rebuild_control(control)?;
     let loaded = loaded.map_err(|error| map_relation_rebuild_error(operation, error))?;
-    if loaded != reconstructed {
+    if loaded != *projection {
         return Err(storage_message(
             operation,
             "native session relation graph did not preserve the canonical reconstruction",

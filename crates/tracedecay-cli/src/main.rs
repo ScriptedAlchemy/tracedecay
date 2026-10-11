@@ -1391,7 +1391,7 @@ async fn dispatch_runtime_command(
         Commands::Serve {
             path,
             timings,
-            claude_code_tool_search,
+            full_tool_list,
         } => {
             if matches!(std::env::var("DISABLE_TRACEDECAY").as_deref(), Ok("true")) {
                 // Allow users to opt out per-project by setting
@@ -1404,7 +1404,7 @@ async fn dispatch_runtime_command(
             // do (they would drop the sweep mid-parse on exit).
             tracedecay_store_runtime::mark_process_long_lived_for_session_maintenance();
             tracing::Instrument::instrument(
-                serve_cmd::run_serve(profile, path, timings, claude_code_tool_search),
+                serve_cmd::run_serve(profile, path, timings, full_tool_list),
                 tracing::trace_span!("cli.serve.run"),
             )
             .await?;

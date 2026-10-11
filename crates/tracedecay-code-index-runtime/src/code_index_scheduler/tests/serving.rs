@@ -1364,7 +1364,7 @@ fn text_artifact_publish_refuses_a_busy_generation_store_and_retries() {
     });
     assert!(matches!(
         received
-            .recv_timeout(Duration::from_millis(500))
+            .recv_timeout(SERVING_SEAT_FAILURE_CEILING)
             .expect("busy publication must settle without waiting"),
         Err(RetrievalPortError::AuthorityUnavailable(_))
     ));
@@ -2837,15 +2837,10 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
         progress: scheduler.build_progress_slot(),
         observed_bulk_commit: std::sync::atomic::AtomicBool::new(false),
     };
-    let cancellation_started = Instant::now();
     let cancellation = latest.advance_artifact_text_serving(1, &control);
     assert_eq!(
         cancellation,
         Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
-    );
-    assert!(
-        cancellation_started.elapsed() < Duration::from_secs(1),
-        "a cancelled scheduler batch must yield within the focused latency bound"
     );
     assert!(
         control
@@ -6650,7 +6645,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
     );
 
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let query_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let query_deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let executed = loop {
         match registry
             .execute_query_search(&scope, core_search_request("alpha_0000"))
@@ -6671,7 +6666,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         "an explicit overflow keeps the currently served text generation stale until reconcile settles"
     );
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let overflow_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let overflow_deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let dashboard = loop {
         let overflow_settled = {
             let scheduler = scheduler

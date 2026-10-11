@@ -1216,7 +1216,7 @@ async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() 
         )
         .await
         .expect("remount worktree over a dirty checkout");
-    tokio::time::timeout(Duration::from_secs(5), recovery_entered)
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, recovery_entered)
         .await
         .expect("dirty remount must recover the retained graph before the successor rebuild")
         .expect("retained graph recovery gate stays open until this test releases it");
@@ -1233,7 +1233,7 @@ async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() 
         .expect("release the dirty successor rebuild");
 
     let mut signals = OwnerSignals::subscribe(&restarted, &remount_root).await;
-    let rebuilt = tokio::time::timeout(Duration::from_secs(10), async {
+    let rebuilt = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if let Some(generation_id) = restarted.latest_generation_id(&remount_root).await
                 && generation_id != sealed_id
@@ -2526,28 +2526,26 @@ async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
                 .scheduler,
         )
     };
-    let settled_deadline = Instant::now() + Duration::from_secs(10);
-    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    loop {
-        let settled = {
-            let scheduler = scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            scheduler.verified_against_source() && scheduler.pending_hint_count() == Some(0)
-        };
-        if settled
-            && !registry
-                .reconcile_in_progress_for_test(fixture.path())
-                .await
-        {
-            break;
-        }
-        assert!(
-            Instant::now() <= settled_deadline,
-            "retained graph-off owner never established initial freshness"
-        );
-        signals.changed_before(settled_deadline).await;
-    }
+    wait_for_owner(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        "initial freshness of the retained graph-off owner",
+        || async {
+            let settled = {
+                let scheduler = scheduler
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                scheduler.verified_against_source() && scheduler.pending_hint_count() == Some(0)
+            };
+            (settled
+                && !registry
+                    .reconcile_in_progress_for_test(fixture.path())
+                    .await)
+                .then_some(())
+        },
+    )
+    .await;
     let admission = registry
         .background_reconcile_admission()
         .acquire_owned()
@@ -2694,7 +2692,7 @@ async fn proven_seated_generation_serves_verified_reads_while_reconcile_owns_the
     // the quiet probe proves the seated generation current (arming the
     // busy-read witness).
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+    let ready = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if let Some(ready) = registry
                 .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
@@ -2759,7 +2757,7 @@ async fn selected_generation_mints_feedback_identity_after_registry_lookup_close
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let selected = tokio::time::timeout(Duration::from_secs(10), async {
+    let selected = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if let Some(ready) = registry
                 .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
@@ -2809,7 +2807,7 @@ async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_wit
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
 
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+    let ready = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if let Some(ready) = registry
                 .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
@@ -2872,7 +2870,7 @@ async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_wit
     // With the scheduler quiet again the exact-source probe re-proves the
     // unchanged checkout and re-arms the witness.
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let reproved = tokio::time::timeout(Duration::from_secs(10), async {
+    let reproved = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if let Some(ready) = registry
                 .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
@@ -2906,7 +2904,7 @@ async fn unchanged_pass_binds_its_source_proof_to_an_unproven_seat() {
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
 
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+    let ready = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if let Some(ready) = registry
                 .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
@@ -3078,7 +3076,7 @@ async fn graph_read_during_reconcile_records_a_busy_follow_up() {
     drop(owner_pass);
     drop(admission);
 
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             let receipts = registry.event_to_ready_receipts();
             if receipts.len() > receipts_before.len()
@@ -3127,7 +3125,7 @@ async fn sealed_publication_identity_answers_before_the_generation_seats() {
         )
         .await
         .expect("mount worktree");
-    tokio::time::timeout(Duration::from_secs(10), projection_started)
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, projection_started)
         .await
         .expect("publication did not reach text projection")
         .expect("publication projection gate stays armed");
@@ -3170,11 +3168,13 @@ async fn sealed_publication_identity_answers_before_the_generation_seats() {
     release_projection
         .send(())
         .expect("release publication projection");
-    let serving =
-        wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
-            registry.latest_text_serving_for_root(fixture.path())
-        })
-        .await;
+    let serving = wait_until_serving_seat(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        || registry.latest_text_serving_for_root(fixture.path()),
+    )
+    .await;
     assert_eq!(
         &serving.metadata().manifest().generation_id,
         sealed.generation_id()
@@ -3745,7 +3745,7 @@ async fn publication_decode_failure_parks_typed_instead_of_indexing() {
     let parked = wait_for_owner(
         &registry,
         fixture.path(),
-        Duration::from_secs(10),
+        SERVING_SEAT_FAILURE_CEILING,
         "a typed convergence park",
         || async {
             registry
@@ -4052,7 +4052,7 @@ async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_with
         )
         .await
         .expect("mount worktree");
-    tokio::time::timeout(Duration::from_secs(10), projection_started)
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, projection_started)
         .await
         .expect("publication did not reach text projection")
         .expect("publication projection gate stays armed");
@@ -4080,11 +4080,13 @@ async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_with
     release_projection
         .send(())
         .expect("release publication projection");
-    let seated =
-        wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
-            registry.latest_complete_serving_for_test(fixture.path())
-        })
-        .await;
+    let seated = wait_until_serving_seat(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        || registry.latest_complete_serving_for_test(fixture.path()),
+    )
+    .await;
     let simple_names = |latest: &LatestCompleteCodeIndexV1| {
         latest
             .generation
@@ -4132,7 +4134,7 @@ async fn raw_edit_during_text_projection_is_stale_after_seat_and_reconciles_with
     let reconciled = wait_until_serving_seat(
         &registry,
         fixture.path(),
-        Duration::from_secs(10),
+        SERVING_SEAT_FAILURE_CEILING,
         || async {
             registry.request_complete_generation(fixture.path()).await;
             registry
@@ -4165,7 +4167,7 @@ async fn edit_during_text_projection_seals_its_successor_before_the_projection_f
         )
         .await
         .expect("mount worktree");
-    tokio::time::timeout(Duration::from_secs(10), projection_started)
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, projection_started)
         .await
         .expect("publication did not reach text projection")
         .expect("publication projection gate stays armed");
@@ -4191,7 +4193,7 @@ async fn edit_during_text_projection_seals_its_successor_before_the_projection_f
     registry
         .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
         .await;
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         while active_pointer().generation_id == projecting {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -4213,7 +4215,7 @@ async fn edit_during_text_projection_seals_its_successor_before_the_projection_f
     release_projection
         .send(())
         .expect("release publication projection");
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             let pointer = active_pointer();
             let projected = |generation_id: &str| {
@@ -4259,7 +4261,7 @@ async fn verified_empty_source_remains_observable_while_scheduler_is_busy() {
     )
     .expect("resolved scope");
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         while !registry
             .reconciled_without_generation_for_scope(&scope)
             .await
@@ -4452,7 +4454,7 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
     let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
 
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+    let ready = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if let Some(ready) = registry
                 .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
@@ -4585,7 +4587,7 @@ async fn a_same_content_successor_pointer_keeps_the_seated_generation_serving() 
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
 
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+    let ready = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if let Some(ready) = registry
                 .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
@@ -4639,7 +4641,7 @@ async fn a_different_content_successor_pointer_refuses_the_stale_seat() {
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
 
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let ready = tokio::time::timeout(Duration::from_secs(10), async {
+    let ready = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if let Some(ready) = registry
                 .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
@@ -5029,7 +5031,7 @@ async fn foreign_serving_generation_replacement_rejects_stale_rollback_token() {
         "the mounted worktree must accept a refresh hint"
     );
     let newer = wait_for_generation_change(&registry, fixture.path(), &original_id).await;
-    let serving_deadline = Instant::now() + Duration::from_secs(5);
+    let serving_deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     let newer_generation = loop {
         if let Some(generation) = registry
@@ -7840,10 +7842,10 @@ async fn readiness_wait_reaches_ready_exactly_when_the_held_graph_publishes() {
     let gate = super::super::graph_activation::install_injected_activation_gate(&scope.worktree_id);
     let mut publications = registry.subscribe_generation_publications();
     drop(admission);
-    tokio::time::timeout(Duration::from_secs(10), gate.wait_until_started())
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, gate.wait_until_started())
         .await
         .expect("graph activation reached the held gate");
-    let published = tokio::time::timeout(Duration::from_secs(10), publications.recv())
+    let published = tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, publications.recv())
         .await
         .expect("publication deadline")
         .expect("sealed publication");
@@ -7977,21 +7979,26 @@ async fn served_texts_containing(
 }
 
 /// `tracedecay_status wait_for { state: fresh }` on a current index verifies
-/// the source and reaches it well inside a one-second budget.
+/// the source with its sweep alone: it reaches `fresh` on the generation it
+/// found, and starts no owner pass to get there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn fresh_wait_on_a_current_index_reaches_inside_one_second() {
+async fn fresh_wait_on_a_current_index_reaches_without_an_owner_pass() {
     let (fixture, _store, registry) =
         settled_fresh_wait_fixture("pub fn source() -> u32 { 1 }\n").await;
-    let started = Instant::now();
+    let generation = registry.latest_generation_id(fixture.path()).await;
+    let passes = registry
+        .subscribe_owner_activity(fixture.path())
+        .await
+        .expect("mounted owner activity")
+        .passes();
     let outcome = registry
         .wait_for_readiness(
             fixture.path(),
             tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh,
-            Duration::from_secs(1),
+            SERVING_SEAT_FAILURE_CEILING,
         )
         .await
         .expect("freshness read");
-    let elapsed = started.elapsed();
     assert!(
         matches!(
             outcome,
@@ -7999,7 +8006,19 @@ async fn fresh_wait_on_a_current_index_reaches_inside_one_second() {
         ),
         "{outcome:?}"
     );
-    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+    assert_eq!(
+        registry
+            .subscribe_owner_activity(fixture.path())
+            .await
+            .expect("mounted owner activity")
+            .passes(),
+        passes,
+        "verifying a current index must not run a pass"
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        generation
+    );
     registry.shutdown().await;
 }
 
@@ -9022,7 +9041,7 @@ async fn serving_seat_wake_arrives_only_after_the_slot_is_seated() {
         )
         .await
         .expect("mount scheduler");
-    tokio::time::timeout(Duration::from_secs(30), seats.changed())
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, seats.changed())
         .await
         .expect("seating wakes its waiters instead of leaving them to poll")
         .expect("the seating channel stays open while the registry lives");
@@ -9460,7 +9479,7 @@ async fn text_freshness_query_during_owner_work_is_current_when_source_is_unchan
     .expect("resolved scope");
 
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let settled_deadline = Instant::now() + Duration::from_secs(10);
+    let settled_deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     while registry
         .reconcile_in_progress_for_test(fixture.path())
         .await
@@ -10414,7 +10433,7 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
     std::fs::rename(&git_dir, &unavailable_git_dir).expect("make Git authority unavailable");
     drop(admission);
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     loop {
         if registry
@@ -10433,7 +10452,7 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
     lock_thread.join().expect("join scheduler holder");
 
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     loop {
         if registry
             .pending_wake_micros_for_scope(&scope)
@@ -10477,7 +10496,7 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
         "restored worktree accepts a retry hint"
     );
     let receipts_before = registry.event_to_ready_receipts().len();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
     loop {
         let seated = registry
@@ -10639,7 +10658,7 @@ async fn resident_memory_graph_refusal_serves_text_and_retries_when_memory_is_gi
                 text.interactive_graph_store()
                     .expect("an activated graph still has its store after park")
                     .await_rewarm_for(
-                        Duration::from_secs(30),
+                        SERVING_SEAT_FAILURE_CEILING,
                         tracedecay_code_index::graph_projection::CodeGraphReadinessRequirement::Catalog,
                     )
                     .expect("a graph read reseats the parked catalog");
@@ -11902,26 +11921,24 @@ async fn graph_off_remount_preserves_an_unhinted_source_reconcile() {
         )
         .await
         .expect("mount graph-off retained generation");
-    let settled_deadline = Instant::now() + Duration::from_secs(10);
-    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    loop {
-        let text_ready = registry
-            .latest_text_serving_freshness_for_scope(&scope)
-            .await
-            .is_some_and(|(latest, _)| latest.query_owners_are_ready());
-        if text_ready
-            && !registry
-                .reconcile_in_progress_for_test(fixture.path())
+    wait_for_owner(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        "the settled graph-off retained generation",
+        || async {
+            let text_ready = registry
+                .latest_text_serving_freshness_for_scope(&scope)
                 .await
-        {
-            break;
-        }
-        assert!(
-            Instant::now() <= settled_deadline,
-            "graph-off retained generation never settled"
-        );
-        signals.changed_before(settled_deadline).await;
-    }
+                .is_some_and(|(latest, _)| latest.query_owners_are_ready());
+            (text_ready
+                && !registry
+                    .reconcile_in_progress_for_test(fixture.path())
+                    .await)
+                .then_some(())
+        },
+    )
+    .await;
 
     let admission = registry
         .background_reconcile_admission()
@@ -11954,22 +11971,7 @@ async fn graph_off_remount_preserves_an_unhinted_source_reconcile() {
     );
     drop(admission);
 
-    let reconcile_deadline = Instant::now() + Duration::from_secs(10);
-    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    loop {
-        let generation = registry.latest_generation_id(fixture.path()).await;
-        if generation
-            .as_ref()
-            .is_some_and(|generation| generation != &generation_a)
-        {
-            break;
-        }
-        assert!(
-            Instant::now() <= reconcile_deadline,
-            "the remount wake never reconciled the unhinted edit"
-        );
-        signals.changed_before(reconcile_deadline).await;
-    }
+    wait_for_generation_change(&registry, fixture.path(), &generation_a).await;
     registry.shutdown().await;
 }
 
@@ -12338,7 +12340,7 @@ async fn terminal_graph_activation_failure_is_typed_for_current_text_generation(
         .await
         .expect("mount retained generation");
     tokio::time::timeout(
-        Duration::from_secs(10),
+        SERVING_SEAT_FAILURE_CEILING,
         activation_gate.wait_until_started(),
     )
     .await
@@ -12346,51 +12348,49 @@ async fn terminal_graph_activation_failure_is_typed_for_current_text_generation(
     super::super::graph_activation::set_injected_terminal_activation_failure(&worktree_id, true);
     activation_gate.release();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let reason = loop {
-        let freshness = registry
-            .dashboard_freshness(fixture.path())
-            .await
-            .expect("mounted dashboard freshness");
-        if let Some(
-            tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Unavailable {
-                ref reason,
-            },
-        ) = freshness.code_graph_serving
-            && reason != "generation_unavailable"
-        {
-            break reason.clone();
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "terminal graph activation failure remained pending: {freshness:?}"
-        );
-        signals.changed_before(deadline).await;
-    };
+    let reason = wait_for_owner(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        "a typed terminal graph activation failure",
+        || async {
+            match registry
+                .dashboard_freshness(fixture.path())
+                .await
+                .expect("mounted dashboard freshness")
+                .code_graph_serving
+            {
+                Some(
+                    tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Unavailable {
+                        reason,
+                    },
+                ) if reason != "generation_unavailable" => Some(reason),
+                _ => None,
+            }
+        },
+    )
+    .await;
     assert!(
         reason.contains("injected terminal graph activation failure"),
         "typed failure must retain its terminal cause: {reason}"
     );
     // The owner's projection runs on its own task now, so the terminal graph
     // failure above can be observed before it finishes. Withdrawal is still
-    // falsified: a withdrawn owner never becomes warm and this deadline fires.
-    let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    let serving_deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if registry
-            .latest_text_serving_for_scope(&scope)
-            .await
-            .is_some_and(|text| text.query_owners_are_ready())
-        {
-            break;
-        }
-        assert!(
-            Instant::now() <= serving_deadline,
-            "terminal native graph failure must not withdraw exact/lexical serving"
-        );
-        signals.changed_before(serving_deadline).await;
-    }
+    // falsified: a withdrawn owner never becomes warm and this wait panics.
+    wait_for_owner(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        "exact/lexical serving after the terminal native graph failure",
+        || async {
+            registry
+                .latest_text_serving_for_scope(&scope)
+                .await
+                .is_some_and(|text| text.query_owners_are_ready())
+                .then_some(())
+        },
+    )
+    .await;
     registry.shutdown().await;
 }
 
@@ -12435,7 +12435,7 @@ async fn graph_decode_does_not_block_text_freshness() {
         .await
         .expect("mount text-only retained generation");
     let mut signals = OwnerSignals::subscribe(&registry, fixture.path()).await;
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if registry
                 .latest_text_serving_freshness_for_scope(&scope)
@@ -12477,7 +12477,7 @@ async fn graph_decode_does_not_block_text_freshness() {
     // after the gate it stayed unclaimed for the whole parked-decode window,
     // and the freshness witness reported that outstanding authoritative rescan
     // -- not the decode -- as the reason the text owner was not current.
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             if held_decode.waiter_count() > 0 {
                 break;

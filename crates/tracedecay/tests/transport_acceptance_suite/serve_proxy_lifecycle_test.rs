@@ -4,8 +4,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracedecay::daemon::proxy_transport_to_daemon;
 use tracedecay_daemon_identity::authority::DaemonAuthority;
 use tracedecay_daemon_protocol::{DaemonAuthPreface, DaemonEndpoint, DaemonHandshake};
+use tracedecay_mcp::get_tool_definitions;
 use tracedecay_mcp::transport::ChannelTransport;
-use tracedecay_mcp::{TOOL_SEARCH_NAME, get_tool_definitions};
 
 fn test_handshake(profile_root: &std::path::Path) -> DaemonHandshake {
     serde_json::from_value(json!({
@@ -130,7 +130,6 @@ async fn proxy_delivers_in_flight_response_after_host_closes() {
         .expect("in-flight daemon tool delivered after host EOF");
     assert_eq!(grep["description"], daemon_tool["description"]);
     assert_eq!(grep["inputSchema"], daemon_tool["inputSchema"]);
-    assert!(tools.iter().any(|tool| tool["name"] == TOOL_SEARCH_NAME));
 
     tokio::time::timeout(std::time::Duration::from_secs(2), proxy)
         .await

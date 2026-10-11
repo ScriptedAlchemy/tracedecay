@@ -364,10 +364,10 @@ not a false trigger.
 Claude Code (2.1.x) defers MCP tool schemas behind `ToolSearch` once a server's
 definitions exceed its context budget; only tools the server marks
 `anthropic/alwaysLoad` are in the prompt from turn one. For TraceDecay that is
-a small core (`search`, `grep`, `context`, `callers`, `status`,
-`active_project`, `storage_status`). Every other graph tool. `impact`,
-`health`, `redundancy`, `affected_tests`, `body`, `outline`, `rename_preview`
-, is a name the model must load first. Read `bare`/`no-skills` adoption with
+the always-loaded set in `crates/tracedecay-mcp-catalog/src/definitions.rs`
+(`ALWAYS_LOADED_TOOL_NAMES`). Every other graph tool, such as `impact`,
+`health`, `redundancy`, `affected_tests`, or `rename_preview`, is a name the
+model must load first. Read `bare`/`no-skills` adoption with
 that in mind: "pure MCP-description pull" only applies to the always-loaded
 core, and a `ToolSearch` call in a transcript marks the model discovering a
 deferred tool, not an unnecessary detour.

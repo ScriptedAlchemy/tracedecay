@@ -2,13 +2,11 @@
 
 use serde_json::Value;
 
-use super::{CONTEXT_DESCRIPTION, def, def_always_load};
+use super::{CONTEXT_DESCRIPTION, RESPONSE_RETRIEVE_TOOL, def};
 use crate::ToolDefinition;
 
-// ── alwaysLoad tools (loaded into the model prompt immediately) ─────────
-
 pub(super) fn def_search(input_schema: Value) -> ToolDefinition {
-    def_always_load(
+    def(
         "tracedecay_search",
         "Search Symbols",
         "Exact and lexical code search over the active project's code graph: find symbols (functions, structs, traits, etc.) by name, identifier fragment, signature, path, or phrase through ranked exact and lexical routes. Every response opens with a `freshness: fresh | possibly_stale` line, so no status preflight is needed. Pass known identifiers as `lexical_anchors` (each an extra ranked route) and set `prefer_symbol` to add a symbol-name route for identifier-shaped query words.",
@@ -17,12 +15,7 @@ pub(super) fn def_search(input_schema: Value) -> ToolDefinition {
 }
 
 pub(super) fn def_grep(input_schema: Value) -> ToolDefinition {
-    // alwaysLoad: content/text search is the single most common native-tool
-    // reflex (grep/rg). Keeping it in the always-loaded set means the model
-    // never has to ToolSearch for it before reaching for Bash grep, which is
-    // the main leak we're plugging. Paired with tracedecay_callers below, this
-    // brings the always-loaded set to 7 (the agreed cap).
-    def_always_load(
+    def(
         "tracedecay_grep",
         "Grep Content",
         "grep, ripgrep, rg, text search, find string. Literal/regex content search over UTF-8 text sources in the project working tree (respects .gitignore; binary and non-UTF-8 files are outside the search scope), graph-enriched: each hit resolves the enclosing symbol so the natural next call is tracedecay_source_body with its node_id. Bounded file or line omissions and unavailable source candidates are reported as partial coverage. Routing: use this for literal/regex content search (string literals, config keys, error messages); for symbol names use tracedecay_search; for concepts use tracedecay_context. Defaults to the active project; pass project_selector.project_id only when intentionally searching another registered project.",
@@ -32,7 +25,7 @@ pub(super) fn def_grep(input_schema: Value) -> ToolDefinition {
 
 pub(super) fn def_retrieve(input_schema: Value) -> ToolDefinition {
     def(
-        "tracedecay_retrieve",
+        RESPONSE_RETRIEVE_TOOL,
         "Retrieve Truncated Response",
         "Use `tracedecay_retrieve` with required argument `handle` to read one bounded page of a truncated MCP response's locally cached text. Pass offset and max_chars for the omitted span you need. Do not walk next_offset until has_more is false or concatenate pages back into the conversation: the stored body already exceeded the response budget. max_chars is clamped to the response-frame budget. This does not re-run the source tool or read a file/session/node again; handles are scoped to the active project store, expire automatically, and never reference remote storage. If the original truncated response used project_selector.project_id, pass the same selector here. Only call it when the missing details are needed to answer the user's request.",
         input_schema,
@@ -40,7 +33,7 @@ pub(super) fn def_retrieve(input_schema: Value) -> ToolDefinition {
 }
 
 pub(super) fn def_context(input_schema: Value) -> ToolDefinition {
-    def_always_load(
+    def(
         "tracedecay_context",
         "Task Context",
         CONTEXT_DESCRIPTION,

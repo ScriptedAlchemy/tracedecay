@@ -24,8 +24,8 @@ use tracedecay_domain::configuration::{
     RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY,
     SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1, SettingKey, SourceKindV1,
     USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
-    USER_UPLOAD_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId,
-    WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 #[cfg(test)]
@@ -687,6 +687,7 @@ pub struct ProfileCodeIndexWorkerCommitV1 {
 /// A store written before one existed converges by adding its default.
 const PROFILE_ADDITIVE_SETTING_KEYS: &[&str] = &[
     USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY,
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
     USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
 ];
