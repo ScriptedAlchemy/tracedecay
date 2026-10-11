@@ -508,7 +508,7 @@ mod cases {
         let work = || -> Result<StatementCounters> {
             let mut statement =
                 connection.prepare_cached("SELECT x FROM target ORDER BY x DESC")?;
-            statement.query_map([], |row| row.get::<_, i64>(0))?.count();
+            let _ = statement.query_map([], |row| row.get::<_, i64>(0))?.count();
             Ok(statement.take_counters())
         };
         insert("target", 10)?;

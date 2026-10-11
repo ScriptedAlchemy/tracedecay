@@ -873,4 +873,103 @@ mod driver {
             assert_eq!(count, 100_000);
         }
     }
+
+    #[cfg(unix)]
+    const POWER_LOSS_CHILD: &str = "TD_SQL_POWER_LOSS_CHILD";
+
+    /// The re-executed child of `power_loss_keeps_acknowledged_commits`: it
+    /// commits rows until the armed power cut aborts it, reporting each
+    /// acknowledged commit on stdout.
+    #[cfg(unix)]
+    #[test]
+    fn power_loss_child() {
+        use std::io::Write;
+
+        use crate::native::crash_io::{CrashEffect, CrashOp, CrashPlan, CrashTarget, arm};
+
+        let Ok(spec) = std::env::var(POWER_LOSS_CHILD) else {
+            return;
+        };
+        let (nth, path) = spec.split_once(' ').unwrap();
+        arm(CrashPlan {
+            target: CrashTarget::Wal,
+            op: CrashOp::Write,
+            nth: nth.parse().unwrap(),
+            effect: CrashEffect::PowerLoss,
+        });
+        let mut connection = Connection::open(path).unwrap();
+        // A caller trying to trade durability for speed.
+        let _ = connection.execute_batch("PRAGMA synchronous = OFF");
+        for index in 0_i64.. {
+            let transaction = connection.transaction().unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO rows (id, payload) VALUES (?1, ?2)",
+                    (index, "x".repeat(8_000)),
+                )
+                .unwrap();
+            transaction.commit().unwrap();
+            let mut out = std::io::stdout().lock();
+            writeln!(out, "TD|ack {index}").unwrap();
+            out.flush().unwrap();
+        }
+    }
+
+    /// Catches commits acknowledged before they are durable: a power cut
+    /// after a commit returned must not lose it, even when the caller asked
+    /// for less durability.
+    #[cfg(unix)]
+    #[test]
+    fn power_loss_keeps_acknowledged_commits() {
+        use std::os::unix::process::ExitStatusExt;
+
+        for nth in [4, 9, 15, 24] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("power.tdb");
+            Connection::open(&path)
+                .unwrap()
+                .execute_batch("CREATE TABLE rows (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
+                .unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "native::tests::driver::power_loss_child",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(POWER_LOSS_CHILD, format!("{nth} {}", path.display()))
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.signal() == Some(6) && stderr.contains("TD_CRASH "),
+                "the child did not crash at WAL write {nth}: {}: {stderr}",
+                output.status
+            );
+            let acknowledged = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| {
+                    line.split_once("TD|ack ")
+                        .map(|(_, index)| index.to_owned())
+                })
+                .map(|index| index.parse::<i64>().unwrap())
+                .collect::<Vec<_>>();
+            assert!(
+                !acknowledged.is_empty(),
+                "WAL write {nth}: no commit acknowledged"
+            );
+            let reopened = Connection::open(&path).unwrap();
+            let mut statement = reopened.prepare("SELECT id FROM rows ORDER BY id").unwrap();
+            let durable = statement
+                .query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(
+                acknowledged.iter().all(|index| durable.contains(index)),
+                "a power cut at WAL write {nth} lost acknowledged commits: \
+                 acknowledged {acknowledged:?}, durable {durable:?}"
+            );
+        }
+    }
 }
