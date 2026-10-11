@@ -127,6 +127,9 @@ const SEARCH_QUERY: &str = match ENGINE {
 
 /// Answers the current-generation request from the top search hit, so the
 /// reader pool validates a typed result and an empty search fails the read.
+/// The snapshot is the `tracedecay_sql` type: a native build compiles only
+/// when the runtime's readers run on that driver, so the recorded `engine`
+/// is the engine that executed the workload.
 #[derive(Clone, Default)]
 struct SearchReader;
 
