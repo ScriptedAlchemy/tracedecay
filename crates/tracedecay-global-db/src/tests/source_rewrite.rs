@@ -320,3 +320,58 @@ async fn rewrite_completion_retires_projected_records_and_rolls_back_a_failed_at
         "retired records must request their session's temporal rebuild"
     );
 }
+
+/// The writer keeps its per-connection output ownership cache current for the
+/// provenance it inserts itself. A provenance row written through any other
+/// path (here the exact-SQL lane) must invalidate that cache, or re-verifying
+/// an output trusts an owner set the authority no longer holds.
+#[tokio::test]
+async fn provenance_planted_outside_the_writer_reaches_the_ownership_cache() {
+    use tracedecay_store::{ObservationProjectionStore, ProjectionPersistOutcome};
+
+    let directory = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+        .await
+        .unwrap();
+    let registered = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let seeded = seed_projected_messages(&runtime, 0..2).await;
+    let (owner, co_owner) = (seeded[0].0.observation_id(), seeded[1].0.observation_id());
+
+    // Re-verifying an untouched output builds the cache from the authority.
+    assert!(matches!(
+        store.project_observation(owner).await.unwrap(),
+        ProjectionPersistOutcome::ExactDuplicate(_)
+    ));
+
+    registered
+        .writer_connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO observation_projection_provenance (
+                projector_version, observation_id, output_ordinal, receipt_id,
+                output_provider, output_message_id, output_digest, message_created,
+                retrieval_anchor_id
+             )
+             SELECT projector_version, observation_id, 1, receipt_id,
+                    output_provider, 'message.record.audit-batch-0', output_digest,
+                    message_created, retrieval_anchor_id
+             FROM observation_projection_provenance
+             WHERE observation_id = ?1",
+            params![co_owner.as_str()],
+        )
+        .await
+        .unwrap();
+
+    // The newer co-owner now owns the output, and its rendering is a
+    // different message: re-verification must see it and refuse.
+    let refusal = store.project_observation(owner).await;
+    assert!(
+        matches!(refusal, Err(ProjectionStoreError::ProvenanceCollision)),
+        "a co-owner planted outside the writer must reach output verification: {refusal:?}"
+    );
+}
