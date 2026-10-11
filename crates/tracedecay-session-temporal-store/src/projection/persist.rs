@@ -1258,16 +1258,21 @@ const CURRENT_ENTITY_VERSION_INSERT: &str = "
         current_occurrence_id = excluded.current_occurrence_id,
         coverage_json = excluded.coverage_json";
 
-/// Both endpoints of a logical copy, each by its own key: `occurrence_id IN
-/// (?3, ?4)` after the session prefix reads the whole session on Turso
-/// (turso-bugs/in-after-equality-prefix-never-seeks.md).
-pub(crate) const COPY_ENDPOINTS_SQL: &str = "SELECT occurrence_id, knowledge_at, valid_time_json
-     FROM session_occurrences
-     WHERE session_id = ?1 AND occurrence_id = ?3 AND +generation <= ?2
+/// Both endpoints of a logical copy, each by its own primary-key lookup:
+/// `occurrence_id IN (?3, ?4)` after the session prefix reads the whole
+/// session on Turso (turso-bugs/in-after-equality-prefix-never-seeks.md), and
+/// without `INDEXED BY` Turso seeks a secondary index on the session alone
+/// (turso-bugs/secondary-index-loses-to-primary-key-prefix.md).
+pub(crate) const COPY_ENDPOINTS_SQL: &str = "SELECT target.occurrence_id, target.knowledge_at,
+            target.valid_time_json
+     FROM session_occurrences AS target
+     INDEXED BY sqlite_autoindex_session_occurrences_1
+     WHERE target.session_id = ?1 AND target.occurrence_id = ?3 AND +target.generation <= ?2
      UNION
-     SELECT occurrence_id, knowledge_at, valid_time_json
-     FROM session_occurrences
-     WHERE session_id = ?1 AND occurrence_id = ?4 AND +generation <= ?2";
+     SELECT source.occurrence_id, source.knowledge_at, source.valid_time_json
+     FROM session_occurrences AS source
+     INDEXED BY sqlite_autoindex_session_occurrences_1
+     WHERE source.session_id = ?1 AND source.occurrence_id = ?4 AND +source.generation <= ?2";
 
 /// Recomputes the occurrence-anchor winners of the anchors in `?3`. The
 /// anchors are joined, never matched with `IN`, so each one seeks

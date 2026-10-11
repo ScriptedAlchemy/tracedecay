@@ -11,16 +11,21 @@ pub(super) fn load_next_pending_projection(
 ) -> tracedecay_sql::Result<Option<SourcePendingProjectionV1>> {
     let pending = connection
         .prepare_cached(
+            // The binding's frontier is read once as a scalar so the pending
+            // row is one primary-key seek; joined on the COALESCE, Turso
+            // seeks the binding alone and reads its whole backlog.
             "SELECT pending.predecessor_frontier_digest,
                     pending.source_receipt_digest,
                     pending.successor_frontier_digest,
-                    states.latest_projection_receipt_digest
-             FROM external_source_states_v1 AS states
-             JOIN external_source_pending_projections_v1 AS pending
-               ON pending.binding_id = states.binding_id
-              AND pending.predecessor_frontier_digest =
-                  COALESCE(states.projection_frontier_digest, 'root')
-             WHERE states.binding_id = ?1",
+                    (SELECT latest_projection_receipt_digest FROM external_source_states_v1
+                     WHERE binding_id = ?1)
+             FROM external_source_pending_projections_v1 AS pending
+                  INDEXED BY sqlite_autoindex_external_source_pending_projections_v1_1
+             WHERE pending.binding_id = ?1
+               AND pending.predecessor_frontier_digest = (
+                   SELECT COALESCE(projection_frontier_digest, 'root')
+                   FROM external_source_states_v1 WHERE binding_id = ?1
+               )",
         )?
         .query_row(params![binding.binding_id.as_str()], |row| {
             Ok((
@@ -111,13 +116,18 @@ pub(super) fn load_next_pending_projection_any(
 ) -> tracedecay_sql::Result<Option<SourcePendingProjectionV1>> {
     let binding = connection
         .prepare_cached(
+            // Walks pending rows in queue order through the registered
+            // stores' `idx_external_source_pending_order_v1` and stops at the
+            // first one its binding's frontier admits, instead of sorting the
+            // whole backlog, which Turso does unless the index is named.
             "SELECT revisions.binding_json
              FROM external_source_pending_projections_v1 AS pending
-             JOIN external_source_states_v1 AS states
+                  INDEXED BY idx_external_source_pending_order_v1
+             CROSS JOIN external_source_states_v1 AS states
                ON states.binding_id = pending.binding_id
               AND pending.predecessor_frontier_digest =
                   COALESCE(states.projection_frontier_digest, 'root')
-             JOIN external_source_binding_revisions_v1 AS revisions
+             CROSS JOIN external_source_binding_revisions_v1 AS revisions
                ON revisions.binding_id = states.binding_id
               AND revisions.binding_revision = states.binding_revision
              ORDER BY pending.successor_sequence, pending.binding_id
@@ -189,6 +199,7 @@ pub(super) fn load_commit_receipt_by_digest(
     load_slim_optional(
         connection,
         "SELECT receipt_json FROM external_source_retained_receipts_v1
+              INDEXED BY sqlite_autoindex_external_source_retained_receipts_v1_1
          WHERE binding_id = ?1 AND receipt_digest = ?2",
         binding.binding_id.as_str(),
         digest,

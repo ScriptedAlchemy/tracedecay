@@ -245,7 +245,7 @@ pub(super) fn build_record_query_with_relations(
                   AND derived.retrieval_anchor_id = c.anchor_id
                   AND derived.evidence_kind = c.derived_kind
                   AND derived.evidence_id = c.retriever_record_id
-                 JOIN session_occurrences AS o
+                 JOIN session_occurrences AS o INDEXED BY sqlite_autoindex_session_occurrences_1
                    ON o.session_id = derived.session_id
                   AND o.occurrence_id = derived.first_occurrence_id
                   {occurrence_condition}
@@ -260,7 +260,7 @@ pub(super) fn build_record_query_with_relations(
                   AND derived.retrieval_anchor_id = c.anchor_id
                   AND derived.evidence_kind = c.derived_kind
                   AND derived.evidence_id = c.retriever_record_id
-                 JOIN session_occurrences AS o
+                 JOIN session_occurrences AS o INDEXED BY sqlite_autoindex_session_occurrences_1
                    ON o.session_id = derived.session_id
                   AND o.occurrence_id = derived.last_occurrence_id
                   {occurrence_condition}

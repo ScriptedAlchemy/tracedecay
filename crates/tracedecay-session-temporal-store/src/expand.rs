@@ -36,27 +36,26 @@ const MAX_SUMMARY_TOPOLOGY_RELATIONS: usize = MAX_SESSION_TEMPORAL_RETRIEVAL_PAG
 // Requested keys are joined, never matched with `IN`: Turso seeks an `IN`
 // only on a leading index column, so `session_id = ?1 AND key IN (...)` reads
 // the whole session (turso-bugs/in-after-equality-prefix-never-seeks.md).
-pub(crate) const ANCHOR_ASSERTIONS_SQL: &str = "WITH requested(anchor_id) AS (
-         SELECT DISTINCT CAST(value AS TEXT) FROM json_each(?3)
-     ),
-     matched(assertion_id) AS (
-         SELECT assertion.assertion_id
-         FROM requested
-         CROSS JOIN session_assertions AS assertion
-         WHERE assertion.session_id = ?1
-           AND assertion.subject_anchor_id = requested.anchor_id
+pub(crate) const ANCHOR_ASSERTIONS_SQL: &str = "WITH matched(assertion_id) AS (
+         SELECT by_subject.assertion_id
+         FROM (SELECT DISTINCT CAST(value AS TEXT) AS anchor_id FROM json_each(?3))
+              AS subject_key
+         CROSS JOIN session_assertions AS by_subject INDEXED BY idx_session_assertions_subject
+         WHERE by_subject.session_id = ?1
+           AND by_subject.subject_anchor_id = subject_key.anchor_id
          UNION
-         SELECT assertion.assertion_id
-         FROM requested
-         CROSS JOIN session_assertions AS assertion
-         WHERE assertion.session_id = ?1
-           AND assertion.object_anchor_id = requested.anchor_id
+         SELECT by_object.assertion_id
+         FROM (SELECT DISTINCT CAST(value AS TEXT) AS anchor_id FROM json_each(?3))
+              AS object_key
+         CROSS JOIN session_assertions AS by_object INDEXED BY idx_session_assertions_object_order
+         WHERE by_object.session_id = ?1
+           AND by_object.object_anchor_id = object_key.anchor_id
      )
      SELECT assertion.assertion_id, assertion.assertion_kind,
             assertion.subject_anchor_id, assertion.object_anchor_id,
             assertion.knowledge_at, assertion.valid_time_json, assertion.evidence_json
      FROM matched
-     CROSS JOIN session_assertions AS assertion
+     CROSS JOIN session_assertions AS assertion INDEXED BY sqlite_autoindex_session_assertions_1
      WHERE assertion.session_id = ?1
        AND assertion.assertion_id = matched.assertion_id
        AND +assertion.generation <= ?2
@@ -82,7 +81,7 @@ pub(crate) const ANCHOR_ASSERTIONS_SQL: &str = "WITH requested(anchor_id) AS (
 
 pub(crate) const SUMMARY_ANCHORS_SQL: &str = "SELECT node.summary_id, node.summary_anchor_id
      FROM (SELECT DISTINCT CAST(value AS TEXT) AS summary_id FROM json_each(?2)) AS requested
-     CROSS JOIN session_summary_nodes AS node
+     CROSS JOIN session_summary_nodes AS node INDEXED BY sqlite_autoindex_session_summary_nodes_1
      WHERE node.summary_id = requested.summary_id
        AND node.session_id = ?1";
 

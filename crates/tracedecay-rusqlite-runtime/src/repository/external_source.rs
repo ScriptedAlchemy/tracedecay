@@ -609,6 +609,7 @@ fn load_current_mutations(
                 history.revision_digest, current.mutation_digest
          FROM {table} AS current
          LEFT JOIN external_source_mutations_v1 AS history
+              INDEXED BY sqlite_autoindex_external_source_mutations_v1_1
            ON history.binding_id = current.binding_id
           AND history.mutation_digest = current.mutation_digest
          WHERE current.binding_id = ?1"
@@ -740,6 +741,7 @@ fn persist_source_commit(
             verify_encoded_row(
                 savepoint,
                 "SELECT mutation_json FROM external_source_mutations_v1
+                 INDEXED BY sqlite_autoindex_external_source_mutations_v1_1
                  WHERE binding_id = ?1 AND mutation_digest = ?2",
                 binding.binding_id.as_str(),
                 mutation.mutation_digest().as_str(),
@@ -875,6 +877,7 @@ fn retire_superseded_history(
     for receipt in receipts {
         let mut retire = savepoint.prepare_cached(
             "DELETE FROM external_source_retained_receipts_v1
+                  INDEXED BY sqlite_autoindex_external_source_retained_receipts_v1_1
              WHERE binding_id = ?1
                AND receipt_digest = ?2
                AND receipt_digest <> (
@@ -883,6 +886,7 @@ fn retire_superseded_history(
                )
                AND NOT EXISTS (
                    SELECT 1 FROM external_source_pending_projections_v1
+                        INDEXED BY sqlite_autoindex_external_source_pending_projections_v1_3
                    WHERE binding_id = ?1 AND source_receipt_digest = ?2
                )
              RETURNING predecessor_frontier_digest, successor_frontier_digest",
@@ -992,6 +996,7 @@ fn persist_projection(
         let mutation_recorded = savepoint
             .prepare_cached(
                 "SELECT 1 FROM external_source_mutations_v1
+                 INDEXED BY sqlite_autoindex_external_source_mutations_v1_1
                  WHERE binding_id = ?1 AND mutation_digest = ?2",
             )?
             .exists(params![
@@ -1295,12 +1300,11 @@ fn validate_revision_collisions(
         );
     }
     for chunk in mutations.chunks(REVISION_COLLISION_PROBE_CHUNK) {
-        let mut sql = String::from(
-            "SELECT native_object_digest, revision_digest, mutation_json
-             FROM external_source_mutations_v1
-             WHERE binding_id = ?1
-               AND (native_object_digest, revision_digest) IN (VALUES ",
-        );
+        // Joined rather than `(a, b) IN (VALUES ...)`: Turso never seeks an
+        // `IN` after the binding prefix
+        // (turso-bugs/in-after-equality-prefix-never-seeks.md).
+        let mut sql =
+            String::from("WITH requested(native_object_digest, revision_digest) AS (VALUES ");
         let mut probe_params: Vec<&str> = Vec::with_capacity(1 + chunk.len() * 2);
         probe_params.push(binding.binding_id.as_str());
         for (index, mutation) in chunk.iter().enumerate() {
@@ -1312,7 +1316,16 @@ fn validate_revision_collisions(
             probe_params.push(mutation.observation().native_object().digest().as_str());
             probe_params.push(mutation.observation().revision().digest().as_str());
         }
-        sql.push(')');
+        sql.push_str(
+            ")
+             SELECT stored.native_object_digest, stored.revision_digest, stored.mutation_json
+             FROM requested
+             CROSS JOIN external_source_mutations_v1 AS stored
+                  INDEXED BY sqlite_autoindex_external_source_mutations_v1_2
+             WHERE stored.binding_id = ?1
+               AND stored.native_object_digest = requested.native_object_digest
+               AND stored.revision_digest = requested.revision_digest",
+        );
         let mut statement = connection.prepare(&sql)?;
         let mut stored = BTreeMap::new();
         let mut rows = statement.query(tracedecay_sql::params_from_iter(probe_params))?;

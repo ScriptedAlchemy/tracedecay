@@ -187,6 +187,7 @@ fn verify_retrieval_anchor(
     }
     let alias_count = connection.query_row(
         "SELECT COUNT(*) FROM retrieval_anchor_aliases
+         INDEXED BY sqlite_autoindex_retrieval_anchor_aliases_2
          WHERE owner_json = ?1 AND anchor_id = ?2",
         params![owner_json, anchor.anchor_id().as_str()],
         |row| row.get::<_, i64>(0),

@@ -17,9 +17,10 @@ fn target_rows_sql() -> String {
         "INSERT INTO sessions (provider, session_id, project_key, project_path)
          VALUES ('claude', '{SESSION}', 'user', '/requested-key-seek');
          INSERT INTO session_temporal_generations (
-            session_id, generation, state, frozen_watermarks_json, created_at,
-            ready_at, activated_at
-         ) VALUES ('{SESSION}', 1, 'active', '{{}}', 1, 1, 1);
+            session_id, generation, state, frozen_watermarks_json, created_at
+         ) VALUES ('{SESSION}', 1, 'building', '{{}}', 1);
+         UPDATE session_temporal_generations SET state = 'ready', ready_at = 1;
+         UPDATE session_temporal_generations SET state = 'active', activated_at = 2;
          INSERT INTO sanitization_receipts (
             receipt_id, sanitizer_version, payload_digest, receipt_json
          ) VALUES ('seek-receipt', 'seek-sanitizer', 'sha256:seek', '{{}}');

@@ -855,6 +855,37 @@ mod driver {
         );
     }
 
+    /// Catches a statement cache emptied when a capability scope ends, which
+    /// recompiles every exact SQL statement on each request.
+    #[test]
+    fn cached_statements_survive_capability_scopes() {
+        let (_directory, _path, connection) = open();
+        connection.execute_batch("CREATE TABLE t(a)").unwrap();
+        connection.set_capability(Capability::Writer).unwrap();
+        let exact_sql = Capability::ExactSql { savepoints: false };
+        let insert = || {
+            connection.with_capability(exact_sql, Capability::Writer, |scoped| {
+                scoped
+                    .prepare_cached("INSERT INTO t VALUES (1)")?
+                    .execute([])
+            })
+        };
+        insert().unwrap();
+        let compiled = connection.compiled_statements();
+        for _ in 0..3 {
+            insert().unwrap();
+        }
+        assert_eq!(
+            connection.compiled_statements(),
+            compiled,
+            "a repeated scoped statement must reuse its compiled program"
+        );
+        let rows: i64 = connection
+            .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 4);
+    }
+
     /// Catches materialized results: a driver query streams past the facade's
     /// row bound and releases its read when dropped mid-way.
     #[test]

@@ -33,6 +33,7 @@ pub(crate) const SOURCE_SUMMARY_AVAILABILITY_SQL: &str = "SELECT availability.su
             availability.availability, availability.reason
      FROM (SELECT DISTINCT CAST(value AS TEXT) AS summary_id FROM json_each(?3)) AS requested
      CROSS JOIN session_summary_availability AS availability
+          INDEXED BY sqlite_autoindex_session_summary_availability_1
      WHERE availability.session_id = ?1 AND availability.generation = ?2
        AND availability.summary_id = requested.summary_id";
 

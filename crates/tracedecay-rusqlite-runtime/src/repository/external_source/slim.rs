@@ -331,7 +331,7 @@ fn attach_mutations(
     };
     let mut statement = connection.prepare_cached(
         "SELECT mutation_json, native_object_digest, revision_digest
-         FROM external_source_mutations_v1
+         FROM external_source_mutations_v1 INDEXED BY sqlite_autoindex_external_source_mutations_v1_1
          WHERE binding_id = ?1 AND mutation_digest = ?2",
     )?;
     let mut mutations = Vec::with_capacity(digests.len());
