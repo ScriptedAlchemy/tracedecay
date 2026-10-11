@@ -653,8 +653,6 @@ mod reset_project_store_tests {
         tracedecay::register_runtime_ports().expect("runtime port registration");
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
-        let project_root = temp.path().join("healthy-project");
-        std::fs::create_dir_all(&project_root).unwrap();
         let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
             &profile_root,
             "profile storage exact-shape fixture",
@@ -666,46 +664,37 @@ mod reset_project_store_tests {
             "profile storage exact-shape fixture",
         )
         .unwrap();
-        let graph = tracedecay_project::project::TraceDecay::init_with_exclusive_maintenance(
-            &project_root,
-            tracedecay_project::project::TraceDecayOpenOptions {
-                profile_root: Some(profile_root.clone()),
-                global_db_path: Some(profile_root.join("global.db")),
-            },
-            &lifecycle,
-        )
-        .await
-        .unwrap();
-        let healthy_project_id = graph
-            .store_layout()
-            .identity
-            .project_id
-            .clone()
-            .expect("profile-sharded project id");
-        let healthy_db = graph.db_path();
-        drop(graph);
+        let mut stores = Vec::new();
+        for name in ["healthy-project", "incompatible-project"] {
+            let project_root = temp.path().join(name);
+            std::fs::create_dir_all(&project_root).unwrap();
+            let graph = tracedecay_project::project::TraceDecay::init_with_exclusive_maintenance(
+                &project_root,
+                tracedecay_project::project::TraceDecayOpenOptions {
+                    profile_root: Some(profile_root.clone()),
+                    global_db_path: Some(profile_root.join("global.db")),
+                },
+                &lifecycle,
+            )
+            .await
+            .unwrap();
+            let project_id = graph
+                .store_layout()
+                .identity
+                .project_id
+                .clone()
+                .expect("profile-sharded project id");
+            stores.push((project_id, graph.db_path()));
+            drop(graph);
+        }
         drop(database_scope);
         drop(lifecycle);
+        let [
+            (healthy_project_id, healthy_db),
+            (incompatible_project_id, incompatible_db),
+        ] = <[_; 2]>::try_from(stores).unwrap();
+        let incompatible_project_id = incompatible_project_id.as_str();
 
-        let incompatible_project_id = "proj_same_version_missing_table";
-        let incompatible_root = tracedecay_runtime_core::storage::profile_sharded_data_root(
-            &profile_root,
-            incompatible_project_id,
-        );
-        std::fs::create_dir_all(&incompatible_root).unwrap();
-        let incompatible_db = incompatible_root.join(tracedecay_runtime_core::config::DB_FILENAME);
-        let source = rusqlite::Connection::open_with_flags(
-            &healthy_db,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        let mut destination = rusqlite::Connection::open(&incompatible_db).unwrap();
-        rusqlite::backup::Backup::new(&source, &mut destination)
-            .unwrap()
-            .run_to_completion(64, Duration::from_millis(1), None)
-            .unwrap();
-        drop(destination);
-        drop(source);
         let connection = rusqlite::Connection::open(&incompatible_db).unwrap();
         connection
             .execute_batch("DROP TABLE diagnostic_generation_publications")

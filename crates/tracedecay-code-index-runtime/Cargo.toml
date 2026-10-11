@@ -70,7 +70,7 @@ notify = "6"
 
 [dev-dependencies]
 filetime = "0.2"
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+rusqlite = { version = "0.40.1", default-features = false }
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = [
     "test-helpers",

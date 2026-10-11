@@ -1071,7 +1071,8 @@ fallback estimate.
 ### Configured remote authority
 
 An explicitly configured, authenticated remote authority can perform
-policy-authorized remote retrieval, replication, backup, restore, or failover.
+policy-authorized remote retrieval, replication, or failover. TraceDecay never
+backs up, exports, or restores a store.
 Only authorized, sanitized, classified records can be exchanged, with exact
 source, retention, coverage, and receipt identity. The remote path fails closed
 with typed `unavailable`, `denied`, or `stale-peer` state; it does not turn a

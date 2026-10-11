@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_contracts::doctor::DoctorStorageFamilyReadV1;
-use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_domain::{CodeGenerationId, canonical_text::sha256_hex};
 
 use super::journey_test_support::git;
@@ -80,7 +79,6 @@ async fn publish_code_edit(
 /// store through the retained daemon-service signature.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mounted_code_generation_retention_continues_capped_segment_reclamation() {
-    let compaction = CompactionThresholdConfig::default();
     let isolation = TempDir::new().expect("isolated production composition");
     let project_root = isolation.path().join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
@@ -206,7 +204,6 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
                 schedulers,
                 &observations,
                 &cancellation,
-                Some(&compaction),
                 None,
             )
             .await;
@@ -243,7 +240,6 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
         schedulers,
         &observations,
         &cancellation,
-        Some(&compaction),
         None,
     )
     .await;

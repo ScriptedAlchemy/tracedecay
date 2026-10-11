@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use super::collection::{
     DurableDatabaseInventoryV1, DurableMemoryCheck, FindingStep, check_store_durable_memory,
-    collect_registered_finding, collect_unregistered_finding, durable_check_scratch_root,
-    durable_database_inventory, open_verified_store, unbounded_deadline,
+    collect_registered_finding, collect_unregistered_finding, durable_database_inventory,
+    open_verified_store, unbounded_deadline,
 };
 use super::fence::{capture_store_content_fence, capture_store_directory_fence};
 use super::pages::walk_store_stats;
@@ -107,7 +107,7 @@ async fn seed_store(
     let data_root = profile_root.join("stores").join(store_id);
     std::fs::create_dir_all(&data_root).unwrap();
     // A real (schema-empty) SQLite file, not raw bytes: the durable-memory
-    // guard opens this file through `sqlite_read_snapshot` before any
+    // guard reads this file in place before any
     // collection, so the fixture must be a database the guard can actually
     // inspect and prove carries no `memory_facts`/etc. rows.
     rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
