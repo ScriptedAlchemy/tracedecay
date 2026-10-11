@@ -25,6 +25,13 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // A constraint message is the schema's own text (a RAISE or the
+            // violated CHECK), shown bare as sqlite3_errmsg shows it.
+            Self::Engine(
+                error @ (turso_core::LimboError::Constraint(_)
+                | turso_core::LimboError::ForeignKeyConstraint(_)
+                | turso_core::LimboError::Raise(..)),
+            ) => write!(formatter, "{error}"),
             Self::Engine(error) => write!(formatter, "native Turso: {error}"),
             Self::InvalidOperation(message) => {
                 write!(formatter, "invalid native operation: {message}")

@@ -806,8 +806,13 @@ async fn final_schema_admission_rejects_mixed_case_extra_temporal_table() {
         .reset_required_context()
         .expect("a mixed-case temporal table must return typed reset-required");
     assert_eq!(authority, "session temporal");
+    // Turso's catalog keeps identifiers lowercased
+    // (turso-bugs/catalog-lowercases-identifiers.md); either spelling names
+    // the same table.
     assert!(
-        reason.contains("SeSsIoN_SuMmArY_BrAnCh_Local"),
+        reason
+            .to_ascii_lowercase()
+            .contains("session_summary_branch_local"),
         "unexpected reason: {reason}"
     );
     assert_eq!(
@@ -848,7 +853,9 @@ async fn final_schema_admission_rejects_mixed_case_extra_graph_publication_table
         .expect("a mixed-case graph table must return typed reset-required");
     assert_eq!(authority, "session temporal");
     assert!(
-        reason.contains("GrApH_PuBlIcAtIoN_BrAnCh_Local"),
+        reason
+            .to_ascii_lowercase()
+            .contains("graph_publication_branch_local"),
         "unexpected reason: {reason}"
     );
     assert_eq!(

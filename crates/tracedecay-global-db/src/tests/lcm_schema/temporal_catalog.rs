@@ -730,12 +730,20 @@ async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
+    let drop_fts = match conn.backend_kind() {
+        tracedecay_runtime_core::db::engine::BackendKind::Sqlite => {
+            "DROP TRIGGER session_summary_nodes_fts_insert_v1;
+             DROP TRIGGER session_summary_nodes_fts_delete_v1;
+             DROP TRIGGER session_summary_nodes_fts_update_v1;
+             DROP TABLE session_summary_nodes_fts;"
+        }
+        tracedecay_runtime_core::db::engine::BackendKind::NativeTurso => {
+            "DROP INDEX session_summary_nodes_fts;"
+        }
+    };
+    conn.execute_batch(drop_fts).await.unwrap();
     conn.execute_batch(
-        "DROP TRIGGER session_summary_nodes_fts_insert_v1;
-         DROP TRIGGER session_summary_nodes_fts_delete_v1;
-         DROP TRIGGER session_summary_nodes_fts_update_v1;
-         DROP TABLE session_summary_nodes_fts;
-         INSERT INTO retrieval_anchors (
+        "INSERT INTO retrieval_anchors (
             anchor_id, anchor_json, owner_json, projection_generation
          ) VALUES ('fts-anchor', '{}', '{}', 'test');
          INSERT INTO session_summary_nodes (
@@ -767,8 +775,7 @@ async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
     let conn = (*raw_db).clone();
     let mut rows = conn
         .query(
-            "SELECT 1 FROM sqlite_master
-             WHERE type = 'table' AND name = 'session_summary_nodes_fts'",
+            "SELECT 1 FROM sqlite_master WHERE name = 'session_summary_nodes_fts'",
             (),
         )
         .await

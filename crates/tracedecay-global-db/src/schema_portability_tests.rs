@@ -487,22 +487,38 @@ fn install_table(installed: &Connection, table: &str, layout_suffix: &str) -> Co
     connection
 }
 
+/// The key-semantics script's results on each table's original WITHOUT ROWID
+/// layout, recorded on `SQLite`. Native has no WITHOUT ROWID layout to run, so
+/// both engines hold the converted layout to this record.
+const WITHOUT_ROWID_KEY_SEMANTICS: &str = include_str!("converted_key_semantics.golden");
+
 #[tokio::test]
 async fn converted_tables_keep_without_rowid_key_semantics() {
     let directory = TempDir::new().unwrap();
     let installed =
         installed_sessions_store(&directory, TestDatabaseRuntimeScope::ProfileSessions).await;
+    let mut recorded = String::new();
     for name in CONVERTED_TABLES {
         let rowid = install_table(&installed, name, "");
-        let without_rowid = install_table(&installed, name, " WITHOUT ROWID");
         let table = KeyedTable::read(&rowid, name);
         assert!(table.key.len() > 1, "{name}: composite key expected");
-        assert_eq!(
-            key_semantics_script(&rowid, &table),
-            key_semantics_script(&without_rowid, &table),
-            "{name}: ROWID layout must keep the WITHOUT ROWID key semantics"
-        );
+        let semantics = key_semantics_script(&rowid, &table);
+        if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Sqlite {
+            let without_rowid = install_table(&installed, name, " WITHOUT ROWID");
+            assert_eq!(
+                semantics,
+                key_semantics_script(&without_rowid, &table),
+                "{name}: ROWID layout must keep the WITHOUT ROWID key semantics"
+            );
+        }
+        let (outcomes, rows) = semantics;
+        recorded.push_str(&format!("{name}\n  {outcomes:?}\n  {rows:?}\n"));
     }
+    assert!(
+        recorded == WITHOUT_ROWID_KEY_SEMANTICS,
+        "ROWID layouts must match the recorded WITHOUT ROWID key semantics; \
+         on SQLite this run is the record for converted_key_semantics.golden:\n{recorded}"
+    );
 }
 
 fn insert_checkpoint(connection: &Connection, shard: &str, incarnation: i64, sequence: i64) {
