@@ -212,12 +212,12 @@ pub async fn project_queued_observations(
         .await
         .map_err(|error| storage("begin projection window transaction", error))?;
     let now_micros = tracedecay_contracts::clock::now_micros().0;
+    let heads = ready_projection_heads(&transaction, now_micros, max).await?;
     let mut items = Vec::new();
-    while items.len() < max {
-        let Some(observation_id) = next_ready_projection_head(&transaction, now_micros).await?
-        else {
+    for (observation_id, ready) in heads {
+        if !ready {
             break;
-        };
+        }
         // Boxed for the same reason as the scalar drain: the collision-guarded
         // apply subtree overflows the base-opt worker stack when inlined.
         match Box::pin(project_observation_in_transaction_with_session(
@@ -246,47 +246,59 @@ pub async fn project_queued_observations(
     Ok(ProjectionDrainBatch { items, has_more })
 }
 
-/// Ready queue head under the same gate as the runtime's
-/// `NextQueuedProjection` read: strict minimum sequence, retry deadline
-/// passed, and no active projection rebuild generation.
-async fn next_ready_projection_head(
+/// The first `max` queue heads in strict sequence order under the same gate
+/// as the runtime's `NextQueuedProjection` read: terminal-collision rows are
+/// skipped, and no active projection rebuild generation may exist. Each row
+/// reports whether its retry deadline has passed; the caller stops at the
+/// first unready head, mirroring the scalar head-of-queue gate (a deferred
+/// head blocks the whole window even when later rows are ready).
+async fn ready_projection_heads(
     conn: &impl QueryExecutor,
     now_micros: i64,
-) -> ProjectionStoreResult<Option<CanonicalObservationIdV1>> {
+    max: usize,
+) -> ProjectionStoreResult<Vec<(CanonicalObservationIdV1, bool)>> {
     let mut rows = conn
         .query(
-            "SELECT observation_id FROM projection_queue
-             WHERE next_retry_at_micros <= ?2
-               AND observation_sequence = (
-                 SELECT MIN(observation_sequence) FROM projection_queue
-                 WHERE next_retry_at_micros < ?3
-               )
+            "SELECT observation_id, next_retry_at_micros <= ?2
+             FROM projection_queue
+             WHERE next_retry_at_micros < ?3
                AND NOT EXISTS (
                  SELECT 1 FROM observation_projection_rebuilds
                  WHERE projector_version = ?1
                )
-             LIMIT 1",
+             ORDER BY observation_sequence
+             LIMIT ?4",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION,
                 now_micros,
-                PROJECTION_TERMINAL_RETRY_MICROS
+                PROJECTION_TERMINAL_RETRY_MICROS,
+                i64::try_from(max).map_err(|_| {
+                    ProjectionStoreError::SequenceOverflow(u64::try_from(max).unwrap_or(u64::MAX))
+                })?,
             ],
         )
         .await
-        .map_err(|error| storage("read projection queue head", error))?;
-    let Some(row) = rows
+        .map_err(|error| storage("read projection queue heads", error))?;
+    let mut heads = Vec::new();
+    while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage("read projection queue head", error))?
-    else {
-        return Ok(None);
-    };
-    let observation_id = row
-        .get::<String>(0)
-        .map_err(|error| storage("decode projection queue head", error))?;
-    Ok(Some(
-        CanonicalObservationIdV1::new(observation_id).map_err(ProjectionStoreError::Contract)?,
-    ))
+        .map_err(|error| storage("read projection queue heads", error))?
+    {
+        let observation_id = row
+            .get::<String>(0)
+            .map_err(|error| storage("decode projection queue head", error))?;
+        let ready = row
+            .get::<i64>(1)
+            .map_err(|error| storage("decode projection queue head", error))?
+            != 0;
+        heads.push((
+            CanonicalObservationIdV1::new(observation_id)
+                .map_err(ProjectionStoreError::Contract)?,
+            ready,
+        ));
+    }
+    Ok(heads)
 }
 
 async fn projection_queue_has_items(conn: &impl QueryExecutor) -> ProjectionStoreResult<bool> {
