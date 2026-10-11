@@ -1,15 +1,11 @@
-//! Real-file workloads through production writer actors and repository SQL.
+//! Real-file contention through production writer actors and repository SQL.
 //!
-//! Concurrent submitters on one shard queue behind its single SQLite writer.
-//! Distinct shard files have distinct actors; readers use WAL snapshots. The
-//! ignored workload reports these separately and asserts durable receipt order.
+//! Concurrent submitters on one shard queue behind its single writer. Distinct
+//! shard files have distinct actors; readers use WAL snapshots. The
+//! `storage_contention` bench target measures the same fixtures.
 
-use std::sync::{
-    Arc, Barrier, Condvar, Mutex,
-    atomic::{AtomicBool, Ordering},
-    mpsc,
-};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
+use std::time::Duration;
 
 use rusqlite::{Savepoint, Transaction};
 use sha2::{Digest, Sha256};
@@ -38,7 +34,7 @@ use crate::runtime_test_support::{
     writer_locator, writer_runtime_fixture,
 };
 
-fn binding(shard: usize) -> StoreRuntimeBindingV1 {
+pub(crate) fn binding(shard: usize) -> StoreRuntimeBindingV1 {
     let mut value = serde_json::to_value(writer_runtime_fixture().origin_binding).unwrap();
     value["shard_id"]["scope"]["project_id"] = format!("project.contention.{shard}").into();
     serde_json::from_value(value).unwrap()
@@ -78,7 +74,7 @@ fn record(generation: &str, ordinal: usize) -> GenerationDiagnosticV1 {
     record
 }
 
-fn publication(
+pub(crate) fn publication(
     binding: &StoreRuntimeBindingV1,
     name: &str,
     records: usize,
@@ -114,14 +110,14 @@ fn publication(
     .unwrap()
 }
 
-fn seed(database: &TestDatabase) {
+pub(crate) fn seed(database: &TestDatabase) {
     database
         .connect()
         .execute_batch(GENERATION_DIAGNOSTICS_SCHEMA_DDL)
         .unwrap();
 }
 
-fn start_writer(
+pub(crate) fn start_writer(
     database: &TestDatabase,
     binding: &StoreRuntimeBindingV1,
     executor: impl StorageOperationExecutor + Send + 'static,
@@ -134,7 +130,10 @@ fn start_writer(
     .unwrap()
 }
 
-fn commit(writer: &PersistentWriter, request: RuntimeSubmitRequestV1) -> StoreCommitReceiptV1 {
+pub(crate) fn commit(
+    writer: &PersistentWriter,
+    request: RuntimeSubmitRequestV1,
+) -> StoreCommitReceiptV1 {
     let probe = Probe::for_submit(&request);
     match run(writer.submit(request, probe)).unwrap() {
         RuntimeSubmitOutcomeV1::Committed { receipt } => receipt,
@@ -142,7 +141,7 @@ fn commit(writer: &PersistentWriter, request: RuntimeSubmitRequestV1) -> StoreCo
     }
 }
 
-fn repository_read(binding: &StoreRuntimeBindingV1) -> RuntimeReadRequestV1 {
+pub(crate) fn repository_read(binding: &StoreRuntimeBindingV1) -> RuntimeReadRequestV1 {
     let mut value = serde_json::to_value(read_request(binding, "foreground")).unwrap();
     value["operation"] = serde_json::to_value(RuntimeReadOperationV1::Repository {
         op: RepositoryReadOperationV1::Project(ProjectReadOperationV1::Diagnostics(
@@ -154,7 +153,7 @@ fn repository_read(binding: &StoreRuntimeBindingV1) -> RuntimeReadRequestV1 {
 }
 
 #[derive(Clone, Default)]
-struct RepositoryReader(ConcreteRepositoryReadExecutor);
+pub(crate) struct RepositoryReader(ConcreteRepositoryReadExecutor);
 
 impl ReaderQueryExecutor for RepositoryReader {
     fn execute_read(
@@ -180,7 +179,7 @@ impl ReaderQueryExecutor for RepositoryReader {
     }
 }
 
-fn readers(
+pub(crate) fn readers(
     database: &TestDatabase,
     binding: &StoreRuntimeBindingV1,
 ) -> ReaderPool<RepositoryReader> {
@@ -192,7 +191,7 @@ fn readers(
     .unwrap()
 }
 
-fn generation(outcome: &RuntimeReadOutcomeV1) -> String {
+pub(crate) fn generation(outcome: &RuntimeReadOutcomeV1) -> String {
     match outcome.value() {
         Some(RuntimeReadResultV1::Repository {
             result: RepositoryReadResultV1::Project(project),
@@ -226,7 +225,7 @@ fn persisted_rows(connection: &rusqlite::Connection, table: &str) -> i64 {
         .unwrap()
 }
 
-fn durable_sequences(database: &TestDatabase, expected: u64) {
+pub(crate) fn durable_sequences(database: &TestDatabase, expected: u64) {
     let connection = database.connect();
     let mut statement = connection
         .prepare(
@@ -702,249 +701,4 @@ fn process_crash_preserves_committed_receipts_and_discards_uncommitted_mutations
     );
     restarted.shutdown_and_join().unwrap();
     durable_sequences(&database, 2);
-}
-
-fn setting(name: &str, default: usize) -> usize {
-    std::env::var(name).map_or(default, |value| {
-        value.parse().expect("positive integer workload setting")
-    })
-}
-
-fn percentiles(mut samples: Vec<Duration>) -> serde_json::Value {
-    samples.sort_unstable();
-    let percentile = |percent: usize| {
-        if samples.is_empty() {
-            return 0.0;
-        }
-        let index = (samples.len() * percent).div_ceil(100).saturating_sub(1);
-        samples[index].as_secs_f64() * 1_000.0
-    };
-    serde_json::json!({ "samples": samples.len(), "p50_ms": percentile(50), "p95_ms": percentile(95), "p99_ms": percentile(99) })
-}
-
-struct StopReadersOnDrop<'a>(&'a AtomicBool);
-impl Drop for StopReadersOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
-
-fn workload(
-    shards: usize,
-    producers: usize,
-    operations: usize,
-    reader_threads: usize,
-    records: usize,
-) {
-    assert!(shards > 0 && producers >= shards && operations > 0);
-    let databases: Vec<_> = (0..shards)
-        .map(|_| {
-            let database = TestDatabase::new("contention-benchmark.db");
-            seed(&database);
-            database
-        })
-        .collect();
-    let bindings: Vec<_> = (0..shards).map(binding).collect();
-    let writers: Vec<_> = databases
-        .iter()
-        .zip(&bindings)
-        .map(|(database, binding)| {
-            Arc::new(start_writer(
-                database,
-                binding,
-                ConcreteRepositoryWriteExecutor::default(),
-            ))
-        })
-        .collect();
-    let pools: Vec<_> = databases
-        .iter()
-        .zip(&bindings)
-        .map(|(database, binding)| readers(database, binding))
-        .collect();
-    // A durable seed ensures every measured read returns a real generation.
-    for (writer, binding) in writers.iter().zip(&bindings) {
-        commit(writer, publication(binding, "generation.seed", records));
-    }
-    let barrier = Barrier::new(producers + reader_threads + 1);
-    let writing = AtomicBool::new(true);
-    let (elapsed, reader_elapsed, write_samples, read_samples, failed, read_failed) =
-        std::thread::scope(|scope| {
-            let stop_readers = StopReadersOnDrop(&writing);
-            let write_tasks: Vec<_> = (0..producers)
-                .map(|producer| {
-                    let writer = &writers[producer % shards];
-                    let binding = &bindings[producer % shards];
-                    let barrier = &barrier;
-                    scope.spawn(move || {
-                        let runtime = tokio::runtime::Builder::new_current_thread()
-                            .enable_time()
-                            .build()
-                            .unwrap();
-                        let mut latencies = Vec::with_capacity(operations);
-                        let mut failed = 0;
-                        barrier.wait();
-                        for operation in 0..operations {
-                            let request = publication(
-                                binding,
-                                &format!("generation.p{producer}.o{operation}"),
-                                records,
-                            );
-                            let probe = Probe::for_submit(&request);
-                            let started = Instant::now();
-                            let result = runtime.block_on(writer.submit(request, probe));
-                            latencies.push(started.elapsed());
-                            if !matches!(result, Ok(RuntimeSubmitOutcomeV1::Committed { .. })) {
-                                failed += 1;
-                            }
-                        }
-                        (latencies, failed)
-                    })
-                })
-                .collect();
-            let read_tasks: Vec<_> = (0..reader_threads)
-                .map(|reader| {
-                    let pool = &pools[reader % shards];
-                    let request = repository_read(&bindings[reader % shards]);
-                    let barrier = &barrier;
-                    let writing = &writing;
-                    scope.spawn(move || {
-                        let mut latencies = Vec::new();
-                        let mut failed = 0;
-                        barrier.wait();
-                        while writing.load(Ordering::Acquire) {
-                            let probe = Probe::for_read(&request);
-                            let started = Instant::now();
-                            let result = (|| -> Result<RuntimeReadOutcomeV1, String> {
-                                let mut lease = pool
-                                    .acquire(&request, &probe, Duration::from_secs(1))
-                                    .map_err(|error| error.to_string())?;
-                                let mut snapshot =
-                                    lease.begin_snapshot().map_err(|error| error.to_string())?;
-                                snapshot
-                                    .execute(request.clone(), &probe)
-                                    .map_err(|error| error.to_string())
-                            })();
-                            latencies.push(started.elapsed());
-                            match result {
-                                Ok(outcome) => {
-                                    generation(&outcome);
-                                }
-                                _ => failed += 1,
-                            }
-                        }
-                        (latencies, failed)
-                    })
-                })
-                .collect();
-            let started = Instant::now();
-            barrier.wait();
-            let mut write_samples = Vec::new();
-            let mut failed = 0;
-            for task in write_tasks {
-                let (samples, errors) = task.join().unwrap();
-                write_samples.extend(samples);
-                failed += errors;
-            }
-            let elapsed = started.elapsed();
-            drop(stop_readers);
-            let mut read_samples = Vec::new();
-            let mut read_failed = 0;
-            for task in read_tasks {
-                let (samples, errors) = task.join().unwrap();
-                read_samples.extend(samples);
-                read_failed += errors;
-            }
-            (
-                elapsed,
-                started.elapsed(),
-                write_samples,
-                read_samples,
-                failed,
-                read_failed,
-            )
-        });
-    let busy: u64 = writers
-        .iter()
-        .map(|writer| writer.telemetry_snapshot().busy_events)
-        .sum();
-    let transactions: u64 = writers
-        .iter()
-        .map(|writer| {
-            writer
-                .telemetry_snapshot()
-                .transactions
-                .committed_transactions
-        })
-        .sum();
-    let read_count = read_samples.len();
-    let write_count = write_samples.len();
-    println!(
-        "{}",
-        serde_json::json!({
-            "workload": "production_diagnostic_publication", "sqlite": rusqlite::version(),
-            "os": std::env::consts::OS, "arch": std::env::consts::ARCH, "debug_assertions": cfg!(debug_assertions),
-            "shards": shards, "concurrent_submitters": producers, "operations_per_submitter": operations,
-            "reader_threads": reader_threads, "diagnostics_per_publication": records,
-            "seed_payload_admission_bytes": publication(&bindings[0], "generation.seed", records).envelope().metadata.admission_bytes,
-            "journal_mode": "wal", "request_durability": "full",
-            "sqlite_synchronous": "normal (runtime connection policy)",
-            "writer_elapsed_s": elapsed.as_secs_f64(), "reader_elapsed_s": reader_elapsed.as_secs_f64(),
-            "committed_ops_per_s": (write_count - failed) as f64 / elapsed.as_secs_f64(),
-            "read_ops_per_s": (read_count - read_failed) as f64 / reader_elapsed.as_secs_f64(),
-            "receipt_latency": percentiles(write_samples), "read_latency": percentiles(read_samples),
-            "failed_submissions": failed, "failed_reads": read_failed, "sqlite_busy_events": busy,
-            "committed_transactions_including_seeds": transactions,
-            "same_shard_write_mode": "one actor serializes BEGIN IMMEDIATE transactions"
-        })
-    );
-    drop(pools);
-    for writer in writers {
-        Arc::try_unwrap(writer)
-            .ok()
-            .unwrap()
-            .shutdown_and_join()
-            .unwrap();
-    }
-    assert_eq!(
-        failed, 0,
-        "workload must report and fail on rejected writes"
-    );
-    assert_eq!(
-        read_failed, 0,
-        "workload must report and fail on rejected reads"
-    );
-    for (shard, database) in databases.iter().enumerate() {
-        let assigned = (0..producers)
-            .filter(|producer| producer % shards == shard)
-            .count();
-        durable_sequences(database, u64::try_from(assigned * operations + 1).unwrap());
-    }
-}
-
-/// Reproducible opt-in workload, compiled in the normal integration suite.
-/// Run with Bazel --test_arg=storage_contention::real_file_contention_benchmark
-/// --test_arg=--ignored --test_arg=--nocapture --test_output=all.
-/// Optional TRACEDECAY_CONTENTION_{SHARDS,PRODUCERS,OPS,READERS,RECORDS}
-/// settings select a single run. Without SHARDS it compares fixed total work
-/// at (1 shard, 1 producer), (1, 8), and (4, 8); readers remain fixed at four.
-#[test]
-#[ignore = "explicit real-file contention workload; emits measured JSON"]
-fn real_file_contention_benchmark() {
-    let operations = setting("TRACEDECAY_CONTENTION_OPS", 128);
-    let reader_threads = setting("TRACEDECAY_CONTENTION_READERS", 4);
-    let records = setting("TRACEDECAY_CONTENTION_RECORDS", 8);
-    if std::env::var_os("TRACEDECAY_CONTENTION_SHARDS").is_some() {
-        let shards = setting("TRACEDECAY_CONTENTION_SHARDS", 1);
-        workload(
-            shards,
-            setting("TRACEDECAY_CONTENTION_PRODUCERS", 8),
-            operations,
-            reader_threads,
-            records,
-        );
-    } else {
-        workload(1, 1, operations * 8, reader_threads, records);
-        workload(1, 8, operations, reader_threads, records);
-        workload(4, 8, operations, reader_threads, records);
-    }
 }

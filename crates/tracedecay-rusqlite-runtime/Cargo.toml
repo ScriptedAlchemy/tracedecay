@@ -33,7 +33,13 @@ tracing = "0.1"
 [dev-dependencies]
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 tempfile = "3"
+tracedecay-sql = { path = "../tracedecay-sql" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
+
+[[bench]]
+name = "storage_contention"
+harness = false
+required-features = ["test-transport"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
