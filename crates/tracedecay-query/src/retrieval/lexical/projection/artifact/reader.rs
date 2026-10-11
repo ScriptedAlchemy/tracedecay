@@ -462,11 +462,7 @@ impl CodeLexicalArtifactReaderV1 {
             ));
         }
         verify_named_path_identity(path, &file)?;
-        let connection = Connection::open_with_flags(
-            sqlite_open_path(path)?,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|error| map_reader_open_error(path, error))?;
+        let connection = open_sealed_reader(path)?;
         verify_named_path_identity(path, &file)?;
         // An unserved revision's receipt has another shape; classify the
         // revision before decoding it so an old artifact is Incompatible.
@@ -594,13 +590,7 @@ impl CodeLexicalArtifactReaderV1 {
         progress(2, TOTAL_RESTORE_CHECKS);
         let connection = {
             let _span = tracing::trace_span!("query.artifact.open.sqlite_connect").entered();
-            {
-                Connection::open_with_flags(
-                    sqlite_open_path(path)?,
-                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                )
-                .map_err(|error| map_reader_open_error(path, error))
-            }
+            open_sealed_reader(path)
         }?;
         checkpoint(control)?;
         verify_named_path_identity(path, &file)?;
@@ -611,11 +601,7 @@ impl CodeLexicalArtifactReaderV1 {
                     &connection,
                     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
                     0,
-                    expected_file_size_bytes,
                 )?;
-                connection
-                    .pragma_update(None, "query_only", true)
-                    .map_err(sqlite_error)?;
                 verify_artifact_state_revision(&connection, control)?;
                 verify_artifact_table_layout(&connection)
             }
@@ -701,13 +687,7 @@ impl CodeLexicalArtifactReaderV1 {
         }
         let connection = {
             let _span = tracing::trace_span!("query.artifact.open.sqlite_connect").entered();
-            {
-                Connection::open_with_flags(
-                    sqlite_open_path(path)?,
-                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                )
-                .map_err(|error| map_reader_open_error(path, error))
-            }
+            open_sealed_reader(path)
         }?;
         let reader = {
             let _span = tracing::trace_span!("query.artifact.open.reader_restore").entered();
@@ -744,13 +724,9 @@ impl CodeLexicalArtifactReaderV1 {
         }: OpenLexicalArtifactConnection<'_>,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         checkpoint(control)?;
-        let sealed_file_size_bytes = expected.file_size_bytes();
         {
             let _span = tracing::trace_span!("query.artifact.open.schema_verify").entered();
             {
-                connection
-                    .pragma_update(None, "query_only", true)
-                    .map_err(sqlite_error)?;
                 verify_artifact_state_revision(&connection, control)?;
                 verify_artifact_table_layout(&connection)
             }
@@ -776,9 +752,6 @@ impl CodeLexicalArtifactReaderV1 {
                     ));
                 }
                 // Kernel SQLite window: page cache clamped to [2, 64] MiB.
-                // Sealed readers also mmap the immutable file (file-backed,
-                // not part of this heap claim) so n-gram serving does not
-                // re-pread the same posting pages on every tool call.
                 let sqlite_budget = cache_budget_bytes - stored_metadata_len;
                 if sqlite_budget < ARTIFACT_SQLITE_CACHE_FLOOR_BYTES {
                     return Err(CodeLexicalArtifactErrorV1::Unreserved(format!(
@@ -791,7 +764,6 @@ impl CodeLexicalArtifactReaderV1 {
                     &connection,
                     sqlite_budget.min(ARTIFACT_SQLITE_CACHE_BYTES) / width,
                     0,
-                    sealed_file_size_bytes,
                 )?;
                 let (stored_metadata_bytes, stored_metadata_digest): (Vec<u8>, String) = connection
                     .query_row(
@@ -891,20 +863,12 @@ impl CodeLexicalArtifactReaderV1 {
             (cache_budget_bytes - stored_metadata_bytes.len()) / ARTIFACT_SQLITE_CACHE_FLOOR_BYTES,
         );
         let mut connections = vec![admit_reader_connection(connection)?];
-        let sibling_open_path = sqlite_open_path(artifact_path)?;
         for _ in 1..width {
             checkpoint(control)?;
             verify_named_path_identity(artifact_path, artifact_file)?;
-            let sibling = Connection::open_with_flags(
-                &sibling_open_path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(|error| map_reader_open_error(artifact_path, error))?;
+            let sibling = open_sealed_reader(artifact_path)?;
             verify_named_path_identity(artifact_path, artifact_file)?;
-            sibling
-                .pragma_update(None, "query_only", true)
-                .map_err(sqlite_error)?;
-            configure_reader_window(&sibling, page_cache_bytes, 0, sealed_file_size_bytes)?;
+            configure_reader_window(&sibling, page_cache_bytes, 0)?;
             connections.push(admit_reader_connection(sibling)?);
         }
         let retained_owned_bytes = stored_metadata_bytes.len() + page_cache_bytes * width;
@@ -3656,12 +3620,19 @@ fn verify_artifact_state_revision(
     checkpoint(control)
 }
 
-fn sealed_reader_mmap_bytes(file_size_bytes: u64) -> Result<i64, CodeLexicalArtifactErrorV1> {
-    i64::try_from(file_size_bytes).map_err(|error| {
-        CodeLexicalArtifactErrorV1::Contract(format!(
-            "sealed lexical artifact is larger than SQLite's mmap_size domain: {error}"
-        ))
-    })
+/// Open the sealed file read-only. Until the pool admits it the connection
+/// runs under [`Capability::Maintenance`] so the opener can size its page
+/// cache; the read-only open still refuses every write.
+fn open_sealed_reader(path: &Path) -> Result<Connection, CodeLexicalArtifactErrorV1> {
+    let connection = Connection::open_with_flags(
+        sqlite_open_path(path)?,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| map_reader_open_error(path, error))?;
+    connection
+        .set_capability(Capability::Maintenance)
+        .map_err(sqlite_error)?;
+    Ok(connection)
 }
 
 /// Pool a configured connection for serving: from here on it may only query.
@@ -3678,7 +3649,6 @@ fn configure_reader_window(
     connection: &Connection,
     cache_budget_bytes: usize,
     retained_metadata_bytes: usize,
-    sealed_file_size_bytes: u64,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let available = cache_budget_bytes
         .checked_sub(retained_metadata_bytes)
@@ -3701,20 +3671,6 @@ fn configure_reader_window(
                 .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
         )
         .map_err(sqlite_error)?;
-    // Content-addressed readers are SQLITE_OPEN_READ_ONLY over an immutable
-    // file. The kernel SQLite window that disables mmap exists for writer /
-    // WAL coherence on graph and staging connections; applying it here forced
-    // sqlite3OsRead to re-pread ~174 MB of posting pages on every tool call
-    // against a multi-gigabyte artifact whose 64 MiB heap cache cannot retain
-    // the working set.
-    let mmap_bytes = sealed_reader_mmap_bytes(sealed_file_size_bytes)?;
-    connection
-        .pragma_update(None, "mmap_size", mmap_bytes)
-        .map_err(sqlite_error)?;
-    connection
-        .pragma_update(None, "temp_store", "FILE")
-        .map_err(sqlite_error)?;
-
     Ok(page_cache_bytes)
 }
 
@@ -3792,7 +3748,7 @@ mod tests {
         ScoreDomainId, SourceFreshness, SourceInstanceKey, SourceNamespace, UtcMicros,
     };
     use tracedecay_private_fs::{RewriteWitness, open_private_file};
-    use tracedecay_sql::{Connection, OpenFlags, params};
+    use tracedecay_sql::{Connection, params};
 
     use super::super::format::{PostingListEncoderV1, encode_document_set};
     use super::super::row_codec::{
@@ -3801,12 +3757,11 @@ mod tests {
     };
     use super::{
         ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, ARTIFACT_NGRAM_MAX_CANDIDATES_V1,
-        ARTIFACT_SQLITE_CACHE_BYTES, ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1,
-        ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1, ArtifactQueryMetricsV1,
-        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactErrorV1,
-        CodeLexicalArtifactReaderV1, CodeLexicalArtifactRestoreWitnessV1, LexicalFieldV1,
-        NGRAM_NORMALIZED, RequestTermPostingsV1, TermFieldPostingsV1,
-        charge_ngram_encoded_list_bytes, configure_reader_window,
+        ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1, ARTIFACT_SQLITE_MAX_BOUND_VALUE_BYTES_V1,
+        ArtifactQueryMetricsV1, CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        CodeLexicalArtifactErrorV1, CodeLexicalArtifactReaderV1,
+        CodeLexicalArtifactRestoreWitnessV1, LexicalFieldV1, NGRAM_NORMALIZED,
+        RequestTermPostingsV1, TermFieldPostingsV1, charge_ngram_encoded_list_bytes,
         ensure_ngram_candidate_cardinality, ensure_sqlite_bind_capacity,
         ensure_sqlite_bound_value_bytes, map_query_artifact_error, ngram_bitmap_candidates,
         ngram_document_query, query_ngrams, retain_bounded, term_frequency, visit_document_ids,
@@ -3893,40 +3848,6 @@ mod tests {
         fn elapsed_micros(&self) -> u64 {
             0
         }
-    }
-
-    #[test]
-    fn sealed_reader_window_mmaps_the_immutable_file() {
-        let directory = tempfile::tempdir().expect("artifact tempdir");
-        let path = directory.path().join("sealed.sqlite");
-        let seed = Connection::open(&path).expect("create sealed fixture");
-        seed.execute_batch("CREATE TABLE t(x INTEGER); INSERT INTO t VALUES (1);")
-            .expect("seed sealed fixture");
-        drop(seed);
-        let file_size = std::fs::metadata(&path).expect("stat sealed fixture").len();
-        let connection = Connection::open_with_flags(
-            &path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .expect("open sealed reader");
-        let page_cache_bytes = configure_reader_window(
-            &connection,
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-            0,
-            file_size,
-        )
-        .expect("configure sealed reader window");
-        assert_eq!(page_cache_bytes, ARTIFACT_SQLITE_CACHE_BYTES);
-        let _: i64 = connection
-            .query_row("SELECT x FROM t", [], |row| row.get(0))
-            .expect("touch the mapped file");
-        let mmap: i64 = connection
-            .pragma_query_value(None, "mmap_size", |row| row.get(0))
-            .expect("read mmap pragma");
-        assert!(
-            mmap >= i64::try_from(file_size).expect("fixture fits mmap_size"),
-            "sealed readers must mmap the immutable file so serving does not re-pread it: mmap={mmap} file={file_size}"
-        );
     }
 
     /// A pooled serving connection runs under the reader capability, so it

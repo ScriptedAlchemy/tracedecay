@@ -1056,10 +1056,10 @@ pub(crate) fn projection_metadata(
     }
 }
 
-/// Appends do not sync, so a killed builder leaves exactly the bytes it
-/// wrote: the staging file and its WAL. Resuming from those bytes must pick
-/// up at the last committed page and seal the same file an uninterrupted
-/// build seals.
+/// A killed builder leaves exactly the bytes it wrote: the staging file and
+/// any journal beside it. Resuming from those bytes must pick up at the last
+/// committed page and seal the same single file an uninterrupted build
+/// seals.
 #[test]
 fn killed_builder_resumes_from_its_unsynced_commits_and_seals_identical_bytes() {
     let (fixture, pages, _) = real_verified_pages_with_maximum_page_chunks(1);
@@ -1101,10 +1101,6 @@ fn killed_builder_resumes_from_its_unsynced_commits_and_seals_identical_bytes() 
         tracedecay_private_fs::make_private_file(&killed_path)
             .expect("restore the private DACL on the captured staging"),
     );
-    assert!(
-        PathBuf::from(format!("{}-wal", killed_path.display())).exists(),
-        "an unsynced append must live in the staging WAL"
-    );
     drop(live);
 
     let sealed = {
@@ -1141,6 +1137,59 @@ fn killed_builder_resumes_from_its_unsynced_commits_and_seals_identical_bytes() 
         Sha256::digest(std::fs::read(&uninterrupted_path).expect("read uninterrupted artifact")),
         "a resumed build must seal the uninterrupted build's bytes"
     );
+}
+
+const SECOND_OPENER_STAGING: &str = "TRACEDECAY_QUERY_SUITE_SECOND_OPENER_STAGING";
+
+/// A builder that has sealed its staging file, including the canonical
+/// rewrite that replaced the file under it, still keeps every other process
+/// out: on the native engine the second opener is refused as owned
+/// elsewhere. SQLite has no such lock and admits it.
+#[test]
+fn sealed_staging_stays_owned_by_its_live_builder() {
+    use tracedecay_sql::ErrorExt;
+
+    if let Ok(path) = std::env::var(SECOND_OPENER_STAGING) {
+        match tracedecay_sql::Connection::open(&path) {
+            Ok(_) => println!("OUTCOME=opened"),
+            Err(error) => println!("OUTCOME={:?}", error.kind()),
+        }
+        return;
+    }
+    let (fixture, pages, source_receipt) = real_verified_pages();
+    let control = ArtifactControl { cancelled: false };
+    let directory = tempfile::tempdir().expect("artifact tempdir");
+    let path = directory.path().join("owned.staging");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&path, fixture.metadata.clone())
+        .expect("create artifact");
+    for page in &pages {
+        builder.append_page(page, &control).expect("append page");
+    }
+    finish_staged_artifact(&mut builder, &source_receipt, &control);
+    let module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, module)| module);
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            &format!("{module}::sealed_staging_stays_owned_by_its_live_builder"),
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(SECOND_OPENER_STAGING, &path)
+        .output()
+        .expect("run the second opener");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "second opener failed: {stdout}");
+    let expected = match tracedecay_sql::ENGINE {
+        tracedecay_sql::Engine::Native => "OUTCOME=OwnedElsewhere",
+        tracedecay_sql::Engine::Sqlite => "OUTCOME=opened",
+    };
+    assert!(
+        stdout.contains(expected),
+        "expected {expected}, the second opener printed: {stdout}"
+    );
+    drop(builder);
 }
 
 #[test]
@@ -3524,12 +3573,20 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
         redundant_structures, 0,
         "the current revision keeps one physical order per family, no secondary index, and no derivable tables"
     );
+    // Deletion is logical (approved delta, vacuum-removed): the seal drops
+    // the finalization state and rewrites the receipt, and those pages stay
+    // on the freelist. The staging tables finalization dropped never reach
+    // the sealed file, because the canonical rewrite copies live content
+    // only, so the freelist stays a few pages whatever the corpus size.
     let freelist_pages: i64 = connection
         .query_row("PRAGMA freelist_count", [], |row| row.get(0))
         .expect("read freelist");
-    assert_eq!(
-        freelist_pages, 0,
-        "finalization returns every dropped staging page to the filesystem"
+    let page_size: i64 = connection
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .expect("read page size");
+    assert!(
+        freelist_pages > 0 && freelist_pages * page_size <= 32 * 1024,
+        "the sealed freelist holds only what the seal deleted, got {freelist_pages} pages of {page_size} bytes"
     );
     let (blocks, documents, untagged_blocks): (i64, i64, i64) = connection
         .query_row(
@@ -3923,8 +3980,8 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
     drop(resumed);
 
     // The remaining index steps (exact merge, n-gram rebuild from rows), then
-    // the two statistics steps (field totals, releasing every dropped
-    // staging page), each committed by exactly one restarted wake. No step
+    // the two statistics steps (field totals, dropping the per-page source
+    // cursors), each committed by exactly one restarted wake. No step
     // builds a secondary index.
     let expected_positions = [
         ("indexes", 3, 0),
@@ -3963,13 +4020,12 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
             "each restarted production wake commits at most one serving index"
         );
         if (phase, ordinal) == ("digest", 0) {
-            let (sealed_lists, staging_tables, freelist): (i64, i64, i64) = connection
+            let (sealed_lists, staging_tables): (i64, i64) = connection
                 .query_row(
                     "SELECT (SELECT COUNT(*) FROM term_postings) + (SELECT COUNT(*) FROM exact_postings) + (SELECT COUNT(*) FROM ngram_postings), \
-                            (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('term_posting_runs', 'exact_posting_runs', 'ngram_posting_pages')), \
-                            (SELECT freelist_count FROM pragma_freelist_count)",
+                            (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('term_posting_runs', 'exact_posting_runs', 'ngram_posting_pages'))",
                     [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .expect("inspect merged postings");
             assert!(
@@ -3977,10 +4033,6 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
                 "the index phase merges committed staging into sealed lists"
             );
             assert_eq!(staging_tables, 0, "every merged staging table is dropped");
-            assert_eq!(
-                freelist, 0,
-                "the final pre-digest wake releases their pages"
-            );
         }
         if (phase, ordinal) == ("digest", 0) {
             let fuzzy_terms: i64 = connection
