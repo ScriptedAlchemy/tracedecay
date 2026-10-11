@@ -989,6 +989,20 @@ fn rewrite_active_text_artifact_format_revision(store_root: &Path, revision: u64
                 .expect("rewrite artifact format revision"),
             1
         );
+        // The digest and the rename below see only the main file, as a
+        // sealed artifact is one file.
+        tracedecay_sql::ConnectionControl::checkpoint(
+            &connection,
+            tracedecay_sql::CheckpointMode::Truncate,
+        )
+        .expect("fold the rewrite into the artifact file");
+    }
+    let mut wal = old_path.clone().into_os_string();
+    wal.push("-wal");
+    match std::fs::remove_file(wal) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("remove the folded artifact WAL: {error}"),
     }
     let artifact_bytes = std::fs::read(&old_path).expect("read rewritten artifact");
     let artifact_hex = Sha256::digest(&artifact_bytes).iter().fold(
