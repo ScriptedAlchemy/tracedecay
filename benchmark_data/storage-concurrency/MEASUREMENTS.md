@@ -16,3 +16,14 @@ Host `ubuntu-main`: linux x86_64, 96 CPUs, debug assertions on.
 | queue-1x8 | 5 (0), none representative | 101.3 | 34.51 | 194.57 | 540.57 | 1.915 | 1.552 | 19.194 | 0 | 0 | 210–350 |
 | queue-4x8 | 5 (0), none representative | 337.7 | 12.21 | 19.58 | 154.59 | 0.906 | 0.621 | 4.620 | 0 | 0 | 212–344 |
 | conflict-1x8 | 5 (0), none representative | 575.5 | 7.74 | 23.00 | 91.55 | 1.860 | 0.402 | 2.864 | 512 | 23 | 225–412 |
+
+## sqlite at `78be351fc085662ef30198d50fc63eeefdfd17a2`
+
+Host `ubuntu-main`: linux x86_64, 96 CPUs, debug assertions on.
+
+| Shape | Runs (representative) | Settled/s | Receipt p50 ms | p95 ms | p99 ms | Read p99 ms | Search p50 ms | Search p99 ms | Conflicts | In-flight retries | Load range |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| queue-1x1 | 10 (3) | 37.5 | 18.81 | 57.41 | 118.21 | 4.939 | 1.908 | 76.676 | 0 | 0 | 170–2531 |
+| queue-1x8 | 10 (4) | 114.3 | 45.61 | 200.38 | 373.24 | 1.977 | 1.196 | 25.037 | 0 | 0 | 178–2734 |
+| queue-4x8 | 10 (4) | 335.3 | 15.70 | 56.71 | 76.45 | 3.197 | 1.071 | 12.668 | 0 | 0 | 179–2734 |
+| conflict-1x8 | 10 (4) | 549.3 | 11.81 | 39.38 | 69.86 | 2.839 | 0.580 | 9.354 | 512 | 30 | 170–2051 |
