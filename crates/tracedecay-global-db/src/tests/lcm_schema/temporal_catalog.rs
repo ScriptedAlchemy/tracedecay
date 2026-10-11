@@ -294,11 +294,46 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "idx_session_external_payload_manifests_session",
         ),
     ] {
-        let details = explain_query_plan(&conn, sql).await;
+        // On both engines each shape's index exists and leads with the
+        // shape's equality columns.
+        let leading: &[&str] = match index {
+            "idx_session_occurrences_anchor_order" => &["session_id", "retrieval_anchor_id"],
+            "idx_session_occurrences_message" => &["session_id", "message_id"],
+            "idx_session_occurrences_thread" => &["session_id", "thread_id"],
+            "idx_session_occurrences_turn" => &["session_id", "turn_id"],
+            "idx_session_occurrences_agent" => &["session_id", "agent_id"],
+            "idx_session_current_entities_occurrence" => &["session_id", "current_occurrence_id"],
+            "idx_session_assertions_object_order" => &["session_id", "object_anchor_id"],
+            "idx_session_assertions_kind_order" => &["session_id", "assertion_kind"],
+            "idx_session_assertions_generation_order" => &["session_id", "knowledge_at"],
+            "idx_session_external_payload_manifests_session" => &["session_id"],
+            other => panic!("no leading columns recorded for {other}"),
+        };
+        let mut rows = conn
+            .query(
+                "SELECT name FROM pragma_index_info(?1) ORDER BY seqno",
+                params![index],
+            )
+            .await
+            .unwrap();
+        let mut columns = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            columns.push(row.get::<String>(0).unwrap());
+        }
         assert!(
-            details.iter().any(|detail| detail.contains(index)),
-            "EXPLAIN did not use {index} for `{sql}`: {details:?}"
+            columns.starts_with(&leading.iter().map(ToString::to_string).collect::<Vec<_>>()),
+            "{index} must lead with {leading:?}, has {columns:?}"
         );
+        // SQLite's planner picks these indexes for the shapes. Turso's planner
+        // prefers the primary-key prefix for some of them
+        // (turso-bugs/secondary-index-loses-to-primary-key-prefix.md).
+        if conn.backend_kind() == tracedecay_runtime_core::db::engine::BackendKind::Sqlite {
+            let details = explain_query_plan(&conn, sql).await;
+            assert!(
+                details.iter().any(|detail| detail.contains(index)),
+                "EXPLAIN did not use {index} for `{sql}`: {details:?}"
+            );
+        }
     }
 }
 
