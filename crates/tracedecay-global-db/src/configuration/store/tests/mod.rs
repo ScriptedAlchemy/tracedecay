@@ -575,3 +575,4 @@ fn evidence_for(plan: &ProtectedChangePlan) -> ScopeRevalidationEvidenceV1 {
 
 mod control;
 mod persistence;
+mod repository_executor;
