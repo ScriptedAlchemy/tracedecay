@@ -4262,7 +4262,8 @@ mod tests {
         // Neither engine serves the replacement: SQLite stays bound to the
         // original file, and the native engine refuses a pathname that no
         // longer names the file it holds.
-        let served_version = served.pragma_query_value(None, "user_version", |row| row.get(0));
+        let served_version =
+            served.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0));
         match tracedecay_sql::ENGINE {
             tracedecay_sql::Engine::Sqlite => assert_eq!(
                 served_version.expect("the opened SQLite connection stays bound to the original"),
