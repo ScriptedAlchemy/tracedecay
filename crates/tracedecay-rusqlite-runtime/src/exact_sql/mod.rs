@@ -4,11 +4,7 @@
 //! module exposes owned values, never a SQLite connection or filesystem path.
 
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicI64, Ordering},
-        mpsc,
-    },
+    sync::{Arc, atomic::AtomicBool, mpsc},
     time::{Duration, Instant},
 };
 
@@ -69,7 +65,7 @@ pub use types::*;
 pub(crate) use command::{WriterCommand, reject_writer_command, run_writer_command};
 
 use command::{TransactionCommand, TransactionLeaseState};
-use guard::{AuthorizedDatabaseOperation, InsertTracker, with_exact_sql_guard};
+use guard::{AuthorizedDatabaseOperation, with_exact_sql_guard};
 
 type ExactSqlQuery = dyn Fn(ExactSqlStatement, OperationPriorityV1, Duration) -> Result<ExactSqlRows, ExactSqlError>
     + Send
@@ -108,7 +104,6 @@ pub struct ExactSqlHandle {
     table_size_telemetry: Arc<TableSizeTelemetryRead>,
     reader_pool_occupancy: Arc<ReaderPoolOccupancyRead>,
     release_reader_memory: Arc<ReaderMemoryRelease>,
-    last_insert_rowid: Arc<AtomicI64>,
     write_authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
 }
 
@@ -251,7 +246,6 @@ impl ExactSqlHandle {
                     reason: MemoryReleaseNoOpReason::ReaderPoolClosed,
                 }),
             }),
-            last_insert_rowid: Arc::new(AtomicI64::new(0)),
             write_authority: None,
         }
     }
@@ -276,7 +270,6 @@ impl ExactSqlHandle {
             table_size_telemetry: Arc::clone(&self.table_size_telemetry),
             reader_pool_occupancy: Arc::clone(&self.reader_pool_occupancy),
             release_reader_memory: Arc::clone(&self.release_reader_memory),
-            last_insert_rowid: Arc::clone(&self.last_insert_rowid),
             write_authority: None,
         }
     }
@@ -290,10 +283,6 @@ impl ExactSqlHandle {
         }
         self.write_authority = Some(authority);
         Ok(self)
-    }
-
-    pub fn last_insert_rowid(&self) -> i64 {
-        self.last_insert_rowid.load(Ordering::Acquire)
     }
 
     /// Live reader-pool occupancy, or `None` once the pool has been closed.
@@ -345,6 +334,33 @@ impl ExactSqlHandle {
             .await?
         {
             SqlResult::Executed(result) => Ok(result),
+            _ => Err(ExactSqlError::WriterUnavailable),
+        }
+    }
+
+    /// Runs one statement that returns rows on the writer actor. Once admitted,
+    /// the write completes even when its caller abandons the reply waiter.
+    pub fn execute_returning(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
+        statement.validate()?;
+        match self.dispatch_writer(SqlRequest::ExecuteReturning(statement))? {
+            SqlResult::Queried(rows) => Ok(rows),
+            _ => Err(ExactSqlError::WriterUnavailable),
+        }
+    }
+
+    pub async fn execute_returning_async(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
+        statement.validate()?;
+        match self
+            .dispatch_writer_async(SqlRequest::ExecuteReturning(statement))
+            .await?
+        {
+            SqlResult::Queried(rows) => Ok(rows),
             _ => Err(ExactSqlError::WriterUnavailable),
         }
     }
@@ -619,7 +635,6 @@ impl ExactSqlHandle {
                 policy,
                 receiver,
                 reply,
-                last_insert_rowid: Arc::clone(&self.last_insert_rowid),
                 lease: Arc::clone(&lease),
                 authority: self.write_authority.clone(),
             })
@@ -674,7 +689,6 @@ impl ExactSqlHandle {
             .try_send(WriterCommand::Dispatch {
                 request,
                 reply,
-                last_insert_rowid: Arc::clone(&self.last_insert_rowid),
                 authority: self.write_authority.clone(),
             })
             .map_err(map_writer_send_error)?;
@@ -1022,12 +1036,9 @@ fn execute_request(
     execution_deadline: Option<Instant>,
     enforce_statement_limit: bool,
     repeated_authority: Option<(Arc<dyn ExactSqlWriteAuthority>, ExactSqlWriteIntent)>,
-) -> (Result<SqlResult, ExactSqlError>, bool) {
-    if let Err(error) = validate_request(&request) {
-        return (Err(error), false);
-    }
-    let insert_tracker = Arc::new(InsertTracker::default());
-    let result = with_exact_sql_guard(
+) -> Result<SqlResult, ExactSqlError> {
+    validate_request(&request)?;
+    with_exact_sql_guard(
         connection,
         pinned_transaction,
         false,
@@ -1038,7 +1049,6 @@ fn execute_request(
         crate::connection::authorize_writer,
         true,
         None,
-        Some(Arc::clone(&insert_tracker)),
         || match request {
             SqlRequest::Validate(statement) => connection
                 .prepare_cached(&statement.sql)
@@ -1047,15 +1057,14 @@ fn execute_request(
             SqlRequest::Execute(statement) => {
                 execute_statement(connection, statement).map(SqlResult::Executed)
             }
-            SqlRequest::Query(statement) => {
+            SqlRequest::Query(statement) | SqlRequest::ExecuteReturning(statement) => {
                 execute_query_unchecked(connection, statement).map(SqlResult::Queried)
             }
             SqlRequest::ExecuteBatch(sql) => {
                 execute_batch(connection, &sql).map(SqlResult::BatchExecuted)
             }
         },
-    );
-    (result, insert_tracker.applied.load(Ordering::Acquire))
+    )
 }
 
 fn verify_write_authority(
@@ -1068,28 +1077,12 @@ fn verify_write_authority(
     }
 }
 
-fn publish_last_insert_rowid(
-    result: &mut Result<SqlResult, ExactSqlError>,
-    inserted: bool,
-    connection_rowid: i64,
-    logical_rowid: &AtomicI64,
-) {
-    if inserted {
-        logical_rowid.store(connection_rowid, Ordering::Release);
-    }
-    let rowid = logical_rowid.load(Ordering::Acquire);
-    match result.as_mut() {
-        Ok(SqlResult::Executed(result)) => result.last_insert_rowid = rowid,
-        Ok(SqlResult::BatchExecuted(result)) => result.last_insert_rowid = rowid,
-        Ok(SqlResult::Validated | SqlResult::Queried(_)) | Err(_) => {}
-    }
-}
-
 fn validate_request(request: &SqlRequest) -> Result<(), ExactSqlError> {
     match request {
         SqlRequest::Validate(statement)
         | SqlRequest::Execute(statement)
-        | SqlRequest::Query(statement) => statement.validate(),
+        | SqlRequest::Query(statement)
+        | SqlRequest::ExecuteReturning(statement) => statement.validate(),
         SqlRequest::ExecuteBatch(sql) => validate_batch(sql),
     }
 }
@@ -1143,10 +1136,7 @@ fn execute_statement(
         .execute(params_from_iter(values))
         .map_err(|error| sqlite_error("execute", error))?;
     crate::telemetry::observe_statement(&prepared);
-    Ok(ExactSqlExecuteResult {
-        changed_rows,
-        last_insert_rowid: connection.last_insert_rowid(),
-    })
+    Ok(ExactSqlExecuteResult { changed_rows })
 }
 
 fn attach_database(
@@ -1172,7 +1162,6 @@ fn attach_database(
         crate::connection::authorize_writer,
         true,
         Some(AuthorizedDatabaseOperation::Attach),
-        None,
         || execute_statement(connection, statement).map(|_| ()),
     )
 }
@@ -1199,7 +1188,6 @@ fn detach_database(
         Some(AuthorizedDatabaseOperation::Detach(
             database_name.to_owned(),
         )),
-        None,
         || execute_batch(connection, &sql).map(|_| ()),
     )
 }
@@ -1211,7 +1199,6 @@ fn execute_batch(connection: &Connection, sql: &str) -> Result<ExactSqlBatchResu
         .map_err(|error| sqlite_error("execute batch", error))?;
     Ok(ExactSqlBatchResult {
         changed_rows: connection.total_changes().saturating_sub(before),
-        last_insert_rowid: connection.last_insert_rowid(),
     })
 }
 
@@ -1235,7 +1222,6 @@ pub(crate) fn execute_query(
         None,
         crate::connection::authorize_reader,
         false,
-        None,
         None,
         || execute_query_unchecked(connection, request),
     )

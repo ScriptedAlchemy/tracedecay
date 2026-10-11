@@ -17,7 +17,6 @@ fn queued_write_rechecks_authority_on_actor_dequeue() {
                     "CREATE TABLE denied_after_queue (value INTEGER)".to_owned(),
                 ),
                 reply,
-                last_insert_rowid: Arc::new(AtomicI64::new(0)),
                 authority: Some(Arc::new(AtomicWriteAuthority(Arc::clone(&allowed)))),
             })
             .is_ok()
@@ -190,7 +189,6 @@ fn exact_sql_guard_restores_authorizer_after_panic() {
             None,
             crate::connection::authorize_writer,
             true,
-            None,
             None,
             || panic!("exact SQL operation panic"),
         );
