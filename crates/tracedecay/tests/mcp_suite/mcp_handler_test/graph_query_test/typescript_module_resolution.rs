@@ -14,10 +14,7 @@ use tracedecay_contracts::{
     CallableCodeSurfaceMeta, CodeCallersSurfaceRequest, ResultProjection, RetrievalOrder,
 };
 
-const FIXTURE_ROOT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../tracedecay-code-extraction/fixtures/typescript-monorepo"
-);
+const FIXTURE_ROOT: &str = "../tracedecay-code-extraction/fixtures/typescript-monorepo";
 
 fn copy_fixture(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();

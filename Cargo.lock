@@ -49,33 +49,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
-name = "amari-core"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4604466370c01bb3453e1fa51a67477727770fbb77898c9dc04b7c974a7e0bbf"
-dependencies = [
- "approx",
- "bytemuck",
- "dashu-float",
- "num-traits",
- "thiserror",
-]
-
-[[package]]
-name = "amari-holographic"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50c6910ba152183755dc13859932c57c5942ab1d3533939315a93b32b289f953"
-dependencies = [
- "amari-core",
- "fastrand",
- "num-traits",
- "rand 0.10.3",
- "rand_chacha 0.10.0",
- "thiserror",
-]
-
-[[package]]
 name = "ambient-authority"
 version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -161,15 +134,6 @@ dependencies = [
  "keyring-core",
  "log",
  "security-framework",
-]
-
-[[package]]
-name = "approx"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]
@@ -605,12 +569,6 @@ name = "bytecount"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
-
-[[package]]
-name = "bytemuck"
-version = "1.25.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 
 [[package]]
 name = "byteorder"
@@ -1130,37 +1088,6 @@ dependencies = [
  "lock_api",
  "once_cell",
  "parking_lot_core",
-]
-
-[[package]]
-name = "dashu-base"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "993b95dc1b248e3f5747dcb017a41d6e75853a2e5ee4504f7d537c5b8dffdae4"
-
-[[package]]
-name = "dashu-float"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "779046eff25a959dd58c8d876dc9673ef2eaebd184fadf7313e27f73a10dd9bd"
-dependencies = [
- "dashu-base",
- "dashu-int",
- "rustversion",
- "static_assertions",
-]
-
-[[package]]
-name = "dashu-int"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49c05a0d5cb0b39fcc87c46432fdac24b90dce239857c7f6b798be4ffc3c42c6"
-dependencies = [
- "cfg-if",
- "dashu-base",
- "num-modular",
- "rustversion",
- "static_assertions",
 ]
 
 [[package]]
@@ -3641,12 +3568,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num-modular"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd8e500409e6cd603b03e477c26a6caecdc27ac58979a53e881c75eafc079f44"
-
-[[package]]
 name = "num-rational"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3906,7 +3827,7 @@ dependencies = [
  "bitflags 2.13.2",
  "num-traits",
  "rand 0.9.5",
- "rand_chacha 0.9.0",
+ "rand_chacha",
  "rand_xorshift",
  "regex-syntax",
  "unarray",
@@ -3995,7 +3916,7 @@ version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
 dependencies = [
- "rand_chacha 0.9.0",
+ "rand_chacha",
  "rand_core 0.9.5",
 ]
 
@@ -4018,16 +3939,6 @@ checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
 dependencies = [
  "ppv-lite86",
  "rand_core 0.9.5",
-]
-
-[[package]]
-name = "rand_chacha"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e6af7f3e25ded52c41df4e0b1af2d047e45896c2f3281792ed68a1c243daedb"
-dependencies = [
- "ppv-lite86",
- "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -5381,7 +5292,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracedecay"
-version = "1.0.0-beta.83"
+version = "1.0.0-beta.84"
 dependencies = [
  "axum",
  "constant_time_eq",
@@ -5653,7 +5564,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-cli"
-version = "1.0.0-beta.83"
+version = "1.0.0-beta.84"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -6390,7 +6301,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-project"
-version = "1.0.0-beta.83"
+version = "1.0.0-beta.84"
 dependencies = [
  "rusqlite",
  "serde_json",
@@ -6558,7 +6469,6 @@ dependencies = [
 name = "tracedecay-session-memory"
 version = "0.1.0"
 dependencies = [
- "amari-holographic",
  "hex",
  "memmap2",
  "regex",

@@ -7,7 +7,7 @@
 //! automation_skill_writer_runner_test binaries into one integration-test
 //! binary so Windows CI links one executable instead of eight. The binary
 //! keeps the automation_runner_test name because automation artifacts embed
-//! `cargo test --test automation_runner_test ...` replay commands.
+//! `bazel test //crates/tracedecay:automation_runner_test ...` harness commands.
 
 #![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]

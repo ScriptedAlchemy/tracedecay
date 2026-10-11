@@ -90,6 +90,7 @@ fn storage_status_request(request_id: &str) -> DaemonInvocationRequest {
         Deadline::new(UtcMicros(30_000_000)).expect("deadline"),
         CancellationContext::active(format!("cancel.{request_id}")).expect("cancellation"),
     )
+    .expect("valid primitive request")
 }
 
 fn application_problem_from(response: DaemonInvocationResponse) -> ApplicationProblem {

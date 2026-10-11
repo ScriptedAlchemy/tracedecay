@@ -11,6 +11,7 @@ npm_link_all_packages(name = "node_modules")
 
 exports_files(
     [
+        ".github/release-targets.json",
         "version.txt",
         "Cargo.toml",
         "rustfmt.toml",

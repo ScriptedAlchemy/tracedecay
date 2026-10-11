@@ -276,7 +276,7 @@ async fn connect_with_restart_grace_resolving(
     }
 }
 
-fn authority_absent(error: &TraceDecayError) -> bool {
+pub(super) fn authority_absent(error: &TraceDecayError) -> bool {
     error
         .project_route_context()
         .is_some_and(|(code, retryable, _)| code == DAEMON_AUTHORITY_UNAVAILABLE && retryable)

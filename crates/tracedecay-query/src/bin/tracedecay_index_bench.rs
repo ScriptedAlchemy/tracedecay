@@ -242,6 +242,105 @@ fn edit(files: &[AdmittedFile]) -> (Vec<AdmittedFile>, BTreeSet<String>) {
     (edited, edited_paths)
 }
 
+/// Preferred committed-corpus names: an unchanged Rust type, an edited Go
+/// method-set type, and that type's constructor. A smaller `--corpus` falls
+/// back to the first distinct sealed names.
+const PREFERRED_SPOT_CHECKS: [&str; 3] = [
+    "ManifestState020",
+    "Aperture017State",
+    "NewAperture017State",
+];
+
+fn symbol_query(generation: &CodeIndexPublishedGenerationV1, name: &str) -> Vec<String> {
+    let mut hits = generation
+        .symbols()
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.simple_name == name)
+        .map(|symbol| symbol.qualified_name.clone())
+        .collect::<Vec<_>>();
+    hits.sort();
+    hits
+}
+
+fn spot_check_names(generation: &CodeIndexPublishedGenerationV1) -> Vec<String> {
+    let available = generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| symbol.simple_name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut names = PREFERRED_SPOT_CHECKS
+        .iter()
+        .filter(|name| available.contains(*name))
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    if names.len() >= 3 {
+        return names;
+    }
+    for symbol in &generation.symbols().symbols {
+        if symbol.simple_name.is_empty() || names.iter().any(|name| name == &symbol.simple_name) {
+            continue;
+        }
+        names.push(symbol.simple_name.clone());
+        if names.len() == 3 {
+            break;
+        }
+    }
+    names
+}
+
+/// After timings are recorded, seal the edited tree as a fresh full index
+/// and require the incremental generation to answer the same symbol queries.
+fn verify_increment_matches_fresh_full(
+    config: CodeIndexProductionConfigV1,
+    repository: &RepositoryId,
+    sanitizer_revision: &SanitizerRevision,
+    edited: &[AdmittedFile],
+    increment: &CodeIndexPublishedGenerationV1,
+    control: &ActiveControl,
+) -> Result<u64, String> {
+    let names = spot_check_names(increment);
+    if names.is_empty() {
+        return Err("incremental generation sealed no symbols to spot-check".to_owned());
+    }
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
+        .map_err(|error| format!("open fresh-full owner: {error}"))?;
+    let published = owner
+        .build_and_publish(
+            build_request(
+                repository,
+                sanitizer_revision,
+                edited,
+                edited
+                    .iter()
+                    .map(|file| file.logical_path.clone())
+                    .collect(),
+                "tree.index-bench.fresh-full",
+                INCREMENT_SEALED_AT,
+            ),
+            control,
+        )
+        .map_err(|error| format!("build fresh full generation: {error}"))?;
+    let fresh = decoded_generation(&store, &published)?;
+    for name in &names {
+        let increment_hits = symbol_query(increment, name);
+        let fresh_hits = symbol_query(&fresh, name);
+        if increment_hits.is_empty() {
+            return Err(format!(
+                "spot-check {name} hit nothing on the incremental index"
+            ));
+        }
+        if increment_hits != fresh_hits {
+            return Err(format!(
+                "spot-check {name}: incremental {increment_hits:?} != fresh full {fresh_hits:?}"
+            ));
+        }
+    }
+    Ok(u64::try_from(names.len()).unwrap_or(u64::MAX))
+}
+
 fn edit_one_body(files: &[AdmittedFile]) -> Option<(Vec<AdmittedFile>, BTreeSet<String>)> {
     const BEFORE: &str = "long next = entries.getOrDefault(key, 0L) + weight + 0L;";
     const AFTER: &str =
@@ -477,7 +576,7 @@ fn run(options: &Options) -> Result<String, String> {
         max_snapshot_age_micros: None,
     };
     let generations = build_generations(
-        config,
+        config.clone(),
         &repository,
         &sanitizer_revision,
         &files,
@@ -543,6 +642,15 @@ fn run(options: &Options) -> Result<String, String> {
 
     let total_wall = started.elapsed();
     let peak_rss_bytes = peak_rss_bytes();
+    let (edited, _) = edit(&files);
+    let spot_checked_queries = verify_increment_matches_fresh_full(
+        config,
+        &repository,
+        &sanitizer_revision,
+        &edited,
+        &generations.generation,
+        &control,
+    )?;
 
     Ok(summary(SummaryFields {
         corpus_root: &options.corpus_root,
@@ -575,6 +683,7 @@ fn run(options: &Options) -> Result<String, String> {
         drain_wall,
         ingest_wall,
         total_wall,
+        spot_checked_queries,
         peak_rss_bytes,
     }))
 }
@@ -1062,6 +1171,7 @@ struct SummaryFields<'a> {
     drain_wall: Duration,
     ingest_wall: Duration,
     total_wall: Duration,
+    spot_checked_queries: u64,
     peak_rss_bytes: Option<u64>,
 }
 
@@ -1079,6 +1189,7 @@ fn summary(fields: SummaryFields<'_>) -> String {
         "retained_parses": fields.retained_parses,
         "source_total_bytes": fields.source_total_bytes,
         "symbol_count": fields.symbol_count,
+        "spot_checked_queries": fields.spot_checked_queries,
         "clones": {
             "census": fields.clone_census,
             "increment_payloads_computed": fields.increment_clone_payloads_computed,

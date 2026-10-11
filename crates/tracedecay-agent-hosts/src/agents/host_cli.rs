@@ -20,7 +20,7 @@
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -141,9 +141,7 @@ pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result
         .to_string();
     let rendered_args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
 
-    let mut child = command.spawn().map_err(|error| TraceDecayError::Config {
-        message: format!("could not run `{}`: {error}", resolved_program.display()),
-    })?;
+    let mut child = spawn_host_command(&mut command, &resolved_program)?;
 
     // Drain both pipes concurrently: a command that writes more than one pipe
     // buffer would otherwise block on write while we block on wait.
@@ -182,6 +180,12 @@ pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result
         timed_out,
         stdout,
         stderr,
+    })
+}
+
+fn spawn_host_command(command: &mut Command, resolved_program: &Path) -> Result<Child> {
+    command.spawn().map_err(|error| TraceDecayError::Config {
+        message: format!("could not run `{}`: {error}", resolved_program.display()),
     })
 }
 
@@ -243,9 +247,7 @@ pub(crate) fn spawn_host_server(
 ) -> Result<HostServerChild> {
     let (mut command, resolved_program) = admitted_host_command(program, args, home)?;
     command.envs(env.iter().copied());
-    let mut child = command.spawn().map_err(|error| TraceDecayError::Config {
-        message: format!("could not run `{}`: {error}", resolved_program.display()),
-    })?;
+    let mut child = spawn_host_command(&mut command, &resolved_program)?;
     let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     if let Some(stdout) = child.stdout.take() {
         spawn_shared_reader(stdout, std::sync::Arc::clone(&output));
@@ -593,6 +595,10 @@ fn admit_windows_profile_environment(command: &mut Command, home: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use std::io::Write as _;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::process::CommandExt as _;
     #[cfg(unix)]
     use tracedecay_runtime_core::test_executable::write_executable_script;
 
@@ -691,11 +697,23 @@ mod tests {
         write_fake_cli(&bin, "exit 0");
         let bin = std::fs::canonicalize(&bin).unwrap();
         let _writer = std::fs::OpenOptions::new().append(true).open(&bin).unwrap();
+        let (mut attempts, attempt_marker) = std::io::pipe().unwrap();
+        let (mut command, resolved_program) =
+            admitted_host_command(&bin, &["plugin", "list"], dir.path()).unwrap();
+        // Every exec attempt forks a child that writes one byte here first, so
+        // the bytes read back count the attempts the spawn made.
+        unsafe {
+            command.pre_exec(move || {
+                let _ = (&attempt_marker).write(&[1]);
+                Ok(())
+            });
+        }
 
-        let started = Instant::now();
-        let error = run_host_cli(&bin, &["plugin", "list"], dir.path())
+        let error = spawn_host_command(&mut command, &resolved_program)
             .expect_err("Linux refuses to exec a file that is open for writing");
-        let elapsed = started.elapsed();
+        drop(command);
+        let mut marks = Vec::new();
+        attempts.read_to_end(&mut marks).unwrap();
 
         assert_eq!(
             error.to_string(),
@@ -704,9 +722,10 @@ mod tests {
                 bin.display()
             )
         );
-        assert!(
-            elapsed < Duration::from_millis(80),
-            "the refusal must not wait for the writer to go away: {elapsed:?}"
+        assert_eq!(
+            marks.len(),
+            1,
+            "the refusal must come from the first exec attempt, not a retry"
         );
     }
 

@@ -41,6 +41,27 @@ pub(super) async fn execute_primitive(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
+    if request.surface_operation() != Some(surface_operation) {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::InvalidRequest,
+        );
+    }
+    let operation = match request.application_operation() {
+        Ok(Some(operation)) => operation,
+        Ok(None) => {
+            return DaemonInvocationResponse::problem(
+                wire_request_id,
+                DaemonInvocationProblem::InvalidRequest,
+            );
+        }
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                wire_request_id,
+                DaemonInvocationProblem::ApplicationContractViolation,
+            );
+        }
+    };
     let Some(project_root) = project_root else {
         return concealed_application_problem(wire_request_id);
     };
@@ -72,24 +93,6 @@ pub(super) async fn execute_primitive(
     let access = match registered.authorization.current(observed_at).await {
         Ok(access) => access,
         Err(problem) => return application_problem(wire_request_id, problem),
-    };
-    let Ok(Some(operation)) =
-        tracedecay_contracts::feedback::feedback_surface_operation(surface_operation.as_str())
-            .and_then(|operation| {
-                operation.map_or_else(
-                    || {
-                        tracedecay_contracts::retrieval::catalog::primitive_read_operation(
-                            surface_operation.as_str(),
-                        )
-                    },
-                    |operation| Ok(Some(operation)),
-                )
-            })
-    else {
-        return DaemonInvocationResponse::problem(
-            wire_request_id,
-            DaemonInvocationProblem::InvalidRequest,
-        );
     };
     let context = match callable_code_request_context(
         &registered.scope,

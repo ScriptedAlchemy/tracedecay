@@ -82,13 +82,14 @@ export function useWorkAttempts(enabled: boolean, pageSize: number = WORK_ATTEMP
   return useQuery<WorkResult<WorkAttemptListV1>>({
     queryKey: workQueryKey(key, 'list-attempts', pageSize),
     enabled,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORK_LIST_ATTEMPTS_ROUTE,
         // No cursor: the first page is the only page this read asks for, and a
         // cursor invented here would name a generation the daemon never minted.
         { cursor: null, page_size: pageSize },
         scopedUrl(scope, WORK_LIST_ATTEMPTS_ROUTE.path),
+        signal,
       ),
   });
 }
@@ -102,11 +103,12 @@ export function useWorkExecutionHistory(
   return useQuery<WorkResult<WorkExecutionHistoryV1>>({
     queryKey: workQueryKey(key, 'list-attempts', 'execution-history', pageSize),
     enabled,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORK_EXECUTION_HISTORY_ROUTE,
         { cursor: null, page_size: pageSize },
         scopedUrl(scope, WORK_EXECUTION_HISTORY_ROUTE.path),
+        signal,
       ),
   });
 }
@@ -121,11 +123,12 @@ export function useWorkTopology(enabled: boolean, pageSize: number = WORK_ATTEMP
   return useQuery<WorkResult<ExecutionTopologyViewV1>>({
     queryKey: workQueryKey(key, 'topology', pageSize),
     enabled,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORK_TOPOLOGY_ROUTE,
         { cursor: null, page_size: pageSize },
         scopedUrl(scope, WORK_TOPOLOGY_ROUTE.path),
+        signal,
       ),
   });
 }
@@ -141,11 +144,12 @@ export function useWorkTopologyMetrics(enabled: boolean) {
   return useQuery<WorkResult<ExecutionTopologyMetricsV1>>({
     queryKey: workQueryKey(key, 'topology-metrics', WORK_TOPOLOGY_METRICS_WINDOW_MICROS, WORK_TOPOLOGY_METRICS_MAX_EVENTS),
     enabled,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORK_EXECUTION_TOPOLOGY_METRICS_ROUTE,
         workTopologyMetricsRequest(),
         scopedUrl(scope, WORK_EXECUTION_TOPOLOGY_METRICS_ROUTE.path),
+        signal,
       ),
   });
 }
@@ -209,11 +213,12 @@ export function useWorkGraphViews(enabled: boolean) {
   const bootstrap = useQuery<WorkResult<WorkGraphReadV1>>({
     queryKey: workQueryKey(key, 'views', 'profile-owned-no-git'),
     enabled,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORK_VIEWS_ROUTE,
         workGraphReadRequest(Date.now() * 1_000),
         scopedUrl(scope, WORK_VIEWS_ROUTE.path),
+        signal,
       ),
   });
   const authority =
@@ -230,11 +235,12 @@ export function useWorkGraphViews(enabled: boolean) {
     // The observation instant is minted per fetch rather than per render: as a
     // query-key member it would mint a new cache entry on every render and turn
     // one read into an unbounded stream of them.
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       callWork(
         WORK_VIEWS_ROUTE,
         workGraphReadRequest(Date.now() * 1_000, authority),
         scopedUrl(scope, WORK_VIEWS_ROUTE.path),
+        signal,
       ),
   });
   return authority === undefined ? bootstrap : exact;

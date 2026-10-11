@@ -6,7 +6,6 @@ pub struct TaskArtifactPolicy {
     accepted_next_actions: &'static [&'static str],
     rejected_next_actions: &'static [&'static str],
     handoff_test: &'static str,
-    eval_replay_command: &'static str,
 }
 
 impl TaskArtifactPolicy {
@@ -20,10 +19,6 @@ impl TaskArtifactPolicy {
 
     pub fn handoff_test(self) -> &'static str {
         self.handoff_test
-    }
-
-    pub fn eval_replay_command(self) -> &'static str {
-        self.eval_replay_command
     }
 }
 
@@ -39,8 +34,7 @@ pub fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
                 "inspect quarantined validation failures",
                 "collect stronger evidence before rerunning curation",
             ],
-            handoff_test: "cargo test --test automation_runner_test memory_curator",
-            eval_replay_command: "cargo test --test automation_runner_test memory_curator_repairs_then_applies_validated_ops_and_records_ledger -- --nocapture",
+            handoff_test: "bazel test //crates/tracedecay:automation_runner_test --test_arg=memory_curator",
         },
         AgentTaskKind::SessionReflector => TaskArtifactPolicy {
             optimizer_action: "update automatic fact receipt evidence or dedupe policy",
@@ -52,8 +46,7 @@ pub fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
                 "inspect quarantined automatic fact receipts",
                 "adjust evidence query before rerunning",
             ],
-            handoff_test: "cargo test --test automation_runner_test session_reflector",
-            eval_replay_command: "cargo test --test automation_runner_test session_reflector_runner_applies_valid_automatic_facts_by_default -- --nocapture",
+            handoff_test: "bazel test //crates/tracedecay:automation_runner_test --test_arg=session_reflector",
         },
         AgentTaskKind::SkillWriter => TaskArtifactPolicy {
             optimizer_action: "update skill writer evidence or activation validation",
@@ -65,8 +58,7 @@ pub fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
                 "inspect rejected skill validation outcomes",
                 "collect stronger usage evidence before rerunning",
             ],
-            handoff_test: "cargo test --test automation_runner_test skill_writer",
-            eval_replay_command: "cargo test --test automation_runner_test skill_writer_runner_activates_validated_skills -- --nocapture",
+            handoff_test: "bazel test //crates/tracedecay:automation_runner_test --test_arg=skill_writer",
         },
         AgentTaskKind::CombinedReview => TaskArtifactPolicy {
             optimizer_action: "update combined automation evidence or per-task validation",
@@ -78,8 +70,7 @@ pub fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
                 "inspect rejected automatic fact and skill validation outcomes",
                 "collect more evidence before rerunning",
             ],
-            handoff_test: "cargo test --test automation_runner_test combined_review",
-            eval_replay_command: "cargo test --test automation_runner_test combined_review_runner_records_both_tasks_from_one_backend_call -- --nocapture",
+            handoff_test: "bazel test //crates/tracedecay:automation_runner_test --test_arg=combined_review",
         },
         AgentTaskKind::UserJob => TaskArtifactPolicy {
             optimizer_action: "update the job prompt, schedule, or delivery target",
@@ -91,8 +82,7 @@ pub fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
                 "inspect the job failure reason",
                 "adjust the job definition before the next scheduled run",
             ],
-            handoff_test: "cargo test --test automation_runner_test jobs",
-            eval_replay_command: "cargo test --test automation_runner_test jobs -- --nocapture",
+            handoff_test: "bazel test //crates/tracedecay:automation_runner_test --test_arg=jobs",
         },
     }
 }

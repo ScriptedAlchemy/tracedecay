@@ -151,9 +151,14 @@ impl Fixture {
         }
     }
 
-    /// Poll the real freshness projection until `accept` returns true, waking
-    /// the worker between observations so a parked pass keeps re-checking on
-    /// its ordinary cadence. Returns the last observed freshness.
+    /// Read the real freshness projection on every owner transition until
+    /// `accept` returns true, waking the worker whenever it is idle so a
+    /// parked pass keeps re-checking on its ordinary cadence. Returns the last
+    /// observed freshness.
+    ///
+    /// A cadence tick never lands on a running pass: a wake queued behind one
+    /// reads as refreshing, so a tick on a fixed spacing never lets a pass
+    /// slower than the spacing read fresh.
     async fn wait_for_freshness(
         &self,
         accept: impl Fn(
@@ -161,6 +166,7 @@ impl Fixture {
         ) -> bool,
     ) -> Option<tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1> {
         let deadline = tokio::time::Instant::now() + CONVERGENCE_DEADLINE;
+        let mut signals = OwnerSignals::subscribe(&self.registry, &self.project).await;
         let mut last = None;
         while tokio::time::Instant::now() < deadline {
             if let Some(freshness) = self.registry.dashboard_freshness(&self.project).await {
@@ -170,8 +176,15 @@ impl Fixture {
                     return last;
                 }
             }
-            self.wake_without_new_input().await;
-            tokio::time::sleep(POLL_SPACING).await;
+            if self
+                .registry
+                .subscribe_owner_activity(&self.project)
+                .await
+                .is_some_and(|activity| activity.pass_finished() && !activity.wake_pending())
+            {
+                self.wake_without_new_input().await;
+            }
+            signals.changed_before(deadline.into_std()).await;
         }
         last
     }

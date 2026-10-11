@@ -103,45 +103,13 @@ jobs:
             --asset-names retained-asset-names \
             --download-dir retained-assets
 
-  dashboard-assets:
-    name: Build dashboard artifact
-    needs: validate-release
-    if: needs.validate-release.outputs.build_required == 'true'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.validate-release.outputs.source_sha }}
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-
-      - uses: ./.github/actions/setup-pnpm
-
-      - name: Build dashboard
-        working-directory: dashboard
-        run: pnpm run build
-
-      - name: Validate dashboard bundle
-        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
-
-      - name: Upload dashboard artifact
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-          if-no-files-found: error
-          include-hidden-files: true
-
   build:
     name: Build ${{ matrix.name }}
     # Gold crashes in its Cortex-A53 erratum fixup during the ARM CLI link.
     # The workflow setting also recovers immutable release sources.
     env:
       BAZEL_LINKOPTS: ${{ matrix.name == 'aarch64-linux' && '-fuse-ld=bfd' || '' }}
-    needs: [validate-release, dashboard-assets]
+    needs: validate-release
     if: needs.validate-release.outputs.build_required == 'true'
     runs-on: ${{ matrix.runner }}
     # Same matrix as release-beta. Windows 81 min, macOS 54 min. 180 is ~2x Windows.
@@ -155,17 +123,8 @@ jobs:
         with:
           ref: ${{ needs.validate-release.outputs.source_sha }}
 
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-
-      - name: Validate downloaded dashboard bundle
-        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
-
-      # Bazel builds the dashboard bundle it embeds; the next step proves it is
-      # byte-identical to the validated artifact above.
+      # Bazel builds and validates //dashboard:app_dist, and the CLI build
+      # script refuses to embed it unless it matches //dashboard:bundle_sha256.
       - name: Build release binary for packaging
         uses: ./.github/actions/build-cli
         with:
@@ -173,16 +132,22 @@ jobs:
           dest: target/${{ matrix.target }}/release
           cache-key: release-${{ matrix.target }}
 
-      - name: Prove the embedded dashboard is the validated artifact
+      # verify-release requires every target to embed the same bundle.
+      - name: Record the embedded dashboard digest
         shell: bash
         run: |
           set -euo pipefail
-          validated="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
-          embedded="$(python3 scripts/check-dashboard-bundle.py "$(bazel info --config=dist bazel-bin)/dashboard/app-dist" --print-digest)"
-          if [[ "$validated" != "$embedded" ]]; then
-            echo "Bazel embedded dashboard ${embedded}, the validated artifact is ${validated}" >&2
-            exit 1
-          fi
+          # Already built for the CLI; naming it top-level materializes it.
+          bazel build --config=dist --config=ci //dashboard:bundle_sha256
+          cp "$(bazel info --config=dist --config=ci bazel-bin)/dashboard/bundle_sha256.txt" \
+            "dashboard-sha256-${{ matrix.name }}.txt"
+
+      - name: Upload embedded dashboard digest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dashboard-sha256-${{ matrix.name }}
+          path: dashboard-sha256-${{ matrix.name }}.txt
+          if-no-files-found: error
 
       - name: Smoke release binary
         shell: bash
@@ -293,11 +258,10 @@ jobs:
 
   verify-release:
     name: Verify immutable GitHub release
-    needs: [validate-release, dashboard-assets, build]
+    needs: [validate-release, build]
     if: >-
       always() &&
       needs.validate-release.result == 'success' &&
-      (needs.dashboard-assets.result == 'success' || needs.dashboard-assets.result == 'skipped') &&
       needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -310,16 +274,17 @@ jobs:
           ref: ${{ needs.validate-release.outputs.source_sha }}
           persist-credentials: false
 
-      - name: Download validated dashboard artifact
+      - name: Download embedded dashboard digests
         if: needs.validate-release.outputs.build_required == 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
+          pattern: dashboard-sha256-*
+          path: dashboard-digests
+          merge-multiple: true
 
-      - name: Validate downloaded dashboard bundle
+      - name: Require one embedded dashboard across targets
         if: needs.validate-release.outputs.build_required == 'true'
-        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
+        run: scripts/check-dashboard-digests.sh dashboard-digests
 
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
 
@@ -715,17 +680,7 @@ jobs:
       - name: Install reviewed npm
         run: npm install -g npm@12.0.2
 
-      # scripts/check-sdk-publish-workflow.py allows only SHA-pinned actions in
-      # this job, so the setup-pnpm composite action is inlined here.
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          cache: true
-          cache_dependency_path: |
-            pnpm-lock.yaml
-            Cargo.lock
-
-      - name: Install npm packages and Cargo sources
-        run: pnpm install --frozen-lockfile
+      - uses: ./.github/actions/setup-pnpm
 
       - name: Verify generated contracts and SDK sources
         working-directory: dashboard
@@ -765,19 +720,14 @@ jobs:
           echo "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1  npm-12.0.2.tgz" \
             | sha256sum -c -
 
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelisk-cache: true
-          repository-cache: true
-
-      # The conformance suite reads TRACEDECAY_TEST_BIN; Bazel builds the
+      # The conformance suite spawns target/debug/tracedecay; Bazel builds the
       # dashboard bundle the daemon embeds.
       - name: Build the real production daemon for conformance
-        run: |
-          set -euo pipefail
-          bazel build --config=ci //crates/tracedecay-cli:tracedecay
-          built="$(bazel cquery --config=ci --output=files //crates/tracedecay-cli:tracedecay 2>/dev/null)"
-          echo "TRACEDECAY_TEST_BIN=${GITHUB_WORKSPACE}/${built}" >> "$GITHUB_ENV"
+        uses: ./.github/actions/build-cli
+        with:
+          config: ci
+          dest: target/debug
+          cache-key: sdk-conformance
 
       - name: Real-daemon conformance against the exact packed tarball
         working-directory: sdks/typescript

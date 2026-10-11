@@ -180,8 +180,7 @@ fn cursor_no_id_identity_preserves_legacy_hash_and_offers_positional_collision_k
 
 #[test]
 fn codex_checked_in_fixture_preserves_canonical_envelope() {
-    let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/provider_normalization/codex");
+    let fixture_root = PathBuf::from("../../tests/fixtures/provider_normalization/codex");
     let native: Value = serde_json::from_str(
         &fs::read_to_string(fixture_root.join("agent_message.input.json")).unwrap(),
     )
@@ -213,8 +212,7 @@ fn codex_checked_in_fixture_preserves_canonical_envelope() {
 
 #[test]
 fn cursor_checked_in_tool_fixture_preserves_projection() {
-    let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/provider_normalization/cursor");
+    let fixture_root = PathBuf::from("../../tests/fixtures/provider_normalization/cursor");
     let native: Value = serde_json::from_str(
         &fs::read_to_string(fixture_root.join("tool_use.input.json")).unwrap(),
     )
@@ -298,8 +296,7 @@ fn cursor_tools_without_host_ids_neither_invent_ids_nor_names() {
 
 #[test]
 fn cursor_composer_checked_in_bubble_preserves_projection() {
-    let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/provider_normalization/cursor_composer");
+    let fixture_root = PathBuf::from("../../tests/fixtures/provider_normalization/cursor_composer");
     let native: Value = serde_json::from_str(
         &fs::read_to_string(fixture_root.join("assistant_bubble.input.json")).unwrap(),
     )
@@ -340,8 +337,7 @@ fn cursor_composer_checked_in_bubble_preserves_projection() {
 
 #[test]
 fn vibe_checked_in_message_preserves_projection_without_workflow_inference() {
-    let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/provider_normalization/vibe");
+    let fixture_root = PathBuf::from("../../tests/fixtures/provider_normalization/vibe");
     let native: Value = serde_json::from_str(
         &fs::read_to_string(fixture_root.join("workflow_lookalike.input.json")).unwrap(),
     )

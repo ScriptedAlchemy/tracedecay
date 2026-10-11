@@ -54,6 +54,7 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                     fixed_strings: request.fixed_strings,
                     case_sensitive: request.case_sensitive,
                     path_glob: request.path_glob.clone(),
+                    scope_prefix: None,
                     context_lines: request.context_lines as usize,
                     max_results: request.window.limit as usize,
                 };

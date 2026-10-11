@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use tracedecay_domain::{
     AuthorizationRevision, ExactClass, FusedCandidate, FusionProfileId, LogicalEvidenceId,
     PrincipalId, PublicRetrieverStatus, QueryFallbackSubpayload, RankedCandidate,
-    RetrievalAnchorId, RetrievalSourceRoleV1, RetrieverKind,
+    RetrievalAnchorId, RetrievalSourceRoleV1, RetrieverKind, SymbolOccurrenceId,
 };
 
 use super::dispatch_test_support::{
@@ -45,6 +45,10 @@ impl tracedecay_graph_query::VerifiedGraphQueryPort for YieldingUnavailableVerif
             ))
         })
     }
+}
+
+fn lexical_symbol_occurrence() -> SymbolOccurrenceId {
+    SymbolOccurrenceId::new(LEXICAL_SYMBOL_ID).expect("lexical symbol occurrence")
 }
 
 fn lexical_candidate() -> RankedCandidate {
@@ -123,6 +127,7 @@ fn completed_lexical_search_with(
             name: "LexicalWidget".to_owned(),
             qualified_name: "crate::LexicalWidget".to_owned(),
             kind: "function".to_owned(),
+            occurrence: Some(lexical_symbol_occurrence()),
             path: path.to_owned(),
             site,
         },
@@ -613,18 +618,51 @@ async fn tracedecay_context_hydrates_search_matches_when_catalog_is_warming() {
         payload["verified_graph_evidence"]["reason_code"],
         "verified-code-graph-read-unavailable"
     );
+    let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(|_| {
+        Box::pin(async {
+            completed_lexical_search_with(
+                "src/lib.rs",
+                Some(lexical_symbol_window(0, 3, "pub fn LexicalWidget() {\n")),
+            )
+        })
+    });
+    let mut options = lexical_search_options(&cg);
+    options.code_index_search_executor = Some(executor);
+    options.verified_graph_query_port = None;
+    let clipped = dispatch_on_graph_authority(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "explain LexicalWidget",
+            "include_code": true,
+            "include_memory": false,
+            "format": "json",
+        }),
+        options,
+    )
+    .await
+    .expect("partial code must not erase the lexical match");
+    let clipped: Value = serde_json::from_str(
+        clipped.value["content"][0]["text"]
+            .as_str()
+            .expect("context JSON text"),
+    )
+    .expect("context JSON payload");
+    assert_eq!(clipped["search_matches"], payload["search_matches"]);
+    assert_eq!(clipped["symbols"], payload["symbols"]);
+    assert_eq!(clipped["code"], json!([]));
+    assert_eq!(clipped["retrieval"]["code"]["state"], "unavailable");
     cg.close();
 }
 
 #[tokio::test]
-async fn tracedecay_context_hydrates_attested_window_past_preceding_noise() {
+async fn tracedecay_context_keeps_matches_without_inventing_a_declaration_extent() {
     let dir = TempDir::new().expect("attested window isolation");
     let profile = SelectorProfile::new(dir.path());
     let project = dir.path().join("context-attested-window");
     fs::create_dir_all(project.join("src")).expect("create fixture sources");
-    // A comment, an import, and a call site all precede the compact
-    // declaration and name it first; only the lane's artifact-attested
-    // window may supply the location and code.
+    // A byte window identifies the match, but does not attest whether it
+    // covers the declaration. Earlier name mentions cannot fill that gap.
     let source = "// LexicalWidget call site\nuse crate::LexicalWidget;\nfn caller() { LexicalWidget(); }\npub fn LexicalWidget() -> u32 { 42 }\n";
     fs::write(project.join("src/lib.rs"), source).expect("write attested window fixture");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
@@ -667,7 +705,7 @@ async fn tracedecay_context_hydrates_attested_window_past_preceding_noise() {
         options,
     )
     .await
-    .expect("attested window must hydrate from the lane's site");
+    .expect("a lexical match remains useful without declaration authority");
     let payload: Value = serde_json::from_str(
         result.value["content"][0]["text"]
             .as_str()
@@ -676,13 +714,15 @@ async fn tracedecay_context_hydrates_attested_window_past_preceding_noise() {
     .expect("attested window JSON payload");
 
     assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
-    assert_eq!(payload["symbols"][0]["start_line"], 4);
-    assert_eq!(payload["symbols"][0]["end_line"], 4);
-    assert_eq!(payload["code"].as_array().map(Vec::len), Some(1));
-    assert_eq!(payload["code"][0]["start_line"], 4);
-    assert_eq!(payload["code"][0]["end_line"], 4);
-    assert_eq!(payload["code"][0]["code"], declared);
-    assert_eq!(payload["retrieval"]["code"]["state"], "ran");
+    assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["symbols"][0]["start_line"], 0);
+    assert_eq!(payload["symbols"][0]["end_line"], 0);
+    assert_eq!(
+        payload["symbols"][0]["unavailable_fields"],
+        json!(["start_line", "end_line", "attrs_start_line"])
+    );
+    assert_eq!(payload["code"], json!([]));
+    assert_eq!(payload["retrieval"]["code"]["state"], "unavailable");
     cg.close();
 }
 
@@ -864,6 +904,7 @@ async fn tracedecay_context_excludes_file_hits_from_symbols_but_serves_their_win
                         name: "LexicalWidget".to_owned(),
                         qualified_name: "crate::LexicalWidget".to_owned(),
                         kind: "function".to_owned(),
+                        occurrence: Some(lexical_symbol_occurrence()),
                         path: "src/lib.rs".to_owned(),
                         site: Some(lexical_symbol_window(
                             0,
@@ -878,6 +919,7 @@ async fn tracedecay_context_excludes_file_hits_from_symbols_but_serves_their_win
                         name: "lib.rs".to_owned(),
                         qualified_name: "src/lib.rs".to_owned(),
                         kind: "file".to_owned(),
+                        occurrence: None,
                         path: "src/lib.rs".to_owned(),
                         site: Some(file_site),
                     },

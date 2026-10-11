@@ -21,10 +21,7 @@ use tracedecay_graph_db::{
 
 use crate::{cross_file_import_calls::publish_fixture_tree, support::PartitionedSealV1};
 
-const FIXTURE_ROOT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../tracedecay-code-extraction/fixtures/typescript-monorepo"
-);
+const FIXTURE_ROOT: &str = "../tracedecay-code-extraction/fixtures/typescript-monorepo";
 
 fn published_fixture() -> Arc<CodeIndexPublishedGenerationV1> {
     publish_fixture_tree(Path::new(FIXTURE_ROOT), "ts-monorepo")

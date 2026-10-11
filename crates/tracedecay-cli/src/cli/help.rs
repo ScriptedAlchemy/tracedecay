@@ -319,7 +319,12 @@ except to debug the protocol. For ad-hoc tool calls from a shell, use \
 names every tool but carries full schemas only for the always-loaded set; \
 the rest are stubs with a short description and an open schema. Calling a \
 stub works and lists its full schema from then on. `--full-tool-list` lists \
-every schema, for hosts that defer tool schemas themselves.";
+every schema, for hosts that defer tool schemas themselves. With \
+TRACEDECAY_MCP_REPEAT_READ_POINTERS=1, a repeated identical source, context, \
+or file-listing read whose answer is unchanged returns a short pointer to \
+the earlier result, and repeating the call once more returns it in full. \
+Set it only for hosts that give each agent its own connection, as the Codex \
+install does.";
 
 pub(crate) const SERVE_AFTER_HELP: &str = "\
 Examples:

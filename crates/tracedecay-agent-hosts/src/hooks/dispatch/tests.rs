@@ -878,7 +878,9 @@ fn binding_publication_waits_for_a_live_callback_holding_the_spool() {
         "publication already prepared this exact file"
     );
     drop(barriers);
-    let held = std::time::Duration::from_millis(20);
+    // A callback descheduled on a loaded host holds its lease past the hook's
+    // own synchronous budget but within the lease itself.
+    let held = 2 * tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET;
     let (capture, _) = HookSpoolV1::open(
         tracedecay_hooks::hook_v2_spool_root(&layout.data_root, host),
         HookSpoolConfigV1::stock(host),
@@ -895,7 +897,7 @@ fn binding_publication_waits_for_a_live_callback_holding_the_spool() {
         drop(capture);
         drop(delivery);
     });
-    assert!(held < tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET);
+    assert!(held < HookSpoolConfigV1::stock(host).writer_lease());
 
     publish_daemon_bindings(&runtime, &layout)
         .expect("publication waits for the live callback instead of failing busy");

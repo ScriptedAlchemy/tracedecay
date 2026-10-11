@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { constants } from "node:fs";
 import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

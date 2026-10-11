@@ -3671,8 +3671,7 @@ fn partitioned_text_metadata_exposes_commitments_without_payload_reads() {
 /// generation must stay plannable while the daemon rebuilds past it.
 #[test]
 fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/partitioned_pre_paging");
+    let fixture = std::path::Path::new("tests/fixtures/partitioned_pre_paging");
     let manifest = std::fs::read(fixture.join("manifest.json")).expect("historical manifest");
     let historical: serde_json::Value =
         serde_json::from_slice(&manifest).expect("historical manifest json");
@@ -3873,11 +3872,8 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
         "the fixture child must reuse a segment from its readable parent"
     );
 
-    let retired_parent = std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/partitioned_pre_paging/manifest.json"),
-    )
-    .expect("historical manifest");
+    let retired_parent = std::fs::read("tests/fixtures/partitioned_pre_paging/manifest.json")
+        .expect("historical manifest");
     let (manifest, segments, published_file_segments) = encode(Some(&retired_parent));
     assert_eq!(
         published_file_segments,

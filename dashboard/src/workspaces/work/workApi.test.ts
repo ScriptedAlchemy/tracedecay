@@ -1,28 +1,22 @@
-/**
- * The Work transport, against the envelope the daemon really sends.
- *
- * Two things are being guarded here. The first is that a refusal never becomes
- * a read: every non-2xx status, every malformed envelope and every payload the
- * generated schema rejects has to arrive as a stated reason, because a Work
- * board that renders an empty set on a 503 is the exact failure this workspace
- * was built to avoid.
- *
- * The second is the envelope walk itself. The dashboard has no generated schema
- * for the application envelope, so these fixtures are written to match
- * `HttpJsonEnvelope` in `crates/tracedecay-api/src/lib.rs` field for field. If
- * the daemon's wrapper moves, the walk must miss and report
- * `unsupported_schema`, never reach a stale field and call it a value.
- */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
-import { workGraphRead } from '../../test/workGraphFixture.ts';
-import { callWork, workPayload, workRefusal } from './workApi.ts';
+import type { EffectReceipt } from '../../contracts/generated.ts';
 import {
+  applicationProblem,
+  applicationSuccess,
+  FIXTURE_SCOPE,
+} from '../../test/applicationEnvelope.ts';
+import { responseWithBodyPendingUntilAbort } from '../../test/pendingBody.ts';
+import { workGraphRead } from '../../test/workGraphFixture.ts';
+import { callWork, workResultInvalidatesReads, type WorkResult } from './workApi.ts';
+import { WORKFLOW_ACTIVATE_DEFINITION_ROUTE } from '../workflows/workflowRoutes.ts';
+import {
+  WORK_MUTATE_GRAPH_ROUTE,
   WORK_PREPARE_GRAPH_MUTATION_ROUTE,
   WORK_VIEWS_ROUTE,
 } from './workRoutes.ts';
 
-/** A product graph payload and request that satisfy the generated contracts. */
 const GRAPH = workGraphRead({ tasks: [] });
 const GRAPH_REQUEST = {
   selection: { selection: 'profile_owned_no_git' as const },
@@ -41,29 +35,6 @@ const PREPARE_REQUEST = {
   },
 };
 
-const RESOLVED_SCOPE = {
-  project_id: 'project.work',
-  repository_id: 'repository.work',
-  worktree_id: 'worktree.work',
-  reference: null,
-  scope_digest: 'sha256:scope',
-};
-
-/** The daemon's success envelope: `kind`/`value`, then the outcome tag, then
- * the packet whose `payload` holds the contract. */
-function success(payload: unknown, outcome: 'evidence' | 'effect' = 'evidence') {
-  return {
-    kind: 'success',
-    value: {
-      binding_id: 'binding.http.work.snapshot',
-      contract: { schema_id: 'schema.work.snapshot.result', schema_revision: 1 },
-      request_id: 'request-1',
-      scope: RESOLVED_SCOPE,
-      outcome: { outcome, value: { payload } },
-    },
-  };
-}
-
 function stub(status: number, body: unknown, options: { invalidJson?: boolean } = {}): void {
   vi.stubGlobal(
     'fetch',
@@ -77,125 +48,319 @@ function stub(status: number, body: unknown, options: { invalidJson?: boolean } 
   );
 }
 
+function views(): Promise<WorkResult<unknown>> {
+  return callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
+}
+
+function prepare(): Promise<WorkResult<unknown>> {
+  return callWork(
+    WORK_PREPARE_GRAPH_MUTATION_ROUTE,
+    PREPARE_REQUEST,
+    '/api/work/prepare-graph-mutation',
+  );
+}
+
+function successWith(patch: (value: Record<string, unknown>) => Record<string, unknown>) {
+  const envelope = applicationSuccess('operation.work.views', GRAPH);
+  return { ...envelope, value: patch(envelope.value) };
+}
+
+const COMMITTED_RECEIPT: EffectReceipt = {
+  actor: 'actor.fixture',
+  catalog_digest: 'sha256:catalog',
+  committed_state: 'sha256:committed',
+  configuration_digest: 'sha256:configuration',
+  effect_class: 'administrative',
+  expected_state: 'sha256:expected',
+  external_proof: null,
+  idempotency_key: 'idempotency.fixture',
+  input_digest: 'sha256:input',
+  operation: 'use_case.work.mutate_graph',
+  outcome: 'partial',
+  policy_digest: 'sha256:policy',
+  privacy_digest: 'sha256:privacy',
+  request_id: 'request.fixture',
+  scope: FIXTURE_SCOPE,
+};
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('the Work problem taxonomy', () => {
-  /**
-   * Each status the daemon's `application_problem_status` can produce, mapped
-   * to the state the page will render. The mapping is asserted whole because a
-   * single wrong entry is invisible in the UI, it just reads as the wrong
-   * reason, and 409 in particular has to be distinguishable from 503, since
-   * one means read again and the other means nothing is running.
-   */
-  it('gives every daemon problem status its own reading', () => {
-    expect(workRefusal(400).state).toBe('error');
-    expect(workRefusal(404).state).toBe('denied');
-    expect(workRefusal(405).state).toBe('locked');
-    expect(workRefusal(409).state).toBe('conflicting');
-    expect(workRefusal(422).state).toBe('unsupported');
-    expect(workRefusal(429).state).toBe('unavailable');
-    expect(workRefusal(408).state).toBe('cancelled');
-    expect(workRefusal(503).state).toBe('unavailable');
-    expect(workRefusal(504).state).toBe('timed_out');
+describe('a canonical success', () => {
+  it('returns the payload decoded by its generated schema with the resolved scope', async () => {
+    stub(200, applicationSuccess('operation.work.views', GRAPH));
+    expect(await views()).toEqual({ outcome: 'value', value: GRAPH, scope: FIXTURE_SCOPE });
   });
 
-  it('names the reason for every refusal, including a status it has no reading for', () => {
-    expect([400, 404, 405, 408, 409, 422, 429, 500, 503, 504].map((status) => workRefusal(status).detail)).toEqual([
-      'the daemon rejected the request as invalid',
-      'not found, or not authorized for this actor',
-      'this scope will not accept the write',
-      'the daemon cancelled the request',
-      'the task moved since it was read',
-      'the daemon does not support this request',
-      'the daemon is saturated',
-      'HTTP 500',
-      'the Work runtime is unavailable',
-      'the daemon timed out',
-    ]);
-  });
-});
+  it('reads a durable command from its effect result', async () => {
+    const route = { ...WORK_MUTATE_GRAPH_ROUTE, request: z.unknown(), response: z.unknown() };
+    const receipt = { mutation: 'accept_task' };
+    stub(200, applicationSuccess('operation.work.mutate_graph', receipt));
+    expect(await callWork(route, {}, '/api/work/mutate-graph')).toMatchObject({
+      outcome: 'value',
+      value: receipt,
+    });
 
-describe('the application envelope walk', () => {
-  it('finds the contract inside an evidence packet and an effect result', () => {
-    expect(workPayload(success(GRAPH))).toEqual({ found: true, payload: GRAPH });
-    expect(workPayload(success(GRAPH, 'effect'))).toEqual({ found: true, payload: GRAPH });
-  });
-
-  /**
-   * Each of these is a wrapper the daemon does not send. The walk has to miss
-   * rather than reach past the difference, because reaching past it is how a
-   * changed envelope turns into a confidently wrong read.
-   */
-  it('misses anything that is not that envelope', () => {
-    expect(workPayload(undefined).found).toBe(false);
-    expect(workPayload({ kind: 'problem', value: { problem: {} } }).found).toBe(false);
-    expect(workPayload({ kind: 'success' }).found).toBe(false);
-    expect(workPayload({ kind: 'success', value: { outcome: {} } }).found).toBe(false);
-    // The packet is present but carries no payload field at all.
-    expect(
-      workPayload({ kind: 'success', value: { outcome: { outcome: 'evidence', value: {} } } })
-        .found,
-    ).toBe(false);
-    // The payload itself is a bare value rather than the wrapped packet.
-    expect(workPayload({ kind: 'success', value: { outcome: GRAPH } }).found).toBe(false);
+    const asEvidence = applicationSuccess('operation.work.views', receipt);
+    stub(200, {
+      ...asEvidence,
+      value: {
+        ...asEvidence.value,
+        binding_id: 'binding.http.work.mutate_graph',
+        contract: { schema_id: 'schema.work.mutate_graph.result', schema_revision: 1 },
+      },
+    });
+    expect(await callWork(route, {}, '/api/work/mutate-graph')).toMatchObject({
+      outcome: 'refused',
+      state: 'unsupported_schema',
+    });
   });
 
-  /** `null` is the daemon saying the operation carried no value. That is found
-   *, the envelope was well-formed, and is refused a step later, so it can
-   * never be confused with a missing envelope. */
-  it('separates an absent payload from an absent envelope', () => {
-    expect(workPayload(success(null))).toEqual({ found: true, payload: null });
+  it.each([
+    ['another binding', (value: Record<string, unknown>) => ({ ...value, binding_id: 'binding.http.work.topology' })],
+    [
+      'another result revision',
+      (value: Record<string, unknown>) => ({
+        ...value,
+        contract: { schema_id: 'schema.work.views.result', schema_revision: 2 },
+      }),
+    ],
+    [
+      'another result contract',
+      (value: Record<string, unknown>) => ({
+        ...value,
+        contract: { schema_id: 'schema.work.topology.result', schema_revision: 1 },
+      }),
+    ],
+    [
+      'an outcome its receipt contract does not admit',
+      (value: Record<string, unknown>) => ({
+        ...value,
+        outcome: { ...(value.outcome as Record<string, unknown>), outcome: 'effect' },
+      }),
+    ],
+    [
+      'an evidence packet with no execution receipt',
+      (value: Record<string, unknown>) => {
+        const outcome = value.outcome as { outcome: string; value: Record<string, unknown> };
+        const { execution: _execution, ...packet } = outcome.value;
+        return { ...value, outcome: { ...outcome, value: packet } };
+      },
+    ],
+  ])('refuses an envelope that answers %s', async (_name, patch) => {
+    stub(200, successWith(patch));
+    expect(await views()).toMatchObject({
+      outcome: 'refused',
+      state: 'unsupported_schema',
+      detail: 'the response envelope does not answer operation.work.views',
+    });
   });
-});
 
-describe('callWork', () => {
-  it('returns the payload decoded by its generated schema', async () => {
-    stub(200, success(GRAPH));
-    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
-    expect(result).toEqual({ outcome: 'value', value: GRAPH, scope: RESOLVED_SCOPE });
-  });
-
-  it('refuses a success envelope without a valid resolved scope', async () => {
-    const body = success(GRAPH);
-    stub(200, { ...body, value: { ...body.value, scope: {} } });
-
-    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
-
-    expect(result).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
+  it('refuses a success without a valid resolved scope', async () => {
+    stub(200, successWith((value) => ({ ...value, scope: { project_id: 'project.work' } })));
+    expect(await views()).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
   });
 
   it('refuses a payload the generated contract does not describe', async () => {
-    // A graph missing its authorized scope is exactly what a drifted daemon
-    // would send, and rendering it would draw a board with no selection authority.
-    stub(200, success({ mode: 'current', snapshot: GRAPH.snapshot }));
-    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
-    expect(result).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
+    stub(200, applicationSuccess('operation.work.views', { mode: 'current', snapshot: GRAPH.snapshot }));
+    expect(await views()).toMatchObject({
+      outcome: 'refused',
+      state: 'unsupported_schema',
+      detail: 'the payload does not satisfy operation.work.views',
+    });
   });
 
-  it('refuses an envelope it cannot walk', async () => {
-    stub(200, { kind: 'success', value: { outcome: { outcome: 'evidence', value: {} } } });
-    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
-    expect(result).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
+  it('refuses a payload of null as an answer without a value', async () => {
+    stub(200, applicationSuccess('operation.work.views', null));
+    expect(await views()).toMatchObject({ outcome: 'refused', state: 'unavailable' });
   });
 
-  it('reports a version conflict as conflicting rather than as an error', async () => {
-    // A product mutation preparation conflict says the graph head moved, a
-    // reason to read again, not a transport fault to retry blindly.
-    stub(409, { kind: 'problem', value: { problem: { kind: 'conflict' } } });
-    const result = await callWork(
-      WORK_PREPARE_GRAPH_MUTATION_ROUTE,
-      PREPARE_REQUEST,
-      '/api/work/prepare-graph-mutation',
+  it('reads a lifecycle effect that timed out as timed out, and re-reads after it', async () => {
+    const route = { ...WORKFLOW_ACTIVATE_DEFINITION_ROUTE, request: z.unknown() };
+    const envelope = applicationSuccess('operation.workflow.activate_definition', null);
+    const outcome = envelope.value.outcome as { value: { execution: Record<string, unknown> } };
+    outcome.value.execution = {
+      ...outcome.value.execution,
+      termination: 'timed_out',
+      cancellation: { stage: 'before_effect', observed_at: 2 },
+    };
+    stub(200, envelope);
+
+    const result = await callWork(route, {}, '/api/application/workflow/activate-definition');
+
+    expect(result).toMatchObject({ outcome: 'refused', state: 'timed_out', termination: 'timed_out' });
+    expect(workResultInvalidatesReads(result)).toBe(true);
+  });
+
+  it.each([
+    ['no deadline observation', null],
+    ['no observation timestamp', { stage: 'before_effect' }],
+    ['an unknown deadline stage', { stage: 'outside_the_contract', observed_at: 2 }],
+  ])('refuses a timed-out lifecycle effect with %s', async (_name, cancellation) => {
+    const route = { ...WORKFLOW_ACTIVATE_DEFINITION_ROUTE, request: z.unknown() };
+    const envelope = applicationSuccess('operation.workflow.activate_definition', null);
+    const outcome = envelope.value.outcome as { value: { execution: Record<string, unknown> } };
+    outcome.value.execution = {
+      ...outcome.value.execution,
+      termination: 'timed_out',
+      cancellation,
+    };
+    stub(200, envelope);
+    expect(await callWork(route, {}, '/api/application/workflow/activate-definition')).toMatchObject({
+      outcome: 'refused',
+      state: 'unsupported_schema',
+    });
+  });
+
+  it('refuses a problem served with a success status', async () => {
+    stub(200, applicationProblem('unavailable', { binding: 'operation.work.views' }));
+    expect(await views()).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
+  });
+
+  it('reports a body that is not JSON without throwing', async () => {
+    stub(200, null, { invalidJson: true });
+    expect(await views()).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
+  });
+});
+
+describe('a canonical problem', () => {
+  it('keeps stale and conflict apart and carries the retry and legal actions', async () => {
+    stub(409, applicationProblem('stale', { binding: 'operation.work.prepare_graph_mutation' }));
+    const stale = await prepare();
+    stub(409, applicationProblem('conflict', { binding: 'operation.work.prepare_graph_mutation' }));
+    const conflict = await prepare();
+
+    expect(stale).toMatchObject({
+      outcome: 'refused',
+      state: 'stale',
+      detail: 'fixture stale problem',
+      problem: { kind: 'stale', retry: 'after_revalidate', legal_actions: ['refresh'] },
+    });
+    expect(conflict).toMatchObject({
+      outcome: 'refused',
+      state: 'conflicting',
+      problem: { kind: 'conflict', retry: 'after_revalidate', legal_actions: ['refresh'] },
+    });
+  });
+
+  it('carries the receipt of an effect that committed before the failure', async () => {
+    stub(
+      409,
+      applicationProblem('partial_effect', {
+        binding: 'operation.work.prepare_graph_mutation',
+        problem: {
+          committed_receipt: COMMITTED_RECEIPT,
+          terminality: 'admitted_terminal',
+          legal_actions: ['reconcile'],
+        },
+      }),
     );
-    expect(result).toMatchObject({ outcome: 'refused', state: 'conflicting' });
+    const result = await prepare();
+    expect(result).toMatchObject({
+      outcome: 'refused',
+      state: 'partial',
+      problem: { committed_receipt: COMMITTED_RECEIPT, legal_actions: ['reconcile'] },
+    });
+    expect(workResultInvalidatesReads(result)).toBe(true);
   });
 
-  it('reports an unavailable Work runtime rather than an empty board', async () => {
+  it('carries a reset directive', async () => {
+    stub(
+      503,
+      applicationProblem('reset_required', {
+        binding: 'operation.work.views',
+        problem: { legal_actions: ['reset'], terminality: 'admitted_terminal' },
+      }),
+    );
+    expect(await views()).toMatchObject({
+      outcome: 'refused',
+      state: 'unavailable',
+      problem: { kind: 'reset_required', legal_actions: ['reset'] },
+    });
+  });
+
+  it('reads a concealed denial, which names no binding, as denied', async () => {
+    stub(404, applicationProblem('not_found_or_not_authorized'));
+    expect(await views()).toMatchObject({
+      outcome: 'refused',
+      state: 'denied',
+      problem: { kind: 'not_found_or_not_authorized' },
+    });
+  });
+
+  it('refuses a concealed denial that names a binding', async () => {
+    stub(404, applicationProblem('not_found_or_not_authorized', { binding: 'operation.work.views' }));
+    expect(await views()).toMatchObject({
+      outcome: 'refused',
+      state: 'unsupported_schema',
+      detail: 'the problem does not answer operation.work.views',
+    });
+  });
+
+  it('refuses a problem for another binding', async () => {
+    stub(503, applicationProblem('unavailable', { binding: 'operation.work.topology' }));
+    expect(await views()).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
+  });
+
+  it('reads a pre-admission problem, which names no binding', async () => {
+    stub(503, applicationProblem('unavailable'));
+    expect(await views()).toMatchObject({ outcome: 'refused', state: 'unavailable' });
+  });
+
+  it('refuses an admitted problem that names no route binding', async () => {
+    stub(503, applicationProblem('reset_required'));
+    expect(await views()).toMatchObject({
+      outcome: 'refused',
+      state: 'unsupported_schema',
+      detail: 'the problem does not answer operation.work.views',
+    });
+  });
+
+  it('refuses a problem record that does not satisfy the generated contract', async () => {
     stub(503, { kind: 'problem', value: { problem: { kind: 'unavailable' } } });
-    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
-    expect(result).toMatchObject({ outcome: 'refused', state: 'unavailable' });
+    expect(await views()).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
+  });
+
+  it('refuses a problem served with a status its kind does not map to', async () => {
+    stub(503, applicationProblem('conflict', { binding: 'operation.work.views' }));
+    expect(await views()).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
+  });
+
+  it('refuses a partial effect that carries no committed receipt', async () => {
+    stub(409, applicationProblem('partial_effect', { binding: 'operation.work.prepare_graph_mutation' }));
+    expect(await prepare()).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
+  });
+});
+
+describe('the dashboard gateway', () => {
+  it('classifies authentication and origin failures without reading their bodies', async () => {
+    stub(401, applicationProblem('unavailable'));
+    expect(await views()).toMatchObject({ outcome: 'refused', state: 'unauthorized' });
+    stub(403, applicationProblem('unavailable'));
+    expect(await views()).toMatchObject({ outcome: 'refused', state: 'denied' });
+  });
+
+  it('reports a read-only project scope as locked with the gateway reason', async () => {
+    stub(405, {
+      status: 'read_only_project',
+      detail: 'project-scoped dashboard APIs are read-only for non-active projects',
+      project_id: 'project.other',
+    });
+    expect(await prepare()).toEqual({
+      outcome: 'refused',
+      state: 'locked',
+      detail: 'project-scoped dashboard APIs are read-only for non-active projects',
+    });
+  });
+
+  it('reports an unavailable selected project with the gateway reason', async () => {
+    stub(503, { status: 'unavailable', detail: 'selected project Work authority is unavailable', project_id: 'p' });
+    expect(await views()).toEqual({
+      outcome: 'refused',
+      state: 'unavailable',
+      detail: 'selected project Work authority is unavailable',
+    });
   });
 
   it('reports an unreachable daemon as offline', async () => {
@@ -205,19 +370,40 @@ describe('callWork', () => {
         throw new TypeError('network');
       }),
     );
-    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
-    expect(result).toMatchObject({ outcome: 'refused', state: 'offline' });
+    expect(await views()).toMatchObject({ outcome: 'refused', state: 'offline' });
+  });
+});
+
+describe('cancellation', () => {
+  it('rejects when the caller aborts the request', async () => {
+    const controller = new AbortController();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        controller.abort();
+        throw init?.signal?.reason;
+      }),
+    );
+    await expect(
+      callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views', controller.signal),
+    ).rejects.toBe(controller.signal.reason);
   });
 
-  it('reports a body that is not JSON without throwing', async () => {
-    stub(200, null, { invalidJson: true });
-    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
-    expect(result).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
+  it('rejects when the caller aborts while the body is being read', async () => {
+    const controller = new AbortController();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) =>
+        responseWithBodyPendingUntilAbort(200, init?.signal),
+      ),
+    );
+    const pending = callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views', controller.signal);
+    controller.abort();
+    await expect(pending).rejects.toBe(controller.signal.reason);
   });
+});
 
-  /** A command that does not satisfy its generated schema is refused here
-   * rather than sent, so the user is told what is wrong instead of being handed
-   * the daemon's 400. */
+describe('requests', () => {
   it('refuses to send a command the generated contract rejects', async () => {
     const sent = vi.fn();
     vi.stubGlobal('fetch', sent);
@@ -230,14 +416,27 @@ describe('callWork', () => {
     expect(sent, 'an invalid command must not reach the daemon').not.toHaveBeenCalled();
   });
 
-  it('POSTs the encoded command to the route it was given', async () => {
+  it('POSTs the encoded command to the gateway path it was given', async () => {
     const sent = vi.fn(async (_url: string, _init?: RequestInit) =>
-      new Response(JSON.stringify(success(GRAPH)), { status: 200 }),
+      new Response(JSON.stringify(applicationSuccess('operation.work.views', GRAPH)), { status: 200 }),
     );
     vi.stubGlobal('fetch', sent);
     await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/projects/p/work/views');
     expect(sent).toHaveBeenCalledWith('/api/projects/p/work/views', expect.objectContaining({ method: 'POST' }));
     const [, init] = sent.mock.calls[0] ?? [];
     expect(JSON.parse(String(init?.body))).toEqual(GRAPH_REQUEST);
+  });
+});
+
+describe('workResultInvalidatesReads', () => {
+  it('invalidates after a commit or a revalidation directive, never after a plain refusal', async () => {
+    stub(200, applicationSuccess('operation.work.views', GRAPH));
+    expect(workResultInvalidatesReads(await views())).toBe(true);
+    stub(409, applicationProblem('conflict', { binding: 'operation.work.views' }));
+    expect(workResultInvalidatesReads(await views())).toBe(true);
+    stub(404, applicationProblem('not_found_or_not_authorized'));
+    expect(workResultInvalidatesReads(await views())).toBe(false);
+    stub(405, { status: 'read_only_project', detail: 'read-only', project_id: 'p' });
+    expect(workResultInvalidatesReads(await views())).toBe(false);
   });
 });

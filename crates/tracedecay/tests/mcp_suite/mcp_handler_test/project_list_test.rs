@@ -19,7 +19,7 @@ use tracedecay_mcp::McpTransport;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::path_safety::{
-    canonical_existing_identity, plain_host_path, same_canonical_path,
+    canonical_existing_identity, canonical_root_identity, plain_host_path, same_canonical_path,
 };
 
 use crate::support;
@@ -283,11 +283,9 @@ async fn project_list_reports_an_empty_registry_as_an_empty_listing() {
     )
     .await
     .expect("empty registry");
-    let registry_path = runtime
-        .profile_database_for_test()
-        .db_path()
-        .display()
-        .to_string();
+    let registry_path = canonical_root_identity(runtime.profile_database_for_test().db_path())
+        .to_string_lossy()
+        .into_owned();
     let server = McpServer::new_with_host_admission_test_runtime_for_test(
         TraceDecay::open_with_options(cg.project_root(), crate::support::graph_open_options(&cg))
             .await

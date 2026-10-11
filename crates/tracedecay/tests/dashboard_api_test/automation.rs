@@ -308,14 +308,10 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         let (status, evals) = get_json(&agent, &format!("{artifact_url}/generated_evals"));
         assert_eq!(status, 200, "generated eval artifact failed: {evals}");
         assert_eq!(evals["payload"]["format"], "tracedecay_automation_eval:v1");
-        assert_eq!(evals["payload"]["runner"]["status"], "passed");
+        assert_eq!(evals["payload"]["record_integrity"]["status"], "passed");
         assert_eq!(
-            evals["payload"]["runner"]["results"][0]["status"],
-            "passed"
-        );
-        assert_eq!(
-            evals["payload"]["automatic_application"]["status"],
-            "applied"
+            evals["payload"]["independent_evaluation"]["status"],
+            "not_run"
         );
         assert_eq!(
             evals["payload"]["eval_definitions"][0]["eval_id"],
@@ -331,7 +327,11 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         );
         assert_eq!(
             gate["payload"]["improvement_gate"]["generated_evals_status"],
-            "passed"
+            "not_run"
+        );
+        assert_eq!(
+            gate["payload"]["task_validation"]["automatic_application"]["status"],
+            "applied"
         );
 
         let (status, handoff) = get_json(&agent, &format!("{artifact_url}/codex_handoff"));

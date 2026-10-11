@@ -14,6 +14,8 @@ use tokio::time::{Duration, Instant};
 use super::binary_version;
 #[cfg(unix)]
 use super::connect_with_restart_grace;
+use super::repeat_reads::RepeatReads;
+use super::repeated_queries::RepeatedQueries;
 use super::tool_surface::ToolSurface;
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
@@ -57,20 +59,20 @@ pub async fn should_proxy_serve_to_daemon(
     .await
 }
 
-#[cfg(not(unix))]
-pub(crate) fn proxy_required_by_platform(transport_supported: bool, endpoint_exists: bool) -> bool {
-    !transport_supported || endpoint_exists
-}
-
-/// Non-Unix clients always use the authenticated loopback broker. There is no
-/// in-process `SQLite` fallback.
+/// Non-Unix clients reach the daemon only through the loopback endpoint its
+/// authority record publishes, so a profile without that record has no daemon
+/// to proxy to. A present but unreadable record still proxies, so the request
+/// reports the record's own failure.
 #[cfg(not(unix))]
 #[allow(clippy::unused_async)] // Preserve parity with the Unix async routing probe.
 pub async fn should_proxy_serve_to_daemon(
-    _profile: &tracedecay_runtime_core::config::ProfileRoot,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
     socket_path: &Path,
 ) -> bool {
-    proxy_required_by_platform(false, socket_path.exists())
+    !matches!(
+        tracedecay_daemon_identity::client_connection(profile.data_dir(), socket_path),
+        Err(error) if super::core_client::authority_absent(&error)
+    )
 }
 
 /// `full_tool_list` serves the daemon's catalog unchanged; otherwise tools the
@@ -81,6 +83,7 @@ pub async fn proxy_stdio_to_daemon(
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
     full_tool_list: bool,
+    repeated_query_hints: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let mut transport = StdioTransport::new();
     proxy_transport_to_daemon_with_drain_bound(
@@ -90,6 +93,7 @@ pub async fn proxy_stdio_to_daemon(
         &mut transport,
         None,
         ToolSurface::new(full_tool_list),
+        repeated_query_hints,
     )
     .await
 }
@@ -142,6 +146,7 @@ pub async fn proxy_transport_to_daemon(
         transport,
         None,
         ToolSurface::new(true),
+        tokio::sync::watch::channel(false).1,
     )
     .await
 }
@@ -156,6 +161,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
     transport: &mut impl McpDuplexTransport,
     drain_bound: Option<Duration>,
     surface: ToolSurface,
+    repeated_query_hints: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let (mut reader, mut writer) = transport.split();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -191,6 +197,8 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
         &mut writer,
         drain_bound,
         surface,
+        RepeatedQueries::new(repeated_query_hints),
+        RepeatReads::from_env()?,
     );
     let result = tokio::try_join!(read_host, proxy);
     drop(eof_tx);
@@ -316,6 +324,8 @@ async fn proxy_host_input_to_daemon(
     writer: &mut impl McpTransportWriter,
     drain_bound: Option<Duration>,
     mut surface: ToolSurface,
+    mut repeated_queries: RepeatedQueries,
+    mut repeat_reads: Option<RepeatReads>,
 ) -> Result<()> {
     let mut routed_handshake = handshake.clone();
     let mut pending = VecDeque::new();
@@ -324,9 +334,7 @@ async fn proxy_host_input_to_daemon(
     }
 
     loop {
-        while let Ok(line) = input.try_recv() {
-            pending.push_back(line);
-        }
+        drain_host_input(input, &mut pending);
         if *eof.borrow() && pending.is_empty() {
             return Ok(());
         }
@@ -339,9 +347,7 @@ async fn proxy_host_input_to_daemon(
                             message: format!("host EOF monitor closed unexpectedly: {error}"),
                         })?;
                         if *eof.borrow() {
-                            while let Ok(line) = input.try_recv() {
-                                pending.push_back(line);
-                            }
+                            drain_host_input(input, &mut pending);
                             if pending.is_empty() {
                                 return Ok(());
                             }
@@ -366,6 +372,7 @@ async fn proxy_host_input_to_daemon(
             &mut routed_handshake,
             request.parsed.as_ref(),
         );
+        repeated_queries.reset_for_initialize(request.parsed.as_ref());
 
         let (cancellation_tx, mut cancellation_rx) = tokio::sync::watch::channel(None);
         for queued in std::mem::take(&mut pending) {
@@ -374,6 +381,8 @@ async fn proxy_host_input_to_daemon(
         let result = {
             let daemon_request = send_host_request(
                 &mut surface,
+                &mut repeated_queries,
+                repeat_reads.as_mut(),
                 socket_path,
                 &routed_handshake,
                 &request,
@@ -421,6 +430,16 @@ async fn proxy_host_input_to_daemon(
         };
         let metadata = write_proxy_request_result(&request, result, writer).await?;
         apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
+    }
+}
+
+/// Queues every already-received host line behind the in-flight request.
+fn drain_host_input(
+    input: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    pending: &mut VecDeque<String>,
+) {
+    while let Ok(line) = input.try_recv() {
+        pending.push_back(line);
     }
 }
 
@@ -740,9 +759,13 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
 }
 
 /// Sends one host request and fits the daemon's answer to this session's tool
-/// surface; a call to a stubbed tool also hydrates its full schema.
+/// surface; a call to a stubbed tool also hydrates its full schema, a
+/// repeated identical read answers with a pointer, and a near-repeat of a
+/// recent tool call carries a hint.
 async fn send_host_request(
     surface: &mut ToolSurface,
+    repeated_queries: &mut RepeatedQueries,
+    repeat_reads: Option<&mut RepeatReads>,
     socket_path: &Path,
     handshake: &DaemonHandshake,
     request: &DaemonProxyRequest<'_>,
@@ -753,6 +776,9 @@ async fn send_host_request(
             .await?;
     surface.rewrite(request.parsed.as_ref(), &mut responses);
     surface.hydrate_called_stub(request.parsed.as_ref(), &mut responses);
+    let pointed = repeat_reads
+        .is_some_and(|repeat_reads| repeat_reads.rewrite(request.parsed.as_ref(), &mut responses));
+    repeated_queries.rewrite(request.parsed.as_ref(), &mut responses, pointed);
     Ok(responses)
 }
 

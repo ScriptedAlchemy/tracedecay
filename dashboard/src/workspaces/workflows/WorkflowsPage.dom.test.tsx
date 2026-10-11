@@ -10,6 +10,7 @@ import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { useScope } from '../../data/scope/store.ts';
+import { applicationProblem, applicationSuccess } from '../../test/applicationEnvelope.ts';
 import { WorkflowsPage } from './WorkflowsPage.tsx';
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
@@ -53,26 +54,7 @@ function definition(version = 1, overrides: Record<string, unknown> = {}) {
   };
 }
 
-function envelope(payload: unknown) {
-  return {
-    kind: 'success',
-    value: {
-      binding_id: 'binding.http.workflow.test',
-      contract: { schema_id: 'schema.workflow.result', schema_revision: 1 },
-      request_id: 'request-1',
-      scope: {
-        project_id: 'project.workflows',
-        repository_id: 'repository.workflows',
-        worktree_id: 'worktree.workflows',
-        reference: null,
-        scope_digest: 'sha256:scope',
-      },
-      outcome: { outcome: 'evidence', value: { payload } },
-    },
-  };
-}
-
-const PROBLEM = { status: 503, body: { kind: 'problem', value: { problem: {} } } };
+const PROBLEM = { status: 503, body: applicationProblem('unavailable') };
 
 /** Answers exactly the routes a test names; anything else fails loudly. */
 function serve(handler: (url: string, body: unknown) => { status: number; body: unknown }) {
@@ -105,13 +87,13 @@ function serveRegistry(extra?: (url: string, body: unknown) => { status: number;
     const handled = extra?.(url, body);
     if (handled) return handled;
     if (url.includes('/application/workflow/list-definitions')) {
-      return { status: 200, body: envelope([v1, v2, nightly]) };
+      return { status: 200, body: applicationSuccess('operation.workflow.list_definitions', [v1, v2, nightly]) };
     }
     if (url.includes('/application/workflow/definition-history')) {
       const id = (body as { definition_id: string }).definition_id;
       return {
         status: 200,
-        body: envelope(id === 'workflow.release-train' ? [v1, v2] : [nightly]),
+        body: applicationSuccess('operation.workflow.definition_history', id === 'workflow.release-train' ? [v1, v2] : [nightly]),
       };
     }
     return PROBLEM;
@@ -161,7 +143,7 @@ describe('the Workflows registry', () => {
     serve(() => PROBLEM);
     renderPage();
 
-    expect(await screen.findByText(/the Work runtime is unavailable/)).toBeTruthy();
+    expect(await screen.findByText(/fixture unavailable problem/)).toBeTruthy();
     expect(screen.queryByText(/no workflow definitions are registered/)).toBeNull();
     expect(document.querySelector('[data-workflow-definitions]')).toBeNull();
     expect(screen.getByTestId('workflow-registry-count').textContent).toBe('registry unread');
@@ -170,7 +152,7 @@ describe('the Workflows registry', () => {
   it('draws the empty registry only when the daemon answered one', async () => {
     serve((url) =>
       url.includes('/application/workflow/list-definitions')
-        ? { status: 200, body: envelope([]) }
+        ? { status: 200, body: applicationSuccess('operation.workflow.list_definitions', []) }
         : PROBLEM,
     );
     renderPage();
@@ -295,14 +277,14 @@ describe('the selected definition', () => {
   it('renders a refused version track as its own typed state beside a decoded definition', async () => {
     serveRegistry((url) =>
       url.includes('/application/workflow/definition-history')
-        ? { status: 404, body: { kind: 'problem', value: { problem: {} } } }
+        ? { status: 404, body: applicationProblem('not_found_or_not_authorized') }
         : null,
     );
     renderPage();
     await userEvent.click(await registryRow(/workflow\.release-train/));
 
     const track = await screen.findByRole('region', { name: /Version track/ });
-    expect(await within(track).findByText(/not found, or not authorized/)).toBeTruthy();
+    expect(await within(track).findByText(/fixture not_found_or_not_authorized problem/)).toBeTruthy();
     expect(track.querySelector('[data-workflow-version-track]')).toBeNull();
     // The definition itself still decoded from the registry.
     expect(document.querySelector('[data-workflow-selected]')).toBeTruthy();
@@ -335,7 +317,7 @@ describe('the selected definition', () => {
 
 describe('lifecycle compare-and-swap', () => {
   function disposition(state: string, revision: number) {
-    return envelope({
+    return applicationSuccess('operation.workflow.activate_definition', {
       definition_id: 'workflow.release-train',
       definition_version: 2,
       state,
@@ -481,7 +463,7 @@ describe('lifecycle compare-and-swap', () => {
   it('renders a conflict verbatim rather than pretending the transition landed', async () => {
     serveRegistry((url) =>
       url.includes('/application/workflow/retire-definition')
-        ? { status: 409, body: { kind: 'problem', value: { problem: {} } } }
+        ? { status: 409, body: applicationProblem('conflict') }
         : null,
     );
     renderPage();
@@ -492,7 +474,7 @@ describe('lifecycle compare-and-swap', () => {
     await userEvent.click(within(dialog).getByRole('button', { name: 'Send retire' }));
 
     const result = screen.getByTestId('workflow-lifecycle-result');
-    expect(await within(result).findByText(/the task moved since it was read/)).toBeTruthy();
+    expect(await within(result).findByText(/fixture conflict problem/)).toBeTruthy();
     expect(result.textContent).toContain('did not transition anything');
     expect(result.querySelector('[data-lifecycle-receipt]')).toBeNull();
     expect(
@@ -595,7 +577,7 @@ describe('exact run lookup', () => {
   it('reads one run, derives its timing from the journal, and refuses a duration for a live run', async () => {
     serveRegistry((url) =>
       url.includes('/application/workflow/get-run')
-        ? { status: 200, body: envelope(projection('running')) }
+        ? { status: 200, body: applicationSuccess('operation.workflow.get_run', projection('running')) }
         : null,
     );
     renderPage();
@@ -636,7 +618,7 @@ describe('exact run lookup', () => {
   it('gives a finished run a duration and pivots to its pinned definition when the registry lists it', async () => {
     serveRegistry((url) =>
       url.includes('/application/workflow/get-run')
-        ? { status: 200, body: envelope(projection('completed')) }
+        ? { status: 200, body: applicationSuccess('operation.workflow.get_run', projection('completed')) }
         : null,
     );
     renderPage();
@@ -660,10 +642,10 @@ describe('exact run lookup', () => {
   it('marks a pinned definition the registry does not list instead of inventing a selection', async () => {
     serve((url) => {
       if (url.includes('/application/workflow/list-definitions')) {
-        return { status: 200, body: envelope([]) };
+        return { status: 200, body: applicationSuccess('operation.workflow.list_definitions', []) };
       }
       if (url.includes('/application/workflow/get-run')) {
-        return { status: 200, body: envelope(projection('running')) };
+        return { status: 200, body: applicationSuccess('operation.workflow.get_run', projection('running')) };
       }
       return PROBLEM;
     });
@@ -682,10 +664,10 @@ describe('exact run lookup', () => {
   it('refuses a run the daemon conceals rather than inventing an empty projection', async () => {
     serve((url) => {
       if (url.includes('/application/workflow/list-definitions')) {
-        return { status: 200, body: envelope([]) };
+        return { status: 200, body: applicationSuccess('operation.workflow.list_definitions', []) };
       }
       if (url.includes('/application/workflow/get-run')) {
-        return { status: 404, body: { kind: 'problem', value: { problem: {} } } };
+        return { status: 404, body: applicationProblem('not_found_or_not_authorized') };
       }
       return PROBLEM;
     });
@@ -694,7 +676,7 @@ describe('exact run lookup', () => {
     await userEvent.type(await screen.findByLabelText('Run id'), 'run.unknown');
     await userEvent.click(screen.getByRole('button', { name: 'Read run' }));
 
-    expect(await screen.findByText(/not found, or not authorized for this actor/)).toBeTruthy();
+    expect(await screen.findByText(/fixture not_found_or_not_authorized problem/)).toBeTruthy();
     expect(screen.getByTestId('workflow-run-state').textContent).toBe('denied');
     expect(document.querySelector('[data-workflow-run]')).toBeNull();
     expect(screen.getByText(/is not an empty run/)).toBeTruthy();

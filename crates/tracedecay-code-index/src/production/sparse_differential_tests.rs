@@ -11,10 +11,7 @@ use super::worker_tests::{
 };
 use super::*;
 
-pub(super) const FIXTURE_ROOT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../tracedecay-code-extraction/fixtures/cross-file-calls"
-);
+pub(super) const FIXTURE_ROOT: &str = "../tracedecay-code-extraction/fixtures/cross-file-calls";
 
 /// Every file under `root`, path-sorted, as `(root-relative path, source)`.
 pub(super) fn fixture_files(root: &Path) -> Vec<(String, String)> {
@@ -63,9 +60,8 @@ pub(super) fn language_for(path: &str) -> &'static str {
 /// follow path order, so two trees with the same paths share them, except
 /// that the `fresh` file gets its own occurrence as an edit does. Over the
 /// owner's active generation only the fresh file's bytes are captured, as a
-/// watched refresh captures only changed files; a build that must run cold
-/// is refused for the missing bytes and recaptures every file, as the
-/// daemon's reconcile does.
+/// watched refresh captures only changed files. A cold successor carries
+/// unchanged files from the sealed parent instead of recapturing them.
 pub(super) fn publish<P: CodeIndexAtomicPublicationPort>(
     owner: &mut CodeIndexProductionOwnerV1<P, WorkerProjectionSink>,
     files: &[(String, String)],
@@ -73,22 +69,12 @@ pub(super) fn publish<P: CodeIndexAtomicPublicationPort>(
     over_parent: bool,
     sealed_at: i64,
 ) -> CodeIndexPublishedBuildV1 {
-    match owner.build_and_publish(
-        fixture_request(files, fresh, over_parent, sealed_at),
-        &UninterruptibleCodeIndexControlV1,
-    ) {
-        Err(CodeIndexProductionErrorV1::Input(CodeIndexInputErrorV1::MissingCapturedFile))
-            if over_parent =>
-        {
-            owner
-                .build_and_publish(
-                    fixture_request(files, fresh, false, sealed_at),
-                    &UninterruptibleCodeIndexControlV1,
-                )
-                .expect("publish the fixture tree from every file")
-        }
-        published => published.expect("publish the fixture tree"),
-    }
+    owner
+        .build_and_publish(
+            fixture_request(files, fresh, over_parent, sealed_at),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect("publish the fixture tree")
 }
 
 fn fixture_request(

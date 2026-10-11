@@ -438,10 +438,10 @@ impl CargoFixture {
         )
         .expect("fixture cargo home config");
 
-        let shared_provenance = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("build-support/source_provenance.rs");
-        let watched_input_module = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("build-support/watched_input_file.rs");
+        let shared_provenance =
+            package_manifest_directory().join("build-support/source_provenance.rs");
+        let watched_input_module =
+            package_manifest_directory().join("build-support/watched_input_file.rs");
         std::fs::write(
             root.join("build.rs"),
             format!(

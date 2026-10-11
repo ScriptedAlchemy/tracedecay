@@ -179,6 +179,36 @@ fn assert_invalid_request_refused(response: &Value, message: &str) {
 }
 
 #[tokio::test]
+async fn rename_preview_refuses_incomplete_utf16_reference_source() {
+    let (fixture, server) = opened_fixture().await;
+    let reserve_id = symbol_id(&server, "reserve_stock").await;
+    let source_path = fixture.project_root.join("src/lib.rs");
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend(LIB_RS.encode_utf16().flat_map(u16::to_le_bytes));
+    bytes.push(1);
+    fs::write(&source_path, &bytes).unwrap();
+
+    let response = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_rename_preview",
+        json!({ "node_id": reserve_id, "format": "json" }),
+    )
+    .await;
+    assert!(response.get("error").is_none(), "{response}");
+    let problem = refusal_problem(&response["result"]);
+    assert_eq!(problem["kind"], "execution_failed", "{response}");
+    assert_eq!(problem["code"], "graph_tool.failed", "{response}");
+    assert!(
+        problem["message"]
+            .as_str()
+            .unwrap()
+            .contains("incomplete UTF-16 code unit"),
+        "{response}"
+    );
+    assert_eq!(fs::read(&source_path).unwrap(), bytes);
+}
+
+#[tokio::test]
 async fn rename_preview_refuses_unknown_and_unusable_node_identity() {
     let (fixture, server) = opened_fixture().await;
 

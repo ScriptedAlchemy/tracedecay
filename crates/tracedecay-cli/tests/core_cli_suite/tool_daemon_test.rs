@@ -2036,7 +2036,7 @@ fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
         &home_path,
         &project_path,
         "configuration_get",
-        json!({ "key": "diagnostics.prewarm.v1" }),
+        json!({ "key": "telemetry.timings.v1" }),
     );
     let project_id = initial["scope"]["project_id"]
         .as_str()
@@ -2048,14 +2048,14 @@ fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
         .to_owned();
     let initial_value = initial["outcome"]["value"]["payload"]["effective_value"]["value"]
         .as_bool()
-        .expect("initial diagnostics prewarm value");
+        .expect("initial telemetry timings value");
     let next_value = !initial_value;
     let mutation = json!({
         "layer": {
             "kind": "project",
             "project_id": project_id,
         },
-        "key": "diagnostics.prewarm.v1",
+        "key": "telemetry.timings.v1",
         "value": {
             "kind": "boolean",
             "value": next_value,
@@ -2088,7 +2088,7 @@ fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
         &home_path,
         &project_path,
         "configuration_get",
-        json!({ "key": "diagnostics.prewarm.v1" }),
+        json!({ "key": "telemetry.timings.v1" }),
     );
     assert_eq!(
         reloaded["outcome"]["value"]["payload"]["effective_value"]["value"], next_value,
@@ -2104,7 +2104,7 @@ fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
             "kind": "project",
             "project_id": project_id,
         },
-        "key": "diagnostics.prewarm.v1",
+        "key": "telemetry.timings.v1",
         "value": {
             "kind": "boolean",
             "value": initial_value,

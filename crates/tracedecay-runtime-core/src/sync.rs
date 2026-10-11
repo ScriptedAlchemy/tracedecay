@@ -8,26 +8,22 @@ use tracedecay_domain::canonical_text::sha256_hex;
 pub fn read_source_file(path: &Path) -> std::io::Result<String> {
     let bytes = read_file_bytes(path)?;
 
-    // UTF-16 LE BOM: FF FE
-    if bytes.starts_with(&[0xFF, 0xFE]) {
-        let u16s: Vec<u16> = bytes[2..]
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect();
-        return String::from_utf16(&u16s)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
-    }
-
-    // UTF-16 BE BOM: FE FF
-    if bytes.starts_with(&[0xFE, 0xFF]) {
-        let u16s: Vec<u16> = bytes[2..]
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
-            .collect();
+    let decode_unit = if bytes.starts_with(&[0xFF, 0xFE]) {
+        Some(u16::from_le_bytes as fn([u8; 2]) -> u16)
+    } else if bytes.starts_with(&[0xFE, 0xFF]) {
+        Some(u16::from_be_bytes as fn([u8; 2]) -> u16)
+    } else {
+        None
+    };
+    if let Some(decode_unit) = decode_unit {
+        let (units, remainder) = bytes[2..].as_chunks::<2>();
+        if !remainder.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "incomplete UTF-16 code unit",
+            ));
+        }
+        let u16s: Vec<u16> = units.iter().copied().map(decode_unit).collect();
         return String::from_utf16(&u16s)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
     }
@@ -95,4 +91,68 @@ pub fn file_stat(path: &Path) -> Option<(i64, u64)> {
 /// Compute SHA-256 content hash of file content.
 pub fn content_hash(content: &str) -> String {
     sha256_hex(content.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_source_file;
+    use std::io::ErrorKind;
+
+    fn read_bytes(bytes: &[u8]) -> std::io::Result<String> {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), bytes).unwrap();
+        read_source_file(file.path())
+    }
+
+    #[test]
+    fn source_utf16_refuses_incomplete_units() {
+        for bytes in [
+            &b"\xFF\xFE\x01"[..],
+            &b"\xFE\xFF\x01"[..],
+            &b"\xFF\xFE\x41\x00\x01"[..],
+            &b"\xFE\xFF\x00\x41\x01"[..],
+        ] {
+            let error = read_bytes(bytes).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+            assert_eq!(error.to_string(), "incomplete UTF-16 code unit");
+        }
+    }
+
+    #[test]
+    fn source_utf16_preserves_strict_surrogate_decoding() {
+        for bytes in [
+            &b"\xFF\xFE\x00\xD8"[..],
+            &b"\xFE\xFF\xD8\x00"[..],
+            &b"\xFF\xFE\x00\xDC"[..],
+            &b"\xFE\xFF\xDC\x00"[..],
+        ] {
+            assert_eq!(
+                read_bytes(bytes).unwrap_err().kind(),
+                ErrorKind::InvalidData
+            );
+        }
+        for bytes in [
+            &b"\xFF\xFE\x41\x00\x3D\xD8\x00\xDE\x0A\x00"[..],
+            &b"\xFE\xFF\x00\x41\xD8\x3D\xDE\x00\x00\x0A"[..],
+        ] {
+            assert_eq!(read_bytes(bytes).unwrap(), "A😀\n");
+        }
+        for bytes in [&b"\xFF\xFE"[..], &b"\xFE\xFF"[..]] {
+            assert_eq!(read_bytes(bytes).unwrap(), "");
+        }
+    }
+
+    #[test]
+    fn source_utf8_preserves_bom_and_strict_decoding() {
+        for bytes in [&b"\xEF\xBB\xBFhi\n"[..], &b"hi\n"[..]] {
+            assert_eq!(read_bytes(bytes).unwrap(), "hi\n");
+        }
+        assert_eq!(read_bytes(b"").unwrap(), "");
+        for bytes in [&b"\x80"[..], &b"\xEF\xBB\xBF\x80"[..]] {
+            assert_eq!(
+                read_bytes(bytes).unwrap_err().kind(),
+                ErrorKind::InvalidData
+            );
+        }
+    }
 }

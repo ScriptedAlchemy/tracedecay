@@ -1057,8 +1057,14 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             }
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            // A refresh that has not published within the hook's wait is a
+            // typed retryable refusal of this same request, not a failure.
+            let retryable_refusal =
+                serde_json::from_slice::<Value>(&output.stdout).is_ok_and(|response| {
+                    response["structuredContent"]["problem"]["retryable"] == true
+                });
             assert!(
-                stderr.contains("is warming in the background"),
+                retryable_refusal || stderr.contains("is warming in the background"),
                 "registered daemon ingest failed\nstdout:\n{}\nstderr:\n{stderr}",
                 String::from_utf8_lossy(&output.stdout),
             );

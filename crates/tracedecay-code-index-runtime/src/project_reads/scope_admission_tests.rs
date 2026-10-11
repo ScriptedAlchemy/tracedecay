@@ -10,7 +10,6 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_contracts::{
@@ -22,7 +21,9 @@ use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::project_code_graph_projection_read_port;
-use crate::code_index_scheduler::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1};
+use crate::code_index_scheduler::{
+    CodeIndexOwnerSignalsV1, CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1,
+};
 
 const PROJECT_ID: &str = "project.project-open-code-graph-scope";
 
@@ -311,26 +312,27 @@ fn request_context(scope: ResolvedScope, suffix: &str) -> RequestContext {
     .expect("request context")
 }
 
-/// Poll seats, never the publication broadcast. The worker announces a
+/// Read seats, never the publication broadcast. The worker announces a
 /// generation before any seat installs it, so a wait that checks the seat and
 /// then subscribes misses the one broadcast whenever it lands in that window.
 /// The fresh ladder abstains until the graph-bearing generation is seated
 /// (the lightweight text owner publishes first), and the decoded root-scope
-/// gate the port uses can trail it, so both are polled.
+/// gate the port uses can trail it, so both are re-read on every owner
+/// signal, subscribed before the first read.
 async fn wait_for_ready_root_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
 ) -> LatestCompleteCodeIndexV1 {
-    let latest = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(latest) = registry.latest_complete_fresh(project_root).await {
-                break latest;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+    let mut signals = CodeIndexOwnerSignalsV1::subscribe(registry, project_root).await;
+    let latest = loop {
+        if let Some(latest) = registry.latest_complete_fresh(project_root).await {
+            break latest;
         }
-    })
-    .await
-    .expect("fresh serving generation");
+        signals
+            .changed()
+            .await
+            .expect("the registry outlives the fixture's owner signals");
+    };
     let generation = latest.generation();
     let snapshot = generation.snapshot();
     let scope = ResolvedScope::new(
@@ -340,19 +342,18 @@ async fn wait_for_ready_root_generation(
         snapshot.reference.clone(),
     )
     .expect("resolved scope");
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(ready) = registry
-                .latest_complete_ready_decoded_for_root_scope(project_root, &scope)
-                .await
-            {
-                break ready;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+    loop {
+        if let Some(ready) = registry
+            .latest_complete_ready_decoded_for_root_scope(project_root, &scope)
+            .await
+        {
+            break ready;
         }
-    })
-    .await
-    .expect("the sealed generation becomes ready and serving for its exact root")
+        signals
+            .changed()
+            .await
+            .expect("the registry outlives the fixture's owner signals");
+    }
 }
 
 fn git(root: &Path, arguments: &[&str]) {

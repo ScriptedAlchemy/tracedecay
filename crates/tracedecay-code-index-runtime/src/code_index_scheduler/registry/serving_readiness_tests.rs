@@ -20,9 +20,10 @@ use super::{
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-/// Failure bound on an owner pass finishing once the worker is parked. Nothing
-/// here passes because time elapsed; a pass that never ends fails loudly.
-const OWNER_PASS_QUIESCENCE_CEILING: Duration = Duration::from_mins(2);
+/// Failure bound on a worker event these tests wait for: a pass finishing,
+/// a publication, a renewed proof, a cancellation wake. Nothing here passes
+/// because time elapsed; an event that never arrives fails loudly.
+const WORKER_EVENT_FAILURE_CEILING: Duration = Duration::from_mins(2);
 
 #[test]
 fn dashboard_ready_requires_text_and_graph_lane_owners() {
@@ -160,17 +161,15 @@ async fn quiesced_background_reconcile_admission(
         .build_publication_lock_handle(project_root)
         .await
         .expect("mounted worktree");
-    let build_publication = tokio::time::timeout(
-        OWNER_PASS_QUIESCENCE_CEILING,
-        build_publication.lock_owned(),
-    )
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "the owner pass for {} never finished",
-            project_root.display()
-        )
-    });
+    let build_publication =
+        tokio::time::timeout(WORKER_EVENT_FAILURE_CEILING, build_publication.lock_owned())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the owner pass for {} never finished",
+                    project_root.display()
+                )
+            });
     (admission, build_publication)
 }
 
@@ -234,7 +233,7 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         "mounted worktree admits complete-generation demand"
     );
     drop(admission);
-    let published = tokio::time::timeout(Duration::from_secs(5), publications.recv())
+    let published = tokio::time::timeout(WORKER_EVENT_FAILURE_CEILING, publications.recv())
         .await
         .expect("sealed publication deadline")
         .expect("sealed publication");
@@ -322,7 +321,7 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         "the read coalesces one verification wake on the retained worker"
     );
     drop(parked_worker);
-    let ready = tokio::time::timeout(Duration::from_secs(5), async {
+    let ready = tokio::time::timeout(WORKER_EVENT_FAILURE_CEILING, async {
         loop {
             changes.changed().await.expect("source proof renewal");
             if let Some(ready) = registry.latest_complete_ready(&project).await {
@@ -366,7 +365,7 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         "a true source hint invalidates the seated proof"
     );
     drop(parked_worker);
-    let revalidated = tokio::time::timeout(Duration::from_secs(5), async {
+    let revalidated = tokio::time::timeout(WORKER_EVENT_FAILURE_CEILING, async {
         loop {
             changes
                 .changed()
@@ -435,7 +434,7 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
     drop(admission);
     changes.borrow_and_update();
     registry.cancel();
-    tokio::time::timeout(Duration::from_secs(5), changes.changed())
+    tokio::time::timeout(WORKER_EVENT_FAILURE_CEILING, changes.changed())
         .await
         .expect("cancellation must wake serving waiters")
         .expect("mounted owner remains observable until shutdown drains");

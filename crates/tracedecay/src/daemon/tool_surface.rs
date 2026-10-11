@@ -22,8 +22,33 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::{ALWAYS_LOAD_META, JsonRpcRequest};
 use tracedecay_runtime_core::logging::log_daemon_event;
+
+/// Reads an explicit serve on/off env. Unset, empty, `0`, and `false` are
+/// off; `1` and `true` are on; anything else is a configuration error rather
+/// than a silent default.
+pub(super) fn env_switch(name: &str) -> Result<bool> {
+    parse_env_switch(name, std::env::var(name))
+}
+
+pub(super) fn parse_env_switch(
+    name: &str,
+    value: std::result::Result<String, std::env::VarError>,
+) -> Result<bool> {
+    match value {
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Ok(value) if value.is_empty() || value == "0" || value == "false" => Ok(false),
+        Ok(value) if value == "1" || value == "true" => Ok(true),
+        Ok(value) => Err(TraceDecayError::Config {
+            message: format!("{name} must be \"1\", \"true\", \"0\", or \"false\", got {value:?}"),
+        }),
+        Err(std::env::VarError::NotUnicode(_)) => Err(TraceDecayError::Config {
+            message: format!("{name} must be \"1\", \"true\", \"0\", or \"false\""),
+        }),
+    }
+}
 
 const TOOL_LIST_CHANGED: &str = "notifications/tools/list_changed";
 /// Characters of the description's first sentence a stub keeps.

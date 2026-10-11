@@ -81,11 +81,32 @@ pub async fn run_serve(
         ));
     }
     let handshake = proxy_serve_handshake(profile, path_arg, original_cwd.as_deref(), timings)?;
-    tracedecay::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, None, full_tool_list)
-        .await
-        .map_err(|error| {
-            tracedecay_daemon_control::with_unavailable_daemon_advice(profile, &socket_path, error)
-        })
+    // The setting is read beside the proxy, not before it: an experimental
+    // advisory must never delay or take down MCP, for example on a loaded
+    // daemon or when serve and the daemon disagree on the configuration surface.
+    let (hints_enabled, repeated_query_hints) = tokio::sync::watch::channel(false);
+    let hints_profile = profile.clone();
+    tokio::spawn(async move {
+        match crate::commands::repeated_query_hints_enabled(&hints_profile).await {
+            Ok(enabled) => {
+                hints_enabled.send_replace(enabled);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "repeated-query hints are off: setting read failed");
+            }
+        }
+    });
+    tracedecay::daemon::proxy_stdio_to_daemon(
+        &socket_path,
+        &handshake,
+        None,
+        full_tool_list,
+        repeated_query_hints,
+    )
+    .await
+    .map_err(|error| {
+        tracedecay_daemon_control::with_unavailable_daemon_advice(profile, &socket_path, error)
+    })
 }
 
 /// Builds daemon routing metadata without opening a project or global

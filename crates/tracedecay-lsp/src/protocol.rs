@@ -6,20 +6,17 @@
 //! typed gateway/provider port.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::convert::Infallible;
 use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tracedecay_daemon_protocol::{
-    ConnectionLocalRequestSequence, FramePoll, FrameSend, LspFrame, MAX_LSP_FRAME_BYTES,
-    ProcessLocalRequestSequence,
+    ConnectionLocalRequestSequence, LspFrame, MAX_LSP_FRAME_BYTES, ProcessLocalRequestSequence,
 };
 use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest};
 use tracedecay_tool_catalog::BindingId;
 
 use crate::analyzer::broker::DiagnosticSeverity;
-use crate::bridge::DaemonLspSessionTransport;
 use crate::capabilities::{
     CapabilityAvailability, CapabilityParseError, ClientCapabilities, EffectiveCapabilities,
     GatewayCapabilities, UpstreamCapabilities, is_supported_context_projection,
@@ -93,7 +90,6 @@ use diagnostics_controller::DiagnosticsController;
 use dynamic_diagnostics_controller::DynamicDiagnosticsController;
 use lifecycle_controller::LifecycleController;
 use native_integration_controller::NativeIntegrationController;
-pub use outbound_controller::DaemonLspProtocolTransport;
 use outbound_controller::OutboundController;
 #[cfg(test)]
 use outbound_controller::QueuedFrame;

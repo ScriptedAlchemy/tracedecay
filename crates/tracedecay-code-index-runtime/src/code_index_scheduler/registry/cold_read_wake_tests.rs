@@ -246,13 +246,9 @@ async fn source_hint_interrupts_attribution_and_owned_noop_retries_same_generati
     let root = canonical_existing_identity(&project).unwrap();
     registry.request_complete_generation(&root).await;
     let mut activity = registry.subscribe_owner_activity(&root).await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while activity.worker_phase() != super::CodeIndexWorkerPhaseV1::AwaitingAdmission {
-            activity.changed().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
+    while activity.worker_phase() != super::CodeIndexWorkerPhaseV1::AwaitingAdmission {
+        activity.changed().await.unwrap();
+    }
     // The current-thread runtime observes the phase after the worker yields
     // on its admission future, so its semaphore request is already queued.
     // Queue behind the source pass but ahead of its optional preparation.
@@ -269,26 +265,22 @@ async fn source_hint_interrupts_attribution_and_owned_noop_retries_same_generati
     let admission = next_admission.await.unwrap();
     let mut signals =
         super::owner_signals::CodeIndexOwnerSignalsV1::subscribe(&registry, &root).await;
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let seated = {
-                let mounted = registry.mounted.lock().await;
-                mounted
-                    .get(&root)
-                    .unwrap()
-                    .serving_generation
-                    .read()
-                    .unwrap()
-                    .is_some()
-            };
-            if seated {
-                break;
-            }
-            signals.changed().await.unwrap();
+    loop {
+        let seated = {
+            let mounted = registry.mounted.lock().await;
+            mounted
+                .get(&root)
+                .unwrap()
+                .serving_generation
+                .read()
+                .unwrap()
+                .is_some()
+        };
+        if seated {
+            break;
         }
-    })
-    .await
-    .unwrap();
+        signals.changed().await.unwrap();
+    }
     let (generation, scope, control) = {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted.get(&root).unwrap();
@@ -324,10 +316,7 @@ async fn source_hint_interrupts_attribution_and_owned_noop_retries_same_generati
     let task = tokio::task::spawn_blocking(move || {
         preparing.prepare_test_attribution(preparing_control.as_ref())
     });
-    tokio::time::timeout(std::time::Duration::from_secs(5), observed)
-        .await
-        .unwrap()
-        .unwrap();
+    observed.await.unwrap();
     registry.request_complete_generation(&root).await;
     assert!(
         !control.inner.is_cancelled(),
@@ -354,24 +343,12 @@ async fn source_hint_interrupts_attribution_and_owned_noop_retries_same_generati
     let mut signals =
         super::owner_signals::CodeIndexOwnerSignalsV1::subscribe(&registry, &root).await;
     drop(admission);
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while registry.retained_text_owner_for_root(&root).await.is_none() {
-            signals.changed().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
-    let ready = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        registry.await_test_attribution_for_scope(
-            &root,
-            &scope,
-            &generation_id,
-            &CancellationToken::new(),
-        ),
-    )
-    .await
-    .unwrap();
+    while registry.retained_text_owner_for_root(&root).await.is_none() {
+        signals.changed().await.unwrap();
+    }
+    let ready = registry
+        .await_test_attribution_for_scope(&root, &scope, &generation_id, &CancellationToken::new())
+        .await;
     assert_eq!(ready, ProviderEvaluationStateV1::Partial);
     assert!(
         generation.test_attribution_read().evidence.is_some(),

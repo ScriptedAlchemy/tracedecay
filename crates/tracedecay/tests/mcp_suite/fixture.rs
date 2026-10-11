@@ -217,8 +217,16 @@ fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::
 
     rewrite_json(&data_dest.join("store_manifest.json"), |manifest| {
         manifest["project_id"] = Value::String(project_id.clone());
-        manifest["project_root"] = Value::String(project_root.to_string_lossy().into_owned());
-        manifest["data_root"] = Value::String(data_dest.to_string_lossy().into_owned());
+        manifest["project_root"] = Value::String(
+            canonical_root_identity(project_root)
+                .to_string_lossy()
+                .into_owned(),
+        );
+        manifest["data_root"] = Value::String(
+            canonical_root_identity(&data_dest)
+                .to_string_lossy()
+                .into_owned(),
+        );
     })?;
 
     if !targets.global_db_path.exists() {
@@ -256,6 +264,10 @@ async fn template_root() -> std::result::Result<&'static Path, &'static str> {
 /// `long Windows security path must have an exact absolute spelling`.
 fn host_exact_template_root(path: &Path) -> PathBuf {
     canonical_root_identity(path)
+}
+
+fn fixture_tmp_root(scratch: &tempfile::TempDir) -> PathBuf {
+    canonical_existing_identity(scratch.path()).expect("scratch temp dir exists")
 }
 
 /// Returns the shared template dir, building it if this is the first test
@@ -590,7 +602,7 @@ async fn changing_a_schema_column_constant_does_not_reuse_the_template() {
     );
 
     let scratch = tempfile::TempDir::new().unwrap();
-    let tmp_root = scratch.path().canonicalize().unwrap();
+    let tmp_root = fixture_tmp_root(&scratch);
     let stale_name = schema_template_dir_name(StoreSchemaVersions::CURRENT, &omitted).unwrap();
     let stale = tmp_root.join(&stale_name);
     fs::create_dir_all(&stale).unwrap();
@@ -607,7 +619,10 @@ async fn changing_a_schema_column_constant_does_not_reuse_the_template() {
         .join("home")
         .join(".tracedecay")
         .join("global.db");
-    let connection = Connection::open(&global_db).unwrap();
+    // The template name carries two digests, so on Windows this path passes
+    // MAX_PATH; SQLite opens it only in the extended-length spelling that
+    // `canonicalize` returns, as the store runtime keeps for such paths.
+    let connection = Connection::open(global_db.canonicalize().unwrap()).unwrap();
     let mut statement = connection
         .prepare("SELECT name FROM pragma_table_info('graph_scopes') ORDER BY cid")
         .unwrap();
@@ -633,7 +648,7 @@ async fn changing_a_schema_column_constant_does_not_reuse_the_template() {
 #[tokio::test]
 async fn template_recorded_at_an_older_git_correlation_version_is_rebuilt() {
     let scratch = tempfile::TempDir::new().unwrap();
-    let tmp_root = scratch.path().canonicalize().unwrap();
+    let tmp_root = fixture_tmp_root(&scratch);
     let current = StoreSchemaVersions::CURRENT;
     let older = StoreSchemaVersions {
         git_correlation: current.git_correlation - 1,
@@ -651,7 +666,10 @@ async fn template_recorded_at_an_older_git_correlation_version_is_rebuilt() {
     )
     .unwrap()
     .join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
-    let downgraded = Connection::open(&stale_sessions)
+    // The template name carries two digests, so on Windows this path passes
+    // MAX_PATH; SQLite opens it only in the extended-length spelling that
+    // `canonicalize` returns, as the store runtime keeps for such paths.
+    let downgraded = Connection::open(stale_sessions.canonicalize().unwrap())
         .unwrap()
         .execute(
             "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'git_correlation'",
@@ -696,7 +714,7 @@ async fn template_recorded_at_an_older_git_correlation_version_is_rebuilt() {
 #[tokio::test]
 async fn template_seed_opens_the_copied_store_for_the_requested_project() {
     let scratch = tempfile::TempDir::new().unwrap();
-    let tmp_root = scratch.path().canonicalize().unwrap();
+    let tmp_root = fixture_tmp_root(&scratch);
     let template = ensure_template(&tmp_root, StoreSchemaVersions::CURRENT)
         .await
         .expect("template builds from a real init");
@@ -752,9 +770,12 @@ async fn template_seed_opens_the_copied_store_for_the_requested_project() {
     );
     assert_eq!(
         manifest["project_root"].as_str(),
-        Some(project.to_str().unwrap())
+        Some(canonical_root_identity(&project).to_string_lossy().as_ref())
     );
-    assert_eq!(cg.project_root(), project.as_path());
+    assert_eq!(
+        cg.project_root(),
+        canonical_root_identity(&project).as_path()
+    );
     cg.close();
 }
 
@@ -763,7 +784,7 @@ async fn template_seed_opens_the_copied_store_for_the_requested_project() {
 #[tokio::test]
 async fn template_seed_does_not_fall_back_when_the_destination_exists() {
     let scratch = tempfile::TempDir::new().unwrap();
-    let tmp_root = scratch.path().canonicalize().unwrap();
+    let tmp_root = fixture_tmp_root(&scratch);
     let template = ensure_template(&tmp_root, StoreSchemaVersions::CURRENT)
         .await
         .expect("template builds from a real init");
