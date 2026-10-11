@@ -161,7 +161,7 @@ pub use projection::{
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
     SESSION_MESSAGE_PROJECTOR_VERSION_V5, SESSION_MESSAGE_PROJECTOR_VERSION_V7,
     SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord, durable_error_detail,
-    message_output_digest,
+    error_chain_is_sqlite_disk_image_corrupt, message_output_digest,
 };
 pub use provider_descriptor::{
     TOOL_CALL_ID_COVERAGE_KEY, TOOL_CALL_IDS_HOST_UNRECORDED, ToolMetadataNormalizer,

@@ -141,7 +141,7 @@ impl HostAdmissionFacade<'_> {
                     &error,
                     "projection store operation failed during host drain",
                 );
-                projection_store_unavailable()
+                projection_error_outcome(&error)
             })?
             else {
                 observation_queue_exhausted = true;
@@ -199,7 +199,7 @@ impl HostAdmissionFacade<'_> {
                                 &error,
                                 "projection store operation failed during host drain",
                             );
-                            projection_store_unavailable()
+                            observation_store_drain_outcome(&error)
                         })?
                     {
                         session_ids.insert(
@@ -232,7 +232,7 @@ impl HostAdmissionFacade<'_> {
                         &error,
                         "projection suffix probe failed during host drain",
                     );
-                    projection_store_unavailable()
+                    projection_error_outcome(&error)
                 })?
                 .is_some();
             if cancellation.is_cancelled() {
@@ -285,6 +285,16 @@ fn warn_projection_drain_store_error(error: &dyn std::error::Error, message: &'s
     );
 }
 
+fn observation_store_drain_outcome(
+    error: &tracedecay_store::ObservationStoreError,
+) -> HostAdmissionOutcome {
+    if tracedecay_store::error_chain_is_sqlite_disk_image_corrupt(error) {
+        HostAdmissionOutcome::terminal_unavailable("projection_store_corrupt")
+    } else {
+        projection_store_unavailable()
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy)]
 enum SimulatedProjectOutcome {
@@ -313,9 +323,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        SimulatedProjectOutcome, git_evidence_convergence_deferred, simulate_drain_project_calls,
+        SimulatedProjectOutcome, git_evidence_convergence_deferred,
+        observation_store_drain_outcome, simulate_drain_project_calls,
         warn_projection_drain_store_error,
     };
+    use tracedecay_sessions::admission::HostAdmissionStatus;
     use tracedecay_store::ObservationStoreError;
 
     struct ErrorFieldVisitor(String);
@@ -477,5 +489,26 @@ mod tests {
                 .any(|field| field.contains("reader acquisition saturated: ReaderPool")),
             "drain warning must include the source chain, got {captured:?}"
         );
+    }
+
+    #[test]
+    fn observation_store_corrupt_read_is_blocked_not_retryable() {
+        let error = ObservationStoreError::Storage {
+            operation: "dispatch observation runtime read",
+            source: Box::new(std::io::Error::other(
+                "SQLite execute failed: database disk image is malformed",
+            )),
+        };
+        let outcome = observation_store_drain_outcome(&error);
+        assert_eq!(outcome.reason_code, Some("projection_store_corrupt"));
+        assert!(!outcome.retryable);
+        assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
+    }
+
+    #[test]
+    fn observation_store_transient_read_stays_retryable() {
+        let outcome = observation_store_drain_outcome(&reader_pool_saturated_observation_error());
+        assert_eq!(outcome.reason_code, Some("projection_store_unavailable"));
+        assert!(outcome.retryable);
     }
 }

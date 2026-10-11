@@ -684,7 +684,7 @@ pub fn durable_error_detail(error: &dyn Error) -> String {
     detail
 }
 
-fn error_chain_is_sqlite_disk_image_corrupt(error: &(dyn Error + Send + Sync)) -> bool {
+pub fn error_chain_is_sqlite_disk_image_corrupt(error: &(dyn Error + Send + Sync)) -> bool {
     let mut current: Option<&dyn Error> = Some(error);
     while let Some(err) = current {
         if sqlite_disk_image_corrupt_message(&err.to_string()) {
@@ -698,6 +698,9 @@ fn error_chain_is_sqlite_disk_image_corrupt(error: &(dyn Error + Send + Sync)) -
 fn sqlite_disk_image_corrupt_message(message: &str) -> bool {
     message.contains("database disk image is malformed")
         || message.contains("file is not a database")
+        || message.contains("malformed database schema")
+        || message.contains("SQLITE_CORRUPT")
+        || message.contains("SQLITE_NOTADB")
 }
 
 pub type ProjectionStoreResult<T> = Result<T, ProjectionStoreError>;
