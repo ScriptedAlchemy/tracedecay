@@ -3501,25 +3501,41 @@ fn append_prepared_clone_bodies(
             payload_insert.push([sql_blob(key), sql_blob(&body.payload)])?;
         }
         payload_insert.finish()?;
-        // Occurrences name their payload, and postings their occurrence, by
-        // the ordinal those rows were just assigned.
-        let mut payload_ordinal = transaction
-            .prepare_cached("SELECT ordinal FROM clone_body_payloads WHERE payload_digest = ?1")
+        // Deduped payloads keep the ordinal already on disk; one IN-list
+        // per chunk replaces a SELECT per body.
+        let payload_ordinals =
+            payload_ordinals_by_digest(transaction, &payload_keys, control)?;
+        let mut next_occurrence = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(ordinal), 0) FROM clone_occurrences",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .map_err(sqlite_error)?;
+        let mut occurrence_ordinals = Vec::with_capacity(bodies.len());
         let mut occurrence_insert = MultiRowInsertV1::new(
             transaction,
-            "clone_occurrences(symbol_key, payload_ordinal, path, body_start, body_end, eligibility)",
-            6,
+            "clone_occurrences(ordinal, symbol_key, payload_ordinal, path, body_start, body_end, eligibility)",
+            7,
             sqlite_error,
         )?;
         for ((body, key), symbol_key) in bodies.iter().zip(&payload_keys).zip(&symbol_keys) {
             checkpoint(control)?;
-            let ordinal: i64 = payload_ordinal
-                .query_row([key.as_slice()], |row| row.get(0))
-                .map_err(sqlite_error)?;
+            let payload_ordinal = *payload_ordinals.get(key.as_slice()).ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Corrupt(
+                    "clone payload ordinal missing after staging".to_owned(),
+                )
+            })?;
+            next_occurrence = next_occurrence.checked_add(1).ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Contract(
+                    "clone occurrence ordinal overflowed".to_owned(),
+                )
+            })?;
+            occurrence_ordinals.push(next_occurrence);
             occurrence_insert.push([
+                sql_integer(next_occurrence),
                 ToSqlOutput::Borrowed(symbol_key.into()),
-                sql_integer(ordinal),
+                sql_integer(payload_ordinal),
                 sql_text(&body.path),
                 sql_integer(i64::try_from(body.body_start).map_err(contract_number)?),
                 sql_integer(i64::try_from(body.body_end).map_err(contract_number)?),
@@ -3527,35 +3543,67 @@ fn append_prepared_clone_bodies(
             ])?;
         }
         occurrence_insert.finish()?;
-        let mut occurrence_ordinal = transaction
-            .prepare_cached("SELECT ordinal FROM clone_occurrences WHERE symbol_key = ?1")
-            .map_err(sqlite_error)?;
         let mut posting_insert = MultiRowInsertV1::new(
             transaction,
             "clone_exact_postings(class, normalization_revision, digest, occurrence_ordinal)",
             4,
             sqlite_error,
         )?;
-        for ((body, symbol_key), digests) in bodies.iter().zip(&symbol_keys).zip(&exact_digests) {
+        for ((body, ordinal), digests) in bodies
+            .iter()
+            .zip(&occurrence_ordinals)
+            .zip(&exact_digests)
+        {
             checkpoint(control)?;
             if body.exact_keys.is_empty() {
                 continue;
             }
-            let ordinal: i64 = occurrence_ordinal
-                .query_row([symbol_key], |row| row.get(0))
-                .map_err(sqlite_error)?;
             for (key, digest) in body.exact_keys.iter().zip(digests) {
                 posting_insert.push([
                     sql_integer(i64::from(key.class as u8)),
                     sql_integer(i64::from(key.normalization_revision)),
                     sql_blob(digest),
-                    sql_integer(ordinal),
+                    sql_integer(*ordinal),
                 ])?;
             }
         }
         posting_insert.finish()?;
+        append_prepared_clone_fingerprints(transaction, pages, &occurrence_ordinals, control)?;
+    } else {
+        append_prepared_clone_fingerprints(transaction, pages, &[], control)?;
     }
-    append_prepared_clone_fingerprints(transaction, pages, control)
+    Ok(())
+}
+
+fn payload_ordinals_by_digest(
+    transaction: &Transaction<'_>,
+    keys: &[[u8; 32]],
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<HashMap<Vec<u8>, i64>, CodeLexicalArtifactErrorV1> {
+    let placeholders = std::iter::repeat_n("?", PAYLOAD_DIGEST_CONFLICT_CHECK_CHUNK)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT payload_digest, ordinal FROM clone_body_payloads WHERE payload_digest IN ({placeholders})"
+    );
+    let mut statement = transaction.prepare_cached(&sql).map_err(sqlite_error)?;
+    let mut ordinals = HashMap::with_capacity(keys.len());
+    for chunk in keys.chunks(PAYLOAD_DIGEST_CONFLICT_CHECK_CHUNK) {
+        checkpoint(control)?;
+        let parameters = chunk.iter().map(Some).chain(std::iter::repeat_n(
+            None,
+            PAYLOAD_DIGEST_CONFLICT_CHECK_CHUNK - chunk.len(),
+        ));
+        let mut rows = statement
+            .query(tracedecay_sql::params_from_iter(parameters))
+            .map_err(sqlite_error)?;
+        while let Some(row) = rows.next().map_err(sqlite_error)? {
+            let digest: Vec<u8> = row.get(0).map_err(sqlite_error)?;
+            let ordinal: i64 = row.get(1).map_err(sqlite_error)?;
+            ordinals.insert(digest, ordinal);
+        }
+    }
+    Ok(ordinals)
 }
 
 /// The key `clone_body_payloads.payload_digest` stores for `digest`.
@@ -3569,6 +3617,7 @@ pub(super) fn stored_digest_key(digest: &str) -> Result<[u8; 32], CodeLexicalArt
 fn append_prepared_clone_fingerprints(
     transaction: &Transaction<'_>,
     pages: &[PreparedCodeLexicalArtifactPageV1],
+    occurrence_ordinals: &[i64],
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     if !pages.iter().any(|page| {
@@ -3584,34 +3633,36 @@ fn append_prepared_clone_fingerprints(
     // journals) most of that tree. Measured on the 1,560-file bench corpus:
     // 273k postings, 78 MiB final table, 2.1 GiB written through 28 commits
     // (27x amplification); staged and sorted once at finalization, 0.4 GiB.
-    // Postings name their occurrence by its stored ordinal, which the
-    // occurrence rows of this batch were just assigned.
-    let mut ordinal = transaction
-        .prepare_cached("SELECT ordinal FROM clone_occurrences WHERE symbol_key = ?1")
-        .map_err(sqlite_error)?;
+    // Occurrence ordinals are the ones this batch just assigned.
+    if occurrence_ordinals.len()
+        != pages.iter().map(|page| page.clone_bodies.len()).sum::<usize>()
+    {
+        return Err(CodeLexicalArtifactErrorV1::Contract(
+            "clone fingerprint staging received a different occurrence ordinal count".to_owned(),
+        ));
+    }
     let mut insert = MultiRowInsertV1::new(
         transaction,
         "clone_fingerprint_postings_pages(language, class, normalization_revision, fingerprint, occurrence_ordinal, token_position)",
         6,
         sqlite_error,
     )?;
-    for body in pages.iter().flat_map(|page| &page.clone_bodies) {
+    for (body, occurrence) in pages
+        .iter()
+        .flat_map(|page| page.clone_bodies.iter())
+        .zip(occurrence_ordinals)
+    {
         checkpoint(control)?;
         let Some(stream) = &body.fingerprint_stream else {
             continue;
         };
-        let occurrence: i64 = ordinal
-            .query_row([stored_symbol_key(&body.symbol_occurrence_id)], |row| {
-                row.get(0)
-            })
-            .map_err(sqlite_error)?;
         for position in &stream.positions {
             insert.push([
                 sql_text(&stream.language),
                 sql_integer(i64::from(stream.class as u8)),
                 sql_integer(i64::from(stream.normalization_revision)),
                 sql_integer(i64::try_from(position.fingerprint).map_err(contract_number)?),
-                sql_integer(occurrence),
+                sql_integer(*occurrence),
                 sql_integer(i64::from(position.token_position)),
             ])?;
         }
@@ -3631,17 +3682,6 @@ fn derive_clone_fingerprint_postings(
     transaction: &Transaction<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    // Heap-staged during append; one merge index replaces a filesort of the
-    // full posting-page table. Dropped with the table after the seal.
-    transaction
-        .execute_batch(
-            "CREATE INDEX clone_fingerprint_postings_pages_merge
-             ON clone_fingerprint_postings_pages(
-                 language, class, normalization_revision, fingerprint,
-                 occurrence_ordinal, token_position
-             )",
-        )
-        .map_err(sqlite_error)?;
     let mut select = transaction
         .prepare(
             "SELECT language, class, normalization_revision, fingerprint, occurrence_ordinal, token_position
@@ -4747,15 +4787,6 @@ fn derive_term_postings(
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let subtoken = field_code(LexicalFieldV1::Subtoken);
-    // PK is `(page_ordinal, term, field)` so catch-up stays the table order.
-    // Finalization reads the serving key first; the merge index is created
-    // here so append never maintains it.
-    transaction
-        .execute_batch(
-            "CREATE INDEX term_posting_runs_merge
-             ON term_posting_runs(term, field, page_ordinal)",
-        )
-        .map_err(sqlite_error)?;
     let mut select = transaction
         .prepare(
             "SELECT term, field, postings FROM term_posting_runs ORDER BY term, field, page_ordinal",
@@ -4836,12 +4867,6 @@ fn derive_exact_postings(
     transaction: &Transaction<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    transaction
-        .execute_batch(
-            "CREATE INDEX exact_posting_runs_merge
-             ON exact_posting_runs(term_id, field, page_ordinal)",
-        )
-        .map_err(sqlite_error)?;
     let mut select = transaction
         .prepare(
             "SELECT term_id, field, documents FROM exact_posting_runs ORDER BY term_id, field, page_ordinal",
@@ -7256,38 +7281,6 @@ mod tests {
             )),
             0,
             "source-page catch-up must be the maintained table order"
-        );
-    }
-
-    #[test]
-    fn merge_index_built_at_finalization_avoids_a_temp_sort() {
-        let connection = Connection::open_in_memory().expect("open artifact database");
-        create_mutable_test_schema(&connection);
-        for (page_ordinal, term) in [(0i64, "omega"), (0, "zeta"), (1, "alpha"), (1, "beta")] {
-            connection
-                .execute(
-                    "INSERT INTO term_posting_runs(page_ordinal, term, field, postings) VALUES (?1, ?2, 4, X'02')",
-                    params![page_ordinal, term],
-                )
-                .expect("seed page-ordered term run");
-        }
-        connection
-            .execute_batch(
-                "CREATE INDEX term_posting_runs_merge
-                 ON term_posting_runs(term, field, page_ordinal)",
-            )
-            .expect("create merge index");
-        let merge_order =
-            "SELECT term, field, postings FROM term_posting_runs ORDER BY term, field, page_ordinal";
-        assert_eq!(
-            super::super::temporary_sorts(&super::super::query_plan(
-                &connection,
-                merge_order,
-                []
-            )),
-            0,
-            "finalization merge must follow the merge index: {:?}",
-            super::super::query_plan(&connection, merge_order, [])
         );
     }
 
