@@ -389,6 +389,7 @@ pub(super) async fn recover_source_edit_transaction(
             message: "source edit crash recovery confirmed the edit already committed to disk"
                 .to_owned(),
         };
+        durability.persist_rollback_record(&journal, &observed_state, true)?;
         let record = applied_record(&journal, &outcome, observed_state, now_micros(), None)?;
         durability.persist_receipt(&record)?;
         return durability.clear_journal();

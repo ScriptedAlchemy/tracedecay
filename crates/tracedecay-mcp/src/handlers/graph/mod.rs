@@ -28,8 +28,8 @@ pub use search_freshness::{freshness_lines, graph_read_freshness};
 pub use verified::{
     GRAPH_RELATION_READ_LIMIT, VerifiedNeighbor, cost_to_expand_verified, graph_occurrence_id,
     graph_symbol_corrupt, graph_symbol_end_line, graph_symbol_paths, graph_symbols_in_scope,
-    line_for_byte_offset, nodes_addressed_by_selector, required_graph_file_path,
-    required_graph_metadata, single_graph_adjacency_batch, traverse_verified_neighbors,
+    nodes_addressed_by_selector, required_graph_file_path, required_graph_metadata,
+    single_graph_adjacency_batch, traverse_verified_neighbors,
 };
 
 use std::cell::RefCell;

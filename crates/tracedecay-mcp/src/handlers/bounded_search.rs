@@ -14,7 +14,6 @@ static SEARCH_SCAN_SEMAPHORE: LazyLock<Arc<Semaphore>> =
 pub(crate) struct CancelSearchOnDrop(Arc<AtomicBool>);
 
 impl CancelSearchOnDrop {
-    #[cfg(test)]
     pub(crate) fn new(cancelled: Arc<AtomicBool>) -> Self {
         Self(cancelled)
     }

@@ -5,6 +5,7 @@ use tracedecay_domain::canonical_text::sha256_hex;
 /// Read a source file to a UTF-8 string, transparently handling UTF-16 LE/BE
 /// (detected via BOM). Returns an IO error only when the file genuinely cannot
 /// be read or decoded.
+#[tracing::instrument(name = "source.read", level = "trace", skip_all)]
 pub fn read_source_file(path: &Path) -> std::io::Result<String> {
     let bytes = read_file_bytes(path)?;
 
