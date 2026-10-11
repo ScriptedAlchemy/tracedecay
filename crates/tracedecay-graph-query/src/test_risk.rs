@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
-use tracedecay_code_index::is_test_file;
 use tracedecay_contracts::retrieval::{
     TestAttributionMethodV1, TestRiskAttributionSummaryV1, TestRiskBucketSummaryV1,
     TestRiskConfidenceV1, TestRiskEntryV1, TestRiskResultV1, TestRiskSummaryV1,
@@ -11,6 +10,7 @@ use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ComplexityAnalysisV1, RelationEdgeKindV1, SymbolOccurrenceId};
 
+use crate::queries::classify_generation_tests;
 use crate::VerifiedGraphQuery;
 use tracedecay_runtime_core::git::churn::file_churn;
 
@@ -97,13 +97,8 @@ pub async fn analyze_test_risk(
         .iter()
         .filter(|n| {
             n.callable
-                && !is_test_file(&n.file)
-                && !n.name.starts_with("test_")
-                && !n.name.starts_with("test")
-                && !n.file.contains("/test")
-                && !evidence.test_annotated.contains(n.occurrence.as_str())
+                && !evidence.test_occurrences.contains(&n.occurrence)
                 && !n.skip_test_coverage
-                && !n.qualified_name.contains("::tests::")
         })
         .filter(|n| tracedecay_domain::path_matches_scope(&n.file, path_prefix))
         .collect();
@@ -124,8 +119,7 @@ pub async fn analyze_test_risk(
     }
     let attribution_depths = build_test_attribution_depths(
         &evidence.calls,
-        &evidence.files,
-        &evidence.test_annotated,
+        &evidence.test_occurrences,
         ATTRIBUTION_DEPTH,
     );
 
@@ -152,10 +146,9 @@ pub async fn analyze_test_risk(
         .filter(|n| {
             n.callable
                 && n.skip_test_coverage
-                && !is_test_file(&n.file)
+                && !evidence.test_occurrences.contains(&n.occurrence)
                 && is_source_file(&n.file)
                 && tracedecay_domain::path_matches_scope(&n.file, path_prefix)
-                && !n.qualified_name.contains("::tests::")
         })
         .count();
 
@@ -260,7 +253,6 @@ pub async fn analyze_test_risk(
 struct VerifiedTestSymbol {
     occurrence: SymbolOccurrenceId,
     name: String,
-    qualified_name: String,
     file: String,
     line: u32,
     /// A lower bound when `complexity_analysis` is not complete.
@@ -273,8 +265,7 @@ struct VerifiedTestSymbol {
 pub struct VerifiedTestEvidence {
     symbols: Vec<VerifiedTestSymbol>,
     calls: Vec<(String, String)>,
-    files: HashMap<String, String>,
-    pub test_annotated: HashSet<String>,
+    pub test_occurrences: HashSet<SymbolOccurrenceId>,
 }
 
 #[tracing::instrument(name = "graph.health.test_risk.evidence", level = "trace", skip_all)]
@@ -307,24 +298,34 @@ pub fn verified_test_evidence(
             "verified test-risk symbol census exceeded its budget",
         ));
     }
-    let occurrences = page
-        .symbols
+    let summaries = page.symbols;
+    let occurrences = summaries
         .iter()
         .map(|symbol| symbol.occurrence.clone())
         .collect::<Vec<_>>();
-    let mut symbols = Vec::with_capacity(page.symbols.len());
-    let mut files = HashMap::with_capacity(page.symbols.len());
-    let mut test_markers = HashSet::new();
-    for symbol in page.symbols {
+    let (edges, extras) = if scoped_paths.is_some() {
+        scoped_test_edges(graph, &occurrences)?
+    } else {
+        (
+            graph.edges_among(
+                &occurrences,
+                &[
+                    RelationEdgeKindV1::Calls,
+                    RelationEdgeKindV1::Annotates,
+                    RelationEdgeKindV1::Contains,
+                ],
+                MAX_TEST_RISK_RELATIONS,
+            )?,
+            Vec::new(),
+        )
+    };
+    let test_occurrences = classify_generation_tests(&summaries, &extras, &edges);
+    let mut symbols = Vec::with_capacity(summaries.len());
+    for symbol in summaries {
         let (metadata, file) = verified_test_symbol_parts(&symbol)?;
-        if tracedecay_code_index::is_test_marker(metadata) {
-            test_markers.insert(symbol.occurrence.clone());
-        }
-        files.insert(symbol.occurrence.as_str().to_owned(), file.to_owned());
         symbols.push(VerifiedTestSymbol {
             occurrence: symbol.occurrence.clone(),
             name: metadata.simple_name.clone(),
-            qualified_name: metadata.qualified_name.clone(),
             file: file.to_owned(),
             line: metadata.start_line.saturating_add(1),
             complexity: metadata
@@ -337,46 +338,46 @@ pub fn verified_test_evidence(
             skip_test_coverage: metadata.skip_test_coverage,
         });
     }
-    let edges = if scoped_paths.is_some() {
-        scoped_test_edges(graph, &occurrences, &mut files, &mut test_markers)?
-    } else {
-        graph.edges_among(
-            &occurrences,
-            &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Annotates],
-            MAX_TEST_RISK_RELATIONS,
-        )?
-    };
     let mut calls = Vec::new();
-    let mut test_annotated = HashSet::new();
     for edge in edges {
-        match edge.kind {
-            RelationEdgeKindV1::Calls => calls.push((
+        if edge.kind == RelationEdgeKindV1::Calls {
+            calls.push((
                 edge.from_occurrence.as_str().to_owned(),
                 edge.to_occurrence.as_str().to_owned(),
-            )),
-            RelationEdgeKindV1::Annotates if test_markers.contains(&edge.from_occurrence) => {
-                test_annotated.insert(edge.to_occurrence.as_str().to_owned());
-            }
-            _ => {}
+            ));
         }
     }
     Ok(VerifiedTestEvidence {
         symbols,
         calls,
-        files,
-        test_annotated,
+        test_occurrences,
     })
 }
 
 fn scoped_test_edges(
     graph: &VerifiedGraphQuery,
     occurrences: &[SymbolOccurrenceId],
-    files: &mut HashMap<String, String>,
-    test_markers: &mut HashSet<SymbolOccurrenceId>,
-) -> Result<Vec<tracedecay_domain::CanonicalRelationEdgeV1>> {
+) -> Result<(
+    Vec<tracedecay_domain::CanonicalRelationEdgeV1>,
+    Vec<CodeGraphSymbolSummaryV1>,
+)> {
+    let in_scope = occurrences.iter().cloned().collect::<HashSet<_>>();
     let mut edges = Vec::new();
-    let mut seen = occurrences.iter().cloned().collect::<HashSet<_>>();
+    let mut extras = Vec::new();
+    let mut extra_seen = HashSet::new();
+    let mut seen = in_scope.clone();
     let mut frontier = occurrences.to_vec();
+    let remember = |neighbor: &CodeGraphSymbolSummaryV1,
+                    extras: &mut Vec<CodeGraphSymbolSummaryV1>,
+                    extra_seen: &mut HashSet<SymbolOccurrenceId>,
+                    in_scope: &HashSet<SymbolOccurrenceId>| {
+        if in_scope.contains(&neighbor.occurrence) {
+            return;
+        }
+        if extra_seen.insert(neighbor.occurrence.clone()) {
+            extras.push(neighbor.clone());
+        }
+    };
     for _ in 0..ATTRIBUTION_DEPTH {
         if frontier.is_empty() {
             break;
@@ -399,23 +400,17 @@ fn scoped_test_edges(
         }
         let mut next = Vec::new();
         for edge in &incoming {
-            let (metadata, file) = verified_test_symbol_parts(&edge.neighbor)?;
-            files.insert(
-                edge.neighbor.occurrence.as_str().to_owned(),
-                file.to_owned(),
-            );
+            verified_test_symbol_parts(&edge.neighbor)?;
             if seen.insert(edge.neighbor.occurrence.clone()) {
                 next.push(edge.neighbor.occurrence.clone());
             }
-            if tracedecay_code_index::is_test_marker(metadata) {
-                test_markers.insert(edge.neighbor.occurrence.clone());
-            }
+            remember(&edge.neighbor, &mut extras, &mut extra_seen, &in_scope);
         }
         edges.extend(incoming.into_iter().map(|edge| edge.edge));
         frontier = next;
     }
     if seen.is_empty() {
-        return Ok(edges);
+        return Ok((edges, extras));
     }
     let remaining = MAX_TEST_RISK_RELATIONS
         .checked_sub(edges.len())
@@ -425,7 +420,7 @@ fn scoped_test_edges(
         })?;
     let annotated = graph
         .callers(
-            &seen.into_iter().collect::<Vec<_>>(),
+            &seen.iter().cloned().collect::<Vec<_>>(),
             &[RelationEdgeKindV1::Annotates],
             remaining,
         )?
@@ -438,17 +433,28 @@ fn scoped_test_edges(
         ));
     }
     for edge in &annotated {
-        let (metadata, file) = verified_test_symbol_parts(&edge.neighbor)?;
-        files.insert(
-            edge.neighbor.occurrence.as_str().to_owned(),
-            file.to_owned(),
-        );
-        if tracedecay_code_index::is_test_marker(metadata) {
-            test_markers.insert(edge.neighbor.occurrence.clone());
-        }
+        verified_test_symbol_parts(&edge.neighbor)?;
+        remember(&edge.neighbor, &mut extras, &mut extra_seen, &in_scope);
     }
     edges.extend(annotated.into_iter().map(|edge| edge.edge));
-    Ok(edges)
+    let remaining = MAX_TEST_RISK_RELATIONS
+        .checked_sub(edges.len())
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| {
+            test_risk_graph_problem("verified test-risk relation census exceeded its budget")
+        })?;
+    let contained = graph.edges_among(
+        occurrences,
+        &[RelationEdgeKindV1::Annotates, RelationEdgeKindV1::Contains],
+        remaining,
+    )?;
+    if edges.len().saturating_add(contained.len()) > MAX_TEST_RISK_RELATIONS {
+        return Err(test_risk_graph_problem(
+            "verified test-risk relation census exceeded its budget",
+        ));
+    }
+    edges.extend(contained);
+    Ok((edges, extras))
 }
 
 fn is_source_file(path: &str) -> bool {
@@ -480,10 +486,13 @@ fn test_risk_graph_problem(detail: &str) -> TraceDecayError {
 #[tracing::instrument(name = "graph.health.test_risk.attribution", level = "trace", skip_all)]
 fn build_test_attribution_depths(
     calls: &[(String, String)],
-    node_to_file: &HashMap<String, String>,
-    test_annotated_callers: &HashSet<String>,
+    test_occurrences: &HashSet<SymbolOccurrenceId>,
     max_depth: usize,
 ) -> HashMap<String, usize> {
+    let test_ids = test_occurrences
+        .iter()
+        .map(SymbolOccurrenceId::as_str)
+        .collect::<HashSet<_>>();
     let mut outgoing_calls: HashMap<String, Vec<String>> = HashMap::new();
     let mut seed_nodes: HashSet<String> = HashSet::new();
 
@@ -492,11 +501,7 @@ fn build_test_attribution_depths(
             .entry(source.clone())
             .or_default()
             .push(target.clone());
-        let is_test_seed = node_to_file
-            .get(source)
-            .is_some_and(|file| is_test_file(file))
-            || test_annotated_callers.contains(source);
-        if is_test_seed {
+        if test_ids.contains(source.as_str()) {
             seed_nodes.insert(source.clone());
         }
     }

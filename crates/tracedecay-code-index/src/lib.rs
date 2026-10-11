@@ -36,14 +36,16 @@ pub mod receipts;
 pub mod retained_parse;
 pub mod source_walk;
 pub mod test_attribution;
+pub mod test_classification;
 pub mod unmounted_files;
 
 pub use self::intake::CodeIndexIntake;
+pub use self::test_classification::{GenerationTestSymbol, generation_test_occurrences};
 
 /// Whether an extracted symbol is a parser-attested test annotation.
 ///
-/// Callers combine this marker with the canonical `Annotates` edge instead of
-/// inferring runnable tests from names or enclosing modules.
+/// [`generation_test_occurrences`] is the classification reports share. This
+/// predicate is only the annotation half of that decision.
 pub fn is_test_marker(record: &lineage::LineageSymbolRecordV1) -> bool {
     record.kind == "annotation_usage" && is_test_annotation_name(&record.simple_name)
 }

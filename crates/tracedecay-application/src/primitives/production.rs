@@ -38,9 +38,10 @@ use crate::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
+use tracedecay_code_index::is_test_marker;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_graph_query::SourceReadContext;
-use tracedecay_graph_query::queries::{GraphQueryManager, is_test_marker};
+use tracedecay_graph_query::queries::GraphQueryManager;
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
     code_graph_read_error_from_runtime,

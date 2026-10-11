@@ -100,6 +100,8 @@ pub(crate) fn register_test_schema_installer() {
 }
 
 #[cfg(test)]
+mod report_classification_tests;
+#[cfg(test)]
 mod verified_query_deadline_tests;
 #[cfg(test)]
 mod verified_query_source_tests;

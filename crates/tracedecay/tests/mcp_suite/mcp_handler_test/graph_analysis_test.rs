@@ -540,7 +540,7 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
 /// | symbol            | why it is not dead                                  |
 /// |-------------------|-----------------------------------------------------|
 /// | `main`            | entry-point name exclusion                          |
-/// | `test_helper`     | `test`-prefixed and `#[test]`-annotated             |
+/// | `test_helper`     | `#[test]` in `tests/test_utils.rs`                  |
 /// | `helper`          | `pub`, and `include_public` defaults to false       |
 /// | `format_greeting` | private, but `helper` calls it (incoming edge)      |
 ///

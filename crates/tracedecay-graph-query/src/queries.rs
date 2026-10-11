@@ -17,7 +17,7 @@ use super::map_projection_error;
 
 const MAX_ANALYTICAL_SYMBOLS: usize = 500_000;
 const MAX_ANALYTICAL_RELATIONS: usize = 2_000_000;
-const HEALTH_EDGE_KINDS: [RelationEdgeKindV1; 8] = [
+const HEALTH_EDGE_KINDS: [RelationEdgeKindV1; 9] = [
     RelationEdgeKindV1::Calls,
     RelationEdgeKindV1::Uses,
     RelationEdgeKindV1::TypeOf,
@@ -26,7 +26,23 @@ const HEALTH_EDGE_KINDS: [RelationEdgeKindV1; 8] = [
     RelationEdgeKindV1::Returns,
     RelationEdgeKindV1::Receives,
     RelationEdgeKindV1::Annotates,
+    RelationEdgeKindV1::Contains,
 ];
+
+/// Edges that keep a symbol alive. `Annotates` and `Contains` are
+/// classification evidence, not uses.
+fn is_liveness_edge(kind: RelationEdgeKindV1) -> bool {
+    matches!(
+        kind,
+        RelationEdgeKindV1::Calls
+            | RelationEdgeKindV1::Uses
+            | RelationEdgeKindV1::TypeOf
+            | RelationEdgeKindV1::Implements
+            | RelationEdgeKindV1::Extends
+            | RelationEdgeKindV1::Returns
+            | RelationEdgeKindV1::Receives
+    )
+}
 
 /// Files that call or use symbols defined in one file, and whether the graph
 /// also holds call sites it could not bind to that file's symbols.
@@ -216,22 +232,10 @@ impl<'a> GraphQueryManager<'a> {
                     })
             }
         }?;
-        let test_markers = symbols
-            .iter()
-            .filter(|symbol| symbol.metadata.as_ref().is_some_and(is_test_marker))
-            .map(|symbol| symbol.occurrence.clone())
-            .collect::<HashSet<_>>();
-        let test_annotated = edges
-            .iter()
-            .filter(|edge| {
-                edge.kind == RelationEdgeKindV1::Annotates
-                    && test_markers.contains(&edge.from_occurrence)
-            })
-            .map(|edge| edge.to_occurrence.clone())
-            .collect::<HashSet<_>>();
+        let test_occurrences = classify_generation_tests(&symbols, &[], &edges);
         let live_targets = edges
             .iter()
-            .filter(|edge| edge.kind != RelationEdgeKindV1::Annotates)
+            .filter(|edge| is_liveness_edge(edge.kind))
             .map(|edge| edge.to_occurrence.clone())
             .collect::<HashSet<_>>();
         let kind_filter = kinds.iter().map(NodeKind::as_str).collect::<HashSet<_>>();
@@ -249,8 +253,7 @@ impl<'a> GraphQueryManager<'a> {
                     && (kind_filter.is_empty() || kind_filter.contains(metadata.kind.as_str()))
                     && (include_public || metadata.visibility != "public")
                     && metadata.simple_name != "main"
-                    && !metadata.simple_name.starts_with("test")
-                    && !test_annotated.contains(&symbol.occurrence)
+                    && !test_occurrences.contains(&symbol.occurrence)
                     && !live_targets.contains(&symbol.occurrence)
             })
             .collect::<Vec<_>>();
@@ -396,8 +399,9 @@ impl<'a> GraphQueryManager<'a> {
     }
 
     /// Folds every health input from one immutable graph generation. Symbol
-    /// metrics are parser-attested metadata; liveness and test annotations are
-    /// derived from the same generation's canonical relation set.
+    /// metrics are parser-attested metadata; liveness and test classification
+    /// come from the same generation's canonical paths, annotations, and
+    /// containment.
     #[tracing::instrument(name = "usecases.graph.health_inputs", level = "trace", skip_all)]
     pub async fn health_inputs(&self, path_prefix: Option<&str>) -> Result<VerifiedHealthInputsV1> {
         let files = {
@@ -417,9 +421,9 @@ impl<'a> GraphQueryManager<'a> {
                 .filter(|path| path_is_within(path, prefix))
                 .collect::<HashSet<_>>()
         });
-        let (symbols, edges, external_test_markers) =
-            self.health_evidence(logical_paths.as_ref())?;
+        let (symbols, edges, extras) = self.health_evidence(logical_paths.as_ref())?;
         let metadata = health_symbol_metadata(&symbols)?;
+        let test_occurrences = classify_generation_tests(&symbols, &extras, &edges);
         let mut adjacency = files
             .into_iter()
             .map(|file| (file.logical_path, HashSet::new()))
@@ -453,26 +457,20 @@ impl<'a> GraphQueryManager<'a> {
         });
         Ok(VerifiedHealthInputsV1 {
             adjacency,
-            aggregates: fold_health_aggregates(
-                metadata,
-                &edges,
-                external_test_markers,
-                path_prefix,
-            ),
+            aggregates: fold_health_aggregates(metadata, &edges, &test_occurrences, path_prefix),
         })
     }
 
-    /// Health symbols, the induced edge set, and the test markers only the
-    /// scoped `callers` walk can see: its far endpoints legitimately sit
-    /// outside the scoped symbol census, so their marker metadata cannot be
-    /// recovered from `symbols` the way the whole-generation branch's can.
+    /// Health symbols, the induced edge set, and neighbors the scoped
+    /// `callers` walk sees outside the census. Those neighbors carry the
+    /// annotation and containment evidence the in-scope rows cannot.
     fn health_evidence(
         &self,
         logical_paths: Option<&HashSet<String>>,
     ) -> Result<(
         Vec<CodeGraphSymbolSummaryV1>,
         Vec<CanonicalRelationEdgeV1>,
-        HashSet<SymbolOccurrenceId>,
+        Vec<CodeGraphSymbolSummaryV1>,
     )> {
         let symbols = {
             let _span = tracing::trace_span!("usecases.graph.health.symbols").entered();
@@ -497,33 +495,31 @@ impl<'a> GraphQueryManager<'a> {
             .iter()
             .map(|symbol| symbol.occurrence.clone())
             .collect::<Vec<_>>();
-        let (edges, external_test_markers) = {
+        let (edges, extras) = {
             let _span = tracing::trace_span!("usecases.graph.health.edges").entered();
             {
                 if logical_paths.is_some() {
-                    self.incoming_edges(&symbols, &HEALTH_EDGE_KINDS)
-                        .map(|edges| {
-                            let markers = edges
-                                .iter()
-                                .filter(|edge| {
-                                    edge.neighbor.occurrence == edge.edge.from_occurrence
-                                        && edge
-                                            .neighbor
-                                            .metadata
-                                            .as_ref()
-                                            .is_some_and(is_test_marker)
-                                })
-                                .map(|edge| edge.edge.from_occurrence.clone())
-                                .collect();
-                            (edges.into_iter().map(|edge| edge.edge).collect(), markers)
-                        })
+                    let incoming = self.incoming_edges(&symbols, &HEALTH_EDGE_KINDS)?;
+                    let census = occurrences.iter().cloned().collect::<HashSet<_>>();
+                    let mut extras = Vec::new();
+                    let mut seen = HashSet::new();
+                    for edge in &incoming {
+                        if census.contains(&edge.neighbor.occurrence) {
+                            continue;
+                        }
+                        if seen.insert(edge.neighbor.occurrence.clone()) {
+                            extras.push(edge.neighbor.clone());
+                        }
+                    }
+                    let edges = incoming.into_iter().map(|edge| edge.edge).collect();
+                    Ok((edges, extras))
                 } else {
                     self.edges_among(&occurrences, &HEALTH_EDGE_KINDS)
-                        .map(|edges| (edges, HashSet::new()))
+                        .map(|edges| (edges, Vec::new()))
                 }
             }
         }?;
-        Ok((symbols, edges, external_test_markers))
+        Ok((symbols, edges, extras))
     }
 
     fn incoming_edges(
@@ -629,26 +625,12 @@ fn fold_health_aggregates(
         ),
     >,
     edges: &[CanonicalRelationEdgeV1],
-    external_test_markers: HashSet<SymbolOccurrenceId>,
+    test_occurrences: &HashSet<SymbolOccurrenceId>,
     path_prefix: Option<&str>,
 ) -> Vec<VerifiedHealthFileAggregateV1> {
     let live_targets = edges
         .iter()
-        .filter(|edge| edge.kind != RelationEdgeKindV1::Annotates)
-        .map(|edge| edge.to_occurrence.clone())
-        .collect::<HashSet<_>>();
-    let test_markers = metadata
-        .iter()
-        .filter(|(_, (_, record))| is_test_marker(record))
-        .map(|(occurrence, _)| occurrence.clone())
-        .chain(external_test_markers)
-        .collect::<HashSet<_>>();
-    let test_annotated = edges
-        .iter()
-        .filter(|edge| {
-            edge.kind == RelationEdgeKindV1::Annotates
-                && test_markers.contains(&edge.from_occurrence)
-        })
+        .filter(|edge| is_liveness_edge(edge.kind))
         .map(|edge| edge.to_occurrence.clone())
         .collect::<HashSet<_>>();
     let mut by_file = HashMap::<String, VerifiedHealthFileAggregateV1>::new();
@@ -678,9 +660,8 @@ fn fold_health_aggregates(
         aggregate.function_methods += 1;
         aggregate.skipped_function_methods += usize::from(record.skip_test_coverage);
         let entrypoint = record.simple_name == "main"
-            || record.simple_name.starts_with("test")
             || record.visibility == "public"
-            || test_annotated.contains(&occurrence);
+            || test_occurrences.contains(&occurrence);
         if !entrypoint && !live_targets.contains(&occurrence) {
             aggregate.dead_function_methods += 1;
         }
@@ -690,8 +671,30 @@ fn fold_health_aggregates(
     aggregates
 }
 
-pub fn is_test_marker(record: &tracedecay_code_index::lineage::LineageSymbolRecordV1) -> bool {
-    tracedecay_code_index::is_test_marker(record)
+pub(crate) fn classify_generation_tests(
+    symbols: &[CodeGraphSymbolSummaryV1],
+    extras: &[CodeGraphSymbolSummaryV1],
+    edges: &[CanonicalRelationEdgeV1],
+) -> HashSet<SymbolOccurrenceId> {
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+    for symbol in symbols.iter().chain(extras) {
+        let Some(record) = symbol.metadata.as_ref() else {
+            continue;
+        };
+        if !seen.insert(symbol.occurrence.clone()) {
+            continue;
+        }
+        rows.push(tracedecay_code_index::GenerationTestSymbol {
+            occurrence: &symbol.occurrence,
+            logical_path: symbol
+                .binding
+                .as_ref()
+                .and_then(|binding| binding.logical_path.as_deref()),
+            record,
+        });
+    }
+    tracedecay_code_index::generation_test_occurrences(&rows, edges)
 }
 
 fn unavailable(detail: &str) -> TraceDecayError {
@@ -729,7 +732,9 @@ mod path_scope_tests {
         LanguageDescriptorRevision, RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
     };
 
-    use super::{fold_health_aggregates, path_is_within, scoped_file_adjacency};
+    use super::{
+        classify_generation_tests, fold_health_aggregates, path_is_within, scoped_file_adjacency,
+    };
 
     fn digest<T>(byte: char) -> T
     where
@@ -847,13 +852,18 @@ mod path_scope_tests {
         marker.metadata = Some(marker_record);
         let mut annotation = edge(&marker, &inside);
         annotation.kind = RelationEdgeKindV1::Annotates;
+        let test_occurrences = classify_generation_tests(
+            std::slice::from_ref(&inside),
+            &[marker],
+            &[annotation.clone()],
+        );
         let aggregates = fold_health_aggregates(
             HashMap::from([(
                 inside.occurrence.clone(),
                 ("src/scoped/inside.rs".to_owned(), &inside_record),
             )]),
             &[annotation],
-            HashSet::from([marker.occurrence.clone()]),
+            &test_occurrences,
             Some("src/scoped"),
         );
 
