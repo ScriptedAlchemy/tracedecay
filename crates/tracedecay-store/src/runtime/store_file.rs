@@ -1,10 +1,11 @@
 //! The single owner of owned-store file names.
 //!
 //! Every owned store family lives under one stem. The engine compiled into
-//! the binary picks the live names: `<stem>.tdb` plus `<stem>.tdb-wal` under
-//! the native engine, `<stem>.db` plus its `-wal`/`-shm`/`-journal` sidecars
-//! under SQLite. The SQLite names are the legacy family the native runtime
-//! deletes on its first boot.
+//! the binary picks the live names: `<stem>.tdb`, `<stem>.tdb-wal` and the
+//! `<stem>.tdb-tmp/` directory its sorts spill into under the native engine,
+//! `<stem>.db` plus its `-wal`/`-shm`/`-journal` sidecars under SQLite. The
+//! SQLite names are the legacy family the native runtime deletes on its first
+//! boot.
 
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ const NATIVE: bool = matches!(tracedecay_sql::ENGINE, tracedecay_sql::Engine::Na
 
 struct Names {
     stem: &'static str,
-    native: [&'static str; 2],
+    native: [&'static str; 3],
     legacy: [&'static str; 4],
     graph: [&'static str; 2],
 }
@@ -22,7 +23,11 @@ macro_rules! names {
     ($stem:literal) => {
         Names {
             stem: $stem,
-            native: [concat!($stem, ".tdb"), concat!($stem, ".tdb-wal")],
+            native: [
+                concat!($stem, ".tdb"),
+                concat!($stem, ".tdb-wal"),
+                concat!($stem, ".tdb-tmp"),
+            ],
             legacy: [
                 concat!($stem, ".db"),
                 concat!($stem, ".db-wal"),
@@ -65,12 +70,18 @@ impl StoreFile {
     pub const PROFILE_ROOT: [Self; 3] = [Self::Profile, Self::ProfileMemory, Self::ProfileSessions];
     /// Families stored in each project shard.
     pub const PROJECT_ROOT: [Self; 2] = [Self::Project, Self::ProjectSessions];
-    /// What the compiled engine appends to a main file name for its sidecars.
+    /// What the compiled engine appends to a main file name for its sidecar
+    /// files.
     pub const SIDECAR_SUFFIXES: &'static [&'static str] = if NATIVE {
         &["-wal"]
     } else {
         &["-wal", "-shm", "-journal"]
     };
+    /// What the compiled engine appends to a main file name for the private
+    /// directory its sorts and ephemeral tables spill into. Closing the store
+    /// removes it, so one that lingers is a dead process's scratch and never
+    /// durable data.
+    pub const TEMP_DIR_SUFFIXES: &'static [&'static str] = if NATIVE { &["-tmp"] } else { &[] };
 
     const fn names(self) -> &'static Names {
         &TABLE[self as usize]
@@ -90,7 +101,8 @@ impl StoreFile {
         }
     }
 
-    /// The main file and every sidecar the compiled engine writes beside it.
+    /// The main file, every sidecar file and the temporary directory the
+    /// compiled engine writes beside it.
     pub const fn family_names(self) -> &'static [&'static str] {
         if NATIVE {
             &self.names().native
@@ -170,7 +182,12 @@ mod tests {
             {
                 assert!(seen.insert(*name), "{name} is spelled by two families");
             }
-            assert_eq!(file.family_names()[0], file.file_name());
+            let members = std::iter::once("")
+                .chain(StoreFile::SIDECAR_SUFFIXES.iter().copied())
+                .chain(StoreFile::TEMP_DIR_SUFFIXES.iter().copied())
+                .map(|suffix| format!("{}{suffix}", file.file_name()))
+                .collect::<Vec<_>>();
+            assert_eq!(file.family_names(), members.as_slice());
             let expected = if NATIVE { ".tdb" } else { ".db" };
             assert!(file.file_name().ends_with(expected), "{}", file.file_name());
         }

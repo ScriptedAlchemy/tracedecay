@@ -696,6 +696,60 @@ async fn sweep_unregistered_stores_collects_retired_branch_store_layout() {
     );
 }
 
+/// Catches the manifestless scan treating the spill directory a dead native
+/// process left beside a project store as unrecognized payload, which would
+/// protect the abandoned directory forever. A name the compiled engine never
+/// writes stays unrecognized.
+#[tokio::test]
+async fn sweep_unregistered_stores_collects_a_lingering_engine_temp_directory() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let base = 1_700_000_000i64;
+    let dir = profile_root.join("projects").join("proj_ghost_spill");
+    let spill = dir
+        .join(format!(
+            "{}-tmp",
+            tracedecay_store::StoreFile::Project.file_name()
+        ))
+        .join("dead-sort");
+    std::fs::create_dir_all(&spill).unwrap();
+    std::fs::write(spill.join("tursodb_temp_file"), b"spilled rows").unwrap();
+    for path in [
+        spill.join("tursodb_temp_file"),
+        spill.clone(),
+        spill.parent().unwrap().to_path_buf(),
+    ] {
+        filetime::set_file_mtime(
+            path,
+            filetime::FileTime::from_unix_time(base - 100 * DAY, 0),
+        )
+        .unwrap();
+    }
+
+    let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, true)
+        .await
+        .unwrap();
+
+    if matches!(tracedecay_sql::ENGINE, tracedecay_sql::Engine::Native) {
+        assert!(
+            report.outcome.errors.is_empty(),
+            "{:?}",
+            report.outcome.errors
+        );
+        assert_eq!(report.outcome.collected.len(), 1);
+        assert!(!dir.exists());
+    } else {
+        assert_eq!(report.outcome.collected.len(), 0);
+        assert_eq!(
+            report.outcome.errors[0].kind,
+            CollectionFailureKind::DurableDataProtected
+        );
+        assert!(dir.exists());
+    }
+}
+
 /// The cold-store page over stores whose roots were removed from disk keeps
 /// the one whose exact registered root still has a live owner, which can
 /// still write into it, and collects the rest, including the store of a root

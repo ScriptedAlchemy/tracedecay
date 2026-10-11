@@ -993,7 +993,8 @@ async fn check_manifestless_store_durable_memory(
 /// file shape is an unverifiable durable-data candidate, not disposable dust.
 /// Files of the retired `branches/` store layout are old data with no current
 /// owner: they are neither candidates nor unrecognized payload, and they are
-/// deleted with the directory.
+/// deleted with the directory. So is the spill directory a dead native
+/// process left beside a project store, which never holds durable data.
 fn collect_sqlite_candidates(
     root: &Path,
     current: &Path,
@@ -1017,7 +1018,8 @@ fn collect_sqlite_candidates(
         }
         let path = entry.path();
         let relative = path.strip_prefix(root).map_err(std::io::Error::other)?;
-        if file_type.is_dir() {
+        if file_type.is_dir() && is_engine_temp_dir(&entry.file_name()) {
+        } else if file_type.is_dir() {
             collect_sqlite_candidates(root, &path, output, control)?;
         } else if file_type.is_file() && is_retired_branch_store_path(relative) {
         } else if file_type.is_file()
@@ -1032,4 +1034,14 @@ fn collect_sqlite_candidates(
     }
     output.sort();
     Ok(())
+}
+
+fn is_engine_temp_dir(name: &std::ffi::OsStr) -> bool {
+    tracedecay_store::StoreFile::PROJECT_ROOT
+        .iter()
+        .any(|store| {
+            tracedecay_store::StoreFile::TEMP_DIR_SUFFIXES
+                .iter()
+                .any(|suffix| name == format!("{}{suffix}", store.file_name()).as_str())
+        })
 }
