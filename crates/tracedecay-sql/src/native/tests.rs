@@ -244,7 +244,7 @@ fn guards_interrupt_with_their_reason_and_never_strand_rollback() {
     assert!(writer.is_autocommit());
     assert_eq!(
         writer
-            .query("SELECT count(*) FROM entries", &[], &guard)
+            .query("SELECT count(*) FROM entries", &[], &execution_guard())
             .unwrap()
             .values,
         vec![vec![Value::Integer(0)]]
@@ -437,7 +437,35 @@ fn foreign_files_are_refused_before_the_engine_touches_them() {
     let header = std::fs::read(directory.path().join("native.tdb")).unwrap();
     assert_eq!(&header[..16], b"SQLite format 3\0");
     assert_eq!(&header[68..72], b"TDN1");
-    Database::open(&directory.path().join("native.tdb")).unwrap();
+
+    // A creation that crashed before its stamp reached the main file leaves
+    // only the engine's unstamped first page; reopening finishes the stamp.
+    let path = directory.path().join("native.tdb");
+    let unstamp = |path: &std::path::Path| {
+        let mut bytes = std::fs::read(path).unwrap();
+        bytes[68..72].fill(0);
+        std::fs::write(path, bytes).unwrap();
+    };
+    unstamp(&path);
+    let resumed = Database::open(&path).unwrap();
+    let mut connection = resumed.connect(Access::Writer).unwrap();
+    connection
+        .execute("CREATE TABLE t(x)", &[], &guard)
+        .unwrap();
+    connection
+        .query("PRAGMA wal_checkpoint(TRUNCATE)", &[], &guard)
+        .unwrap();
+    drop(connection);
+    drop(resumed);
+    assert_eq!(&std::fs::read(&path).unwrap()[68..72], b"TDN1");
+    unstamp(&path);
+    assert!(
+        matches!(
+            Database::open(&path),
+            Err(Error::Engine(turso_core::LimboError::NotADB))
+        ),
+        "an unstamped store with content is not adopted"
+    );
 }
 
 /// Catches the engine reaching a path other than its main file and WAL.

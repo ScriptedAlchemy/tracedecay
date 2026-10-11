@@ -250,7 +250,7 @@ impl Database {
             std::mem::forget(file);
             return Ok(Self { shared });
         }
-        let fresh = preflight(&file)?;
+        let header = preflight(&file)?;
         let confined = Arc::new(ConfinedIo::new(text.to_owned(), file, identity)?);
         let io: Arc<dyn turso_core::IO> = confined.clone();
         let main = io.open_file(text, turso_core::OpenFlags::Create, true)?;
@@ -270,7 +270,7 @@ impl Database {
                 }),
             }),
         };
-        database.admit_format(fresh)?;
+        database.admit_format(header)?;
         let _ = database.shared.identity.set(identity);
         registry.insert(identity, Arc::downgrade(&database.shared));
         Ok(database)
@@ -295,19 +295,26 @@ impl Database {
         })
     }
 
-    /// Stamps a fresh store, and refuses a store whose header lacks the stamp
-    /// (an empty main file can still carry WAL frames from another writer).
-    fn admit_format(&self, fresh: bool) -> Result<()> {
+    /// Checks the stamp the engine reads through the WAL, and stamps a fresh
+    /// store. The stamp is checkpointed at once: the engine writes an
+    /// unstamped first page straight to the main file, and the preflight reads
+    /// only the main file.
+    fn admit_format(&self, header: Header) -> Result<()> {
         let connection = self.connect_with(Capability::Maintenance, false)?;
         let application_id = connection.pragma_u32("application_id")?;
-        if application_id == APPLICATION_ID {
+        if application_id == APPLICATION_ID && header == Header::Stamped {
             return Ok(());
         }
-        if fresh && application_id == 0 && connection.pragma_u32("page_count")? == 0 {
+        if header == Header::Stamped
+            || (application_id != APPLICATION_ID
+                && (application_id != 0 || connection.pragma_u32("schema_version")? != 0))
+        {
+            return Err(foreign_format());
+        }
+        if application_id != APPLICATION_ID {
             connection.execute_unchecked(&format!("PRAGMA application_id = {APPLICATION_ID}"))?;
-            return Ok(());
         }
-        Err(foreign_format())
+        connection.execute_unchecked("PRAGMA wal_checkpoint(TRUNCATE)")
     }
 
     fn engine(&self) -> &Engine {
@@ -410,26 +417,52 @@ fn foreign_format() -> Error {
     Error::Engine(LimboError::NotADB)
 }
 
-/// Reads the header before the engine touches the file: an empty file is a
-/// fresh store; anything else must be a SQLite-format file stamped TDN1.
-fn preflight(file: &std::fs::File) -> Result<bool> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Header {
+    /// An empty file: a store being created.
+    Empty,
+    /// Only the engine's first page, written before the stamp was
+    /// checkpointed: a creation interrupted by a crash.
+    Unstamped,
+    Stamped,
+}
+
+/// Reads the main file's header before the engine touches it. Anything but an
+/// empty file, a single unstamped first page, or a SQLite-format file stamped
+/// TDN1 is refused.
+fn preflight(file: &std::fs::File) -> Result<Header> {
     let length = file
         .metadata()
         .map_err(|error| Error::InvalidOperation(format!("inspect native database: {error}")))?
         .len();
     if length == 0 {
-        return Ok(true);
+        return Ok(Header::Empty);
     }
     let mut header = [0_u8; 100];
     let mut reader = file;
     reader
         .read_exact(&mut header)
         .map_err(|_| foreign_format())?;
-    let application_id = u32::from_be_bytes([header[68], header[69], header[70], header[71]]);
-    if &header[..16] != SQLITE_MAGIC || application_id != APPLICATION_ID {
+    let field = |offset: usize| {
+        u32::from_be_bytes([
+            header[offset],
+            header[offset + 1],
+            header[offset + 2],
+            header[offset + 3],
+        ])
+    };
+    if &header[..16] != SQLITE_MAGIC {
         return Err(foreign_format());
     }
-    Ok(false)
+    let page_size = match u16::from_be_bytes([header[16], header[17]]) {
+        1 => 65_536,
+        size => u64::from(size),
+    };
+    match field(68) {
+        APPLICATION_ID => Ok(Header::Stamped),
+        0 if field(28) == 1 && length == page_size => Ok(Header::Unstamped),
+        _ => Err(foreign_format()),
+    }
 }
 
 /// A compiled statement and the capability it was authorized under.
