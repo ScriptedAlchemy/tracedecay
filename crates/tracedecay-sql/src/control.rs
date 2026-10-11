@@ -1,6 +1,6 @@
 //! Engine-neutral types and the control surface both engine arms implement.
 
-use std::{fs::File, io};
+use std::{fs::File, io, path::Path};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
@@ -38,33 +38,17 @@ pub enum ErrorKind {
     /// A statement or request exceeded an engine resource limit, such as the
     /// VM-operation budget.
     LimitExceeded,
+    /// A read, write or sync on the store's files failed. The same statement
+    /// may succeed once the I/O condition clears.
+    IoErr,
+    /// The engine could not open a file it needed.
+    CantOpen,
+    /// A full-text index's shadow data is damaged; the base tables are not.
+    CorruptVtab,
 }
 
 pub trait ErrorExt {
     fn kind(&self) -> ErrorKind;
-
-    /// SQLite's `(primary, extended)` result codes. Exact on the SQLite arm;
-    /// derived from [`ErrorExt::kind`] elsewhere, until callers that persist
-    /// codes match on the kind instead.
-    fn sqlite_codes(&self) -> Option<(i32, i32)> {
-        let code = match self.kind() {
-            ErrorKind::Busy => 5,
-            ErrorKind::Interrupted => 9,
-            ErrorKind::ReadOnly => 8,
-            ErrorKind::CommitOutcomeUnknown => 10,
-            ErrorKind::Corrupt => 11,
-            ErrorKind::Schema => 17,
-            ErrorKind::LimitExceeded => 18,
-            ErrorKind::Constraint => 19,
-            ErrorKind::Denied | ErrorKind::TransactionControlDenied => 23,
-            ErrorKind::ForeignFormat => 26,
-            ErrorKind::NoRows
-            | ErrorKind::Unsupported
-            | ErrorKind::OwnedElsewhere
-            | ErrorKind::Other => return None,
-        };
-        Some((code, code))
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -240,6 +224,27 @@ pub fn file_identity(file: &File) -> io::Result<FileIdentity> {
         file: (u64::from(information.file_index_high) << 32)
             | u64::from(information.file_index_low),
     })
+}
+
+/// The identity `path` names now. On Unix this is a `stat`: opening and
+/// closing a descriptor of the store would release every POSIX record lock
+/// this process holds on it, the engine's exclusive lock included.
+#[cfg(unix)]
+pub fn path_identity(path: &Path) -> io::Result<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(path)?;
+    Ok(FileIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
+    })
+}
+
+/// Windows locks belong to the handle that took them, so a short-lived handle
+/// is safe here.
+#[cfg(not(unix))]
+pub fn path_identity(path: &Path) -> io::Result<FileIdentity> {
+    file_identity(&File::open(path)?)
 }
 
 #[cfg(not(any(unix, windows)))]

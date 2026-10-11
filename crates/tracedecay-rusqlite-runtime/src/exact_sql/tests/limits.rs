@@ -44,7 +44,13 @@ fn query_execution_time_is_bounded() {
         )
         .unwrap_err();
 
-    assert!(matches!(error, ExactSqlError::Sqlite { code: Some(9), .. }));
+    assert!(matches!(
+        error,
+        ExactSqlError::Sqlite {
+            kind: ErrorKind::Interrupted,
+            ..
+        }
+    ));
     // The interrupt must land near the execution limit, not multiples beyond.
     assert!(started.elapsed() < EXACT_SQL_EXECUTION_LIMIT * 2);
 }
@@ -78,7 +84,7 @@ fn invalid_sqlite_text_is_rejected_without_lossy_conversion() {
 }
 
 #[test]
-fn sqlite_errors_preserve_primary_and_extended_codes() {
+fn engine_errors_carry_their_kind() {
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
@@ -101,8 +107,7 @@ fn sqlite_errors_preserve_primary_and_extended_codes() {
     assert!(matches!(
         error,
         ExactSqlError::Sqlite {
-            code: Some(19),
-            extended_code: Some(2067),
+            kind: ErrorKind::Constraint,
             ..
         }
     ));

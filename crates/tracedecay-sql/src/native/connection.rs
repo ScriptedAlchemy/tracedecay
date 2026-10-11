@@ -358,6 +358,11 @@ impl Database {
             .expect("the engine lives until the last handle drops")
     }
 
+    /// The canonical path of a file store; `None` in memory.
+    pub(crate) fn path(&self) -> Option<&str> {
+        self.engine().confined.as_ref().map(|io| io.main())
+    }
+
     pub(crate) fn file_has_moved(&self) -> Result<bool> {
         self.engine()
             .confined

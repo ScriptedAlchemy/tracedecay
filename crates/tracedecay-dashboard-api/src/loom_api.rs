@@ -239,16 +239,9 @@ impl fmt::Display for LoomReadFailureV1 {
 
 impl From<EngineError> for LoomReadFailureV1 {
     fn from(error: EngineError) -> Self {
-        const SQLITE_BUSY: i32 = 5;
-        const SQLITE_LOCKED: i32 = 6;
-        const SQLITE_INTERRUPT: i32 = 9;
-        let transient = match &error {
-            EngineError::Busy | EngineError::Runtime(_) => true,
-            EngineError::Sqlite { code, .. } => {
-                matches!(code, Some(SQLITE_BUSY | SQLITE_LOCKED | SQLITE_INTERRUPT))
-            }
-            _ => false,
-        };
+        let transient = matches!(error, EngineError::Runtime(_))
+            || error.is_busy_or_locked()
+            || error.is_interrupted();
         if transient {
             Self::StoreUnavailable(error.to_string())
         } else {

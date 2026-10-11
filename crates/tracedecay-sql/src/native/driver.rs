@@ -157,6 +157,8 @@ impl From<super::Error> for Error {
                 // unreadable header here is damage.
                 LimboError::Corrupt(_) | LimboError::NotADB => ErrorKind::Corrupt,
                 LimboError::TooBig => ErrorKind::LimitExceeded,
+                LimboError::CompletionError(_) => ErrorKind::IoErr,
+                LimboError::IoBackendUnavailable(_) => ErrorKind::CantOpen,
                 _ => ErrorKind::Other,
             },
             super::Error::QueryLimitExceeded
@@ -678,12 +680,22 @@ pub enum DropBehavior {
     Panic,
 }
 
-/// One thread-owned native connection with rusqlite's method surface. A
-/// read-write open starts with no statement restriction, as a SQLite
-/// connection without an authorizer does; a read-only open is a reader.
+/// One thread-owned native connection with rusqlite's method surface. An
+/// open starts with no statement restriction, as a SQLite connection without
+/// an authorizer does; a read-only open is also query-only.
 pub struct Connection {
     core: super::Connection,
     savepoint_depth: Cell<usize>,
+}
+
+impl fmt::Debug for Connection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Connection")
+            .field("path", &self.path())
+            .field("autocommit", &self.is_autocommit())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Connection {
@@ -703,15 +715,22 @@ impl Connection {
             return Err(Error::InvalidPath(path.to_owned()));
         }
         let database = Database::open_path(path, !read_only)?;
-        let capability = if read_only {
-            Capability::Reader
-        } else {
-            Capability::Maintenance
-        };
         Ok(Self {
-            core: database.connect_with(capability, read_only)?,
+            core: database.connect_with(Capability::Maintenance, read_only)?,
             savepoint_depth: Cell::new(0),
         })
+    }
+
+    /// The store's canonical path; `None` in memory.
+    pub fn path(&self) -> Option<&str> {
+        self.core.database().path()
+    }
+
+    /// Closing is dropping: the drop rolls back any open transaction and the
+    /// engine stays open while another connection holds it.
+    pub fn close(self) -> std::result::Result<(), (Self, Error)> {
+        drop(self);
+        Ok(())
     }
 
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> Result<usize> {
@@ -750,11 +769,7 @@ impl Connection {
         &mut self,
         behavior: TransactionBehavior,
     ) -> Result<Transaction<'_>> {
-        self.core.begin_transaction(behavior)?;
-        Ok(Transaction {
-            connection: self,
-            drop_behavior: DropBehavior::Rollback,
-        })
+        Transaction::new_unchecked(self, behavior)
     }
 
     /// Outside a transaction this begins a deferred one, as SQLite's
@@ -953,7 +968,29 @@ pub struct Transaction<'c> {
     drop_behavior: DropBehavior,
 }
 
-impl Transaction<'_> {
+impl fmt::Debug for Transaction<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Transaction")
+            .field("drop_behavior", &self.drop_behavior)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'c> Transaction<'c> {
+    /// Begins a transaction through a shared borrow, as rusqlite's does; the
+    /// caller guarantees no other transaction is open on the connection.
+    pub fn new_unchecked(
+        connection: &'c Connection,
+        behavior: TransactionBehavior,
+    ) -> Result<Self> {
+        connection.core.begin_transaction(behavior)?;
+        Ok(Self {
+            connection,
+            drop_behavior: DropBehavior::Rollback,
+        })
+    }
+
     pub fn savepoint(&mut self) -> Result<Savepoint<'_>> {
         Savepoint::open(self.connection)
     }
@@ -1032,6 +1069,16 @@ pub struct Savepoint<'c> {
     owns_transaction: bool,
     drop_behavior: DropBehavior,
     finished: bool,
+}
+
+impl fmt::Debug for Savepoint<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Savepoint")
+            .field("name", &self.name)
+            .field("drop_behavior", &self.drop_behavior)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'c> Savepoint<'c> {
@@ -1130,18 +1177,32 @@ pub struct Statement<'c> {
     connection: &'c Connection,
     prepared: Option<Prepared>,
     cached: bool,
+    columns: Rc<[String]>,
     /// The engine's lifetime counters when last taken. A cached program
     /// keeps counting across uses, so only the difference is this caller's.
     counted: Cell<StatementCounters>,
 }
 
+impl fmt::Debug for Statement<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Statement")
+            .field("columns", &self.columns)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'c> Statement<'c> {
     fn new(connection: &'c Connection, prepared: Prepared, cached: bool) -> Self {
         let counted = Cell::new(engine_counters(&prepared));
+        let columns = (0..prepared.statement.num_columns())
+            .map(|index| prepared.statement.get_column_name(index).into_owned())
+            .collect();
         Self {
             connection,
             prepared: Some(prepared),
             cached,
+            columns,
             counted,
         }
     }
@@ -1153,7 +1214,11 @@ impl<'c> Statement<'c> {
     }
 
     pub fn column_count(&self) -> usize {
-        self.prepared().statement.num_columns()
+        self.columns.len()
+    }
+
+    pub fn column_names(&self) -> Vec<&str> {
+        self.columns.iter().map(String::as_str).collect()
     }
 
     fn start<P: Params>(&mut self, params: P) -> Result<&mut Prepared> {
@@ -1185,10 +1250,8 @@ impl<'c> Statement<'c> {
     pub fn query<P: Params>(&mut self, params: P) -> Result<Rows<'_>> {
         let connection = self.connection;
         let core = &connection.core;
+        let columns = Rc::clone(&self.columns);
         let prepared = self.start(params)?;
-        let columns = (0..prepared.statement.num_columns())
-            .map(|index| prepared.statement.get_column_name(index).into_owned())
-            .collect();
         Ok(Rows {
             core,
             prepared,
@@ -1260,6 +1323,7 @@ impl Drop for Statement<'_> {
     }
 }
 
+#[derive(Debug)]
 pub struct CachedStatement<'c>(Statement<'c>);
 
 impl<'c> Deref for CachedStatement<'c> {

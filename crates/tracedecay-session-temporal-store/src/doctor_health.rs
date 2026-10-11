@@ -19,7 +19,6 @@ use crate::schema_constants::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_CO
 mod relation_health;
 
 const MAX_FINDING_COUNT: u64 = 1_000_000;
-const SQLITE_CORRUPT_VTAB: i32 = 267;
 const SESSION_TEMPORAL_HEALTH_CACHE_TTL: Duration = Duration::from_secs(2);
 const MAX_CACHED_SESSION_TEMPORAL_STORES: usize = 64;
 const HEALTH_PROBE_PAGE_SIZE: i64 = 512;
@@ -1293,8 +1292,7 @@ fn is_fts_finding(kind: SessionTemporalHealthFindingKind) -> bool {
 }
 
 fn is_fts_virtual_table_corruption(error: &EngineError) -> bool {
-    error.sqlite_extended_code() == Some(SQLITE_CORRUPT_VTAB)
-        || error.sqlite_code() == Some(SQLITE_CORRUPT_VTAB)
+    error.is_corrupt_virtual_table()
 }
 
 fn classify_engine_error(error: &EngineError) -> SessionTemporalHealthStatus {

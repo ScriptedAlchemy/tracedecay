@@ -92,6 +92,10 @@ impl SharedReply {
                 .is_none_or(|settled| follower.enqueued_at <= settled.at)
     }
 
+    pub(super) fn is_settled(&self) -> bool {
+        self.lock().settled.is_some()
+    }
+
     fn take_leader(&self) -> Option<oneshot::Sender<RequestResult>> {
         self.lock().leader.take()
     }
