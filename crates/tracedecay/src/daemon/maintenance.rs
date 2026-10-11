@@ -9,7 +9,6 @@ use tracedecay_code_index::parallelism::{
     collect_idle_installed_worker_heaps, collect_installed_worker_heaps_when_idle,
 };
 use tracedecay_code_index_retention::code_index_generations::code_index_store_root;
-use tracedecay_maintenance::compaction_receipt::record_live_compaction_outcome;
 use tracedecay_maintenance::generation::{
     run_project_generation_maintenance, run_registered_project_generation_maintenance,
 };
@@ -184,15 +183,7 @@ async fn run_registered_store_retention(
         Ok(_) => {}
     }
     log_payload_gc_outcome(&report.payload_gc);
-    let mut succeeded = report.succeeded();
-    if let Some(compaction) = &config.compaction {
-        let outcome = tracedecay_maintenance::retention::live_compaction::compact_registered_store(
-            database, compaction,
-        )
-        .await;
-        succeeded &= record_live_compaction_outcome("mounted_sessions", outcome);
-    }
-    succeeded
+    report.succeeded()
 }
 
 fn log_payload_gc_outcome(
@@ -766,7 +757,6 @@ impl MaintenanceCoordinator {
                                 code_index_schedulers,
                                 &maintenance_observations,
                                 &self.cancellation,
-                                retention.compaction.as_ref(),
                                 continuation,
                             )
                             .await
@@ -823,30 +813,6 @@ impl MaintenanceCoordinator {
             }
         }
 
-        if continuation.is_none()
-            && !self.cancellation.is_cancelled()
-            && let Some(compaction) = &retention.compaction
-        {
-            match administration
-                .try_with_writer(|| async {
-                    let compacted =
-                        tracedecay_maintenance::retention::live_compaction::compact_registered_store(
-                            profile_database,
-                            compaction,
-                        )
-                        .await;
-                    record_live_compaction_outcome("global.db", compacted)
-                })
-                .await
-            {
-                Some(true) => {}
-                Some(false) => outcome = MaintenanceTickOutcome::Retry,
-                None => {
-                    deferred = deferred.saturating_add(1);
-                    outcome = MaintenanceTickOutcome::Retry;
-                }
-            }
-        }
         if continuation.is_none() && !self.cancellation.is_cancelled() {
             let mut owner_roots = tracedecay_maintenance::store_maintenance::scheduler_owner_roots(
                 code_index_schedulers,
@@ -1117,7 +1083,6 @@ pub(super) fn retention_maintenance_enabled(
     retention.session_lcm.enabled
         || retention.observation.enabled
         || retention.orphan_store_gc_days.is_some()
-        || retention.compaction.is_some()
 }
 
 pub(crate) fn now_secs_i64() -> Result<i64, &'static str> {
@@ -1660,7 +1625,6 @@ mod tests {
         retention.session_lcm.enabled = false;
         retention.observation.enabled = false;
         retention.orphan_store_gc_days = None;
-        retention.compaction = None;
         retention
             .store_soft_budgets_bytes
             .insert("sessions.db".to_string(), 1);

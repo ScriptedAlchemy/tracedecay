@@ -24,9 +24,8 @@ use super::identity::{FreePageRatioV1, StorageByteSizeV1, StoreKeyV1, TableNameV
 /// One cheap size sample for a single store, derived from page-count pragmas.
 ///
 /// `total_bytes` is `page_count * page_size`; `free_bytes` is
-/// `freelist_pages * page_size`. Both are recorded so the free-page ratio and
-/// the reclaimable-bytes estimate (Plan 38 §6 compaction) can be computed
-/// without re-reading the store.
+/// `freelist_pages * page_size`. Both are recorded so the free-page ratio can
+/// be computed without re-reading the store.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StoreSizeSampleV1 {

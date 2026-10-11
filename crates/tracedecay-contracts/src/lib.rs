@@ -418,11 +418,10 @@ pub use source_edit::{
 };
 pub use source_edit_rollback::{SourceEditRollbackRequestV1, source_edit_rollback_operation};
 pub use storage::{
-    CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1, FreePageRatioV1,
-    IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, OrphanStoreRecordV1,
-    RelativeArtifactPathV1, RetentionBacklogRecordV1, StorageByteSizeV1, StorageTelemetryFuture,
-    StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1, StoreSizeBudgetV1,
-    StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
+    FreePageRatioV1, IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1,
+    OrphanStoreRecordV1, RelativeArtifactPathV1, RetentionBacklogRecordV1, StorageByteSizeV1,
+    StorageTelemetryFuture, StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1,
+    StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
     incident_debris_finding, orphan_store_finding, over_budget_finding, retention_backlog_finding,
 };
 pub use surface_contracts::{

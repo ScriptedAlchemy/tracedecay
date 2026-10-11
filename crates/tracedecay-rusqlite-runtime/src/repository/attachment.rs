@@ -483,27 +483,6 @@ impl RepositoryRuntimePhysicalAttachment {
             })
     }
 
-    pub async fn run_bounded_incremental_compaction(
-        &self,
-        max_pages: u32,
-        authority: Arc<dyn RuntimeWriteAuthority>,
-    ) -> Result<(), RepositoryDispatchError> {
-        let writer = {
-            let state = self.lock_state();
-            if !state.admission_open || state.closed {
-                return Err(RepositoryDispatchError::Closed);
-            }
-            state
-                .writer
-                .clone()
-                .ok_or(RepositoryDispatchError::Closed)?
-        };
-        writer
-            .bounded_incremental_vacuum(max_pages, authority)
-            .await
-            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
-    }
-
     pub async fn run_checkpoint(
         &self,
         request: CheckpointRequest,
