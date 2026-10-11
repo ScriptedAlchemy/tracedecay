@@ -273,7 +273,7 @@ fn monitor_loop(
             format_number(tally.saved)
         );
         if tally.missed > 0 {
-            footer_content.push_str(&format!(", {} calls missed", format_number(tally.missed)));
+            footer_content.push_str(&format!(", missed calls: {}", format_number(tally.missed)));
         }
         let footer_padding = w.saturating_sub(footer_content.len());
         let hint = "\u{2191}\u{2193}/PgUp/PgDn scroll | Ctrl+R reset | Ctrl+C quit";
