@@ -1086,16 +1086,13 @@ async fn search_workflow_facts(
         .map(|predicate| format!("({predicate})"))
         .collect::<Vec<_>>()
         .join(" + ");
-    // The limit is spelled as a literal: Turso drops matching observations
-    // when this CTE's LIMIT is a bound parameter
-    // (turso-bugs/cte-limit-parameter-drops-groups.md).
-    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    query_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
     let _ = write!(
         sql,
         " ORDER BY item_order_missing, first_item_order,
                    (latest_timestamp IS NULL) ASC, latest_timestamp DESC,
                    latest_sequence DESC, first_fact_ordinal
-          LIMIT {limit}
+          LIMIT ?{}
         )
         SELECT
             s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
@@ -1118,7 +1115,8 @@ async fn search_workflow_facts(
                  ({matched_terms}) DESC,
                  CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END, w.item_order,
                  (w.native_timestamp IS NULL) ASC, w.native_timestamp DESC,
-                 w.fact_ordinal"
+                 w.fact_ordinal",
+        query_params.len()
     );
 
     let mut rows = snapshot
