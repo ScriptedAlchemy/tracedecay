@@ -8,6 +8,7 @@ license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [features]
+test-helpers = []
 test-transport = []
 
 [dependencies]
@@ -35,6 +36,15 @@ tracing = "0.1"
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 tempfile = "3"
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
+tracedecay-sql = { path = "../tracedecay-sql", features = ["test-helpers"] }
+
+[[test]]
+name = "crash"
+path = "tests/crash/main.rs"
+required-features = ["test-helpers"]
+
+[package.metadata.bazel]
+test_sizes = { crash = "large" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

@@ -93,6 +93,7 @@ impl RusqliteCheckpointDriver {
             CheckpointMode::Restart => EngineCheckpointMode::Restart,
             CheckpointMode::Truncate => EngineCheckpointMode::Truncate,
         })?;
+        failpoint!("mid_checkpoint");
         Ok(CheckpointReport {
             busy: outcome.busy,
             log_frames: nonnegative(outcome.log_frames, 1)?,
