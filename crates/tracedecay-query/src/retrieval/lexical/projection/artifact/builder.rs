@@ -4028,8 +4028,7 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 page_ordinal INTEGER NOT NULL,
                 term TEXT NOT NULL,
                 field INTEGER NOT NULL,
-                postings BLOB NOT NULL,
-                PRIMARY KEY(page_ordinal, term, field)
+                postings BLOB NOT NULL
             );
             CREATE TABLE term_postings (
                 term TEXT NOT NULL PRIMARY KEY,
@@ -4052,8 +4051,7 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 page_ordinal INTEGER NOT NULL,
                 term_id INTEGER NOT NULL,
                 field INTEGER NOT NULL,
-                documents BLOB NOT NULL,
-                PRIMARY KEY(page_ordinal, term_id, field)
+                documents BLOB NOT NULL
             );
             CREATE TABLE exact_postings (
                 term_id INTEGER NOT NULL,
@@ -4076,8 +4074,7 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
             CREATE TABLE row_dictionary_pages (
                 page_ordinal INTEGER NOT NULL,
                 entry_id INTEGER NOT NULL,
-                entry BLOB NOT NULL,
-                PRIMARY KEY(page_ordinal, entry_id)
+                entry BLOB NOT NULL
             );
             CREATE TRIGGER content_epoch_source_pages_insert AFTER INSERT ON source_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
             CREATE TRIGGER content_epoch_row_chunk_pages_insert AFTER INSERT ON row_chunk_pages BEGIN UPDATE content_epoch SET epoch = epoch + 1 WHERE singleton = 1; END;
