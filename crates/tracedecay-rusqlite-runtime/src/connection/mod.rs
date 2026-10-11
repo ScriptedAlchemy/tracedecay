@@ -415,8 +415,7 @@ impl VerifiedReader {
 }
 
 pub(crate) fn open(path: &Path, mode: ConnectionMode) -> Result<Connection, ConnectionPolicyError> {
-    let (connection, fresh_writer) = open_raw(path, mode)?;
-    finish_open(connection, mode, fresh_writer)
+    finish_open(open_raw(path, mode)?, mode)
 }
 
 pub(crate) fn open_writer(
@@ -424,15 +423,14 @@ pub(crate) fn open_writer(
     opened_database: Option<&OpenedDatabaseFile>,
     canonical_path: &Path,
 ) -> Result<Connection, WriterOpenError> {
-    let (connection, fresh_writer) =
-        open_raw(path, ConnectionMode::Writer).map_err(WriterOpenError::Policy)?;
+    let connection = open_raw(path, ConnectionMode::Writer).map_err(WriterOpenError::Policy)?;
     if let Some(opened_database) = opened_database {
         opened_database
             .verify_connection(&connection, canonical_path)
             .map_err(WriterOpenError::Identity)?;
     }
-    let connection = finish_open(connection, ConnectionMode::Writer, fresh_writer)
-        .map_err(WriterOpenError::Policy)?;
+    let connection =
+        finish_open(connection, ConnectionMode::Writer).map_err(WriterOpenError::Policy)?;
     if let Some(opened_database) = opened_database {
         opened_database
             .verify_connection(&connection, canonical_path)
@@ -524,25 +522,17 @@ fn device_stem(component: &str) -> bool {
         .any(|device| stem.eq_ignore_ascii_case(device))
 }
 
-fn open_raw(
-    path: &Path,
-    mode: ConnectionMode,
-) -> Result<(Connection, bool), ConnectionPolicyError> {
+fn open_raw(path: &Path, mode: ConnectionMode) -> Result<Connection, ConnectionPolicyError> {
     {
         let _span = tracing::trace_span!("rusqlite.connection.open").entered();
         {
-            let fresh_writer = mode == ConnectionMode::Writer
-                && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0);
             let path = sqlite_host_path(path);
             let flags = match mode {
                 ConnectionMode::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY,
                 ConnectionMode::Writer => OpenFlags::SQLITE_OPEN_READ_WRITE,
             } | OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
-            let connection = Connection::open_with_flags(&path, flags)
-                .map_err(|source| policy("open", source))?;
-
-            Ok((connection, fresh_writer))
+            Connection::open_with_flags(&path, flags).map_err(|source| policy("open", source))
         }
     }
 }
@@ -554,12 +544,11 @@ fn open_raw(
 fn finish_open(
     connection: Connection,
     mode: ConnectionMode,
-    fresh_writer: bool,
 ) -> Result<Connection, ConnectionPolicyError> {
     {
         let _span = tracing::trace_span!("rusqlite.connection.configure").entered();
         {
-            apply_policy(&connection, mode, fresh_writer)?;
+            apply_policy(&connection, mode)?;
             Ok(connection)
         }
     }
@@ -603,7 +592,7 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
                 | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
             let connection =
                 Connection::open_with_flags(uri, flags).map_err(|source| policy("open", source))?;
-            apply_policy(&connection, ConnectionMode::Reader, false)?;
+            apply_policy(&connection, ConnectionMode::Reader)?;
             Ok(connection)
         }
     }
@@ -675,7 +664,6 @@ fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {
 fn apply_policy(
     connection: &Connection,
     mode: ConnectionMode,
-    fresh_writer: bool,
 ) -> Result<(), ConnectionPolicyError> {
     connection
         .apply_engine_policy()
@@ -685,12 +673,6 @@ fn apply_policy(
         .map_err(|source| policy("foreign keys", source))?;
 
     if mode == ConnectionMode::Writer {
-        if fresh_writer {
-            connection
-                .pragma_update(None, "auto_vacuum", "INCREMENTAL")
-                .map_err(|source| policy("fresh auto-vacuum", source))?;
-            verify_pragma_i64(connection, "auto_vacuum", 2)?;
-        }
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(|source| policy("WAL journal", source))?;
