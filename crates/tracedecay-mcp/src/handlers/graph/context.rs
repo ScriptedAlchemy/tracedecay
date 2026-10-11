@@ -378,8 +378,17 @@ fn hydrate_context_from_search_matches(
         // Location and code resolve separately: lineage lines stand even
         // when the source cannot be re-read, while a byte window attests
         // both only when its bytes still verify.
-        let verified_window =
-            serve_site_code(ctx, &search_match.file, site, &mut sanitized_by_path);
+        let needs_code = include_code && code_blocks.len() < max_code_blocks;
+        let needs_line_mapping = search_match.kind != "file"
+            && matches!(
+                site,
+                Some(tracedecay_query::code_search::CodeIndexSearchSiteV1::ArtifactWindow(_))
+            );
+        let verified_window = if needs_code || needs_line_mapping {
+            serve_site_code(ctx, &search_match.file, site, &mut sanitized_by_path)
+        } else {
+            None
+        };
         let mut attested_lines = None;
         match site {
             Some(tracedecay_query::code_search::CodeIndexSearchSiteV1::SymbolLines {
