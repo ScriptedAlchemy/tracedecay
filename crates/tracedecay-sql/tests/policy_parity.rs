@@ -1,7 +1,10 @@
 //! Guard parity between the SQLite authorizers and the native engine (#3402).
 //!
 //! - `policy.tsv` holds the SQLite arm's prepare-time verdict per capability
-//!   for a statement corpus, over the objects in `policy-fixture.sql`.
+//!   for a statement corpus, over the objects in `policy-fixture.sql`. The
+//!   fixture holds only objects both engines can create: a temp trigger, which
+//!   native refuses, would make SQLite deny a cascading `DROP TABLE` for a
+//!   reason native cannot reproduce.
 //! - `census.tsv` holds every distinct statement the owned-store suites ran on
 //!   SQLite, with the capability it ran under. Its `sqlite_replay` column says
 //!   how far SQLite gets with the statement on the census's own replayed DDL:

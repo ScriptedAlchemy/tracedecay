@@ -77,13 +77,13 @@ deny	deny	deny	deny	deny	allow	CREATE TEMP TRIGGER n_ttr AFTER INSERT ON t BEGIN
 deny	deny	deny	deny	deny	allow	CREATE TRIGGER temp.n_ttr2 AFTER INSERT ON tf BEGIN SELECT 1; END
 deny	deny	deny	deny	deny	allow	CREATE TEMP VIEW n_tv AS SELECT 1
 deny	deny	deny	allow	allow	allow	CREATE VIEW temp.n_tv2 AS SELECT 1
-deny	deny	deny	deny	deny	allow	DROP TABLE temp.tf
-deny	deny	deny	deny	deny	allow	DROP TABLE tf
+deny	deny	deny	allow	allow	allow	DROP TABLE temp.tf
+deny	deny	deny	allow	allow	allow	DROP TABLE tf
 deny	deny	deny	allow	allow	allow	DROP INDEX temp.tf_x
-deny	deny	deny	deny	deny	allow	DROP TRIGGER temp.tf_tr
-deny	deny	deny	deny	deny	allow	DROP TRIGGER tf_tr
-deny	deny	deny	deny	deny	allow	DROP VIEW temp.tf_v
-deny	deny	deny	deny	deny	allow	DROP VIEW tf_v
+error	error	error	error	error	error	DROP TRIGGER temp.tf_tr
+error	error	error	error	error	error	DROP TRIGGER tf_tr
+error	error	error	error	error	error	DROP VIEW temp.tf_v
+error	error	error	error	error	error	DROP VIEW tf_v
 deny	deny	deny	deny	deny	deny	ATTACH DATABASE ':memory:' AS aux
 deny	deny	deny	deny	deny	deny	ATTACH DATABASE ?1 AS aux
 deny	deny	deny	deny	deny	deny	ATTACH 'file:policy-corpus?mode=memory' AS aux
@@ -104,8 +104,8 @@ allow	deny	allow	deny	allow	allow	ROLLBACK TO SAVEPOINT sp
 allow	allow	allow	allow	allow	allow	PRAGMA application_id
 deny	deny	deny	deny	deny	allow	PRAGMA application_id = 1413762609
 allow	allow	allow	allow	allow	allow	PRAGMA auto_vacuum
-deny	deny	deny	allow	allow	allow	PRAGMA auto_vacuum = INCREMENTAL
-deny	deny	deny	allow	allow	allow	PRAGMA auto_vacuum = 2
+deny	deny	deny	deny	deny	allow	PRAGMA auto_vacuum = INCREMENTAL
+deny	deny	deny	deny	deny	allow	PRAGMA auto_vacuum = 2
 deny	deny	deny	deny	deny	allow	PRAGMA auto_vacuum = NONE
 allow	allow	allow	allow	allow	allow	PRAGMA busy_timeout
 deny	deny	allow	allow	allow	allow	PRAGMA busy_timeout = 5000
@@ -132,7 +132,7 @@ allow	allow	allow	allow	allow	allow	PRAGMA function_list
 deny	deny	deny	deny	deny	allow	PRAGMA hard_heap_limit = 0
 deny	deny	deny	deny	deny	allow	PRAGMA ignore_check_constraints = ON
 allow	allow	allow	deny	deny	allow	PRAGMA incremental_vacuum
-deny	deny	deny	allow	allow	allow	PRAGMA incremental_vacuum(10)
+deny	deny	deny	deny	deny	allow	PRAGMA incremental_vacuum(10)
 allow	allow	allow	allow	allow	allow	PRAGMA index_info(t_a)
 allow	allow	allow	allow	allow	allow	PRAGMA index_list(t)
 allow	allow	allow	allow	allow	allow	PRAGMA index_xinfo(t_a)
