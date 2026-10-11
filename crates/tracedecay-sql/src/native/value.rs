@@ -16,6 +16,14 @@ pub struct Rows {
 }
 
 impl Value {
+    pub(crate) fn payload_len(&self) -> usize {
+        match self {
+            Self::Text(value) => value.len(),
+            Self::Blob(value) => value.len(),
+            _ => 0,
+        }
+    }
+
     pub(crate) fn to_native(&self) -> Result<turso_core::Value> {
         Ok(match self {
             Self::Null => turso_core::Value::Null,

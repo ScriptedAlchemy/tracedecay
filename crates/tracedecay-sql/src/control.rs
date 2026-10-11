@@ -25,6 +25,12 @@ pub enum ErrorKind {
     NoRows,
     Unsupported,
     Other,
+    /// The file is not a TraceDecay native store (wrong header or
+    /// application id). Refused before the engine touches it.
+    ForeignFormat,
+    /// COMMIT was stepped and then failed: the transaction may or may not be
+    /// durable. Callers settle by receipt lookup.
+    CommitOutcomeUnknown,
 }
 
 pub trait ErrorExt {
