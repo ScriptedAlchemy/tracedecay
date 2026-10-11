@@ -162,10 +162,14 @@ impl GuardSlot {
     }
 
     fn check(&self) -> Result<()> {
-        self.check_with(ExecutionGuard::verify)
+        self.check_with(ExecutionGuard::verify, true)
     }
 
-    fn check_with(&self, verify: impl Fn(&ExecutionGuard) -> Result<()>) -> Result<()> {
+    fn check_with(
+        &self,
+        verify: impl Fn(&ExecutionGuard) -> Result<()>,
+        verify_identity: bool,
+    ) -> Result<()> {
         let guards = {
             let state = self.state();
             if state.suspended {
@@ -174,16 +178,22 @@ impl GuardSlot {
             state.guards.clone()
         };
         guards.iter().try_for_each(verify)?;
-        self.confined.as_ref().map_or(Ok(()), |io| io.verify())
+        match &self.confined {
+            Some(io) if verify_identity => io.verify(),
+            _ => Ok(()),
+        }
     }
 
     /// Admits a statement about to start: its budget restarts and the guards
     /// are checked. A scope's interrupt poll is not: as on SQLite, only a
     /// running statement is polled, so a statement that finishes within one
-    /// progress interval is never interrupted.
-    fn start(&self) -> Result<()> {
+    /// progress interval is never interrupted. The file identity is checked
+    /// when `verify_identity`: every statement that starts a transaction, so
+    /// a statement inside an open transaction relies on the check that
+    /// opened it and on the progress ticks.
+    fn start(&self, verify_identity: bool) -> Result<()> {
         self.state().ticks = 0;
-        self.check_with(ExecutionGuard::verify_admission)
+        self.check_with(ExecutionGuard::verify_admission, verify_identity)
     }
 
     fn progress(&self) -> bool {
@@ -530,6 +540,14 @@ pub(crate) struct Prepared {
     ddl: bool,
     /// INSERT, UPDATE or DELETE: interrupting one ends its transaction.
     write: bool,
+    pub(crate) columns: Arc<[String]>,
+}
+
+/// A compiled non-DDL statement waiting in the cache for its SQL text.
+struct Cached {
+    statement: turso_core::Statement,
+    write: bool,
+    columns: Arc<[String]>,
 }
 
 /// Exclusively owned by one thread: the writer actor or one reader worker.
@@ -541,8 +559,9 @@ pub struct Connection {
     /// capability scope fails even if its operation swallowed the error.
     transaction_control_denied: Cell<bool>,
     read_only: bool,
-    /// Compiled non-DDL statements and whether each writes.
-    cache: RefCell<HashMap<(Capability, String), (turso_core::Statement, bool)>>,
+    /// Compiled non-DDL statements by `(capability, sql)`, nested so a hit
+    /// moves the owned SQL key out instead of allocating a lookup key.
+    cache: RefCell<HashMap<Capability, HashMap<String, Cached>>>,
     database: Database,
 }
 
@@ -632,17 +651,19 @@ impl Connection {
     pub(crate) fn prepare(&self, sql: &str, cached: bool) -> Result<Prepared> {
         let capability = self.capability();
         if cached
-            && let Some((statement, write)) = self
+            && let Some((sql, hit)) = self
                 .cache
                 .borrow_mut()
-                .remove(&(capability, sql.to_owned()))
+                .get_mut(&capability)
+                .and_then(|statements| statements.remove_entry(sql))
         {
             return Ok(Prepared {
-                statement,
-                sql: sql.to_owned(),
+                statement: hit.statement,
+                sql,
                 capability,
                 ddl: false,
-                write,
+                write: hit.write,
+                columns: hit.columns,
             });
         }
         validate_request(sql, &[])?;
@@ -651,12 +672,16 @@ impl Connection {
         let ddl = policy::is_ddl(&command);
         let write = policy::is_write(&command);
         let statement = self.compile(command, sql)?;
+        let columns = (0..statement.num_columns())
+            .map(|index| statement.get_column_name(index).into_owned())
+            .collect();
         Ok(Prepared {
             statement,
             sql: sql.to_owned(),
             capability,
             ddl,
             write,
+            columns,
         })
     }
 
@@ -674,16 +699,25 @@ impl Connection {
         }
         prepared.statement.clear_bindings();
         let mut cache = self.cache.borrow_mut();
-        if cache.len() >= STATEMENT_CACHE_CAPACITY {
+        if cache.values().map(HashMap::len).sum::<usize>() >= STATEMENT_CACHE_CAPACITY {
             cache.clear();
         }
         cache
-            .entry((prepared.capability, prepared.sql))
-            .or_insert((prepared.statement, prepared.write));
+            .entry(prepared.capability)
+            .or_default()
+            .entry(prepared.sql)
+            .or_insert(Cached {
+                statement: prepared.statement,
+                write: prepared.write,
+                columns: prepared.columns,
+            });
     }
 
     /// Readmits a statement before it runs: a statement compiled under
-    /// another capability is re-authorized, and the guards are checked.
+    /// another capability is re-authorized, and the guards are checked. The
+    /// file identity is checked only when the statement starts a transaction,
+    /// since a `stat` per statement of a bulk transaction is measurable
+    /// writer-thread time (#3491).
     pub(crate) fn admit(&self, prepared: &mut Prepared) -> Result<()> {
         let capability = self.capability();
         if prepared.capability != capability {
@@ -691,7 +725,7 @@ impl Connection {
             prepared.capability = capability;
         }
         prepared.statement.reset()?;
-        self.guard.start()
+        self.guard.start(self.inner.get_auto_commit())
     }
 
     pub(crate) fn bind(&self, prepared: &mut Prepared, values: &[Value]) -> Result<()> {
@@ -713,7 +747,20 @@ impl Connection {
 
     /// Steps until the next row (`true`) or completion (`false`).
     pub(crate) fn step(&self, prepared: &mut Prepared) -> Result<bool> {
-        let row = match self.drive(&mut prepared.statement) {
+        let profiled = crate::stmt_profile::enabled().then(Instant::now);
+        let driven = self.drive(&mut prepared.statement);
+        if let Some(started) = profiled {
+            crate::stmt_profile::time(&prepared.sql, started.elapsed());
+            if matches!(driven, Ok(false)) {
+                crate::stmt_profile::finish(
+                    &prepared.sql,
+                    prepared
+                        .statement
+                        .stmt_status(turso_core::StatementStatusCounter::VmStep),
+                );
+            }
+        }
+        let row = match driven {
             Ok(row) => row,
             Err(error) => {
                 return Err(self.end_interrupted_write(
@@ -809,12 +856,18 @@ impl Connection {
             let ddl = policy::is_ddl(&command);
             let write = policy::is_write(&command);
             let mut statement = self.compile(command, input)?;
-            self.guard.start()?;
+            self.guard.start(true)?;
+            let started = Instant::now();
             while self
                 .drive(&mut statement)
                 .map_err(|error| self.end_interrupted_write(&mut statement, write, error))?
             {
             }
+            crate::stmt_profile::record(
+                input,
+                started.elapsed(),
+                statement.stmt_status(turso_core::StatementStatusCounter::VmStep),
+            );
             if ddl {
                 self.clear_cache();
             }
@@ -826,8 +879,14 @@ impl Connection {
     /// the capability verdict.
     pub(crate) fn execute_unchecked(&self, sql: &str) -> Result<()> {
         let mut statement = self.compile(parse_single(sql)?, sql)?;
-        self.guard.start()?;
+        self.guard.start(true)?;
+        let started = Instant::now();
         while self.drive(&mut statement)? {}
+        crate::stmt_profile::record(
+            sql,
+            started.elapsed(),
+            statement.stmt_status(turso_core::StatementStatusCounter::VmStep),
+        );
         Ok(())
     }
 
@@ -838,6 +897,7 @@ impl Connection {
             .compile(parse_single(sql).map_err(Settlement::Refused)?, sql)
             .map_err(Settlement::Refused)?;
         let previous = self.guard.set_suspended(true);
+        let started = Instant::now();
         let result = loop {
             match self.drive(&mut statement) {
                 Ok(true) => {}
@@ -846,6 +906,7 @@ impl Connection {
             }
         };
         self.guard.set_suspended(previous);
+        crate::stmt_profile::record(sql, started.elapsed(), 0);
         result
     }
 

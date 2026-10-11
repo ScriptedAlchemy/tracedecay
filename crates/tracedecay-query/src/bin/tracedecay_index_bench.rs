@@ -132,7 +132,9 @@ fn main() -> ExitCode {
         }
     };
 
-    match run(&options) {
+    let outcome = run(&options);
+    tracedecay_sql::stmt_profile::dump();
+    match outcome {
         Ok(summary) => {
             println!("{summary}");
             ExitCode::SUCCESS

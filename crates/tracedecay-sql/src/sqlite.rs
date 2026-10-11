@@ -304,6 +304,19 @@ fn install_authorizer(
     transaction_control_denied: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
     census::trace(connection, capability);
+    if crate::stmt_profile::enabled() {
+        connection.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_PROFILE,
+            Some(|event| {
+                if let rusqlite::trace::TraceEvent::Profile(statement, elapsed) = event {
+                    let sql = statement.sql();
+                    crate::stmt_profile::time(&sql, elapsed);
+                    let vm = statement.get_status(rusqlite::StatementStatus::VmStep);
+                    crate::stmt_profile::finish(&sql, u64::try_from(vm.max(0)).unwrap_or(0));
+                }
+            }),
+        );
+    }
     connection.authorizer(Some(move |context: AuthContext<'_>| {
         if denies_transaction_control(capability, &context.action) {
             if let Some(denied) = &transaction_control_denied {
