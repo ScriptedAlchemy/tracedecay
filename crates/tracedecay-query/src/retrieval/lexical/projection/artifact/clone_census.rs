@@ -377,15 +377,16 @@ pub(super) mod tests {
     /// Store `payload` and return its ordinal.
     fn store_payload(connection: &Connection, payload: &CloneBodyPayloadV1) -> i64 {
         connection
-            .execute(
-                "INSERT INTO clone_body_payloads(payload_digest, payload) VALUES (?1, ?2)",
+            .query_row(
+                "INSERT INTO clone_body_payloads(payload_digest, payload) VALUES (?1, ?2)
+                 RETURNING ordinal",
                 params![
                     digest_key(&payload.payload_digest).expect("payload digest key"),
                     encode_clone_payload(payload).expect("payload bytes").0
                 ],
+                |row| row.get(0),
             )
-            .expect("store payload");
-        connection.last_insert_rowid()
+            .expect("store payload")
     }
 
     fn store_occurrence(connection: &Connection, id: &str, payload_ordinal: i64) {

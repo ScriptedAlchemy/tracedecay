@@ -7,7 +7,7 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, RecvTimeoutError},
     },
     time::{Duration, Instant},
@@ -21,8 +21,7 @@ use super::{
     ExactSqlCommitReceipt, ExactSqlError, ExactSqlRollbackReceipt, ExactSqlRows, ExactSqlStatement,
     ExactSqlWriteAuthority, ExactSqlWriteIntent, ExecutionPolicy, MAX_EXACT_SQL_ATTACHMENTS,
     SqlRequest, SqlResult, TransactionPolicy, attach_database, detach_database,
-    execute_query_unchecked, execute_request, publish_last_insert_rowid, sqlite_error,
-    verify_write_authority,
+    execute_query_unchecked, execute_request, sqlite_error, verify_write_authority,
 };
 use rusqlite::limits::Limit;
 
@@ -30,7 +29,6 @@ pub(crate) enum WriterCommand {
     Dispatch {
         request: SqlRequest,
         reply: async_channel::Sender<Result<SqlResult, ExactSqlError>>,
-        last_insert_rowid: Arc<AtomicI64>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
     BeginTransaction {
@@ -38,7 +36,6 @@ pub(crate) enum WriterCommand {
         policy: TransactionPolicy,
         receiver: Receiver<TransactionCommand>,
         reply: async_channel::Sender<Result<(), ExactSqlError>>,
-        last_insert_rowid: Arc<AtomicI64>,
         lease: Arc<TransactionLeaseState>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
@@ -251,7 +248,6 @@ pub(crate) fn run_writer_command(
         WriterCommand::Dispatch {
             request,
             reply,
-            last_insert_rowid,
             authority,
         } => {
             if let Err(error) = verify_write_authority(authority.as_deref(), request.intent()) {
@@ -261,26 +257,57 @@ pub(crate) fn run_writer_command(
             // `rusqlite.exact_sql.transaction` and `rusqlite.exact_sql.vacuum`
             // split the pooled `rusqlite.writer.exact_sql` population, so a
             // slow exact-SQL lane is attributable to a specific command shape.
-            let (mut result, inserted) = {
+            let result = {
                 let _span = tracing::trace_span!("rusqlite.exact_sql.execute").entered();
                 {
-                    execute_request(
-                        connection,
-                        request,
-                        false,
-                        Some(Arc::clone(shutdown_requested)),
-                        None,
-                        true,
-                        None,
-                    )
+                    let returning = matches!(&request, SqlRequest::ExecuteReturning(_));
+                    let execute = |connection: &Connection| {
+                        execute_request(
+                            connection,
+                            request,
+                            false,
+                            Some(Arc::clone(shutdown_requested)),
+                            None,
+                            true,
+                            None,
+                        )
+                    };
+                    if returning {
+                        let before = connection.total_changes();
+                        match Transaction::new_unchecked(connection, TransactionBehavior::Deferred)
+                        {
+                            Ok(transaction) => {
+                                let result = execute(&transaction).and_then(|result| {
+                                    transaction
+                                        .execute_batch("COMMIT")
+                                        .map(|()| result)
+                                        .map_err(|error| {
+                                            sqlite_error(
+                                                "commit returning write transaction",
+                                                error,
+                                            )
+                                        })
+                                });
+                                match result {
+                                    Ok(result) => Ok(result),
+                                    Err(error) => match discard_transaction(transaction, before) {
+                                        Ok(_) => Err(error),
+                                        Err(rollback_error) => {
+                                            shutdown_requested.store(true, Ordering::Release);
+                                            Err(rollback_error)
+                                        }
+                                    },
+                                }
+                            }
+                            Err(error) => {
+                                Err(sqlite_error("begin returning write transaction", error))
+                            }
+                        }
+                    } else {
+                        execute(connection)
+                    }
                 }
             };
-            publish_last_insert_rowid(
-                &mut result,
-                inserted,
-                connection.last_insert_rowid(),
-                &last_insert_rowid,
-            );
             DeferredReply::new(reply, result)
         }
         WriterCommand::BeginTransaction {
@@ -288,7 +315,6 @@ pub(crate) fn run_writer_command(
             policy,
             receiver,
             reply,
-            last_insert_rowid,
             lease,
             authority,
         } => {
@@ -328,7 +354,6 @@ pub(crate) fn run_writer_command(
                             receiver,
                             before,
                             shutdown_requested,
-                            &last_insert_rowid,
                             &lease,
                             authority,
                             policy,
@@ -378,7 +403,6 @@ pub(crate) fn run_writer_command(
                         None,
                         crate::connection::authorize_writer,
                         false,
-                        None,
                         None,
                         || execute_query_unchecked(connection, statement),
                     )
@@ -451,7 +475,6 @@ fn run_transaction(
     receiver: Receiver<TransactionCommand>,
     before: u64,
     shutdown_requested: &Arc<AtomicBool>,
-    last_insert_rowid: &AtomicI64,
     lease: &TransactionLeaseState,
     authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     policy: TransactionPolicy,
@@ -640,7 +663,7 @@ fn run_transaction(
                     };
                 let execution_deadline =
                     (execution_policy == ExecutionPolicy::Bounded).then_some(transaction_deadline);
-                let (mut result, inserted) = execute_request(
+                let result = execute_request(
                     &transaction,
                     request,
                     true,
@@ -698,12 +721,6 @@ fn run_transaction(
                         previous_attachment_limit,
                     );
                 }
-                publish_last_insert_rowid(
-                    &mut result,
-                    inserted,
-                    transaction.last_insert_rowid(),
-                    last_insert_rowid,
-                );
                 let succeeded = result.is_ok();
                 let _ = reply.try_send(result);
                 let renewed_at = lease_now();

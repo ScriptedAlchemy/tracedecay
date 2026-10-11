@@ -435,3 +435,61 @@ fn outstanding_writer_replies_leave_the_runtime_able_to_poll_other_tasks() {
         let _ = sender.send_blocking(());
     }
 }
+
+#[test]
+fn admitted_execute_returning_completes_after_reply_waiter_is_abandoned() {
+    current_thread().block_on(async {
+        let fixture = fixture('a', 'a');
+        let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+        base.execute_batch(
+            "CREATE TABLE returning_abandoned (id INTEGER PRIMARY KEY, value TEXT)".to_owned(),
+        )
+        .unwrap();
+        let (handle, accepted, release) = gated_handle(&fixture, ExactSqlWriteIntent::Execute);
+        let mut pending = Box::pin(handle.execute_returning_async(statement(
+            "INSERT INTO returning_abandoned(value) VALUES ('admitted') RETURNING id",
+            vec![],
+        )));
+        assert!(poll_once(pending.as_mut()).await.is_pending());
+        tokio::time::timeout(Duration::from_secs(1), accepted)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(pending);
+        release.send(()).unwrap();
+        let rows = base
+            .execute_returning_async(statement(
+                "INSERT INTO returning_abandoned(value) VALUES ('barrier') RETURNING id",
+                vec![],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(2)]);
+        let persisted = base
+            .query(
+                statement(
+                    "SELECT id, value FROM returning_abandoned ORDER BY id",
+                    vec![],
+                ),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            persisted.rows,
+            vec![
+                ExactSqlRow {
+                    values: vec![
+                        ExactSqlValue::Integer(1),
+                        ExactSqlValue::Text("admitted".to_owned())
+                    ]
+                },
+                ExactSqlRow {
+                    values: vec![
+                        ExactSqlValue::Integer(2),
+                        ExactSqlValue::Text("barrier".to_owned())
+                    ]
+                },
+            ]
+        );
+    });
+}

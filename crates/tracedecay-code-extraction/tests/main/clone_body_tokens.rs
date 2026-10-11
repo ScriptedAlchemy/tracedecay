@@ -361,3 +361,83 @@ fn extracted_streams_hold_grammar_kinds_by_number_without_changing_the_wire_shap
         "a stream read back from disk resolves its kinds to the same grammar numbers"
     );
 }
+
+/// Tree-sitter-python gives a zero-width `body` field to a function whose
+/// suite is empty or only comments. That is a missing clone candidate, not a
+/// clone-body record: emitting the empty span fails chunk identity and parks
+/// the whole worktree (#3401).
+#[test]
+fn empty_or_comment_only_python_bodies_are_not_clone_candidates() {
+    let stubs = [
+        "def pending():\n",
+        "def pending():",
+        "def pending():\n    # not implemented\n",
+        "async def pending():\n    # not implemented\n",
+        "class Hook:\n    def on_start(self):\n        # leftover from a generator\n",
+    ];
+    for source in stubs {
+        let artifact = PythonExtractor.extract_artifact("src/hooks.py", source);
+        assert!(
+            artifact.result.errors.is_empty(),
+            "{source:?}: {:?}",
+            artifact.result.errors
+        );
+        assert!(
+            artifact
+                .result
+                .nodes
+                .iter()
+                .any(|node| node.kind.is_callable_kind()),
+            "{source:?} must still extract the callable: {:?}",
+            artifact.result.nodes
+        );
+        assert!(
+            artifact
+                .clone_bodies
+                .iter()
+                .all(|body| !body.body_span.is_empty()),
+            "{source:?} emitted an empty clone-body span: {:?}",
+            artifact.clone_bodies
+        );
+        assert!(
+            artifact.clone_bodies.is_empty(),
+            "{source:?} is not a clone candidate: {:?}",
+            artifact.clone_bodies
+        );
+    }
+
+    let mixed = "\
+def pending():
+    # not implemented
+
+def publish(value):
+    parsed = parse(value)
+    return validate(parsed)
+";
+    let artifact = PythonExtractor.extract_artifact("src/hooks.py", mixed);
+    assert_eq!(
+        artifact
+            .result
+            .nodes
+            .iter()
+            .filter(|node| node.kind.is_callable_kind())
+            .count(),
+        2,
+        "{:?}",
+        artifact.result.nodes
+    );
+    assert_eq!(
+        artifact.clone_bodies.len(),
+        1,
+        "{:?}",
+        artifact.clone_bodies
+    );
+    assert!(!artifact.clone_bodies[0].body_span.is_empty());
+    let publish = artifact
+        .result
+        .nodes
+        .iter()
+        .find(|node| node.name == "publish")
+        .expect("publish");
+    assert_eq!(artifact.clone_bodies[0].symbol_occurrence_id, publish.id);
+}

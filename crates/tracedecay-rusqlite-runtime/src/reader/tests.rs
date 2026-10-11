@@ -1315,6 +1315,130 @@ fn saturating_background_readers_never_block_a_foreground_read() {
     drop(held);
 }
 
+#[test]
+fn concurrent_background_reader_opens_preserve_foreground_capacity() {
+    #[derive(Default)]
+    struct OpenState {
+        armed: bool,
+        entered: u16,
+        released: bool,
+    }
+
+    struct OpeningExecutor(Arc<(Mutex<OpenState>, Condvar)>);
+
+    impl Clone for OpeningExecutor {
+        fn clone(&self) -> Self {
+            let (state, changed) = &*self.0;
+            let mut state = state.lock().unwrap();
+            if state.armed {
+                state.entered += 1;
+                changed.notify_all();
+                // Park the four background opens after the pool reserves
+                // their capacity, before they become checked-out workers.
+                if state.entered <= 4 {
+                    let (state, _) = changed
+                        .wait_timeout_while(state, Duration::from_secs(10), |state| !state.released)
+                        .unwrap();
+                    let released = state.released;
+                    drop(state);
+                    assert!(released, "test must release pending reader opens");
+                }
+            }
+            Self(Arc::clone(&self.0))
+        }
+    }
+
+    impl ReaderQueryExecutor for OpeningExecutor {
+        fn execute_read(
+            &mut self,
+            snapshot: &Transaction<'_>,
+            request: &RuntimeReadRequestV1,
+        ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
+            CountExecutor.execute_read(snapshot, request)
+        }
+    }
+
+    struct ReleaseOpens(Arc<(Mutex<OpenState>, Condvar)>);
+
+    impl Drop for ReleaseOpens {
+        fn drop(&mut self) {
+            let (state, changed) = &*self.0;
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .released = true;
+            changed.notify_all();
+        }
+    }
+
+    let store = TestStore::new();
+    let mut budget = AdmissionConfigV1::default().readers;
+    budget.min_per_hot_shard = 2;
+    budget.max_per_hot_shard = 8;
+    let opening = Arc::new((Mutex::new(OpenState::default()), Condvar::new()));
+    let pool = ReaderPool::start(
+        store.locator(),
+        budget,
+        OpeningExecutor(Arc::clone(&opening)),
+    )
+    .unwrap();
+    let background = request(&store.binding, OperationPriorityV1::Background);
+    let background_probe = Probe::for_request(&background);
+    let warm = (0..2)
+        .map(|_| {
+            pool.acquire(&background, &background_probe, Duration::ZERO)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    opening.0.lock().unwrap().armed = true;
+    let release = ReleaseOpens(Arc::clone(&opening));
+    let growing = (0..4)
+        .map(|_| {
+            let pool = pool.clone();
+            let background = background.clone();
+            std::thread::spawn(move || {
+                let probe = Probe::for_request(&background);
+                pool.acquire(&background, &probe, Duration::ZERO).unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let (state, changed) = &*opening;
+    let (state, _) = changed
+        .wait_timeout_while(state.lock().unwrap(), Duration::from_secs(5), |state| {
+            state.entered < 4
+        })
+        .unwrap();
+    assert_eq!(state.entered, 4, "all four reader opens must overlap");
+    drop(state);
+
+    assert!(matches!(
+        pool.acquire(&background, &background_probe, Duration::ZERO),
+        Err(ReaderAcquireError::Saturated { .. })
+    ));
+    let foreground = request(&store.binding, OperationPriorityV1::Foreground);
+    let foreground_probe = Probe::for_request(&foreground);
+    let mut reserved = pool
+        .acquire(&foreground, &foreground_probe, Duration::ZERO)
+        .expect("foreground must admit while background connections are opening");
+    reserved
+        .begin_snapshot()
+        .unwrap()
+        .execute(foreground.clone(), &foreground_probe)
+        .unwrap();
+    let other_reserved = pool
+        .acquire(&foreground, &foreground_probe, Duration::ZERO)
+        .expect("both reserved foreground workers must remain reachable");
+
+    drop(release);
+    let grown = growing
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(pool.snapshot().leased_general, 8);
+    drop((reserved, other_reserved, grown, warm));
+    assert_eq!(pool.snapshot().leased_general, 0);
+}
+
 /// The reservation is a share of the lane, never the whole lane: with the
 /// smallest legal budget background work must still admit.
 #[test]
