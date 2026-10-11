@@ -44,7 +44,7 @@ use super::{
     query_meta, quiesced_background_reconcile_admission, replace_scheduler_chunker_revision,
     replace_scheduler_policy_revision, rewrite_active_rust_extractor_revision,
     rewrite_preserving_stat, scheduler, scheduler_with_policy, served_lexical_texts,
-    settle_text_projection, settled_owner_with_idle_admission, test_project_id,
+    settle_text_projection, settled_owners_with_idle_admission, test_project_id,
     wait_for_dashboard_ready, wait_for_event_to_ready, wait_for_generation_change,
     wait_for_initial_generation, wait_for_live_complete_generation,
     wait_for_live_complete_generation_by_polling, wait_for_owner, wait_for_owner_pass,
@@ -4361,7 +4361,7 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     // owns the single global admission permit this test needs idle. Settle
     // that chain and burn the banked permit behind it before sampling.
     settle_text_projection(&registry, fixture.path()).await;
-    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    settled_owners_with_idle_admission(&registry, &[fixture.path()]).await;
     let generation = latest.generation();
     let verified_import = generation
         .imports()
@@ -5209,7 +5209,7 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     // whole mount-era chain, then hold the admission so no further pass can
     // start under the sample below.
     settle_text_projection(&registry, fixture.path()).await;
-    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    settled_owners_with_idle_admission(&registry, &[fixture.path()]).await;
     let _quiet_owner = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let canonical_root =
         canonical_existing_identity(fixture.path()).expect("canonical fixture root");
@@ -5305,7 +5305,7 @@ async fn busy_query_does_not_rearm_dashboard_verification() {
     // seated generation. Admission is then held, so a later demand cannot
     // reseat it.
     let _seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
-    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    settled_owners_with_idle_admission(&registry, &[fixture.path()]).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let canonical_root =
         canonical_existing_identity(fixture.path()).expect("canonical fixture root");
@@ -5405,7 +5405,7 @@ async fn status_reads_on_an_unchanged_tree_schedule_no_verification() {
         .clone();
     wait_for_dashboard_ready(&registry, fixture.path()).await;
     settle_text_projection(&registry, fixture.path()).await;
-    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    settled_owners_with_idle_admission(&registry, &[fixture.path()]).await;
     clear_pending_wake_until_quiet(&registry, &scope).await;
     registry
         .source_freshness_for_root(fixture.path())
@@ -5946,7 +5946,7 @@ async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
     // under the sample, and prove the pending-wake slot stays empty, exactly
     // as the text-progress test does.
     settle_text_projection(&registry, fixture.path()).await;
-    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    settled_owners_with_idle_admission(&registry, &[fixture.path()]).await;
     let _quiet_owner = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let canonical = canonical_existing_identity(fixture.path()).expect("canonical fixture");
     let scope = {
@@ -6002,7 +6002,7 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
     // Settle the mount-era passes and burn the wake permits they bank, so the
     // held admission is the only scheduling this sample can observe.
     settle_text_projection(&registry, fixture.path()).await;
-    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    settled_owners_with_idle_admission(&registry, &[fixture.path()]).await;
 
     let admission = registry
         .background_reconcile_admission()
@@ -7733,13 +7733,6 @@ async fn background_reconciles_respect_a_single_admission_permit() {
             .await
             .expect("mount worktree");
     }
-    // Publication broadcasts at publish time, before the pass's deliberately
-    // admission-free tail (graph prepare, activation, serving seat) has run.
-    // Wait for both serving seats, the tail's last scheduler-lock step, so
-    // each worker is parked on its wake. Holding the first scheduler's lock
-    // any earlier wedges that worker inside its tail, where it holds no
-    // permit, and the second worktree would overtake through the free permit
-    // before the first worker's edit pass is ever admitted.
     let first_generation = wait_for_live_complete_generation(&registry, first.path())
         .await
         .generation()
@@ -7752,6 +7745,11 @@ async fn background_reconciles_respect_a_single_admission_permit() {
         .manifest()
         .generation_id
         .clone();
+    // A serving seat does not park the worker: the complete-generation demand
+    // above queues a follow-up pass, and a pass's tail holds no permit. Hold
+    // the first scheduler's lock while either is still running and the first
+    // worker wedges without the permit, so the second overtakes through it.
+    settled_owners_with_idle_admission(&registry, &[first.path(), second.path()]).await;
 
     let first_handle = registry
         .scheduler_handle(first.path())
@@ -7950,7 +7948,7 @@ async fn settled_fresh_wait_fixture(
         .await
         .expect("mount worktree");
     wait_for_initial_generation(&registry, fixture.path()).await;
-    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    settled_owners_with_idle_admission(&registry, &[fixture.path()]).await;
     (fixture, store, registry)
 }
 
@@ -8230,7 +8228,7 @@ async fn owner_activity_reports_a_pass_that_settled_before_the_reader_looked() {
         .await
         .expect("mount worktree");
     let initial = wait_for_initial_generation(&registry, fixture.path()).await;
-    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    settled_owners_with_idle_admission(&registry, &[fixture.path()]).await;
     let activity = registry
         .subscribe_owner_activity(fixture.path())
         .await

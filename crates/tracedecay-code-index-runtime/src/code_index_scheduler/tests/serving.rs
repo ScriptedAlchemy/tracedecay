@@ -65,7 +65,7 @@ use super::{
     moved_reference_scope, progress_snapshot_for_generation, published, query_authority,
     query_meta, quiesced_background_reconcile_admission, ranked_symbol_names, ranks_symbol,
     rewrite_active_text_artifact_format_revision, routed_core_search_request, scheduler,
-    settle_text_projection, settled_owner_with_idle_admission, test_project_id,
+    settle_text_projection, settled_owners_with_idle_admission, test_project_id,
     wait_for_dashboard_ready, wait_for_live_complete_generation,
     wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
     wait_for_settled_owner, with_untouched_fillers, write,
@@ -5807,7 +5807,7 @@ async fn unpinned_callees_wait_for_the_source_proof_a_hook_hint_lapsed() {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text);
     }
-    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    settled_owners_with_idle_admission(&registry, &[fixture.path()]).await;
     let generation = latest.generation.manifest().generation_id.clone();
     let caller = latest
         .generation
