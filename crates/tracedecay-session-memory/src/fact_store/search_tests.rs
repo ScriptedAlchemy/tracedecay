@@ -136,7 +136,7 @@ async fn sparse_search_encodes_only_lexically_eligible_canonical_facts() {
     let (_, read_control) = live_read_control(false);
     let capture = FactVectorCapture::default();
     {
-        let _capture = tracedecay_runtime_core::logging::set_tracing_capture(capture.clone());
+        let _capture = tracedecay_domain::test_fixtures::set_tracing_capture(capture.clone());
         let query = ProjectMemoryFactSearchQuery::new(
             FactOwnerV1::Profile,
             ProjectMemoryFactSearchKindV1::Search,
