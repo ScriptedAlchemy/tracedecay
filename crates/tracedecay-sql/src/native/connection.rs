@@ -255,6 +255,8 @@ impl Database {
         let header = preflight(&file)?;
         let confined = Arc::new(ConfinedIo::new(text.to_owned(), file, identity)?);
         let io: Arc<dyn turso_core::IO> = confined.clone();
+        #[cfg(all(unix, feature = "test-helpers"))]
+        let io = super::crash_io::wrap(io);
         let main = io.open_file(text, turso_core::OpenFlags::Create, true)?;
         let storage = Arc::new(turso_core::storage::database::DatabaseFile::new(main));
         let database = open_engine(

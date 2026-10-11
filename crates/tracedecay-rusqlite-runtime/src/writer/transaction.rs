@@ -230,7 +230,10 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
     // interrupt it once it is stepped.
     let match_result = if has_pending_writes {
         let _span = tracing::trace_span!("rusqlite.commit").entered();
-        transaction.commit()
+        failpoint!("before_commit");
+        transaction
+            .commit()
+            .inspect(|()| failpoint!("after_commit_before_watermark"))
     } else {
         let result = transaction.rollback();
         persistence.transaction_rolled_back(schema_was_ready);
