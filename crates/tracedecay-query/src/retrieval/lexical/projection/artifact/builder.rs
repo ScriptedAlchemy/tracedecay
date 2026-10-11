@@ -442,8 +442,10 @@ impl FinalizationSectionV1 {
             (Self::CloneFingerprintPostings, false) => Some(
                 "SELECT language, class, normalization_revision, fingerprint, posting_count, postings FROM clone_fingerprint_postings ORDER BY language, class, normalization_revision, fingerprint LIMIT ?1",
             ),
+            // The rest of the resumed key's fingerprint family; the native
+            // engine seeks an equality prefix and a range, never a row value.
             (Self::CloneFingerprintPostings, true) => Some(
-                "SELECT language, class, normalization_revision, fingerprint, posting_count, postings FROM clone_fingerprint_postings WHERE (language, class, normalization_revision, fingerprint) > (?1, ?2, ?3, ?4) ORDER BY language, class, normalization_revision, fingerprint LIMIT ?5",
+                "SELECT language, class, normalization_revision, fingerprint, posting_count, postings FROM clone_fingerprint_postings WHERE language = ?1 AND class = ?2 AND normalization_revision = ?3 AND fingerprint > ?4 ORDER BY language, class, normalization_revision, fingerprint LIMIT ?5",
             ),
             (
                 Self::DocumentIntegrity
@@ -5636,14 +5638,31 @@ fn advance_clone_section_rows(
                 normalization_revision,
                 fingerprint,
             }),
-        ) => advance_native_section_rows(
-            transaction,
-            section,
-            section.walked_query(true)?,
-            params![language, class, normalization_revision, fingerprint, limit],
-            state,
-            control,
-        ),
+        ) => {
+            let within = advance_native_section_rows(
+                transaction,
+                section,
+                section.walked_query(true)?,
+                params![language, class, normalization_revision, fingerprint, limit],
+                state,
+                control,
+            )?;
+            let remaining = limit - i64::try_from(within).map_err(contract_number)?;
+            if remaining == 0 {
+                return Ok(within);
+            }
+            // Families are few, so this row-value scan runs once per family
+            // boundary instead of once per resume.
+            let later = advance_native_section_rows(
+                transaction,
+                section,
+                "SELECT language, class, normalization_revision, fingerprint, posting_count, postings FROM clone_fingerprint_postings WHERE (language, class, normalization_revision) > (?1, ?2, ?3) ORDER BY language, class, normalization_revision, fingerprint LIMIT ?4",
+                params![language, class, normalization_revision, remaining],
+                state,
+                control,
+            )?;
+            Ok(within + later)
+        }
         _ => Err(CodeLexicalArtifactErrorV1::Corrupt(
             "persisted lexical artifact clone finalization key does not match its section"
                 .to_owned(),
