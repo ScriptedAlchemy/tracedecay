@@ -1,4 +1,4 @@
-use rusqlite::{Row, params};
+use tracedecay_sql::{Row, params};
 use tracedecay_store::{
     DurabilityClassV1, OutboxAcknowledgementReceiptV1, OutboxEffectStateV1,
     RuntimeTransactionScopeV1, StoreCommitReceiptV1, StoreEffectIdV1, StoreOperationIdV1,

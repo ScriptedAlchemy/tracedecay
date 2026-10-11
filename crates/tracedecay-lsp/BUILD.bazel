@@ -26,7 +26,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-lsp__d4995bb0fe0",
+    name = "tracedecay-lsp__d02e8e67fa5",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_lsp",

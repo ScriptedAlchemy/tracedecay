@@ -7,8 +7,11 @@ license = "MIT"
 description = "The owned-store SQL driver: one rusqlite-shaped API over the engine selected at build time"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
+[features]
+test-helpers = []
+
 [dependencies]
-rusqlite = { workspace = true, features = ["bundled", "hooks"] }
+rusqlite = { workspace = true, features = ["bundled", "hooks", "limits"] }
 turso_core.workspace = true
 turso_parser.workspace = true
 tracing = "0.1"

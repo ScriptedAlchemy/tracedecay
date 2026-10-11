@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationAuditEventKindV1, ConfigurationCandidateV1,
@@ -8,6 +7,7 @@ use tracedecay_domain::configuration::{
     SettingKey,
 };
 use tracedecay_domain::{ActorId, UtcMicros};
+use tracedecay_sql::{OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_store::{
     ConfigurationCommitV1, ConfigurationRevisionRecordV1, ProfileReadOperationV1,
     ProfileReadResultV1,
@@ -28,7 +28,7 @@ impl ConfigurationExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         commit: &ConfigurationCommitV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         commit.validate().map_err(invalid)?;
         if commit.next_revision.parent_revision_id.as_ref()
             != Some(&commit.expected_base_revision_id)
@@ -82,7 +82,7 @@ impl ConfigurationExecutor {
         &mut self,
         snapshot: &Transaction<'_>,
         operation: &ProfileReadOperationV1,
-    ) -> rusqlite::Result<ProfileReadResultV1> {
+    ) -> tracedecay_sql::Result<ProfileReadResultV1> {
         let revision_id = match operation {
             ProfileReadOperationV1::CurrentConfiguration => current_revision_id(snapshot)?
                 .map(ConfigurationRevisionId::new)
@@ -116,7 +116,9 @@ struct StoredAuditPayloadV1<'a> {
     event: &'a tracedecay_domain::configuration::ConfigurationAuditEvent,
 }
 
-fn current_revision_id(connection: &rusqlite::Connection) -> rusqlite::Result<Option<String>> {
+fn current_revision_id(
+    connection: &tracedecay_sql::Connection,
+) -> tracedecay_sql::Result<Option<String>> {
     let mut statement = connection.prepare_cached(
         "SELECT revision_id
          FROM configuration_revisions AS candidate
@@ -128,7 +130,7 @@ fn current_revision_id(connection: &rusqlite::Connection) -> rusqlite::Result<Op
     )?;
     let revisions = statement
         .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<tracedecay_sql::Result<Vec<_>>>()?;
     match revisions.as_slice() {
         [] => Ok(None),
         [revision] => Ok(Some(revision.clone())),
@@ -141,7 +143,7 @@ fn current_revision_id(connection: &rusqlite::Connection) -> rusqlite::Result<Op
 fn insert_revision(
     savepoint: &Savepoint<'_>,
     revision: &ConfigurationRevisionRecordV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     revision.validate().map_err(invalid)?;
     savepoint.execute(
         "INSERT INTO configuration_revisions (
@@ -229,7 +231,7 @@ fn snapshot_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static str, Opt
 fn insert_receipt(
     savepoint: &Savepoint<'_>,
     commit: &ConfigurationCommitV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let authorization = commit
         .change_plan
         .as_ref()
@@ -264,7 +266,7 @@ fn insert_receipt(
 fn insert_audit_event(
     savepoint: &Savepoint<'_>,
     commit: &ConfigurationCommitV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let event = &commit.audit_event;
     let payload = encode(&StoredAuditPayloadV1 {
         schema_version: AUDIT_PAYLOAD_SCHEMA_VERSION,
@@ -297,9 +299,9 @@ fn insert_audit_event(
 }
 
 fn read_revision(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     revision_id: &ConfigurationRevisionId,
-) -> rusqlite::Result<Option<ConfigurationRevisionRecordV1>> {
+) -> tracedecay_sql::Result<Option<ConfigurationRevisionRecordV1>> {
     let metadata = connection
         .query_row(
             "SELECT parent_revision_id, snapshot_id, effective_behavior_digest,
@@ -346,7 +348,7 @@ fn read_revision(
                 row.get::<_, String>(2)?,
             ))
         })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<tracedecay_sql::Result<Vec<_>>>()?;
     let mut effective_values = BTreeMap::new();
     let mut provenance = BTreeMap::new();
     for (key, schema_revision, payload) in rows {

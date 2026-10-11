@@ -227,7 +227,7 @@ async fn durable_memory_rows_block_orphan_store_collection() {
     .await;
 
     {
-        let connection = rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
+        let connection = tracedecay_sql::Connection::open(data_root.join("graph.db")).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
@@ -284,7 +284,7 @@ async fn memory_v2_rows_block_orphan_store_collection() {
     .await;
 
     {
-        let connection = rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
+        let connection = tracedecay_sql::Connection::open(data_root.join("graph.db")).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE memory_v2_assertions (
@@ -329,7 +329,7 @@ async fn empty_memory_table_does_not_block_collection() {
     )
     .await;
     {
-        let connection = rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
+        let connection = tracedecay_sql::Connection::open(data_root.join("graph.db")).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE memory_facts (
@@ -458,7 +458,7 @@ fn delete_boundary_refuses_same_second_sqlite_mutation() {
     let data_root = profile_root.join("stores/sqlite-race");
     std::fs::create_dir_all(&data_root).unwrap();
     let database = data_root.join("graph.db");
-    let connection = rusqlite::Connection::open(&database).unwrap();
+    let connection = tracedecay_sql::Connection::open(&database).unwrap();
     connection
         .execute_batch("CREATE TABLE facts (value TEXT NOT NULL);")
         .unwrap();
@@ -467,7 +467,7 @@ fn delete_boundary_refuses_same_second_sqlite_mutation() {
     let original_time =
         filetime::FileTime::from_system_time(database.metadata().unwrap().modified().unwrap());
 
-    let connection = rusqlite::Connection::open(&database).unwrap();
+    let connection = tracedecay_sql::Connection::open(&database).unwrap();
     connection
         .execute("INSERT INTO facts (value) VALUES ('post-census')", [])
         .unwrap();
@@ -481,7 +481,7 @@ fn delete_boundary_refuses_same_second_sqlite_mutation() {
         unbounded_collection_control(),
     );
     assert!(matches!(result, Err(CollectionFailureKind::PayloadChanged)));
-    let connection = rusqlite::Connection::open(&database).unwrap();
+    let connection = tracedecay_sql::Connection::open(&database).unwrap();
     let rows: i64 = connection
         .query_row("SELECT COUNT(*) FROM facts", [], |row| row.get(0))
         .unwrap();
@@ -595,9 +595,10 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
     let dir = profile_root.join("projects").join("proj_ghost_with_memory");
     std::fs::create_dir_all(&dir).unwrap();
     {
-        let connection =
-            rusqlite::Connection::open(dir.join(tracedecay_store::StoreFile::Project.file_name()))
-                .unwrap();
+        let connection = tracedecay_sql::Connection::open(
+            dir.join(tracedecay_store::StoreFile::Project.file_name()),
+        )
+        .unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
@@ -629,7 +630,7 @@ fn seed_retired_branch_store(data_root: &Path, mtime_secs: i64) -> (PathBuf, u64
     let branches = data_root.join("branches");
     std::fs::create_dir_all(&branches).unwrap();
     let database = branches.join("feature.db");
-    rusqlite::Connection::open(&database)
+    tracedecay_sql::Connection::open(&database)
         .unwrap()
         .execute_batch(
             "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
@@ -1015,7 +1016,7 @@ mod durable_inventory {
         let profile = tempfile::tempdir().unwrap();
         let data_root = profile.path().join("stores/durable");
         std::fs::create_dir_all(&data_root).unwrap();
-        let writer = rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
+        let writer = tracedecay_sql::Connection::open(data_root.join("graph.db")).unwrap();
         writer
             .execute_batch(
                 "PRAGMA journal_mode = WAL;
@@ -1046,7 +1047,7 @@ mod durable_inventory {
         let profile = tempfile::tempdir().unwrap();
         let data_root = profile.path().join("stores/live");
         std::fs::create_dir_all(&data_root).unwrap();
-        let writer = rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
+        let writer = tracedecay_sql::Connection::open(data_root.join("graph.db")).unwrap();
         writer
             .execute_batch(
                 "PRAGMA journal_mode = WAL;
@@ -1075,7 +1076,7 @@ mod durable_inventory {
         let profile = tempfile::tempdir().unwrap();
         let data_root = profile.path().join("stores/cancelled");
         std::fs::create_dir_all(&data_root).unwrap();
-        rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
+        tracedecay_sql::Connection::open(data_root.join("graph.db")).unwrap();
 
         let check = check_store_durable_memory(
             profile.path(),
@@ -1145,7 +1146,7 @@ async fn symlink_graph_database_is_durable_data_protected() {
     .await;
     let graph_path = data_root.join("graph.db");
     let target = tmp.path().join("graph-target.db");
-    rusqlite::Connection::open(&target).unwrap();
+    tracedecay_sql::Connection::open(&target).unwrap();
     std::fs::remove_file(&graph_path).unwrap();
     std::os::unix::fs::symlink(&target, &graph_path).unwrap();
 

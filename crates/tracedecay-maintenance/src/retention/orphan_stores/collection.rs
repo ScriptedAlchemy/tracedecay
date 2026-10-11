@@ -743,7 +743,7 @@ async fn check_durable_memory_rows(
 /// or `None` when that cannot be read. A change to the file during the read
 /// is caught by the census fence the caller re-checks before deleting.
 fn memory_rows_present(database: &Path) -> Option<bool> {
-    let connection = super::super::quiesced_sqlite::open_quiesced(database).ok()?;
+    let connection = super::super::quiesced_store::open_quiesced(database).ok()?;
     let tables = connection
         .prepare(
             "SELECT name
@@ -756,7 +756,7 @@ fn memory_rows_present(database: &Path) -> Option<bool> {
         .and_then(|mut statement| {
             statement
                 .query_map(["memory\\_%"], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()
+                .collect::<tracedecay_sql::Result<Vec<_>>>()
         })
         .ok()?;
     for table in tables {

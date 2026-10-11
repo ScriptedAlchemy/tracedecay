@@ -1,141 +1,75 @@
-# SQLite storage concurrency workload
+# Storage contention benchmark
 
-[Recorded measurements](MEASUREMENTS.md) include the machine, build settings,
-three repetitions, raw results, and latency limitations.
+The `storage_contention` bench in `crates/tracedecay-rusqlite-runtime` measures
+the publication and search protocols of one owned store engine on fresh real
+files. It compares the SQLite engine against the native Turso engine. The
+engine is chosen at build time by `//crates/tracedecay-sql:engine`.
 
-The runtime retains one persistent SQLite writer actor per shard file and
-independent WAL reader connections. Concurrent submissions to one shard are
-serialized and batched; distinct shard files can execute write transactions
-concurrently. Adding connections that write the same SQLite file does not
-provide overlapping write transactions.
+Each benchmark process runs four shapes, in order. Every shape opens fresh
+store files and installs the diagnostics schema and a full-text index over
+diagnostic messages. It then commits one unmeasured seed publication per shard.
 
-The reader pool reserves two general workers for foreground requests. Pending
-connection opens now consume their prospective lease capacity before startup
-completes. This prevents parallel background pool growth from taking the
-foreground reservation. The deterministic unit regression parks four concurrent
-opens in a pool with two existing leases and a maximum of eight workers, rejects
-a fifth background acquisition, and serves both reserved foreground readers.
+| Shape | Shards | Submitters | Publications per submitter | Keys |
+|---|---:|---:|---:|---|
+| `queue-1x1` | 1 | 1 | 1,024 | unique |
+| `queue-1x8` | 1 | 8 | 128 | unique |
+| `queue-4x8` | 4 | 8 | 128 | unique |
+| `conflict-1x8` | 1 | 8 | 128 | contended |
 
-Run the correctness suites through the repository's Bazel authority:
+- **Publication.** Submitters send production diagnostic publications of eight
+  records through the shard's persistent writer actor. Submitters on one shard
+  queue behind that actor, which batches them into write transactions.
+- **Contended keys.** In `conflict-1x8`, every submitter publishes every key.
+  Odd submitters send a different command digest. Each key commits once. An
+  identical attempt either joins the in-flight commit as a follower or replays
+  the commit. An attempt with the other digest settles as an idempotency
+  conflict.
+- **Retries.** An attempt rejected as a duplicate operation in flight is
+  retried after 1 ms. An attempt answered `Saturated` is retried after its
+  `retry_after_ms`. Receipt latency runs from the first attempt to the settled
+  outcome, so it includes queueing and every retry.
+- **Reads.** While submitters run, two readers repeat the current-generation
+  diagnostic read and two readers repeat a full-text search for `mismatched`.
+  Both go through production reader pools on WAL snapshots. A search that
+  returns no hits counts as a failed read.
 
-```sh
-bazel test //crates/tracedecay-rusqlite-runtime:unit_test --test_output=errors
-bazel test //crates/tracedecay-rusqlite-runtime:rusqlite_suite --test_output=errors
-```
+A shape fails unless every attempt settles, no read fails, and each shard's
+durable receipt and checkpoint sequences are contiguous, with exactly one
+commit per key. It also fails unless `PRAGMA integrity_check` passes, every
+unique key commits, and the contended shape reports idempotency conflicts.
 
-The integration suite's `storage_contention` module covers production diagnostic
-publication SQL with retained WAL snapshots, simultaneous submitters, contiguous
-durable receipts and checkpoint sequences, idempotency conflicts, rollback and
-resubmission, contention with an external SQLite writer, graceful reopen, and
-abrupt process termination during an uncommitted publication. Fixtures use
-temporary files and never read an operator profile. Existing actor tests prove
-that a shard can commit while another shard holds an open write transaction.
+## Running
 
-Run the explicit measurement workload:
-
-```sh
-bazel test //crates/tracedecay-rusqlite-runtime:rusqlite_suite \
-  --test_arg=storage_contention::real_file_contention_benchmark \
-  --test_arg=--ignored --test_arg=--nocapture --test_output=all \
-  --nocache_test_results
-```
-
-The default workload compares 1,024 publications at `(shards, submitters)`
-`(1, 1)`, `(1, 8)`, and `(4, 8)`, with four concurrent reader threads and eight
-diagnostics per publication. Each run creates fresh real files, initializes
-schema, and performs one unmeasured durable seed per shard. Request construction
-is outside receipt latency; it remains inside total throughput time. Reader
-latency includes acquisition, snapshot creation, and the production current
-diagnostic generation query. JSON output includes p50/p95/p99 latency, throughput,
-failure counts, SQLite busy events, and committed transaction counts. Every
-measurement verifies receipt/checkpoint continuity and SQLite integrity.
-
-To select one shape, pass `--test_env=TRACEDECAY_CONTENTION_SHARDS=4` and
-`--test_env=TRACEDECAY_CONTENTION_PRODUCERS=8`. Other settings are
-`TRACEDECAY_CONTENTION_OPS` (per submitter), `TRACEDECAY_CONTENTION_READERS`, and
-`TRACEDECAY_CONTENTION_RECORDS`. Use fresh processes and repeat runs; do not use
-a throughput threshold as a correctness assertion.
-
-These measurements cover diagnostic publication and a scalar repository read.
-They do not characterize all FTS/search, graph, index, or session workloads. The
-runtime uses WAL with SQLite `synchronous=NORMAL`; a process termination test is
-not a power-loss durability test. Shard throughput comparisons measure existing
-shard parallelism, not a speedup attributable to the admission accounting fix.
-Partitioning also reduces per-file history and working sets, so the comparison
-does not isolate thread parallelism from all other benefits of sharding.
-
-## Turso compatibility boundary
-
-The [pinned compatibility evidence](TURSO-COMPATIBILITY.md) covers official Turso
-v0.8.0 at commit `2829ee1662bd01d79f60c2c170af684a2b50af86`. Its experimental
-`WITHOUT ROWID` support does not cover the update/delete/upsert operations this
-runtime needs. Required authorizer and update hooks and SQLite FTS5 are absent;
-WAL hooks are an additional gap, not a current production dependency. Ordinary
-triggers and JSON extraction are supported.
-
-The separate [opt-in native engine prototype](turso-prototype/README.md) pins the
-official `pyturso==0.8.0` wheel by SHA-256. It uses real files and ordinary ROWID
-tables for a reduced checkpoint/receipt protocol. It tests two independently
-mutated transactions open before either commits, snapshot isolation, shared
-checkpoint conflict, full rollback/retry, replay, digest conflict, and reopen.
-The exact production ledger DDL is a separate negative compatibility probe.
-This is an engine experiment, not a production adapter or migration.
-Its added differential lane exercises the actual four-ledger schema adapted
-to ROWID tables against SQLite's original schema: 34 constraint rejections,
-rollback/CAS/retry, representative mutations, replay and fresh-process reopen.
-That lane is sequential; its success does not establish overlapping execution
-of TraceDecay's full ledger protocol or hook/search parity.
-
-The [caller and data migration plan](MIGRATION-PLAN.md) identifies the exact
-rejected DDL, all search/guard dependencies, the complete cutover sequence,
-and the smallest search compatibility decision. It includes direct database
-opens and foreign SQLite sources, rather than replacing only registered
-connection constructors.
-
-Every committed TraceDecay operation updates one checkpoint/commit-sequence row
-per shard. That singleton remains a conflict with otherwise independent
-mutations. A production engine switch needs full security, search, migration,
-and recovery evidence and a justified protocol design. The default durable
-store, root workspace dependencies, and single-writer-per-shard architecture
-remain unchanged.
-
-## Verification
-
-The final patch against `5fe50528b317bb6fa5f380994be1adc127e6c61d` passed:
-
-- Default production library build without `test-transport`.
-- All 336 runtime unit tests.
-- All 143 runtime integration tests; two opt-in entry points remain ignored in
-  the normal suite. The crash helper executes through the process recovery test.
-- Three explicit benchmark process runs, nine measured workload shapes.
-- Strict Clippy over the production library, unit tests, and integration suite.
-- The affected crate's Bazel rustfmt gate and `git diff --check`.
-
-The new admission regression was also run with the original `leased`-only
-condition. It failed at the fifth background acquisition assertion. After
-restoring the fix, all unit tests passed. [Baseline failure](baseline-regression.txt),
-[final unit summary](final-unit-summary.txt), and
-[integration summary](final-integration-summary.txt) preserve that behavior.
-
-Additional successful build/check commands:
+Record five fresh processes on the current commit:
 
 ```sh
-bazel build //crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime
-bazel build --config=clippy \
-  //crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime \
-  //crates/tracedecay-rusqlite-runtime:unit_test \
-  //crates/tracedecay-rusqlite-runtime:rusqlite_suite
-bazel build //crates/tracedecay-rusqlite-runtime:rustfmt_check_2024
+scripts/run-storage-contention-benchmark.sh            # SQLite engine
+scripts/run-storage-contention-benchmark.sh --native   # native Turso engine
 ```
 
-The full workspace build passed (386 targets). All 148 workspace test targets
-were exercised across the initial run and continuations of only unfinished
-targets: 135 passed, 12 failed, and one timed out. Workspace rustfmt, strict
-Clippy, and generated Bazel build checks passed.
-[Workspace verification](workspace-verification.txt)
-records the exact scope, failures, controlled baseline evidence, and host-tool
-reruns. The full workspace test suite is not green.
+The runner refuses a dirty tree outside this directory. Each run calls
+`bazel test //crates/tracedecay-rusqlite-runtime:storage_contention
+--test_arg=--bench` uncached, with the commit SHA and host name in the test
+environment. A passing run appends its JSON lines to
+[results.jsonl](results.jsonl); a failed run appends nothing and stops the
+runner. The runner then regenerates [MEASUREMENTS.md](MEASUREMENTS.md) from
+every recorded row.
 
-[Focused failure triage](TRIAGE.md) records exact isolated controls and
-original-condition comparisons without weakening assertions or increasing
-budgets.
+Each row records the source SHA, the host, the engine compiled into the
+binary, OS, architecture, CPU count, and debug assertions. It also records
+the one-minute load average at the start and end of the shape. A row is
+`representative` only when both load averages are at or below 200.
+
+Bazel's default `fastbuild` keeps debug assertions on, so the numbers compare
+engines on one host and build. They do not estimate release capacity.
+
+## Scope
+
+The full-text index belongs to this benchmark and is not a production search
+index. On SQLite it is an FTS5 external-content table with an insert trigger.
+On native Turso it is a `USING fts` index. Both are maintained inside the
+publishing transaction. Search ranking differs between the engines. The
+benchmark checks only that a search returns hits.
+
+Process termination and power-loss durability are covered by tests, not by
+this benchmark. The cutover contract is [CUTOVER-DESIGN.md](CUTOVER-DESIGN.md).

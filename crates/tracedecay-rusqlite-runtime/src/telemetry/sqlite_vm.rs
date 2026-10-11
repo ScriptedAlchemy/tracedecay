@@ -1,10 +1,10 @@
-//! SQLite VM counters collected at statement boundaries.
+//! Engine work counters collected at statement boundaries.
 //!
 //! Names stay static. Counters never include SQL text or user values.
 
 use std::cell::Cell;
 
-use rusqlite::{Statement, StatementStatus};
+use tracedecay_sql::{Statement, StatementControl};
 
 use super::SqliteVmSnapshot;
 
@@ -17,10 +17,11 @@ thread_local! {
 }
 
 pub(crate) fn observe_statement(statement: &Statement<'_>) {
+    let counters = statement.take_counters();
     let delta = SqliteVmSnapshot {
-        fullscan_steps: take_status(statement, StatementStatus::FullscanStep),
-        sort_steps: take_status(statement, StatementStatus::Sort),
-        vm_steps: take_status(statement, StatementStatus::VmStep),
+        fullscan_steps: counters.fullscan_steps,
+        sort_steps: counters.sort_steps,
+        vm_steps: counters.vm_steps,
     };
     OBSERVED.with(|cell| cell.set(cell.get().saturating_add(delta)));
 }
@@ -29,17 +30,9 @@ pub(crate) fn take_observed_vm() -> SqliteVmSnapshot {
     OBSERVED.with(|cell| cell.replace(SqliteVmSnapshot::default()))
 }
 
-fn take_status(statement: &Statement<'_>, status: StatementStatus) -> u64 {
-    i32_to_u64(statement.reset_status(status))
-}
-
-fn i32_to_u64(value: i32) -> u64 {
-    u64::try_from(value.max(0)).unwrap_or(u64::MAX)
-}
-
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
+    use tracedecay_sql::Connection;
 
     use super::*;
 

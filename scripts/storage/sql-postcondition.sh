@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Fail, listing each site, when owned code still names rusqlite. Only the
-# driver's SQLite arm, the foreign session-host readers, and the lexical
-# projection artifact may. Pass paths to limit the check. The default is
-# every crate.
+# driver's SQLite arm and the foreign session-host readers may. Pass paths to
+# check one unit's scope; the default is every crate.
 #
 # Usage: scripts/storage/sql-postcondition.sh [PATH...]
 set -euo pipefail
@@ -18,8 +17,6 @@ allowed=(
   -g '!crates/tracedecay-sessions/src/runtime/shared.rs'
   -g '!crates/tracedecay-sessions/src/runtime/hosts/**'
   -g '!crates/tracedecay-sessions/Cargo.toml'
-  -g '!crates/tracedecay-query/src/retrieval/lexical/**'
-  -g '!crates/tracedecay-query/Cargo.toml'
 )
 
 # Code paths (`rusqlite::`, `use rusqlite;`, `extern crate rusqlite`) and

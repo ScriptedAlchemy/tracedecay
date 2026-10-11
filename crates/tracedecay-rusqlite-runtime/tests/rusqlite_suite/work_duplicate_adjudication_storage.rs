@@ -1,7 +1,7 @@
 use crate::work_registered_store;
 
-use rusqlite::params;
 use std::num::NonZeroU16;
+use tracedecay_sql::params;
 
 use tracedecay_contracts::{
     WorkDuplicateAdjudicationAppendOutcomeV1, WorkDuplicateAdjudicationPortV1,
@@ -104,11 +104,11 @@ fn write_observing(
     }
 }
 
-fn insert_attempts(connection: &rusqlite::Connection) {
+fn insert_attempts(connection: &tracedecay_sql::Connection) {
     insert_attempts_for(connection, &authority());
 }
 
-fn insert_attempts_for(connection: &rusqlite::Connection, authority: &WorkAuthority) {
+fn insert_attempts_for(connection: &tracedecay_sql::Connection, authority: &WorkAuthority) {
     for identity in [
         attempt("task.duplicate.1", "run.duplicate.1", "attempt.duplicate.1"),
         attempt("task.duplicate.2", "run.duplicate.2", "attempt.duplicate.2"),

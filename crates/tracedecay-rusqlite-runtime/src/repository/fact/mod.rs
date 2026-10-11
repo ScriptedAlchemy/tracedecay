@@ -7,10 +7,10 @@
 
 use std::collections::HashSet;
 
-use rusqlite::{OptionalExtension, Savepoint, Transaction, params, params_from_iter};
 use tracedecay_domain::{
     FactCurationActionV1, FactId, FactLineageEventKindV1, FactOwnerV1, RetrievalAnchorId,
 };
+use tracedecay_sql::{OptionalExtension, Savepoint, Transaction, params, params_from_iter};
 use tracedecay_store::{FactReadOperationV1, FactReadResultV1, FactWriteBatch};
 
 use super::support::{encode, invalid};
@@ -38,7 +38,7 @@ impl FactExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         batch: &FactWriteBatch,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         let owner = OwnerColumns::new(batch.owner())?;
         let actual_last = current_last_event(savepoint, &owner, batch.fact_id())?;
         if actual_last.as_ref() != batch.expected_last_event_id() {
@@ -79,7 +79,7 @@ impl FactExecutor {
         &mut self,
         snapshot: &Transaction<'_>,
         operation: &FactReadOperationV1,
-    ) -> rusqlite::Result<FactReadResultV1> {
+    ) -> tracedecay_sql::Result<FactReadResultV1> {
         match operation {
             FactReadOperationV1::Current(query) => {
                 read_current(snapshot, query).map(|fact| FactReadResultV1::Current(Box::new(fact)))
@@ -92,10 +92,10 @@ impl FactExecutor {
 }
 
 fn require_supersession_endpoints_available(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     owner: &OwnerColumns,
     batch: &FactWriteBatch,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     for event in batch.events() {
         let FactLineageEventKindV1::Curated {
             action: FactCurationActionV1::SupersededBy { fact_id: target },
@@ -111,10 +111,10 @@ fn require_supersession_endpoints_available(
 }
 
 fn require_current_fact_available(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     owner: &OwnerColumns,
     fact_id: &FactId,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let active = connection
         .query_row(
             "SELECT active_assertion_id
@@ -137,10 +137,10 @@ fn require_current_fact_available(
 /// only for an existing target fact; a new fact cannot make its own evidence
 /// true by being inserted later in the same write.
 fn require_normalized_tag_evidence_available(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     owner: &OwnerColumns,
     batch: &FactWriteBatch,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let evidence_fact_ids = batch
         .events()
         .iter()
@@ -195,10 +195,10 @@ fn require_normalized_tag_evidence_available(
 /// exactly when every id comes back present, which is the same "all must exist"
 /// contract the per-anchor loop enforced, down to the error it raises.
 fn require_referenced_anchors_available(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     owner: &OwnerColumns,
     anchor_ids: &[RetrievalAnchorId],
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     if anchor_ids.is_empty() {
         return Ok(());
     }
@@ -237,7 +237,7 @@ pub(super) struct OwnerColumns {
 }
 
 impl OwnerColumns {
-    pub(super) fn new(owner: &FactOwnerV1) -> rusqlite::Result<Self> {
+    pub(super) fn new(owner: &FactOwnerV1) -> tracedecay_sql::Result<Self> {
         let (kind, project_id) = match owner {
             FactOwnerV1::Profile => ("profile", String::new()),
             FactOwnerV1::Project { project_id } => ("project", project_id.as_str().to_owned()),

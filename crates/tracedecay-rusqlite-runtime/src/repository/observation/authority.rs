@@ -4,13 +4,13 @@
 //! instead, so a re-applied write reads back exactly the rows the first apply
 //! wrote or fails as a collision.
 
-use rusqlite::{OptionalExtension, params};
 use tracedecay_domain::{
     AnchorSourceGeneration, DurableObservationV1, EvidenceAvailabilityV1, FactOwnerV1,
     GenerationBoundRepositoryProvenanceV1, ObservationSourceCursorV1, RepositoryProvenanceV1,
     RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget,
     prove_cline_native_source_transition,
 };
+use tracedecay_sql::{OptionalExtension, params};
 use tracedecay_store::{
     AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
     ObservationCursorAdvance, RepositoryProvenanceAttachmentV1, RetrievalAnchorDispositionRecordV1,
@@ -22,9 +22,9 @@ use super::cursor_authority::{
 };
 
 pub(super) fn persist_sanitization_receipt(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     receipt: &tracedecay_domain::SanitizationReceiptV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let receipt_json = encode(receipt)?;
     let receipt_id = receipt.receipt().receipt_id().as_str();
     connection.execute(
@@ -53,11 +53,11 @@ pub(super) fn persist_sanitization_receipt(
 }
 
 pub(super) fn cursor_advance_receipt_matches(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     source_json: &str,
     scope_json: &str,
     advance: &ObservationCursorAdvance,
-) -> rusqlite::Result<bool> {
+) -> tracedecay_sql::Result<bool> {
     let stored = connection
         .query_row(
             READ_CURSOR_ADVANCE_SQL,
@@ -91,9 +91,9 @@ pub(super) fn cursor_advance_receipt_matches(
 }
 
 pub(super) fn persist_retrieval_anchor(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     anchor: &RetrievalAnchorRecord,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let anchor_json = encode(anchor)?;
     let owner_json = encode(anchor.owner())?;
     let inserted = connection.execute(
@@ -134,9 +134,9 @@ pub(super) fn persist_retrieval_anchor(
 }
 
 fn verify_retrieval_anchor(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     anchor: &RetrievalAnchorRecord,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let owner_json = encode(anchor.owner())?;
     let stored = connection
         .query_row(
@@ -201,10 +201,10 @@ fn verify_retrieval_anchor(
 // successor may wait behind the still-readable predecessor. Once promoted,
 // immutable historical anchor replay requires the exact supersession receipt.
 fn cline_alias_transition_is_valid(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     anchor: &RetrievalAnchorRecord,
     current_anchor_id: &str,
-) -> rusqlite::Result<bool> {
+) -> tracedecay_sql::Result<bool> {
     let Some(current_json) = connection
         .query_row(
             "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1",
@@ -323,7 +323,7 @@ struct SlimRepositoryProvenance {
 /// own content id, and leave a digest-sized reference in each row.
 fn slim_repository_provenance(
     attachment: &RepositoryProvenanceAttachmentV1,
-) -> rusqlite::Result<SlimRepositoryProvenance> {
+) -> tracedecay_sql::Result<SlimRepositoryProvenance> {
     let mut availability = serde_json::to_value(attachment.availability())
         .map_err(|error| invalid(error.to_string()))?;
     let mut capture_json = None;
@@ -360,10 +360,10 @@ fn slim_repository_provenance(
 }
 
 pub(super) fn persist_repository_provenance(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     observation_id: &str,
     attachment: &RepositoryProvenanceAttachmentV1,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     if let Some(anchor) = attachment.anchor() {
         persist_retrieval_anchor(connection, anchor)?;
     }
@@ -396,9 +396,9 @@ pub(super) fn persist_repository_provenance(
 }
 
 pub(super) fn verify_observation_authority(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     write: &AnchoredObservationWrite,
-) -> rusqlite::Result<()> {
+) -> tracedecay_sql::Result<()> {
     let observation_id = write.observation().observation_id().as_str();
     let bound_anchor_id = connection
         .query_row(
@@ -501,7 +501,7 @@ pub(super) fn verify_observation_authority(
 fn repository_replay_anchor(
     attachment: &RepositoryProvenanceAttachmentV1,
     retained_json: &str,
-) -> rusqlite::Result<Option<RetrievalAnchorRecord>> {
+) -> tracedecay_sql::Result<Option<RetrievalAnchorRecord>> {
     let retained: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> =
         decode(retained_json.to_owned())?;
     let (Some(old), Some(new), Some(anchor)) = (
@@ -571,10 +571,10 @@ fn repository_replay_anchor(
 }
 
 pub(super) fn read_cursor(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     source_json: &str,
     scope_json: &str,
-) -> rusqlite::Result<Option<ObservationSourceCursorV1>> {
+) -> tracedecay_sql::Result<Option<ObservationSourceCursorV1>> {
     connection
         .query_row(
             READ_SOURCE_CURSOR_SQL,

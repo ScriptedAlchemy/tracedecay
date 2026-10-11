@@ -7,6 +7,8 @@ pub enum Error {
     Engine(turso_core::LimboError),
     InvalidOperation(String),
     Denied(String),
+    /// Transaction control or a savepoint outside what the capability allows.
+    TransactionControlDenied,
     Cancelled,
     DeadlineExceeded,
     Authority(String),
@@ -24,6 +26,9 @@ impl fmt::Display for Error {
                 write!(formatter, "invalid native operation: {message}")
             }
             Self::Denied(message) => write!(formatter, "native SQL denied: {message}"),
+            Self::TransactionControlDenied => {
+                formatter.write_str("transaction control is denied in this capability scope")
+            }
             Self::Cancelled => formatter.write_str("native operation cancelled"),
             Self::DeadlineExceeded => formatter.write_str("native operation deadline exceeded"),
             Self::Authority(message) => write!(formatter, "native write authority: {message}"),
@@ -102,6 +107,7 @@ impl Error {
             self,
             Self::InvalidOperation(_)
                 | Self::Denied(_)
+                | Self::TransactionControlDenied
                 | Self::Unsupported(_)
                 | Self::RequestLimitExceeded
                 | Self::Engine(

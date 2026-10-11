@@ -1,7 +1,3 @@
-use std::collections::BTreeSet;
-use std::path::{Component, Path};
-
-use rusqlite::functions::FunctionFlags;
 use tracedecay_code_index::clones::{CloneExactKeyV1, CloneNormalizationClassV1};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
@@ -62,9 +58,6 @@ pub struct CloneExactFamilyArtifactPageV1 {
     pub families: Vec<CloneExactFamilyArtifactCandidateV1>,
     pub next_cursor: Option<String>,
 }
-
-const GENERATED_PATH_FUNCTION: &str = "tracedecay_is_generated_path";
-const PULL_REQUEST_PATH_FUNCTION: &str = "tracedecay_is_pull_request_path";
 
 impl CodeLexicalArtifactReaderV1 {
     #[allow(clippy::too_many_arguments)] // mirrors sibling clone page readers' filter/cursor surface
@@ -138,9 +131,14 @@ impl CodeLexicalArtifactReaderV1 {
             .map(|position| digest_key(&position.digest))
             .transpose()?
             .unwrap_or_default();
+        // Path policy is bound as JSON arrays the query walks with
+        // `json_each`, so the statement needs no registered function.
+        let generated_segments =
+            serde_json::to_string(tracedecay_domain::GENERATED_DIR_SEGMENTS)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let pull_request_paths_json = serde_json::to_string(pull_request_paths.unwrap_or_default())
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
         let connection = self.lock_connection(Some(&|| checkpoint(control)))?;
-        install_generated_path_function(&connection)?;
-        install_pull_request_path_function(&connection, pull_request_paths)?;
         let mut statement = connection
             .prepare_cached(
                 "WITH families AS ( \
@@ -153,46 +151,53 @@ impl CodeLexicalArtifactReaderV1 {
                     FROM clone_exact_postings AS posting \
                     JOIN clone_occurrences AS occurrence \
                       ON occurrence.ordinal = posting.occurrence_ordinal \
-                    WHERE ((:conservative AND posting.class = 1) OR (:rename AND posting.class = 2)) \
-                      AND (:path IS NULL OR occurrence.path = :path \
-                           OR (substr(occurrence.path, 1, length(:path)) = :path \
-                               AND substr(occurrence.path, length(:path) + 1, 1) = '/')) \
-                      AND (:include_generated OR tracedecay_is_generated_path(occurrence.path) = 0) \
+                    WHERE ((?1 AND posting.class = 1) OR (?2 AND posting.class = 2)) \
+                      AND (?3 IS NULL OR occurrence.path = ?3 \
+                           OR (substr(occurrence.path, 1, length(?3)) = ?3 \
+                               AND substr(occurrence.path, length(?3) + 1, 1) = '/')) \
+                      AND (?5 OR NOT EXISTS ( \
+                           SELECT 1 FROM json_each(?13) AS segment \
+                           WHERE instr('/' || occurrence.path || '/', '/' || segment.value || '/') > 0)) \
                     GROUP BY posting.class, posting.normalization_revision, posting.digest \
                     HAVING COUNT(*) > 1 \
-                       AND (NOT :pull_request \
-                            OR MAX(tracedecay_is_pull_request_path(occurrence.path))) \
+                       AND (NOT ?4 \
+                            OR MAX(occurrence.path IN (SELECT value FROM json_each(?14)))) \
                  ) \
                  SELECT class, normalization_revision, digest, representative, member_count, reviewable_source_bytes \
                  FROM families \
-                 WHERE NOT :has_after \
-                    OR reviewable_source_bytes < :after_reviewable \
-                    OR (reviewable_source_bytes = :after_reviewable AND member_count < :after_members) \
-                    OR (reviewable_source_bytes = :after_reviewable AND member_count = :after_members AND class > :after_class) \
-                    OR (reviewable_source_bytes = :after_reviewable AND member_count = :after_members AND class = :after_class AND normalization_revision > :after_revision) \
-                    OR (reviewable_source_bytes = :after_reviewable AND member_count = :after_members AND class = :after_class AND normalization_revision = :after_revision AND digest > :after_digest) \
+                 WHERE NOT ?6 \
+                    OR reviewable_source_bytes < ?7 \
+                    OR (reviewable_source_bytes = ?7 AND member_count < ?8) \
+                    OR (reviewable_source_bytes = ?7 AND member_count = ?8 AND class > ?9) \
+                    OR (reviewable_source_bytes = ?7 AND member_count = ?8 AND class = ?9 AND normalization_revision > ?10) \
+                    OR (reviewable_source_bytes = ?7 AND member_count = ?8 AND class = ?9 AND normalization_revision = ?10 AND digest > ?11) \
                  ORDER BY reviewable_source_bytes DESC, member_count DESC, class, normalization_revision, digest \
-                 LIMIT :fetch",
+                 LIMIT ?12",
             )
             .map_err(sqlite_error)?;
+        let after_reviewable = i64::try_from(after_reviewable)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let after_members = i64::try_from(after_members)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+        let fetch_rows = i64::try_from(fetch)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
         let mut rows = statement
-            .query(rusqlite::named_params! {
-                ":conservative": match_classes.contains(&CloneNormalizationClassV1::Conservative),
-                ":rename": match_classes.contains(&CloneNormalizationClassV1::Rename),
-                ":path": path,
-                ":pull_request": pull_request_paths.is_some(),
-                ":include_generated": include_generated_paths,
-                ":has_after": after.is_some(),
-                ":after_reviewable": i64::try_from(after_reviewable)
-                    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
-                ":after_members": i64::try_from(after_members)
-                    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
-                ":after_class": i64::from(after_class),
-                ":after_revision": i64::from(after_revision),
-                ":after_digest": after_digest.as_slice(),
-                ":fetch": i64::try_from(fetch)
-                    .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
-            })
+            .query(tracedecay_sql::params![
+                match_classes.contains(&CloneNormalizationClassV1::Conservative),
+                match_classes.contains(&CloneNormalizationClassV1::Rename),
+                path,
+                pull_request_paths.is_some(),
+                include_generated_paths,
+                after.is_some(),
+                after_reviewable,
+                after_members,
+                i64::from(after_class),
+                i64::from(after_revision),
+                after_digest.as_slice(),
+                fetch_rows,
+                generated_segments,
+                pull_request_paths_json,
+            ])
             .map_err(sqlite_error)?;
         let mut families = Vec::with_capacity(fetch);
         while let Some(row) = rows.next().map_err(sqlite_error)? {
@@ -261,50 +266,4 @@ impl CodeLexicalArtifactReaderV1 {
             next_cursor,
         })
     }
-}
-
-fn install_generated_path_function(
-    connection: &rusqlite::Connection,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    connection
-        .create_scalar_function(
-            GENERATED_PATH_FUNCTION,
-            1,
-            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-            |context| {
-                let path = context.get::<String>(0)?;
-                Ok(Path::new(&path).components().any(|component| {
-                    matches!(
-                        component,
-                        Component::Normal(segment)
-                            if segment
-                                .to_str()
-                                .is_some_and(tracedecay_domain::is_generated_dir_segment)
-                    )
-                }))
-            },
-        )
-        .map_err(sqlite_error)
-}
-
-fn install_pull_request_path_function(
-    connection: &rusqlite::Connection,
-    paths: Option<&[String]>,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let paths = paths
-        .into_iter()
-        .flatten()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    connection
-        .create_scalar_function(
-            PULL_REQUEST_PATH_FUNCTION,
-            1,
-            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-            move |context| {
-                let path = context.get::<String>(0)?;
-                Ok(paths.contains(&path))
-            },
-        )
-        .map_err(sqlite_error)
 }

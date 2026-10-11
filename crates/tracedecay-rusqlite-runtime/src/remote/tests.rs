@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use rusqlite::Savepoint;
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_contracts::remote::{
@@ -49,6 +48,7 @@ use tracedecay_domain::{
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
     canonical_sha256,
 };
+use tracedecay_sql::Savepoint;
 use tracedecay_store::{
     AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
     StorageRuntimeErrorV1, StoreIncarnationV1, VerifiedStoreLocatorV1,
@@ -72,7 +72,7 @@ impl StorageOperationExecutor for NoWrites {
         &mut self,
         _savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         Ok(())
     }
 }
@@ -83,7 +83,7 @@ struct NoReads;
 impl ReaderQueryExecutor for NoReads {
     fn execute_read(
         &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
+        _snapshot: &tracedecay_sql::Transaction<'_>,
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
         unreachable!("migration SQL queries bypass the product read executor")
@@ -125,7 +125,7 @@ fn remote_test_binding() -> StoreRuntimeBindingV1 {
 fn fixture_with_binding(binding: StoreRuntimeBindingV1) -> Fixture {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("remote.sqlite3");
-    let connection = rusqlite::Connection::open(&path).unwrap();
+    let connection = tracedecay_sql::Connection::open(&path).unwrap();
     connection.execute_batch(REMOTE_NODE_LOCAL_SCHEMA).unwrap();
     connection
         .execute(

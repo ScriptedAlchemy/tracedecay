@@ -122,7 +122,7 @@ impl CloneOccurrenceRouteV1 {
 /// digest, selected in the order `symbol_key, payload.payload_digest, path,
 /// body_start, body_end, eligibility`.
 pub(super) struct StoredCloneOccurrenceV1 {
-    pub symbol_key: rusqlite::types::Value,
+    pub symbol_key: tracedecay_sql::types::Value,
     /// `None` when the left-joined payload row is absent.
     pub payload_digest: Option<Vec<u8>>,
     pub path: String,
@@ -132,7 +132,10 @@ pub(super) struct StoredCloneOccurrenceV1 {
 }
 
 impl StoredCloneOccurrenceV1 {
-    pub(super) fn read(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Self> {
+    pub(super) fn read(
+        row: &tracedecay_sql::Row<'_>,
+        first: usize,
+    ) -> tracedecay_sql::Result<Self> {
         Ok(Self {
             symbol_key: row.get(first)?,
             payload_digest: row.get(first + 1)?,
@@ -147,10 +150,10 @@ impl StoredCloneOccurrenceV1 {
 /// The occurrence columns at `first` of a row that left-joins them, `None`
 /// when the join found no occurrence.
 pub(super) fn stored_clone_occurrence(
-    row: &rusqlite::Row<'_>,
+    row: &tracedecay_sql::Row<'_>,
     first: usize,
 ) -> Result<Option<StoredCloneOccurrenceV1>, CodeLexicalArtifactErrorV1> {
-    if row.get_ref(first).map_err(sqlite_error)? == rusqlite::types::ValueRef::Null {
+    if row.get_ref(first).map_err(sqlite_error)? == tracedecay_sql::types::ValueRef::Null {
         return Ok(None);
     }
     StoredCloneOccurrenceV1::read(row, first)
@@ -162,8 +165,8 @@ pub(super) fn stored_clone_occurrence(
 pub(super) type StoredCloneBodyRowV1 = (StoredCloneOccurrenceV1, Option<Vec<u8>>);
 
 pub(super) fn routed_clone_body_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<StoredCloneBodyRowV1> {
+    row: &tracedecay_sql::Row<'_>,
+) -> tracedecay_sql::Result<StoredCloneBodyRowV1> {
     Ok((StoredCloneOccurrenceV1::read(row, 0)?, row.get(6)?))
 }
 

@@ -1,5 +1,5 @@
-use rusqlite::{Row, params};
 use tracedecay_domain::UtcMicros;
+use tracedecay_sql::{Row, params};
 use tracedecay_store::{
     CommandDigestV1, CommitSequenceV1, DurabilityClassV1, IdempotencyIdentityV1,
     OperationPriorityV1, RuntimeBatchCompatibilityV1, RuntimeTransactionIdV1,

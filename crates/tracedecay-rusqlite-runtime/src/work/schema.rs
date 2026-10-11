@@ -336,7 +336,7 @@ DROP TABLE IF EXISTS work_events_v1;
 DROP TABLE IF EXISTS work_owner_cursors_v1;
 ";
 
-pub fn install_work_schema(connection: &Connection) -> rusqlite::Result<()> {
+pub fn install_work_schema(connection: &Connection) -> tracedecay_sql::Result<()> {
     connection.execute_batch(WORK_SCHEMA_V1)?;
     connection.execute_batch(RETIRE_WORK_EVENT_JOURNAL_V1)?;
     connection.execute_batch(WORK_PRODUCT_SCHEMA_V1)

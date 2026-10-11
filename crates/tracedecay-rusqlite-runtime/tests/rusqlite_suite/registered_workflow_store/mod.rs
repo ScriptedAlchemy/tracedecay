@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 
-use rusqlite::{Connection, Savepoint};
 use tempfile::TempDir;
 use tracedecay_domain::LocatorDigest;
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle;
@@ -12,6 +11,7 @@ use tracedecay_rusqlite_runtime::workflow::install_workflow_schema;
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
 };
+use tracedecay_sql::{Connection, Savepoint};
 use tracedecay_store::{
     AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
     StorageRuntimeErrorV1, StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
@@ -26,7 +26,7 @@ impl StorageOperationExecutor for NoTypedWrites {
         &mut self,
         _savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         unreachable!("workflow writes only through the registered exact-SQL channel")
     }
 }
@@ -37,7 +37,7 @@ struct NoTypedReads;
 impl ReaderQueryExecutor for NoTypedReads {
     fn execute_read(
         &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
+        _snapshot: &tracedecay_sql::Transaction<'_>,
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
         unreachable!("workflow reads only through the registered exact-SQL channel")

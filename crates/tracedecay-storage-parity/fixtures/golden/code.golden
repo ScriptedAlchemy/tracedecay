@@ -1,0 +1,3 @@
+# receipt trace
+{"error":"WriterRuntime(Infrastructure { operation: \"closed native operation: native SQLite operation failed: Invalid parameter name: repository attachment does not own record git index transaction\" })","step":"git_index_transaction_rejected"}
+# logical dump

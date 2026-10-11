@@ -17,33 +17,77 @@ pub enum ErrorKind {
     Interrupted,
     ReadOnly,
     Schema,
+    /// The file is not a database or its pages are damaged.
+    Corrupt,
     Denied,
+    /// A statement inside a [`ConnectionControl::with_capability`] scope tried
+    /// to begin, end or (outside its lease) nest a transaction.
+    TransactionControlDenied,
     NoRows,
     Unsupported,
     /// Another process holds the store's exclusive lock. The store is
     /// unavailable to this process; it is not busy and retrying is futile.
     OwnedElsewhere,
     Other,
+    /// The file is not a TraceDecay native store (wrong header or
+    /// application id). Refused before the engine touches it.
+    ForeignFormat,
+    /// COMMIT was stepped and then failed: the transaction may or may not be
+    /// durable. Callers settle by receipt lookup.
+    CommitOutcomeUnknown,
 }
 
 pub trait ErrorExt {
     fn kind(&self) -> ErrorKind;
+
+    /// SQLite's `(primary, extended)` result codes. Exact on the SQLite arm;
+    /// derived from [`ErrorExt::kind`] elsewhere, until callers that persist
+    /// codes match on the kind instead.
+    fn sqlite_codes(&self) -> Option<(i32, i32)> {
+        let code = match self.kind() {
+            ErrorKind::Busy => 5,
+            ErrorKind::Interrupted => 9,
+            ErrorKind::ReadOnly => 8,
+            ErrorKind::Schema => 17,
+            ErrorKind::Corrupt => 11,
+            ErrorKind::Constraint => 19,
+            ErrorKind::Denied | ErrorKind::TransactionControlDenied => 23,
+            ErrorKind::ForeignFormat => 26,
+            ErrorKind::NoRows
+            | ErrorKind::Unsupported
+            | ErrorKind::Other
+            | ErrorKind::CommitOutcomeUnknown => return None,
+        };
+        Some((code, code))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Capability {
     /// Queries and read-only introspection pragmas.
     Reader,
+    /// Caller-supplied SQL on a reader: [`Capability::Reader`] without
+    /// transaction control or savepoints, which would end the reader's
+    /// snapshot.
+    ExactSqlRead,
     /// DML plus idempotent `CREATE TABLE`/`CREATE INDEX` for ledger bootstrap.
     /// Triggers, views, drops, temp objects, ATTACH and protected pragmas are
     /// denied.
     Writer,
-    /// Schema install, repair and maintenance: everything.
+    /// Caller-supplied SQL on the writer. Durable DDL, temp tables and temp
+    /// indexes are allowed. Temp triggers and views, ATTACH, `load_extension`,
+    /// pragmas outside the exact SQL allowlist and transaction control are
+    /// denied; savepoints only when the caller holds a transaction lease.
+    ExactSql { savepoints: bool },
+    /// Schema install, repair and maintenance: everything except ATTACH and
+    /// DETACH.
     Maintenance,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointMode {
+    /// Reports the WAL's frame counts without copying any frame back.
+    Noop,
     Passive,
     Full,
     Restart,
@@ -75,8 +119,11 @@ pub struct FileIdentity {
 pub trait ConnectionControl {
     fn set_capability(&self, capability: Capability) -> crate::Result<()>;
 
-    /// Runs `operation` under `scoped`, then reinstalls `base` and drops cached
-    /// statements compiled under `scoped`, on success, error and unwind.
+    /// Runs `operation` under `scoped`, then reinstalls `base` on success,
+    /// error and unwind. No statement compiled under `scoped` runs under
+    /// `base` without being authorized again. A transaction-control statement
+    /// denied inside the scope makes the scope fail with
+    /// [`ErrorKind::TransactionControlDenied`] whatever `operation` returned.
     fn with_capability<T>(
         &self,
         scoped: Capability,
@@ -100,6 +147,38 @@ pub trait ConnectionControl {
     /// Whether the main database file's pathname no longer names the file the
     /// engine holds open.
     fn file_has_moved(&self) -> crate::Result<bool>;
+}
+
+/// [`ConnectionControl::guard_scope`] for a transaction, whose operation needs
+/// the transaction itself to open savepoints.
+pub trait TransactionControl {
+    fn guard_scope_mut<T>(
+        &mut self,
+        should_interrupt: impl FnMut() -> bool + Send + 'static,
+        operation: impl FnOnce(&mut Self) -> T,
+    ) -> crate::Result<T>;
+}
+
+/// Engine settings every owned-store connection carries: zero busy wait, no
+/// checkpoint on close, resource limits, the statement-cache size and the
+/// engine build checks.
+pub trait EnginePolicy {
+    fn apply_engine_policy(&self) -> crate::Result<()>;
+}
+
+/// Per-statement work counters, reset when read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StatementCounters {
+    pub vm_steps: u64,
+    pub fullscan_steps: u64,
+    pub sort_steps: u64,
+    /// Times the statement was compiled again because the schema or the
+    /// capability changed under it.
+    pub reprepares: u64,
+}
+
+pub trait StatementControl {
+    fn take_counters(&self) -> StatementCounters;
 }
 
 pub const PROGRESS_INTERVAL_OPS: i32 = 1_000;
@@ -164,4 +243,75 @@ pub fn file_identity(_file: &File) -> io::Result<FileIdentity> {
         io::ErrorKind::Unsupported,
         "file identity is unsupported on this platform",
     ))
+}
+
+/// The pragmas [`Capability::ExactSql`] may run, on either engine.
+pub(crate) fn is_allowed_exact_sql_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
+    is_exact_sql_read_pragma(pragma_name, pragma_value)
+        || (pragma_value.is_none() && pragma_name.eq_ignore_ascii_case("shrink_memory"))
+        || pragma_value.is_some_and(|value| {
+            (pragma_name.eq_ignore_ascii_case("foreign_keys")
+                && (value.eq_ignore_ascii_case("on") || value == "1"))
+                || (pragma_name.eq_ignore_ascii_case("defer_foreign_keys")
+                    && (value.eq_ignore_ascii_case("on") || value == "1"))
+                || (pragma_name.eq_ignore_ascii_case("busy_timeout")
+                    && value.parse::<u32>().is_ok())
+                || (pragma_name.eq_ignore_ascii_case("secure_delete")
+                    && (value.eq_ignore_ascii_case("on") || value == "1"))
+                || (pragma_name.eq_ignore_ascii_case("user_version")
+                    && value.parse::<u32>().is_ok())
+                || (pragma_name.eq_ignore_ascii_case("wal_autocheckpoint")
+                    && value.parse::<u32>().is_ok())
+        })
+}
+
+fn is_exact_sql_read_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
+    const ARGUMENT_SAFE: &[&str] = &[
+        "foreign_key_check",
+        "foreign_key_list",
+        "index_info",
+        "index_list",
+        "index_xinfo",
+        "integrity_check",
+        "quick_check",
+        "table_info",
+        "table_list",
+        "table_xinfo",
+    ];
+    const NO_ARGUMENT_ONLY: &[&str] = &[
+        "application_id",
+        "auto_vacuum",
+        "busy_timeout",
+        "cache_size",
+        "collation_list",
+        "compile_options",
+        "data_version",
+        "database_list",
+        "defer_foreign_keys",
+        "foreign_keys",
+        "freelist_count",
+        "function_list",
+        "journal_mode",
+        "mmap_size",
+        "module_list",
+        "page_count",
+        "page_size",
+        "pragma_list",
+        "query_only",
+        "recursive_triggers",
+        "schema_version",
+        "secure_delete",
+        "synchronous",
+        "temp_store",
+        "user_version",
+        "wal_autocheckpoint",
+    ];
+
+    ARGUMENT_SAFE
+        .iter()
+        .any(|candidate| pragma_name.eq_ignore_ascii_case(candidate))
+        || (pragma_value.is_none()
+            && NO_ARGUMENT_ONLY
+                .iter()
+                .any(|candidate| pragma_name.eq_ignore_ascii_case(candidate)))
 }

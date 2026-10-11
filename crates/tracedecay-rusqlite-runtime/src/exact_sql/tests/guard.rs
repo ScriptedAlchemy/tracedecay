@@ -1,3 +1,5 @@
+use tracedecay_sql::ConnectionControl;
+
 use super::*;
 
 #[test]
@@ -173,22 +175,18 @@ fn pinned_batch_allows_schema_install_ddl() {
 
 #[test]
 fn exact_sql_guard_restores_authorizer_after_panic() {
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
-    connection
-        .authorizer(Some(crate::connection::authorize_writer))
-        .unwrap();
+    let connection = Connection::open_in_memory().unwrap();
+    connection.set_capability(Capability::Writer).unwrap();
 
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _: Result<(), ExactSqlError> = with_exact_sql_guard(
             &connection,
-            false,
-            false,
+            Capability::ExactSql { savepoints: false },
+            Capability::Writer,
             None,
             None,
             true,
             None,
-            crate::connection::authorize_writer,
-            true,
             || panic!("exact SQL operation panic"),
         );
     }));

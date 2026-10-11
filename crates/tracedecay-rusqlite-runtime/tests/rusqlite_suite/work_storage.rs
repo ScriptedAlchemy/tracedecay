@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use tracedecay_sql::Connection;
 
 use crate::work_registered_store::RegisteredWorkStore;
 

@@ -139,6 +139,7 @@ async fn compute_profile_owner_operation(
             let request: AdminCliSurfaceRequestV1 =
                 decode_primitive_request(&Value::Object(arguments), operation.mcp_tool_name())?;
             let registry = Box::pin(store_administration.registered_profile_database()).await?;
+            let store_telemetry = store_administration.store_telemetry_sampling();
             GraphToolResultV1::AdminCli(Box::new(
                 Box::pin(
                     tracedecay_mcp::handlers::admin_cli::compute_projectless_admin_cli(
@@ -149,6 +150,7 @@ async fn compute_profile_owner_operation(
                         profile_identity.profile_root(),
                         active_project_root,
                         code_index_schedulers,
+                        Some(&store_telemetry),
                     ),
                 )
                 .await?,

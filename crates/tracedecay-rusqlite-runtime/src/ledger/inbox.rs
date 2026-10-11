@@ -1,9 +1,9 @@
-#[cfg(test)]
-use rusqlite::Row;
-use rusqlite::params;
 use serde::Serialize;
 #[cfg(test)]
 use serde::de::DeserializeOwned;
+#[cfg(test)]
+use tracedecay_sql::Row;
+use tracedecay_sql::params;
 #[cfg(test)]
 use tracedecay_store::TransactionalOutboxEntryV1;
 use tracedecay_store::{

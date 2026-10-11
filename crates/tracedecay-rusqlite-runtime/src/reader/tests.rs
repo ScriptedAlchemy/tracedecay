@@ -8,7 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rusqlite::{Connection, Transaction};
 use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId, ResolvedScope,
@@ -17,6 +16,7 @@ use tracedecay_contracts::{
     },
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId};
+use tracedecay_sql::{Connection, Transaction};
 use tracedecay_store::{
     AdmissionConfigV1, LocatorDigest, OperationPriorityV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOutcomeV1,

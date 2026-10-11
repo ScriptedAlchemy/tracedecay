@@ -1,45 +1,18 @@
-//! One behavior contract for both engine arms. Every case runs under the
-//! default build and under `--config=native`. A case the native arm cannot run
-//! yet is named in `NATIVE_PENDING` and must fail there with
-//! `ErrorKind::Unsupported`; any other native failure, and any pending case
-//! that starts passing, fails the suite.
+//! One behavior contract for both engine arms: every case runs, with the same
+//! assertions, under the default build and under `--config=native`.
 
 use std::time::Duration;
 
 use tracedecay_sql::{
-    Capability, CheckpointMode, Connection, ConnectionControl, ENGINE, Engine, ErrorExt, ErrorKind,
+    Capability, CheckpointMode, Connection, ConnectionControl, ErrorExt, ErrorKind,
     OptionalExtension, Result, TransactionBehavior, params, params_from_iter, types::Value,
 };
-
-const NATIVE_PENDING: &[&str] = &[
-    "busy_is_classified",
-    "capability_scope_denies_and_restores",
-    "guard_scope_interrupts_running_statement",
-];
-
-fn run(name: &str, case: fn() -> Result<()>) {
-    let pending = ENGINE == Engine::Native && NATIVE_PENDING.contains(&name);
-    match case() {
-        Ok(()) => assert!(
-            !pending,
-            "{name} passes on native; remove it from NATIVE_PENDING"
-        ),
-        Err(error) if pending => {
-            assert_eq!(
-                error.kind(),
-                ErrorKind::Unsupported,
-                "{name} is pending on native but failed with {error}"
-            );
-        }
-        Err(error) => panic!("{name}: {error}"),
-    }
-}
 
 macro_rules! conformance {
     ($($name:ident),+ $(,)?) => {$(
         #[test]
-        fn $name() {
-            run(stringify!($name), cases::$name);
+        fn $name() -> Result<()> {
+            cases::$name()
         }
     )+};
 }
@@ -55,6 +28,7 @@ conformance!(
     constraint_is_classified,
     busy_is_classified,
     capability_scope_denies_and_restores,
+    exact_sql_scope_fails_on_swallowed_transaction_control,
     guard_scope_interrupts_running_statement,
     page_stats_and_checkpoint_report_the_file,
 );
@@ -298,6 +272,32 @@ mod cases {
         assert_eq!(trigger.kind(), ErrorKind::Denied, "{trigger}");
         connection.execute("INSERT INTO items (name) VALUES ('restored')", [])?;
         assert_eq!(names(&connection)?, ["restored"]);
+        Ok(())
+    }
+
+    /// Catches an exact SQL scope that succeeds after its operation swallowed a
+    /// transaction-control denial, or a denial that leaks into the next scope.
+    pub(super) fn exact_sql_scope_fails_on_swallowed_transaction_control() -> Result<()> {
+        let connection = Connection::open_in_memory()?;
+        items(&connection)?;
+        connection.set_capability(Capability::Writer)?;
+        let exact_sql = Capability::ExactSql { savepoints: false };
+        let swallowed = connection
+            .with_capability(exact_sql, Capability::Writer, |scoped| {
+                let _ = scoped.execute_batch("BEGIN");
+                scoped.execute("INSERT INTO items (name) VALUES ('scoped')", [])
+            })
+            .expect_err("a denied BEGIN fails the scope");
+        assert_eq!(
+            swallowed.kind(),
+            ErrorKind::TransactionControlDenied,
+            "{swallowed}"
+        );
+        assert!(connection.is_autocommit(), "the denied BEGIN never ran");
+        connection.with_capability(exact_sql, Capability::Writer, |scoped| {
+            scoped.execute("INSERT INTO items (name) VALUES ('clean')", [])
+        })?;
+        assert_eq!(names(&connection)?, ["scoped", "clean"]);
         Ok(())
     }
 

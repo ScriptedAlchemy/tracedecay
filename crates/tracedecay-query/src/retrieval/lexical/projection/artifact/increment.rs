@@ -15,11 +15,11 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use rusqlite::{OptionalExtension, Transaction, params};
 use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, SealedLexicalFileReplacementV1, VerifiedSealedLexicalPageV1,
 };
 use tracedecay_domain::CodeGenerationId;
+use tracedecay_sql::{OptionalExtension, Transaction, params};
 
 use super::builder::page_transient_peak_bytes;
 use super::format::contract_number;

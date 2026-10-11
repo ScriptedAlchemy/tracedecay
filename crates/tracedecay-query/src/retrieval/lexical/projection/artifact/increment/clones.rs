@@ -4,9 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::types::Value;
-use rusqlite::{Transaction, params};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_sql::types::Value;
+use tracedecay_sql::{Transaction, params};
 
 use super::super::builder::stored_digest_key;
 use super::super::clone_codec::digest_key;

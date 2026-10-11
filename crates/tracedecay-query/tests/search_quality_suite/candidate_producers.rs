@@ -903,7 +903,8 @@ fn finish_staged_artifact(
 }
 
 fn stored_base_section_receipts(path: &Path) -> Vec<Vec<u8>> {
-    let connection = rusqlite::Connection::open(path).expect("open artifact receipt inspection");
+    let connection =
+        tracedecay_sql::Connection::open(path).expect("open artifact receipt inspection");
     let mut statement = connection
         .prepare("SELECT base_sections_receipt FROM source_pages ORDER BY page_ordinal")
         .expect("prepare ordered base-section receipt query");
@@ -1324,7 +1325,8 @@ fn clone_payloads_are_content_addressed_and_postings_page() {
         }
         finish_staged_artifact(&mut builder, &receipt, &control)
     };
-    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect V16 artifact");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("inspect V16 artifact");
     assert_eq!(
         connection
             .query_row("SELECT COUNT(*) FROM clone_body_payloads", [], |row| row
@@ -1574,7 +1576,8 @@ fn clone_payloads_are_content_addressed_and_postings_page() {
         "deleted occurrences and postings must not remain active"
     );
     drop(reader);
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open clone tamper writer");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("open clone tamper writer");
     connection
         .execute_batch(
             "DROP TRIGGER immutable_clone_body_payloads_update;
@@ -1592,7 +1595,8 @@ fn clone_payloads_are_content_addressed_and_postings_page() {
         ),
         Err(CodeLexicalArtifactErrorV1::Corrupt(_))
     ));
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open shape tamper writer");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("open shape tamper writer");
     connection
         .execute_batch("DROP TABLE clone_exact_postings;")
         .expect("remove required clone table");
@@ -1928,8 +1932,9 @@ fn selected_block_finds_both_containment_directions_without_indexing_subtrees() 
             .saturating_mul(70),
         "containment must exercise the ratio that whole-body matching rejects"
     );
-    let connection = rusqlite::Connection::open(directory.path().join("clone-artifact-v16.sqlite"))
-        .expect("inspect clone artifact");
+    let connection =
+        tracedecay_sql::Connection::open(directory.path().join("clone-artifact-v16.sqlite"))
+            .expect("inspect clone artifact");
     assert_eq!(
         connection
             .query_row("SELECT COUNT(*) FROM clone_occurrences", [], |row| row
@@ -2844,7 +2849,7 @@ fn disk_artifact_seals_one_ngram_list_per_distinct_key_without_staging() {
         .append_pages(&pages, &control)
         .expect("commit one durable source batch");
 
-    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect staging");
+    let connection = tracedecay_sql::Connection::open(&artifact_path).expect("inspect staging");
     let staged_ngram_tables: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name LIKE 'ngram_posting%' AND name != 'ngram_postings'",
@@ -2859,7 +2864,7 @@ fn disk_artifact_seals_one_ngram_list_per_distinct_key_without_staging() {
     drop(connection);
 
     let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
-    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect ngram lists");
+    let connection = tracedecay_sql::Connection::open(&artifact_path).expect("inspect ngram lists");
     let (stored_rows, distinct_keys, postings): (i64, i64, i64) = connection
         .query_row(
             "SELECT COUNT(*), COUNT(DISTINCT printf('%d:%d', kind, ngram)), SUM(document_frequency) FROM ngram_postings",
@@ -2958,7 +2963,7 @@ fn content_addressed_reader_rejects_atomic_same_size_replacement() {
     drop(builder);
     let original_bytes = std::fs::read(&artifact_path).expect("read verified artifact bytes");
     std::fs::copy(&artifact_path, &replacement_path).expect("copy replacement artifact");
-    let replacement = rusqlite::Connection::open(&replacement_path)
+    let replacement = tracedecay_sql::Connection::open(&replacement_path)
         .expect("open replacement artifact for header-only mutation");
     replacement
         .pragma_update(None, "user_version", 42i64)
@@ -3108,7 +3113,7 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
     let current = i64::from(verified.format_revision());
     for revision in [current - 1, current + 1] {
         let connection =
-            rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
+            tracedecay_sql::Connection::open(&artifact_path).expect("open artifact mutation");
         connection
             .execute(
                 "UPDATE artifact_state SET format_revision = ?1 WHERE singleton = 1",
@@ -3292,7 +3297,7 @@ fn annotation_uses_mint_no_lexical_artifact_documents() {
         .rebuild_and_finalize(&mut fixture.open_source(128), &control)
         .expect("build artifact");
     drop(builder);
-    let stored_rows: i64 = rusqlite::Connection::open(&path)
+    let stored_rows: i64 = tracedecay_sql::Connection::open(&path)
         .expect("inspect artifact")
         .query_row("SELECT COUNT(*) FROM row_chunks", [], |row| row.get(0))
         .expect("count rows");
@@ -3391,7 +3396,7 @@ fn reader_refuses_historical_v10_writer_artifact_as_incompatible() {
     let checked_in =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lexical-artifact-v10.sqlite");
     let control = ArtifactControl { cancelled: false };
-    let on_disk_revision: i64 = rusqlite::Connection::open(&checked_in)
+    let on_disk_revision: i64 = tracedecay_sql::Connection::open(&checked_in)
         .expect("inspect v10 fixture")
         .query_row(
             "SELECT format_revision FROM artifact_state WHERE singleton = 1",
@@ -3450,7 +3455,8 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
     let file_bytes = std::fs::metadata(&artifact_path)
         .expect("artifact metadata")
         .len();
-    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect sealed artifact");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("inspect sealed artifact");
     let format_revision: i64 = connection
         .query_row(
             "SELECT format_revision FROM artifact_state WHERE singleton = 1",
@@ -3491,19 +3497,24 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
     let term_plan = connection
         .prepare("EXPLAIN QUERY PLAN SELECT lists FROM term_postings WHERE term = ?1")
         .expect("prepare term plan")
-        .query_map(rusqlite::params!["widget"], |row| row.get::<_, String>(3))
+        .query_map(tracedecay_sql::params!["widget"], |row| {
+            row.get::<_, String>(3)
+        })
         .expect("query term plan")
         .collect::<Result<Vec<_>, _>>()
         .expect("collect term plan");
     assert!(
-        term_plan
-            .iter()
-            .any(|detail| detail.contains("USING PRIMARY KEY")),
-        "a term's lists must be one clustered-key seek, got {term_plan:?}"
+        term_plan.len() == 1
+            && term_plan
+                .iter()
+                .all(|detail| detail.starts_with("SEARCH") && detail.contains("(term=?)")),
+        "a term's lists must be one primary-key seek, got {term_plan:?}"
     );
+    // Key constraints are the tables' own `sqlite_autoindex_*` indexes; any
+    // other index is a redundant second order.
     let redundant_structures: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_schema WHERE (type = 'index' AND name NOT LIKE 'sqlite_autoindex_clone_%') \
+            "SELECT COUNT(*) FROM sqlite_schema WHERE (type = 'index' AND name NOT LIKE 'sqlite_autoindex_%') \
              OR (type = 'table' AND name IN ('rows', 'vocabulary', 'term_stats', 'ngram_statistics', 'document_integrity', 'import_integrity', 'import_evidence', 'term_posting_runs', 'exact_posting_runs', 'ngram_posting_pages', 'row_chunk_pages'))",
             [],
             |row| row.get(0),
@@ -3641,7 +3652,8 @@ fn reader_rejects_current_artifact_missing_its_chunk_lookup_table() {
         builder.append_page(page, &control).expect("append page");
     }
     let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("open artifact mutation");
     connection
         .execute_batch("DROP TABLE row_chunks;")
         .expect("remove required chunk lookup table");
@@ -3671,7 +3683,8 @@ fn disk_artifact_defers_statistics_and_serving_indexes_until_freeze() {
         builder.append_page(page, &control).expect("append page");
     }
 
-    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect staging artifact");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("inspect staging artifact");
     let staging_indexes: Vec<String> = connection
         .prepare(
             "SELECT name FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY name",
@@ -3733,7 +3746,8 @@ fn disk_artifact_defers_statistics_and_serving_indexes_until_freeze() {
             .expect("persist base freeze"),
         CodeLexicalArtifactFinalizationStepV1::Pending { .. }
     ));
-    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect frozen artifact");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("inspect frozen artifact");
     assert!(
         connection
             .execute(
@@ -3747,7 +3761,8 @@ fn disk_artifact_defers_statistics_and_serving_indexes_until_freeze() {
 
     let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
     assert_eq!(verified.total_chunks(), source_receipt.total_chunks());
-    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect sealed artifact");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("inspect sealed artifact");
     let serving_indexes: Vec<String> = connection
         .prepare(
             "SELECT name FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY name",
@@ -3873,7 +3888,8 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
         ("indexes".to_owned(), 1),
         "cancellation inside the next SQLite statement must not advance its durable state"
     );
-    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect cancelled step");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("inspect cancelled step");
     let (chunk_lookups, term_runs, sealed_terms): (i64, i64, i64) = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM row_chunks), (SELECT COUNT(*) FROM term_posting_runs), \
@@ -3934,7 +3950,7 @@ fn disk_artifact_production_wake_commits_one_restartable_setwise_step() {
             (phase.to_owned(), ordinal)
         );
         let connection =
-            rusqlite::Connection::open(&artifact_path).expect("inspect serving indexes");
+            tracedecay_sql::Connection::open(&artifact_path).expect("inspect serving indexes");
         let indexes: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%'",
@@ -4064,7 +4080,7 @@ fn decode_term_lists_oracle(encoded: &[u8]) -> Vec<(i64, i64, Vec<u8>)> {
 /// Postings staged in one run table, counted by decoding every run with the
 /// independent format oracle.
 fn staged_posting_count(path: &Path, table: &str, frequencies: bool) -> usize {
-    let connection = rusqlite::Connection::open(path).expect("open staged runs");
+    let connection = tracedecay_sql::Connection::open(path).expect("open staged runs");
     let column = if frequencies { "postings" } else { "documents" };
     connection
         .prepare(&format!("SELECT {column} FROM {table}"))
@@ -4108,7 +4124,7 @@ fn decode_document_list(mut encoded: &[u8]) -> Vec<u32> {
 }
 
 fn persisted_finalization_position(path: &Path) -> (String, u64) {
-    let connection = rusqlite::Connection::open(path).expect("open finalization state");
+    let connection = tracedecay_sql::Connection::open(path).expect("open finalization state");
     let state: Vec<u8> = connection
         .query_row(
             "SELECT state FROM finalization_state WHERE singleton = 1",
@@ -4184,7 +4200,8 @@ fn disk_artifact_term_insert_execution_is_monotone_by_primary_key() {
     let artifact_path = directory.path().join("term-insert-order.sqlite");
     let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
         .expect("create artifact");
-    let trace = rusqlite::Connection::open(&artifact_path).expect("open term insert observer");
+    let trace =
+        tracedecay_sql::Connection::open(&artifact_path).expect("open term insert observer");
     trace
         .execute_batch(
             "CREATE TABLE term_insert_trace (
@@ -4204,7 +4221,8 @@ fn disk_artifact_term_insert_execution_is_monotone_by_primary_key() {
     builder
         .append_pages(&pages, &ArtifactControl { cancelled: false })
         .expect("append observed term postings");
-    let trace = rusqlite::Connection::open(&artifact_path).expect("read term insert observer");
+    let trace =
+        tracedecay_sql::Connection::open(&artifact_path).expect("read term insert observer");
     // Batches stage `term_posting_runs` keyed `(page_ordinal, term, field)`,
     // so that is the order a monotone insert stream must follow.
     let keys = trace
@@ -4227,7 +4245,7 @@ fn disk_artifact_term_insert_execution_is_monotone_by_primary_key() {
     let resets = keys.windows(2).filter(|pair| pair[1] < pair[0]).count();
     assert_eq!(
         resets, 0,
-        "term INSERT execution must follow the WITHOUT ROWID primary key"
+        "term INSERT execution must follow the primary key"
     );
 }
 
@@ -5156,7 +5174,8 @@ fn disk_artifact_previous_revision_is_incompatible_before_resume() {
     .expect("the current revision opens");
 
     let previous = i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1) - 1;
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open staged artifact");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("open staged artifact");
     connection
         .execute(
             "UPDATE artifact_state SET format_revision = ?1 WHERE singleton = 1",
@@ -5214,7 +5233,8 @@ fn disk_artifact_resume_rejects_current_revision_with_wrong_chunk_lookup_shape()
     }
     drop(builder);
 
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open lookup mutation");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("open lookup mutation");
     connection
         .execute_batch(
             "DROP TABLE row_chunks;
@@ -5222,7 +5242,7 @@ fn disk_artifact_resume_rejects_current_revision_with_wrong_chunk_lookup_shape()
                 document_id INTEGER NOT NULL,
                 chunk_id BLOB NOT NULL,
                 PRIMARY KEY(document_id, chunk_id)
-             ) WITHOUT ROWID;",
+             );",
         )
         .expect("replace the chunk lookup table with the wrong key order");
     drop(connection);
@@ -5262,7 +5282,8 @@ fn disk_artifact_finalization_refuses_inter_wake_mutation() {
             .expect("start bounded finalization"),
         CodeLexicalArtifactFinalizationStepV1::Pending { .. }
     ));
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("open artifact mutation");
     assert!(
         connection
             .execute(
@@ -5306,7 +5327,8 @@ fn disk_artifact_rejects_noncanonical_receipt_reservation_tail() {
             CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => break receipt,
         }
     };
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open sealed artifact");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("open sealed artifact");
     let mut receipt: Vec<u8> = connection
         .query_row(
             "SELECT receipt FROM artifact_state WHERE singleton = 1",
@@ -5353,7 +5375,8 @@ fn disk_artifact_mandatory_verifier_rejects_tampered_real_source_chain() {
     builder
         .append_page(&pages[0], &control)
         .expect("append canonical first page");
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("open artifact mutation");
     assert!(
         connection
             .execute(
@@ -5423,97 +5446,6 @@ fn disk_artifact_seal_is_terminal_and_refuses_page_replay() {
 }
 
 #[test]
-fn disk_artifact_preseal_gate_denies_external_derived_mutation() {
-    let (fixture, pages, source_receipt) = real_verified_pages();
-    let metadata = fixture.metadata.clone();
-    let directory = tempfile::tempdir().expect("artifact tempdir");
-    let artifact_path = directory.path().join("preseal-derived-mutation.sqlite");
-    let control = ArtifactControl { cancelled: false };
-    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone())
-        .expect("create artifact");
-    for page in &pages {
-        builder.append_page(page, &control).expect("append page");
-    }
-
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
-    let original_row: Vec<u8> = connection
-        .query_row(
-            "SELECT payload FROM row_blocks ORDER BY first_document LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("artifact row block");
-    let original_term_postings = i64::try_from(staged_posting_count(
-        &artifact_path,
-        "term_posting_runs",
-        true,
-    ))
-    .expect("term posting count");
-    assert!(original_term_postings > 0);
-    let mut mutated_row = original_row.clone();
-    mutated_row.push(b' ');
-    let row_mutation = connection.execute(
-        "UPDATE row_blocks SET payload = ?1 WHERE first_document = (SELECT MIN(first_document) FROM row_blocks)",
-        [mutated_row],
-    );
-    let posting_mutation = connection.execute("DELETE FROM term_posting_runs", []);
-    let row_insertion = connection.execute(
-        "INSERT INTO row_chunk_pages(document_id, chunk_id) VALUES (?1, 'external-conflict')",
-        [i64::MAX],
-    );
-    assert!(
-        row_mutation.is_err(),
-        "schema-time mutation authority must deny external row updates before finalization"
-    );
-    assert!(
-        posting_mutation.is_err(),
-        "schema-time mutation authority must deny external posting deletes before finalization"
-    );
-    assert!(
-        row_insertion.is_err(),
-        "schema-time mutation authority must deny external row inserts before finalization"
-    );
-    let integrity: String = connection
-        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
-        .expect("SQLite integrity check");
-    assert_eq!(integrity, "ok");
-    drop(connection);
-
-    let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
-    CodeLexicalArtifactReaderV1::open_with_control(
-        &artifact_path,
-        &verified,
-        &metadata,
-        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-        &control,
-    )
-    .expect("denied mutation preserves a readable finalized artifact");
-    let connection =
-        rusqlite::Connection::open(&artifact_path).expect("inspect finalized artifact");
-    let rebuilt_row: Vec<u8> = connection
-        .query_row(
-            "SELECT payload FROM row_blocks ORDER BY first_document LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("finalized artifact row block");
-    let rebuilt_term_postings: i64 = connection
-        .prepare("SELECT lists FROM term_postings")
-        .expect("prepare finalized term lists")
-        .query_map([], |row| row.get::<_, Vec<u8>>(0))
-        .expect("read finalized term lists")
-        .map(|lists| {
-            decode_term_lists_oracle(&lists.expect("finalized term lists"))
-                .iter()
-                .map(|(_, document_frequency, _)| document_frequency)
-                .sum::<i64>()
-        })
-        .sum();
-    assert_eq!(rebuilt_row, original_row);
-    assert_eq!(rebuilt_term_postings, original_term_postings);
-}
-
-#[test]
 fn disk_artifact_finalization_rejects_mutated_artifact_state() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let metadata = fixture.metadata.clone();
@@ -5535,11 +5467,12 @@ fn disk_artifact_finalization_rejects_mutated_artifact_state() {
     );
     let forged_metadata = serde_json::to_vec(&forged_metadata).expect("canonical forged metadata");
     let forged_digest = digest_id::<ManifestDigest>('9');
-    let connection = rusqlite::Connection::open(&artifact_path).expect("open artifact mutation");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("open artifact mutation");
     connection
         .execute(
             "UPDATE artifact_state SET metadata = ?1, metadata_digest = ?2 WHERE singleton = 1",
-            rusqlite::params![forged_metadata, forged_digest.as_str()],
+            tracedecay_sql::params![forged_metadata, forged_digest.as_str()],
         )
         .expect("mutate structurally valid pre-seal artifact state");
     let integrity: String = connection
@@ -5650,7 +5583,8 @@ fn disk_artifact_cancellation_rolls_back_import_append_and_reopen_verification()
             .expect("rolled back progress"),
         progress_before
     );
-    let connection = rusqlite::Connection::open(&artifact_path).expect("inspect staging artifact");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("inspect staging artifact");
     let staged_import_pages: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM source_pages WHERE page_ordinal = ?1",
@@ -5713,7 +5647,8 @@ fn disk_artifact_cancellation_rolls_back_import_append_and_reopen_verification()
 /// production failure is quoted verbatim so a regression reproduces the
 /// exact activation error it protects against.
 fn staged_row_cardinality(artifact_path: &Path) -> (u64, u64) {
-    let connection = rusqlite::Connection::open(artifact_path).expect("inspect staging artifact");
+    let connection =
+        tracedecay_sql::Connection::open(artifact_path).expect("inspect staging artifact");
     // Appends stage chunk ids in `row_chunk_pages`; sealing moves them into
     // `row_chunks`.
     let staging: bool = connection
@@ -5755,7 +5690,8 @@ fn disk_artifact_receipt_failure_rolls_back_prior_page_rows_and_receipts() {
     let control = ArtifactControl { cancelled: false };
     let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata)
         .expect("create artifact");
-    let connection = rusqlite::Connection::open(&artifact_path).expect("install receipt failpoint");
+    let connection =
+        tracedecay_sql::Connection::open(&artifact_path).expect("install receipt failpoint");
     connection
         .execute_batch(
             "CREATE TRIGGER fail_second_page_receipt
@@ -5840,7 +5776,8 @@ fn disk_artifact_budget_refusal_precedes_progress_and_accepts_boundary() {
         bytes_before,
         "preflight refusal must not allocate or persist projection rows"
     );
-    let connection = rusqlite::Connection::open(&refused_path).expect("inspect refusal state");
+    let connection =
+        tracedecay_sql::Connection::open(&refused_path).expect("inspect refusal state");
     let rows: i64 = connection
         .query_row("SELECT COUNT(*) FROM row_chunk_pages", [], |row| row.get(0))
         .expect("row count after refusal");

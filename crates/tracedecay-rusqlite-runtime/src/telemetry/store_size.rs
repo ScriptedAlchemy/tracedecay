@@ -113,6 +113,13 @@ impl SqliteStoreSizeTelemetryPort {
                     store: store.clone(),
                 };
             }
+            // Per-table bytes come from SQLite's `dbstat`, which the native
+            // engine does not provide.
+            if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Native {
+                return TableGrowthTelemetryReadV1::Unsupported {
+                    store: store.clone(),
+                };
+            }
             let handle = self.handle.clone();
             let reader_wait = self.reader_wait;
             let context = context.clone();

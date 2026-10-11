@@ -10,6 +10,7 @@ use thiserror::Error;
 pub use tracedecay_code_index::clones::CloneSelectedBlockV1;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 use tracedecay_runtime_core::path_safety::{SqliteDatabasePathError, sqlite_database_path};
+use tracedecay_sql::{Capability, ConnectionControl, ErrorExt, ErrorKind};
 
 mod builder;
 mod clone_census;
@@ -166,7 +167,7 @@ fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeLexic
     }
 }
 
-fn sqlite_error(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
+fn sqlite_error(error: tracedecay_sql::Error) -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Io(error.to_string())
 }
 
@@ -185,11 +186,12 @@ fn sqlite_open_path(path: &Path) -> Result<PathBuf, CodeLexicalArtifactErrorV1> 
     })
 }
 
-fn sqlite_corrupt(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
-    match error.sqlite_error_code() {
-        Some(
-            rusqlite::ffi::ErrorCode::DatabaseCorrupt | rusqlite::ffi::ErrorCode::NotADatabase,
-        ) => CodeLexicalArtifactErrorV1::Corrupt(error.to_string()),
+fn sqlite_corrupt(error: tracedecay_sql::Error) -> CodeLexicalArtifactErrorV1 {
+    match error.kind() {
+        // The native engine reports a damaged header as a foreign format.
+        ErrorKind::Corrupt | ErrorKind::ForeignFormat => {
+            CodeLexicalArtifactErrorV1::Corrupt(error.to_string())
+        }
         _ => CodeLexicalArtifactErrorV1::Io(error.to_string()),
     }
 }
@@ -224,8 +226,9 @@ fn open_builder_connection(
     path: &Path,
     durability: BuilderDurabilityV1,
     memory_budget_bytes: usize,
-) -> Result<rusqlite::Connection, CodeLexicalArtifactErrorV1> {
-    let connection = rusqlite::Connection::open(sqlite_open_path(path)?).map_err(sqlite_error)?;
+) -> Result<tracedecay_sql::Connection, CodeLexicalArtifactErrorV1> {
+    let connection =
+        tracedecay_sql::Connection::open(sqlite_open_path(path)?).map_err(sqlite_error)?;
     match durability {
         BuilderDurabilityV1::Unpublished => {
             connection
@@ -291,12 +294,17 @@ fn open_builder_connection(
             if temp_store_file { "FILE" } else { "MEMORY" },
         )
         .map_err(sqlite_error)?;
+    // The builder installs the private schema, its triggers and every
+    // finalization drop on this one connection.
+    connection
+        .set_capability(Capability::Maintenance)
+        .map_err(sqlite_error)?;
     Ok(connection)
 }
 
 /// Commit the staging file's following writes into its WAL. Idempotent.
 fn enter_resumable_journal(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     set_journal_mode(connection, "wal")
 }
@@ -304,7 +312,7 @@ fn enter_resumable_journal(
 /// Fold the WAL into the staging file and return it to a rollback journal,
 /// syncing both. Idempotent; a no-op outside WAL.
 fn leave_resumable_journal(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     {
         let _span = tracing::trace_span!("query.artifact.staging.journal_fold").entered();
@@ -313,11 +321,13 @@ fn leave_resumable_journal(
 }
 
 fn set_journal_mode(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     mode: &str,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let granted: String = connection
-        .pragma_update_and_check(None, "journal_mode", mode, |row| row.get(0))
+        .query_row(&format!("PRAGMA journal_mode = {mode}"), [], |row| {
+            row.get(0)
+        })
         .map_err(sqlite_error)?;
     if granted.eq_ignore_ascii_case(mode) {
         Ok(())
@@ -339,8 +349,8 @@ fn set_journal_mode(
 /// in memory; the connection returns to file-backed storage afterwards so
 /// finalization keeps its threaded sorter.
 fn with_memory_statement_journals<T>(
-    connection: &mut rusqlite::Connection,
-    append: impl FnOnce(&mut rusqlite::Connection) -> Result<T, CodeLexicalArtifactErrorV1>,
+    connection: &mut tracedecay_sql::Connection,
+    append: impl FnOnce(&mut tracedecay_sql::Connection) -> Result<T, CodeLexicalArtifactErrorV1>,
 ) -> Result<T, CodeLexicalArtifactErrorV1> {
     select_temp_store(connection, true)?;
     let appended = append(connection);
@@ -353,7 +363,7 @@ fn with_memory_statement_journals<T>(
 /// the transaction it governs. Memory storage also disables the sorter's
 /// spill and helper threads: an `ORDER BY` then holds its whole input.
 fn select_temp_store(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     memory: bool,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     connection
@@ -364,7 +374,7 @@ fn select_temp_store(
 /// CPU units one builder statement occupies: the builder thread plus every
 /// SQLite sorter helper the connection was granted.
 fn builder_sorter_cpu_units(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     let effective_sorter_workers: i64 = connection
         .pragma_query_value(None, "threads", |row| row.get(0))
@@ -384,11 +394,47 @@ fn builder_sorter_cpu_units(
 }
 
 fn with_builder_sorter_cpu_admission<T>(
-    connection: &rusqlite::Connection,
+    connection: &tracedecay_sql::Connection,
     operation: impl FnOnce() -> T,
 ) -> Result<T, CodeLexicalArtifactErrorV1> {
     let admitted_units = builder_sorter_cpu_units(connection)?;
     Ok(tracedecay_code_index::parallelism::with_background_cpu_permits(admitted_units, operation))
+}
+
+/// The `EXPLAIN QUERY PLAN` detail lines of `sql`, so tests pin a
+/// statement's access path (`SEARCH` on a key, no `SCAN`, no temporary
+/// b-tree for its order) on either engine.
+#[cfg(test)]
+fn query_plan(
+    connection: &tracedecay_sql::Connection,
+    sql: &str,
+    params: impl tracedecay_sql::Params,
+) -> Vec<String> {
+    let mut statement = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("prepare query plan");
+    let mut rows = statement.query(params).expect("read query plan");
+    let mut details = Vec::new();
+    while let Some(row) = rows.next().expect("step query plan") {
+        details.push(row.get::<_, String>(3).expect("query plan detail"));
+    }
+    details
+}
+
+/// Plan lines that walk a whole table or index.
+#[cfg(test)]
+fn full_scans(plan: &[String]) -> usize {
+    plan.iter()
+        .filter(|detail| detail.starts_with("SCAN"))
+        .count()
+}
+
+/// Plan lines that sort through a temporary b-tree.
+#[cfg(test)]
+fn temporary_sorts(plan: &[String]) -> usize {
+    plan.iter()
+        .filter(|detail| detail.contains("USE TEMP B-TREE"))
+        .count()
 }
 
 #[cfg(test)]
@@ -404,7 +450,7 @@ mod tests {
         open_builder_connection, with_memory_statement_journals,
     };
 
-    fn temp_store(connection: &rusqlite::Connection) -> i64 {
+    fn temp_store(connection: &tracedecay_sql::Connection) -> i64 {
         connection
             .pragma_query_value(None, "temp_store", |row| row.get(0))
             .expect("temp-store pragma")
@@ -498,8 +544,8 @@ mod tests {
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         )
         .expect("builder connection");
-        let capability_probe =
-            rusqlite::Connection::open_in_memory().expect("open SQLite worker capability probe");
+        let capability_probe = tracedecay_sql::Connection::open_in_memory()
+            .expect("open SQLite worker capability probe");
         capability_probe
             .pragma_update(None, "threads", i64::MAX)
             .expect("probe SQLite worker ceiling");
@@ -625,7 +671,7 @@ mod sorter_identity_tests {
                     ngram INTEGER NOT NULL, documents BLOB NOT NULL,
                     cardinality INTEGER NOT NULL,
                     PRIMARY KEY(page_ordinal, kind, ngram)
-                ) WITHOUT ROWID;",
+                );",
             )
             .expect("create ngram identity fixture");
         let transaction = connection.transaction().expect("seed ngram fixture");
@@ -636,7 +682,7 @@ mod sorter_identity_tests {
             for page in 0..64i64 {
                 for ngram in (0..512i64).rev() {
                     insert
-                        .execute(rusqlite::params![
+                        .execute(tracedecay_sql::params![
                             page,
                             ngram % 2,
                             ngram,

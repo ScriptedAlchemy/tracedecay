@@ -7213,7 +7213,6 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "filetime",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -7229,6 +7228,7 @@ dependencies = [
  "tracedecay-lcm",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
+ "tracedecay-sql",
  "tracedecay-store",
  "tracedecay-store-runtime",
  "tracedecay-tool-catalog",
@@ -7418,7 +7418,6 @@ dependencies = [
  "hmac",
  "rayon",
  "roaring",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -7432,6 +7431,7 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
+ "tracedecay-sql",
  "tracedecay-temporal-query",
  "tracing",
  "zeroize",
@@ -7486,6 +7486,7 @@ dependencies = [
  "tokio",
  "tracedecay-contracts",
  "tracedecay-domain",
+ "tracedecay-sql",
  "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracing",
@@ -7699,6 +7700,24 @@ dependencies = [
  "tracing",
  "turso_core",
  "turso_parser",
+]
+
+[[package]]
+name = "tracedecay-storage-parity"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracedecay-contracts",
+ "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-runtime-core",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-sql",
+ "tracedecay-store",
 ]
 
 [[package]]

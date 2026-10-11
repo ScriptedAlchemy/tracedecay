@@ -5,6 +5,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::Capability;
 
 fn execution_guard() -> ExecutionGuard {
     ExecutionGuard::new(
@@ -16,107 +17,212 @@ fn execution_guard() -> ExecutionGuard {
 
 fn database() -> (tempfile::TempDir, Database) {
     let directory = tempfile::tempdir().unwrap();
-    let database = Database::open(&directory.path().join("native.db")).unwrap();
+    let database = Database::open(&directory.path().join("native.tdb")).unwrap();
     (directory, database)
 }
 
+fn verdict(sql: &str, capability: Capability) -> std::result::Result<(), String> {
+    let (command, _) = policy::dialect().parse(sql).unwrap();
+    policy::authorize(&command.unwrap(), capability).map_err(|error| error.to_string())
+}
+
+/// Catches a native verdict that diverges from the SQLite arm's authorizers,
+/// including the prototype's Writer that allowed CREATE TRIGGER and VIEW.
 #[test]
-fn native_reader_and_transaction_boundaries_are_enforced() {
-    let (_directory, database) = database();
-    let mut writer = database.connect(Access::Writer).unwrap();
-    let guard = execution_guard();
-    writer
-        .execute(
-            "CREATE TABLE entries(id INTEGER PRIMARY KEY, body TEXT NOT NULL)",
+fn capability_verdicts_match_the_sqlite_authorizers() {
+    use Capability::{Maintenance, Reader, Writer};
+    let cases: &[(&str, &[Capability], &[Capability])] = &[
+        ("SELECT 1", &[Reader, Writer, Maintenance], &[]),
+        (
+            "INSERT INTO t VALUES (1)",
+            &[Writer, Maintenance],
+            &[Reader],
+        ),
+        ("EXPLAIN DELETE FROM t", &[Writer, Maintenance], &[Reader]),
+        (
+            "CREATE TABLE IF NOT EXISTS t (x)",
+            &[Writer, Maintenance],
+            &[Reader],
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS i ON t (x)",
+            &[Writer, Maintenance],
+            &[Reader],
+        ),
+        ("CREATE TEMP TABLE t (x)", &[Maintenance], &[Reader, Writer]),
+        (
+            "CREATE TRIGGER g AFTER INSERT ON t BEGIN SELECT 1; END",
+            &[Maintenance],
+            &[Reader, Writer],
+        ),
+        (
+            "CREATE VIEW v AS SELECT 1",
+            &[Maintenance],
+            &[Reader, Writer],
+        ),
+        (
+            "CREATE TEMP TRIGGER g AFTER INSERT ON t BEGIN SELECT 1; END",
             &[],
-            &guard,
-        )
-        .unwrap();
-    let mut reader = database.connect(Access::Reader).unwrap();
-    for sql in [
-        "INSERT INTO entries(body) VALUES('forbidden')",
-        "EXPLAIN DELETE FROM entries",
-        "PRAGMA query_only=OFF",
-        "PRAGMA foreign_keys=OFF",
-        "BEGIN",
-        "ATTACH ':memory:' AS other",
-    ] {
-        assert!(
-            matches!(reader.query(sql, &[], &guard), Err(Error::Denied(_))),
-            "{sql}"
-        );
-    }
-    for sql in [
-        "COMMIT",
-        "END",
-        "SAVEPOINT injected",
-        "ROLLBACK",
-        "PRAGMA writable_schema=ON",
-        "CREATE TEMP TRIGGER bad AFTER INSERT ON entries BEGIN DELETE FROM entries; END",
-        "CREATE TEMP VIEW bad AS SELECT * FROM entries",
-    ] {
-        assert!(
-            matches!(writer.execute_batch(sql, &guard), Err(Error::Denied(_))),
-            "{sql}"
-        );
-    }
-    assert!(matches!(
-        reader.begin(TransactionBehavior::Immediate, &guard),
-        Err(Error::Denied(_))
-    ));
-    assert!(matches!(reader.checkpoint(&guard), Err(Error::Denied(_))));
-    assert!(matches!(
-        reader.set_full_durability(&guard),
-        Err(Error::Denied(_))
-    ));
-    writer.set_full_durability(&guard).unwrap();
-    assert!(matches!(
-        writer.execute("PRAGMA secure_delete=ON", &[], &guard),
-        Err(Error::Unsupported(_))
-    ));
-    assert!(matches!(
-        reader.query("PRAGMA secure_delete", &[], &guard),
-        Err(Error::Unsupported(_))
-    ));
-    writer
-        .begin(TransactionBehavior::Immediate, &guard)
-        .unwrap();
-    writer
-        .execute(
-            "INSERT INTO entries(body) VALUES(?)",
-            &[Value::Text("first".to_owned())],
-            &guard,
-        )
-        .unwrap();
-    writer.savepoint("owned_1", &guard).unwrap();
-    writer
-        .execute(
-            "INSERT INTO entries(body) VALUES('rolled back')",
+            &[Reader, Writer, Maintenance],
+        ),
+        (
+            "CREATE VIEW temp.v AS SELECT 1",
             &[],
-            &guard,
-        )
-        .unwrap();
-    writer.rollback_savepoint("owned_1").unwrap();
-    writer.release_savepoint("owned_1", &guard).unwrap();
-    writer.commit(&guard).unwrap();
-    assert_eq!(
-        reader
-            .query("SELECT body FROM entries", &[], &guard)
-            .unwrap()
-            .values,
-        vec![vec![Value::Text("first".to_owned())]]
+            &[Reader, Writer, Maintenance],
+        ),
+        ("DROP TABLE t", &[Maintenance], &[Reader, Writer]),
+        ("DROP TRIGGER temp.g", &[], &[Reader, Writer, Maintenance]),
+        (
+            "ALTER TABLE t ADD COLUMN y",
+            &[Maintenance],
+            &[Reader, Writer],
+        ),
+        (
+            "ATTACH ':memory:' AS other",
+            &[],
+            &[Reader, Writer, Maintenance],
+        ),
+        ("VACUUM", &[], &[Reader, Writer, Maintenance]),
+        ("BEGIN IMMEDIATE", &[Reader, Writer, Maintenance], &[]),
+        ("SAVEPOINT s", &[Reader, Writer, Maintenance], &[]),
+        ("PRAGMA journal_mode", &[Reader, Writer, Maintenance], &[]),
+        ("PRAGMA table_info(t)", &[Reader, Writer, Maintenance], &[]),
+        (
+            "PRAGMA wal_checkpoint(TRUNCATE)",
+            &[Writer, Maintenance],
+            &[Reader],
+        ),
+        (
+            "PRAGMA auto_vacuum = 'incremental'",
+            &[Maintenance],
+            &[Reader, Writer],
+        ),
+        (
+            "PRAGMA incremental_vacuum(8)",
+            &[Maintenance],
+            &[Reader, Writer],
+        ),
+        ("PRAGMA query_only = OFF", &[Maintenance], &[Reader, Writer]),
+        (
+            "PRAGMA foreign_keys = OFF",
+            &[Maintenance],
+            &[Reader, Writer],
+        ),
+        (
+            "PRAGMA writable_schema = ON",
+            &[Maintenance],
+            &[Reader, Writer],
+        ),
+    ];
+    for (sql, allowed, denied) in cases {
+        for capability in *allowed {
+            assert_eq!(
+                verdict(sql, *capability),
+                Ok(()),
+                "{sql} under {capability:?}"
+            );
+        }
+        for capability in *denied {
+            assert!(
+                verdict(sql, *capability).is_err(),
+                "{sql} must be denied under {capability:?}"
+            );
+        }
+    }
+    assert!(
+        verdict("PRAGMA secure_delete = ON", Maintenance)
+            .is_err_and(|error| error.contains("secure deletion")),
+        "secure delete is refused, never silently accepted"
     );
 }
 
+/// Catches exact SQL capabilities that diverge from the SQLite arm: caller
+/// SQL ending or nesting the runtime's transaction, savepoints without a
+/// lease, a read scope that writes, or a pragma outside the exact SQL
+/// allowlist.
 #[test]
-fn native_stored_objects_and_nested_expressions_cannot_load_extensions() {
+fn exact_sql_capabilities_match_the_sqlite_authorizer() {
     let (_directory, database) = database();
-    let mut writer = database.connect(Access::Writer).unwrap();
+    let mut connection = database.connect(Access::Writer).unwrap();
     let guard = execution_guard();
-    writer
-        .execute(
-            "CREATE TABLE entries(id INTEGER PRIMARY KEY, body TEXT)",
+    connection
+        .execute("CREATE TABLE t(x)", &[], &guard)
+        .unwrap();
+    let denied_control = |connection: &mut Connection, sql: &str| {
+        assert!(
+            matches!(
+                connection.execute(sql, &[], &guard),
+                Err(Error::TransactionControlDenied)
+            ),
+            "{sql} must be denied as transaction control"
+        );
+    };
+
+    connection.set_capability(Capability::ExactSql { savepoints: false });
+    denied_control(&mut connection, "BEGIN");
+    denied_control(&mut connection, "SAVEPOINT s");
+    assert!(connection.is_autocommit());
+    connection
+        .execute("CREATE TEMP TABLE scratch(x)", &[], &guard)
+        .unwrap();
+    connection
+        .execute("INSERT INTO t VALUES (1)", &[], &guard)
+        .unwrap();
+    connection
+        .execute("PRAGMA user_version = 7", &[], &guard)
+        .unwrap();
+    assert!(matches!(
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)", &[], &guard),
+        Err(Error::Denied(_))
+    ));
+    assert!(matches!(
+        connection.execute(
+            "CREATE TEMP TRIGGER g AFTER INSERT ON t BEGIN SELECT 1; END",
             &[],
+            &guard
+        ),
+        Err(Error::Denied(_))
+    ));
+
+    connection.set_capability(Capability::ExactSql { savepoints: true });
+    connection.execute("SAVEPOINT s", &[], &guard).unwrap();
+    connection
+        .execute("INSERT INTO t VALUES (2)", &[], &guard)
+        .unwrap();
+    connection.execute("ROLLBACK TO s", &[], &guard).unwrap();
+    connection.execute("RELEASE s", &[], &guard).unwrap();
+    denied_control(&mut connection, "BEGIN");
+    assert!(connection.is_autocommit());
+
+    connection.set_capability(Capability::ExactSqlRead);
+    assert!(matches!(
+        connection.execute("INSERT INTO t VALUES (3)", &[], &guard),
+        Err(Error::Denied(_))
+    ));
+    denied_control(&mut connection, "SAVEPOINT r");
+
+    connection.set_capability(Capability::Writer);
+    let rows = connection
+        .query("SELECT x FROM t ORDER BY x", &[], &guard)
+        .unwrap();
+    assert_eq!(rows.values, vec![vec![Value::Integer(1)]]);
+    let version = connection
+        .query("PRAGMA user_version", &[], &guard)
+        .unwrap();
+    assert_eq!(version.values, vec![vec![Value::Integer(7)]]);
+}
+
+/// Catches a dialect that resolves extension loading or a catalog object
+/// outside the allowlist, in direct SQL or a stored trigger body.
+#[test]
+fn denied_functions_and_catalog_objects_never_resolve() {
+    let (_directory, database) = database();
+    let mut connection = database.connect(Access::Writer).unwrap();
+    connection.set_capability(Capability::Maintenance);
+    let guard = execution_guard();
+    connection
+        .execute_batch(
+            "CREATE TABLE entries(id INTEGER PRIMARY KEY, body TEXT)",
             &guard,
         )
         .unwrap();
@@ -124,55 +230,52 @@ fn native_stored_objects_and_nested_expressions_cannot_load_extensions() {
         "SELECT load_extension('missing')",
         "SELECT CASE WHEN 0 THEN load_extension('missing') ELSE 'safe' END",
         "SELECT \"load_extension\"('missing')",
+        "SELECT nextval('s')",
     ] {
         assert!(
-            writer.query(sql, &[], &guard).is_err(),
-            "{sql} must not load an extension"
+            matches!(connection.query(sql, &[], &guard), Err(Error::Denied(_))),
+            "{sql}"
         );
     }
-    assert_eq!(
-        writer.query("SELECT 1", &[], &guard).unwrap().values,
-        vec![vec![Value::Integer(1)]]
-    );
-    // A view can defer expression resolution until read. The policy is installed
-    // on the native dialect, so the later compiled access still rejects loading.
-    let created = writer.execute(
-        "CREATE VIEW dangerous AS SELECT load_extension('missing') AS result",
-        &[],
-        &guard,
-    );
-    if created.is_ok() {
+    if connection
+        .execute(
+            "CREATE TRIGGER dangerous AFTER INSERT ON entries BEGIN SELECT load_extension('x'); END",
+            &[],
+            &guard,
+        )
+        .is_ok()
+    {
         assert!(
-            writer
-                .query("SELECT * FROM dangerous", &[], &guard)
-                .is_err()
+            connection
+                .execute("INSERT INTO entries(body) VALUES ('fires')", &[], &guard)
+                .is_err(),
+            "a stored trigger body cannot load an extension"
         );
     }
-    let trigger = writer.execute("CREATE TRIGGER dangerous_insert AFTER INSERT ON entries BEGIN SELECT load_extension('missing'); END", &[], &guard);
-    if trigger.is_ok() {
+    for table in ["sqlite_dbpage", "btree_dump", "turso_types"] {
         assert!(
-            writer
-                .execute("INSERT INTO entries(body) VALUES('safe')", &[], &guard)
-                .is_err()
+            connection
+                .query(&format!("SELECT * FROM {table}"), &[], &guard)
+                .is_err(),
+            "{table} must not resolve"
         );
+    }
+    for sql in [
+        "SELECT count(*) FROM json_each('[1,2]')",
+        "SELECT count(*) FROM pragma_table_info('entries')",
+    ] {
         assert_eq!(
-            writer
-                .query("SELECT count(*) FROM entries", &[], &guard)
-                .unwrap()
-                .values,
-            vec![vec![Value::Integer(0)]]
+            connection.query(sql, &[], &guard).unwrap().values,
+            vec![vec![Value::Integer(2)]],
+            "{sql}"
         );
-        writer
-            .execute("DROP TRIGGER main.dangerous_insert", &[], &guard)
-            .unwrap();
-        writer
-            .execute("INSERT INTO entries(body) VALUES('safe')", &[], &guard)
-            .unwrap();
     }
 }
 
+/// Catches a progress guard that loses the interrupt reason, and a commit or
+/// rollback that a revoked guard can strand.
 #[test]
-fn cancellation_and_revocation_interrupt_native_vm_and_preserve_rollback() {
+fn guards_interrupt_with_their_reason_and_never_strand_rollback() {
     let (_directory, database) = database();
     let mut writer = database.connect(Access::Writer).unwrap();
     let guard = execution_guard();
@@ -184,19 +287,31 @@ fn cancellation_and_revocation_interrupt_native_vm_and_preserve_rollback() {
         )
         .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
+    let authority_calls = Arc::clone(&calls);
     let revoked = ExecutionGuard::new(
         Some(Instant::now() + Duration::from_secs(30)),
         Arc::new(AtomicBool::new(false)),
         Some(Arc::new(move || {
-            if calls.fetch_add(1, Ordering::SeqCst) >= 4 {
+            if authority_calls.fetch_add(1, Ordering::SeqCst) >= 4 {
                 Err("revoked".to_owned())
             } else {
                 Ok(())
             }
         })),
     );
-    let result = writer.query("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) FROM n", &[], &revoked);
-    assert!(matches!(result, Err(Error::Authority(message)) if message == "revoked"));
+    let result = writer.query(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) FROM n",
+        &[],
+        &revoked,
+    );
+    assert!(
+        matches!(&result, Err(Error::Authority(message)) if message == "revoked"),
+        "{result:?}"
+    );
+    assert!(
+        calls.load(Ordering::SeqCst) >= 5,
+        "the guard ran mid-statement"
+    );
     writer
         .begin(TransactionBehavior::Immediate, &guard)
         .unwrap();
@@ -207,6 +322,7 @@ fn cancellation_and_revocation_interrupt_native_vm_and_preserve_rollback() {
     cancelled.cancelled.store(true, Ordering::Release);
     assert!(matches!(writer.commit(&cancelled), Err(Error::Cancelled)));
     writer.rollback().unwrap();
+    assert!(writer.is_autocommit());
     assert_eq!(
         writer
             .query("SELECT count(*) FROM entries", &[], &execution_guard())
@@ -221,6 +337,8 @@ fn cancellation_and_revocation_interrupt_native_vm_and_preserve_rollback() {
     ));
 }
 
+/// Catches a batch that applies its first statements before a later one is
+/// refused, and an unbounded materialized result.
 #[test]
 fn whole_batch_is_authorized_before_first_write_and_results_are_bounded() {
     let (_directory, database) = database();
@@ -235,7 +353,7 @@ fn whole_batch_is_authorized_before_first_write_and_results_are_bounded() {
         .unwrap();
     assert!(matches!(
         writer.execute_batch(
-            "INSERT INTO entries(body) VALUES('must not apply'); COMMIT",
+            "INSERT INTO entries(body) VALUES('must not apply'); ATTACH ':memory:' AS other",
             &guard
         ),
         Err(Error::Denied(_))
@@ -247,13 +365,18 @@ fn whole_batch_is_authorized_before_first_write_and_results_are_bounded() {
             .values,
         vec![vec![Value::Integer(0)]]
     );
-    assert!(matches!(writer.query("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10001) SELECT x FROM n", &[], &guard), Err(Error::QueryLimitExceeded)));
-    assert_eq!(
-        writer.query("SELECT 1", &[], &guard).unwrap().values,
-        vec![vec![Value::Integer(1)]]
-    );
+    assert!(matches!(
+        writer.query(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10001) SELECT x FROM n",
+            &[],
+            &guard
+        ),
+        Err(Error::QueryLimitExceeded)
+    ));
 }
 
+/// Catches lost committed rows or a leaked uncommitted transaction across a
+/// drop and reopen.
 #[test]
 fn drop_rolls_back_and_reopen_retains_only_committed_values() {
     let (directory, database) = database();
@@ -278,7 +401,7 @@ fn drop_rolls_back_and_reopen_retains_only_committed_values() {
             .unwrap();
     }
     drop(database);
-    let reopened = Database::open(&directory.path().join("native.db")).unwrap();
+    let reopened = Database::open(&directory.path().join("native.tdb")).unwrap();
     let mut reader = reopened.connect(Access::Reader).unwrap();
     assert_eq!(
         reader
@@ -309,70 +432,182 @@ fn foreign_keys_and_constraint_refusals_remain_typed() {
             &guard,
         )
         .unwrap_err();
-    assert!(error.is_deterministic_refusal());
+    assert!(error.is_deterministic_refusal(), "{error:?}");
     assert!(!error.is_transient_read_failure());
     assert!(!error.requires_transaction_retry());
-    writer
-        .execute("INSERT INTO parents(id) VALUES(9)", &[], &guard)
+    assert!(Error::Engine(turso_core::LimboError::WriteWriteConflict).requires_transaction_retry());
+}
+
+/// Catches a second engine instance on one file: the second open must see the
+/// first open's write lock, also when it names the file by another path.
+#[test]
+fn in_process_opens_share_one_engine_by_file_identity() {
+    let (directory, first) = database();
+    let guard = execution_guard();
+    let mut holder = first.connect(Access::Writer).unwrap();
+    holder.execute("CREATE TABLE t(x)", &[], &guard).unwrap();
+    holder
+        .begin(TransactionBehavior::Immediate, &guard)
         .unwrap();
-    writer
-        .execute(
-            "INSERT INTO children(id,parent_id) VALUES(1,9)",
-            &[],
-            &guard,
-        )
+    holder
+        .execute("INSERT INTO t VALUES (1)", &[], &guard)
         .unwrap();
-    let error = writer
-        .execute(
-            "INSERT INTO children(id,parent_id) VALUES(1,9)",
-            &[],
-            &guard,
-        )
-        .unwrap_err();
-    assert!(error.is_deterministic_refusal());
-    assert!(
-        writer
-            .query("PRAGMA foreign_key_check", &[], &guard)
-            .unwrap()
-            .values
-            .is_empty()
-    );
+    let alias = directory.path().join("alias.tdb");
+    std::fs::hard_link(directory.path().join("native.tdb"), &alias).unwrap();
+    for path in [directory.path().join("native.tdb"), alias] {
+        let second = Database::open(&path).unwrap();
+        let mut contender = second.connect(Access::Writer).unwrap();
+        contender.set_busy_timeout(Duration::ZERO);
+        assert!(
+            matches!(
+                contender.execute("INSERT INTO t VALUES (2)", &[], &guard),
+                Err(Error::Busy)
+            ),
+            "{} opened a second engine instance",
+            path.display()
+        );
+    }
+    holder.commit(&guard).unwrap();
+}
+
+/// Catches an engine that opens, rewrites or stamps a file that is not a
+/// TraceDecay native store.
+#[test]
+fn foreign_files_are_refused_before_the_engine_touches_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let sqlite = directory.path().join("foreign.db");
+    rusqlite::Connection::open(&sqlite)
+        .unwrap()
+        .execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (1);")
+        .unwrap();
+    let short = directory.path().join("short.tdb");
+    std::fs::write(&short, [0_u8; 50]).unwrap();
+    let garbage = directory.path().join("garbage.tdb");
+    std::fs::write(&garbage, vec![7_u8; 4096]).unwrap();
+    for path in [sqlite, short, garbage] {
+        let before = std::fs::read(&path).unwrap();
+        assert!(
+            matches!(
+                Database::open(&path),
+                Err(Error::Engine(turso_core::LimboError::NotADB))
+            ),
+            "{} must be refused",
+            path.display()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before, "{}", path.display());
+        let mut wal = path.clone().into_os_string();
+        wal.push("-wal");
+        assert!(!std::path::Path::new(&wal).exists(), "{}", path.display());
+    }
+
+    let (directory, fresh) = database();
+    let guard = execution_guard();
+    let mut connection = fresh.connect(Access::Writer).unwrap();
     assert_eq!(
-        writer
-            .query("SELECT id, parent_id FROM children", &[], &guard)
+        connection
+            .query("PRAGMA application_id", &[], &guard)
             .unwrap()
             .values,
-        vec![vec![Value::Integer(1), Value::Integer(9)]]
+        vec![vec![Value::Integer(0x5444_4E31)]]
+    );
+    connection
+        .query("PRAGMA wal_checkpoint(TRUNCATE)", &[], &guard)
+        .unwrap();
+    drop(connection);
+    drop(fresh);
+    let header = std::fs::read(directory.path().join("native.tdb")).unwrap();
+    assert_eq!(&header[..16], b"SQLite format 3\0");
+    assert_eq!(&header[68..72], b"TDN1");
+
+    // A creation that crashed before its stamp reached the main file leaves
+    // only the engine's unstamped first page; reopening finishes the stamp.
+    let path = directory.path().join("native.tdb");
+    let unstamp = |path: &std::path::Path| {
+        let mut bytes = std::fs::read(path).unwrap();
+        bytes[68..72].fill(0);
+        std::fs::write(path, bytes).unwrap();
+    };
+    unstamp(&path);
+    let resumed = Database::open(&path).unwrap();
+    let mut connection = resumed.connect(Access::Writer).unwrap();
+    connection
+        .execute("CREATE TABLE t(x)", &[], &guard)
+        .unwrap();
+    connection
+        .query("PRAGMA wal_checkpoint(TRUNCATE)", &[], &guard)
+        .unwrap();
+    drop(connection);
+    drop(resumed);
+    assert_eq!(&std::fs::read(&path).unwrap()[68..72], b"TDN1");
+    unstamp(&path);
+    assert!(
+        matches!(
+            Database::open(&path),
+            Err(Error::Engine(turso_core::LimboError::NotADB))
+        ),
+        "an unstamped store with content is not adopted"
     );
 }
 
-#[cfg(unix)]
+/// Catches the engine reaching a path other than its main file and WAL.
 #[test]
-fn native_pinned_file_identity_rejects_replacement_and_unlink_recreate() {
+fn confined_io_admits_only_the_main_file_and_its_wal() {
+    use turso_core::{IO, OpenFlags};
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("held.db");
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(&path)
+    let main = directory.path().join("store.tdb");
+    let file = confined_io::open_regular(&main, true).unwrap();
+    let identity = confined_io::held_identity(&file).unwrap();
+    let main = main.to_str().unwrap().to_owned();
+    let io = confined_io::ConfinedIo::new(main.clone(), file, identity).unwrap();
+    let elsewhere = directory.path().join("elsewhere");
+    for path in [
+        elsewhere.to_str().unwrap().to_owned(),
+        format!("{main}-journal"),
+        format!("{main}-shm"),
+    ] {
+        assert!(
+            io.open_file(&path, OpenFlags::Create, false).is_err(),
+            "{path}"
+        );
+        assert!(!std::path::Path::new(&path).exists(), "{path}");
+    }
+    assert!(io.remove_file(&main).is_err());
+    assert!(std::path::Path::new(&main).exists());
+    io.open_file(&main, OpenFlags::Create, false).unwrap();
+    #[cfg(unix)]
+    {
+        let target = directory.path().join("target");
+        std::fs::write(&target, b"").unwrap();
+        std::os::unix::fs::symlink(&target, format!("{main}-wal")).unwrap();
+        assert!(
+            io.open_file(&format!("{main}-wal"), OpenFlags::Create, false)
+                .is_err(),
+            "a symlinked WAL is refused"
+        );
+        std::fs::remove_file(format!("{main}-wal")).unwrap();
+    }
+    io.open_file(&format!("{main}-wal"), OpenFlags::Create, false)
         .unwrap();
-    let database = Database::open_pinned(&path, file).unwrap();
+    io.remove_file(&format!("{main}-wal")).unwrap();
+}
+
+/// Catches a connection that keeps using a store whose pathname now names a
+/// different file.
+#[test]
+fn identity_fence_rejects_replacement_and_unlink_recreate() {
+    let (directory, database) = database();
+    let path = directory.path().join("native.tdb");
     let guard = execution_guard();
     let mut writer = database.connect(Access::Writer).unwrap();
     writer
-        .execute(
-            "CREATE TABLE entries(id INTEGER PRIMARY KEY, body TEXT)",
-            &[],
-            &guard,
-        )
+        .execute("CREATE TABLE entries(body TEXT)", &[], &guard)
         .unwrap();
     writer
-        .execute("INSERT INTO entries(body) VALUES('original')", &[], &guard)
+        .execute("INSERT INTO entries VALUES('original')", &[], &guard)
         .unwrap();
-    let staged = directory.path().join("renamed.db");
+    let staged = directory.path().join("renamed.tdb");
     std::fs::rename(&path, &staged).unwrap();
-    std::fs::write(&path, b"replacement must never become the held database").unwrap();
+    std::fs::write(&path, b"replacement").unwrap();
     assert!(matches!(
         database.connect(Access::Reader),
         Err(Error::Denied(_))
@@ -393,51 +628,305 @@ fn native_pinned_file_identity_rejects_replacement_and_unlink_recreate() {
     std::fs::remove_file(&path).unwrap();
     std::fs::write(&path, b"new inode").unwrap();
     assert!(matches!(
-        writer.execute(
-            "INSERT INTO entries(body) VALUES('must not apply')",
-            &[],
-            &guard
-        ),
+        writer.execute("INSERT INTO entries VALUES('must not apply')", &[], &guard),
         Err(Error::Denied(_))
     ));
 }
 
-#[cfg(unix)]
+/// (voluntary context switches, CPU clock ticks) of the calling thread.
+#[cfg(target_os = "linux")]
+fn thread_scheduling() -> (u64, u64) {
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let voluntary = status
+        .lines()
+        .find_map(|line| line.strip_prefix("voluntary_ctxt_switches:"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let stat = std::fs::read_to_string("/proc/thread-self/stat").unwrap();
+    let fields: Vec<&str> = stat.rsplit_once(") ").unwrap().1.split(' ').collect();
+    let ticks = fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap();
+    (voluntary, ticks)
+}
+
+/// Catches a busy wait that pumps the no-op IO loop instead of sleeping, and
+/// a sleep that outlives the statement deadline.
+#[cfg(target_os = "linux")]
 #[test]
-fn pathname_only_registry_entry_cannot_satisfy_descriptor_bound_attachment() {
-    let (directory, pathname_database) = database();
-    let path = directory.path().join("native.db");
+fn busy_waits_sleep_within_the_deadline_instead_of_spinning() {
+    let (_directory, database) = database();
     let guard = execution_guard();
-    let mut writer = pathname_database.connect(Access::Writer).unwrap();
-    writer
-        .execute(
-            "CREATE TABLE entries(id INTEGER PRIMARY KEY, body TEXT NOT NULL)",
-            &[],
-            &guard,
-        )
+    let mut holder = database.connect(Access::Writer).unwrap();
+    holder.execute("CREATE TABLE t(x)", &[], &guard).unwrap();
+    holder
+        .begin(TransactionBehavior::Immediate, &guard)
         .unwrap();
-    writer
-        .execute(
-            "INSERT INTO entries(body) VALUES('pathname-owned')",
-            &[],
-            &guard,
-        )
+    holder
+        .execute("INSERT INTO t VALUES (1)", &[], &guard)
         .unwrap();
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-        .unwrap();
+    let mut contender = database.connect(Access::Writer).unwrap();
+    contender.set_busy_timeout(Duration::from_millis(400));
+    let (switches, ticks) = thread_scheduling();
+    let started = Instant::now();
+    let result = contender.execute("INSERT INTO t VALUES (2)", &[], &guard);
+    let elapsed = started.elapsed();
+    let (switches_after, ticks_after) = thread_scheduling();
+    assert!(matches!(result, Err(Error::Busy)), "{result:?}");
+    assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
     assert!(
-        Database::open_pinned(&path, file).is_err(),
-        "a pathname-open registry entry cannot satisfy a descriptor-bound open"
+        switches_after - switches >= 5,
+        "the wait slept {} times",
+        switches_after - switches
     );
-    assert_eq!(
-        writer
-            .query("SELECT body FROM entries", &[], &guard)
+    let cpu = Duration::from_millis((ticks_after - ticks) * 10);
+    assert!(cpu * 2 <= elapsed, "{cpu:?} of CPU over {elapsed:?}");
+
+    contender.set_busy_timeout(Duration::from_secs(30));
+    let bounded = ExecutionGuard::new(
+        Some(Instant::now() + Duration::from_millis(150)),
+        Arc::new(AtomicBool::new(false)),
+        None,
+    );
+    let started = Instant::now();
+    let result = contender.execute("INSERT INTO t VALUES (3)", &[], &bounded);
+    assert!(matches!(result, Err(Error::DeadlineExceeded)), "{result:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    holder.commit(&guard).unwrap();
+}
+
+/// Catches authority baked into a compiled or cached statement.
+#[test]
+fn compiled_statements_are_readmitted_under_the_current_capability() {
+    let (_directory, database) = database();
+    let connection = database.connect(Access::Writer).unwrap();
+    connection.run_batch("CREATE TABLE t(x)").unwrap();
+    let insert = "INSERT INTO t VALUES (1)";
+    let cached = connection.prepare(insert, true).unwrap();
+    connection.recycle(cached);
+    connection.set_capability(Capability::Reader);
+    assert!(matches!(
+        connection.prepare(insert, true),
+        Err(Error::Denied(_))
+    ));
+    connection.set_capability(Capability::Writer);
+    let mut held = connection.prepare(insert, false).unwrap();
+    connection.set_capability(Capability::Reader);
+    assert!(matches!(connection.admit(&mut held), Err(Error::Denied(_))));
+    connection.set_capability(Capability::Writer);
+    connection.admit(&mut held).unwrap();
+    while connection.step(&mut held).unwrap() {}
+
+    let revoked = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&revoked);
+    connection.push_guard(ExecutionGuard::new(
+        None,
+        Arc::new(AtomicBool::new(false)),
+        Some(Arc::new(move || {
+            if flag.load(Ordering::SeqCst) {
+                Err("revoked".to_owned())
+            } else {
+                Ok(())
+            }
+        })),
+    ));
+    let mut select = connection.prepare("SELECT count(*) FROM t", true).unwrap();
+    connection.admit(&mut select).unwrap();
+    assert!(connection.step(&mut select).unwrap());
+    connection.recycle(select);
+    revoked.store(true, Ordering::SeqCst);
+    let mut select = connection.prepare("SELECT count(*) FROM t", true).unwrap();
+    assert!(matches!(
+        connection.admit(&mut select),
+        Err(Error::Authority(message)) if message == "revoked"
+    ));
+    connection.pop_guard();
+}
+
+#[cfg(td_engine = "native")]
+mod driver {
+    use std::time::Duration;
+
+    use crate::{Capability, CheckpointMode, Connection, ConnectionControl, ErrorExt, ErrorKind};
+
+    fn open() -> (tempfile::TempDir, std::path::PathBuf, Connection) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("driver.tdb");
+        let connection = Connection::open(&path).unwrap();
+        (directory, path, connection)
+    }
+
+    /// Catches a COMMIT failure reported as an ordinary error, which a writer
+    /// would settle as rolled back.
+    #[test]
+    fn commit_failure_after_commit_starts_is_outcome_unknown() {
+        let (_directory, _path, mut connection) = open();
+        connection
+            .execute_batch(
+                "CREATE TABLE parents(id INTEGER PRIMARY KEY); \
+                 CREATE TABLE children(id INTEGER PRIMARY KEY, parent_id INTEGER \
+                 REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED)",
+            )
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute("INSERT INTO children VALUES (1, 9)", [])
+            .unwrap();
+        let error = transaction.commit().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::CommitOutcomeUnknown, "{error}");
+    }
+
+    /// Catches a statement cache that serves a program compiled under one
+    /// capability to another, and a stale program after DDL.
+    #[test]
+    fn cached_statements_follow_capability_and_schema() {
+        let (_directory, _path, connection) = open();
+        connection.execute_batch("CREATE TABLE t(a)").unwrap();
+        connection.set_capability(Capability::Writer).unwrap();
+        connection.execute("INSERT INTO t VALUES (1)", []).unwrap();
+        let denied = connection
+            .with_capability(Capability::Reader, Capability::Writer, |reader| {
+                reader.execute("INSERT INTO t VALUES (2)", [])
+            })
+            .unwrap_err();
+        assert_eq!(denied.kind(), ErrorKind::Denied, "{denied}");
+        let mut held = connection.prepare("INSERT INTO t VALUES (3)").unwrap();
+        let denied = connection
+            .with_capability(Capability::Reader, Capability::Writer, |_| held.execute([]))
+            .unwrap_err();
+        assert_eq!(denied.kind(), ErrorKind::Denied, "{denied}");
+        held.execute([]).unwrap();
+        drop(held);
+
+        connection.set_capability(Capability::Maintenance).unwrap();
+        let columns = |connection: &Connection| {
+            connection
+                .prepare_cached("SELECT * FROM t")
+                .unwrap()
+                .query_row([], |row| Ok(row.get_ref(1).is_ok()))
+                .unwrap()
+        };
+        assert!(!columns(&connection));
+        connection
+            .execute_batch("DROP TABLE t; CREATE TABLE t(a, b); INSERT INTO t VALUES (1, 2)")
+            .unwrap();
+        assert!(
+            columns(&connection),
+            "the cached program saw the old schema"
+        );
+    }
+
+    /// Catches materialized results: a driver query streams past the facade's
+    /// row bound and releases its read when dropped mid-way.
+    #[test]
+    fn rows_stream_and_release_their_read() {
+        let (_directory, path, connection) = open();
+        connection.execute_batch("CREATE TABLE t(x)").unwrap();
+        let mut statement = connection
+            .prepare(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000) \
+                 SELECT x FROM n",
+            )
+            .unwrap();
+        let count = statement
+            .query_map([], |row| row.get::<_, i64>(0))
             .unwrap()
-            .values,
-        vec![vec![Value::Text("pathname-owned".to_owned())]]
-    );
-    drop(pathname_database);
+            .count();
+        assert_eq!(count, 20_000);
+        connection
+            .execute("INSERT INTO t VALUES (1), (2), (3)", [])
+            .unwrap();
+        let mut select = connection.prepare("SELECT x FROM t").unwrap();
+        let mut rows = select.query([]).unwrap();
+        assert!(rows.next().unwrap().is_some());
+        drop(rows);
+        let checkpointer = Connection::open(&path).unwrap();
+        checkpointer.busy_timeout(Duration::ZERO).unwrap();
+        let outcome = checkpointer.checkpoint(CheckpointMode::Truncate).unwrap();
+        assert!(!outcome.busy, "a dropped Rows still holds its read");
+    }
+
+    /// Catches an interrupt handle that cannot stop a running statement.
+    #[test]
+    fn interrupt_handle_stops_a_running_statement() {
+        let (_directory, _path, connection) = open();
+        let handle = connection.get_interrupt_handle();
+        let interrupter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            handle.interrupt();
+        });
+        let error = connection
+            .query_row(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) \
+                 SELECT count(*) FROM n",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_err();
+        interrupter.join().unwrap();
+        assert_eq!(error.kind(), ErrorKind::Interrupted, "{error}");
+        let after: i64 = connection
+            .query_row("SELECT 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(after, 1);
+    }
+
+    /// Catches a control surface that is missing or answers wrongly on native:
+    /// every checkpoint mode, WAL mode with no automatic checkpoint, and file
+    /// identity.
+    #[test]
+    fn control_surface_reports_the_store() {
+        let (directory, path, connection) = open();
+        let mode: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        connection
+            .execute_batch("CREATE TABLE t(payload BLOB)")
+            .unwrap();
+        let mut insert = connection.prepare("INSERT INTO t VALUES (?1)").unwrap();
+        for _ in 0..1_200 {
+            insert.execute([vec![0_u8; 4_000]]).unwrap();
+        }
+        drop(insert);
+        let passive = connection.checkpoint(CheckpointMode::Passive).unwrap();
+        assert!(
+            passive.log_frames >= 1_200,
+            "an automatic checkpoint ran: {passive:?}"
+        );
+        for mode in [
+            CheckpointMode::Full,
+            CheckpointMode::Restart,
+            CheckpointMode::Truncate,
+        ] {
+            let outcome = connection.checkpoint(mode).unwrap();
+            assert!(!outcome.busy, "{mode:?}: {outcome:?}");
+        }
+        let mut wal = path.clone().into_os_string();
+        wal.push("-wal");
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), 0);
+        assert!(!connection.file_has_moved().unwrap());
+        let moved = directory.path().join("moved.tdb");
+        std::fs::rename(&path, &moved).unwrap();
+        assert!(connection.file_has_moved().unwrap());
+        std::fs::rename(&moved, &path).unwrap();
+        assert!(!connection.file_has_moved().unwrap());
+    }
+
+    /// Catches a driver open that accepts a SQLite file another engine owns.
+    #[test]
+    fn opening_a_foreign_sqlite_file_is_foreign_format() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("foreign.db");
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE t(x)")
+            .unwrap();
+        let error = Connection::open(&path).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::ForeignFormat, "{error}");
+    }
 }

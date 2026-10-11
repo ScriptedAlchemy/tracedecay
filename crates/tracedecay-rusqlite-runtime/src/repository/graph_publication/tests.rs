@@ -4,9 +4,9 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use rusqlite::Savepoint;
 use tempfile::TempDir;
 use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMicros};
+use tracedecay_sql::Savepoint;
 use tracedecay_store::{
     AdmissionConfigV1, GraphDependencyGenerationClosureDigestV1,
     GraphDependencyGenerationIdentityV1, GraphGenerationIdV1, GraphNamespaceV1,
@@ -38,7 +38,7 @@ impl StorageOperationExecutor for NoWrites {
         &mut self,
         _savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         Ok(())
     }
 }
@@ -49,7 +49,7 @@ struct NoReads;
 impl ReaderQueryExecutor for NoReads {
     fn execute_read(
         &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
+        _snapshot: &tracedecay_sql::Transaction<'_>,
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
         unreachable!("exact SQL queries bypass the closed product read executor")
@@ -75,7 +75,7 @@ impl Fixture {
     fn new_for_shard(shard_id: tracedecay_store::StoreShardIdV1) -> Self {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("graph-publication.sqlite3");
-        drop(rusqlite::Connection::open(&path).unwrap());
+        drop(tracedecay_sql::Connection::open(&path).unwrap());
         let path = path.canonicalize().unwrap();
         let binding = StoreRuntimeBindingV1::new(
             shard_id,

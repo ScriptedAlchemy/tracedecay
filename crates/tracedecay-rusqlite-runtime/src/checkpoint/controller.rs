@@ -219,7 +219,7 @@ impl WriterCheckpointController {
         }
     }
 
-    pub(crate) fn connection_mut(&mut self) -> &mut rusqlite::Connection {
+    pub(crate) fn connection_mut(&mut self) -> &mut tracedecay_sql::Connection {
         self.driver.connection_mut()
     }
 }

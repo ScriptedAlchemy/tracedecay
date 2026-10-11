@@ -4,8 +4,8 @@ mod validation;
 
 use std::{error::Error, fmt};
 
-use rusqlite::Savepoint;
 use tracedecay_domain::ObservationSourceCursorV1;
+use tracedecay_sql::Savepoint;
 use tracedecay_store::{
     CursorAdvanceLedgerDisagreementV1, OutboxEffectStateV1, RepositoryWritePayloadV1,
     RuntimeSubmitRequestV1, StorageRuntimeContractErrorV1, TransactionalInboxReceiptV1,
@@ -22,13 +22,13 @@ pub trait StorageOperationExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()>;
+    ) -> tracedecay_sql::Result<()>;
 
     fn enqueue_outbox(
         &mut self,
         savepoint: &Savepoint<'_>,
         entry: &TransactionalOutboxEntryV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         if entry.state == OutboxEffectStateV1::Pending {
             self.execute(
                 savepoint,
@@ -43,7 +43,7 @@ pub trait StorageOperationExecutor {
         &mut self,
         savepoint: &Savepoint<'_>,
         entry: &TransactionalOutboxEntryV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         self.execute(
             savepoint,
             &RepositoryWritePayloadV1::ApplyInbox(Box::new(entry.clone())),
@@ -54,7 +54,7 @@ pub trait StorageOperationExecutor {
         &mut self,
         _savepoint: &Savepoint<'_>,
         _receipt: &TransactionalInboxReceiptV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         Ok(())
     }
 
@@ -71,7 +71,7 @@ pub trait StorageOperationExecutor {
 #[derive(Debug)]
 pub enum StorageOperationError {
     Contract(StorageRuntimeContractErrorV1),
-    Native(rusqlite::Error),
+    Native(tracedecay_sql::Error),
     ObservationSourceCursorConflict {
         expected: Box<Option<ObservationSourceCursorV1>>,
         actual: Box<Option<ObservationSourceCursorV1>>,
@@ -111,8 +111,8 @@ impl Error for StorageOperationError {
     }
 }
 
-impl From<rusqlite::Error> for StorageOperationError {
-    fn from(error: rusqlite::Error) -> Self {
+impl From<tracedecay_sql::Error> for StorageOperationError {
+    fn from(error: tracedecay_sql::Error) -> Self {
         Self::Native(error)
     }
 }
@@ -122,7 +122,7 @@ impl StorageOperationExecutor for Box<dyn StorageOperationExecutor + Send> {
         &mut self,
         savepoint: &Savepoint<'_>,
         payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         (**self).execute(savepoint, payload)
     }
 
@@ -130,7 +130,7 @@ impl StorageOperationExecutor for Box<dyn StorageOperationExecutor + Send> {
         &mut self,
         savepoint: &Savepoint<'_>,
         entry: &TransactionalOutboxEntryV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         (**self).enqueue_outbox(savepoint, entry)
     }
 
@@ -138,7 +138,7 @@ impl StorageOperationExecutor for Box<dyn StorageOperationExecutor + Send> {
         &mut self,
         savepoint: &Savepoint<'_>,
         entry: &TransactionalOutboxEntryV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         (**self).apply_inbox(savepoint, entry)
     }
 
@@ -146,7 +146,7 @@ impl StorageOperationExecutor for Box<dyn StorageOperationExecutor + Send> {
         &mut self,
         savepoint: &Savepoint<'_>,
         receipt: &TransactionalInboxReceiptV1,
-    ) -> rusqlite::Result<()> {
+    ) -> tracedecay_sql::Result<()> {
         (**self).acknowledge_outbox(savepoint, receipt)
     }
 
