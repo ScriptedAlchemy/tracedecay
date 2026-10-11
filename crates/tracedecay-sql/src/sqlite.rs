@@ -304,6 +304,7 @@ fn install_authorizer(
     transaction_control_denied: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
     census::trace(connection, capability);
+    crate::stmt_profile::trace_sqlite(connection);
     connection.authorizer(Some(move |context: AuthContext<'_>| {
         if denies_transaction_control(capability, &context.action) {
             if let Some(denied) = &transaction_control_denied {
