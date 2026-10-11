@@ -8,7 +8,8 @@ use tracedecay_runtime_core::db::{
 };
 use tracedecay_store::{
     ObservationProjection, PROJECTION_TERMINAL_RETRY_MICROS, PROVIDER_USAGE_PROJECTOR_VERSION,
-    ProjectedObservation, ProjectionBatchItem, ProjectionDrainBatch, ProjectionPersistOutcome,
+    ProjectedObservation, ProjectionBatchItem, ProjectionCheckpoint, ProjectionDrainBatch,
+    ProjectionPersistOutcome,
     ProjectionPredecessorConvergence, ProjectionRebuildOutcome, ProjectionSkipReason,
     ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
     SESSION_MESSAGE_PROJECTOR_VERSION_V4, SESSION_MESSAGE_PROJECTOR_VERSION_V5,
@@ -212,24 +213,37 @@ pub async fn project_queued_observations(
         .await
         .map_err(|error| storage("begin projection window transaction", error))?;
     let now_micros = tracedecay_contracts::clock::now_micros().0;
+    // The output-state cache and checkpoint are window-scoped inside one
+    // write transaction: the writer keeps the temp rows current itself, the
+    // read snapshot cannot observe foreign commits mid-window, and the
+    // intermediate checkpoint rows are only durable at commit. Reading and
+    // writing them once per window replaces two statements per item.
+    ensure_projection_output_state_cache(&transaction).await?;
+    let mut checkpoint = read_checkpoint(&transaction).await?;
+    let initial_sequence = checkpoint.last_sequence();
     let heads = ready_projection_heads(&transaction, now_micros, max).await?;
     let mut items = Vec::new();
-    for (observation_id, ready) in heads {
+    for (observation_id, queued_sequence, ready) in heads {
         if !ready {
             break;
         }
         // Boxed for the same reason as the scalar drain: the collision-guarded
         // apply subtree overflows the base-opt worker stack when inlined.
-        match Box::pin(project_observation_in_transaction_with_session(
+        match Box::pin(project_window_item_in_transaction(
             &transaction,
             &observation_id,
+            queued_sequence,
+            checkpoint,
         ))
         .await
         {
-            Ok((outcome, session_id)) => items.push(ProjectionBatchItem {
-                outcome,
-                session_id,
-            }),
+            Ok((outcome, session_id, next_checkpoint)) => {
+                checkpoint = next_checkpoint;
+                items.push(ProjectionBatchItem {
+                    outcome,
+                    session_id,
+                });
+            }
             Err(error) => {
                 transaction.rollback().await.map_err(|rollback_error| {
                     storage("rollback failed projection window", rollback_error)
@@ -237,6 +251,9 @@ pub async fn project_queued_observations(
                 return Err(error);
             }
         }
+    }
+    if checkpoint.last_sequence() != initial_sequence {
+        write_checkpoint(&transaction, checkpoint.last_sequence()).await?;
     }
     let has_more = projection_queue_has_items(&transaction).await?;
     transaction
@@ -256,10 +273,10 @@ async fn ready_projection_heads(
     conn: &impl QueryExecutor,
     now_micros: i64,
     max: usize,
-) -> ProjectionStoreResult<Vec<(CanonicalObservationIdV1, bool)>> {
+) -> ProjectionStoreResult<Vec<(CanonicalObservationIdV1, u64, bool)>> {
     let mut rows = conn
         .query(
-            "SELECT observation_id, next_retry_at_micros <= ?2
+            "SELECT observation_id, observation_sequence, next_retry_at_micros <= ?2
              FROM projection_queue
              WHERE next_retry_at_micros < ?3
                AND NOT EXISTS (
@@ -288,17 +305,115 @@ async fn ready_projection_heads(
         let observation_id = row
             .get::<String>(0)
             .map_err(|error| storage("decode projection queue head", error))?;
+        let sequence = decode_sequence(
+            row.get::<i64>(1)
+                .map_err(|error| storage("decode projection queue head", error))?,
+            "decode projection queue head",
+        )?;
         let ready = row
-            .get::<i64>(1)
+            .get::<i64>(2)
             .map_err(|error| storage("decode projection queue head", error))?
             != 0;
         heads.push((
             CanonicalObservationIdV1::new(observation_id)
                 .map_err(ProjectionStoreError::Contract)?,
+            sequence,
             ready,
         ));
     }
     Ok(heads)
+}
+
+/// The window-scoped variant of [`project_observation_in_transaction_with_session`]:
+/// queue-head selection, output-state cache setup, and checkpoint bookkeeping
+/// already ran once for the whole window, so the item only pays for its own
+/// observation read, derivation, guarded write, and queue consumption. The
+/// queue-row sequence came from the window's head select inside this same
+/// transaction, replacing the per-item `queued_sequence` probe. Returns the
+/// advanced checkpoint for the caller's single end-of-window write.
+async fn project_window_item_in_transaction(
+    transaction: &impl Executor,
+    observation_id: &CanonicalObservationIdV1,
+    queued: u64,
+    checkpoint: ProjectionCheckpoint,
+) -> ProjectionStoreResult<(ProjectionPersistOutcome, String, ProjectionCheckpoint)> {
+    let Some((sequence, observation)) = read_observation(transaction, observation_id).await? else {
+        return Err(ProjectionStoreError::ObservationNotFound);
+    };
+    if sequence != queued {
+        return Err(ProjectionStoreError::NotQueued);
+    }
+    let session_id = observation.source().session_id().as_str().to_owned();
+    let mut effect = derive_projection_with_alias(transaction, &observation).await?;
+    if sequence <= checkpoint.last_sequence() {
+        verify_effect(transaction, &observation, &effect).await?;
+        if !matches!(
+            effect,
+            ObservationProjection::Skipped(
+                ProjectionSkipReason::InvalidContract
+                    | ProjectionSkipReason::NativeSourceSuperseded
+                    | ProjectionSkipReason::SourceRecordRetired
+            )
+        ) {
+            record_canonical_observation_effect(transaction, sequence, &observation, &effect)
+                .await?;
+        }
+        consume_projection_queue_item(transaction, observation_id).await?;
+        return Ok((
+            ProjectionPersistOutcome::ExactDuplicate(checkpoint.clone()),
+            session_id,
+            checkpoint,
+        ));
+    }
+    let expected = checkpoint.last_sequence().saturating_add(1);
+    if sequence != expected {
+        return Err(ProjectionStoreError::Gap {
+            expected,
+            actual: sequence,
+        });
+    }
+
+    // Boxed: the collision-guarded write composes the whole apply subtree;
+    // inlining it into the drain future overflows the base-opt worker stack.
+    Box::pin(write_effect_converging_collisions(
+        transaction,
+        &CollisionGuardedWrite::Drain,
+        sequence,
+        &observation,
+        &mut effect,
+    ))
+    .await?;
+    if !matches!(
+        effect,
+        ObservationProjection::Skipped(
+            ProjectionSkipReason::InvalidContract
+                | ProjectionSkipReason::NativeSourceSuperseded
+                | ProjectionSkipReason::SourceRecordRetired
+        )
+    ) {
+        record_canonical_observation_effect(transaction, sequence, &observation, &effect).await?;
+    }
+    // A genuine session collision stays on its queue row with last_error set
+    // and a terminal deadline. The checkpoint still advances, and head
+    // selection skips that row, so later observations project.
+    if !queue_row_is_terminal_collision(transaction, observation_id).await? {
+        consume_projection_queue_item(transaction, observation_id).await?;
+    }
+    let checkpoint = ProjectionCheckpoint::new(sequence);
+    let output_count = effect.output_count();
+    let outcome = match effect {
+        ObservationProjection::Message(_) | ObservationProjection::Composite { .. } => {
+            ProjectionPersistOutcome::Projected(ProjectedObservation::new(
+                checkpoint.clone(),
+                output_count,
+            ))
+        }
+        ObservationProjection::Skipped(reason) => ProjectionPersistOutcome::Skipped {
+            checkpoint: checkpoint.clone(),
+            reason,
+        },
+    };
+    Ok((outcome, session_id, checkpoint))
 }
 
 async fn projection_queue_has_items(conn: &impl QueryExecutor) -> ProjectionStoreResult<bool> {
