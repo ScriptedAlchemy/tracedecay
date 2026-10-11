@@ -272,29 +272,16 @@ fn reset_refused_project_graph_store(
             ),
         });
     }
-    let family_member = |suffix: &str| {
-        let mut path = graph_db_path.clone().into_os_string();
-        path.push(suffix);
-        PathBuf::from(path)
-    };
-    for suffix in tracedecay_store::StoreFile::TEMP_DIR_SUFFIXES {
-        let path = family_member(suffix);
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                    message: format!("failed to remove {}: {error}", path.display()),
-                });
-            }
-        }
-    }
+    // The verification open above already cleared and removed a native
+    // store's temporary directory, so only the files remain.
     for suffix in std::iter::once("").chain(
         tracedecay_store::StoreFile::SIDECAR_SUFFIXES
             .iter()
             .copied(),
     ) {
-        let path = family_member(suffix);
+        let mut path = graph_db_path.clone().into_os_string();
+        path.push(suffix);
+        let path = PathBuf::from(path);
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

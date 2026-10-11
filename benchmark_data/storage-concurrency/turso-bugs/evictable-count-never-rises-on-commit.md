@@ -45,3 +45,12 @@ count for a cached dirty, unspilled page. Measured over five interleaved runs
 engine `native-h2` against `native-base`), writer thread only: cycles:u
 65.2 G to 59.5 G (-8.7%), instructions:u 99.3 G to 97.9 G, fastest ingest
 16.9 s to 15.4 s.
+
+Pinned by `spill_check_work_per_commit_stays_flat_as_the_store_grows` in
+`crates/tracedecay-sql/src/native/tests.rs`. It counts the cache entries
+`count_evictable_pages` walks, through the thread-local counter that
+`scripts/bazel/patches/turso_core-page-cache-walk-counter.patch` adds. The
+test runs six commits of 600 one-page rows each against a 200-page cache.
+With the fix every commit walks about 1,200 entries. Without the
+`notify_page_clean` call the walks per commit go 1,182, 20,800, 27,000,
+28,000, 28,800 and 28,000.
