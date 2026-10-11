@@ -90,3 +90,20 @@ impl<T: SessionTemporalExec> SessionTemporalExec for QueryCountingConnection<'_,
         SessionTemporalExec::execute_batch(self.inner, sql)
     }
 }
+
+/// The engine's VM steps for running `sql` to completion on a raw driver
+/// connection: a work measure that grows with the rows a statement visits.
+pub(crate) fn statement_vm_steps(
+    connection: &tracedecay_sql::Connection,
+    sql: &str,
+    params: impl tracedecay_sql::Params,
+) -> u64 {
+    use tracedecay_sql::StatementControl;
+
+    let mut statement = connection.prepare(sql).expect("prepare measured statement");
+    statement.take_counters();
+    let mut rows = statement.query(params).expect("run measured statement");
+    while rows.next().expect("step measured statement").is_some() {}
+    drop(rows);
+    statement.take_counters().vm_steps
+}

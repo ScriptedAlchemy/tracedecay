@@ -51,4 +51,5 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpe
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", features = ["test-helpers"] }
+tracedecay-sql = { path = "../tracedecay-sql" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", features = ["test-helpers"] }

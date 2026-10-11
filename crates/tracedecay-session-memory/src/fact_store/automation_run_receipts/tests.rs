@@ -400,78 +400,106 @@ async fn same_owner_and_run_are_isolated_across_two_physical_databases() {
     }
 }
 
+fn statement_vm_steps(
+    connection: &tracedecay_sql::Connection,
+    sql: &str,
+    params: impl tracedecay_sql::Params,
+) -> u64 {
+    use tracedecay_sql::StatementControl;
+
+    let mut statement = connection.prepare(sql).expect("prepare measured lookup");
+    statement.take_counters();
+    let mut rows = statement.query(params).expect("run measured lookup");
+    while rows.next().expect("step measured lookup").is_some() {}
+    drop(rows);
+    statement.take_counters().vm_steps
+}
+
+fn seed_other_run_receipts(
+    connection: &tracedecay_sql::Connection,
+    runs: std::ops::Range<usize>,
+    owner_json: &str,
+) {
+    let (start, last) = (runs.start, runs.end - 1);
+    let sequence = format!(
+        "WITH RECURSIVE run(n) AS (
+             VALUES({start}) UNION ALL SELECT n + 1 FROM run WHERE n < {last}
+         )"
+    );
+    connection
+        .execute_batch(&format!(
+            "BEGIN;
+             {sequence}
+             INSERT INTO memory_v2_operation_receipts (
+                 owner_kind, project_id, operation_id, operation_kind,
+                 request_digest, receipt_json, recorded_at
+             )
+             SELECT 'profile', '', 'curation.other.' || n, 'curation', 'digest.' || n,
+                    json_object('automation_run_id', 'run.other.' || n), n
+             FROM run;
+             {sequence}
+             INSERT INTO memory_v2_automatic_fact_receipts (
+                 apply_id, owner_kind, project_id, owner_json, idempotency_key,
+                 request_digest, request_json, evidence_json, state,
+                 quarantine_reason, recorded_at
+             )
+             SELECT 'apply.other.' || n, 'profile', '', '{owner_json}',
+                    'automatic.other.' || n, 'automatic-digest.' || n,
+                    json_object('automation_run_id', 'run.other.' || n),
+                    '{{}}', 'quarantined', 'fixture', n
+             FROM run;
+             COMMIT;"
+        ))
+        .expect("seed other runs' receipts under the same owner");
+}
+
+/// Recovery reads one run's receipts. Other runs under the same owner must not
+/// raise its cost: a lookup that filters the owner's whole history instead of
+/// seeking the run index grows with every receipt the owner ever recorded.
 #[tokio::test]
-async fn exact_run_lookup_plans_use_the_canonical_expression_indexes() {
-    let (_directory, database) = database("automation-run-query-plan").await;
-    let run_id = RunId::new("run.query-plan").expect("automation run identity");
-    let snapshot = database
-        .begin_memory_read_transaction(PROJECT_MEMORY_READ_OPERATION)
-        .await
-        .expect("begin query-plan snapshot");
-
-    let mut curation_plan = snapshot
-        .query(
-            "EXPLAIN QUERY PLAN
-             SELECT operation_id
-             FROM memory_v2_operation_receipts
-             WHERE owner_kind = ?1 AND project_id = ?2 AND operation_kind = 'curation'
-               AND json_extract(receipt_json, '$.automation_run_id') = ?3
-             ORDER BY recorded_at ASC, operation_id ASC LIMIT 2",
-            params!["profile", "", run_id.as_str()],
+async fn exact_run_lookups_cost_the_run_not_the_owner_history() {
+    let (_directory, path, database) = database_at("automation-run-lookup-cost").await;
+    drop(database);
+    let connection = tracedecay_sql::Connection::open(&path).expect("open measured store");
+    let owner_json = serde_json::to_string(&FactOwnerV1::Profile).expect("serialize profile owner");
+    let fetch_limit = i64::try_from(MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS + 1)
+        .expect("bounded automatic fetch limit");
+    let lookup_steps = || {
+        (
+            statement_vm_steps(
+                &connection,
+                CURATION_RUN_RECEIPTS_SQL,
+                tracedecay_sql::params!["profile", "", "run.measured"],
+            ),
+            statement_vm_steps(
+                &connection,
+                AUTOMATIC_RUN_RECEIPTS_SQL,
+                tracedecay_sql::params![
+                    "profile",
+                    "",
+                    owner_json.as_str(),
+                    "run.measured",
+                    fetch_limit
+                ],
+            ),
         )
-        .await
-        .expect("explain curation recovery lookup");
-    let mut curation_details = Vec::new();
-    while let Some(row) = curation_plan
-        .next()
-        .await
-        .expect("read curation query plan")
-    {
-        curation_details.push(row_string(&row, 3, PROJECT_MEMORY_READ_OPERATION).unwrap());
-    }
-    drop(curation_plan);
-    assert!(
-        curation_details
-            .iter()
-            .any(|detail| detail.contains("idx_memory_v2_operation_receipts_automation_run")),
-        "curation recovery plan must use the run index: {curation_details:?}"
-    );
+    };
 
-    let mut automatic_plan = snapshot
-        .query(
-            "EXPLAIN QUERY PLAN
-             SELECT apply_id
-             FROM memory_v2_automatic_fact_receipts
-             WHERE owner_kind = ?1 AND project_id = ?2 AND owner_json = ?3
-               AND json_extract(request_json, '$.automation_run_id') = ?4
-             ORDER BY recorded_at ASC, apply_id ASC LIMIT ?5",
-            params![
-                "profile",
-                "",
-                serde_json::to_string(&FactOwnerV1::Profile).expect("serialize profile owner"),
-                run_id.as_str(),
-                i64::try_from(MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS + 1)
-                    .expect("bounded automatic fetch limit"),
-            ],
-        )
-        .await
-        .expect("explain automatic recovery lookup");
-    let mut automatic_details = Vec::new();
-    while let Some(row) = automatic_plan
-        .next()
-        .await
-        .expect("read automatic query plan")
-    {
-        automatic_details.push(row_string(&row, 3, PROJECT_MEMORY_READ_OPERATION).unwrap());
-    }
-    drop(automatic_plan);
+    seed_other_run_receipts(&connection, 0..16, &owner_json);
+    let (curation_base, automatic_base) = lookup_steps();
+    seed_other_run_receipts(&connection, 16..2_048, &owner_json);
+    let (curation_grown, automatic_grown) = lookup_steps();
+
     assert!(
-        automatic_details
-            .iter()
-            .any(|detail| detail.contains("idx_memory_v2_automatic_fact_receipts_automation_run")),
-        "automatic recovery plan must use the run index: {automatic_details:?}"
+        curation_grown <= 2 * curation_base,
+        "curation recovery must cost its run, not the owner's 2048 other runs: \
+         {curation_base} -> {curation_grown} VM steps"
     );
-    snapshot.commit().await.expect("finish query-plan snapshot");
+    assert!(
+        automatic_grown <= 2 * automatic_base,
+        "automatic recovery must cost its run, not the owner's 2048 other runs: \
+         {automatic_base} -> {automatic_grown} VM steps"
+    );
 }
 
 #[tokio::test]

@@ -397,8 +397,9 @@ pub(super) async fn publish_candidate_generation(
     drop(open_rows);
     let mut max_rows = conn
         .query(
-            "SELECT COALESCE(MAX(generation), 0)
-             FROM session_temporal_generations WHERE session_id = ?1",
+            "SELECT COALESCE((
+                 SELECT MAX(generation) FROM session_temporal_generations WHERE session_id = ?1
+             ), 0)",
             params![session_id],
         )
         .await?;

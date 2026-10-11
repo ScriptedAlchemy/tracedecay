@@ -38,7 +38,9 @@ use tracedecay_global_db::tests::harness::{
 };
 use tracedecay_lcm::retrieval_content::derived_text_for_index;
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
+use tracedecay_runtime_core::db::engine::{
+    BackendKind, Executor, QueryExecutor, TestConnection, params,
+};
 use tracedecay_store::StoreFile;
 
 fn fixture_session(value: &str) -> SessionId {
@@ -2978,10 +2980,15 @@ async fn occurrence_replay_accepts_existing_full_text_and_rejects_changed_conten
         i64::try_from(text.len()).unwrap()
     );
     drop(rows);
-    transaction.execute(
-        "UPDATE session_occurrences SET index_text = index_text || 'corrupt' WHERE session_id = ?1",
-        params![session_id.as_str()],
-    ).await.unwrap();
+    // A bound value, not `index_text || ...`: see
+    // turso-bugs/virtual-column-before-its-source-fails-not-null-on-update.md.
+    transaction
+        .execute(
+            "UPDATE session_occurrences SET index_text = ?2 WHERE session_id = ?1",
+            params![session_id.as_str(), format!("{text}corrupt")],
+        )
+        .await
+        .unwrap();
     super::persist::persist_occurrences(&transaction, &batch, &ExecutionControl::default())
         .await
         .expect_err("matching digest cannot excuse changed stored text");
@@ -3045,6 +3052,23 @@ fn fixture_realistic_observation(
 }
 
 async fn print_user_sessions_dbstat(snapshot: &impl QueryExecutor, family_bytes: u64, n: usize) {
+    let accounted = match snapshot.backend_kind() {
+        BackendKind::Sqlite => print_sqlite_dbstat(snapshot, n).await,
+        // Native Turso has no dbstat (approved delta: sqlite-introspection-removed);
+        // the family size and the column census below still name the dominant bytes.
+        BackendKind::NativeTurso => {
+            let refused = match snapshot.query("SELECT name FROM dbstat", ()).await {
+                Err(_) => true,
+                Ok(mut rows) => rows.next().await.is_err(),
+            };
+            assert!(refused, "native Turso must not expose SQLite dbstat");
+            0
+        }
+    };
+    print_user_sessions_census(snapshot, family_bytes, accounted, n).await;
+}
+
+async fn print_sqlite_dbstat(snapshot: &impl QueryExecutor, n: usize) -> u64 {
     let mut rows = snapshot
         .query(
             "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name ORDER BY SUM(pgsize) DESC",
@@ -3080,6 +3104,15 @@ async fn print_user_sessions_dbstat(snapshot: &impl QueryExecutor, family_bytes:
             row.get::<i64>(3).unwrap(),
         );
     }
+    accounted
+}
+
+async fn print_user_sessions_census(
+    snapshot: &impl QueryExecutor,
+    family_bytes: u64,
+    accounted: u64,
+    n: usize,
+) {
     let lcm_sql = "SELECT
             COALESCE(SUM(length(COALESCE(content, ''))), 0),
             COALESCE(SUM(length(COALESCE(metadata_json, ''))), 0),
