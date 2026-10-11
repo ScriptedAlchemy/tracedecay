@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 * **test:** set untrusted-ctime fixture mtimes with `fs::set_times` so Windows `SetFileTime` receives `FILE_WRITE_ATTRIBUTES` ([#3347](https://github.com/ScriptedAlchemy/tracedecay/issues/3347))
+* **sessions:** reap an already-exited Codex app-server without spawning Windows `taskkill` ([#3204](https://github.com/ScriptedAlchemy/tracedecay/issues/3204))
 * **session:** name each provider's historical ingest blocker instead of the first retryable failure in rotation ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))
 * **session:** classify SQLITE_CORRUPT / SQLITE_NOTADB as blocked `projection_store_corrupt` instead of retrying a malformed page ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))
 * **session:** log the source chain on projection drain warnings so the journal names the real stall ([#3393](https://github.com/ScriptedAlchemy/tracedecay/issues/3393))

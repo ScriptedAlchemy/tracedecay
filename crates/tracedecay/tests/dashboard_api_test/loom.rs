@@ -601,20 +601,23 @@ const LARGE_HISTORY_MESSAGES: usize = 12;
 fn default_message_timeline_reports_bounded_counts_for_large_history() {
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_fixture_without_memory().await;
+        let prepared = prepare_dashboard_fixture_without_memory().await;
         let session_count = 3_000_u64;
         let mut sessions = Vec::with_capacity(session_count as usize);
         let mut message_ids = Vec::with_capacity(session_count as usize);
         for index in 0..session_count {
-            let session =
-                large_history_session(&fixture.host_runtime, &fixture.project_root, index as usize);
+            let session = large_history_session(
+                &prepared.host_runtime,
+                &prepared.project_root,
+                index as usize,
+            );
             message_ids.push(format!("{}-message", session.session_id));
             sessions.push(session);
         }
         const BATCH_ITEMS: usize = 32;
         for chunk in sessions.chunks(BATCH_ITEMS) {
             assert!(
-                fixture
+                prepared
                     .host_runtime
                     .upsert_sessions_for_test(HostAdmissionScope::Project, chunk)
                     .await
@@ -630,7 +633,7 @@ fn default_message_timeline_reports_bounded_counts_for_large_history() {
                 .zip(message_id_chunk.iter())
                 .map(|(session, message_id)| {
                     tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
-                        project_id: fixture.host_runtime.project_id().as_str(),
+                        project_id: prepared.host_runtime.project_id().as_str(),
                         provider: "cursor",
                         session_id: &session.session_id,
                         message_id,
@@ -642,7 +645,7 @@ fn default_message_timeline_reports_bounded_counts_for_large_history() {
                     }
                 })
                 .collect::<Vec<_>>();
-            fixture
+            prepared
                 .host_runtime
                 .seed_session_message_observations_for_test(&seeds)
                 .await
@@ -653,11 +656,12 @@ fn default_message_timeline_reports_bounded_counts_for_large_history() {
             .map(|session| session.session_id.as_str())
             .collect::<Vec<_>>();
 
-        fixture
+        prepared
             .host_runtime
             .materialize_session_temporal_refreshes_for_test(&session_ids)
             .await
             .unwrap();
+        let fixture = serve_prepared_dashboard_fixture(prepared).await;
         let (status, timeline) = get_json(
             &http_agent(),
             &format!(
@@ -741,16 +745,16 @@ fn large_history_messages(session: &SessionRecord) -> Vec<SessionMessageRecord> 
 fn loom_temporal_serves_one_bounded_page_of_a_large_history() {
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_fixture(false).await;
+        let prepared = prepare_dashboard_fixture(false).await;
         let histories = (0..LARGE_HISTORY_SESSIONS)
             .map(|index| {
                 let session =
-                    large_history_session(&fixture.host_runtime, &fixture.project_root, index);
+                    large_history_session(&prepared.host_runtime, &prepared.project_root, index);
                 let messages = large_history_messages(&session);
                 (session, messages)
             })
             .collect::<Vec<_>>();
-        fixture
+        prepared
             .host_runtime
             .seed_session_histories_for_test(
                 HostAdmissionScope::Project,
@@ -761,6 +765,7 @@ fn loom_temporal_serves_one_bounded_page_of_a_large_history() {
             )
             .await
             .unwrap_or_else(|error| panic!("seed large history: {error}"));
+        let fixture = serve_prepared_dashboard_fixture(prepared).await;
 
         // The suite's standard HTTP client gives up after four seconds; the
         // first page must arrive inside that budget regardless of how much

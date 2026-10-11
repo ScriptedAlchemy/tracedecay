@@ -242,7 +242,7 @@ for line in sys.stdin:
             "params": {"delta": "retained dashboard user job output", "model": "dashboard-fake-model"}
         }), flush=True)
         print(json.dumps({"method": "turn/completed"}), flush=True)
-        break
+        os._exit(0)
 "#
         .replace(
             "__STARTED_PATH__",
