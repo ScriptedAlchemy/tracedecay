@@ -1045,14 +1045,18 @@ impl HostAdmissionTestRuntimeV1 {
             .read_snapshot()
             .await
             .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
-        let mut rows = snapshot
-            .query(
-                "SELECT COUNT(*)
-                 FROM lcm_raw_messages_fts
-                 WHERE lcm_raw_messages_fts MATCH ?1",
-                [query],
-            )
-            .await?;
+        // SQLite keeps an FTS5 table beside the raw rows; the native engine
+        // indexes the columns themselves and matches through `fts_match`.
+        let count_sql = match tracedecay_sql::ENGINE {
+            tracedecay_sql::Engine::Sqlite => {
+                "SELECT COUNT(*) FROM lcm_raw_messages_fts WHERE lcm_raw_messages_fts MATCH ?1"
+            }
+            tracedecay_sql::Engine::Native => {
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE fts_match(index_text, role, kind, model, tool_names, ?1)"
+            }
+        };
+        let mut rows = snapshot.query(count_sql, [query]).await?;
         let row = rows
             .next()
             .await?
