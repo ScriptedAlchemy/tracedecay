@@ -237,14 +237,14 @@ pub(super) fn def_unsafe_patterns(input_schema: Value) -> ToolDefinition {
 mod tests {
     use serde_json::json;
 
-    use crate::get_maximal_tool_definitions;
+    use crate::get_tool_definitions;
 
     /// Without an advertised `path` an agent cannot scope the report, and a
     /// fixture corpus consumes the whole page before any product source is
     /// reported.
     #[test]
     fn dead_code_advertises_an_optional_path_filter_like_its_siblings() {
-        let definitions = get_maximal_tool_definitions().expect("maximal catalog");
+        let definitions = get_tool_definitions().expect("tool catalog");
         let definition = definitions
             .iter()
             .find(|definition| definition.name == "tracedecay_dead_code")

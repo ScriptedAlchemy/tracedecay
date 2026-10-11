@@ -9,8 +9,8 @@ use tracedecay_code_index::production::{
     CodeIndexExecutionControlV1, advance_import_dictionary_digest, initial_import_dictionary_digest,
 };
 use tracedecay_domain::{
-    BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkId,
-    ComponentRevision, ExactFieldV1, ExactTechnicalTermV1, FileOccurrenceId,
+    BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
+    CodeSearchChunkId, ComponentRevision, ExactFieldV1, ExactTechnicalTermV1, FileOccurrenceId,
     LanguageDescriptorRevision, ManifestDigest, ScoreDomainId, SourceSpan, SymbolOccurrenceId,
 };
 use tracedecay_sql::{Connection, OptionalExtension};
@@ -1223,6 +1223,10 @@ pub struct CodeLexicalArtifactOccurrenceV1 {
     pub file: FileOccurrenceId,
     pub symbol: Option<SymbolOccurrenceId>,
     pub chunk: CodeSearchChunkId,
+    pub grain: CodeSearchChunkGrainV1,
+    /// The chunk this one nests in: a symbol signature's parent is the
+    /// symbol's first body piece.
+    pub parent_chunk: Option<CodeSearchChunkId>,
     pub source_span: SourceSpan,
     pub logical_path: String,
     pub sanitized_text: BoundedSanitizedText,

@@ -1,3 +1,4 @@
+use rmcp::model::ProtocolVersion;
 use serde_json::{Value, json};
 
 /// Every JSON-RPC method surface the MCP server understands. This is the
@@ -37,10 +38,21 @@ pub fn classify_mcp_method(method: &str) -> McpMethod {
 }
 
 /// The `initialize` result payload for product metadata supplied by the
-/// composition root.
-pub fn initialize_result(version: &str, instructions: &str) -> Value {
+/// composition root, agreeing to the client's `requested_protocol` when this
+/// server speaks it and to the newest handshake revision otherwise. Raw
+/// answers such as the daemon bootstrap reach hosts without rmcp's own
+/// negotiation, so they must agree to the same version rmcp would.
+pub fn initialize_result(
+    version: &str,
+    instructions: &str,
+    requested_protocol: Option<&str>,
+) -> Value {
+    let protocol = ProtocolVersion::known_up_to(&ProtocolVersion::LATEST)
+        .iter()
+        .find(|known| Some(known.as_str()) == requested_protocol)
+        .unwrap_or(&ProtocolVersion::LATEST);
     json!({
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": protocol,
         "capabilities": {
             "tools": {
                 "listChanged": true

@@ -17,7 +17,7 @@ use crate::context_headings::{
 };
 use crate::handlers::support::text_tool_result;
 use crate::path_tree::format_compact_path_list;
-use crate::tools::render::{self, Md};
+use crate::tools::render::{self, Md, RankedRow, ranked_rows_md};
 use serde_json::Value;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
@@ -35,14 +35,18 @@ use super::lexical_routing::matched_anchor_line;
 use super::search::append_coverage_md;
 use super::search_evidence::append_verified_graph_evidence_md;
 
-/// Renders a context result: the full markdown for JSON callers' fallback,
-/// and a lane-bounded preview for markdown callers.
+/// Renders a context result: the typed JSON for JSON callers, and a
+/// lane-bounded markdown preview otherwise.
 pub(crate) fn render_context(
     response_handle_root: Option<&Path>,
     args: &Value,
     result: &ContextResultV1,
 ) -> Result<ToolResult> {
     let value = serde_json::to_value(result)?;
+    if render::wants_json(args) {
+        let text = render::finalize(response_handle_root, args, &value, String::new);
+        return Ok(text_tool_result(&text, Vec::new()));
+    }
     let mut output = freshness_lines(&result.freshness);
     output.push_str(&context_markdown(
         &result.task,
@@ -52,7 +56,13 @@ pub(crate) fn render_context(
         &result.code,
     ));
     if result.symbols.is_empty() {
-        append_context_search_matches(&mut output, &result.search_matches);
+        append_context_search_matches(
+            &mut output,
+            response_handle_root,
+            &result.task,
+            &result.search_matches,
+            !result.lexical_anchors.is_empty(),
+        );
     }
     append_context_lexical_anchors(&mut output, &result.lexical_anchors);
     insert_context_memory_section(
@@ -85,12 +95,8 @@ pub(crate) fn render_context(
         output.push_str(&degradation);
     }
     append_retrieval_budget_md(&mut output, &result.retrieval);
-    let text = if render::wants_json(args) {
-        render::finalize(response_handle_root, args, &value, || output)
-    } else {
-        let preview = context_markdown_lane_preview(&output);
-        render::markdown_preview_with_handle(response_handle_root, &output, &preview)
-    };
+    let preview = context_markdown_lane_preview(&output);
+    let text = render::markdown_preview_with_handle(response_handle_root, &output, &preview);
     Ok(text_tool_result(&text, Vec::new()))
 }
 
@@ -112,11 +118,10 @@ fn context_markdown(
         }
     } else {
         for block in code {
-            let _ = writeln!(
-                output,
-                "#### {}:{}\n```\n{}\n```",
-                block.file, block.start_line, block.code,
-            );
+            let _ = writeln!(output, "#### {}:{}", block.file, block.start_line);
+            let mut code = Md::new();
+            code.code("", &block.code);
+            output.push_str(&code.render());
         }
     }
     output.push('\n');
@@ -150,22 +155,37 @@ fn context_markdown(
     output
 }
 
-fn append_context_search_matches(output: &mut String, matches: &[ContextSearchMatchV1]) {
+/// Context matches carry no per-row routes, so a call with caller anchors
+/// keeps every match: the anchor receipt counts the sites this page returns.
+fn append_context_search_matches(
+    output: &mut String,
+    response_handle_root: Option<&Path>,
+    task: &str,
+    matches: &[ContextSearchMatchV1],
+    anchored: bool,
+) {
     if matches.is_empty() {
         return;
     }
     output.push_str("\n### Available Code Search Matches\n");
-    for search_match in matches {
-        let _ = writeln!(
-            output,
-            "- **{}** ({}), `{}` · rank {} · utility {}",
-            search_match.name,
-            search_match.kind,
-            search_match.file,
-            search_match.rank,
-            search_match.utility_micros,
-        );
-    }
+    let rows = matches
+        .iter()
+        .map(|search_match| RankedRow {
+            rank: u64::from(search_match.rank),
+            utility_micros: search_match.utility_micros,
+            name: search_match.name.clone(),
+            anchored,
+            markdown: format!(
+                "- **{}** ({}), `{}` · rank {} · utility {}\n",
+                search_match.name,
+                search_match.kind,
+                search_match.file,
+                search_match.rank,
+                search_match.utility_micros,
+            ),
+        })
+        .collect::<Vec<_>>();
+    output.push_str(&ranked_rows_md(response_handle_root, task, &rows));
 }
 
 /// Every caller anchor's outcome, so an anchor that matched nothing is never
@@ -318,6 +338,59 @@ pub(super) fn verified_plan_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn search_matches() -> Vec<ContextSearchMatchV1> {
+        (1..=10)
+            .map(|rank| ContextSearchMatchV1 {
+                anchor_id: format!("code-symbol:m{rank}"),
+                name: format!("m{rank}"),
+                qualified_name: format!("crate::m{rank}"),
+                kind: "function".to_owned(),
+                file: "src/lib.rs".to_owned(),
+                exact_class: "exact_message".to_owned(),
+                rank,
+                utility_micros: if rank <= 3 { 2_000_000 } else { 1_000_000 },
+            })
+            .collect()
+    }
+
+    #[test]
+    fn search_matches_trim_the_weak_tail_unless_caller_anchors_ran() {
+        let root = tempfile::tempdir().expect("handle root");
+        let mut trimmed = String::new();
+        append_context_search_matches(
+            &mut trimmed,
+            Some(root.path()),
+            "where is m1 defined",
+            &search_matches(),
+            false,
+        );
+        let (kept, marker) = trimmed
+            .split_once("- _Trimmed 7 lower-ranked results (ranks 4-10, ")
+            .expect("weak tail is trimmed");
+        assert_eq!(
+            kept,
+            "\n### Available Code Search Matches\n\
+             - **m1** (function), `src/lib.rs` · rank 1 · utility 2000000\n\
+             - **m2** (function), `src/lib.rs` · rank 2 · utility 2000000\n\
+             - **m3** (function), `src/lib.rs` · rank 3 · utility 2000000\n"
+        );
+        assert!(marker.contains("tracedecay_retrieve"), "{marker}");
+
+        let mut anchored = String::new();
+        append_context_search_matches(
+            &mut anchored,
+            Some(root.path()),
+            "where is m1 defined",
+            &search_matches(),
+            true,
+        );
+        assert!(!anchored.contains("Trimmed"), "{anchored}");
+        assert!(
+            anchored.contains("· rank 10 · utility 1000000\n"),
+            "{anchored}"
+        );
+    }
 
     #[test]
     fn plan_markdown_renders_the_typed_sections() {

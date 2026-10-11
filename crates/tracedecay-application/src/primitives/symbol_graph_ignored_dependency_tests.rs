@@ -97,7 +97,12 @@ impl CodeGraphProjectionReadPort for FixtureCodeGraphProjection {
                 RequestAdmission::Cancelled => return Err(CodeGraphReadError::Cancelled),
                 RequestAdmission::TimedOut => return Err(CodeGraphReadError::TimedOut),
             }
-            VerifiedCodeGraphRead::new(self.scope.clone(), Arc::clone(&self.store), self.freshness)
+            VerifiedCodeGraphRead::new(
+                self.scope.clone(),
+                Arc::clone(&self.store),
+                self.freshness,
+                None,
+            )
         })
     }
 }

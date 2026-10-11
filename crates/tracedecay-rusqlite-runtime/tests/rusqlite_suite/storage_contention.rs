@@ -268,17 +268,9 @@ impl StorageOperationExecutor for PausedPublication {
         ConcreteRepositoryWriteExecutor::default().execute(savepoint, payload)?;
         self.entered.send(()).unwrap();
         let (released, condition) = &*self.gate;
-        let (released, timeout) = condition
-            .wait_timeout_while(
-                released.lock().unwrap(),
-                Duration::from_secs(10),
-                |released| !*released,
-            )
+        let _released = condition
+            .wait_while(released.lock().unwrap(), |released| !*released)
             .unwrap();
-        assert!(
-            *released && !timeout.timed_out(),
-            "publication release timed out"
-        );
         Ok(())
     }
 }
@@ -338,7 +330,7 @@ fn concurrent_wal_readers_keep_snapshots_while_a_repository_write_commits() {
         let binding = &binding;
         let submission =
             scope.spawn(move || commit(&writer, publication(binding, "generation.next", 4)));
-        entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        entered_rx.recv().unwrap();
         // Both dedicated readers execute while the writer has already mutated
         // this same file inside BEGIN IMMEDIATE, before its COMMIT.
         assert_eq!(

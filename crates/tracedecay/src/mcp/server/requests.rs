@@ -2,7 +2,6 @@
 //! handshake handling, resources, and `tools/call` execution.
 
 use std::collections::BTreeMap;
-use std::path::Component;
 
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -11,7 +10,7 @@ use tracedecay_mcp::server::{
     DispatchSettlement, DispatchToolPolicy, PreparedDispatchControl, dispatch_cancelled_error,
 };
 use tracedecay_mcp::tools::response_trailers::{
-    ToolTokenAccounting, record_token_accounting, response_token_count,
+    self, ToolTokenAccounting, record_token_accounting, response_tokens,
 };
 use tracedecay_mcp::{
     ToolResult, mark_semantic_tool_error, semantic_failure_reason, server::resources_list_result,
@@ -386,7 +385,11 @@ impl McpServer {
         };
 
         let result = match method {
-            McpMethod::Initialize => Some(self.handle_initialize(id, request.client_info_name())),
+            McpMethod::Initialize => Some(self.handle_initialize(
+                id,
+                request.client_info_name(),
+                request.requested_protocol_version(),
+            )),
             // Some clients send the initialized notification with an id (or
             // via the alternate method name); both stay compatibility no-ops.
             // Hook events were consumed by the early notification dispatch
@@ -590,11 +593,12 @@ impl McpServer {
         &self,
         id: Value,
         client_name: Option<&str>,
+        requested_protocol: Option<&str>,
     ) -> JsonRpcResponse {
         if let Some(client_name) = client_name {
             *recover_lock(&self.client_name) = Some(client_name.to_owned());
         }
-        match initialize_result(SERVER_INSTRUCTIONS) {
+        match initialize_result(SERVER_INSTRUCTIONS, requested_protocol) {
             Ok(result) => JsonRpcResponse::success(id, result),
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         }
@@ -639,7 +643,6 @@ impl McpServer {
                 &profile_id,
                 &authority,
                 &project_catalog_discovery_scope(),
-                ToolRegistryMode::HostAvailable,
             )
         };
         match match_result {
@@ -950,6 +953,8 @@ impl McpServer {
                 .filter(|path| !path.is_empty() && !token_map.contains_key(path.as_str()))
                 .cloned()
                 .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
         };
         if uncached_files.is_empty() {
             return cached_tokens;
@@ -957,23 +962,7 @@ impl McpServer {
 
         let project_root = project_root.to_path_buf();
         let uncached_tokens = tokio::task::spawn_blocking(move || {
-            uncached_files
-                .into_iter()
-                .filter_map(|path| {
-                    let relative = Path::new(&path);
-                    if relative.is_absolute()
-                        || relative
-                            .components()
-                            .any(|component| matches!(component, Component::ParentDir))
-                    {
-                        return None;
-                    }
-                    std::fs::metadata(project_root.join(relative))
-                        .ok()
-                        .filter(std::fs::Metadata::is_file)
-                        .map(|metadata| metadata.len() / 4)
-                })
-                .fold(0_u64, u64::saturating_add)
+            response_trailers::raw_file_tokens(&project_root, &uncached_files)
         })
         .await
         .unwrap_or_else(|error| {
@@ -1010,10 +999,8 @@ impl McpServer {
         cg: &TraceDecay,
         result: &mut ToolResult,
     ) -> ToolTokenAccounting {
-        // Real served-output count, before any banners/metrics lines are appended.
-        let Some(response_tokens) = response_token_count(result) else {
-            return ToolTokenAccounting::default();
-        };
+        // Served output, before any banners/metrics lines are appended.
+        let response_tokens = response_tokens(result);
         // "Before" counterfactual: reading every referenced file raw,
         // in full. Counters credit only the net saving per call,
         // before minus what this response actually delivered.

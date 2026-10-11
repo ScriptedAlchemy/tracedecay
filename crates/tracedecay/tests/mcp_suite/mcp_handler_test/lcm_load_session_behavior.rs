@@ -36,10 +36,6 @@ const INVALID: &str = "The retained operation request is invalid.";
 const NOT_FOUND: &str = "The requested resource was not found or is not authorized";
 const DEFAULT_LIMIT: u64 = 4_096;
 const CLAMPED_LIMIT: u64 = 20_000;
-const TOOL_META: &str = r#"{"evidence":{"ordering_domain":"snapshot_order","range":{"end":4,"start":3}},"facts":[{"content":"tool-returns-token-91","kind":"tool_result","success":true}],"native_record_kind":"message","provider":"cursor","relations":{"message_id":"load-proof-tool","session_id":"load-proof-session"},"stable_record_id":"record.mcp.load-proof-session.load-proof-tool","version":1}"#;
-const ASSISTANT_META: &str = r#"{"evidence":{"ordering_domain":"snapshot_order","range":{"end":3,"start":2}},"facts":[{"content":"assistant-names-oak-hook","kind":"message","model":"test-model","role":"assistant","timestamp":20}],"native_record_kind":"message","provider":"cursor","relations":{"message_id":"load-proof-assistant","session_id":"load-proof-session"},"stable_record_id":"record.mcp.load-proof-session.load-proof-assistant","version":1}"#;
-const USER_META: &str = r#"{"evidence":{"ordering_domain":"snapshot_order","range":{"end":2,"start":1}},"facts":[{"content":"user-asks-brass","kind":"message","model":"test-model","role":"user","timestamp":10}],"native_record_kind":"message","provider":"cursor","relations":{"message_id":"load-proof-user","session_id":"load-proof-session"},"stable_record_id":"record.mcp.load-proof-session.load-proof-user","version":1}"#;
-const CODEX_META: &str = r#"{"evidence":{"ordering_domain":"snapshot_order","range":{"end":5,"start":4}},"facts":[{"content":"codex-only-brass-note","kind":"message","model":"test-model","role":"assistant","timestamp":25}],"native_record_kind":"message","provider":"codex","relations":{"message_id":"load-proof-codex","session_id":"load-proof-session"},"stable_record_id":"record.mcp.load-proof-session.load-proof-codex","version":1}"#;
 
 #[tokio::test]
 async fn tracedecay_lcm_load_session_returns_the_messages_the_caller_asked_for() {
@@ -669,7 +665,7 @@ fn assert_loaded(
     assert_eq!(payload["provider"], provider, "{payload}");
     assert_eq!(payload["session_id"], SESSION, "{payload}");
     assert_eq!(payload["content_limit"], json!(content_limit), "{payload}");
-    assert_eq!(payload["messages"], messages, "{payload}");
+    assert_eq!(public_messages(payload), messages, "{payload}");
     assert_eq!(payload["omitted"], json!(omitted), "{payload}");
     assert_eq!(
         payload["temporal"]["coverage"]["unknown"],
@@ -748,6 +744,74 @@ fn assert_not_found(payload: &Value) {
     assert!(payload.get("messages").is_none(), "{payload}");
 }
 
+fn public_messages(payload: &Value) -> Value {
+    let messages = payload["messages"]
+        .as_array()
+        .unwrap_or_else(|| panic!("messages: {payload}"));
+    Value::Array(
+        messages
+            .iter()
+            .map(|message| {
+                assert_visible_message_facts(message);
+                let mut public = message.clone();
+                public
+                    .as_object_mut()
+                    .unwrap_or_else(|| panic!("message object: {message}"))
+                    .remove("metadata_json");
+                public
+            })
+            .collect(),
+    )
+}
+
+fn parse_metadata(message: &Value) -> Value {
+    let metadata_json = message["metadata_json"]
+        .as_str()
+        .unwrap_or_else(|| panic!("metadata_json: {message}"));
+    serde_json::from_str(metadata_json).unwrap_or_else(|err| panic!("{err}: {metadata_json}"))
+}
+
+fn assert_visible_message_facts(message: &Value) {
+    let metadata = parse_metadata(message);
+    let message_id = message["message_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("message_id: {message}"));
+    let fact = &metadata["facts"][0];
+    match message_id {
+        TOOL_ID => {
+            assert_eq!(fact["kind"], "tool_result", "{metadata}");
+            assert_eq!(fact["content"], TOOL_BODY, "{metadata}");
+            assert_eq!(fact["success"], json!(true), "{metadata}");
+            assert_eq!(fact["token_count"], json!(6), "{metadata}");
+        }
+        ASSISTANT_ID => {
+            assert_eq!(fact["kind"], "message", "{metadata}");
+            assert_eq!(fact["content"], ASSISTANT_BODY, "{metadata}");
+            assert_eq!(fact["role"], "assistant", "{metadata}");
+            assert_eq!(fact["timestamp"], json!(ASSISTANT_AT), "{metadata}");
+        }
+        USER_ID => {
+            assert_eq!(fact["kind"], "message", "{metadata}");
+            assert_eq!(fact["content"], USER_BODY, "{metadata}");
+            assert_eq!(fact["role"], "user", "{metadata}");
+            assert_eq!(fact["timestamp"], json!(USER_AT), "{metadata}");
+        }
+        CODEX_ID => {
+            assert_eq!(fact["kind"], "message", "{metadata}");
+            assert_eq!(fact["content"], CODEX_BODY, "{metadata}");
+            assert_eq!(fact["role"], "assistant", "{metadata}");
+            assert_eq!(fact["timestamp"], json!(CODEX_AT), "{metadata}");
+        }
+        other => panic!("unexpected returned message {other}"),
+    }
+    assert_eq!(
+        metadata["relations"]["message_id"], message_id,
+        "{metadata}"
+    );
+    assert_eq!(metadata["relations"]["session_id"], SESSION, "{metadata}");
+    assert_eq!(metadata["provider"], message["provider"], "{metadata}");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn message(
     message_id: &str,
@@ -760,11 +824,11 @@ fn message(
     limit: u64,
     truncated: bool,
 ) -> Value {
-    let (timestamp, metadata_json) = match message_id {
-        TOOL_ID => (Value::Null, TOOL_META),
-        ASSISTANT_ID => (json!(ASSISTANT_AT), ASSISTANT_META),
-        USER_ID => (json!(USER_AT), USER_META),
-        CODEX_ID => (json!(CODEX_AT), CODEX_META),
+    let timestamp = match message_id {
+        TOOL_ID => Value::Null,
+        ASSISTANT_ID => json!(ASSISTANT_AT),
+        USER_ID => json!(USER_AT),
+        CODEX_ID => json!(CODEX_AT),
         other => panic!("unexpected seeded message {other}"),
     };
     json!({
@@ -785,7 +849,6 @@ fn message(
         },
         "content_hash": null,
         "storage_kind": "canonical_occurrence",
-        "payload_ref": null,
-        "metadata_json": metadata_json
+        "payload_ref": null
     })
 }

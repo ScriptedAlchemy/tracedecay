@@ -4576,6 +4576,7 @@ function loomChainPayload(sessionId: string): Record<string, unknown> {
     next_cursor: null,
     counts: {
       message_count: 998,
+      unpublished_message_count: 0,
       source_token_count: 18_400,
       summary_node_count: LOOM_CHAIN_SUMMARY_NODES.length,
       summary_token_count: 1_020,

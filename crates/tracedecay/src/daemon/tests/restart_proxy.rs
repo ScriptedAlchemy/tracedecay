@@ -1125,6 +1125,7 @@ async fn disconnected_client_does_not_outlive_a_daemon_that_never_answers() {
             None,
             &mut transport,
             Some(std::time::Duration::from_millis(250)),
+            false,
         )
         .await
     });

@@ -15,6 +15,7 @@ use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
+use crate::runtime::observation::jsonl_observation_admission::is_lost_cursor_cas;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{
     FileDiscoveryReport, TranscriptIngestError, TranscriptIngestResult,
@@ -400,10 +401,7 @@ impl SnapshotAdmissionRunner {
                             self.stats.messages_upserted =
                                 self.stats.messages_upserted.saturating_add(1);
                         }
-                        cursors.insert(
-                            source_identity.clone(),
-                            Some(outcome.receipt().committed_cursor().clone()),
-                        );
+                        remember_committed_cursor(&mut cursors, source_identity, &outcome);
                         self.sessions.insert(record.session_id().to_owned());
                     }
                     false
@@ -413,7 +411,10 @@ impl SnapshotAdmissionRunner {
                         provider: self.provider,
                     });
                 }
-                Err(error) if error.recovery.is_some() => true,
+                // A re-offered unchanged record is an exact duplicate that
+                // moves no cursor, so a record chained behind it in the same
+                // window loses its compare-and-swap. Scalar replay re-reads.
+                Err(error) if error.recovery.is_some() || is_lost_cursor_cas(&error) => true,
                 Err(error) => return Err(host_admission_error(self.provider, error)),
             };
             if scalar_replay {
@@ -518,10 +519,7 @@ impl SnapshotAdmissionRunner {
                 if matches!(outcome.as_ref(), ObservationPersistOutcome::Committed(_)) {
                     self.stats.messages_upserted = self.stats.messages_upserted.saturating_add(1);
                 }
-                cursors.insert(
-                    source_identity.clone(),
-                    Some(outcome.receipt().committed_cursor().clone()),
-                );
+                remember_committed_cursor(cursors, source_identity, &outcome);
                 self.sessions.insert(record.session_id().to_owned());
             }
             CaptureObservationOutcome::Rejected { receipt, .. } => {
@@ -708,6 +706,24 @@ pub async fn snapshot_range_was_committed(
     // the authority cannot confirm that the cursor advanced.
     let cursor = facade.get_source_cursor(source, scope).await.ok().flatten();
     snapshot_cursor_covers_range(cursor.as_ref(), generation, range)
+}
+
+/// An exact duplicate's receipt names the frontier of its original commit,
+/// not the source's current cursor, so the next capture must re-read it.
+fn remember_committed_cursor(
+    cursors: &mut BTreeMap<ObservationSourceIdentityV1, Option<ObservationSourceCursorV1>>,
+    source: &ObservationSourceIdentityV1,
+    outcome: &ObservationPersistOutcome,
+) {
+    match outcome {
+        ObservationPersistOutcome::ExactDuplicate(_) => {
+            cursors.remove(source);
+        }
+        ObservationPersistOutcome::Committed(receipt)
+        | ObservationPersistOutcome::CoveredDuplicate(receipt) => {
+            cursors.insert(source.clone(), Some(receipt.committed_cursor().clone()));
+        }
+    }
 }
 
 pub fn snapshot_cursor_covers_range(

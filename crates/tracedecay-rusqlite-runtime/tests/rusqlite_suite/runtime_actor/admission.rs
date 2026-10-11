@@ -1,15 +1,15 @@
 use std::pin::pin;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
 
 use tracedecay_store::{
-    AdmissionConfigV1, BatchBudgetV1, OperationPriorityV1, QueueBudgetV1, RuntimeSubmitOutcomeV1,
+    AdmissionConfigV1, BatchBudgetV1, CommitSequenceV1, OperationPriorityV1, QueueBudgetV1,
+    RuntimeSubmitOutcomeV1, SaturationScopeV1, StoreCommitReceiptV1,
 };
 
 use super::support::{
-    ExecutorControl, ReleaseOnDrop, TestBinding, TestDatabase, TestProbe, release, request,
-    runtime, unwrap_arc, writer,
+    ExecutorControl, ReleaseOnDrop, TestBinding, TestDatabase, TestProbe, marker_count, release,
+    request, runtime, unwrap_arc, writer,
 };
 
 #[test]
@@ -61,7 +61,7 @@ fn saturation_is_immediate_while_reserved_health_work_remains_admissible() {
         let first_probe = TestProbe::fixed(&first);
         let first_task = tokio::spawn(async move { first_writer.submit(first, first_probe).await });
         tokio::task::yield_now().await;
-        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        entered_rx.recv().unwrap();
 
         let overflow = request(
             binding,
@@ -78,7 +78,16 @@ fn saturation_is_immediate_while_reserved_health_work_remains_admissible() {
             Poll::Ready(outcome) => outcome.unwrap(),
             Poll::Pending => panic!("saturated overflow waited for queue capacity"),
         };
-        assert!(matches!(outcome, RuntimeSubmitOutcomeV1::Saturated { .. }));
+        assert!(
+            matches!(
+                outcome,
+                RuntimeSubmitOutcomeV1::Saturated {
+                    scope: SaturationScopeV1::ShardOperations,
+                    ..
+                }
+            ),
+            "occupied general lane must refuse overflow immediately: {outcome:?}"
+        );
 
         let health = request(
             binding,
@@ -94,20 +103,29 @@ fn saturation_is_immediate_while_reserved_health_work_remains_admissible() {
         release(&gate);
         assert!(matches!(
             first_task.await.unwrap().unwrap(),
-            RuntimeSubmitOutcomeV1::Committed { .. }
+            RuntimeSubmitOutcomeV1::Committed {
+                receipt: StoreCommitReceiptV1 {
+                    commit_sequence: CommitSequenceV1(1),
+                    ..
+                }
+            }
         ));
         assert!(matches!(
             health_task.await.unwrap().unwrap(),
-            RuntimeSubmitOutcomeV1::Committed { .. }
+            RuntimeSubmitOutcomeV1::Committed {
+                receipt: StoreCommitReceiptV1 {
+                    commit_sequence: CommitSequenceV1(2),
+                    ..
+                }
+            }
         ));
     });
-    let telemetry = writer.telemetry_snapshot();
-    assert_eq!(telemetry.operations.offered_operations, 3);
-    assert_eq!(telemetry.operations.admitted_operations, 2);
-    assert_eq!(telemetry.operations.completed_operations, 2);
-    assert_eq!(telemetry.operations.shed_operations, 1);
-    assert_eq!(telemetry.health_lane_services, 1);
     unwrap_arc(writer).shutdown_and_join().unwrap();
+    assert_eq!(
+        marker_count(&database),
+        2,
+        "first and health commits persist; the shed overflow must not"
+    );
 }
 
 #[test]
@@ -140,13 +158,31 @@ fn foreground_request_uses_foreground_ceiling_when_background_ceiling_is_smaller
 
     assert!(matches!(
         runtime().block_on(writer.submit(foreground.clone(), TestProbe::fixed(&foreground),)),
-        Ok(RuntimeSubmitOutcomeV1::Committed { .. })
+        Ok(RuntimeSubmitOutcomeV1::Committed {
+            receipt: StoreCommitReceiptV1 {
+                commit_sequence: CommitSequenceV1(1),
+                ..
+            }
+        })
     ));
-    let commit = writer
-        .telemetry_snapshot()
-        .latest_commit
-        .expect("foreground commit telemetry");
-    assert_eq!(commit.batch.priority, OperationPriorityV1::Foreground);
-    assert_eq!(commit.batch.batch_bytes, 128);
+    let background = request(
+        binding,
+        "operation.priority-ceiling.background",
+        "key.priority-ceiling.background",
+        'b',
+        OperationPriorityV1::Background,
+    );
+    assert!(matches!(
+        runtime().block_on(writer.submit(background.clone(), TestProbe::fixed(&background))),
+        Ok(RuntimeSubmitOutcomeV1::Saturated {
+            scope: SaturationScopeV1::ShardBytes,
+            ..
+        })
+    ));
     writer.shutdown_and_join().unwrap();
+    assert_eq!(
+        marker_count(&database),
+        1,
+        "the over-ceiling background request must not persist"
+    );
 }

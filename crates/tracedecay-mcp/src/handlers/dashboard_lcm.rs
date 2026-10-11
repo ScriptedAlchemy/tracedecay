@@ -9,7 +9,7 @@ use tracedecay_domain::{
     ActorId, DomainError, RetrievalGrainV1, SessionId, TemporalModeV1, canonical_sha256,
 };
 use tracedecay_session_memory::session::{
-    SessionCursorRequest, SessionRetrievalScope, SessionTemporalQuery,
+    SessionCursorRequest, SessionDataFreshness, SessionRetrievalScope, SessionTemporalQuery,
 };
 use tracedecay_temporal_query::context::{ContextBudget, MAX_CONTEXT_RECORDS};
 use tracedecay_temporal_query::ranking::DiversityLimits;
@@ -21,6 +21,7 @@ use tracedecay_dashboard_api::{
     DashboardLcmReadFutureV1, DashboardLcmReadOutcomeV1, DashboardLcmReadPortV1,
     DashboardLcmReadRequestV1, DashboardLcmReadStateV1,
 };
+use tracedecay_lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 use tracedecay_lcm::{LcmDescribeResponse, LcmDescribeTarget};
 use tracedecay_sessions::runtime::SessionSearchTimeRange;
 
@@ -28,7 +29,7 @@ use tracedecay_session_memory::context::ResolvedSessionIdentity;
 use tracedecay_session_runtime::session_retrieval::{
     LcmDescribeServiceCommand, LcmDescribeServiceOutcome, SessionApplicationRetrievalPortV1,
     SessionRetrievalPageView, SessionRetrievalServiceOutcome, SessionRetrievalStoreScope,
-    admitted_execution_limits,
+    SessionRetrievalUnavailableReason, admitted_execution_limits,
 };
 
 const SUMMARY_DESCRIBE_CONCURRENCY: usize = 8;
@@ -117,13 +118,41 @@ impl DashboardLcmReadAdapter {
         let mut cursor = initial_cursor(&request);
         let mut seen_cursors = BTreeSet::new();
         let mut aggregate_results = Vec::new();
-        let mut aggregate_omitted = 0_u64;
+        // Genuine record omissions accumulate separately from the folded
+        // `omitted` count, which also carries the freshness lag flag; the
+        // flag names projection distance, not records.
+        let mut aggregate_record_omitted = 0_u64;
+        // The freshness lag flag rides inside each page's `omitted` count
+        // but names the same projection gap the unpublished raw count
+        // measures exactly, so it is tracked apart from genuine record
+        // omissions.
+        let mut aggregate_lag_omitted = 0_u64;
         let mut aggregate_pages = 0_usize;
         // A non-aggregate session read serves one window: a Partial outcome
         // (continuation cursor or genuine omission) keeps the page visibly
         // partial. Aggregate reads drain to the terminal cursor, so only
         // their accumulated omissions matter.
         let mut window_partial = false;
+        // A session read's stats come from the canonical describe authority,
+        // addressed by the session's measured provider, taken from the
+        // hydrated page itself, never a wildcard the exact-identity describe
+        // reads would treat as a provider named "all".
+        let session_request_id = match &request {
+            DashboardLcmReadRequestV1::Session { session_id, .. } => {
+                match SessionId::new(session_id) {
+                    Ok(session_id) => Some(session_id),
+                    Err(_) => {
+                        return not_ready(
+                            DashboardLcmReadStateV1::Unavailable,
+                            "lcm_dashboard_request_invalid",
+                        );
+                    }
+                }
+            }
+            DashboardLcmReadRequestV1::Search { .. }
+            | DashboardLcmReadRequestV1::Overview { .. }
+            | DashboardLcmReadRequestV1::Timeline { .. } => None,
+        };
         // Aggregate reads consume the daemon-issued continuation to its
         // terminal page. The opaque cursor binds the frozen participant/source
         // manifest and ordering, while each execute call reauthorizes and
@@ -135,7 +164,7 @@ impl DashboardLcmReadAdapter {
                     "lcm_dashboard_request_invalid",
                 );
             };
-            let (page, omitted, paged_partial) = match tracing::Instrument::instrument(
+            let (page, record_omitted, paged_partial) = match tracing::Instrument::instrument(
                 self.retrieval
                     .retrieve_admitted_with_cancellation(&context, &cancellation, query),
                 tracing::trace_span!("mcp.lcm.retrieve"),
@@ -151,8 +180,15 @@ impl DashboardLcmReadAdapter {
                     0,
                     false,
                 ),
-                SessionRetrievalServiceOutcome::Partial { page, omitted, .. } => {
-                    (page, omitted, true)
+                SessionRetrievalServiceOutcome::Partial {
+                    page,
+                    freshness,
+                    record_omitted,
+                    ..
+                } => {
+                    aggregate_lag_omitted =
+                        aggregate_lag_omitted.saturating_add(session_freshness_lag(freshness));
+                    (page, record_omitted, true)
                 }
                 SessionRetrievalServiceOutcome::Stale { .. } => {
                     return not_ready(
@@ -188,7 +224,32 @@ impl DashboardLcmReadAdapter {
                         "lcm_temporal_reset_required",
                     );
                 }
-                SessionRetrievalServiceOutcome::Unavailable(_) => {
+                SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
+                    // A session whose transcript never reached the temporal
+                    // projection has no generation for the page read, so the
+                    // temporal authority reports `TemporalStoreUnavailable`
+                    // with no worker state rather than an empty page. Only
+                    // that workerless miss reads the raw store for the
+                    // session's measured counts: every other reason — an
+                    // unconfigured service, a refused kernel read, a failed
+                    // store read, or a refresh worker that reports its own
+                    // state — keeps the typed unavailable instead of serving
+                    // counts past a genuine authority failure. A silent or
+                    // fully published raw store keeps the typed state too.
+                    if matches!(
+                        unavailable.reason,
+                        SessionRetrievalUnavailableReason::TemporalStoreUnavailable
+                    ) && unavailable.worker.is_none()
+                        && let Some(session_id) = &session_request_id
+                        && let Ok(stats) = self
+                            .retrieval
+                            .lcm_session_raw_stats_admitted(session_id.as_str())
+                            .await
+                        && let Some(stats) = stats.first()
+                        && stats.unpublished_message_count > 0
+                    {
+                        return unpublished_session_page(stats);
+                    }
                     return not_ready(
                         DashboardLcmReadStateV1::Unavailable,
                         "lcm_temporal_authority_unavailable",
@@ -218,7 +279,7 @@ impl DashboardLcmReadAdapter {
                 }
             };
             aggregate_pages = aggregate_pages.saturating_add(1);
-            aggregate_omitted = aggregate_omitted.saturating_add(omitted);
+            aggregate_record_omitted = aggregate_record_omitted.saturating_add(record_omitted);
             if !aggregate {
                 window_partial |= paged_partial;
             }
@@ -233,7 +294,7 @@ impl DashboardLcmReadAdapter {
                 // but this aggregate view is deliberately bounded. Preserve a
                 // truthful partial state instead of turning a read into
                 // unbounded background work.
-                aggregate_omitted = aggregate_omitted.saturating_add(1);
+                aggregate_record_omitted = aggregate_record_omitted.saturating_add(1);
                 break temporal;
             }
             let Some(next_cursor) = next_cursor else {
@@ -251,33 +312,48 @@ impl DashboardLcmReadAdapter {
             results: aggregate_results,
             temporal,
         };
-        let omitted = aggregate_omitted;
+        let record_omitted = aggregate_record_omitted;
 
-        let mut partial_description_count = 0_u64;
-        // A session read's stats come from the canonical describe authority,
-        // addressed by the session's measured provider, taken from the
-        // hydrated page itself, never a wildcard the exact-identity describe
-        // reads would treat as a provider named "all".
-        let session_request_id = match &request {
-            DashboardLcmReadRequestV1::Session { session_id, .. } => {
-                match SessionId::new(session_id) {
-                    Ok(session_id) => Some(session_id),
+        // Summary-node hydration drops are genuinely distinct records and
+        // always add; the session describe's own omissions are tracked
+        // apart because they already contain the unpublished rows.
+        let mut summary_omitted = 0_u64;
+        let mut session_describe_omitted = 0_u64;
+        // The measured provider names the session's exact describe
+        // authority and is taken from the hydrated page itself, never a
+        // wildcard. A session whose raw rows are all unpublished serves no
+        // occurrence to take it from, and no anchor a describe can hydrate:
+        // the session-scoped raw-store stats answer both the provider and
+        // the describe counts in one read, and an empty answer is the
+        // absent-session evidence the typed state below reads.
+        let mut session_raw_stats = None;
+        let session_provider = match page
+            .results
+            .first()
+            .map(|result| result.message.provider.clone())
+        {
+            Some(provider) => Some(provider),
+            None => match &session_request_id {
+                Some(session_id) => match self
+                    .retrieval
+                    .lcm_session_raw_stats_admitted(session_id.as_str())
+                    .await
+                {
+                    Ok(stats) => {
+                        let provider = stats.first().map(|stats| stats.provider.clone());
+                        session_raw_stats = provider.is_some().then_some(stats);
+                        provider
+                    }
                     Err(_) => {
                         return not_ready(
                             DashboardLcmReadStateV1::Unavailable,
-                            "lcm_dashboard_request_invalid",
+                            "lcm_session_description_unavailable",
                         );
                     }
-                }
-            }
-            DashboardLcmReadRequestV1::Search { .. }
-            | DashboardLcmReadRequestV1::Overview { .. }
-            | DashboardLcmReadRequestV1::Timeline { .. } => None,
+                },
+                None => None,
+            },
         };
-        let session_provider = page
-            .results
-            .first()
-            .map(|result| result.message.provider.clone());
 
         let mut messages = Vec::new();
         let mut summary_requests = Vec::new();
@@ -320,9 +396,8 @@ impl DashboardLcmReadAdapter {
         let mut summary_nodes = Vec::with_capacity(hydrated_summaries.len());
         for result in hydrated_summaries {
             match result {
-                Ok((summary, partial)) => {
-                    partial_description_count =
-                        partial_description_count.saturating_add(u64::from(partial));
+                Ok((summary, summary_dropped)) => {
+                    summary_omitted = summary_omitted.saturating_add(summary_dropped);
                     summary_nodes.push(summary);
                 }
                 Err((state, _)) => {
@@ -332,9 +407,32 @@ impl DashboardLcmReadAdapter {
         }
 
         let stats = if let Some(session_id) = session_request_id {
-            match session_provider {
-                Some(provider) => {
-                    let (description, partial) = match self
+            match (session_provider, session_raw_stats) {
+                // The page served no record, so describe has no temporal
+                // anchor to hydrate from: the raw-store stats carry the
+                // session's transcript counts instead.
+                (Some(_), Some(raw_stats)) => {
+                    let session_stats = raw_stats
+                        .first()
+                        .map(|stats| {
+                            (
+                                stats.raw_message_count,
+                                stats.unpublished_message_count,
+                                stats.summary_node_count,
+                            )
+                        })
+                        .unwrap_or_default();
+                    DashboardLcmCanonicalStatsV1 {
+                        message_count: session_stats.0,
+                        unpublished_message_count: session_stats.1,
+                        summary_node_count: session_stats.2,
+                        summary_token_count: None,
+                        source_token_count: None,
+                        token_estimate_total: None,
+                    }
+                }
+                (Some(provider), None) => {
+                    let (description, session_description_omitted) = match self
                         .describe(
                             &context,
                             &cancellation,
@@ -348,10 +446,10 @@ impl DashboardLcmReadAdapter {
                         Ok(described) => described,
                         Err((state, reason)) => return not_ready(state, reason),
                     };
-                    partial_description_count =
-                        partial_description_count.saturating_add(u64::from(partial));
+                    session_describe_omitted = session_description_omitted;
                     DashboardLcmCanonicalStatsV1 {
                         message_count: description.raw_message_count,
+                        unpublished_message_count: description.unpublished_message_count,
                         summary_node_count: description.summary_node_count,
                         summary_token_count: None,
                         source_token_count: None,
@@ -361,7 +459,7 @@ impl DashboardLcmReadAdapter {
                 // No temporal record surfaced for the session, so there is no
                 // measured provider to describe under: the zero stats feed the
                 // typed session-absent state below.
-                None => DashboardLcmCanonicalStatsV1::default(),
+                (None, _) => DashboardLcmCanonicalStatsV1::default(),
             }
         } else {
             DashboardLcmCanonicalStatsV1::default()
@@ -395,7 +493,35 @@ impl DashboardLcmReadAdapter {
                 }
             }
         };
-        let total_omitted = omitted.saturating_add(partial_description_count);
+        // `record_omitted` is the retrieval authority's genuine missing-
+        // record count with the freshness lag flag already kept out. On the
+        // terminal page the flag, the session describe's hydration drops,
+        // and the unpublished raw count all measure the same projection
+        // gap: an unpublished row always fails describe hydration (it has
+        // no published occurrence anchor), so describe omissions already
+        // contain the unpublished rows. Only the largest of the three
+        // stands; the page's record omissions and dropped summary nodes
+        // count different missing records and always add. A windowed page
+        // instead keeps the flag on top: its partiality is pagination, not
+        // proof of missing records, and there is no terminal count to
+        // deduplicate against.
+        let total_omitted = if canonical_page.has_more {
+            record_omitted
+                .saturating_add(summary_omitted)
+                .saturating_add(session_describe_omitted)
+                .saturating_add(aggregate_lag_omitted)
+        } else {
+            record_omitted
+                .saturating_add(summary_omitted)
+                .saturating_add(
+                    aggregate_lag_omitted.max(session_describe_omitted).max(
+                        canonical_page
+                            .stats
+                            .unpublished_message_count
+                            .unsigned_abs(),
+                    ),
+                )
+        };
         // A windowed page with a continuation cursor stays visibly partial
         // even when nothing was genuinely omitted (omitted stays 0): the
         // partiality is a state carried from the retrieval outcome, never
@@ -487,9 +613,9 @@ impl DashboardLcmReadAdapter {
         context: &RequestContext,
         cancellation: &CancellationSignal,
         request: SummaryHydrationRequest,
-    ) -> Result<(DashboardLcmCanonicalSummaryV1, bool), (DashboardLcmReadStateV1, &'static str)>
+    ) -> Result<(DashboardLcmCanonicalSummaryV1, u64), (DashboardLcmReadStateV1, &'static str)>
     {
-        let (description, partial) = self
+        let (description, describe_omitted) = self
             .describe(
                 context,
                 cancellation,
@@ -525,7 +651,7 @@ impl DashboardLcmReadAdapter {
                 expand_hint,
                 summary: request.content,
             },
-            partial,
+            describe_omitted,
         ))
     }
 
@@ -537,7 +663,7 @@ impl DashboardLcmReadAdapter {
         session_id: SessionId,
         target: LcmDescribeTarget,
         grain: RetrievalGrainV1,
-    ) -> Result<(LcmDescribeResponse, bool), (DashboardLcmReadStateV1, &'static str)> {
+    ) -> Result<(LcmDescribeResponse, u64), (DashboardLcmReadStateV1, &'static str)> {
         match tracing::Instrument::instrument(
             self.retrieval.describe_lcm_admitted(
                 context,
@@ -554,11 +680,12 @@ impl DashboardLcmReadAdapter {
         )
         .await
         {
-            LcmDescribeServiceOutcome::Complete { description, .. } => Ok((description, false)),
+            LcmDescribeServiceOutcome::Complete { description, .. } => Ok((description, 0)),
             LcmDescribeServiceOutcome::Partial {
                 description: Some(description),
+                retrieval,
                 ..
-            } => Ok((description, true)),
+            } => Ok((description, lcm_describe_record_omitted(retrieval))),
             LcmDescribeServiceOutcome::Stale { .. } => Err((
                 DashboardLcmReadStateV1::Stale,
                 "lcm_temporal_projection_stale",
@@ -746,6 +873,55 @@ const fn session_budget_reason(
         SessionRetrievalBudgetStageV1::HydrationBytes => "lcm_temporal_budget_hydration_bytes",
         SessionRetrievalBudgetStageV1::ContextBytes => "lcm_temporal_budget_context_bytes",
         SessionRetrievalBudgetStageV1::ContextTokens => "lcm_temporal_budget_context_tokens",
+    }
+}
+
+/// The freshness lag flag a retrieval outcome's `omitted` count embeds.
+/// The flag names the same projection gap `unpublished_message_count`
+/// measures exactly, so it is separated from genuine record omissions
+/// before the two counts are combined.
+fn session_freshness_lag(freshness: SessionDataFreshness) -> u64 {
+    match freshness {
+        SessionDataFreshness::Partial { generation_lag } => generation_lag.max(1),
+        SessionDataFreshness::Fresh | SessionDataFreshness::Stored { .. } => 0,
+    }
+}
+
+/// A describe outcome's genuine record omissions: its compressed count
+/// minus the freshness lag flag, which measures the same projection gap as
+/// the unpublished raw count.
+fn lcm_describe_record_omitted(retrieval: LcmRetrievalOutcome) -> u64 {
+    let lag = match retrieval.freshness() {
+        LcmDataFreshness::Partial { generation_lag } => generation_lag.max(1),
+        LcmDataFreshness::Fresh | LcmDataFreshness::Stored { .. } => 0,
+    };
+    retrieval.omitted().saturating_sub(lag)
+}
+
+/// A session the temporal projection has not published at all: no generation
+/// exists for the page read, so the raw store's session-scoped stats build
+/// the page directly. Its counts are the transcript's own authority, and the
+/// unpublished rows are the whole omission — the page stays visibly partial.
+fn unpublished_session_page(
+    stats: &tracedecay_lcm::types::LcmSessionRawStats,
+) -> DashboardLcmReadOutcomeV1 {
+    DashboardLcmReadOutcomeV1::Partial {
+        page: DashboardLcmCanonicalPageV1 {
+            messages: Vec::new(),
+            summary_nodes: Vec::new(),
+            overview_matches: None,
+            stats: DashboardLcmCanonicalStatsV1 {
+                message_count: stats.raw_message_count,
+                unpublished_message_count: stats.unpublished_message_count,
+                summary_node_count: stats.summary_node_count,
+                summary_token_count: None,
+                source_token_count: None,
+                token_estimate_total: None,
+            },
+            has_more: false,
+            next_cursor: None,
+        },
+        omitted: stats.unpublished_message_count.unsigned_abs(),
     }
 }
 
@@ -970,6 +1146,24 @@ mod tests {
 
     struct UnusedSessionRetrieval;
 
+    struct EmptyTemporalRetrieval;
+
+    impl SessionApplicationRetrievalPortV1 for EmptyTemporalRetrieval {
+        fn retrieve_admitted<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _query: SessionTemporalQuery,
+        ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a>
+        {
+            Box::pin(async {
+                SessionRetrievalServiceOutcome::CompleteZero {
+                    temporal: tracedecay_session_runtime::session_retrieval::SessionTemporalMetadataView::default(),
+                    freshness: SessionDataFreshness::Fresh,
+                }
+            })
+        }
+    }
+
     impl SessionApplicationRetrievalPortV1 for UnusedSessionRetrieval {
         fn retrieve_admitted<'a>(
             &'a self,
@@ -979,6 +1173,119 @@ mod tests {
         {
             panic!("expired dashboard admission must not invoke retrieval")
         }
+    }
+
+    /// Retrieval authority whose per-call outcomes the test sets outright,
+    /// so omission accounting is exercised through the adapter's public
+    /// `execute` rather than its private arithmetic.
+    struct StubSessionRetrieval {
+        retrieve: SessionRetrievalServiceOutcome,
+        raw_stats: Vec<tracedecay_lcm::types::LcmSessionRawStats>,
+        describe: LcmDescribeServiceOutcome,
+    }
+
+    impl SessionApplicationRetrievalPortV1 for StubSessionRetrieval {
+        fn retrieve_admitted<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _query: SessionTemporalQuery,
+        ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a>
+        {
+            Box::pin(async move { self.retrieve.clone() })
+        }
+
+        fn describe_lcm_admitted<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _cancellation: &'a CancellationSignal,
+            _command: LcmDescribeServiceCommand,
+        ) -> tracedecay_session_runtime::session_retrieval::LcmDescribeServiceFuture<'a> {
+            Box::pin(async move { self.describe.clone() })
+        }
+
+        fn lcm_session_raw_stats_admitted<'a>(
+            &'a self,
+            _session_id: &'a str,
+        ) -> tracedecay_session_runtime::session_retrieval::LcmSessionRawStatsFutureV1<'a> {
+            let raw_stats = self.raw_stats.clone();
+            Box::pin(async move { Ok(raw_stats) })
+        }
+    }
+
+    fn stub_message_result(
+        provider: &str,
+        session_id: &str,
+        ordinal: i64,
+    ) -> tracedecay_sessions::runtime::SessionMessageSearchResult {
+        tracedecay_sessions::runtime::SessionMessageSearchResult {
+            session: tracedecay_sessions::runtime::SessionRecord {
+                provider: provider.to_owned(),
+                session_id: session_id.to_owned(),
+                project_key: "project.dashboard-lcm-test".to_owned(),
+                project_path: "/project/dashboard-lcm-test".to_owned(),
+                title: None,
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            },
+            message: tracedecay_sessions::runtime::SessionMessageRecord {
+                provider: provider.to_owned(),
+                message_id: format!("{session_id}.message.{ordinal}"),
+                session_id: session_id.to_owned(),
+                role: "user".to_owned(),
+                timestamp: Some(1_700_002_000 + ordinal),
+                ordinal,
+                text: "a canonical message".to_owned(),
+                kind: None,
+                model: None,
+                tool_names: None,
+                source_path: None,
+                source_offset: None,
+                metadata_json: None,
+            },
+            score: 0.0,
+        }
+    }
+
+    fn stub_describe_response(
+        provider: &str,
+        session_id: &str,
+        raw_message_count: i64,
+        unpublished_message_count: i64,
+    ) -> LcmDescribeResponse {
+        LcmDescribeResponse {
+            target: "session".to_owned(),
+            provider: provider.to_owned(),
+            session_id: session_id.to_owned(),
+            raw_message_count,
+            unpublished_message_count,
+            summary_node_count: 0,
+            external_payload_count: 0,
+            first_store_id: Some(1),
+            last_store_id: Some(raw_message_count),
+            raw_messages: Vec::new(),
+            summary_nodes: Vec::new(),
+            summary_node: None,
+            external_payload: None,
+            session_token_estimate: None,
+        }
+    }
+
+    fn stub_control(name: &str) -> DashboardHttpRequestControlV1 {
+        let now = tracedecay_contracts::now_micros();
+        DashboardHttpRequestControlV1::from_parts_for_test(
+            tracedecay_contracts::RequestId::new(format!("request.{name}"))
+                .expect("request identity"),
+            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(now.0 + 30_000_000))
+                .expect("request deadline"),
+            CancellationSignal::active(format!("cancel.{name}")).expect("request cancellation"),
+            now,
+        )
     }
 
     fn dashboard_lcm_test_identity() -> ResolvedSessionIdentity {
@@ -1000,6 +1307,183 @@ mod tests {
                     .expect("branch identity"),
             ),
         )
+    }
+
+    /// A published occurrence omitted by the page and unpublished raw rows
+    /// are different missing records: the omission count adds them, never
+    /// collapses to the larger count.
+    #[tokio::test]
+    async fn page_omissions_and_unpublished_rows_count_distinct_records() {
+        let retrieval = StubSessionRetrieval {
+            retrieve: SessionRetrievalServiceOutcome::Partial {
+                page: SessionRetrievalPageView {
+                    results: vec![stub_message_result(
+                        "cursor",
+                        "session.dashboard-disjoint",
+                        1,
+                    )],
+                    temporal: tracedecay_session_runtime::session_retrieval::SessionTemporalMetadataView::default(),
+                },
+                freshness: SessionDataFreshness::Fresh,
+                omitted: 1,
+                record_omitted: 1,
+            },
+            raw_stats: Vec::new(),
+            describe: LcmDescribeServiceOutcome::Partial {
+                description: Some(stub_describe_response(
+                    "cursor",
+                    "session.dashboard-disjoint",
+                    4,
+                    2,
+                )),
+                temporal: tracedecay_session_runtime::session_retrieval::SessionTemporalMetadataView::default(),
+                grain: RetrievalGrainV1::Session,
+                state: Some(tracedecay_domain::HydrationStateV1::Available),
+                lineage: Vec::new(),
+                retrieval: LcmRetrievalOutcome::partial(LcmDataFreshness::Fresh, 2),
+            },
+        };
+        let adapter =
+            DashboardLcmReadAdapter::new(Arc::new(retrieval), dashboard_lcm_test_identity())
+                .expect("project dashboard adapter");
+
+        let outcome = adapter
+            .execute(
+                stub_control("dashboard-lcm-disjoint"),
+                Some("project.dashboard-lcm-test"),
+                DashboardLcmReadRequestV1::Session {
+                    session_id: "session.dashboard-disjoint".to_owned(),
+                    limit: 100,
+                    cursor: None,
+                },
+            )
+            .await;
+
+        let DashboardLcmReadOutcomeV1::Partial { page, omitted } = outcome else {
+            panic!("a page short of the counted messages stays partial");
+        };
+        assert_eq!(page.stats.message_count, 4);
+        assert_eq!(page.stats.unpublished_message_count, 2);
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(
+            omitted, 3,
+            "one omitted published record plus two unpublished rows"
+        );
+    }
+
+    /// Every stored message unpublished means no temporal generation exists
+    /// for the page read and the temporal authority reports unavailable; the
+    /// session's raw store resolves the counted transcript instead of absent.
+    #[tokio::test]
+    async fn fully_unpublished_session_reports_counts_instead_of_absent() {
+        let retrieval = StubSessionRetrieval {
+            retrieve: SessionRetrievalServiceOutcome::Unavailable(
+                tracedecay_session_runtime::session_retrieval::SessionRetrievalUnavailable::without_worker(
+                    SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+                ),
+            ),
+            raw_stats: vec![tracedecay_lcm::types::LcmSessionRawStats {
+                provider: "cursor".to_owned(),
+                raw_message_count: 5,
+                unpublished_message_count: 5,
+                summary_node_count: 0,
+            }],
+            describe: LcmDescribeServiceOutcome::Unavailable(
+                tracedecay_session_runtime::session_retrieval::SessionRetrievalUnavailable::service_not_configured(),
+            ),
+        };
+        let adapter =
+            DashboardLcmReadAdapter::new(Arc::new(retrieval), dashboard_lcm_test_identity())
+                .expect("project dashboard adapter");
+
+        let outcome = adapter
+            .execute(
+                stub_control("dashboard-lcm-unpublished"),
+                Some("project.dashboard-lcm-test"),
+                DashboardLcmReadRequestV1::Session {
+                    session_id: "session.dashboard-unpublished".to_owned(),
+                    limit: 100,
+                    cursor: None,
+                },
+            )
+            .await;
+
+        let DashboardLcmReadOutcomeV1::Partial { page, omitted } = outcome else {
+            panic!("a stored but unpublished session is partial, not absent");
+        };
+        assert_eq!(page.stats.message_count, 5);
+        assert_eq!(page.stats.unpublished_message_count, 5);
+        assert_eq!(omitted, 5);
+        assert!(page.messages.is_empty());
+    }
+
+    /// When neither the temporal page nor the raw store holds anything for
+    /// the session, no provider resolves and the absent state stands.
+    #[tokio::test]
+    async fn session_with_no_stored_messages_stays_absent() {
+        let retrieval = StubSessionRetrieval {
+            retrieve: SessionRetrievalServiceOutcome::CompleteZero {
+                temporal: tracedecay_session_runtime::session_retrieval::SessionTemporalMetadataView::default(),
+                freshness: SessionDataFreshness::Fresh,
+            },
+            raw_stats: Vec::new(),
+            describe: LcmDescribeServiceOutcome::Unavailable(
+                tracedecay_session_runtime::session_retrieval::SessionRetrievalUnavailable::service_not_configured(),
+            ),
+        };
+        let adapter =
+            DashboardLcmReadAdapter::new(Arc::new(retrieval), dashboard_lcm_test_identity())
+                .expect("project dashboard adapter");
+
+        let outcome = adapter
+            .execute(
+                stub_control("dashboard-lcm-absent"),
+                Some("project.dashboard-lcm-test"),
+                DashboardLcmReadRequestV1::Session {
+                    session_id: "session.dashboard-absent".to_owned(),
+                    limit: 100,
+                    cursor: None,
+                },
+            )
+            .await;
+
+        let DashboardLcmReadOutcomeV1::NotReady { state, reason } = outcome else {
+            panic!("a session with no stored messages is absent");
+        };
+        assert_eq!(state, DashboardLcmReadStateV1::Absent);
+        assert_eq!(reason, "lcm_session_absent");
+    }
+
+    #[tokio::test]
+    async fn unavailable_raw_authority_does_not_report_an_absent_session() {
+        let retrieval = EmptyTemporalRetrieval;
+        let unavailable = retrieval
+            .lcm_session_raw_stats_admitted("session.dashboard-unavailable")
+            .await
+            .expect_err("an unconfigured raw authority is not an empty store");
+        assert_eq!(
+            unavailable,
+            tracedecay_session_runtime::session_retrieval::SessionRetrievalUnavailable::service_not_configured(),
+        );
+        let adapter =
+            DashboardLcmReadAdapter::new(Arc::new(retrieval), dashboard_lcm_test_identity())
+                .expect("project dashboard adapter");
+        let outcome = adapter
+            .execute(
+                stub_control("dashboard-lcm-unavailable"),
+                Some("project.dashboard-lcm-test"),
+                DashboardLcmReadRequestV1::Session {
+                    session_id: "session.dashboard-unavailable".to_owned(),
+                    limit: 100,
+                    cursor: None,
+                },
+            )
+            .await;
+        let DashboardLcmReadOutcomeV1::NotReady { state, reason } = outcome else {
+            panic!("missing raw authority must remain unavailable");
+        };
+        assert_eq!(state, DashboardLcmReadStateV1::Unavailable);
+        assert_eq!(reason, "lcm_session_description_unavailable");
     }
 
     #[tokio::test]

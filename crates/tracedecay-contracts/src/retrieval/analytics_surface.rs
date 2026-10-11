@@ -139,10 +139,8 @@ pub struct AnalyticsToolsSectionV1 {
     pub raw_distinct_event_name_count: usize,
     pub called_available_defined_tool_count: usize,
     pub available_defined_tool_count: usize,
-    pub maximal_defined_tool_count: usize,
     pub aliased_call_names: Vec<AnalyticsCanonicalCallNameV1>,
     pub bound_internal_call_names: Vec<AnalyticsEventCallNameV1>,
-    pub unavailable_public_call_names: Vec<AnalyticsCanonicalCallNameV1>,
     pub unknown_or_retired_call_names: Vec<AnalyticsEventCallNameV1>,
     pub zero_call_available_defined_tools: AnalyticsZeroCallToolsV1,
 }

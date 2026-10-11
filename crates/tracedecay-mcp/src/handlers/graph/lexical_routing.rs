@@ -79,10 +79,14 @@ pub(super) fn routing_from_parts(
     })
 }
 
+const ANCHOR_ROUTE_PREFIX: &str = "anchor:";
+
 pub(super) fn route_label(route: &LexicalRouteKindV1) -> String {
     match route {
         LexicalRouteKindV1::Query => "query".to_owned(),
-        LexicalRouteKindV1::Anchor { anchor } => format!("anchor:{}", anchor.as_str()),
+        LexicalRouteKindV1::Anchor { anchor } => {
+            format!("{ANCHOR_ROUTE_PREFIX}{}", anchor.as_str())
+        }
         LexicalRouteKindV1::PreferredSymbol { tokens } => {
             format!("symbol:{}", tokens.join("|"))
         }
@@ -217,6 +221,17 @@ pub(super) fn anchor_outcome(receipt: &LexicalAnchorReceiptV1) -> ContextLexical
         LexicalAnchorOutcomeV1::Unmatched => ContextLexicalAnchorV1::Unmatched { anchor },
         LexicalAnchorOutcomeV1::NotServed => ContextLexicalAnchorV1::NotServed { anchor },
     }
+}
+
+/// True when a caller `lexical_anchors` route ranked this result row.
+pub(super) fn ranked_by_anchor(result: &Value) -> bool {
+    result
+        .get("lexical_routes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|route| route.get("route").and_then(Value::as_str))
+        .any(|label| label.starts_with(ANCHOR_ROUTE_PREFIX))
 }
 
 pub(super) fn result_route_suffix(result: &Value) -> String {

@@ -33,7 +33,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  AST_GREP_VERSION: "0.44.0"
 
 jobs:
   # Drafts run cheap gates. Ready PRs and pushes run the Bazel Linux authority;
@@ -162,6 +161,9 @@ jobs:
 
       - name: Test the unused tool-context matching rules
         run: python3 scripts/test-measure-unused-tool-context.py
+
+      - name: Test the ranked-tail trim replay against the Rust rule cases
+        run: bazel run //scripts:test-measure-ranked-tail-trim.py
 
       - name: Test the Hermes dashboard embed helpers
         run: python3 -m unittest discover -s dashboard/hermes-wrapper -p 'test_*.py'
@@ -717,10 +719,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
       - name: Fetch the debug CLI built once for this run
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

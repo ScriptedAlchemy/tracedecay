@@ -159,6 +159,48 @@ pub async fn session_providers(
     Ok(providers)
 }
 
+/// Per-provider raw transcript stats for one explicit session id, ordered by
+/// most recent ingested activity: the measured provider alongside the raw,
+/// unpublished, and visible-summary counts a describe would report. The raw
+/// store answers even when the temporal projection has published nothing for
+/// the session, where an occurrence page or describe has no anchor to read.
+pub async fn session_raw_stats(
+    conn: &(impl QueryExecutor + ?Sized),
+    session_id: &str,
+) -> Result<Vec<LcmSessionRawStats>, LcmError> {
+    let mut rows = conn
+        .query(
+            &format!(
+                "SELECT raw.provider,
+                        COUNT(*),
+                        SUM(CASE WHEN {unpublished} THEN 1 ELSE 0 END),
+                        (SELECT COUNT(*)
+                         FROM session_summary_nodes n
+                         WHERE n.provider = raw.provider
+                           AND n.session_id = raw.session_id
+                           AND {visible})
+                 FROM lcm_raw_messages raw
+                 WHERE raw.session_id = ?1
+                 GROUP BY raw.provider
+                 ORDER BY MAX(raw.store_id) DESC",
+                unpublished = schema::RAW_MESSAGE_UNPUBLISHED_SQL,
+                visible = schema::SUMMARY_VISIBLE_SQL,
+            ),
+            params![session_id],
+        )
+        .await?;
+    let mut stats = Vec::new();
+    while let Some(row) = rows.next().await? {
+        stats.push(LcmSessionRawStats {
+            provider: row.get(0)?,
+            raw_message_count: row.get(1)?,
+            unpublished_message_count: row.get(2)?,
+            summary_node_count: row.get(3)?,
+        });
+    }
+    Ok(stats)
+}
+
 /// Loads a bounded turn-ordered replay slice for one session: head turns,
 /// tail turns (deduplicated against the head), and top summary-DAG nodes.
 #[tracing::instrument(name = "sessions.lcm.replay_slice", level = "trace", skip_all)]

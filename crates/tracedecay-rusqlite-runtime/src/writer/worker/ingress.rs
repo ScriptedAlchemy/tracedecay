@@ -172,15 +172,15 @@ pub(super) fn enqueue(
         }
         return reject_duplicate(item, operation_id, telemetry);
     }
-    if let Some(hub) = inflight.get(&operation_id) {
+    if let Some(hub) = inflight.get(&operation_id)
+        && hub.overlaps(&item)
+    {
         if !hub.matches(&item) {
             return reject_duplicate(item, operation_id, telemetry);
         }
-        if hub.can_attach(&item) {
-            hub.attach_request(item);
-            telemetry.released(1, admission_bytes);
-            return true;
-        }
+        hub.attach_request(item);
+        telemetry.released(1, admission_bytes);
+        return true;
     }
     if let Err(item) = queue.push(item) {
         return reject_duplicate(item, operation_id, telemetry);

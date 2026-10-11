@@ -93,6 +93,18 @@ pub type LcmRawStoreIdsFutureV1<'a> = Pin<
     >,
 >;
 
+pub type LcmSessionRawStatsFutureV1<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    Vec<tracedecay_lcm::types::LcmSessionRawStats>,
+                    SessionRetrievalUnavailable,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
 pub(crate) type TaskSessionApplicationRetrievalFutureV1<'a> =
     Pin<Box<dyn Future<Output = TaskSessionRetrievalOutcomeV1> + Send + 'a>>;
 
@@ -181,6 +193,18 @@ pub trait SessionApplicationRetrievalPortV1: Send + Sync {
         _identities: Vec<(String, String)>,
     ) -> LcmRawStoreIdsFutureV1<'_> {
         Box::pin(async { Ok(BTreeMap::new()) })
+    }
+
+    /// Session-scoped raw-store authority: per-provider transcript counts
+    /// for the session id, most recently active first. A session whose
+    /// stored messages are all unpublished serves no occurrence to measure
+    /// a provider from and no anchor a describe can hydrate, so the raw
+    /// store must name both the provider and the counts.
+    fn lcm_session_raw_stats_admitted<'a>(
+        &'a self,
+        _session_id: &'a str,
+    ) -> LcmSessionRawStatsFutureV1<'a> {
+        Box::pin(async { Err(SessionRetrievalUnavailable::service_not_configured()) })
     }
 
     /// The refresh worker's serving state for this root, current, still
@@ -277,6 +301,16 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                             }
                             other => other,
                         },
+                    }
+                }
+                SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
+                    // Same remap describe/expand already apply: a pending
+                    // historical generation is the worker's state, not an
+                    // absent temporal store.
+                    if let Some(converging) = self.converging_projection_unavailable(&unavailable) {
+                        SessionRetrievalServiceOutcome::Unavailable(converging)
+                    } else {
+                        SessionRetrievalServiceOutcome::Unavailable(unavailable)
                     }
                 }
                 outcome => outcome,
@@ -411,6 +445,32 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                         operation: "resolve LCM raw-message store ids".to_owned(),
                     },
                 )
+        })
+    }
+
+    fn lcm_session_raw_stats_admitted<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> LcmSessionRawStatsFutureV1<'a> {
+        Box::pin(async move {
+            let result = async {
+                let snapshot = self.database.read_snapshot().await?;
+                tracedecay_lcm::query::session_raw_stats(&snapshot, session_id)
+                    .await
+                    .map_err(
+                        |error| tracedecay_domain::errors::TraceDecayError::Database {
+                            message: error.to_string(),
+                            operation: "resolve LCM session raw stats".to_owned(),
+                        },
+                    )
+            }
+            .await;
+            result.map_err(|error| {
+                tracing::warn!(%error, "LCM session raw statistics read failed");
+                SessionRetrievalUnavailable::without_worker(
+                    SessionRetrievalUnavailableReason::TemporalStoreReadFailed,
+                )
+            })
         })
     }
 }

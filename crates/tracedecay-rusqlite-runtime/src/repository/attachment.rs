@@ -851,12 +851,7 @@ fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        sync::mpsc,
-        thread,
-        time::{Duration, Instant},
-    };
+    use std::{fs, sync::mpsc, thread, time::Duration};
 
     use tempfile::TempDir;
     use tracedecay_domain::LocatorDigest;
@@ -1200,20 +1195,15 @@ mod tests {
                 .expect("writer remains attached")
                 .checkpoint_handle()
         };
-        let pressure_deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if matches!(
-                checkpoint.pressure(),
-                crate::CheckpointPressure::BlockGeneral { .. }
-            ) {
-                break;
-            }
-            assert!(
-                Instant::now() < pressure_deadline,
-                "the first over-hard-limit write must publish hard checkpoint pressure"
-            );
-            thread::yield_now();
-        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut status = checkpoint.status_subscription();
+        runtime
+            .block_on(checkpoint.pressure_subscription().wait_for(|pressure| {
+                matches!(pressure, crate::CheckpointPressure::BlockGeneral { .. })
+            }))
+            .expect("the first over-hard-limit write must publish hard checkpoint pressure");
         let blocked_wal_bytes = std::fs::metadata(&wal_path).unwrap().len();
 
         let queued_handle = handle.clone();
@@ -1242,42 +1232,43 @@ mod tests {
             crate::CheckpointPressure::BlockGeneral { ref blockers, .. }
                 if !blockers.is_clear()
         ));
-        let runtime_snapshot = attachment.snapshot();
-        let writer_snapshot = runtime_snapshot
-            .writer
-            .as_ref()
-            .expect("the writer remains attached while hard pressure is active");
+        // Every hard-drain retry publishes a checkpoint status, so wait for
+        // one instead of assuming the 100 ms retry timer fired in time.
+        let writer_snapshot = loop {
+            status.mark_unchanged();
+            let writer_snapshot = attachment
+                .snapshot()
+                .writer
+                .expect("the writer remains attached while hard pressure is active");
+            if writer_snapshot.wal.hard_retry_wakes > 0 {
+                break writer_snapshot;
+            }
+            runtime
+                .block_on(status.changed())
+                .expect("the writer keeps retrying the hard drain");
+        };
         assert!(matches!(
             writer_snapshot.checkpoint_pressure,
             crate::CheckpointPressure::BlockGeneral { .. }
         ));
-        assert!(writer_snapshot.wal.hard_retry_wakes > 0);
 
         drop(snapshot);
-        completed_rx
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .unwrap();
+        // The drain's checkpoint and the WAL restart behind it both fsync,
+        // which a saturated disk stalls for tens of seconds; wait for the
+        // write itself rather than bounding that I/O.
+        completed_rx.recv().unwrap().unwrap();
         queued.join().unwrap();
-        let recovery_deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let status = checkpoint.status();
-            let recovered = matches!(checkpoint.pressure(), crate::CheckpointPressure::Open)
-                && status.latest.as_ref().is_some_and(|outcome| match outcome {
-                    crate::CheckpointOutcome::BelowSoft { wal }
-                    | crate::CheckpointOutcome::Complete { wal, .. } => wal.bytes <= 8 * 1024,
-                    crate::CheckpointOutcome::Pending { .. }
-                    | crate::CheckpointOutcome::Interrupted { .. } => false,
-                });
-            if recovered {
-                break;
-            }
-            assert!(
-                Instant::now() < recovery_deadline,
-                "the released reader must let the checkpoint recover below the soft limit"
-            );
-            thread::yield_now();
-        }
+        runtime
+            .block_on(status.wait_for(|status| {
+                matches!(checkpoint.pressure(), crate::CheckpointPressure::Open)
+                    && status.latest.as_ref().is_some_and(|outcome| match outcome {
+                        crate::CheckpointOutcome::BelowSoft { wal }
+                        | crate::CheckpointOutcome::Complete { wal, .. } => wal.bytes <= 8 * 1024,
+                        crate::CheckpointOutcome::Pending { .. }
+                        | crate::CheckpointOutcome::Interrupted { .. } => false,
+                    })
+            }))
+            .expect("the released reader must let the checkpoint recover below the soft limit");
 
         attachment.drain().unwrap();
         attachment.close_and_join().unwrap();

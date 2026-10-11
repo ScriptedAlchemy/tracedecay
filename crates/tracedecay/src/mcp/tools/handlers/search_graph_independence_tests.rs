@@ -638,14 +638,16 @@ async fn tracedecay_context_hydrates_attested_window_past_preceding_noise() {
     let declared = "pub fn LexicalWidget() -> u32 { 42 }";
     let start = u64::try_from(source.find(declared).expect("declaration offset"))
         .expect("declaration offset bytes");
-    let site = tracedecay_query::code_search::CodeIndexSearchSiteV1::ArtifactWindow {
-        source_span: tracedecay_domain::SourceSpan {
-            start_byte: start,
-            end_byte: start + declared.len() as u64,
+    let site = tracedecay_query::code_search::CodeIndexSearchSiteV1::ArtifactWindow(
+        tracedecay_query::code_search::CodeIndexSearchWindowV1 {
+            source_span: tracedecay_domain::SourceSpan {
+                start_byte: start,
+                end_byte: start + declared.len() as u64,
+            },
+            sanitized_text: tracedecay_domain::BoundedSanitizedText::new(declared)
+                .expect("bounded window text"),
         },
-        sanitized_text: tracedecay_domain::BoundedSanitizedText::new(declared)
-            .expect("bounded window text"),
-    };
+    );
     let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(move |_| {
         let site = site.clone();
         Box::pin(async move { completed_lexical_search_with("src/lib.rs", Some(site)) })
@@ -703,14 +705,16 @@ async fn tracedecay_context_reports_code_unavailable_when_attested_source_is_mis
     .await
     .expect("registered missing source fixture");
 
-    let site = tracedecay_query::code_search::CodeIndexSearchSiteV1::ArtifactWindow {
-        source_span: tracedecay_domain::SourceSpan {
-            start_byte: 0,
-            end_byte: 10,
+    let site = tracedecay_query::code_search::CodeIndexSearchSiteV1::ArtifactWindow(
+        tracedecay_query::code_search::CodeIndexSearchWindowV1 {
+            source_span: tracedecay_domain::SourceSpan {
+                start_byte: 0,
+                end_byte: 10,
+            },
+            sanitized_text: tracedecay_domain::BoundedSanitizedText::new("fn missing")
+                .expect("bounded window text"),
         },
-        sanitized_text: tracedecay_domain::BoundedSanitizedText::new("fn missing")
-            .expect("bounded window text"),
-    };
+    );
     let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(move |_| {
         let site = site.clone();
         Box::pin(async move { completed_lexical_search_with("src/missing.rs", Some(site)) })
@@ -840,14 +844,16 @@ async fn tracedecay_context_excludes_file_hits_from_symbols_but_serves_their_win
     // symbol location to attest, so it earns no symbols[] row; its own
     // artifact window is still a bounded site and serves as code.
     let file_text = source.trim_end();
-    let file_site = tracedecay_query::code_search::CodeIndexSearchSiteV1::ArtifactWindow {
-        source_span: tracedecay_domain::SourceSpan {
-            start_byte: 0,
-            end_byte: file_text.len() as u64,
+    let file_site = tracedecay_query::code_search::CodeIndexSearchSiteV1::ArtifactWindow(
+        tracedecay_query::code_search::CodeIndexSearchWindowV1 {
+            source_span: tracedecay_domain::SourceSpan {
+                start_byte: 0,
+                end_byte: file_text.len() as u64,
+            },
+            sanitized_text: tracedecay_domain::BoundedSanitizedText::new(file_text)
+                .expect("bounded file window"),
         },
-        sanitized_text: tracedecay_domain::BoundedSanitizedText::new(file_text)
-            .expect("bounded file window"),
-    };
+    );
     let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(move |_| {
         let file_site = file_site.clone();
         Box::pin(async move {

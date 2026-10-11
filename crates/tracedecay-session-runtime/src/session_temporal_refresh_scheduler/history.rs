@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -17,29 +18,29 @@ use tracedecay_sessions::observation::ObservationCancellation;
 pub type SessionHistoricalIngestPass<'a> =
     Pin<Box<dyn Future<Output = SessionHistoricalIngestOutcome> + Send + 'a>>;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionHistoricalIngestOutcome {
     Complete,
     Pending {
         made_progress: bool,
     },
     Retryable {
-        reason_code: &'static str,
+        reason_code: String,
         made_progress: bool,
     },
     Blocked {
-        reason_code: &'static str,
+        reason_code: String,
         made_progress: bool,
     },
     Cancelled,
 }
 
 impl SessionHistoricalIngestOutcome {
-    pub const fn needs_another_pass(self) -> bool {
+    pub const fn needs_another_pass(&self) -> bool {
         matches!(self, Self::Pending { .. } | Self::Retryable { .. })
     }
 
-    pub const fn made_progress(self) -> bool {
+    pub const fn made_progress(&self) -> bool {
         matches!(
             self,
             Self::Pending {
@@ -324,15 +325,17 @@ fn classify_transcript_ingest_outcome(
         return SessionHistoricalIngestOutcome::Cancelled;
     }
     let made_progress = outcome.made_progress();
-    if let Some(failure) = outcome.failures.iter().find(|failure| !failure.retryable) {
+    let blocked = pass_reason_code(&outcome.failures, false);
+    if !blocked.is_empty() {
         return SessionHistoricalIngestOutcome::Blocked {
-            reason_code: failure.reason_code,
+            reason_code: blocked,
             made_progress,
         };
     }
-    if let Some(failure) = outcome.failures.first() {
+    let retryable = pass_reason_code(&outcome.failures, true);
+    if !retryable.is_empty() {
         return SessionHistoricalIngestOutcome::Retryable {
-            reason_code: failure.reason_code,
+            reason_code: retryable,
             made_progress,
         };
     }
@@ -340,6 +343,44 @@ fn classify_transcript_ingest_outcome(
         return SessionHistoricalIngestOutcome::Pending { made_progress };
     }
     SessionHistoricalIngestOutcome::Complete
+}
+
+/// Names the pass blocker(s) per provider. A single-provider pass keeps the
+/// raw reason code so existing status strings stay stable. Multi-provider
+/// passes use `provider:reason` so rotation order cannot hide the real stall.
+fn pass_reason_code(
+    failures: &[tracedecay_sessions::runtime::TranscriptCatchUpFailure],
+    retryable: bool,
+) -> String {
+    let provider_count = failures
+        .iter()
+        .map(|failure| failure.provider)
+        .collect::<BTreeSet<_>>()
+        .len();
+    let mut blockers = BTreeMap::new();
+    for failure in failures {
+        if failure.retryable != retryable {
+            continue;
+        }
+        blockers
+            .entry(failure.provider)
+            .or_insert(failure.reason_code);
+    }
+    if blockers.is_empty() {
+        return String::new();
+    }
+    if provider_count <= 1 {
+        let mut reasons = blockers.into_values();
+        return match reasons.next() {
+            Some(reason) => reason.to_owned(),
+            None => String::new(),
+        };
+    }
+    blockers
+        .into_iter()
+        .map(|(provider, reason)| format!("{provider}:{reason}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[cfg(test)]
@@ -383,7 +424,7 @@ mod tests {
         assert_eq!(
             outcome,
             SessionHistoricalIngestOutcome::Retryable {
-                reason_code: "authority_write_failed",
+                reason_code: "authority_write_failed".to_owned(),
                 made_progress: false,
             }
         );
@@ -400,7 +441,7 @@ mod tests {
         assert_eq!(
             outcome,
             SessionHistoricalIngestOutcome::Blocked {
-                reason_code: "invalid_observation_contract",
+                reason_code: "invalid_observation_contract".to_owned(),
                 made_progress: false,
             }
         );
@@ -432,7 +473,7 @@ mod tests {
         assert_eq!(
             outcome,
             SessionHistoricalIngestOutcome::Blocked {
-                reason_code: "observation_cursor_advance_collision",
+                reason_code: "observation_cursor_advance_collision".to_owned(),
                 made_progress: true,
             }
         );
@@ -440,5 +481,114 @@ mod tests {
             outcome.made_progress(),
             "the healthy Claude and Codex rows must still reach temporal projection"
         );
+    }
+
+    fn ingest_outcome_with_failures(
+        failures: Vec<TranscriptCatchUpFailure>,
+    ) -> TranscriptIngestOutcome {
+        TranscriptIngestOutcome {
+            stats: tracedecay_sessions::runtime::shared::TranscriptIngestStats::default(),
+            failures,
+            coverage: IngestPassCoverage::Complete,
+            scheduling_state_written: false,
+            coverage_advanced: false,
+        }
+    }
+
+    /// Provider rotation folds retryable failures in discovery order. Status
+    /// must name each provider's blocker, not whichever failure happened to
+    /// land first (the reporting host showed `historical_retry:cursor_conflict`
+    /// while Claude was blocked on projection storage).
+    #[test]
+    fn multi_provider_retryable_pass_names_each_provider_blocker() {
+        let outcome = classify_transcript_ingest_outcome(
+            ingest_outcome_with_failures(vec![
+                TranscriptCatchUpFailure {
+                    provider: "opencode",
+                    source: "observation",
+                    reason_code: "cursor_conflict",
+                    retryable: true,
+                    source_locator: None,
+                },
+                TranscriptCatchUpFailure {
+                    provider: "claude",
+                    source: "observation",
+                    reason_code: "projection_storage_retry_scheduled",
+                    retryable: true,
+                    source_locator: None,
+                },
+            ]),
+            &ObservationCancellation::default(),
+        );
+
+        let SessionHistoricalIngestOutcome::Retryable {
+            ref reason_code,
+            made_progress,
+        } = outcome
+        else {
+            panic!("multi-provider retryable failures must stay retryable, got {outcome:?}");
+        };
+        assert!(!made_progress);
+        assert!(
+            reason_code.contains("claude")
+                && reason_code.contains("projection_storage_retry_scheduled"),
+            "status must name Claude's blocker, got {reason_code}"
+        );
+        assert!(
+            reason_code.contains("opencode") && reason_code.contains("cursor_conflict"),
+            "status must name OpenCode's blocker, got {reason_code}"
+        );
+        assert_ne!(
+            reason_code, "cursor_conflict",
+            "rotation order must not hide later providers behind the first retryable failure"
+        );
+        assert!(outcome.needs_another_pass());
+    }
+
+    /// A non-retryable provider failure is the pass blocker even when an
+    /// earlier retryable cursor conflict is folded first.
+    #[test]
+    fn multi_provider_pass_names_the_non_retryable_provider_blocker() {
+        let outcome = classify_transcript_ingest_outcome(
+            ingest_outcome_with_failures(vec![
+                TranscriptCatchUpFailure {
+                    provider: "opencode",
+                    source: "observation",
+                    reason_code: "cursor_conflict",
+                    retryable: true,
+                    source_locator: None,
+                },
+                TranscriptCatchUpFailure {
+                    provider: "claude",
+                    source: "observation",
+                    reason_code: "projection_store_corrupt",
+                    retryable: false,
+                    source_locator: None,
+                },
+            ]),
+            &ObservationCancellation::default(),
+        );
+
+        let SessionHistoricalIngestOutcome::Blocked {
+            ref reason_code,
+            made_progress,
+        } = outcome
+        else {
+            panic!("a non-retryable provider failure must block the pass, got {outcome:?}");
+        };
+        assert!(!made_progress);
+        assert!(
+            reason_code.contains("projection_store_corrupt"),
+            "status must name the corrupt projection store, got {reason_code}"
+        );
+        assert!(
+            reason_code.contains("claude"),
+            "status must name the provider that is blocked, got {reason_code}"
+        );
+        assert!(
+            !reason_code.contains("cursor_conflict"),
+            "a retryable sibling must not become the blocked label, got {reason_code}"
+        );
+        assert!(!outcome.needs_another_pass());
     }
 }

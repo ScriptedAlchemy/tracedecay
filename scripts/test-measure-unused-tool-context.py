@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
+import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("measure-unused-tool-context.py")
 spec = importlib.util.spec_from_file_location("measure_unused_tool_context", SCRIPT)
@@ -456,6 +460,35 @@ class HostResultShapes(unittest.TestCase):
         for name in (SEARCH, "mcp__tracedecay__tracedecay_search", "tracedecay_search"):
             self.assertEqual(measure.tool_name(name), "tracedecay_search")
         self.assertIsNone(measure.tool_name("Grep"))
+
+
+class CommandCoverage(unittest.TestCase):
+    def test_no_scored_text_reports_null_coverage(self) -> None:
+        redacted = [
+            lcm_row(1, "assistant", "{}", [
+                {"kind": "tool_invocation", "invocation_id": "c1", "name": SEARCH}
+            ]),
+            lcm_row(2, "tool", "null", [
+                {"kind": "tool_result", "invocation_id": "c1", "content": None, "success": True}
+            ]),
+        ]
+        for messages, calls in (([], 0), ([lcm_row(1, "assistant", "Done", [])], 0), (redacted, 1)):
+            with self.subTest(calls=calls, messages=len(messages)), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "report.json"
+                stdout = io.StringIO()
+                with (
+                    patch.object(sys, "argv", [str(SCRIPT), "--session", "codex:session", "--json", str(output)]),
+                    patch.object(measure, "discover", return_value={}),
+                    patch.object(measure, "load_messages", return_value=messages),
+                    redirect_stdout(stdout),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(measure.main(), 0)
+                report = json.loads(output.read_text())
+                self.assertEqual(report["coverage"]["scored_calls"], calls)
+                self.assertEqual(report["coverage"]["scored_non_error_calls"], 0)
+                self.assertIsNone(report["coverage"]["token_count_coverage"])
+                self.assertIn('"token_count_coverage": null', stdout.getvalue())
 
 
 if __name__ == "__main__":

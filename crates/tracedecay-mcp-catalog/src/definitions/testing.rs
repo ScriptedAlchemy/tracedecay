@@ -53,7 +53,7 @@ pub(super) fn def_run_affected_tests(input_schema: Value) -> ToolDefinition {
 mod tests {
     #[test]
     fn affected_test_execution_requires_an_explicit_file_manifest() {
-        let definition = crate::get_maximal_tool_definitions()
+        let definition = crate::get_tool_definitions()
             .expect("tool definitions")
             .into_iter()
             .find(|definition| definition.name == "tracedecay_run_affected_tests")
