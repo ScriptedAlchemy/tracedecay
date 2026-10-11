@@ -1176,7 +1176,7 @@ mod tests {
             .execute_batch(
                 "PRAGMA foreign_keys = OFF;
                  CREATE TABLE authority_foreign_key_audit_progress (
-                    audit_name TEXT PRIMARY KEY,
+                    audit_name TEXT NOT NULL PRIMARY KEY,
                     last_table TEXT NOT NULL
                  );
                  CREATE TABLE parent (id INTEGER PRIMARY KEY);

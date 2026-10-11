@@ -187,6 +187,9 @@ mod observation_batch_tests;
 mod observation_collision_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+mod schema_portability_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod session_project_rebind_tests;
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

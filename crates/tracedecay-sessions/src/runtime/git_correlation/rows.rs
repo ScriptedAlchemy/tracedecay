@@ -26,7 +26,7 @@ use super::{
 
 pub(super) const GIT_EVIDENCE_ROWS_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS git_evidence_span (
-        span_id TEXT PRIMARY KEY CHECK(length(span_id) > 0),
+        span_id TEXT NOT NULL PRIMARY KEY CHECK(length(span_id) > 0),
         session_id TEXT NOT NULL CHECK(length(session_id) > 0),
         provider TEXT NOT NULL,
         branch TEXT,
@@ -51,7 +51,7 @@ pub(super) const GIT_EVIDENCE_ROWS_SCHEMA: &str = "
         session_id TEXT NOT NULL CHECK(length(session_id) > 0),
         record TEXT NOT NULL,
         PRIMARY KEY (commit_sha, session_id)
-    ) WITHOUT ROWID;
+    );
     CREATE INDEX IF NOT EXISTS idx_git_evidence_commit_session
         ON git_evidence_commit(session_id);
     CREATE TABLE IF NOT EXISTS git_history_session_publication (
@@ -59,7 +59,7 @@ pub(super) const GIT_EVIDENCE_ROWS_SCHEMA: &str = "
         session_id TEXT NOT NULL,
         sequence INTEGER NOT NULL,
         PRIMARY KEY(provider, session_id)
-    ) WITHOUT ROWID;
+    );
     CREATE TABLE IF NOT EXISTS git_evidence_generation (
         singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
         sequence INTEGER NOT NULL CHECK(sequence > 0),

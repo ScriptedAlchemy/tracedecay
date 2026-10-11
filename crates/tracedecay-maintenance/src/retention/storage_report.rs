@@ -1307,7 +1307,7 @@ mod tests {
         let conn = TestConnection::open(&profile_root.join(GLOBAL_DB_FILENAME));
         conn.execute_batch(
             "CREATE TABLE code_projects (
-                project_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL PRIMARY KEY,
                 canonical_root TEXT NOT NULL
              );",
         )
@@ -1761,7 +1761,7 @@ mod tests {
                     "PRAGMA journal_mode = WAL;
                      PRAGMA wal_autocheckpoint = 0;
                      CREATE TABLE code_projects (
-                         project_id TEXT PRIMARY KEY, canonical_root TEXT NOT NULL
+                         project_id TEXT NOT NULL PRIMARY KEY, canonical_root TEXT NOT NULL
                      );
                      INSERT INTO code_projects VALUES ('proj_a', '/repos/a');",
                 )

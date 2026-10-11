@@ -32,7 +32,7 @@ const TEMPORAL_FTS_CONTRACTS: &[(&str, &str)] = &[
 
 const TEMPORAL_SCHEMA_DDL: &str = r"
     CREATE TABLE IF NOT EXISTS session_temporal_schema_migrations (
-        name TEXT PRIMARY KEY,
+        name TEXT NOT NULL PRIMARY KEY,
         version INTEGER NOT NULL CHECK(version > 0),
         applied_at INTEGER NOT NULL
     );
@@ -42,7 +42,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     -- active generation is 'available'. Rows are immutable; retirement is an
     -- availability state, never a delete.
     CREATE TABLE IF NOT EXISTS session_summary_nodes (
-        summary_id TEXT PRIMARY KEY,
+        summary_id TEXT NOT NULL PRIMARY KEY,
         session_id TEXT NOT NULL,
         provider TEXT NOT NULL,
         conversation_id TEXT NOT NULL,
@@ -136,7 +136,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     );
 
     CREATE TABLE IF NOT EXISTS session_external_payload_manifests (
-        payload_ref TEXT PRIMARY KEY,
+        payload_ref TEXT NOT NULL PRIMARY KEY,
         session_id TEXT NOT NULL,
         payload_digest TEXT NOT NULL,
         manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json)),
@@ -246,7 +246,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     -- The schema deliberately creates no key row. Daemon-owned key rotation
     -- appends an authenticated version; SQLite cannot prove the caller's identity.
     CREATE TABLE IF NOT EXISTS session_query_cursor_keys (
-        key_id TEXT PRIMARY KEY,
+        key_id TEXT NOT NULL PRIMARY KEY,
         key_version INTEGER NOT NULL UNIQUE CHECK(key_version > 0),
         key_material BLOB NOT NULL,
         created_at INTEGER NOT NULL,
@@ -312,7 +312,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     );
 
     CREATE TABLE IF NOT EXISTS session_temporal_observation_effects (
-        observation_id TEXT PRIMARY KEY,
+        observation_id TEXT NOT NULL PRIMARY KEY,
         observation_sequence INTEGER NOT NULL UNIQUE CHECK(observation_sequence > 0),
         session_id TEXT NOT NULL,
         receipt_id TEXT NOT NULL,

@@ -98,7 +98,7 @@ mod tests {
             observation_json TEXT NOT NULL
         );
         CREATE TABLE observation_repository_provenance (
-            observation_id TEXT PRIMARY KEY,
+            observation_id TEXT NOT NULL PRIMARY KEY,
             availability_json TEXT NOT NULL,
             capture_json TEXT
         );";

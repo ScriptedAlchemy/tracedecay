@@ -309,35 +309,6 @@ pub(in crate::db) async fn create_schema(
     conn: &impl MemoryV2Executor,
     operation: &str,
 ) -> Result<()> {
-    if conn.backend_kind() == BackendKind::Sqlite {
-        conn.execute_batch("PRAGMA secure_delete = ON")
-            .await
-            .map_err(|error| db_error(operation, error))?;
-        // Unknown pragmas can succeed without changing any engine behavior. The
-        // persisted memory payload purge contract requires enabled secure delete.
-        let mut secure_delete = conn
-            .query("PRAGMA secure_delete", ())
-            .await
-            .map_err(|error| db_error(operation, error))?;
-        let enabled = match secure_delete
-            .next()
-            .await
-            .map_err(|error| db_error(operation, error))?
-        {
-            Some(row) => {
-                row.get::<i64>(0)
-                    .map_err(|error| db_error(operation, error))?
-                    == 1
-            }
-            None => false,
-        };
-        if !enabled {
-            return Err(db_error(
-                operation,
-                "attached engine cannot confirm enabled secure_delete for memory payload purges",
-            ));
-        }
-    }
     crate::db::retrieval_anchor_schema::install_retrieval_anchor_schema(conn, operation).await?;
     conn.execute_batch(BASELINE_SCHEMA)
         .await

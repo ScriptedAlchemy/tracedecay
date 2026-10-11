@@ -1682,6 +1682,41 @@ mod tests {
         encode_ngram_bitmap, encode_term_lists, term_lists_bytes,
     };
 
+    /// `WITHOUT ROWID` statements the lexical artifact still issues. The native
+    /// engine has no such layout; the artifact's native port converts them and
+    /// sets this to zero, which turns the test into the artifact's permanent
+    /// schema lint.
+    const WITHOUT_ROWID_STATEMENTS_PENDING_NATIVE_PORT: usize = 15;
+
+    #[test]
+    fn artifact_adds_no_without_rowid_tables() {
+        let statements: usize = [
+            include_str!("../artifact.rs"),
+            include_str!("builder.rs"),
+            include_str!("clone_census.rs"),
+            include_str!("clone_codec.rs"),
+            include_str!("fingerprints.rs"),
+            include_str!("format.rs"),
+            include_str!("increment.rs"),
+            include_str!("increment/clones.rs"),
+            include_str!("increment/postings.rs"),
+            include_str!("postings.rs"),
+            include_str!("prepared.rs"),
+            include_str!("reader.rs"),
+            include_str!("reader/family_report.rs"),
+            include_str!("row_codec.rs"),
+            include_str!("schema.rs"),
+        ]
+        .iter()
+        .map(|source| source.matches(concat!(")", " WITHOUT ROWID")).count())
+        .sum();
+        assert_eq!(
+            statements, WITHOUT_ROWID_STATEMENTS_PENDING_NATIVE_PORT,
+            "new lexical artifact tables must be rowid tables; lower the pending \
+             count when a table is converted"
+        );
+    }
+
     #[test]
     fn v12_ngram_delta_varints_round_trip_sparse_and_dense_shards() {
         for documents in [

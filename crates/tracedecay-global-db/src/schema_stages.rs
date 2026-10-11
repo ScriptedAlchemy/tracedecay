@@ -41,11 +41,11 @@ const CANONICAL_BODY_RECLAIM_PAGES: u64 = 4096;
 
 const REGISTRY_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS projects (
-        path TEXT PRIMARY KEY,
+        path TEXT NOT NULL PRIMARY KEY,
         tokens_saved INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS code_projects (
-        project_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL PRIMARY KEY,
         canonical_root TEXT NOT NULL,
         display_root TEXT NOT NULL,
         primary_root_platform TEXT,
@@ -58,13 +58,13 @@ const REGISTRY_SCHEMA: &str = "
         last_seen_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS project_aliases (
-        alias_path TEXT PRIMARY KEY,
+        alias_path TEXT NOT NULL PRIMARY KEY,
         project_id TEXT NOT NULL,
         last_seen_at INTEGER NOT NULL,
         FOREIGN KEY(project_id) REFERENCES code_projects(project_id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS store_instances (
-        store_id TEXT PRIMARY KEY,
+        store_id TEXT NOT NULL PRIMARY KEY,
         project_id TEXT NOT NULL,
         store_kind TEXT NOT NULL,
         storage_mode TEXT NOT NULL,
@@ -76,7 +76,7 @@ const REGISTRY_SCHEMA: &str = "
         FOREIGN KEY(project_id) REFERENCES code_projects(project_id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS graph_scopes (
-        graph_scope_id TEXT PRIMARY KEY,
+        graph_scope_id TEXT NOT NULL PRIMARY KEY,
         project_id TEXT NOT NULL,
         store_id TEXT NOT NULL,
         branch_name TEXT NOT NULL,
@@ -137,7 +137,7 @@ const REMOTE_DELETION_SCHEMA: &str = "
 
 const TRANSCRIPT_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS parse_offsets (
-        file_path TEXT PRIMARY KEY,
+        file_path TEXT NOT NULL PRIMARY KEY,
         byte_offset INTEGER NOT NULL,
         mtime INTEGER NOT NULL,
         file_id INTEGER NOT NULL DEFAULT 0
@@ -242,7 +242,7 @@ const TRANSCRIPT_SCHEMA: &str = "
         ON sessions(project_path, provider, session_id)
         WHERE ended_at IS NULL;
     CREATE TABLE IF NOT EXISTS session_backfill_meta (
-        key TEXT PRIMARY KEY,
+        key TEXT NOT NULL PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
@@ -1844,7 +1844,7 @@ mod tests {
                 .execute_batch(
                     "DROP TABLE graph_scopes;
                      CREATE TABLE graph_scopes (
-                         graph_scope_id TEXT PRIMARY KEY,
+                         graph_scope_id TEXT NOT NULL PRIMARY KEY,
                          project_id TEXT NOT NULL,
                          store_id TEXT NOT NULL,
                          branch_name TEXT NOT NULL,

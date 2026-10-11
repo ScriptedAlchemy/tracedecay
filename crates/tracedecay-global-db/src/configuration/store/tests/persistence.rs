@@ -476,9 +476,9 @@ async fn revision_three_store() -> (tempfile::TempDir, TestConnection) {
 async fn store_carrying_the_retired_default_collection_entry_fails_closed_typed() {
     let (_directory, connection) = revision_three_store().await;
 
-    // The SQL shape is unchanged between registry revisions 3 and 4, so
-    // schema admission still passes; the reset must come from the retired
-    // entry itself, not from a DDL mismatch.
+    // Revision 3 predates NOT NULL primary keys, so admission refuses its
+    // shape; the revision reads below must still fail closed on the retired
+    // entry itself.
     assert!(
         crate::configuration::schema::fresh_configuration_store_evidence(&*connection)
             .await
@@ -486,9 +486,10 @@ async fn store_carrying_the_retired_default_collection_entry_fails_closed_typed(
             .is_none(),
         "a populated revision-3 store must not present as fresh"
     );
-    crate::configuration::schema::admit_configuration_schema(&*connection, None)
-        .await
-        .unwrap();
+    assert!(matches!(
+        crate::configuration::schema::admit_configuration_schema(&*connection, None).await,
+        Err(crate::configuration::schema::ConfigurationSchemaError::ResetRequired { .. })
+    ));
 
     let current_revision_id = current_revision_id_from_executor(&connection)
         .await

@@ -411,7 +411,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let conn = TestConnection::open(&tmp.path().join("legacy-bodies.db"));
         conn.execute_batch(
-            "CREATE TABLE global_schema_migrations (migration TEXT PRIMARY KEY);
+            "CREATE TABLE global_schema_migrations (migration TEXT NOT NULL PRIMARY KEY);
              INSERT INTO global_schema_migrations VALUES ('session-canonical-bodies-v1');
              CREATE TABLE observations (observation_id TEXT PRIMARY KEY, observation_json TEXT NOT NULL);",
         ).await.unwrap();
@@ -454,7 +454,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let conn = TestConnection::open(&tmp.path().join("observations.db"));
         conn.execute_batch(
-            "CREATE TABLE global_schema_migrations (migration TEXT PRIMARY KEY);
+            "CREATE TABLE global_schema_migrations (migration TEXT NOT NULL PRIMARY KEY);
              CREATE TABLE observations (observation_id TEXT PRIMARY KEY, observation_json TEXT NOT NULL);",
         ).await.unwrap();
         let unchanged = serde_json::json!({"pieces": vec!["s".repeat(512); 9]}).to_string();
@@ -537,7 +537,7 @@ mod tests {
         let path = tmp.path().join("user-sessions.db");
         let conn = TestConnection::open(&path);
         conn.execute_batch(&format!(
-            "CREATE TABLE global_schema_migrations (migration TEXT PRIMARY KEY);
+            "CREATE TABLE global_schema_migrations (migration TEXT NOT NULL PRIMARY KEY);
              CREATE TABLE observations (
                  observation_id TEXT PRIMARY KEY,
                  observation_json TEXT NOT NULL

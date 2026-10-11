@@ -1364,7 +1364,7 @@ mod probe_tests {
         SessionTemporalExec::execute_batch(
             &connection,
             &format!(
-                "CREATE TABLE retrieval_anchors (anchor_id TEXT PRIMARY KEY);
+                "CREATE TABLE retrieval_anchors (anchor_id TEXT NOT NULL PRIMARY KEY);
                  CREATE TABLE session_summary_nodes (summary_anchor_id TEXT NOT NULL);
                  CREATE TABLE session_occurrences (retrieval_anchor_id TEXT NOT NULL);
                  CREATE TABLE session_assertions (
@@ -1422,7 +1422,7 @@ mod probe_tests {
         let connection = TestConnection::open(&tmp.path().join("doctor-locked-name.db"));
         SessionTemporalExec::execute_batch(
             &connection,
-            "CREATE TABLE retrieval_anchors (anchor_id TEXT PRIMARY KEY);
+            "CREATE TABLE retrieval_anchors (anchor_id TEXT NOT NULL PRIMARY KEY);
              CREATE VIEW session_summary_nodes AS
                  SELECT summary_anchor_id FROM locked_summary_rows;",
         )

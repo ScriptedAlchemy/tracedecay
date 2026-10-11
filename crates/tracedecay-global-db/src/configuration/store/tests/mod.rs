@@ -219,7 +219,7 @@ async fn assert_retired_key_converges_out(raw_key: &str, value: ConfigurationVal
         .execute(
             "INSERT INTO configuration_entries (
                 revision_id, key, layer_kind, layer_id, schema_revision, typed_value
-             ) VALUES (?1, ?2, 'default', NULL, 1, ?3)",
+             ) VALUES (?1, ?2, 'default', '', 1, ?3)",
             tracedecay_runtime_core::db::engine::params![
                 root.revision_id.as_str(),
                 retired.as_str(),

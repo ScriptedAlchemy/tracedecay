@@ -250,8 +250,8 @@ async fn sqlite_objects(
 }
 
 /// Every release from beta.25 through beta.37 published the fixture's exact
-/// shape. The writer removes its retired tables, retains supported rows, and
-/// refuses credential rows that no shipped binary wrote.
+/// shape. Stores start fresh at the native cutover, so no prior shape
+/// converges.
 const RELEASED_BETA37_CONFIGURATION_SQL: &str =
     include_str!("../../tests/fixtures/configuration-released-beta37.sql");
 
@@ -282,72 +282,23 @@ async fn released_connection() -> (
     (directory, connection)
 }
 
-async fn prior_final_connection() -> (
-    tempfile::TempDir,
-    tracedecay_runtime_core::db::engine::TestConnection,
-) {
-    let (directory, connection) = released_connection().await;
-    connection
-        .execute_batch(
-            "DROP TABLE configuration_credential_references;
-             DROP TABLE configuration_semantic_retrieval_state_v1;
-             DROP TABLE configuration_semantic_retrieval_pending_v1;
-             DROP TABLE configuration_semantic_retrieval_inventory_v1;
-             INSERT INTO configuration_semantic_accepted_profiles_v1 VALUES
-                ('sha256:accepted', '{\"retired\":true}');",
-        )
-        .await
-        .unwrap();
-    (directory, connection)
-}
-
-async fn pre_residue_final_connection() -> (
-    tempfile::TempDir,
-    tracedecay_runtime_core::db::engine::TestConnection,
-) {
-    let (directory, connection) = released_connection().await;
-    connection
-        .execute_batch("DROP TABLE configuration_credential_references;")
-        .await
-        .unwrap();
-    (directory, connection)
-}
-
 async fn count(connection: &impl QueryExecutor, sql: &str) -> i64 {
     let mut rows = connection.query(sql, ()).await.unwrap();
     rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
 }
 
 #[tokio::test]
-async fn released_configuration_shape_is_admitted_and_converged_with_rows_intact() {
+async fn released_configuration_shape_requires_reset_without_repair() {
     let (_directory, connection) = released_connection().await;
-    assert_eq!(
-        count(
-            &*connection,
-            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'configuration_credential_references'"
-        )
-        .await,
-        1,
-        "fixture carries the shipped table"
-    );
+    let before = sqlite_objects(&connection).await;
 
-    super::admit_configuration_schema(&*connection, None)
-        .await
-        .expect("a shipped shape is admissible read-only");
-    ensure_configuration_schema(&*connection, None)
-        .await
-        .expect("a shipped shape converges instead of demanding a reset");
+    assert_reset_required(super::admit_configuration_schema(&*connection, None).await);
+    assert_reset_required(ensure_configuration_schema(&*connection, None).await);
 
     assert_eq!(
-        count(
-            &*connection,
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE name LIKE 'configuration_credential_references%'
-                OR name LIKE 'configuration_semantic_%'"
-        )
-        .await,
-        0,
-        "retired schema objects are gone"
+        sqlite_objects(&connection).await,
+        before,
+        "refusal must leave the released schema untouched"
     );
     let mut rows = connection
         .query(
@@ -364,93 +315,6 @@ async fn released_configuration_shape_is_admitted_and_converged_with_rows_intact
             .get::<String>(0)
             .unwrap(),
         "{\"kept\":true}"
-    );
-    drop(rows);
-    ensure_configuration_schema(&*connection, None)
-        .await
-        .expect("the converged store is the exact final shape");
-}
-
-#[tokio::test]
-async fn prior_final_configuration_shape_drops_accepted_profiles_and_preserves_configuration_rows()
-{
-    let (_directory, connection) = prior_final_connection().await;
-    super::admit_configuration_schema(&*connection, None)
-        .await
-        .expect("the prior tip shape is admissible read-only");
-    ensure_configuration_schema(&*connection, None)
-        .await
-        .expect("the prior tip shape converges");
-
-    assert_eq!(
-        count(
-            &*connection,
-            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'configuration_semantic_%'"
-        )
-        .await,
-        0,
-        "retired semantic schema objects are gone"
-    );
-    assert_eq!(
-        count(
-            &*connection,
-            "SELECT COUNT(*) FROM configuration_entries WHERE revision_id = 'revision.1'"
-        )
-        .await,
-        1,
-        "supported configuration rows remain"
-    );
-}
-
-#[tokio::test]
-async fn pre_residue_final_configuration_shape_drops_all_semantic_tables() {
-    let (_directory, connection) = pre_residue_final_connection().await;
-    super::admit_configuration_schema(&*connection, None)
-        .await
-        .expect("the pre-residue tip shape is admissible read-only");
-    ensure_configuration_schema(&*connection, None)
-        .await
-        .expect("the pre-residue tip shape converges");
-
-    assert_eq!(
-        count(
-            &*connection,
-            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'configuration_semantic_%'"
-        )
-        .await,
-        0,
-        "retired semantic schema objects are gone"
-    );
-    assert_eq!(
-        count(
-            &*connection,
-            "SELECT COUNT(*) FROM configuration_entries WHERE revision_id = 'revision.1'"
-        )
-        .await,
-        1,
-        "supported configuration rows remain"
-    );
-}
-
-#[tokio::test]
-async fn released_configuration_shape_with_credential_rows_stays_reset_required() {
-    let (_directory, connection) = released_connection().await;
-    connection
-        .execute_batch(
-            "INSERT INTO configuration_credential_references VALUES
-                ('credential.1', 'api_token', 'sha256:ac', 'sha256:ad', 1, 'sha256:ae', 1, 1, 2, 0);",
-        )
-        .await
-        .unwrap();
-    assert_reset_required(ensure_configuration_schema(&*connection, None).await);
-    assert_eq!(
-        count(
-            &*connection,
-            "SELECT COUNT(*) FROM configuration_credential_references"
-        )
-        .await,
-        1,
-        "refusal must not discard the unknown row"
     );
 }
 
