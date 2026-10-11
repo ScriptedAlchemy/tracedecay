@@ -166,6 +166,8 @@ mod status_runtime_test;
 #[cfg(feature = "test-transport")]
 mod str_replace_behavior_test;
 #[cfg(feature = "test-transport")]
+mod test_classification_behavior_test;
+#[cfg(feature = "test-transport")]
 mod test_map_test;
 #[cfg(feature = "test-transport")]
 mod test_risk_behavior_test;

@@ -422,6 +422,13 @@ impl HookAdmissionLedgerV1 {
         self.log.failed.load(Ordering::Acquire)
     }
 
+    /// A staged commit still owes its sync. Its frames are durable only once
+    /// awaited, and it does not hold the writer lock, so this handle must
+    /// stay open until it settles.
+    pub fn commits_in_flight(&self) -> bool {
+        Arc::strong_count(&self.log) > 1
+    }
+
     /// Stage one admission attempt. `work` is the provider envelope to redrive
     /// until [`Self::stage_work_completion`]; it is recorded with a first
     /// admission, or with an exact duplicate whose work is neither pending nor

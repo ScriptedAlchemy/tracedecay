@@ -22,6 +22,7 @@ mod projection;
 pub mod queries;
 pub mod scc;
 mod source_authority;
+mod test_classification;
 pub mod test_risk;
 mod verified_query;
 

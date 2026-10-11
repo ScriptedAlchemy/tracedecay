@@ -1,7 +1,6 @@
 //! Production adapters for compatibility primitive families.
 
 pub mod concrete;
-pub mod grep_analysis;
 pub mod production;
 pub mod runtime;
 mod support;
@@ -15,7 +14,6 @@ pub use concrete::{
     AuthenticatedSymbolGraphCursorAdapter, SourceReadAdapter, SymbolGraphCursorSnapshot,
     SymbolGraphCursorSnapshotAuthority, SymbolGraphCursorSnapshotFuture,
 };
-pub use grep_analysis::{TraceDecayAstGrepAuthorityV1, TraceDecayDependencyDepthAuthorityV1};
 pub use production::{
     ProductionPrimitiveCodeAuthoritiesV1, ProductionPrimitiveOpenRequestV1,
     TraceDecayAffectedTestsPortV1, admitted_root_uri_for_project, locator_digest_for_project,

@@ -4058,23 +4058,36 @@ pub fn while_let_then_sibling(target: &Target, mut other: Option<Other>) -> u32 
 }
 
 #[tokio::test]
-async fn field_sites_ignores_field_text_in_real_rust_literals() {
+async fn field_sites_ignores_field_text_in_rust_literals() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     fs::create_dir_all(project_root.join("src")).unwrap();
-    let source = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../tracedecay-session-memory/src/monitor_ring.rs"
-    ));
-    let line_of = |needle: &str| {
-        source
-            .lines()
-            .position(|line| line.contains(needle))
-            .map(|index| index as u64 + 1)
-            .unwrap_or_else(|| panic!("fixture lost the line containing {needle:?}"))
-    };
-    let literal_line = line_of("\"monitor.mmap\"");
-    let write_line = line_of("self.mmap = unsafe");
+    let source = r##"pub const MMAP_FILENAME: &str = "monitor.mmap";
+
+pub struct MmapReader {
+    mmap: Vec<u8>,
+}
+
+impl MmapReader {
+    pub fn len(&self) -> usize {
+        self.mmap.len()
+    }
+
+    pub fn first(&self) -> u8 {
+        self.mmap[0]
+    }
+
+    pub fn describe(&self) -> &'static str {
+        r#"reads self.mmap = nothing"#
+    }
+
+    pub fn refresh(&mut self) {
+        self.mmap = vec![0; 8];
+    }
+}
+"##;
+    let literal_lines = [1, 17];
+    let write_line = 21;
     fs::write(project_root.join("src/lib.rs"), source).unwrap();
     let host = init_test_project(&project_root).await;
 
@@ -4089,12 +4102,14 @@ async fn field_sites_ignores_field_text_in_real_rust_literals() {
     let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
 
     assert_eq!(output["qualifier_applied"], true, "payload: {output}");
-    assert_eq!(output["read_count"], 9, "payload: {output}");
+    assert_eq!(output["read_count"], 2, "payload: {output}");
     assert_eq!(output["write_count"], 1, "payload: {output}");
     assert!(
-        output["read_sites"]
-            .as_array()
-            .is_some_and(|sites| sites.iter().all(|site| site["line"] != literal_line)),
+        output["read_sites"].as_array().is_some_and(|sites| {
+            sites
+                .iter()
+                .all(|site| !literal_lines.contains(&site["line"].as_u64().unwrap_or(0)))
+        }),
         "string literal was reported as a field site: {output}"
     );
     assert_eq!(

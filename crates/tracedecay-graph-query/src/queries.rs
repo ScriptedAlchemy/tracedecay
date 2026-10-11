@@ -14,6 +14,9 @@ use tracedecay_domain::{
 use tracedecay_graph_db::GraphCancellation;
 
 use super::map_projection_error;
+use crate::test_classification::{
+    TestClassification, classified_symbol, rust_module_declarer_candidates,
+};
 
 const MAX_ANALYTICAL_SYMBOLS: usize = 500_000;
 const MAX_ANALYTICAL_RELATIONS: usize = 2_000_000;
@@ -216,19 +219,13 @@ impl<'a> GraphQueryManager<'a> {
                     })
             }
         }?;
-        let test_markers = symbols
-            .iter()
-            .filter(|symbol| symbol.metadata.as_ref().is_some_and(is_test_marker))
-            .map(|symbol| symbol.occurrence.clone())
-            .collect::<HashSet<_>>();
-        let test_annotated = edges
-            .iter()
-            .filter(|edge| {
-                edge.kind == RelationEdgeKindV1::Annotates
-                    && test_markers.contains(&edge.from_occurrence)
-            })
-            .map(|edge| edge.to_occurrence.clone())
-            .collect::<HashSet<_>>();
+        let classification = TestClassification::new(
+            &symbols
+                .iter()
+                .filter_map(classified_symbol)
+                .collect::<Vec<_>>(),
+            &edges,
+        );
         let live_targets = edges
             .iter()
             .filter(|edge| edge.kind != RelationEdgeKindV1::Annotates)
@@ -238,19 +235,14 @@ impl<'a> GraphQueryManager<'a> {
         let mut dead = symbols
             .into_iter()
             .filter(|symbol| {
-                let Some(metadata) = symbol.metadata.as_ref() else {
+                let Some((path, metadata)) = classified_symbol(symbol) else {
                     return false;
                 };
-                symbol
-                    .binding
-                    .as_ref()
-                    .and_then(|binding| binding.logical_path.as_deref())
-                    .is_some_and(|path| tracedecay_domain::path_matches_scope(path, path_prefix))
+                tracedecay_domain::path_matches_scope(path, path_prefix)
                     && (kind_filter.is_empty() || kind_filter.contains(metadata.kind.as_str()))
                     && (include_public || metadata.visibility != "public")
                     && metadata.simple_name != "main"
-                    && !metadata.simple_name.starts_with("test")
-                    && !test_annotated.contains(&symbol.occurrence)
+                    && !classification.is_test_entrypoint(path, metadata)
                     && !live_targets.contains(&symbol.occurrence)
             })
             .collect::<Vec<_>>();
@@ -417,8 +409,7 @@ impl<'a> GraphQueryManager<'a> {
                 .filter(|path| path_is_within(path, prefix))
                 .collect::<HashSet<_>>()
         });
-        let (symbols, edges, external_test_markers) =
-            self.health_evidence(logical_paths.as_ref())?;
+        let (symbols, edges, classification) = self.health_evidence(logical_paths.as_ref())?;
         let metadata = health_symbol_metadata(&symbols)?;
         let mut adjacency = files
             .into_iter()
@@ -453,26 +444,21 @@ impl<'a> GraphQueryManager<'a> {
         });
         Ok(VerifiedHealthInputsV1 {
             adjacency,
-            aggregates: fold_health_aggregates(
-                metadata,
-                &edges,
-                external_test_markers,
-                path_prefix,
-            ),
+            aggregates: fold_health_aggregates(metadata, &edges, &classification, path_prefix),
         })
     }
 
-    /// Health symbols, the induced edge set, and the test markers only the
-    /// scoped `callers` walk can see: its far endpoints legitimately sit
-    /// outside the scoped symbol census, so their marker metadata cannot be
-    /// recovered from `symbols` the way the whole-generation branch's can.
+    /// Health symbols, the induced edge set, and their test classification.
+    /// A scoped census also classifies with the far endpoints of the scoped
+    /// `callers` walk and the files that could declare a scoped module, since
+    /// their markers and `#[cfg(test)]` gates sit outside the scoped symbols.
     fn health_evidence(
         &self,
         logical_paths: Option<&HashSet<String>>,
     ) -> Result<(
         Vec<CodeGraphSymbolSummaryV1>,
         Vec<CanonicalRelationEdgeV1>,
-        HashSet<SymbolOccurrenceId>,
+        TestClassification,
     )> {
         let symbols = {
             let _span = tracing::trace_span!("usecases.graph.health.symbols").entered();
@@ -497,33 +483,53 @@ impl<'a> GraphQueryManager<'a> {
             .iter()
             .map(|symbol| symbol.occurrence.clone())
             .collect::<Vec<_>>();
-        let (edges, external_test_markers) = {
-            let _span = tracing::trace_span!("usecases.graph.health.edges").entered();
-            {
-                if logical_paths.is_some() {
-                    self.incoming_edges(&symbols, &HEALTH_EDGE_KINDS)
-                        .map(|edges| {
-                            let markers = edges
-                                .iter()
-                                .filter(|edge| {
-                                    edge.neighbor.occurrence == edge.edge.from_occurrence
-                                        && edge
-                                            .neighbor
-                                            .metadata
-                                            .as_ref()
-                                            .is_some_and(is_test_marker)
-                                })
-                                .map(|edge| edge.edge.from_occurrence.clone())
-                                .collect();
-                            (edges.into_iter().map(|edge| edge.edge).collect(), markers)
-                        })
-                } else {
-                    self.edges_among(&occurrences, &HEALTH_EDGE_KINDS)
-                        .map(|edges| (edges, HashSet::new()))
-                }
-            }
-        }?;
-        Ok((symbols, edges, external_test_markers))
+        let _span = tracing::trace_span!("usecases.graph.health.edges").entered();
+        let Some(paths) = logical_paths else {
+            let edges = self.edges_among(&occurrences, &HEALTH_EDGE_KINDS)?;
+            let classification = TestClassification::new(
+                &symbols
+                    .iter()
+                    .filter_map(classified_symbol)
+                    .collect::<Vec<_>>(),
+                &edges,
+            );
+            return Ok((symbols, edges, classification));
+        };
+        let (edges, neighbors) = self
+            .incoming_edges(&symbols, &HEALTH_EDGE_KINDS)?
+            .into_iter()
+            .map(|edge| (edge.edge, edge.neighbor))
+            .unzip::<_, _, Vec<_>, Vec<_>>();
+        let mut declarer_paths = rust_module_declarer_candidates(paths);
+        declarer_paths.retain(|path| !paths.contains(path));
+        let declarers = if declarer_paths.is_empty() {
+            Vec::new()
+        } else {
+            self.symbols_in_logical_files_page(
+                &declarer_paths,
+                None,
+                MAX_ANALYTICAL_SYMBOLS,
+                MAX_ANALYTICAL_SYMBOLS,
+            )?
+            .symbols
+        };
+        let declarer_edges = self.edges_among(
+            &declarers
+                .iter()
+                .map(|symbol| symbol.occurrence.clone())
+                .collect::<Vec<_>>(),
+            &[RelationEdgeKindV1::Annotates],
+        )?;
+        let classification = TestClassification::new(
+            &symbols
+                .iter()
+                .chain(&neighbors)
+                .chain(&declarers)
+                .filter_map(classified_symbol)
+                .collect::<Vec<_>>(),
+            edges.iter().chain(&declarer_edges),
+        );
+        Ok((symbols, edges, classification))
     }
 
     fn incoming_edges(
@@ -629,7 +635,7 @@ fn fold_health_aggregates(
         ),
     >,
     edges: &[CanonicalRelationEdgeV1],
-    external_test_markers: HashSet<SymbolOccurrenceId>,
+    classification: &TestClassification,
     path_prefix: Option<&str>,
 ) -> Vec<VerifiedHealthFileAggregateV1> {
     let live_targets = edges
@@ -637,25 +643,14 @@ fn fold_health_aggregates(
         .filter(|edge| edge.kind != RelationEdgeKindV1::Annotates)
         .map(|edge| edge.to_occurrence.clone())
         .collect::<HashSet<_>>();
-    let test_markers = metadata
-        .iter()
-        .filter(|(_, (_, record))| is_test_marker(record))
-        .map(|(occurrence, _)| occurrence.clone())
-        .chain(external_test_markers)
-        .collect::<HashSet<_>>();
-    let test_annotated = edges
-        .iter()
-        .filter(|edge| {
-            edge.kind == RelationEdgeKindV1::Annotates
-                && test_markers.contains(&edge.from_occurrence)
-        })
-        .map(|edge| edge.to_occurrence.clone())
-        .collect::<HashSet<_>>();
     let mut by_file = HashMap::<String, VerifiedHealthFileAggregateV1>::new();
     for (occurrence, (file_path, record)) in metadata {
         if path_prefix.is_some_and(|prefix| !path_is_within(&file_path, prefix)) {
             continue;
         }
+        let entrypoint = record.simple_name == "main"
+            || record.visibility == "public"
+            || classification.is_test_entrypoint(&file_path, record);
         let aggregate =
             by_file
                 .entry(file_path.clone())
@@ -677,10 +672,6 @@ fn fold_health_aggregates(
         }
         aggregate.function_methods += 1;
         aggregate.skipped_function_methods += usize::from(record.skip_test_coverage);
-        let entrypoint = record.simple_name == "main"
-            || record.simple_name.starts_with("test")
-            || record.visibility == "public"
-            || test_annotated.contains(&occurrence);
         if !entrypoint && !live_targets.contains(&occurrence) {
             aggregate.dead_function_methods += 1;
         }
@@ -729,7 +720,9 @@ mod path_scope_tests {
         LanguageDescriptorRevision, RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
     };
 
-    use super::{fold_health_aggregates, path_is_within, scoped_file_adjacency};
+    use super::{
+        TestClassification, fold_health_aggregates, path_is_within, scoped_file_adjacency,
+    };
 
     fn digest<T>(byte: char) -> T
     where
@@ -844,16 +837,23 @@ mod path_scope_tests {
         let mut inside = symbol("symbol.inside_test", "src/scoped/inside.rs");
         inside.metadata = Some(inside_record.clone());
         let mut marker = symbol("symbol.test_marker", "src/outside.rs");
-        marker.metadata = Some(marker_record);
+        marker.metadata = Some(marker_record.clone());
         let mut annotation = edge(&marker, &inside);
         annotation.kind = RelationEdgeKindV1::Annotates;
+        let classification = TestClassification::new(
+            &[
+                ("src/scoped/inside.rs", &inside_record),
+                ("src/outside.rs", &marker_record),
+            ],
+            [&annotation],
+        );
         let aggregates = fold_health_aggregates(
             HashMap::from([(
                 inside.occurrence.clone(),
                 ("src/scoped/inside.rs".to_owned(), &inside_record),
             )]),
-            &[annotation],
-            HashSet::from([marker.occurrence.clone()]),
+            &[annotation.clone()],
+            &classification,
             Some("src/scoped"),
         );
 
