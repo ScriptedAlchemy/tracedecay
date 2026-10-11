@@ -889,11 +889,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     // banked permit resolves the wait at once, so the worker was
                     // never idle.
                     if !notified.as_mut().enable() {
+                        worker_residency.release_decode_when_parked(&worker_resident_owners);
                         super::CodeIndexWorkerPhaseV1::enter(
                             &worker_phase_signal,
                             super::CodeIndexWorkerPhaseV1::Parked,
                         );
-                        worker_residency.release_decode_when_parked(&worker_resident_owners);
                     }
                     tracing::Instrument::instrument(
                         notified,

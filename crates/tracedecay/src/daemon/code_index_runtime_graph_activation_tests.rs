@@ -2128,6 +2128,35 @@ async fn status_polls_let_the_graph_lease_lapse_and_graph_reads_renew_it() {
         "status polls leave the graph lease",
     )
     .await;
+    let mut activity = mount
+        .registry
+        .subscribe_owner_activity(fixture.path())
+        .await
+        .expect("mounted owner activity");
+    let mut headroom = owners.subscribe_headroom();
+    // The initial publisher releases its graph when it parks. Measure the
+    // read lease after that release, rather than racing the publisher's tail.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if activity.worker_phase()
+                == tracedecay_code_index_runtime::code_index_scheduler::CodeIndexWorkerPhaseV1::Parked
+                && !activity.wake_pending()
+                && serving_graph_owners(
+                    &owners.report(std::time::Instant::now()),
+                    mount.generation_id.as_str(),
+                )
+                .is_empty()
+            {
+                break;
+            }
+            tokio::select! {
+                changed = activity.changed() => changed.expect("live owner activity"),
+                changed = headroom.changed() => changed.expect("live resident owners"),
+            }
+        }
+    })
+    .await
+    .expect("initial publisher parks and releases its graph");
     let graph_idle_for = || {
         let report = owners.report(std::time::Instant::now());
         assert!(
