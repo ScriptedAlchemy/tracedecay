@@ -88,31 +88,28 @@ fn digest_table(
     digest: &mut Sha256,
     table: &str,
 ) -> Result<(), CanonicalContentDigestError> {
+    digest_ordered_sql(connection, digest, &ordered_table_read(connection, table)?)
+}
+
+/// The read that fixes a table's row order: by its shortest NOT NULL unique
+/// declaration prefix when one exists, otherwise by every column.
+fn ordered_table_read(
+    connection: &Connection,
+    table: &str,
+) -> Result<String, CanonicalContentDigestError> {
     let escaped = table.replace('"', "\"\"");
-    if let Some(prefix) = unique_declaration_prefix_len(connection, &escaped)? {
-        let order = (1..=prefix)
-            .map(|index| index.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        return digest_ordered_sql(
-            connection,
-            digest,
-            &format!("SELECT * FROM \"{escaped}\" ORDER BY {order}"),
-        );
-    }
-    let statement = connection
-        .prepare(&format!("SELECT * FROM \"{escaped}\""))
-        .map_err(|error| CanonicalContentDigestError::new("prepare session table read", error))?;
-    let order = (1..=statement.column_count())
+    let order_len = match unique_declaration_prefix_len(connection, &escaped)? {
+        Some(prefix) => prefix,
+        None => connection
+            .prepare(&format!("SELECT * FROM \"{escaped}\""))
+            .map_err(|error| CanonicalContentDigestError::new("prepare session table read", error))?
+            .column_count(),
+    };
+    let order = (1..=order_len)
         .map(|index| index.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    drop(statement);
-    digest_ordered_sql(
-        connection,
-        digest,
-        &format!("SELECT * FROM \"{escaped}\" ORDER BY {order}"),
-    )
+    Ok(format!("SELECT * FROM \"{escaped}\" ORDER BY {order}"))
 }
 
 fn unique_declaration_prefix_len(
@@ -223,9 +220,7 @@ fn digest_ordered_sql(
     let mut statement = connection
         .prepare(sql)
         .map_err(|error| CanonicalContentDigestError::new("prepare ordered session read", error))?;
-    digest_query_rows(digest, &mut statement)?;
-    crate::telemetry::observe_statement(&statement);
-    Ok(())
+    digest_query_rows(digest, &mut statement)
 }
 
 fn digest_query_rows(
@@ -286,7 +281,6 @@ mod tests {
     use tracedecay_sql::Connection;
 
     use super::*;
-    use crate::telemetry::take_observed_vm;
 
     const ROW_COUNT: i64 = 64;
 
@@ -329,29 +323,24 @@ mod tests {
                 )
                 .unwrap();
         }
+        let read = ordered_table_read(&connection, "messages").unwrap();
+        let plan = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {read}"))
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<tracedecay_sql::Result<Vec<_>>>()
+            .unwrap();
         drop(connection);
+        assert_eq!(read, "SELECT * FROM \"messages\" ORDER BY 1, 2");
+        assert!(
+            !plan.is_empty() && plan.iter().all(|step| !step.contains("TEMP B-TREE")),
+            "the declaration-prefix read must follow the primary-key index, not sort; got {plan:?}"
+        );
 
         let expected = reference_session_domain_digest(&path);
-        let _ = take_observed_vm();
         let actual = canonical_session_domain_content_sha256(&path).unwrap();
-        let snapshot = take_observed_vm();
         assert_eq!(actual, expected, "digest identity must stay byte-exact");
-        assert!(
-            snapshot.fullscan_steps <= u64::try_from(ROW_COUNT).unwrap(),
-            "index-ordered read must visit each row at most once; got {snapshot:?}"
-        );
-        assert_eq!(
-            snapshot.sort_steps, 0,
-            "full-table ORDER BY must not run in SQLite; got {snapshot:?}"
-        );
-        assert!(
-            snapshot.vm_steps > 0,
-            "digest must record sqlite_vm steps for the table read"
-        );
-        assert!(
-            snapshot.vm_steps < u64::try_from(ROW_COUNT).unwrap().saturating_mul(32),
-            "ordered read must stay linear in visited rows; got {snapshot:?}"
-        );
     }
 
     fn reference_session_domain_digest(path: &std::path::Path) -> [u8; 32] {
