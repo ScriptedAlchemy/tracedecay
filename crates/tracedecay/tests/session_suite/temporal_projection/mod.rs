@@ -618,6 +618,20 @@ pub(crate) async fn rows(path: &std::path::Path, sql: &str) -> Vec<String> {
     mapped.collect::<Result<Vec<_>, _>>().unwrap()
 }
 
+/// Counts occurrences the search index matches for `term`. SQLite keeps an
+/// FTS5 table beside `session_occurrences`; the native engine indexes the
+/// column itself and is queried through `fts_match`.
+pub(crate) fn occurrence_search_count_sql(term: &str) -> String {
+    match tracedecay_sql::ENGINE {
+        tracedecay_sql::Engine::Sqlite => format!(
+            "SELECT COUNT(*) FROM session_occurrences_fts WHERE session_occurrences_fts MATCH '{term}'"
+        ),
+        tracedecay_sql::Engine::Native => format!(
+            "SELECT COUNT(*) FROM session_occurrences WHERE fts_match(index_text, '{term}')"
+        ),
+    }
+}
+
 pub(crate) async fn scalar_runtime(runtime: &HostAdmissionTestRuntimeV1, sql: &str) -> i64 {
     runtime
         .read_session_database_for_test(HostAdmissionScope::Profile, sql)
