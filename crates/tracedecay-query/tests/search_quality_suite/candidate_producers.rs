@@ -2433,14 +2433,30 @@ fn concurrent_artifact_reads_are_bounded_and_keep_the_verified_file() {
     );
 
     // Unix permits unlinking an open SQLite file. The retained handles must
-    // continue reading the original bytes, never the newly named file.
+    // continue reading the original bytes, never the newly named file. The
+    // native engine refuses every statement once its pathname names another
+    // file, so it serves neither.
     #[cfg(unix)]
     {
         let path = artifact._directory.path().join("lexical.sqlite");
         std::fs::remove_file(&path).expect("unlink the artifact pathname");
         std::fs::write(&path, b"replacement is not the verified SQLite file")
             .expect("replace pathname");
-        for over_budget in [false, true] {
+        if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Native {
+            assert!(
+                matches!(
+                    artifact.reader.read_lexical_postings(&request),
+                    Err(RetrievalPortError::AuthorityUnavailable(_))
+                ),
+                "the native reader refuses a replaced pathname"
+            );
+        }
+        let retained_inode_reads = if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Native {
+            &[][..]
+        } else {
+            &[false, true][..]
+        };
+        for &over_budget in retained_inode_reads {
             observed.store(
                 if over_budget { ceiling.get() } else { 0 },
                 Ordering::SeqCst,
@@ -3017,6 +3033,11 @@ fn content_addressed_reader_rejects_atomic_same_size_replacement() {
     replacement
         .pragma_update(None, "user_version", 42i64)
         .expect("change only replacement SQLite header");
+    tracedecay_sql::ConnectionControl::checkpoint(
+        &replacement,
+        tracedecay_sql::CheckpointMode::Truncate,
+    )
+    .expect("fold the replacement's header into its file");
     drop(replacement);
     let replacement_bytes =
         std::fs::read(&replacement_path).expect("read replacement artifact bytes");
