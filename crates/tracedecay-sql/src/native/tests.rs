@@ -757,24 +757,62 @@ mod driver {
         (directory, path, connection)
     }
 
-    /// Catches a COMMIT failure reported as an ordinary error, which a writer
-    /// would settle as rolled back.
+    const COMMIT_FAILURE_CHILD: &str = "TRACEDECAY_NATIVE_COMMIT_FAILURE_CHILD";
+
+    /// The re-executed child of `commit_failure_after_commit_starts_is_outcome_unknown`:
+    /// the armed failure is process-wide, so it runs alone.
+    #[cfg(unix)]
     #[test]
-    fn commit_failure_after_commit_starts_is_outcome_unknown() {
-        let (_directory, _path, mut connection) = open();
-        connection
-            .execute_batch(
-                "CREATE TABLE parents(id INTEGER PRIMARY KEY); \
-                 CREATE TABLE children(id INTEGER PRIMARY KEY, parent_id INTEGER \
-                 REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED)",
-            )
-            .unwrap();
+    fn commit_failure_child() {
+        use crate::native::crash_io::{CrashEffect, CrashOp, CrashPlan, CrashTarget, arm};
+
+        let Ok(path) = std::env::var(COMMIT_FAILURE_CHILD) else {
+            return;
+        };
+        arm(CrashPlan {
+            target: CrashTarget::Wal,
+            op: CrashOp::Sync,
+            nth: 1,
+            effect: CrashEffect::Fail,
+        });
+        let mut connection = Connection::open(path).unwrap();
         let transaction = connection.transaction().unwrap();
         transaction
-            .execute("INSERT INTO children VALUES (1, 9)", [])
+            .execute("INSERT INTO children VALUES (1)", [])
             .unwrap();
-        let error = transaction.commit().unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::CommitOutcomeUnknown, "{error}");
+        match transaction.commit() {
+            Ok(()) => println!("OUTCOME=committed"),
+            Err(error) => println!("OUTCOME={:?}", error.kind()),
+        }
+    }
+
+    /// Catches a COMMIT failure reported as an ordinary error, which a writer
+    /// would settle as rolled back: the WAL fsync fails after COMMIT started
+    /// writing frames.
+    #[cfg(unix)]
+    #[test]
+    fn commit_failure_after_commit_starts_is_outcome_unknown() {
+        let (_directory, path, connection) = open();
+        connection
+            .execute_batch("CREATE TABLE children(id INTEGER PRIMARY KEY)")
+            .unwrap();
+        drop(connection);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "native::tests::driver::commit_failure_child",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(COMMIT_FAILURE_CHILD, &path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "child failed: {stdout}");
+        assert!(
+            stdout.contains("OUTCOME=CommitOutcomeUnknown"),
+            "child printed: {stdout}"
+        );
     }
 
     /// Catches a statement cache that serves a program compiled under one

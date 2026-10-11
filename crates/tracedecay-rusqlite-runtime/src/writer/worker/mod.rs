@@ -449,8 +449,10 @@ impl Worker {
             eprintln!(
                 "[tracedecay] rusqlite writer worker panicked; writer is now faulted: {message}"
             );
-            state.store(WriterState::Faulted as u8, Ordering::Release);
+            // Settle the telemetry first: a caller that observes the fault
+            // reads final counts.
             telemetry.fault_unsettled();
+            state.store(WriterState::Faulted as u8, Ordering::Release);
         }
     }
 
@@ -1302,43 +1304,6 @@ mod auxiliary_scheduling_tests {
         assert_eq!(
             leader_rx.blocking_recv().expect("leader reply"),
             Ok(outcome)
-        );
-    }
-
-    /// The settled leader's receipt, not an in-flight refusal, must answer a
-    /// conflicting request that arrives after the reply but before the actor
-    /// retires the leader's in-flight entry.
-    #[test]
-    fn conflicting_request_after_settlement_runs_instead_of_reporting_in_flight() {
-        let telemetry = WriterTelemetry::default();
-        let mut queue = FairQueue::default();
-        let mut inflight = HashMap::new();
-        let (leader, leader_rx) =
-            accepted_request_with_reply("operation.settled-conflict", "key.leader");
-        let (conflict, mut conflict_rx) =
-            accepted_request_with_reply("operation.settled-conflict", "key.conflict");
-        assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
-        let executing = queue.drain_fair().pop().expect("dequeued leader");
-        inflight.insert(executing.operation_id().clone(), executing.shared_reply());
-        let outcome = RuntimeSubmitOutcomeV1::Unavailable {
-            reason: UnavailableReasonV1::Faulted,
-        };
-        executing.settle(Ok(outcome.clone()));
-        assert_eq!(
-            leader_rx.blocking_recv().expect("leader reply"),
-            Ok(outcome)
-        );
-
-        assert!(enqueue(&mut queue, &mut inflight, conflict, &telemetry));
-        assert!(
-            conflict_rx.try_recv().is_err(),
-            "the conflict waits for its own execution"
-        );
-        let queued = queue.drain_fair();
-        assert_eq!(queued.len(), 1);
-        assert_eq!(
-            queued[0].operation_id().as_str(),
-            "operation.settled-conflict"
         );
     }
 

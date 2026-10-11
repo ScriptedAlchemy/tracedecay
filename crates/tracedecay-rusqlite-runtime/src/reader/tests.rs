@@ -337,18 +337,34 @@ fn reader_startup_recovers_a_retained_wal_before_reporting_ready() {
     let mut shm = store.path.as_os_str().to_os_string();
     shm.push("-shm");
     let shm = PathBuf::from(shm);
-    std::fs::remove_file(&shm).expect("remove stale WAL index");
+    // The native engine keeps its WAL index in memory and rebuilds it from the
+    // WAL on open; only SQLite leaves a `-shm` file to go stale.
+    if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Sqlite {
+        std::fs::remove_file(&shm).expect("remove stale WAL index");
+    }
 
-    let _pool = ReaderPool::start(
+    let pool = ReaderPool::start(
         store.locator(),
         AdmissionConfigV1::default().readers,
         CountExecutor,
     )
     .expect("start readers over retained WAL");
 
+    if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Sqlite {
+        assert!(
+            shm.exists(),
+            "ready readers must have completed the first WAL-backed schema read"
+        );
+    }
+    let general = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&general);
+    let mut lease = pool
+        .acquire(&general, &probe, Duration::from_secs(5))
+        .unwrap();
+    let mut snapshot = lease.begin_snapshot().unwrap();
     assert!(
-        shm.exists(),
-        "ready readers must have completed the first WAL-backed schema read"
+        healthy(&snapshot.execute(general.clone(), &probe).unwrap()),
+        "the retained WAL frame is visible to the first read"
     );
 }
 
@@ -442,15 +458,18 @@ fn reserved_health_reader_reports_exact_store_size_pragmas() {
     assert!(sample.page_size_bytes > 0);
     assert!(sample.page_count > 0);
     assert!(sample.freelist_pages <= sample.page_count);
-    let table_sizes = pool
-        .read_table_sizes(Duration::MAX, || None)
-        .expect("table size samples");
-    assert!(
-        table_sizes
-            .iter()
-            .any(|sample| sample.table_name == "markers" && sample.bytes == 0),
-        "an empty table has zero payload bytes rather than one page of fabricated payload"
-    );
+    // Per-table payload bytes come from SQLite's `dbstat`.
+    if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Sqlite {
+        let table_sizes = pool
+            .read_table_sizes(Duration::MAX, || None)
+            .expect("table size samples");
+        assert!(
+            table_sizes
+                .iter()
+                .any(|sample| sample.table_name == "markers" && sample.bytes == 0),
+            "an empty table has zero payload bytes rather than one page of fabricated payload"
+        );
+    }
     pool.wait_until_quiescent();
     let snapshot = pool.snapshot();
     assert_eq!(snapshot.leased_health, 0);
@@ -586,9 +605,9 @@ fn application_telemetry_wait_does_not_block_the_async_runtime() {
             runtime_advanced.store(true, Ordering::SeqCst);
         });
         let read = port
-            .table_growth(&context, &StoreKeyV1::new("reader.db").unwrap())
+            .store_size(&context, &StoreKeyV1::new("reader.db").unwrap())
             .await;
-        assert!(matches!(read, TableGrowthTelemetryReadV1::Unknown { .. }));
+        assert!(matches!(read, StorageTelemetryReadV1::Unknown { .. }));
     });
 
     assert!(
@@ -596,6 +615,19 @@ fn application_telemetry_wait_does_not_block_the_async_runtime() {
         "waiting for SQLite telemetry must yield the async runtime"
     );
     drop(health_snapshot);
+}
+
+/// Per-table payload bytes come from SQLite's `dbstat`; the native engine has
+/// none, so its port reports the read as unsupported instead of guessing.
+fn native_reports_no_table_payloads(read: &TableGrowthTelemetryReadV1) -> bool {
+    if tracedecay_sql::ENGINE != tracedecay_sql::Engine::Native {
+        return false;
+    }
+    assert!(
+        matches!(read, TableGrowthTelemetryReadV1::Unsupported { .. }),
+        "native table growth is unsupported, got {read:?}"
+    );
+    true
 }
 
 #[test]
@@ -621,6 +653,9 @@ fn application_telemetry_port_compares_table_payload_watermarks() {
 
     let baseline =
         runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
+    if native_reports_no_table_payloads(&baseline) {
+        return;
+    }
     assert!(
         matches!(
             baseline,
@@ -674,6 +709,9 @@ fn application_telemetry_port_marks_new_table_baseline_pending() {
 
     let baseline =
         runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
+    if native_reports_no_table_payloads(&baseline) {
+        return;
+    }
     assert!(matches!(
         baseline,
         TableGrowthTelemetryReadV1::BaselineEstablished { .. }

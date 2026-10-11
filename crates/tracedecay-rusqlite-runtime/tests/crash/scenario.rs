@@ -67,6 +67,7 @@ impl Mode {
         let effect = match parts.next() {
             Some("kill") => CrashEffect::Kill,
             Some("power") => CrashEffect::PowerLoss,
+            Some("fail") => CrashEffect::Fail,
             other => panic!("unknown crash effect {other:?}"),
         };
         let io = Io::new(target, op, effect);
@@ -111,6 +112,7 @@ impl fmt::Display for Mode {
         let effect = match io.effect {
             CrashEffect::Kill => "kill",
             CrashEffect::PowerLoss => "power",
+            CrashEffect::Fail => "fail",
         };
         write!(formatter, "{kind}:{target}:{op}:{effect}")
     }

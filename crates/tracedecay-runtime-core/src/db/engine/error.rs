@@ -207,15 +207,13 @@ impl Error {
             Self::NativeTurso { transient_read, .. } => *transient_read,
             Self::TransactionExpired | Self::Cancelled => true,
             Self::StatementBatch { source, .. } => source.is_transient_read_failure(),
-            _ => matches!(
-                self.engine_kind(),
-                Some(
-                    ErrorKind::Busy
-                        | ErrorKind::Interrupted
-                        | ErrorKind::IoErr
-                        | ErrorKind::CantOpen
-                )
-            ),
+            _ => {
+                self.is_busy_or_locked()
+                    || matches!(
+                        self.engine_kind(),
+                        Some(ErrorKind::Interrupted | ErrorKind::IoErr | ErrorKind::CantOpen)
+                    )
+            }
         }
     }
 }
