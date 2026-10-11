@@ -23,7 +23,10 @@ const FIELD_LEN: usize = 32; // null-padded UTF-8 per string field
 
 // Header offsets
 const OFF_WRITE_IDX: usize = 0;
-// bytes 8..32 reserved
+/// Nonzero stamp the first writer puts on a fresh file, so a reader can tell
+/// a replaced ring from the one it was draining.
+const OFF_GENERATION: usize = 8;
+// bytes 16..32 reserved
 
 // Entry field offsets (relative to entry start)
 const EOFF_PREFIX: usize = 0;
@@ -128,6 +131,13 @@ fn write_entry_inner(
     let timestamp = tracedecay_runtime_core::tracedecay::unix_secs();
     mmap[off + EOFF_TIMESTAMP..off + EOFF_TIMESTAMP + 8].copy_from_slice(&timestamp.to_le_bytes());
 
+    if read_u64(&mmap, OFF_GENERATION) == 0 {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |elapsed| elapsed.as_nanos() as u64 | 1);
+        mmap[OFF_GENERATION..OFF_GENERATION + 8].copy_from_slice(&stamp.to_le_bytes());
+    }
+
     // Increment write_idx (reader sees this last).
     let new_idx = write_idx + 1;
     mmap[OFF_WRITE_IDX..OFF_WRITE_IDX + 8].copy_from_slice(&new_idx.to_le_bytes());
@@ -145,6 +155,29 @@ fn write_entry_inner(
 pub struct MmapReader {
     mmap: memmap2::Mmap,
     dir: PathBuf,
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    bytes
+        .get(offset..offset + 8)
+        .and_then(|field| field.try_into().ok())
+        .map_or(0, u64::from_le_bytes)
+}
+
+/// How far a reader has drained one ring file.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RingCursor {
+    generation: u64,
+    next_idx: u64,
+}
+
+/// Entries one [`MmapReader::drain`] read, oldest first.
+#[derive(Debug, Default)]
+pub struct RingDrain {
+    pub entries: Vec<MonitorEntry>,
+    /// Entries written since the cursor that writers overwrote, or may have
+    /// been overwriting, before they could be read.
+    pub dropped: u64,
 }
 
 fn read_str(mmap: &memmap2::Mmap, offset: usize) -> String {
@@ -168,14 +201,7 @@ impl MmapReader {
 
     /// Current write index (number of entries ever written).
     pub fn write_idx(&self) -> u64 {
-        if self.mmap.len() < HEADER_SIZE {
-            return 0;
-        }
-        u64::from_le_bytes(
-            self.mmap[OFF_WRITE_IDX..OFF_WRITE_IDX + 8]
-                .try_into()
-                .unwrap_or([0; 8]),
-        )
+        read_u64(&self.mmap, OFF_WRITE_IDX)
     }
 
     /// Read the entry at the given ring-buffer slot (0..255).
@@ -218,6 +244,41 @@ impl MmapReader {
         })
     }
 
+    /// Read every entry written after `cursor` that the ring still holds, and
+    /// advance `cursor` past them.
+    ///
+    /// A replaced ring file restarts the cursor at its first entry. Entries
+    /// lost to overwrite are counted in [`RingDrain::dropped`], never reread.
+    pub fn drain(&self, cursor: &mut RingCursor) -> RingDrain {
+        let capacity = RING_CAPACITY as u64;
+        let generation = read_u64(&self.mmap, OFF_GENERATION);
+        let head = self.write_idx();
+        let replaced = generation != 0 && cursor.generation != 0 && generation != cursor.generation;
+        if replaced || head < cursor.next_idx {
+            cursor.next_idx = 0;
+        }
+        if generation != 0 {
+            cursor.generation = generation;
+        }
+
+        // The writer of index `i + capacity` reuses the slot of `i` before it
+        // publishes `i + capacity + 1`, so without the writer lock only the
+        // newest `capacity - 1` entries are safe to read.
+        let unread = head.saturating_sub(cursor.next_idx);
+        let start = cursor.next_idx.max((head + 1).saturating_sub(capacity));
+        let mut read: Vec<(u64, MonitorEntry)> = (start..head)
+            .filter_map(|idx| Some((idx, self.entry((idx as usize) % RING_CAPACITY)?)))
+            .collect();
+        let settled = self.write_idx();
+        read.retain(|(idx, _)| idx + capacity > settled);
+
+        cursor.next_idx = head;
+        RingDrain {
+            dropped: unread - read.len() as u64,
+            entries: read.into_iter().map(|(_, entry)| entry).collect(),
+        }
+    }
+
     /// Re-read the mmap to pick up new writes.
     #[tracing::instrument(name = "runtime_core.monitor_ring.refresh", level = "trace", skip_all)]
     pub fn refresh(&mut self) -> std::io::Result<()> {
@@ -230,7 +291,82 @@ impl MmapReader {
 
 #[cfg(test)]
 mod tests {
-    use super::{MmapReader, write_entry_to};
+    use super::{
+        FILE_SIZE, MMAP_FILENAME, MmapReader, RING_CAPACITY, RingCursor, RingDrain, write_entry_to,
+    };
+    use std::path::Path;
+
+    fn write_values(dir: &Path, values: std::ops::RangeInclusive<u64>) {
+        let project = Path::new("/projects/alpha");
+        for value in values {
+            write_entry_to(dir, project, "tracedecay", "search", value, 0);
+        }
+    }
+
+    fn deltas(drain: &RingDrain) -> Vec<u64> {
+        drain.entries.iter().map(|entry| entry.delta).collect()
+    }
+
+    #[test]
+    fn drain_reads_each_retained_entry_once_and_counts_overwritten_ones() {
+        let capacity = RING_CAPACITY as u64;
+        for burst in [0_u64, capacity, capacity + 1, 300] {
+            let dir = tempfile::tempdir().expect("monitor dir");
+            std::fs::File::create(dir.path().join(MMAP_FILENAME))
+                .and_then(|file| file.set_len(FILE_SIZE as u64))
+                .expect("create ring");
+            let reader = MmapReader::open_at(dir.path()).expect("open monitor");
+            let mut cursor = RingCursor::default();
+
+            write_values(dir.path(), 1..=5);
+            assert_eq!(deltas(&reader.drain(&mut cursor)), vec![1, 2, 3, 4, 5]);
+
+            write_values(dir.path(), 6..=5 + burst);
+            let drain = reader.drain(&mut cursor);
+            let lost = burst.saturating_sub(capacity - 1);
+            assert_eq!(drain.dropped, lost, "burst {burst}");
+            assert_eq!(
+                deltas(&drain),
+                (6 + lost..=5 + burst).collect::<Vec<_>>(),
+                "burst {burst}"
+            );
+
+            let idle = reader.drain(&mut cursor);
+            assert!(idle.entries.is_empty(), "burst {burst}: idle poll rereads");
+            assert_eq!(idle.dropped, 0, "burst {burst}");
+        }
+    }
+
+    /// Walking every index modulo the capacity rereads lapped slots: these
+    /// 300 calls once totaled 56,414 instead of at most the true 45,150.
+    #[test]
+    fn drain_totals_only_the_retained_window_after_a_lapped_ring() {
+        let dir = tempfile::tempdir().expect("monitor dir");
+        write_values(dir.path(), 1..=300);
+        let reader = MmapReader::open_at(dir.path()).expect("open monitor");
+        let drain = reader.drain(&mut RingCursor::default());
+        assert_eq!(
+            drain.entries.iter().map(|entry| entry.delta).sum::<u64>(),
+            44_115
+        );
+        assert_eq!(drain.dropped, 45);
+    }
+
+    #[test]
+    fn drain_restarts_at_the_first_entry_of_a_replaced_ring() {
+        let dir = tempfile::tempdir().expect("monitor dir");
+        write_values(dir.path(), 1..=10);
+        let mut reader = MmapReader::open_at(dir.path()).expect("open monitor");
+        let mut cursor = RingCursor::default();
+        assert_eq!(reader.drain(&mut cursor).entries.len(), 10);
+
+        std::fs::remove_file(dir.path().join(MMAP_FILENAME)).expect("remove ring");
+        write_values(dir.path(), 101..=120);
+        reader.refresh().expect("remap replaced ring");
+        let drain = reader.drain(&mut cursor);
+        assert_eq!(deltas(&drain), (101..=120).collect::<Vec<_>>());
+        assert_eq!(drain.dropped, 0);
+    }
 
     /// Writers no longer msync, so an already-open reader must still observe
     /// every entry through its existing mapping, without a refresh.
