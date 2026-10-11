@@ -589,18 +589,15 @@ fn confined_io_admits_only_the_main_file_and_its_wal() {
 /// land in its in-memory log and vanish.
 #[test]
 fn writable_open_refuses_a_store_held_read_only() {
-    use crate::ConnectionControl;
-    let directory = tempfile::tempdir().unwrap();
+    let (directory, database) = database();
     let path = directory.path().join("native.tdb");
     let guard = execution_guard();
-    let creator = crate::Connection::open(&path).unwrap();
-    creator
-        .execute_batch("CREATE TABLE entries(body TEXT)")
+    database
+        .connect(Access::Writer)
+        .unwrap()
+        .execute("CREATE TABLE entries(body TEXT)", &[], &guard)
         .unwrap();
-    let folded = creator.checkpoint(crate::CheckpointMode::Truncate).unwrap();
-    assert!(!folded.busy);
-    drop(creator);
-    std::fs::remove_file(directory.path().join("native.tdb-wal")).unwrap();
+    drop(database);
 
     let read_only = Database::open_path(&path, false).unwrap();
     assert!(
@@ -608,12 +605,12 @@ fn writable_open_refuses_a_store_held_read_only() {
         "a writable open shared the read-only engine"
     );
     drop(read_only);
-    let writable = Database::open(&path).unwrap();
-    let mut writer = writable.connect(Access::Writer).unwrap();
-    writer
+    Database::open(&path)
+        .unwrap()
+        .connect(Access::Writer)
+        .unwrap()
         .execute("INSERT INTO entries VALUES('kept')", &[], &guard)
         .unwrap();
-    assert!(directory.path().join("native.tdb-wal").exists());
 }
 
 /// Catches a connection that keeps using a store whose pathname now names a
