@@ -64,6 +64,7 @@ impl ErrorExt for Error {
             Some(ErrorCode::OperationInterrupted) => ErrorKind::Interrupted,
             Some(ErrorCode::ReadOnly) => ErrorKind::ReadOnly,
             Some(ErrorCode::SchemaChanged) => ErrorKind::Schema,
+            Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase) => ErrorKind::Corrupt,
             Some(ErrorCode::AuthorizationForStatementDenied) => ErrorKind::Denied,
             _ => ErrorKind::Other,
         }

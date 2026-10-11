@@ -23,7 +23,6 @@ use tracedecay_runtime_core::resident_memory::ResidentMemoryReservationV1;
 
 use roaring::RoaringBitmap;
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter, types::Value};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::clones::{
     CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneExactKeyV1, CloneSelectedBlockV1,
@@ -37,6 +36,10 @@ use tracedecay_domain::{
     SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, canonical_sha256, split_subtokens,
 };
 use tracedecay_private_fs::{RewriteWitness, open_private_file};
+use tracedecay_sql::{
+    Capability, Connection, ConnectionControl, OpenFlags, OptionalExtension, params_from_iter,
+    types::Value,
+};
 
 use super::builder::compute_section_digests;
 use super::clone_codec::{
@@ -56,9 +59,8 @@ use super::format::{
 };
 use super::postings::{NGRAM_NORMALIZED, query_ngrams, raw_override_query_ngrams};
 use super::row_codec::{
-    ConnectionRowDictionaryV1, ROW_BLOCK_BY_DOCUMENT_SQL, RowBlocksV1, ScoringPrefaceIndexV1,
-    StoredRowV1, decode_artifact_row, load_scoring_preface_index, stored_chunk_key,
-    stored_symbol_key,
+    ConnectionRowDictionaryV1, RowBlocksV1, ScoringPrefaceIndexV1, StoredRowV1,
+    decode_artifact_row, load_scoring_preface_index, stored_chunk_key, stored_symbol_key,
 };
 use super::schema::{
     exact_field_code, field_from_code, require_served_revision, stable_exact_term_id,
@@ -888,7 +890,7 @@ impl CodeLexicalArtifactReaderV1 {
         let width = Self::MAX_CONCURRENT_READS.min(
             (cache_budget_bytes - stored_metadata_bytes.len()) / ARTIFACT_SQLITE_CACHE_FLOOR_BYTES,
         );
-        let mut connections = vec![StdMutex::new(connection)];
+        let mut connections = vec![admit_reader_connection(connection)?];
         let sibling_open_path = sqlite_open_path(artifact_path)?;
         for _ in 1..width {
             checkpoint(control)?;
@@ -903,7 +905,7 @@ impl CodeLexicalArtifactReaderV1 {
                 .pragma_update(None, "query_only", true)
                 .map_err(sqlite_error)?;
             configure_reader_window(&sibling, page_cache_bytes, 0, sealed_file_size_bytes)?;
-            connections.push(StdMutex::new(sibling));
+            connections.push(admit_reader_connection(sibling)?);
         }
         let retained_owned_bytes = stored_metadata_bytes.len() + page_cache_bytes * width;
         Ok(Self {
@@ -1049,7 +1051,7 @@ impl CodeLexicalArtifactReaderV1 {
             )
             .map_err(sqlite_error)?;
         let mut rows = statement
-            .query(rusqlite::params![
+            .query(tracedecay_sql::params![
                 i64::from(key.class as u8),
                 i64::from(key.normalization_revision),
                 digest_key(&key.digest)?.as_slice(),
@@ -1165,7 +1167,7 @@ impl CodeLexicalArtifactReaderV1 {
                  ORDER BY occurrence.body_end - occurrence.body_start, \
                  occurrence.symbol_key \
                  LIMIT 1",
-                rusqlite::params![
+                tracedecay_sql::params![
                     path,
                     i64::try_from(span.start_byte).map_err(|error| {
                         CodeLexicalArtifactErrorV1::Contract(error.to_string())
@@ -1321,7 +1323,7 @@ impl CodeLexicalArtifactReaderV1 {
     fn verified_clone_member(
         route: &CloneOccurrenceRouteV1,
         key: &CloneExactKeyV1,
-        row: &rusqlite::Row<'_>,
+        row: &tracedecay_sql::Row<'_>,
     ) -> Result<(i64, CloneExactArtifactMemberV1), CodeLexicalArtifactErrorV1> {
         let ordinal: i64 = row.get(0).map_err(sqlite_error)?;
         let Some(stored) = stored_clone_occurrence(row, 1)? else {
@@ -1566,8 +1568,6 @@ struct ArtifactQueryMetricsV1 {
     #[cfg(test)]
     probes: Cell<u64>,
     #[cfg(test)]
-    fullscan_steps: Cell<u64>,
-    #[cfg(test)]
     ngram_decoded_lists: Cell<u64>,
     #[cfg(test)]
     ngram_peak_candidates: Cell<u64>,
@@ -1580,30 +1580,9 @@ impl ArtifactQueryMetricsV1 {
         self.probes.set(self.probes.get().saturating_add(1));
     }
 
-    #[inline(always)]
-    fn observe_statement(
-        &self,
-        #[cfg_attr(not(test), expect(unused_variables))] statement: &rusqlite::Statement<'_>,
-    ) -> Result<(), RetrievalPortError> {
-        #[cfg(test)]
-        {
-            let steps =
-                u64::try_from(statement.get_status(rusqlite::StatementStatus::FullscanStep))
-                    .map_err(contract_error)?;
-            self.fullscan_steps
-                .set(self.fullscan_steps.get().saturating_add(steps));
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     fn probes(&self) -> u64 {
         self.probes.get()
-    }
-
-    #[cfg(test)]
-    fn observed_fullscan_steps(&self) -> u64 {
-        self.fullscan_steps.get()
     }
 
     #[cfg(test)]
@@ -1648,7 +1627,6 @@ fn visit_document_ids(
 /// posting probe. Phrase document frequencies need these rows; ordinary
 /// term scoring reads the block preface instead.
 fn visit_lexical_rows(
-    connection: &Connection,
     rows: &RowBlocksV1<'_>,
     documents: &RoaringBitmap,
     postings: &RequestTermPostingsV1,
@@ -1688,12 +1666,6 @@ fn visit_lexical_rows(
                 visited = visited.saturating_add(1);
             }
             retrieval_checkpoint(control)?;
-            if !documents.is_empty() {
-                let statement = connection
-                    .prepare_cached(ROW_BLOCK_BY_DOCUMENT_SQL)
-                    .map_err(map_query_sql_error)?;
-                metrics.observe_statement(&statement)?;
-            }
             Ok(())
         }
     }
@@ -2054,7 +2026,6 @@ impl<'a> ArtifactQueryV1<'a> {
             .values()
             .fold(RoaringBitmap::new(), |union, documents| union | documents);
         visit_lexical_rows(
-            self.connection,
             &self.row_blocks,
             &phrase_documents,
             &RequestTermPostingsV1::default(),
@@ -2868,7 +2839,6 @@ impl<'a> ArtifactQueryV1<'a> {
             vocabulary.push(row.get(0).map_err(map_query_sql_error)?);
         }
         drop(rows);
-        self.metrics.observe_statement(&statement)?;
         Ok(Arc::new(FuzzyVocabularyV1::from_terms(vocabulary)?))
     }
 
@@ -2903,7 +2873,6 @@ impl<'a> ArtifactQueryV1<'a> {
             field_totals.insert(field, usize::try_from(total).map_err(contract_error)?);
         }
         drop(rows);
-        self.metrics.observe_statement(&statement)?;
         let mut document_frequencies = BTreeMap::<LexicalFieldV1, BTreeMap<String, usize>>::new();
         let mut postings = RequestTermPostingsV1::default();
         if !terms.is_empty() {
@@ -2928,7 +2897,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 let term: String = row.get(0).map_err(map_query_sql_error)?;
                 let stored = row
                     .get_ref(1)
-                    .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
+                    .and_then(|value| value.as_blob().map_err(tracedecay_sql::Error::from))
                     .map_err(map_query_sql_error)?;
                 let encoded = term_lists_bytes(stored).map_err(map_query_artifact_error)?;
                 let encoded = encoded.as_ref();
@@ -2953,7 +2922,6 @@ impl<'a> ArtifactQueryV1<'a> {
                 }
             }
             drop(rows);
-            self.metrics.observe_statement(&statement)?;
         }
         Ok(LexicalStatsCacheV1 {
             field_totals,
@@ -3696,6 +3664,16 @@ fn sealed_reader_mmap_bytes(file_size_bytes: u64) -> Result<i64, CodeLexicalArti
     })
 }
 
+/// Pool a configured connection for serving: from here on it may only query.
+fn admit_reader_connection(
+    connection: Connection,
+) -> Result<StdMutex<Connection>, CodeLexicalArtifactErrorV1> {
+    connection
+        .set_capability(Capability::Reader)
+        .map_err(sqlite_error)?;
+    Ok(StdMutex::new(connection))
+}
+
 fn configure_reader_window(
     connection: &Connection,
     cache_budget_bytes: usize,
@@ -3758,7 +3736,7 @@ fn map_private_artifact_file_error(error: std::io::Error) -> CodeLexicalArtifact
     }
 }
 
-fn map_reader_open_error(path: &Path, error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
+fn map_reader_open_error(path: &Path, error: tracedecay_sql::Error) -> CodeLexicalArtifactErrorV1 {
     match path.try_exists() {
         Ok(false) => CodeLexicalArtifactErrorV1::Missing(error.to_string()),
         Ok(true) | Err(_) => sqlite_error(error),
@@ -3780,7 +3758,7 @@ fn row_occurrence(row: ArtifactRowV1) -> CodeLexicalArtifactOccurrenceV1 {
     }
 }
 
-fn map_query_sql_error(error: rusqlite::Error) -> RetrievalPortError {
+fn map_query_sql_error(error: tracedecay_sql::Error) -> RetrievalPortError {
     RetrievalPortError::AuthorityUnavailable(format!("lexical artifact read failed: {error}"))
 }
 
@@ -3808,18 +3786,18 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use roaring::RoaringBitmap;
-    use rusqlite::hooks::{AuthAction, Authorization};
-    use rusqlite::{Connection, OpenFlags, params};
     use sha2::{Digest, Sha256};
     use tracedecay_domain::{
         CodeGenerationId, ComponentRevision, FreshnessCompatibilityV1, ManifestDigest,
         ScoreDomainId, SourceFreshness, SourceInstanceKey, SourceNamespace, UtcMicros,
     };
     use tracedecay_private_fs::{RewriteWitness, open_private_file};
+    use tracedecay_sql::{Connection, OpenFlags, params};
 
     use super::super::format::{PostingListEncoderV1, encode_document_set};
     use super::super::row_codec::{
-        BlockRowV1, RowBlocksV1, ScoringPrefaceIndexV1, encode_row_blocks,
+        BlockRowV1, ROW_BLOCK_BY_DOCUMENT_SQL, RowBlocksV1, ScoringPrefaceIndexV1,
+        encode_row_blocks,
     };
     use super::{
         ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, ARTIFACT_NGRAM_MAX_CANDIDATES_V1,
@@ -3951,43 +3929,72 @@ mod tests {
         );
     }
 
+    /// A pooled serving connection runs under the reader capability, so it
+    /// can neither lift `query_only` nor write, while queries still serve.
+    #[test]
+    fn pooled_reader_connections_only_query() {
+        let connection = Connection::open_in_memory().expect("open reader fixture");
+        connection
+            .execute_batch("CREATE TABLE t (x INTEGER PRIMARY KEY); INSERT INTO t VALUES (1);")
+            .expect("seed reader fixture");
+        let pooled = super::admit_reader_connection(connection).expect("admit reader");
+        let connection = pooled.lock().expect("reader lock");
+        assert!(
+            connection.execute_batch("PRAGMA query_only = 0").is_err(),
+            "a serving connection must not reconfigure itself"
+        );
+        assert!(
+            connection.execute("INSERT INTO t VALUES (2)", []).is_err(),
+            "a serving connection must not write"
+        );
+        let rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .expect("serving reads still run");
+        assert_eq!(rows, 1);
+    }
+
     #[test]
     fn content_addressed_integrity_reuses_the_publisher_proof() {
-        let connection = Connection::open_in_memory().expect("open SQLite fixture");
-        let quick_check_observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let observer = std::sync::Arc::clone(&quick_check_observed);
-        connection
-            .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
-                if matches!(
-                    context.action,
-                    AuthAction::Pragma { pragma_name, .. }
-                        if pragma_name.eq_ignore_ascii_case("quick_check")
-                ) {
-                    observer.store(true, Ordering::SeqCst);
-                    Authorization::Deny
-                } else {
-                    Authorization::Allow
-                }
-            }))
-            .expect("install quick-check observer");
+        let directory = tempfile::tempdir().expect("integrity fixture dir");
+        let path = directory.path().join("damaged.sqlite");
+        {
+            let connection = Connection::open(&path).expect("create integrity fixture");
+            connection
+                .execute_batch(
+                    "CREATE TABLE t (x INTEGER PRIMARY KEY, y BLOB NOT NULL);
+                     WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 400)
+                     INSERT INTO t SELECT x, zeroblob(100) FROM n;",
+                )
+                .expect("fill integrity fixture");
+        }
+        // Damage the table's root page header; the schema page stays intact,
+        // so only a structural scan can notice.
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("open fixture for damage");
+            file.seek(SeekFrom::Start(4096)).expect("seek table root");
+            file.write_all(&[0xff; 12]).expect("damage table root");
+        }
+        let connection = Connection::open(&path).expect("reopen damaged fixture");
 
         super::verify_reader_sqlite_integrity(
             &connection,
             super::ReaderIntegrityAuthorityV1::ContentAddressedPublisherProof,
         )
-        .expect("a content-addressed reopen reuses its publisher integrity proof");
-        assert!(
-            !quick_check_observed.load(Ordering::SeqCst),
-            "content-addressed reopen must not rescan the whole SQLite artifact"
-        );
+        .expect("content-addressed reopen must not rescan the whole SQLite artifact");
 
         let error = super::verify_reader_sqlite_integrity(
             &connection,
             super::ReaderIntegrityAuthorityV1::ReceiptOnly,
         )
         .expect_err("a receipt-only reopen still requires SQLite integrity verification");
-        assert!(matches!(error, CodeLexicalArtifactErrorV1::Io(_)));
-        assert!(quick_check_observed.load(Ordering::SeqCst));
+        assert!(
+            matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)),
+            "unexpected error: {error:?}"
+        );
     }
 
     struct MutateSqliteHeaderAtObservation {
@@ -4303,7 +4310,8 @@ mod tests {
             .expect("named path initially identifies the retained file");
         let served = Connection::open_with_flags(
             &artifact_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | tracedecay_sql::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .expect("SQLite opens the retained artifact name");
         std::fs::rename(&replacement_path, &artifact_path)
@@ -4341,7 +4349,8 @@ mod tests {
         super::checkpoint(&mutation).expect("run the reader's post-hash checkpoint");
         let served = Connection::open_with_flags(
             &artifact_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | tracedecay_sql::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .expect("SQLite opens the same inode after mutation");
         let served_version: i64 = served
@@ -4540,7 +4549,7 @@ mod tests {
                     document_frequency INTEGER NOT NULL,
                     documents BLOB NOT NULL,
                     PRIMARY KEY(kind, ngram)
-                ) WITHOUT ROWID;",
+                );",
             )
             .expect("ngram fixture schema");
         for (ngram, documents) in lists {
@@ -4611,7 +4620,16 @@ mod tests {
         assert_eq!(matching.iter().collect::<Vec<_>>(), [2]);
         assert_eq!(bounded_metrics.ngram_peak_candidates.get(), 1);
         assert_eq!(bounded_metrics.ngram_decoded_lists.get(), 2);
-        assert_eq!(bounded_metrics.observed_fullscan_steps(), 0);
+        let plan = super::super::query_plan(
+            &connection,
+            "SELECT documents, document_frequency FROM ngram_postings WHERE kind = ?1 AND ngram = ?2",
+            [1i64, 10],
+        );
+        assert_eq!(
+            super::super::full_scans(&plan),
+            0,
+            "n-gram lists must seek their key, got {plan:?}"
+        );
 
         let short_circuit_metrics = ArtifactQueryMetricsV1::default();
         let empty = ngram_bitmap_candidates(
@@ -4787,7 +4805,6 @@ mod tests {
         let control = CancelAtObservation::new(usize::MAX);
         let mut visited = 0;
         visit_lexical_rows(
-            &connection,
             &RowBlocksV1::new(&connection, ScoringPrefaceIndexV1::empty()),
             &documents,
             &postings,
@@ -4819,7 +4836,6 @@ mod tests {
         let control = CancelAtObservation::new(2);
         let mut visited = 0usize;
         let error = visit_lexical_rows(
-            &connection,
             &RowBlocksV1::new(&connection, ScoringPrefaceIndexV1::empty()),
             &documents,
             &postings,
@@ -4844,7 +4860,6 @@ mod tests {
 
         let mut complete = 0usize;
         visit_lexical_rows(
-            &connection,
             &RowBlocksV1::new(&connection, ScoringPrefaceIndexV1::empty()),
             &documents,
             &postings,
@@ -4885,7 +4900,6 @@ mod tests {
 
         let rows = RowBlocksV1::new(&connection, ScoringPrefaceIndexV1::empty());
         visit_lexical_rows(
-            &connection,
             &rows,
             &documents,
             &postings,
@@ -4920,10 +4934,11 @@ mod tests {
             1,
             "statement count must stay constant as documents and terms grow"
         );
+        let plan = super::super::query_plan(&connection, ROW_BLOCK_BY_DOCUMENT_SQL, [0i64]);
         assert_eq!(
-            metrics.observed_fullscan_steps(),
+            super::super::full_scans(&plan),
             0,
-            "row lookups must stay on the row key at scale"
+            "row lookups must stay on the row key at scale, got {plan:?}"
         );
         let blocks: i64 = connection
             .query_row("SELECT COUNT(*) FROM row_blocks", [], |row| row.get(0))
@@ -5022,7 +5037,7 @@ mod tests {
                     term TEXT NOT NULL PRIMARY KEY,
                     in_fuzzy INTEGER NOT NULL,
                     lists BLOB NOT NULL
-                ) WITHOUT ROWID;
+                );
                 INSERT INTO term_postings(term, in_fuzzy, lists) VALUES ('alpha', 1, x'00'), ('beta', 0, x'00');",
             )
             .expect("seed vocabulary");

@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 use roaring::RoaringBitmap;
-use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::production::{
@@ -14,6 +13,7 @@ use tracedecay_domain::{
     ComponentRevision, ExactFieldV1, ExactTechnicalTermV1, FileOccurrenceId,
     LanguageDescriptorRevision, ManifestDigest, ScoreDomainId, SourceSpan, SymbolOccurrenceId,
 };
+use tracedecay_sql::{Connection, OptionalExtension};
 
 use super::super::{CodeLexicalProjectionMetadataV1, LexicalFieldV1, ProjectedChunkV1};
 use super::clone_census::CodeLexicalCloneIndexCensusV1;
@@ -307,13 +307,12 @@ fn validate_page_base_sections(
 /// reports it.
 type ColumnShapeV1 = (&'static str, &'static str, i64, i64);
 
-/// `(table, WITHOUT ROWID, columns)` for every table a staging or sealed
-/// artifact always carries. Staging-only append tables are dropped by
-/// finalization and carry no serving contract.
-const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
+/// `(table, columns)` for every table a staging or sealed artifact always
+/// carries, each an ordinary rowid table. Staging-only append tables are
+/// dropped by finalization and carry no serving contract.
+const ARTIFACT_TABLE_LAYOUT: [(&str, &[ColumnShapeV1]); 12] = [
     (
         "source_pages",
-        false,
         &[
             ("page_ordinal", "INTEGER", 0, 1),
             ("file_ordinal", "INTEGER", 1, 0),
@@ -329,7 +328,6 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
     ),
     (
         "row_blocks",
-        false,
         &[
             ("first_document", "INTEGER", 0, 1),
             ("payload", "BLOB", 1, 0),
@@ -337,12 +335,10 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
     ),
     (
         "row_chunks",
-        true,
         &[("chunk_id", "BLOB", 1, 1), ("document_id", "INTEGER", 1, 0)],
     ),
     (
         "term_postings",
-        true,
         &[
             ("term", "TEXT", 1, 1),
             ("in_fuzzy", "INTEGER", 1, 0),
@@ -351,7 +347,6 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
     ),
     (
         "exact_postings",
-        true,
         &[
             ("term_id", "INTEGER", 1, 1),
             ("field", "INTEGER", 1, 2),
@@ -360,7 +355,6 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
     ),
     (
         "ngram_postings",
-        true,
         &[
             ("kind", "INTEGER", 1, 1),
             ("ngram", "INTEGER", 1, 2),
@@ -370,12 +364,10 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
     ),
     (
         "exact_vocabulary",
-        false,
         &[("term_id", "INTEGER", 0, 1), ("term", "BLOB", 1, 0)],
     ),
     (
         "row_dictionary",
-        false,
         &[
             ("entry_id", "INTEGER", 0, 1),
             ("entry", "BLOB", 1, 0),
@@ -384,7 +376,6 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
     ),
     (
         "clone_body_payloads",
-        false,
         &[
             ("ordinal", "INTEGER", 0, 1),
             ("payload_digest", "BLOB", 1, 0),
@@ -393,7 +384,6 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
     ),
     (
         "clone_occurrences",
-        false,
         &[
             ("ordinal", "INTEGER", 0, 1),
             ("symbol_key", "BLOB", 1, 0),
@@ -406,7 +396,6 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
     ),
     (
         "clone_exact_postings",
-        true,
         &[
             ("class", "INTEGER", 1, 1),
             ("normalization_revision", "INTEGER", 1, 2),
@@ -416,7 +405,6 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
     ),
     (
         "clone_fingerprint_postings",
-        true,
         &[
             ("language", "TEXT", 1, 1),
             ("class", "INTEGER", 1, 2),
@@ -445,7 +433,7 @@ pub(super) fn verify_artifact_table_layout(
             "parent-carried lexical artifact requires a full rebuild".to_owned(),
         ));
     }
-    for (table, expected_without_rowid, expected_columns) in ARTIFACT_TABLE_LAYOUT {
+    for (table, expected_columns) in ARTIFACT_TABLE_LAYOUT {
         let without_rowid: Option<i64> = connection
             .query_row(
                 "SELECT wr FROM pragma_table_list WHERE schema = 'main' AND name = ?1 AND type = 'table'",
@@ -459,7 +447,7 @@ pub(super) fn verify_artifact_table_layout(
                 ))
             })?;
         let columns = table_columns(connection, table)?;
-        if without_rowid != Some(i64::from(expected_without_rowid))
+        if without_rowid != Some(0)
             || !table_column_shapes(&columns).eq(expected_columns.iter().copied())
         {
             return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
@@ -1538,7 +1526,7 @@ impl CodeLexicalSourceSummaryV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Self, CodeLexicalArtifactErrorV1> {
         let corrupt =
-            |error: rusqlite::Error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string());
+            |error: tracedecay_sql::Error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string());
         let overflow = || {
             CodeLexicalArtifactErrorV1::Corrupt(
                 "lexical artifact staged source totals overflowed".to_owned(),
@@ -1682,12 +1670,8 @@ mod tests {
         encode_ngram_bitmap, encode_term_lists, term_lists_bytes,
     };
 
-    /// `WITHOUT ROWID` statements the lexical artifact still issues. The native
-    /// engine has no such layout; the artifact's native port converts them and
-    /// sets this to zero, which turns the test into the artifact's permanent
-    /// schema lint.
-    const WITHOUT_ROWID_STATEMENTS_PENDING_NATIVE_PORT: usize = 15;
-
+    /// The native engine has no `WITHOUT ROWID` layout, so no artifact source
+    /// may declare one.
     #[test]
     fn artifact_adds_no_without_rowid_tables() {
         let statements: usize = [
@@ -1711,9 +1695,8 @@ mod tests {
         .map(|source| source.matches(concat!(")", " WITHOUT ROWID")).count())
         .sum();
         assert_eq!(
-            statements, WITHOUT_ROWID_STATEMENTS_PENDING_NATIVE_PORT,
-            "new lexical artifact tables must be rowid tables; lower the pending \
-             count when a table is converted"
+            statements, 0,
+            "lexical artifact tables must be rowid tables"
         );
     }
 
