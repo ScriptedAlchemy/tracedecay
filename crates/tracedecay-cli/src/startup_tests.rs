@@ -524,7 +524,7 @@ fn agent_install_health_check_is_selective() {
     assert!(should_skip_agent_install_check(&Commands::Serve {
         path: None,
         timings: false,
-        claude_code_tool_search: false,
+        full_tool_list: false,
     }));
     assert!(should_skip_agent_install_check(&Commands::Install {
         agent: Some("cursor".to_string()),
@@ -732,4 +732,22 @@ fn query_commands_accept_json_output() {
             action: crate::cli::BranchAction::List { json: true, .. }
         }
     ));
+}
+
+#[test]
+fn the_beta_83_claude_plugin_flag_serves_the_full_tool_list() {
+    for flag in ["--full-tool-list", "--claude-code-tool-search"] {
+        let cli = Cli::try_parse_from(["tracedecay", "serve", flag])
+            .unwrap_or_else(|error| panic!("{flag} must parse: {error}"));
+        assert!(
+            matches!(
+                cli.command,
+                Some(Commands::Serve {
+                    full_tool_list: true,
+                    ..
+                })
+            ),
+            "{flag} must select the full tool list"
+        );
+    }
 }

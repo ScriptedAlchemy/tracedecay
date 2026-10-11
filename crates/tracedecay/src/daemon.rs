@@ -487,6 +487,8 @@ pub(crate) mod session_runtime_tests;
 #[cfg(test)]
 pub(crate) mod store_runtime_tests;
 
+mod repeat_reads;
+mod repeated_queries;
 mod tool_surface;
 mod wire_io;
 #[cfg(test)]

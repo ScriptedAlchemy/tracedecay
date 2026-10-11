@@ -12,14 +12,15 @@ use tracedecay_domain::{
 };
 use tracedecay_privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::params;
 use tracedecay_store::{
     FactReadControl, FactStoreError, ProjectMemoryFactAddCommandV1,
     ProjectMemoryFactAddDispositionV1, ProjectMemoryFactAddMaterialV1,
     ProjectMemoryFactContradictionQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
     ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRetrievalCommandV1,
-    ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchGraphCoverageV1,
-    ProjectMemoryFactSearchGraphDegradationV1, ProjectMemoryFactSearchKindV1,
-    ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
+    ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchFilterV1,
+    ProjectMemoryFactSearchGraphCoverageV1, ProjectMemoryFactSearchGraphDegradationV1,
+    ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
 };
 
 use super::candidates::project_memory_probe_candidates_tx;
@@ -29,7 +30,239 @@ use super::search::{
     project_memory_graph_degradation,
 };
 
-async fn database() -> (TempDir, Database) {
+#[derive(Clone, Default)]
+struct FactVectorCapture {
+    encodings: Arc<AtomicUsize>,
+    insertions: Arc<AtomicUsize>,
+}
+
+impl tracing::Subscriber for FactVectorCapture {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.name() == "runtime_core.memory.fact_vector.encode"
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        let id = self.encodings.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::span::Id::from_u64(id as u64)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+        struct Insertions<'a>(&'a AtomicUsize);
+        impl tracing::field::Visit for Insertions<'_> {
+            fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+                if field.name() == "cache_inserted" && value {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
+            fn record_debug(
+                &mut self,
+                _field: &tracing::field::Field,
+                _value: &dyn std::fmt::Debug,
+            ) {
+            }
+        }
+        values.record(&mut Insertions(&self.insertions));
+    }
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+    fn event(&self, _event: &tracing::Event<'_>) {}
+    fn enter(&self, _span: &tracing::span::Id) {}
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+#[tokio::test]
+async fn sparse_search_encodes_only_lexically_eligible_canonical_facts() {
+    let (_directory, database) = database().await;
+    let store = DatabaseFactStore::new(&database);
+    let control = write_control();
+    let mut expected = BTreeSet::new();
+    for (index, content) in [
+        "recalltoken configure parser loader",
+        "recalltoken observe scheduler admission",
+        "recalltoken inspect schema migration",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let outcome = store
+            .add_project_memory_fact(
+                add_command_with_trust(
+                    &format!("operation.sparse-eligible-{index}"),
+                    content,
+                    vec![],
+                    0.9,
+                ),
+                &control,
+            )
+            .await
+            .expect("write eligible canonical fact");
+        assert_eq!(
+            outcome.disposition(),
+            ProjectMemoryFactAddDispositionV1::Added
+        );
+        expected.insert(outcome.fact().fact_id().clone());
+    }
+    for index in 0..32 {
+        add_fact(
+            &store,
+            &control,
+            &format!("operation.sparse-distractor-{index}"),
+            &format!("unrelated_{index} newest_{index} distraction_{index}"),
+            vec!["elsewhere".to_owned()],
+        )
+        .await;
+    }
+    // Future timestamps are supported by the score's clock-skew rule. Keep
+    // age constant so independent searches compare full scores and cursors.
+    let transaction = database
+        .begin_memory_write_transaction("seed clock-skew search fixture")
+        .await
+        .expect("begin fixture timestamp transaction");
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE memory_v2_current_facts SET updated_at = ?1",
+                params![4_102_444_800_000_000_i64],
+            )
+            .await
+            .expect("set future fixture timestamps"),
+        35
+    );
+    transaction
+        .commit()
+        .await
+        .expect("commit fixture timestamps");
+    let (_, read_control) = live_read_control(false);
+    let capture = FactVectorCapture::default();
+    {
+        let _capture = tracedecay_runtime_core::logging::set_tracing_capture(capture.clone());
+        let query = ProjectMemoryFactSearchQuery::new(
+            FactOwnerV1::Profile,
+            ProjectMemoryFactSearchKindV1::Search,
+            Some("recalltoken".to_owned()),
+            None,
+            1,
+        )
+        .expect("sparse search query");
+        let page = store
+            .search_project_memory_facts(query, &read_control)
+            .await
+            .expect("sparse page");
+        assert_eq!(page.hits().len(), 1);
+    }
+    let (ids, cursors) = collect_search_ids(&store, &read_control).await;
+    assert_eq!(ids.iter().cloned().collect::<BTreeSet<_>>(), expected);
+    assert_eq!(ids.len(), 3);
+    assert_eq!(cursors.len(), 2);
+    let encodings = capture.encodings.load(Ordering::Relaxed);
+    let insertions = capture.insertions.load(Ordering::Relaxed);
+    println!("sparse search: {encodings} cold encodings, {insertions} cache insertions");
+    assert!(
+        encodings <= expected.len(),
+        "irrelevant candidates were encoded: {encodings}"
+    );
+    assert_eq!(insertions, encodings);
+
+    let mut expanded_pages = Vec::new();
+    let mut eligible_pages = Vec::new();
+    for (min_trust, pages) in [
+        (None, &mut expanded_pages),
+        (Some(Confidence::new(0.85).unwrap()), &mut eligible_pages),
+    ] {
+        let mut after = None;
+        for _ in 0..4 {
+            let query = ProjectMemoryFactSearchQuery::with_filter(
+                FactOwnerV1::Profile,
+                ProjectMemoryFactSearchKindV1::Search,
+                Some("recalltoken".to_owned()),
+                ProjectMemoryFactSearchFilterV1::new(None, min_trust, None).unwrap(),
+                after,
+                1,
+            )
+            .unwrap();
+            let page = store
+                .search_project_memory_facts(query, &read_control)
+                .await
+                .unwrap();
+            after = page.next_after().cloned();
+            pages.push(page);
+            if after.is_none() {
+                break;
+            }
+        }
+    }
+    assert_eq!(expanded_pages.len(), 3);
+    assert_eq!(
+        expanded_pages, eligible_pages,
+        "newest distractors changed scores, explanations, order, or cursors"
+    );
+}
+
+#[tokio::test]
+async fn search_retains_tag_entity_path_prefix_and_threshold_admission() {
+    let (_directory, database) = database().await;
+    let store = DatabaseFactStore::new(&database);
+    let id = add_fact(
+        &store,
+        &write_control(),
+        "operation.lexical-recall",
+        "parser configuration governs module loading",
+        vec![
+            "crate::foo".to_owned(),
+            "pkg.module".to_owned(),
+            "src/lib.rs".to_owned(),
+        ],
+    )
+    .await;
+    let (_, read_control) = live_read_control(false);
+    for text in [
+        "fixture",
+        "crate::foo",
+        "pkg.module",
+        "src/lib.rs",
+        "configur",
+        "!",
+    ] {
+        let query = ProjectMemoryFactSearchQuery::new(
+            FactOwnerV1::Profile,
+            ProjectMemoryFactSearchKindV1::Search,
+            Some(text.to_owned()),
+            None,
+            10,
+        )
+        .unwrap();
+        let page = store
+            .search_project_memory_facts(query, &read_control)
+            .await
+            .unwrap();
+        assert_eq!(page.hits().len(), 1, "lost recall for {text}");
+        assert_eq!(page.hits()[0].fact().fact_id(), &id);
+        if text == "configur" {
+            assert!(page.hits()[0].scores().fts_score_millionths() > 0);
+            assert_eq!(page.hits()[0].scores().jaccard_score_millionths(), 0);
+        }
+        let query = ProjectMemoryFactSearchQuery::with_filter(
+            FactOwnerV1::Profile,
+            ProjectMemoryFactSearchKindV1::Search,
+            Some(text.to_owned()),
+            ProjectMemoryFactSearchFilterV1::new(None, None, Some(1_500_000)).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        assert!(
+            store
+                .search_project_memory_facts(query, &read_control)
+                .await
+                .unwrap()
+                .hits()
+                .is_empty()
+        );
+    }
+}
+
+pub(super) async fn database() -> (TempDir, Database) {
     let directory = tempdir().expect("create search fixture directory");
     let path = directory.path().join("canonical-search.db");
     let authority = DatabaseAuthority::acquire_test(&path, "canonical search test authority")
@@ -42,7 +275,7 @@ async fn database() -> (TempDir, Database) {
     (directory, database)
 }
 
-fn write_control() -> FactWriteControl {
+pub(super) fn write_control() -> FactWriteControl {
     FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
 }
 
@@ -69,10 +302,19 @@ fn read_control_interrupted_on_poll(
     (interrupted, polls, control)
 }
 
-fn add_command(
+pub(super) fn add_command(
+    operation: &str,
+    content: &str,
+    entities: Vec<String>,
+) -> ProjectMemoryFactAddCommandV1 {
+    add_command_with_trust(operation, content, entities, 0.8)
+}
+
+fn add_command_with_trust(
     operation: &str,
     content: &str,
     mut entities: Vec<String>,
+    trust: f64,
 ) -> ProjectMemoryFactAddCommandV1 {
     entities.sort_unstable();
     let material = json!({
@@ -103,7 +345,7 @@ fn add_command(
         json!({"fixture": "canonical-search"}),
         receipt,
         None,
-        Confidence::new(0.8).expect("search fixture trust"),
+        Confidence::new(trust).expect("search fixture trust"),
         None,
     )
     .and_then(|material| {

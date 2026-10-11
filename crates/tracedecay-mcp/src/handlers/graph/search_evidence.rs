@@ -3,11 +3,13 @@ use std::future::Future;
 use serde_json::Value;
 
 use crate::tools::render::Md;
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{PrimitiveUnavailableEvidenceV1, SearchExternalImportHintV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 use tracedecay_query::code_search::CodeIndexSearchDisplayV1;
 
+use super::verified::required_graph_file_path;
 use crate::McpToolContext;
 use crate::handlers::dependency_hints;
 
@@ -109,15 +111,14 @@ impl<'a> SearchGraphEvidence<'a> {
         Self { graph, unavailable }
     }
 
-    /// The one graph symbol a search display names, when the graph resolves
-    /// it uniquely. A graph read failure is recorded as the response's
-    /// unavailable graph evidence.
+    /// The graph symbol a search display names. A graph read failure is
+    /// recorded as the response's unavailable graph evidence.
     pub(super) fn node_id_for(&mut self, display: &CodeIndexSearchDisplayV1) -> Option<String> {
         let Ok(graph) = self.graph else {
             return None;
         };
-        match unique_graph_node_id_for_search_display(graph, display) {
-            Ok(node_id) => node_id,
+        match graph_symbol_for_display(graph, display) {
+            Ok(symbol) => symbol.map(|symbol| symbol.occurrence.as_str().to_owned()),
             Err(error) => {
                 self.unavailable = Some(dependency_hints::unavailable_evidence(&error));
                 None
@@ -154,22 +155,17 @@ impl<'a> SearchGraphEvidence<'a> {
     }
 }
 
-fn unique_graph_node_id_for_search_display(
+/// The graph symbol a search display names: its exact occurrence, declared
+/// in the display's file. A file hit names none.
+pub(super) fn graph_symbol_for_display(
     graph: &VerifiedGraphQuery,
     display: &CodeIndexSearchDisplayV1,
-) -> Result<Option<String>> {
-    let nodes = graph.resolve_qualified_name(&display.qualified_name, Some(&display.kind), 16)?;
-    let mut matches = nodes.into_iter().filter(|node| {
-        node.binding
-            .as_ref()
-            .and_then(|binding| binding.logical_path.as_deref())
-            == Some(display.path.as_str())
-    });
-    let Some(node) = matches.next() else {
+) -> Result<Option<CodeGraphSymbolSummaryV1>> {
+    let Some(occurrence) = display.occurrence.as_ref() else {
         return Ok(None);
     };
-    Ok(matches
-        .next()
-        .is_none()
-        .then(|| node.occurrence.as_str().to_owned()))
+    let Some(symbol) = graph.symbol_summary(occurrence)? else {
+        return Ok(None);
+    };
+    Ok((required_graph_file_path(&symbol)? == display.path).then_some(symbol))
 }

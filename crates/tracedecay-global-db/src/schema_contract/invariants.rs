@@ -712,9 +712,13 @@ async fn foreign_key_table_violates(
     while let Some(row) = rows.next().await.map_err(audit_read_error)? {
         let id = row.get::<i64>(0).map_err(audit_read_error)?;
         let parent = row.get::<String>(1).map_err(audit_read_error)?;
+        // An implicit primary-key reference reports `to` as NULL on SQLite
+        // and as an empty name on the native engine.
         let column = (
             row.get::<String>(2).map_err(audit_read_error)?,
-            row.get::<Option<String>>(3).map_err(audit_read_error)?,
+            row.get::<Option<String>>(3)
+                .map_err(audit_read_error)?
+                .filter(|to| !to.is_empty()),
         );
         match keys.last_mut() {
             Some((last, _, columns)) if *last == id => columns.push(column),

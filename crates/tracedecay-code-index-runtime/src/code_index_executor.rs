@@ -463,6 +463,7 @@ pub fn code_index_search_display_binding(
                             .to_owned(),
                         qualified_name: file.logical_path.clone(),
                         kind: "file".to_owned(),
+                        occurrence: None,
                         path: file.logical_path.clone(),
                         site: Some(code_search::CodeIndexSearchSiteV1::ArtifactWindow(
                             published_chunk_window(chunk),
@@ -646,7 +647,7 @@ pub fn code_index_text_search_display_binding(
     };
     let site = Some(code_search::CodeIndexSearchSiteV1::ArtifactWindow(window));
     let display = match occurrence.symbol {
-        Some(_) => code_search::CodeIndexSearchDisplayV1 {
+        Some(symbol) => code_search::CodeIndexSearchDisplayV1 {
             name: occurrence
                 .simple_name
                 .ok_or(HydrationUnavailableV1::Invalid)?,
@@ -654,6 +655,7 @@ pub fn code_index_text_search_display_binding(
                 .qualified_name
                 .ok_or(HydrationUnavailableV1::Invalid)?,
             kind: occurrence.kind.ok_or(HydrationUnavailableV1::Invalid)?,
+            occurrence: Some(symbol),
             path: occurrence.logical_path,
             site,
         },
@@ -674,6 +676,7 @@ pub fn code_index_text_search_display_binding(
                 name,
                 qualified_name: occurrence.logical_path.clone(),
                 kind: "file".to_owned(),
+                occurrence: None,
                 path: occurrence.logical_path,
                 site,
             }
@@ -802,6 +805,7 @@ fn code_index_symbol_display(
             .to_owned(),
         qualified_name: symbol.qualified_name.clone(),
         kind: symbol.kind.clone(),
+        occurrence: Some(symbol.occurrence.clone()),
         path,
         site,
     })

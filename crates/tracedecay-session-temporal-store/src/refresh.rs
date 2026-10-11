@@ -30,11 +30,16 @@ use super::query::{
     retire_superseded_versions, storage, storage_message,
 };
 use super::rebuild::{
-    checkpoint_relation_rebuild_control, rebuild_candidate_session_relations,
-    validate_candidate_frontier,
+    apply_candidate_relation_projection, checkpoint_relation_rebuild_control,
+    rebuild_candidate_session_relations, reconstruct_candidate_session_relations,
+    record_relation_receipts_group, validate_candidate_frontier,
 };
 use super::relation_receipts::acknowledge_relation_receipt;
-use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb, SessionTemporalWriteTxn};
+use super::relations::SessionRelationProjection;
+use crate::handle::{
+    SessionTemporalAccess, SessionTemporalExec, SessionTemporalRegisteredDb,
+    SessionTemporalWriteTxn,
+};
 
 const BEGIN_REFRESH: &str = "begin or join session refresh";
 const PERSIST_REFRESH: &str = "persist session refresh progress";
@@ -176,6 +181,14 @@ pub enum SessionRefreshBeginPlanV1 {
     Begun,
     /// An equivalent operation already exists; the request attaches to it.
     Joined,
+}
+
+#[derive(Debug)]
+pub struct SessionRefreshBeginBatchItemV1 {
+    pub request: SessionRefreshBeginOrJoinRequestV1,
+    pub accepted_at: UtcMicros,
+    pub progress: SessionRefreshProgressV1,
+    pub batch: SessionTemporalProjectionBatchV1,
 }
 
 /// Outcome of committing a refresh begin and its first projected batch in
@@ -365,6 +378,118 @@ async fn begin_session_refresh_in_transaction(
     })
 }
 
+enum SessionRefreshSnapshotPlan {
+    Planned(SessionRefreshBeginPlanV1),
+    /// No cursor key, or generation rows with none active.
+    NeedsWrite,
+}
+
+async fn plan_session_refresh_on_snapshot(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    request: SessionRefreshBeginOrJoinRequestV1,
+    refresh_key: Option<&SessionRefreshKeyV1>,
+    coverage_request: SessionTemporalCoverageRequestV1,
+    session_id: &SessionId,
+    accepted_at: UtcMicros,
+) -> SessionStoreResult<SessionRefreshSnapshotPlan> {
+    let request = match read_active_generation(conn, session_id).await? {
+        Some((_, active_watermarks)) => {
+            rebase_on_committed_frontier(request, active_watermarks.projection_frontier())?
+        }
+        None => request,
+    };
+    let reset_generation = read_reset_generation(conn, session_id).await?;
+    let request_digest = refresh_binding_digest(&request, reset_generation)?;
+    if read_joinable_operation_by_digest(conn, session_id, &request_digest)
+        .await?
+        .is_some()
+    {
+        return Ok(SessionRefreshSnapshotPlan::Planned(
+            SessionRefreshBeginPlanV1::Joined,
+        ));
+    }
+    if read_running_operation(conn, session_id).await?.is_some() {
+        return Err(SessionStoreError::IdempotencyConflict {
+            context: "session refresh busy",
+        });
+    }
+    require_no_open_candidate(conn, session_id, None, BEGIN_REFRESH).await?;
+    let provisioned_cursor_key =
+        match super::cursor_keys::read_active_session_cursor_key(conn).await? {
+            Some(key) => key,
+            None => return Ok(SessionRefreshSnapshotPlan::NeedsWrite),
+        };
+    let candidate_base = next_generation(conn, session_id).await?;
+    let (active_generation, active_watermarks, minted) =
+        match read_active_generation(conn, session_id).await? {
+            Some(active) => (active.0, active.1, false),
+            None => {
+                if candidate_base.value() != 1 {
+                    return Ok(SessionRefreshSnapshotPlan::NeedsWrite);
+                }
+                let generation = SessionProjectionGenerationV1::new(1)?;
+                let watermarks = SessionFrozenWatermarksV1::new(
+                    generation,
+                    request.target_frontier().committed_through(),
+                    request.target_frontier().committed_through(),
+                    0,
+                );
+                (generation, watermarks, true)
+            }
+        };
+    let candidate_generation = if minted {
+        // An empty generation table plans candidate 2; the commit mints generation 1 first.
+        SessionProjectionGenerationV1::new(2)?
+    } else {
+        candidate_base
+    };
+    let mut frozen_watermarks = SessionFrozenWatermarksV1::new(
+        active_generation,
+        request.target_frontier().observed_through(),
+        request.target_frontier().observed_through(),
+        active_watermarks.summary_frontier(),
+    );
+    if let Some(cursor_key) = active_watermarks.cursor_key() {
+        frozen_watermarks = frozen_watermarks.with_cursor_key(cursor_key.clone());
+    } else {
+        frozen_watermarks = frozen_watermarks.with_cursor_key(provisioned_cursor_key);
+    }
+    let attempt = next_operation_attempt(conn, session_id, &request_digest).await?;
+    let operation_id = operation_id_for_digest(&request_digest, attempt)?;
+    let binding = RefreshBinding {
+        generation: candidate_generation,
+        source_frontier: request.target_frontier().committed_through(),
+        target_frontier: request.target_frontier().observed_through(),
+        watermarks: frozen_watermarks,
+        projector_version: PROJECTOR_VERSION.to_owned(),
+        config_digest: config_digest(),
+        binding_digest: request_digest,
+    };
+    let target_frontier = request.target_frontier();
+    let source_targets = match refresh_key {
+        Some(refresh_key) => refresh_key.sources().to_vec(),
+        None => default_refresh_source_targets(conn, session_id, target_frontier).await?,
+    };
+    Ok(SessionRefreshSnapshotPlan::Planned(
+        SessionRefreshBeginPlanV1::Prepared(Box::new(SessionRefreshRecoveryV1 {
+            operation_id,
+            session_id: session_id.clone(),
+            source_targets,
+            coverage_request,
+            source_frontier: binding.source_frontier,
+            target_frontier,
+            candidate_generation: binding.generation,
+            frozen_watermarks: binding.watermarks,
+            projector_version: binding.projector_version,
+            config_digest: binding.config_digest,
+            binding_digest: binding.binding_digest,
+            progress: None,
+            restart_state: SessionRefreshRestartStateV1::BeginProjection,
+            accepted_at,
+        })),
+    ))
+}
+
 /// Resolves the single-source refresh target the recovery decode derives
 /// for a begin request without a refresh key: the session's lowest provider
 /// name, or `all` when none is registered.
@@ -472,6 +597,49 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         let session_id = request.session_id().clone();
         let coverage_request = request.coverage_request().clone();
         let refresh_key = request.refresh_key().cloned();
+        let key_snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        let key_active = super::cursor_keys::read_active_session_cursor_key(&key_snapshot)
+            .await?
+            .is_some();
+        drop(key_snapshot);
+        // A missing cursor key is provisioned before the snapshot plan.
+        if !key_active {
+            let transaction = self
+                .begin_write_transaction()
+                .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+                .await
+                .map_err(|error| storage(BEGIN_REFRESH, error))?;
+            ensure_active_session_cursor_key_in_transaction(&transaction).await?;
+            transaction
+                .commit()
+                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                .await
+                .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        }
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        if !session_reset_is_pending(&snapshot, &session_id).await? {
+            match plan_session_refresh_on_snapshot(
+                &snapshot,
+                request.clone(),
+                refresh_key.as_ref(),
+                coverage_request.clone(),
+                &session_id,
+                now_micros(BEGIN_REFRESH)?,
+            )
+            .await?
+            {
+                SessionRefreshSnapshotPlan::Planned(plan) => return Ok(plan),
+                SessionRefreshSnapshotPlan::NeedsWrite => drop(snapshot),
+            }
+        } else {
+            drop(snapshot);
+        }
         let transaction = self
             .begin_write_transaction()
             .instrument(tracing::trace_span!("session_temporal.txn.begin"))
@@ -510,22 +678,6 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 SessionRefreshBeginTxnOutcome::Joined { .. } => SessionRefreshBeginPlanV1::Joined,
             });
         }
-        // The begin mints a random cursor key when no active key exists, and
-        // a rolled-back mint leaves the commit replay reading a different key.
-        // Provisioning the shared key first makes both replays deterministic;
-        // with an active key already committed this transaction writes
-        // nothing and its commit appends no WAL frames.
-        ensure_active_session_cursor_key_in_transaction(&transaction).await?;
-        transaction
-            .commit()
-            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
-            .await
-            .map_err(|error| storage(BEGIN_REFRESH, error))?;
-        let transaction = self
-            .begin_write_transaction()
-            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-            .await
-            .map_err(|error| storage(BEGIN_REFRESH, error))?;
         let outcome =
             begin_session_refresh_in_transaction(&transaction, request, now_micros(BEGIN_REFRESH)?)
                 .await;
@@ -629,34 +781,14 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 .map_err(|error| storage(PERSIST_REFRESH, error))?;
             return Ok(SessionRefreshBeginBatchOutcomeV1::BeganOnly);
         }
-        let persisted = async {
-            require_progress_timestamp(&progress, authoritative_validation_time)?;
-            let receipt = persist_session_temporal_projection_batch_in_transaction(
-                &transaction,
-                &batch,
-                &execution_control,
-            )
-            .await?;
-            validate_next_progress(
-                &transaction,
-                &progress,
-                batch.generation(),
-                batch.batch_ordinal(),
-                batch.item_count(),
-            )
-            .await?;
-            validate_progress_binding(&binding, &progress)?;
-            insert_progress_and_binding(&transaction, &progress, &batch).await?;
-            touch_running_operation(
-                &transaction,
-                progress.session_id(),
-                progress.operation_id(),
-                progress.updated_at(),
-            )
-            .await?;
-            checkpoint_relation_rebuild_control(&execution_control)?;
-            Ok::<_, SessionStoreError>(receipt)
-        }
+        let persisted = persist_begin_batch_in_transaction(
+            &transaction,
+            &binding,
+            &progress,
+            &batch,
+            authoritative_validation_time,
+            &execution_control,
+        )
         .await;
         match persisted {
             Ok(receipt) => {
@@ -699,6 +831,46 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 })
             }
         }
+    }
+
+    #[tracing::instrument(
+        name = "session_temporal.txn.begin_refresh_batch_group",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn commit_session_refresh_begin_batch_group(
+        &self,
+        items: Vec<SessionRefreshBeginBatchItemV1>,
+        execution_control: ExecutionControl,
+    ) -> SessionStoreResult<Vec<SessionStoreResult<SessionRefreshBeginBatchOutcomeV1>>> {
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(PERSIST_REFRESH, error))?;
+        let mut outcomes = Vec::with_capacity(items.len());
+        for (index, item) in items.into_iter().enumerate() {
+            match commit_begin_batch_item_in_transaction(
+                &transaction,
+                index,
+                item,
+                &execution_control,
+            )
+            .await
+            {
+                Ok(outcome) => outcomes.push(outcome),
+                Err(boundary_error) => {
+                    return abort_grouped_transaction(transaction, boundary_error, PERSIST_REFRESH)
+                        .await;
+                }
+            }
+        }
+        transaction
+            .commit()
+            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+            .await
+            .map_err(|error| storage(PERSIST_REFRESH, error))?;
+        Ok(outcomes)
     }
 
     pub async fn persist_session_refresh_projection_batch_result(
@@ -942,30 +1114,19 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             checkpoint_relation_rebuild_control(&execution_control)?;
             return Ok(receipt);
         }
-        drop(snapshot);
-
-        let preflight = self
-            .begin_write_transaction()
-            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
-            .await
-            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
         let binding = require_running_binding(
-            &preflight,
+            &snapshot,
             request.session_id(),
             request.operation_id(),
             COMPLETE_REFRESH,
         )
         .await?;
+        drop(snapshot);
         if request.frontier().committed_through() != binding.target_frontier {
             return Err(SessionStoreError::InvalidStateTransition {
                 context: "refresh completion target coverage",
             });
         }
-        preflight
-            .commit()
-            .instrument(tracing::trace_span!("session_temporal.txn.commit"))
-            .await
-            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
 
         let relation_projection = rebuild_candidate_session_relations(
             self.inner(),
@@ -981,96 +1142,190 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .instrument(tracing::trace_span!("session_temporal.txn.begin"))
             .await
             .map_err(|error| storage(COMPLETE_REFRESH, error))?;
-        if let Some(receipt) =
-            read_receipt(&transaction, request.session_id(), request.operation_id()).await?
-        {
-            require_exact_completion(&receipt, &request)?;
-            checkpoint_relation_rebuild_control(&execution_control)?;
-            transaction
-                .commit()
-                .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+        let receipt = complete_session_refresh_in_transaction(
+            &transaction,
+            request,
+            &relation_projection,
+            &execution_control,
+        )
+        .await;
+        match receipt {
+            Ok(receipt) => {
+                transaction
+                    .commit()
+                    .instrument(tracing::trace_span!("session_temporal.txn.commit"))
+                    .await
+                    .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+                Ok(receipt)
+            }
+            Err(error) => {
+                transaction
+                    .rollback()
+                    .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
+                    .await
+                    .map_err(|rollback| storage(COMPLETE_REFRESH, rollback))?;
+                Err(error)
+            }
+        }
+    }
+
+    #[tracing::instrument(
+        name = "session_temporal.txn.complete_refresh_group",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn complete_session_refresh_group(
+        &self,
+        items: Vec<(SessionRefreshCompletionRequestV1, SessionRelationProjection)>,
+        execution_control: ExecutionControl,
+    ) -> SessionStoreResult<Vec<SessionStoreResult<SessionRefreshReceiptV1>>> {
+        let transaction = self
+            .begin_write_transaction()
+            .instrument(tracing::trace_span!("session_temporal.txn.begin"))
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        let mut receipts = Vec::with_capacity(items.len());
+        for (index, (request, relation_projection)) in items.into_iter().enumerate() {
+            let savepoint = format!("refresh_complete_item_{index}");
+            if let Err(error) = transaction
+                .execute(&format!("SAVEPOINT {savepoint}"), ())
                 .await
-                .map_err(|error| storage(COMPLETE_REFRESH, error))?;
-            return Ok(receipt);
+                .map_err(|error| storage(COMPLETE_REFRESH, error))
+            {
+                return abort_grouped_transaction(transaction, error, COMPLETE_REFRESH).await;
+            }
+            let receipt = complete_session_refresh_in_transaction(
+                &transaction,
+                request,
+                &relation_projection,
+                &execution_control,
+            )
+            .await;
+            let outcome = match receipt {
+                Ok(receipt) => match transaction
+                    .execute(&format!("RELEASE SAVEPOINT {savepoint}"), ())
+                    .await
+                {
+                    Ok(_) => Ok(receipt),
+                    Err(error) => {
+                        return abort_grouped_transaction(
+                            transaction,
+                            storage(COMPLETE_REFRESH, error),
+                            COMPLETE_REFRESH,
+                        )
+                        .await;
+                    }
+                },
+                Err(item_error) => {
+                    let rollback = async {
+                        transaction
+                            .execute(&format!("ROLLBACK TO SAVEPOINT {savepoint}"), ())
+                            .await
+                            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+                        transaction
+                            .execute(&format!("RELEASE SAVEPOINT {savepoint}"), ())
+                            .await
+                            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+                        Ok::<_, SessionStoreError>(())
+                    }
+                    .await;
+                    match rollback {
+                        Ok(()) => Err(item_error),
+                        Err(rollback_error) => {
+                            return abort_grouped_transaction(
+                                transaction,
+                                rollback_error,
+                                COMPLETE_REFRESH,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            };
+            receipts.push(outcome);
         }
-        let binding = require_running_binding(
-            &transaction,
-            request.session_id(),
-            request.operation_id(),
-            COMPLETE_REFRESH,
-        )
-        .await?;
-        let progress = require_exact_terminal_progress(
-            &transaction,
-            request.session_id(),
-            request.operation_id(),
-            request.frontier(),
-            request.coverage(),
-        )
-        .await?;
-        let mut request = request;
-        if request.source_coverage().is_none()
-            && let Some(source_coverage) = progress.source_coverage().cloned()
-        {
-            request = request.with_source_coverage(source_coverage);
-        }
-        if request.frontier().committed_through() != binding.target_frontier {
-            return Err(SessionStoreError::InvalidStateTransition {
-                context: "refresh completion target coverage",
-            });
-        }
-        validate_final_projection_receipt(
-            &transaction,
-            request.session_id(),
-            binding.generation,
-            &binding.watermarks,
-            &relation_projection,
-            &execution_control,
-        )
-        .await?;
-        validate_candidate_frontier(
-            &transaction,
-            request.session_id().as_str(),
-            generation_i64(binding.generation, COMPLETE_REFRESH)?,
-            binding.target_frontier,
-            &relation_projection,
-            &execution_control,
-        )
-        .await?;
-        acknowledge_relation_receipt(&transaction, &relation_projection).await?;
-        let terminal_at = terminal_timestamp(&progress, COMPLETE_REFRESH)?;
-        activate_bound_generation(&transaction, request.session_id(), &binding, terminal_at)
-            .await?;
-        finish_operation(
-            &transaction,
-            request.session_id(),
-            request.operation_id(),
-            "complete",
-            None,
-            terminal_at,
-        )
-        .await?;
-        insert_terminal_receipt(
-            &transaction,
-            request.session_id(),
-            request.operation_id(),
-            "complete",
-            progress.frontier(),
-            progress.coverage(),
-            request
-                .source_coverage()
-                .or_else(|| progress.source_coverage()),
-            None,
-            terminal_at,
-        )
-        .await?;
-        checkpoint_relation_rebuild_control(&execution_control)?;
         transaction
             .commit()
             .instrument(tracing::trace_span!("session_temporal.txn.commit"))
             .await
             .map_err(|error| storage(COMPLETE_REFRESH, error))?;
-        Ok(SessionRefreshReceiptV1::completed(request, terminal_at))
+        Ok(receipts)
+    }
+
+    pub async fn stage_session_refresh_completion(
+        &self,
+        request: SessionRefreshCompletionRequestV1,
+        execution_control: &ExecutionControl,
+    ) -> SessionStoreResult<SessionRefreshCompletionStage> {
+        checkpoint_relation_rebuild_control(execution_control)?;
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        if let Some(receipt) =
+            read_receipt(&snapshot, request.session_id(), request.operation_id()).await?
+        {
+            require_exact_completion(&receipt, &request)?;
+            checkpoint_relation_rebuild_control(execution_control)?;
+            return Ok(SessionRefreshCompletionStage::Durable(receipt));
+        }
+        let binding = require_running_binding(
+            &snapshot,
+            request.session_id(),
+            request.operation_id(),
+            COMPLETE_REFRESH,
+        )
+        .await?;
+        drop(snapshot);
+        if request.frontier().committed_through() != binding.target_frontier {
+            return Err(SessionStoreError::InvalidStateTransition {
+                context: "refresh completion target coverage",
+            });
+        }
+
+        let relation_projection = reconstruct_candidate_session_relations(
+            self.inner(),
+            request.session_id(),
+            binding.generation,
+            execution_control,
+            COMPLETE_REFRESH,
+        )
+        .await?;
+
+        Ok(SessionRefreshCompletionStage::Ready {
+            request,
+            relation_projection: Box::new(relation_projection),
+        })
+    }
+
+    pub async fn record_relation_receipts_group(
+        &self,
+        projections: &[SessionRelationProjection],
+        execution_control: &ExecutionControl,
+    ) -> SessionStoreResult<Vec<SessionStoreResult<tracedecay_graph_db::GraphWatermark>>> {
+        record_relation_receipts_group(
+            self.inner(),
+            projections,
+            execution_control,
+            COMPLETE_REFRESH,
+        )
+        .await
+    }
+
+    pub async fn apply_candidate_relation_projection(
+        &self,
+        snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+        projection: &SessionRelationProjection,
+        execution_control: &ExecutionControl,
+    ) -> SessionStoreResult<SessionRelationProjection> {
+        apply_candidate_relation_projection(
+            self.inner(),
+            snapshot,
+            projection,
+            execution_control,
+            COMPLETE_REFRESH,
+        )
+        .await
     }
 
     #[tracing::instrument(name = "session_temporal.txn.fail_refresh", level = "trace", skip_all)]
@@ -1582,7 +1837,7 @@ async fn read_running_operation(
 }
 
 async fn read_active_generation(
-    conn: &impl crate::handle::SessionTemporalExec,
+    conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &SessionId,
 ) -> SessionStoreResult<Option<(SessionProjectionGenerationV1, SessionFrozenWatermarksV1)>> {
     let mut rows = conn
@@ -2886,6 +3141,270 @@ fn decode_refresh_state(
             operation,
             "refresh operation state is invalid",
         )),
+    }
+}
+
+async fn persist_begin_batch_in_transaction(
+    transaction: &impl SessionTemporalWriteTxn,
+    binding: &RefreshBinding,
+    progress: &SessionRefreshProgressV1,
+    batch: &SessionTemporalProjectionBatchV1,
+    authoritative_validation_time: UtcMicros,
+    execution_control: &ExecutionControl,
+) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
+    require_progress_timestamp(progress, authoritative_validation_time)?;
+    let receipt = persist_session_temporal_projection_batch_in_transaction(
+        transaction,
+        batch,
+        execution_control,
+    )
+    .await?;
+    validate_next_progress(
+        transaction,
+        progress,
+        batch.generation(),
+        batch.batch_ordinal(),
+        batch.item_count(),
+    )
+    .await?;
+    validate_progress_binding(binding, progress)?;
+    insert_progress_and_binding(transaction, progress, batch).await?;
+    touch_running_operation(
+        transaction,
+        progress.session_id(),
+        progress.operation_id(),
+        progress.updated_at(),
+    )
+    .await?;
+    checkpoint_relation_rebuild_control(execution_control)?;
+    Ok(receipt)
+}
+
+#[derive(Debug)]
+pub enum SessionRefreshCompletionStage {
+    Durable(SessionRefreshReceiptV1),
+    Ready {
+        request: SessionRefreshCompletionRequestV1,
+        relation_projection: Box<SessionRelationProjection>,
+    },
+}
+
+async fn complete_session_refresh_in_transaction(
+    transaction: &impl SessionTemporalWriteTxn,
+    request: SessionRefreshCompletionRequestV1,
+    relation_projection: &SessionRelationProjection,
+    execution_control: &ExecutionControl,
+) -> SessionStoreResult<SessionRefreshReceiptV1> {
+    if let Some(receipt) =
+        read_receipt(transaction, request.session_id(), request.operation_id()).await?
+    {
+        require_exact_completion(&receipt, &request)?;
+        checkpoint_relation_rebuild_control(execution_control)?;
+        return Ok(receipt);
+    }
+    let binding = require_running_binding(
+        transaction,
+        request.session_id(),
+        request.operation_id(),
+        COMPLETE_REFRESH,
+    )
+    .await?;
+    let progress = require_exact_terminal_progress(
+        transaction,
+        request.session_id(),
+        request.operation_id(),
+        request.frontier(),
+        request.coverage(),
+    )
+    .await?;
+    validate_final_projection_receipt(
+        transaction,
+        request.session_id(),
+        binding.generation,
+        &binding.watermarks,
+        relation_projection,
+        execution_control,
+    )
+    .await?;
+    validate_candidate_frontier(
+        transaction,
+        request.session_id().as_str(),
+        generation_i64(binding.generation, COMPLETE_REFRESH)?,
+        binding.target_frontier,
+        relation_projection,
+        execution_control,
+    )
+    .await?;
+    let mut request = request;
+    if request.source_coverage().is_none()
+        && let Some(source_coverage) = progress.source_coverage().cloned()
+    {
+        request = request.with_source_coverage(source_coverage);
+    }
+    if request.frontier().committed_through() != binding.target_frontier {
+        return Err(SessionStoreError::InvalidStateTransition {
+            context: "refresh completion target coverage",
+        });
+    }
+    acknowledge_relation_receipt(transaction, relation_projection).await?;
+    let terminal_at = terminal_timestamp(&progress, COMPLETE_REFRESH)?;
+    activate_bound_generation(transaction, request.session_id(), &binding, terminal_at).await?;
+    finish_operation(
+        transaction,
+        request.session_id(),
+        request.operation_id(),
+        "complete",
+        None,
+        terminal_at,
+    )
+    .await?;
+    insert_terminal_receipt(
+        transaction,
+        request.session_id(),
+        request.operation_id(),
+        "complete",
+        progress.frontier(),
+        progress.coverage(),
+        request
+            .source_coverage()
+            .or_else(|| progress.source_coverage()),
+        None,
+        terminal_at,
+    )
+    .await?;
+    checkpoint_relation_rebuild_control(execution_control)?;
+    Ok(SessionRefreshReceiptV1::completed(request, terminal_at))
+}
+
+pub(super) async fn abort_grouped_transaction<T>(
+    transaction: impl SessionTemporalWriteTxn,
+    boundary_error: SessionStoreError,
+    operation: &'static str,
+) -> SessionStoreResult<T> {
+    transaction
+        .rollback()
+        .instrument(tracing::trace_span!("session_temporal.txn.rollback"))
+        .await
+        .map_err(|error| storage(operation, error))?;
+    Err(boundary_error)
+}
+
+async fn rollback_begin_item_savepoint(
+    transaction: &impl SessionTemporalWriteTxn,
+    savepoint: &str,
+) -> SessionStoreResult<()> {
+    transaction
+        .execute(&format!("ROLLBACK TO SAVEPOINT {savepoint}"), ())
+        .await
+        .map_err(|error| storage(PERSIST_REFRESH, error))?;
+    transaction
+        .execute(&format!("RELEASE SAVEPOINT {savepoint}"), ())
+        .await
+        .map_err(|error| storage(PERSIST_REFRESH, error))?;
+    Ok(())
+}
+
+async fn commit_begin_batch_item_in_transaction(
+    transaction: &impl SessionTemporalWriteTxn,
+    index: usize,
+    item: SessionRefreshBeginBatchItemV1,
+    execution_control: &ExecutionControl,
+) -> SessionStoreResult<SessionStoreResult<SessionRefreshBeginBatchOutcomeV1>> {
+    let savepoint = format!("refresh_begin_item_{index}");
+    let SessionRefreshBeginBatchItemV1 {
+        request,
+        accepted_at,
+        progress,
+        batch,
+    } = item;
+    if let Err(error) = validate_progress_batch_identity(&progress, &batch) {
+        return Ok(Err(error));
+    }
+    let authoritative_validation_time = now_micros(PERSIST_REFRESH)?;
+    transaction
+        .execute(&format!("SAVEPOINT {savepoint}"), ())
+        .await
+        .map_err(|error| storage(PERSIST_REFRESH, error))?;
+    let (operation_id, binding) =
+        match begin_session_refresh_in_transaction(transaction, request.clone(), accepted_at).await
+        {
+            Err(error) => {
+                rollback_begin_item_savepoint(transaction, &savepoint).await?;
+                return Ok(Err(error));
+            }
+            Ok(SessionRefreshBeginTxnOutcome::Joined { .. }) => {
+                rollback_begin_item_savepoint(transaction, &savepoint).await?;
+                return Ok(Ok(SessionRefreshBeginBatchOutcomeV1::Joined));
+            }
+            Ok(SessionRefreshBeginTxnOutcome::Started {
+                operation_id,
+                binding,
+                ..
+            }) => (operation_id, binding),
+        };
+    let diverged = operation_id != *progress.operation_id()
+        || validate_batch_binding(&binding, &batch).is_err()
+        || validate_progress_binding(&binding, &progress).is_err();
+    if diverged {
+        transaction
+            .execute(&format!("RELEASE SAVEPOINT {savepoint}"), ())
+            .await
+            .map_err(|error| storage(PERSIST_REFRESH, error))?;
+        return Ok(Ok(SessionRefreshBeginBatchOutcomeV1::BeganOnly));
+    }
+    match persist_begin_batch_in_transaction(
+        transaction,
+        &binding,
+        &progress,
+        &batch,
+        authoritative_validation_time,
+        execution_control,
+    )
+    .await
+    {
+        Ok(receipt) => {
+            transaction
+                .execute(&format!("RELEASE SAVEPOINT {savepoint}"), ())
+                .await
+                .map_err(|error| storage(PERSIST_REFRESH, error))?;
+            Ok(Ok(SessionRefreshBeginBatchOutcomeV1::Persisted {
+                progress: Box::new(progress),
+                receipt: Box::new(receipt),
+            }))
+        }
+        Err(_) => {
+            rollback_begin_item_savepoint(transaction, &savepoint).await?;
+            let alone = format!("{savepoint}_alone");
+            transaction
+                .execute(&format!("SAVEPOINT {alone}"), ())
+                .await
+                .map_err(|error| storage(PERSIST_REFRESH, error))?;
+            // On the ungrouped path a crash between batch rollback and
+            // begin commit leaves exactly this durable begin, so replay
+            // must not depend on which path wrote it.
+            let outcome =
+                begin_session_refresh_in_transaction(transaction, request, accepted_at).await;
+            Ok(match outcome {
+                Err(error) => {
+                    rollback_begin_item_savepoint(transaction, &alone).await?;
+                    Err(error)
+                }
+                Ok(SessionRefreshBeginTxnOutcome::Started { .. }) => {
+                    transaction
+                        .execute(&format!("RELEASE SAVEPOINT {alone}"), ())
+                        .await
+                        .map_err(|error| storage(PERSIST_REFRESH, error))?;
+                    Ok(SessionRefreshBeginBatchOutcomeV1::BeganOnly)
+                }
+                Ok(SessionRefreshBeginTxnOutcome::Joined { .. }) => {
+                    transaction
+                        .execute(&format!("RELEASE SAVEPOINT {alone}"), ())
+                        .await
+                        .map_err(|error| storage(PERSIST_REFRESH, error))?;
+                    Ok(SessionRefreshBeginBatchOutcomeV1::Joined)
+                }
+            })
+        }
     }
 }
 

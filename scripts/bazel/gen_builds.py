@@ -1204,6 +1204,9 @@ def main():
             data += ' + ["//tests:fixtures"]'
             if name == "tracedecay" and t["name"] == "memory_suite":
                 data += ' + ["//evals/memory:scenarios"]'
+            if name == "tracedecay" and t["name"] == "mcp_suite":
+                agents, _, _ = group_label(Path("plugin/agents/code-explorer.md"))
+                data += " + [" + q([agents]) + "]"
             if name == "tracedecay" and t["name"] == "claude_observation_benchmark":
                 data += ' + ["//benchmark_data:claude-observation"]'
             if name == "tracedecay" and t["name"] == "session_temporal":

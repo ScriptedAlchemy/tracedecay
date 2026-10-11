@@ -16,7 +16,8 @@ use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
 use tracedecay_daemon_protocol::RequestedOutputFormat;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
-    ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY, UserProfileId,
+    ConfigurationValueV1, SettingKey, USER_REPEATED_QUERY_HINTS_SETTING_KEY,
+    USER_UPLOAD_ENABLED_SETTING_KEY, UserProfileId,
 };
 use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -217,15 +218,23 @@ async fn resolved_setting(
 pub(crate) async fn canonical_upload_enabled(
     profile: &ProfileRoot,
 ) -> tracedecay_domain::errors::Result<bool> {
-    upload_enabled(&resolved_setting(profile, None, USER_UPLOAD_ENABLED_SETTING_KEY).await?)
+    boolean_setting(&resolved_setting(profile, None, USER_UPLOAD_ENABLED_SETTING_KEY).await?)
 }
 
-fn upload_enabled(setting: &ResolvedSetting) -> tracedecay_domain::errors::Result<bool> {
+/// The profile's experimental repeated-query hint setting for `serve`.
+pub(crate) async fn repeated_query_hints_enabled(
+    profile: &ProfileRoot,
+) -> tracedecay_domain::errors::Result<bool> {
+    boolean_setting(&resolved_setting(profile, None, USER_REPEATED_QUERY_HINTS_SETTING_KEY).await?)
+}
+
+fn boolean_setting(setting: &ResolvedSetting) -> tracedecay_domain::errors::Result<bool> {
     match setting.effective_value {
         ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
-        _ => Err(configuration_error(
-            "worldwide counter upload setting is not boolean",
-        )),
+        _ => Err(configuration_error(format!(
+            "setting {} is not boolean",
+            setting.key.as_str()
+        ))),
     }
 }
 
@@ -353,7 +362,7 @@ pub(crate) async fn handle_upload_counter(
         tracedecay_daemon_identity::profile_identity::load_existing(profile.data_dir())?
             .profile_id()
             .clone();
-    let mutations = if upload_enabled(&current)? != enable {
+    let mutations = if boolean_setting(&current)? != enable {
         vec![ConfigurationDirectMutationRequestV1::Set {
             layer: ConfigurationLayerIdV1::UserProfile {
                 profile_id: profile_id.clone(),

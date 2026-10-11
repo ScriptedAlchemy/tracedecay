@@ -16,13 +16,9 @@ use super::primitives::{
     row_optional_string, row_string, storage_error, storage_message,
 };
 
-// Native Turso prefers an index that shares only the owner prefix and then
-// filters the owner's whole history, so both lookups pin the run index that
-// SQLite already chooses.
 const CURATION_RUN_RECEIPTS_SQL: &str =
     "SELECT operation_id, request_digest, fact_id, event_id, receipt_json
      FROM memory_v2_operation_receipts
-          INDEXED BY idx_memory_v2_operation_receipts_automation_run
      WHERE owner_kind = ?1
        AND project_id = ?2
        AND operation_kind = 'curation'
@@ -30,6 +26,9 @@ const CURATION_RUN_RECEIPTS_SQL: &str =
      ORDER BY recorded_at ASC, operation_id ASC
      LIMIT 2";
 
+// Native Turso prefers an index that shares only the owner prefix and then
+// filters the owner's whole history, so the lookup pins the run index that
+// SQLite already chooses.
 const AUTOMATIC_RUN_RECEIPTS_SQL: &str = "SELECT automatic.apply_id, automatic.request_digest,
             automatic.idempotency_key, automatic.state,
             automatic.applied_fact_id, automatic.applied_event_id,

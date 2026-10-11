@@ -244,6 +244,50 @@ async fn tracedecay_lcm_describe_reports_shape_without_bodies() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn tracedecay_lcm_describe_counts_messages_beyond_the_published_generation() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let session = "orchard-describe-unpublished";
+    let published = seed_temporal_lcm_session_message(
+        &cg,
+        session,
+        "orchard-published",
+        "published orchard message",
+        1,
+    )
+    .await;
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, session, vec![published]).await;
+    // Intake and raw-message projection have committed the second message;
+    // the session's active temporal generation still covers only the first.
+    let _pending = seed_temporal_lcm_session_message(
+        &cg,
+        session,
+        "orchard-pending",
+        "pending orchard message",
+        2,
+    )
+    .await;
+    let server = real_mcp_server(cg).await;
+    let overview = describe(
+        &server,
+        json!({"provider": "cursor", "session_id": session}),
+    )
+    .await;
+    assert_eq!(
+        overview["description"]["raw_message_count"], 2,
+        "{overview}"
+    );
+    assert_eq!(
+        overview["description"]["unpublished_message_count"], 1,
+        "{overview}"
+    );
+    assert_eq!(overview["status"], "partial", "{overview}");
+    assert_eq!(overview["retrieval"]["outcome"], "partial", "{overview}");
+    assert!(overview["omitted"].as_u64().unwrap() >= 1, "{overview}");
+    server.shutdown().await;
+}
+
 async fn describe(server: &McpServer, arguments: Value) -> Value {
     let result = handle_real_server_tool_call(server, "tracedecay_lcm_describe", arguments).await;
     serde_json::from_str(extract_real_server_text(&result)).expect("describe JSON")
@@ -265,6 +309,7 @@ fn session_document(node_id: &str, payload_ref: &str) -> Value {
             "last_store_id": 2,
             "provider": "cursor",
             "raw_message_count": 2,
+            "unpublished_message_count": 0,
             "raw_messages": [
                 {
                     "content_preview": SOURCE_BODY,
@@ -338,6 +383,7 @@ fn summary_node_document(node_id: &str) -> Value {
             "last_store_id": 2,
             "provider": "cursor",
             "raw_message_count": 2,
+            "unpublished_message_count": 0,
             "raw_messages": [],
             "session_id": SESSION,
             "summary_node": {
@@ -428,6 +474,7 @@ fn external_payload_document(payload_ref: &str, content_hash: &str) -> Value {
             "last_store_id": 2,
             "provider": "cursor",
             "raw_message_count": 2,
+            "unpublished_message_count": 0,
             "raw_messages": [],
             "session_id": SESSION,
             "summary_node": null,
@@ -470,6 +517,7 @@ fn ghost_document() -> Value {
             "last_store_id": null,
             "provider": "cursor",
             "raw_message_count": 0,
+            "unpublished_message_count": 0,
             "raw_messages": [],
             "session_id": "ghost-session",
             "session_token_estimate": 0,

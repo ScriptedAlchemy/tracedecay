@@ -20,7 +20,6 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 REQUIRED_TOOLS = [
     "tracedecay_search",
-    "tracedecay_tool_search",
     "tracedecay_diagnostics",
     "tracedecay_impact",
     "tracedecay_affected",
@@ -127,14 +126,6 @@ elif method == "resources/list":
     print(json.dumps({{"resources": [{{"uri": "tracedecay://status"}}]}}))
 elif method == "tools/call":
     tool = arguments[arguments.index("--tool-name") + 1]
-    if tool == "tracedecay_tool_search":
-        print(json.dumps({{
-            "content": [{{
-                "type": "text",
-                "text": "tracedecay_diagnostics tracedecay_impact tracedecay_affected",
-            }}],
-        }}))
-        raise SystemExit(0)
     if tool == "tracedecay_diagnostics":
         print(json.dumps({{
             "isError": True,
@@ -142,8 +133,15 @@ elif method == "tools/call":
                 "type": "text",
                 "text": "daemon diagnostic authority is unavailable",
             }}],
+            "structuredContent": {{"problem": {{"kind": "unavailable"}}}},
         }}))
         raise SystemExit(2)
+    elif tool == "definitely_not_a_tool":
+        print(json.dumps({{
+            "isError": True,
+            "content": [{{"type": "text", "text": "unknown tool"}}],
+            "structuredContent": {{"problem": {{"code": "unknown_tool"}}}},
+        }}))
     else:
         raise SystemExit(1)
 else:

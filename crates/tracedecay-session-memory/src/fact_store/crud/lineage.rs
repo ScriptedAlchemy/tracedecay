@@ -510,6 +510,7 @@ pub(in crate::fact_store) async fn load_current_projection(
             "SELECT payload_access, trust_score, active_assertion_id,
                     last_event_id, updated_at
              FROM memory_v2_current_facts
+             INDEXED BY sqlite_autoindex_memory_v2_current_facts_1
              WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3",
             params![fact_id.as_str(), owner.kind, owner.project_id.as_str()],
         )

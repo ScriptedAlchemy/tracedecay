@@ -352,7 +352,7 @@ have_plugin=0
 if [[ -d "$plugin_src/.claude-plugin" ]]; then
   have_plugin=1
   cat > "$mcp_cfg" <<JSON
-{"mcpServers":{"tracedecay":{"type":"stdio","command":"$TD","args":["serve"],"env":{"TRACEDECAY_DATA_DIR":"$TRACEDECAY_DATA_DIR","TRACEDECAY_DISABLE_GLOBAL_DB":"1"}}}}
+{"mcpServers":{"tracedecay":{"type":"stdio","command":"$TD","args":["serve","--full-tool-list"],"env":{"TRACEDECAY_DATA_DIR":"$TRACEDECAY_DATA_DIR","TRACEDECAY_DISABLE_GLOBAL_DB":"1"}}}}
 JSON
 fi
 

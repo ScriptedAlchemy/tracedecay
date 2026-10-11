@@ -14,6 +14,8 @@ use tokio::time::{Duration, Instant};
 use super::binary_version;
 #[cfg(unix)]
 use super::connect_with_restart_grace;
+use super::repeat_reads::RepeatReads;
+use super::repeated_queries::RepeatedQueries;
 use super::tool_surface::ToolSurface;
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
@@ -73,12 +75,15 @@ pub async fn should_proxy_serve_to_daemon(
     proxy_required_by_platform(false, socket_path.exists())
 }
 
+/// `full_tool_list` serves the daemon's catalog unchanged; otherwise tools the
+/// catalog does not mark always-loaded are listed as stubs.
 #[tracing::instrument(name = "daemon.engine.proxy.stdio", level = "trace", skip_all)]
 pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
-    claude_code_tool_search: bool,
+    full_tool_list: bool,
+    repeated_query_hints: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let mut transport = StdioTransport::new();
     proxy_transport_to_daemon_with_drain_bound(
@@ -87,7 +92,8 @@ pub async fn proxy_stdio_to_daemon(
         replay_line,
         &mut transport,
         None,
-        claude_code_tool_search,
+        ToolSurface::new(full_tool_list),
+        repeated_query_hints,
     )
     .await
 }
@@ -139,7 +145,8 @@ pub async fn proxy_transport_to_daemon(
         replay_line,
         transport,
         None,
-        false,
+        ToolSurface::new(true),
+        tokio::sync::watch::channel(false).1,
     )
     .await
 }
@@ -153,7 +160,8 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
     replay_line: Option<String>,
     transport: &mut impl McpDuplexTransport,
     drain_bound: Option<Duration>,
-    claude_code_tool_search: bool,
+    surface: ToolSurface,
+    repeated_query_hints: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let (mut reader, mut writer) = transport.split();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -188,7 +196,9 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
         &mut eof_rx,
         &mut writer,
         drain_bound,
-        ToolSurface::from_serve(claude_code_tool_search)?,
+        surface,
+        RepeatedQueries::new(repeated_query_hints),
+        RepeatReads::from_env()?,
     );
     let result = tokio::try_join!(read_host, proxy);
     drop(eof_tx);
@@ -314,6 +324,8 @@ async fn proxy_host_input_to_daemon(
     writer: &mut impl McpTransportWriter,
     drain_bound: Option<Duration>,
     mut surface: ToolSurface,
+    mut repeated_queries: RepeatedQueries,
+    mut repeat_reads: Option<RepeatReads>,
 ) -> Result<()> {
     let mut routed_handshake = handshake.clone();
     let mut pending = VecDeque::new();
@@ -322,9 +334,7 @@ async fn proxy_host_input_to_daemon(
     }
 
     loop {
-        while let Ok(line) = input.try_recv() {
-            pending.push_back(line);
-        }
+        drain_host_input(input, &mut pending);
         if *eof.borrow() && pending.is_empty() {
             return Ok(());
         }
@@ -337,9 +347,7 @@ async fn proxy_host_input_to_daemon(
                             message: format!("host EOF monitor closed unexpectedly: {error}"),
                         })?;
                         if *eof.borrow() {
-                            while let Ok(line) = input.try_recv() {
-                                pending.push_back(line);
-                            }
+                            drain_host_input(input, &mut pending);
                             if pending.is_empty() {
                                 return Ok(());
                             }
@@ -364,6 +372,7 @@ async fn proxy_host_input_to_daemon(
             &mut routed_handshake,
             request.parsed.as_ref(),
         );
+        repeated_queries.reset_for_initialize(request.parsed.as_ref());
 
         let (cancellation_tx, mut cancellation_rx) = tokio::sync::watch::channel(None);
         for queued in std::mem::take(&mut pending) {
@@ -372,6 +381,8 @@ async fn proxy_host_input_to_daemon(
         let result = {
             let daemon_request = send_host_request(
                 &mut surface,
+                &mut repeated_queries,
+                repeat_reads.as_mut(),
                 socket_path,
                 &routed_handshake,
                 &request,
@@ -419,6 +430,16 @@ async fn proxy_host_input_to_daemon(
         };
         let metadata = write_proxy_request_result(&request, result, writer).await?;
         apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
+    }
+}
+
+/// Queues every already-received host line behind the in-flight request.
+fn drain_host_input(
+    input: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    pending: &mut VecDeque<String>,
+) {
+    while let Ok(line) = input.try_recv() {
+        pending.push_back(line);
     }
 }
 
@@ -737,45 +758,27 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
             .is_some_and(json_rpc_error_is_project_open_retryable)
 }
 
-/// Sends one host request through this session's tool surface: search answers
-/// from the daemon catalog, and `tools/list` follows the session advertisement.
+/// Sends one host request and fits the daemon's answer to this session's tool
+/// surface; a call to a stubbed tool also hydrates its full schema, a
+/// repeated identical read answers with a pointer, and a near-repeat of a
+/// recent tool call carries a hint.
 async fn send_host_request(
     surface: &mut ToolSurface,
+    repeated_queries: &mut RepeatedQueries,
+    repeat_reads: Option<&mut RepeatReads>,
     socket_path: &Path,
     handshake: &DaemonHandshake,
     request: &DaemonProxyRequest<'_>,
     cancellation: &mut tokio::sync::watch::Receiver<Option<String>>,
 ) -> Result<Vec<String>> {
-    if let Some((id, query)) = surface.search_request(request.parsed.as_ref()) {
-        // The catalog lookup borrows the search's own id so a host
-        // cancellation forwarded verbatim matches this daemon request.
-        let catalog_line =
-            serde_json::json!({ "jsonrpc": "2.0", "id": id.clone(), "method": "tools/list" })
-                .to_string();
-        let catalog = DaemonProxyRequest::new(&catalog_line);
-        let listing = send_daemon_request_with_project_open_retry(
-            socket_path,
-            handshake,
-            &catalog,
-            cancellation,
-        )
-        .await?;
-        // A cancel during the fetch must settle without loading tools.
-        if cancellation.borrow().is_some() {
-            let response = JsonRpcResponse::error_with_data(
-                id,
-                ErrorCode::RequestCancelled,
-                "MCP request cancelled".to_owned(),
-                Some(serde_json::json!({ "reason_code": "request_cancelled" })),
-            );
-            return Ok(vec![format!("{}\n", serde_json::to_string(&response)?)]);
-        }
-        return Ok(surface.answer_search(&id, &query, &listing));
-    }
     let mut responses =
         send_daemon_request_with_project_open_retry(socket_path, handshake, request, cancellation)
             .await?;
     surface.rewrite(request.parsed.as_ref(), &mut responses);
+    surface.hydrate_called_stub(request.parsed.as_ref(), &mut responses);
+    let pointed = repeat_reads
+        .is_some_and(|repeat_reads| repeat_reads.rewrite(request.parsed.as_ref(), &mut responses));
+    repeated_queries.rewrite(request.parsed.as_ref(), &mut responses, pointed);
     Ok(responses)
 }
 

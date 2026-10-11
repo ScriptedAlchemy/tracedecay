@@ -194,8 +194,8 @@ fn deploy_stamps_version_and_binary_path() {
     );
     assert_eq!(
         mcp["mcpServers"]["graph"]["args"],
-        serde_json::json!(["serve", "--claude-code-tool-search"]),
-        "Claude plugin must pass the native tool-search flag, not guess the host"
+        serde_json::json!(["serve", "--full-tool-list"]),
+        "Claude Code defers tool schemas itself, so its plugin must list every schema"
     );
 }
 
