@@ -206,8 +206,12 @@ where
         tracing_subscriber::fmt::format::FmtSpan::NONE
     };
     let max_level = filter.max_level();
+    // Workspace feature unification can enable `ansi`, which colors every
+    // field separator; daemon stderr is a log file or journal whose readers
+    // match `key=value` text.
     tracing_subscriber::fmt::layer()
         .with_writer(writer)
+        .with_ansi(false)
         .with_target(true)
         .with_span_events(span_events)
         .compact()
