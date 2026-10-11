@@ -50,6 +50,16 @@ the page) but the bound `?1` runs through `prov_output (projector_version=?)`
 (108,291 VM steps). This made `tracedecay-global-db`'s resumed authority audit
 grow with the store on native.
 
+A join key behaves the same. `tracedecay-sessions`
+`SESSION_ACTIVITY_PAGE_AFTER_SQL` joins `sessions` on `(provider,
+session_id)`, the whole primary key. With the full `sessions` schema Turso
+seeks `idx_sessions_parent (provider=?)` instead and reads every session of
+the provider; session rows carry their kilobyte titles, so one drained
+message read 3.8 MB from an 800-session store against 0.5 MB from a
+100-session one (`tracedecay-session-runtime` `session_drain_read_cost`).
+Without the other `sessions` indexes the same statement seeks
+`(session_id=? AND provider=?)`.
+
 ## Workaround
 
 Statements whose bound depends on a secondary index name it with

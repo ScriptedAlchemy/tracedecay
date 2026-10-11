@@ -886,7 +886,6 @@ fn retire_superseded_history(
                )
                AND NOT EXISTS (
                    SELECT 1 FROM external_source_pending_projections_v1
-                        INDEXED BY sqlite_autoindex_external_source_pending_projections_v1_3
                    WHERE binding_id = ?1 AND source_receipt_digest = ?2
                )
              RETURNING predecessor_frontier_digest, successor_frontier_digest",
