@@ -16,6 +16,39 @@ use super::primitives::{
     row_optional_string, row_string, storage_error, storage_message,
 };
 
+// Native Turso prefers an index that shares only the owner prefix and then
+// filters the owner's whole history, so both lookups pin the run index that
+// SQLite already chooses.
+const CURATION_RUN_RECEIPTS_SQL: &str =
+    "SELECT operation_id, request_digest, fact_id, event_id, receipt_json
+     FROM memory_v2_operation_receipts
+          INDEXED BY idx_memory_v2_operation_receipts_automation_run
+     WHERE owner_kind = ?1
+       AND project_id = ?2
+       AND operation_kind = 'curation'
+       AND json_extract(receipt_json, '$.automation_run_id') = ?3
+     ORDER BY recorded_at ASC, operation_id ASC
+     LIMIT 2";
+
+const AUTOMATIC_RUN_RECEIPTS_SQL: &str = "SELECT automatic.apply_id, automatic.request_digest,
+            automatic.idempotency_key, automatic.state,
+            automatic.applied_fact_id, automatic.applied_event_id,
+            envelope.operation_id, envelope.operation_kind,
+            envelope.request_digest, envelope.fact_id, envelope.event_id,
+            envelope.receipt_json
+     FROM memory_v2_automatic_fact_receipts AS automatic
+          INDEXED BY idx_memory_v2_automatic_fact_receipts_automation_run
+     LEFT JOIN memory_v2_operation_receipts AS envelope
+       ON envelope.owner_kind = automatic.owner_kind
+      AND envelope.project_id = automatic.project_id
+      AND envelope.operation_id = automatic.idempotency_key
+     WHERE automatic.owner_kind = ?1
+       AND automatic.project_id = ?2
+       AND automatic.owner_json = ?3
+       AND json_extract(automatic.request_json, '$.automation_run_id') = ?4
+     ORDER BY automatic.recorded_at ASC, automatic.apply_id ASC
+     LIMIT ?5";
+
 struct AutomaticReceiptEnvelopeRow {
     apply_id: ProvenanceId,
     request_digest: String,
@@ -42,14 +75,7 @@ pub(super) async fn project_memory_automation_run_receipts_tx(
 
     let mut curation_rows = transaction
         .query(
-            "SELECT operation_id, request_digest, fact_id, event_id, receipt_json
-             FROM memory_v2_operation_receipts
-             WHERE owner_kind = ?1
-               AND project_id = ?2
-               AND operation_kind = 'curation'
-               AND json_extract(receipt_json, '$.automation_run_id') = ?3
-             ORDER BY recorded_at ASC, operation_id ASC
-             LIMIT 2",
+            CURATION_RUN_RECEIPTS_SQL,
             params![key.kind, key.project_id.as_str(), run_id.as_str()],
         )
         .await
@@ -114,23 +140,7 @@ pub(super) async fn project_memory_automation_run_receipts_tx(
         })?;
     let mut automatic_rows = transaction
         .query(
-            "SELECT automatic.apply_id, automatic.request_digest,
-                    automatic.idempotency_key, automatic.state,
-                    automatic.applied_fact_id, automatic.applied_event_id,
-                    envelope.operation_id, envelope.operation_kind,
-                    envelope.request_digest, envelope.fact_id, envelope.event_id,
-                    envelope.receipt_json
-             FROM memory_v2_automatic_fact_receipts AS automatic
-             LEFT JOIN memory_v2_operation_receipts AS envelope
-               ON envelope.owner_kind = automatic.owner_kind
-              AND envelope.project_id = automatic.project_id
-              AND envelope.operation_id = automatic.idempotency_key
-             WHERE automatic.owner_kind = ?1
-               AND automatic.project_id = ?2
-               AND automatic.owner_json = ?3
-               AND json_extract(automatic.request_json, '$.automation_run_id') = ?4
-             ORDER BY automatic.recorded_at ASC, automatic.apply_id ASC
-             LIMIT ?5",
+            AUTOMATIC_RUN_RECEIPTS_SQL,
             params![
                 key.kind,
                 key.project_id.as_str(),

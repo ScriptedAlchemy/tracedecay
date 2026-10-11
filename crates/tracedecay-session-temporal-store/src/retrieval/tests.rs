@@ -2716,12 +2716,8 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
              role TEXT NOT NULL,
              knowledge_at INTEGER NOT NULL,
              snippet_text TEXT NOT NULL,
+             index_text TEXT NOT NULL,
              PRIMARY KEY(session_id, generation, occurrence_id)
-         );
-         CREATE VIRTUAL TABLE session_occurrences_fts USING fts5(
-             snippet_text,
-             content = 'session_occurrences',
-             content_rowid = 'rowid'
          );
          INSERT INTO sessions VALUES ('claude', 'session-large', 'user');
          INSERT INTO retrieval_anchors VALUES (
@@ -2734,6 +2730,21 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
     )
     .await
     .expect("large exact fixture schema");
+    let backend = conn.backend_kind();
+    conn.execute_batch(match backend {
+        BackendKind::Sqlite => {
+            "CREATE VIRTUAL TABLE session_occurrences_fts USING fts5(
+                 index_text,
+                 content = 'session_occurrences',
+                 content_rowid = 'rowid'
+             );"
+        }
+        BackendKind::NativeTurso => {
+            tracedecay_runtime_core::db::native_search::SearchIndex::Occurrence.create_sql()
+        }
+    })
+    .await
+    .expect("exact candidate search index");
     let literal = "exact-tail-🚨";
     let prefix_bytes = 768 * 1024;
     let snippet = format!("{} {literal}", "x".repeat(prefix_bytes));
@@ -2741,7 +2752,7 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
     conn.execute(
         "INSERT INTO session_occurrences VALUES (
              'session-large', 1, 'occurrence-large', 'observation-large', 'claude',
-             'anchor-large', 'message-large', 'turn-large', 'user', 1, ?1
+             'anchor-large', 'message-large', 'turn-large', 'user', 1, ?1, ?1
          )",
         vec![SqlValue::Text(snippet)],
     )
@@ -2754,17 +2765,19 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
     conn.execute(
         "INSERT INTO session_occurrences VALUES (
              'session-large', 1, 'occurrence-oversized', 'observation-large', 'claude',
-             'anchor-large', 'message-oversized', 'turn-oversized', 'user', 2, ?1
+             'anchor-large', 'message-oversized', 'turn-oversized', 'user', 2, ?1, ?1
          )",
         vec![SqlValue::Text(oversized_snippet)],
     )
     .await
     .expect("oversized hostile occurrence");
-    conn.execute_batch(
-        "INSERT INTO session_occurrences_fts(session_occurrences_fts) VALUES('rebuild');",
-    )
-    .await
-    .expect("rebuild exact candidate FTS fixture");
+    if backend == BackendKind::Sqlite {
+        conn.execute_batch(
+            "INSERT INTO session_occurrences_fts(session_occurrences_fts) VALUES('rebuild');",
+        )
+        .await
+        .expect("rebuild exact candidate FTS fixture");
+    }
 
     let candidate_item_bytes = 256 * 1024;
     let source_bytes = i64::try_from(MAX_OBSERVATION_RECORD_BYTES).expect("source byte cap");
@@ -2801,15 +2814,12 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
 
     let mut root_rows = conn
         .query(
-            ROOT_EXACT_CANDIDATE_QUERY,
+            root_exact_candidate_query(backend),
             vec![
                 SqlValue::Text("user".to_string()),
                 SqlValue::Null,
                 SqlValue::Text(literal.to_string()),
-                SqlValue::Text(fts_phrase(
-                    literal,
-                    tracedecay_runtime_core::db::engine::BackendKind::Sqlite,
-                )),
+                SqlValue::Text(fts_phrase(literal, backend)),
                 SqlValue::Integer(i64::MAX),
                 SqlValue::Text(String::new()),
                 SqlValue::Text(String::new()),
