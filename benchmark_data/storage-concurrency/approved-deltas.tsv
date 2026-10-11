@@ -1,0 +1,5 @@
+target	test	category	evidence
+//crates/tracedecay-sql:policy_parity	native::every_census_statement_runs_under_its_capability	fts-shape	native refuses census statements that name an FTS5 table, shadow table or sync trigger; the replay installs USING fts indexes and every other statement on those tables runs
+//crates/tracedecay-sql:policy_parity	native::every_census_statement_runs_under_its_capability	sqlite-introspection-removed	native refuses dbstat and PRAGMA wal_checkpoint(NOOP); CheckpointMode::Noop reads WAL frames from the engine (conformance checkpoint tests)
+//crates/tracedecay-sql:policy_parity	native::every_census_statement_runs_under_its_capability	vacuum-removed	native refuses PRAGMA auto_vacuum and incremental_vacuum writes
+//crates/tracedecay-sql:policy_parity	native::every_census_statement_runs_under_its_capability	secure-delete	native refuses PRAGMA secure_delete (no page scrubbing)
