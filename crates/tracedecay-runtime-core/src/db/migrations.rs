@@ -99,8 +99,12 @@ async fn set_version(conn: &impl Executor, version: u32) -> Result<()> {
     Ok(())
 }
 /// Configures incremental auto-vacuum for a brand-new database before any
-/// schema-shaping pragmas or tables are created.
-pub async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &str) -> Result<()> {
+/// schema-shaping pragmas or tables are created. Native stores reuse freed
+/// pages in place and have no incremental-vacuum mode to configure.
+pub async fn configure_fresh_auto_vacuum(conn: &impl Executor, operation: &str) -> Result<()> {
+    if conn.backend_kind() == crate::db::engine::BackendKind::NativeTurso {
+        return Ok(());
+    }
     conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
         .await
         .map_err(|e| TraceDecayError::Database {
@@ -120,12 +124,7 @@ pub async fn create_schema(database: &crate::db::Database) -> Result<()> {
 }
 
 async fn create_schema_engine_connection(conn: &DatabaseEngineWriteConnection) -> Result<()> {
-    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
-        .await
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("create_schema: failed to configure fresh auto_vacuum: {error}"),
-            operation: "create_schema".to_owned(),
-        })?;
+    configure_fresh_auto_vacuum(conn, "create_schema").await?;
     let transaction = conn
         .authorized_long_lease_transaction()
         .await

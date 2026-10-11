@@ -27,10 +27,6 @@ type SchemaInventory = BTreeMap<String, SchemaObject>;
 static EXPECTED_FINAL_SHAPE: LazyLock<std::result::Result<SchemaInventory, String>> =
     LazyLock::new(build_expected_final_shape);
 
-/// Workspace path of the native golden inventory.
-const NATIVE_FINAL_SHAPE_GOLDEN_PATH: &str =
-    "crates/tracedecay-runtime-core/src/db/migrations/native_final_shape.json";
-
 /// The `sqlite_master` inventory of a fresh native install, as Turso persists
 /// it. Regenerate after any memory-store DDL change with
 /// `bz run //crates/tracedecay-runtime-core:unit_test -- native_final_shape_golden`.
@@ -57,12 +53,6 @@ fn compiled_engine_inventory() -> Result<&'static SchemaInventory> {
         tracedecay_sql::Engine::Sqlite => BackendKind::Sqlite,
         tracedecay_sql::Engine::Native => BackendKind::NativeTurso,
     })
-}
-
-fn render_native_golden(inventory: &SchemaInventory) -> std::result::Result<String, String> {
-    serde_json::to_string_pretty(inventory)
-        .map(|json| json + "\n")
-        .map_err(|error| format!("failed to render native final-shape golden: {error}"))
 }
 
 fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> {
@@ -410,11 +400,11 @@ mod fingerprint_tests {
 mod native_final_shape_golden {
     use std::path::Path;
 
-    use super::{
-        NATIVE_FINAL_SHAPE_GOLDEN, NATIVE_FINAL_SHAPE_GOLDEN_PATH, read_inventory,
-        render_native_golden,
-    };
+    use super::{NATIVE_FINAL_SHAPE_GOLDEN, read_inventory};
     use crate::db::engine::NativeTestConnection;
+
+    const NATIVE_FINAL_SHAPE_GOLDEN_PATH: &str =
+        "crates/tracedecay-runtime-core/src/db/migrations/native_final_shape.json";
 
     /// Catches a memory-store DDL change that was not regenerated into the
     /// golden, which would refuse every fresh native store. Under `bz run`
@@ -432,12 +422,11 @@ mod native_final_shape_golden {
             .await
             .expect("install final schema objects on native");
         transaction.commit().await.expect("commit native golden");
-        let rendered = render_native_golden(
-            &read_inventory(&*connection)
-                .await
-                .expect("read native inventory"),
-        )
-        .expect("render native golden");
+        let inventory = read_inventory(&*connection)
+            .await
+            .expect("read native inventory");
+        let rendered =
+            serde_json::to_string_pretty(&inventory).expect("render native golden") + "\n";
         if let Some(workspace) = std::env::var_os("BUILD_WORKSPACE_DIRECTORY") {
             std::fs::write(
                 Path::new(&workspace).join(NATIVE_FINAL_SHAPE_GOLDEN_PATH),

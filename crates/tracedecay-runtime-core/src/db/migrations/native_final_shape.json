@@ -1,1 +1,627 @@
-{}
+{
+  "__turso_internal_fts_dir_memory_v2_assertion_payloads_fts": {
+    "type": "table",
+    "table": "__turso_internal_fts_dir_memory_v2_assertion_payloads_fts",
+    "sql": "CREATE TABLE __turso_internal_fts_dir_memory_v2_assertion_payloads_fts (path TEXT NOT NULL, chunk_no INTEGER NOT NULL, bytes BLOB NOT NULL)"
+  },
+  "__turso_internal_fts_dir_memory_v2_assertion_payloads_fts_key": {
+    "type": "index",
+    "table": "__turso_internal_fts_dir_memory_v2_assertion_payloads_fts",
+    "sql": "CREATE INDEX IF NOT EXISTS __turso_internal_fts_dir_memory_v2_assertion_payloads_fts_key ON __turso_internal_fts_dir_memory_v2_assertion_payloads_fts USING backing_btree (path, chunk_no, bytes)"
+  },
+  "__turso_internal_seq___turso_internal_autoincrement_graph_publication_replay_v1": {
+    "type": "table",
+    "table": "__turso_internal_seq___turso_internal_autoincrement_graph_publication_replay_v1",
+    "sql": "CREATE TABLE \"__turso_internal_seq___turso_internal_autoincrement_graph_publication_replay_v1\"(value INTEGER PRIMARY KEY,is_called INTEGER,start INTEGER,inc INTEGER,min INTEGER,max INTEGER,cycle INTEGER)"
+  },
+  "__turso_internal_seq___turso_internal_autoincrement_memory_v2_assertion_payloads": {
+    "type": "table",
+    "table": "__turso_internal_seq___turso_internal_autoincrement_memory_v2_assertion_payloads",
+    "sql": "CREATE TABLE \"__turso_internal_seq___turso_internal_autoincrement_memory_v2_assertion_payloads\"(value INTEGER PRIMARY KEY,is_called INTEGER,start INTEGER,inc INTEGER,min INTEGER,max INTEGER,cycle INTEGER)"
+  },
+  "__turso_internal_seq___turso_internal_autoincrement_memory_v2_lineage_events": {
+    "type": "table",
+    "table": "__turso_internal_seq___turso_internal_autoincrement_memory_v2_lineage_events",
+    "sql": "CREATE TABLE \"__turso_internal_seq___turso_internal_autoincrement_memory_v2_lineage_events\"(value INTEGER PRIMARY KEY,is_called INTEGER,start INTEGER,inc INTEGER,min INTEGER,max INTEGER,cycle INTEGER)"
+  },
+  "__turso_internal_seq___turso_internal_autoincrement_retrieval_anchor_dispositions": {
+    "type": "table",
+    "table": "__turso_internal_seq___turso_internal_autoincrement_retrieval_anchor_dispositions",
+    "sql": "CREATE TABLE \"__turso_internal_seq___turso_internal_autoincrement_retrieval_anchor_dispositions\"(value INTEGER PRIMARY KEY,is_called INTEGER,start INTEGER,inc INTEGER,min INTEGER,max INTEGER,cycle INTEGER)"
+  },
+  "diagnostic_generation_publications": {
+    "type": "table",
+    "table": "diagnostic_generation_publications",
+    "sql": "CREATE TABLE diagnostic_generation_publications (generation_id TEXT NOT NULL, publication_revision INTEGER NOT NULL CHECK (publication_revision > 0), record_state TEXT NOT NULL, state_generation TEXT, published_at INTEGER NOT NULL, PRIMARY KEY (generation_id, publication_revision))"
+  },
+  "external_source_acquisition_queue_v1": {
+    "type": "table",
+    "table": "external_source_acquisition_queue_v1",
+    "sql": "CREATE TABLE external_source_acquisition_queue_v1 (binding_id TEXT NOT NULL PRIMARY KEY, state_digest TEXT NOT NULL, not_before_micros INTEGER, state_json TEXT NOT NULL)"
+  },
+  "external_source_authority_receipts_v1": {
+    "type": "table",
+    "table": "external_source_authority_receipts_v1",
+    "sql": "CREATE TABLE external_source_authority_receipts_v1 (binding_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, definition_digest TEXT NOT NULL, binding_digest TEXT NOT NULL, receipt_json TEXT NOT NULL, PRIMARY KEY (binding_id, idempotency_key))"
+  },
+  "external_source_binding_revisions_v1": {
+    "type": "table",
+    "table": "external_source_binding_revisions_v1",
+    "sql": "CREATE TABLE external_source_binding_revisions_v1 (binding_id TEXT NOT NULL, binding_revision INTEGER NOT NULL CHECK (binding_revision > 0), definition_revision INTEGER NOT NULL CHECK (definition_revision > 0), binding_digest TEXT NOT NULL, binding_json TEXT NOT NULL, PRIMARY KEY (binding_id, binding_revision))"
+  },
+  "external_source_commit_receipts_v2": {
+    "type": "table",
+    "table": "external_source_commit_receipts_v2",
+    "sql": "CREATE TABLE external_source_commit_receipts_v2 (binding_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, receipt_digest TEXT NOT NULL, mutation_digests_json TEXT NOT NULL, PRIMARY KEY (binding_id, idempotency_key))"
+  },
+  "external_source_definition_revisions_v1": {
+    "type": "table",
+    "table": "external_source_definition_revisions_v1",
+    "sql": "CREATE TABLE external_source_definition_revisions_v1 (source_id TEXT NOT NULL, definition_revision INTEGER NOT NULL CHECK (definition_revision > 0), definition_digest TEXT NOT NULL, definition_json TEXT NOT NULL, PRIMARY KEY (source_id, definition_revision))"
+  },
+  "external_source_frontiers_v1": {
+    "type": "table",
+    "table": "external_source_frontiers_v1",
+    "sql": "CREATE TABLE external_source_frontiers_v1 (binding_id TEXT NOT NULL, frontier_digest TEXT NOT NULL, frontier_json TEXT NOT NULL, PRIMARY KEY (binding_id, frontier_digest))"
+  },
+  "external_source_lineage_v1": {
+    "type": "table",
+    "table": "external_source_lineage_v1",
+    "sql": "CREATE TABLE external_source_lineage_v1 (binding_id TEXT NOT NULL, lineage_digest TEXT NOT NULL, source_receipt_digest TEXT NOT NULL, lineage_json TEXT NOT NULL, PRIMARY KEY (binding_id, lineage_digest))"
+  },
+  "external_source_mutations_v1": {
+    "type": "table",
+    "table": "external_source_mutations_v1",
+    "sql": "CREATE TABLE external_source_mutations_v1 (binding_id TEXT NOT NULL, mutation_digest TEXT NOT NULL, native_object_digest TEXT NOT NULL, revision_digest TEXT NOT NULL, mutation_json TEXT NOT NULL, PRIMARY KEY (binding_id, mutation_digest), UNIQUE (binding_id, native_object_digest, revision_digest))"
+  },
+  "external_source_objects_v2": {
+    "type": "table",
+    "table": "external_source_objects_v2",
+    "sql": "CREATE TABLE external_source_objects_v2 (binding_id TEXT NOT NULL, native_object_digest TEXT NOT NULL, partition_digest TEXT NOT NULL, mutation_digest TEXT NOT NULL, PRIMARY KEY (binding_id, native_object_digest))"
+  },
+  "external_source_pending_projections_v1": {
+    "type": "table",
+    "table": "external_source_pending_projections_v1",
+    "sql": "CREATE TABLE external_source_pending_projections_v1 (binding_id TEXT NOT NULL, predecessor_frontier_digest TEXT NOT NULL, successor_frontier_digest TEXT NOT NULL, successor_sequence INTEGER NOT NULL CHECK (successor_sequence > 0), source_receipt_digest TEXT NOT NULL, PRIMARY KEY (binding_id, predecessor_frontier_digest), UNIQUE (binding_id, successor_frontier_digest), UNIQUE (binding_id, source_receipt_digest))"
+  },
+  "external_source_projected_objects_v2": {
+    "type": "table",
+    "table": "external_source_projected_objects_v2",
+    "sql": "CREATE TABLE external_source_projected_objects_v2 (binding_id TEXT NOT NULL, native_object_digest TEXT NOT NULL, mutation_digest TEXT NOT NULL, PRIMARY KEY (binding_id, native_object_digest))"
+  },
+  "external_source_projection_effects_v2": {
+    "type": "table",
+    "table": "external_source_projection_effects_v2",
+    "sql": "CREATE TABLE external_source_projection_effects_v2 (binding_id TEXT NOT NULL, projection_digest TEXT NOT NULL, effect_index INTEGER NOT NULL CHECK (effect_index >= 0), native_object_digest TEXT NOT NULL, mutation_digest TEXT NOT NULL, effect_json TEXT NOT NULL, PRIMARY KEY (binding_id, projection_digest, effect_index))"
+  },
+  "external_source_projection_lineage_v1": {
+    "type": "table",
+    "table": "external_source_projection_lineage_v1",
+    "sql": "CREATE TABLE external_source_projection_lineage_v1 (binding_id TEXT NOT NULL, projection_digest TEXT NOT NULL, lineage_index INTEGER NOT NULL CHECK (lineage_index >= 0), lineage_digest TEXT NOT NULL, lineage_json TEXT NOT NULL, PRIMARY KEY (binding_id, projection_digest, lineage_index))"
+  },
+  "external_source_projection_publications_v2": {
+    "type": "table",
+    "table": "external_source_projection_publications_v2",
+    "sql": "CREATE TABLE external_source_projection_publications_v2 (binding_id TEXT NOT NULL, projection_digest TEXT NOT NULL, source_receipt_digest TEXT NOT NULL, predecessor_frontier_digest TEXT NOT NULL, successor_frontier_digest TEXT NOT NULL, receipt_json TEXT NOT NULL, PRIMARY KEY (binding_id, projection_digest), UNIQUE (binding_id, source_receipt_digest), UNIQUE (binding_id, successor_frontier_digest))"
+  },
+  "external_source_retained_receipts_v1": {
+    "type": "table",
+    "table": "external_source_retained_receipts_v1",
+    "sql": "CREATE TABLE external_source_retained_receipts_v1 (binding_id TEXT NOT NULL, receipt_digest TEXT NOT NULL, predecessor_frontier_digest TEXT NOT NULL, successor_frontier_digest TEXT NOT NULL, receipt_json TEXT NOT NULL, PRIMARY KEY (binding_id, receipt_digest))"
+  },
+  "external_source_states_v1": {
+    "type": "table",
+    "table": "external_source_states_v1",
+    "sql": "CREATE TABLE external_source_states_v1 (binding_id TEXT NOT NULL PRIMARY KEY, source_id TEXT NOT NULL, owner_kind TEXT NOT NULL CHECK (owner_kind IN ('project', 'profile')), owner_id TEXT NOT NULL, definition_revision INTEGER NOT NULL CHECK (definition_revision > 0), definition_digest TEXT NOT NULL, binding_revision INTEGER NOT NULL CHECK (binding_revision > 0), binding_digest TEXT NOT NULL, source_frontier_digest TEXT NOT NULL, source_frontier_json TEXT NOT NULL, projection_frontier_digest TEXT, latest_source_receipt_digest TEXT NOT NULL, latest_projection_receipt_digest TEXT)"
+  },
+  "generation_diagnostics": {
+    "type": "table",
+    "table": "generation_diagnostics",
+    "sql": "CREATE TABLE generation_diagnostics (diagnostic_anchor TEXT NOT NULL, generation_id TEXT NOT NULL, publication_revision INTEGER NOT NULL CHECK (publication_revision > 0), repository TEXT NOT NULL, worktree TEXT, reference TEXT, source_revision TEXT, file_occurrence_id TEXT NOT NULL, content_digest TEXT NOT NULL, symbol_occurrence_id TEXT, span_start INTEGER NOT NULL, span_end INTEGER NOT NULL, code TEXT NOT NULL, severity TEXT NOT NULL, message TEXT NOT NULL, message_digest TEXT NOT NULL, producer_kind TEXT NOT NULL, producer TEXT NOT NULL, analyzer_revision TEXT NOT NULL, configuration_revision TEXT NOT NULL, sanitization_receipt TEXT, evidence_class TEXT NOT NULL, collected_at INTEGER NOT NULL, record_state TEXT NOT NULL DEFAULT 'current', state_generation TEXT, persisted_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (generation_id, publication_revision, diagnostic_anchor))"
+  },
+  "graph_publication_replay_dependencies_v1": {
+    "type": "table",
+    "table": "graph_publication_replay_dependencies_v1",
+    "sql": "CREATE TABLE graph_publication_replay_dependencies_v1 (owner_replay_sequence INTEGER NOT NULL REFERENCES graph_publication_replay_v1 (sequence) ON DELETE CASCADE, ordinal INTEGER NOT NULL CHECK (ordinal >= 0), dependency_replay_sequence INTEGER NOT NULL, shard_id TEXT NOT NULL, namespace TEXT NOT NULL, projection TEXT NOT NULL, generation TEXT NOT NULL, PRIMARY KEY (owner_replay_sequence, ordinal), UNIQUE (owner_replay_sequence, shard_id, namespace, projection), FOREIGN KEY (dependency_replay_sequence, shard_id, namespace, projection, generation) REFERENCES graph_publication_replay_v1 (sequence, shard_id, namespace, projection, generation) ON DELETE RESTRICT) STRICT"
+  },
+  "graph_publication_replay_tombstone_dependencies_v1": {
+    "type": "table",
+    "table": "graph_publication_replay_tombstone_dependencies_v1",
+    "sql": "CREATE TABLE graph_publication_replay_tombstone_dependencies_v1 (tombstone_replay_sequence INTEGER NOT NULL REFERENCES graph_publication_replay_tombstones_v1 (replay_sequence) ON DELETE CASCADE, ordinal INTEGER NOT NULL CHECK (ordinal >= 0), shard_id TEXT NOT NULL, namespace TEXT NOT NULL, projection TEXT NOT NULL, generation TEXT NOT NULL, PRIMARY KEY (tombstone_replay_sequence, ordinal), UNIQUE (tombstone_replay_sequence, shard_id, namespace, projection)) STRICT"
+  },
+  "graph_publication_replay_tombstones_v1": {
+    "type": "table",
+    "table": "graph_publication_replay_tombstones_v1",
+    "sql": "CREATE TABLE graph_publication_replay_tombstones_v1 (replay_sequence INTEGER PRIMARY KEY, shard_id TEXT NOT NULL, namespace TEXT NOT NULL, projection TEXT NOT NULL, generation TEXT NOT NULL, idempotency_key TEXT NOT NULL, input_digest TEXT NOT NULL, dependency_generation_closure_digest TEXT NOT NULL, direct_dependency_bytes INTEGER NOT NULL CHECK (direct_dependency_bytes >= 2\n            AND direct_dependency_bytes <= 1048576), expected_prior_head TEXT, expected_recovered_digest TEXT NOT NULL, canonical_replay_source_digest TEXT NOT NULL, UNIQUE (shard_id, namespace, projection, generation), UNIQUE (shard_id, namespace, projection, idempotency_key)) STRICT"
+  },
+  "graph_publication_replay_v1": {
+    "type": "table",
+    "table": "graph_publication_replay_v1",
+    "sql": "CREATE TABLE graph_publication_replay_v1 (sequence INTEGER PRIMARY KEY AUTOINCREMENT, shard_id TEXT NOT NULL, namespace TEXT NOT NULL, projection TEXT NOT NULL, generation TEXT NOT NULL, idempotency_key TEXT NOT NULL, input_digest TEXT NOT NULL, dependency_generation_closure_digest TEXT NOT NULL, direct_dependency_bytes INTEGER NOT NULL CHECK (direct_dependency_bytes >= 2\n            AND direct_dependency_bytes <= 1048576), expected_prior_head TEXT, expected_recovered_digest TEXT NOT NULL, canonical_replay_source_digest TEXT NOT NULL, canonical_replay_source BLOB NOT NULL CHECK (length(canonical_replay_source) > 0\n            AND length(canonical_replay_source) <= 4194304\n            AND length(canonical_replay_source)\n                + direct_dependency_bytes <= 4194304), UNIQUE (shard_id, namespace, projection, generation), UNIQUE (shard_id, namespace, projection, idempotency_key), UNIQUE (sequence, shard_id, namespace, projection, generation)) STRICT"
+  },
+  "graph_verified_heads_v1": {
+    "type": "table",
+    "table": "graph_verified_heads_v1",
+    "sql": "CREATE TABLE graph_verified_heads_v1 (shard_id TEXT NOT NULL, namespace TEXT NOT NULL, projection TEXT NOT NULL, replay_sequence INTEGER NOT NULL UNIQUE REFERENCES graph_publication_replay_v1 (sequence) ON DELETE RESTRICT, recovered_digest TEXT NOT NULL, PRIMARY KEY (shard_id, namespace, projection)) STRICT"
+  },
+  "idx_diagnostic_generation_current": {
+    "type": "index",
+    "table": "diagnostic_generation_publications",
+    "sql": "CREATE UNIQUE INDEX IF NOT EXISTS idx_diagnostic_generation_current ON diagnostic_generation_publications (record_state) WHERE record_state = 'current'"
+  },
+  "idx_diagnostic_publications_generation_revision": {
+    "type": "index",
+    "table": "diagnostic_generation_publications",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_diagnostic_publications_generation_revision ON diagnostic_generation_publications (generation_id, publication_revision DESC)"
+  },
+  "idx_external_source_acquisition_ready_v1": {
+    "type": "index",
+    "table": "external_source_acquisition_queue_v1",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_external_source_acquisition_ready_v1 ON external_source_acquisition_queue_v1 (not_before_micros, binding_id) WHERE not_before_micros IS NOT NULL"
+  },
+  "idx_external_source_projection_publications_predecessor_v1": {
+    "type": "index",
+    "table": "external_source_projection_publications_v2",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_external_source_projection_publications_predecessor_v1 ON external_source_projection_publications_v2 (binding_id, predecessor_frontier_digest)"
+  },
+  "idx_external_source_retained_receipts_predecessor_v1": {
+    "type": "index",
+    "table": "external_source_retained_receipts_v1",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_external_source_retained_receipts_predecessor_v1 ON external_source_retained_receipts_v1 (binding_id, predecessor_frontier_digest)"
+  },
+  "idx_external_source_retained_receipts_successor_v1": {
+    "type": "index",
+    "table": "external_source_retained_receipts_v1",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_external_source_retained_receipts_successor_v1 ON external_source_retained_receipts_v1 (binding_id, successor_frontier_digest)"
+  },
+  "idx_external_source_states_owner_v1": {
+    "type": "index",
+    "table": "external_source_states_v1",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_external_source_states_owner_v1 ON external_source_states_v1 (owner_kind, owner_id, source_id)"
+  },
+  "idx_generation_diagnostics_anchor_revision": {
+    "type": "index",
+    "table": "generation_diagnostics",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_anchor_revision ON generation_diagnostics (diagnostic_anchor, publication_revision DESC)"
+  },
+  "idx_generation_diagnostics_file": {
+    "type": "index",
+    "table": "generation_diagnostics",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_file ON generation_diagnostics (file_occurrence_id, generation_id)"
+  },
+  "idx_generation_diagnostics_file_generation_state_anchor": {
+    "type": "index",
+    "table": "generation_diagnostics",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_file_generation_state_anchor ON generation_diagnostics (file_occurrence_id, generation_id, record_state, diagnostic_anchor)"
+  },
+  "idx_generation_diagnostics_generation_state": {
+    "type": "index",
+    "table": "generation_diagnostics",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_generation_state ON generation_diagnostics (generation_id, record_state)"
+  },
+  "idx_generation_diagnostics_generation_state_anchor": {
+    "type": "index",
+    "table": "generation_diagnostics",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_generation_state_anchor ON generation_diagnostics (generation_id, record_state, diagnostic_anchor)"
+  },
+  "idx_graph_publication_dependency_replay": {
+    "type": "index",
+    "table": "graph_publication_replay_dependencies_v1",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_graph_publication_dependency_replay ON graph_publication_replay_dependencies_v1 (dependency_replay_sequence)"
+  },
+  "idx_graph_publication_replay_projection_sequence": {
+    "type": "index",
+    "table": "graph_publication_replay_v1",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_graph_publication_replay_projection_sequence ON graph_publication_replay_v1 (shard_id, namespace, projection, sequence)"
+  },
+  "idx_graph_publication_tombstone_projection": {
+    "type": "index",
+    "table": "graph_publication_replay_tombstones_v1",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_graph_publication_tombstone_projection ON graph_publication_replay_tombstones_v1 (shard_id, namespace, projection)"
+  },
+  "idx_memory_v2_assertions_fact": {
+    "type": "index",
+    "table": "memory_v2_assertions",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_memory_v2_assertions_fact ON memory_v2_assertions (fact_id, owner_kind, project_id, asserted_at)"
+  },
+  "idx_memory_v2_automatic_fact_receipt_list": {
+    "type": "index",
+    "table": "memory_v2_automatic_fact_receipts",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_memory_v2_automatic_fact_receipt_list ON memory_v2_automatic_fact_receipts (owner_kind, project_id, state, recorded_at, apply_id)"
+  },
+  "idx_memory_v2_automatic_fact_receipts_automation_run": {
+    "type": "index",
+    "table": "memory_v2_automatic_fact_receipts",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_memory_v2_automatic_fact_receipts_automation_run ON memory_v2_automatic_fact_receipts (owner_kind, project_id, json_extract (request_json, '$.automation_run_id'), recorded_at, apply_id)"
+  },
+  "idx_memory_v2_current_page": {
+    "type": "index",
+    "table": "memory_v2_current_facts",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_memory_v2_current_page ON memory_v2_current_facts (owner_kind, project_id, fact_id)"
+  },
+  "idx_memory_v2_current_search": {
+    "type": "index",
+    "table": "memory_v2_current_facts",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_memory_v2_current_search ON memory_v2_current_facts (owner_kind, project_id, updated_at DESC, fact_id)"
+  },
+  "idx_memory_v2_events_as_of": {
+    "type": "index",
+    "table": "memory_v2_lineage_events",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_memory_v2_events_as_of ON memory_v2_lineage_events (fact_id, owner_kind, project_id, occurred_at, event_id)"
+  },
+  "idx_memory_v2_events_fact": {
+    "type": "index",
+    "table": "memory_v2_lineage_events",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_memory_v2_events_fact ON memory_v2_lineage_events (fact_id, owner_kind, project_id, event_sequence)"
+  },
+  "idx_memory_v2_evidence_anchor": {
+    "type": "index",
+    "table": "memory_v2_evidence",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_memory_v2_evidence_anchor ON memory_v2_evidence (anchor_id, owner_json)"
+  },
+  "idx_memory_v2_feedback_history_fact": {
+    "type": "index",
+    "table": "memory_v2_feedback_history",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_memory_v2_feedback_history_fact ON memory_v2_feedback_history (owner_kind, project_id, fact_id, occurred_at, event_id)"
+  },
+  "idx_memory_v2_operation_receipts_automation_run": {
+    "type": "index",
+    "table": "memory_v2_operation_receipts",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_memory_v2_operation_receipts_automation_run ON memory_v2_operation_receipts (owner_kind, project_id, operation_kind, json_extract (receipt_json, '$.automation_run_id'), recorded_at, operation_id)"
+  },
+  "idx_memory_v2_operation_receipts_fact": {
+    "type": "index",
+    "table": "memory_v2_operation_receipts",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_memory_v2_operation_receipts_fact ON memory_v2_operation_receipts (fact_id, owner_kind, project_id, recorded_at)"
+  },
+  "idx_read_cache_session": {
+    "type": "index",
+    "table": "read_cache",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_read_cache_session ON read_cache (session_id, created_at)"
+  },
+  "idx_retrieval_anchor_dispositions_current": {
+    "type": "index",
+    "table": "retrieval_anchor_dispositions",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_retrieval_anchor_dispositions_current ON retrieval_anchor_dispositions (anchor_id, owner_json, sequence DESC)"
+  },
+  "idx_retrieval_anchor_reverse_derivative": {
+    "type": "index",
+    "table": "retrieval_anchor_reverse_lineage",
+    "sql": "CREATE INDEX IF NOT EXISTS idx_retrieval_anchor_reverse_derivative ON retrieval_anchor_reverse_lineage (owner_json, derivative_kind, derivative_id, direct_evidence)"
+  },
+  "idx_retrieval_anchors_owner": {
+    "type": "index",
+    "table": "retrieval_anchors",
+    "sql": "CREATE UNIQUE INDEX IF NOT EXISTS idx_retrieval_anchors_owner ON retrieval_anchors (anchor_id, owner_json)"
+  },
+  "memory_v2_assertion_evidence": {
+    "type": "table",
+    "table": "memory_v2_assertion_evidence",
+    "sql": "CREATE TABLE memory_v2_assertion_evidence (assertion_id TEXT NOT NULL, evidence_id TEXT NOT NULL, fact_id TEXT NOT NULL, owner_kind TEXT NOT NULL, project_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK (ordinal >= 0), PRIMARY KEY (assertion_id, fact_id, owner_kind, project_id, ordinal), UNIQUE (assertion_id, fact_id, owner_kind, project_id, evidence_id), FOREIGN KEY (assertion_id, fact_id, owner_kind, project_id) REFERENCES memory_v2_assertions (assertion_id, fact_id, owner_kind, project_id), FOREIGN KEY (evidence_id, fact_id, owner_kind, project_id) REFERENCES memory_v2_evidence (evidence_id, fact_id, owner_kind, project_id))"
+  },
+  "memory_v2_assertion_evidence_no_delete": {
+    "type": "trigger",
+    "table": "memory_v2_assertion_evidence",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_assertion_evidence_no_delete BEFORE DELETE ON memory_v2_assertion_evidence BEGIN SELECT RAISE (ABORT, 'memory_v2 assertion evidence is immutable'); END"
+  },
+  "memory_v2_assertion_evidence_no_update": {
+    "type": "trigger",
+    "table": "memory_v2_assertion_evidence",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_assertion_evidence_no_update BEFORE UPDATE ON memory_v2_assertion_evidence BEGIN SELECT RAISE (ABORT, 'memory_v2 assertion evidence is immutable'); END"
+  },
+  "memory_v2_assertion_payload_digests": {
+    "type": "table",
+    "table": "memory_v2_assertion_payload_digests",
+    "sql": "CREATE TABLE memory_v2_assertion_payload_digests (payload_rowid INTEGER PRIMARY KEY, assertion_id TEXT NOT NULL, fact_id TEXT NOT NULL, owner_kind TEXT NOT NULL, project_id TEXT NOT NULL, content_digest TEXT NOT NULL CHECK (length(content_digest) = 71 AND content_digest LIKE 'sha256:%'), UNIQUE (assertion_id, fact_id, owner_kind, project_id), FOREIGN KEY (payload_rowid) REFERENCES memory_v2_assertion_payloads (rowid))"
+  },
+  "memory_v2_assertion_payload_digests_lookup": {
+    "type": "index",
+    "table": "memory_v2_assertion_payload_digests",
+    "sql": "CREATE INDEX IF NOT EXISTS memory_v2_assertion_payload_digests_lookup ON memory_v2_assertion_payload_digests (owner_kind, project_id, content_digest, fact_id)"
+  },
+  "memory_v2_assertion_payload_digests_no_update": {
+    "type": "trigger",
+    "table": "memory_v2_assertion_payload_digests",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_assertion_payload_digests_no_update BEFORE UPDATE ON memory_v2_assertion_payload_digests BEGIN SELECT RAISE (ABORT, 'memory_v2 assertion payload digests are immutable'); END"
+  },
+  "memory_v2_assertion_payload_purges": {
+    "type": "table",
+    "table": "memory_v2_assertion_payload_purges",
+    "sql": "CREATE TABLE memory_v2_assertion_payload_purges (assertion_id TEXT NOT NULL, fact_id TEXT NOT NULL, owner_kind TEXT NOT NULL, project_id TEXT NOT NULL, payload_reference_json TEXT NOT NULL CHECK (json_valid(payload_reference_json)), detector_revision TEXT NOT NULL CHECK (length(detector_revision) > 0), purge_reason TEXT NOT NULL CHECK (purge_reason = 'detector_flagged'), PRIMARY KEY (assertion_id, fact_id, owner_kind, project_id), FOREIGN KEY (assertion_id, fact_id, owner_kind, project_id) REFERENCES memory_v2_assertions (assertion_id, fact_id, owner_kind, project_id))"
+  },
+  "memory_v2_assertion_payload_purges_no_delete": {
+    "type": "trigger",
+    "table": "memory_v2_assertion_payload_purges",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_assertion_payload_purges_no_delete BEFORE DELETE ON memory_v2_assertion_payload_purges BEGIN SELECT RAISE (ABORT, 'memory_v2 assertion payload purge receipts are immutable'); END"
+  },
+  "memory_v2_assertion_payload_purges_no_update": {
+    "type": "trigger",
+    "table": "memory_v2_assertion_payload_purges",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_assertion_payload_purges_no_update BEFORE UPDATE ON memory_v2_assertion_payload_purges BEGIN SELECT RAISE (ABORT, 'memory_v2 assertion payload purge receipts are immutable'); END"
+  },
+  "memory_v2_assertion_payloads": {
+    "type": "table",
+    "table": "memory_v2_assertion_payloads",
+    "sql": "CREATE TABLE memory_v2_assertion_payloads (rowid INTEGER PRIMARY KEY AUTOINCREMENT, assertion_id TEXT NOT NULL, fact_id TEXT NOT NULL, owner_kind TEXT NOT NULL, project_id TEXT NOT NULL, payload_json TEXT NOT NULL CHECK (json_valid(payload_json)), content TEXT NOT NULL, UNIQUE (assertion_id, fact_id, owner_kind, project_id), FOREIGN KEY (assertion_id, fact_id, owner_kind, project_id) REFERENCES memory_v2_assertions (assertion_id, fact_id, owner_kind, project_id))"
+  },
+  "memory_v2_assertion_payloads_fts": {
+    "type": "index",
+    "table": "memory_v2_assertion_payloads",
+    "sql": "CREATE INDEX IF NOT EXISTS memory_v2_assertion_payloads_fts ON memory_v2_assertion_payloads USING fts (content)"
+  },
+  "memory_v2_assertion_supersession": {
+    "type": "table",
+    "table": "memory_v2_assertion_supersession",
+    "sql": "CREATE TABLE memory_v2_assertion_supersession (assertion_id TEXT NOT NULL, fact_id TEXT NOT NULL, owner_kind TEXT NOT NULL, project_id TEXT NOT NULL, superseded_assertion_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK (ordinal >= 0), PRIMARY KEY (assertion_id, fact_id, owner_kind, project_id, ordinal), UNIQUE (assertion_id, fact_id, owner_kind, project_id, superseded_assertion_id), FOREIGN KEY (assertion_id, fact_id, owner_kind, project_id) REFERENCES memory_v2_assertions (assertion_id, fact_id, owner_kind, project_id), FOREIGN KEY (superseded_assertion_id, fact_id, owner_kind, project_id) REFERENCES memory_v2_assertions (assertion_id, fact_id, owner_kind, project_id))"
+  },
+  "memory_v2_assertions": {
+    "type": "table",
+    "table": "memory_v2_assertions",
+    "sql": "CREATE TABLE memory_v2_assertions (assertion_id TEXT NOT NULL, fact_id TEXT NOT NULL, owner_kind TEXT NOT NULL, project_id TEXT NOT NULL, owner_json TEXT NOT NULL CHECK (json_valid(owner_json)), assertion_header_json TEXT NOT NULL CHECK (json_valid(assertion_header_json)), kind_json TEXT NOT NULL CHECK (json_valid(kind_json)), payload_reference_json TEXT NOT NULL CHECK (json_valid(payload_reference_json)), receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)), asserted_at INTEGER NOT NULL, actor_id TEXT, PRIMARY KEY (assertion_id, fact_id, owner_kind, project_id), UNIQUE (assertion_id, owner_json), FOREIGN KEY (fact_id, owner_kind, project_id) REFERENCES memory_v2_facts (fact_id, owner_kind, project_id))"
+  },
+  "memory_v2_assertions_no_delete": {
+    "type": "trigger",
+    "table": "memory_v2_assertions",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_assertions_no_delete BEFORE DELETE ON memory_v2_assertions BEGIN SELECT RAISE (ABORT, 'memory_v2 assertions are immutable'); END"
+  },
+  "memory_v2_assertions_no_update": {
+    "type": "trigger",
+    "table": "memory_v2_assertions",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_assertions_no_update BEFORE UPDATE ON memory_v2_assertions BEGIN SELECT RAISE (ABORT, 'memory_v2 assertions are immutable'); END"
+  },
+  "memory_v2_automatic_fact_receipts": {
+    "type": "table",
+    "table": "memory_v2_automatic_fact_receipts",
+    "sql": "CREATE TABLE memory_v2_automatic_fact_receipts (apply_id TEXT NOT NULL, owner_kind TEXT NOT NULL CHECK (owner_kind IN ('profile', 'project')), project_id TEXT NOT NULL, owner_json TEXT NOT NULL CHECK (json_valid(owner_json)), idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, request_json TEXT NOT NULL CHECK (json_valid(request_json)), evidence_json TEXT NOT NULL CHECK (json_valid(evidence_json)), state TEXT NOT NULL CHECK (state IN ('applied', 'quarantined')), quarantine_reason TEXT, applied_fact_id TEXT, applied_assertion_id TEXT, applied_event_id TEXT, recorded_at INTEGER NOT NULL, PRIMARY KEY (apply_id, owner_kind, project_id), UNIQUE (owner_kind, project_id, idempotency_key), UNIQUE (owner_kind, project_id, request_digest), CHECK ((owner_kind = 'profile' AND project_id = '') OR\n                (owner_kind = 'project' AND project_id <> '')), FOREIGN KEY (applied_fact_id, owner_kind, project_id) REFERENCES memory_v2_facts (fact_id, owner_kind, project_id), FOREIGN KEY (applied_assertion_id, applied_fact_id, owner_kind, project_id) REFERENCES memory_v2_assertions (assertion_id, fact_id, owner_kind, project_id), FOREIGN KEY (applied_event_id, applied_fact_id, owner_kind, project_id) REFERENCES memory_v2_lineage_events (event_id, fact_id, owner_kind, project_id), CHECK ((state = 'applied'\n                    AND quarantine_reason IS NULL\n                    AND applied_fact_id IS NOT NULL\n                    AND applied_event_id IS NOT NULL) OR\n                (state = 'quarantined'\n                    AND quarantine_reason IS NOT NULL\n                    AND applied_fact_id IS NULL\n                    AND applied_assertion_id IS NULL\n                    AND applied_event_id IS NULL)))"
+  },
+  "memory_v2_automatic_fact_receipts_no_delete": {
+    "type": "trigger",
+    "table": "memory_v2_automatic_fact_receipts",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_automatic_fact_receipts_no_delete BEFORE DELETE ON memory_v2_automatic_fact_receipts BEGIN SELECT RAISE (ABORT, 'memory_v2 automatic fact receipts are immutable'); END"
+  },
+  "memory_v2_automatic_fact_receipts_no_update": {
+    "type": "trigger",
+    "table": "memory_v2_automatic_fact_receipts",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_automatic_fact_receipts_no_update BEFORE UPDATE ON memory_v2_automatic_fact_receipts BEGIN SELECT RAISE (ABORT, 'memory_v2 automatic fact receipts are immutable'); END"
+  },
+  "memory_v2_automatic_fact_receipts_require_keys": {
+    "type": "trigger",
+    "table": "memory_v2_automatic_fact_receipts",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_automatic_fact_receipts_require_keys BEFORE INSERT ON memory_v2_automatic_fact_receipts WHEN NEW.idempotency_key IS NULL OR length (NEW.idempotency_key) = 0 OR NEW.request_digest IS NULL OR length (NEW.request_digest) = 0 BEGIN SELECT RAISE (ABORT, 'memory_v2 automatic fact receipts require idempotency and request digests'); END"
+  },
+  "memory_v2_current_facts": {
+    "type": "table",
+    "table": "memory_v2_current_facts",
+    "sql": "CREATE TABLE memory_v2_current_facts (fact_id TEXT NOT NULL, owner_kind TEXT NOT NULL, project_id TEXT NOT NULL, payload_access TEXT NOT NULL CHECK (payload_access IN (\n                'eligible', 'redacted', 'quarantined', 'retention_expired',\n                'deleted', 'unavailable', 'ambiguous'\n            )), trust_score REAL CHECK (trust_score IS NULL OR (trust_score >= 0.0 AND trust_score <= 1.0)), active_assertion_id TEXT, last_event_id TEXT NOT NULL, updated_at INTEGER NOT NULL, retrieval_count INTEGER NOT NULL DEFAULT 0 CHECK (retrieval_count >= 0), access_count INTEGER NOT NULL DEFAULT 0 CHECK (access_count >= 0), helpful_count INTEGER NOT NULL DEFAULT 0 CHECK (helpful_count >= 0), unhelpful_count INTEGER NOT NULL DEFAULT 0 CHECK (unhelpful_count >= 0), last_retrieved_at INTEGER, last_recalled_at INTEGER, last_feedback_at INTEGER, PRIMARY KEY (fact_id, owner_kind, project_id), FOREIGN KEY (fact_id, owner_kind, project_id) REFERENCES memory_v2_facts (fact_id, owner_kind, project_id), FOREIGN KEY (active_assertion_id, fact_id, owner_kind, project_id) REFERENCES memory_v2_assertions (assertion_id, fact_id, owner_kind, project_id), FOREIGN KEY (last_event_id, fact_id, owner_kind, project_id) REFERENCES memory_v2_lineage_events (event_id, fact_id, owner_kind, project_id))"
+  },
+  "memory_v2_events_no_delete": {
+    "type": "trigger",
+    "table": "memory_v2_lineage_events",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_events_no_delete BEFORE DELETE ON memory_v2_lineage_events BEGIN SELECT RAISE (ABORT, 'memory_v2 lineage events are immutable'); END"
+  },
+  "memory_v2_events_no_update": {
+    "type": "trigger",
+    "table": "memory_v2_lineage_events",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_events_no_update BEFORE UPDATE ON memory_v2_lineage_events BEGIN SELECT RAISE (ABORT, 'memory_v2 lineage events are immutable'); END"
+  },
+  "memory_v2_evidence": {
+    "type": "table",
+    "table": "memory_v2_evidence",
+    "sql": "CREATE TABLE memory_v2_evidence (evidence_id TEXT NOT NULL, fact_id TEXT NOT NULL, owner_kind TEXT NOT NULL, project_id TEXT NOT NULL, owner_json TEXT NOT NULL CHECK (json_valid(owner_json)), anchor_id TEXT NOT NULL, evidence_json TEXT NOT NULL CHECK (json_valid(evidence_json)), PRIMARY KEY (evidence_id, fact_id, owner_kind, project_id), FOREIGN KEY (fact_id, owner_kind, project_id) REFERENCES memory_v2_facts (fact_id, owner_kind, project_id), FOREIGN KEY (anchor_id, owner_json) REFERENCES retrieval_anchors (anchor_id, owner_json))"
+  },
+  "memory_v2_evidence_no_delete": {
+    "type": "trigger",
+    "table": "memory_v2_evidence",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_evidence_no_delete BEFORE DELETE ON memory_v2_evidence BEGIN SELECT RAISE (ABORT, 'memory_v2 evidence is immutable'); END"
+  },
+  "memory_v2_evidence_no_update": {
+    "type": "trigger",
+    "table": "memory_v2_evidence",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_evidence_no_update BEFORE UPDATE ON memory_v2_evidence BEGIN SELECT RAISE (ABORT, 'memory_v2 evidence is immutable'); END"
+  },
+  "memory_v2_facts": {
+    "type": "table",
+    "table": "memory_v2_facts",
+    "sql": "CREATE TABLE memory_v2_facts (fact_id TEXT NOT NULL, owner_kind TEXT NOT NULL CHECK (owner_kind IN ('profile', 'project')), project_id TEXT NOT NULL, owner_json TEXT NOT NULL CHECK (json_valid(owner_json)), identity_json TEXT NOT NULL CHECK (json_valid(identity_json)), created_at INTEGER NOT NULL, PRIMARY KEY (fact_id, owner_kind, project_id), UNIQUE (fact_id, owner_json), CHECK ((owner_kind = 'profile' AND project_id = '') OR\n                (owner_kind = 'project' AND project_id <> '')))"
+  },
+  "memory_v2_facts_no_delete": {
+    "type": "trigger",
+    "table": "memory_v2_facts",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_facts_no_delete BEFORE DELETE ON memory_v2_facts BEGIN SELECT RAISE (ABORT, 'memory_v2 fact identities are immutable'); END"
+  },
+  "memory_v2_facts_no_update": {
+    "type": "trigger",
+    "table": "memory_v2_facts",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_facts_no_update BEFORE UPDATE ON memory_v2_facts BEGIN SELECT RAISE (ABORT, 'memory_v2 fact identities are immutable'); END"
+  },
+  "memory_v2_feedback_history": {
+    "type": "table",
+    "table": "memory_v2_feedback_history",
+    "sql": "CREATE TABLE memory_v2_feedback_history (owner_kind TEXT NOT NULL CHECK (owner_kind IN ('profile', 'project')), project_id TEXT NOT NULL, fact_id TEXT NOT NULL, event_id TEXT NOT NULL, \"action\" TEXT NOT NULL CHECK (action IN ('helpful', 'unhelpful')), old_trust REAL NOT NULL CHECK (old_trust >= 0.0 AND old_trust <= 1.0), new_trust REAL NOT NULL CHECK (new_trust >= 0.0 AND new_trust <= 1.0), occurred_at INTEGER NOT NULL, source TEXT, note TEXT, details_availability TEXT NOT NULL CHECK (details_availability IN ('available', 'redacted', 'unknown')), PRIMARY KEY (owner_kind, project_id, fact_id, event_id), FOREIGN KEY (fact_id, owner_kind, project_id) REFERENCES memory_v2_facts (fact_id, owner_kind, project_id), FOREIGN KEY (event_id, fact_id, owner_kind, project_id) REFERENCES memory_v2_lineage_events (event_id, fact_id, owner_kind, project_id), CHECK ((owner_kind = 'profile' AND project_id = '') OR\n                (owner_kind = 'project' AND project_id <> '')), CHECK (details_availability = 'available' OR (source IS NULL AND note IS NULL)))"
+  },
+  "memory_v2_feedback_history_no_delete": {
+    "type": "trigger",
+    "table": "memory_v2_feedback_history",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_feedback_history_no_delete BEFORE DELETE ON memory_v2_feedback_history BEGIN SELECT RAISE (ABORT, 'memory_v2 feedback history records are immutable'); END"
+  },
+  "memory_v2_feedback_history_only_redaction": {
+    "type": "trigger",
+    "table": "memory_v2_feedback_history",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_feedback_history_only_redaction BEFORE UPDATE ON memory_v2_feedback_history WHEN NOT (NEW.owner_kind IS OLD.owner_kind AND NEW.project_id IS OLD.project_id AND NEW.fact_id IS OLD.fact_id AND NEW.event_id IS OLD.event_id AND NEW.\"action\" IS OLD.\"action\" AND NEW.old_trust IS OLD.old_trust AND NEW.new_trust IS OLD.new_trust AND NEW.occurred_at IS OLD.occurred_at AND NEW.source IS NULL AND NEW.note IS NULL AND ((OLD.details_availability = 'available' AND NEW.details_availability = 'redacted') OR (OLD.source IS NULL AND OLD.note IS NULL AND NEW.details_availability IS OLD.details_availability))) BEGIN SELECT RAISE (ABORT, 'memory_v2 feedback history permits only detail redaction'); END"
+  },
+  "memory_v2_lineage_events": {
+    "type": "table",
+    "table": "memory_v2_lineage_events",
+    "sql": "CREATE TABLE memory_v2_lineage_events (event_sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL, fact_id TEXT NOT NULL, owner_kind TEXT NOT NULL, project_id TEXT NOT NULL, event_json TEXT NOT NULL CHECK (json_valid(event_json)), occurred_at INTEGER NOT NULL, recorded_at INTEGER NOT NULL, UNIQUE (event_id, fact_id, owner_kind, project_id), FOREIGN KEY (fact_id, owner_kind, project_id) REFERENCES memory_v2_facts (fact_id, owner_kind, project_id))"
+  },
+  "memory_v2_operation_receipts": {
+    "type": "table",
+    "table": "memory_v2_operation_receipts",
+    "sql": "CREATE TABLE memory_v2_operation_receipts (owner_kind TEXT NOT NULL CHECK (owner_kind IN ('profile', 'project')), project_id TEXT NOT NULL, operation_id TEXT NOT NULL CHECK (length(operation_id) > 0), operation_kind TEXT NOT NULL CHECK (operation_kind IN (\n                'add', 'update', 'remove', 'feedback', 'retrieval',\n                'curation', 'merge', 'automatic_fact_apply'\n            )), request_digest TEXT NOT NULL CHECK (length(request_digest) > 0), fact_id TEXT, event_id TEXT, receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)), recorded_at INTEGER NOT NULL, PRIMARY KEY (owner_kind, project_id, operation_id), FOREIGN KEY (fact_id, owner_kind, project_id) REFERENCES memory_v2_facts (fact_id, owner_kind, project_id), FOREIGN KEY (event_id, fact_id, owner_kind, project_id) REFERENCES memory_v2_lineage_events (event_id, fact_id, owner_kind, project_id), CHECK (event_id IS NULL OR fact_id IS NOT NULL), CHECK ((owner_kind = 'profile' AND project_id = '') OR\n                (owner_kind = 'project' AND project_id <> '')))"
+  },
+  "memory_v2_operation_receipts_no_delete": {
+    "type": "trigger",
+    "table": "memory_v2_operation_receipts",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_operation_receipts_no_delete BEFORE DELETE ON memory_v2_operation_receipts BEGIN SELECT RAISE (ABORT, 'memory_v2 operation receipts are immutable'); END"
+  },
+  "memory_v2_operation_receipts_no_payload": {
+    "type": "trigger",
+    "table": "memory_v2_operation_receipts",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_operation_receipts_no_payload BEFORE INSERT ON memory_v2_operation_receipts WHEN EXISTS (SELECT 1 FROM json_tree (NEW.receipt_json) WHERE lower (CAST (\"key\" AS TEXT)) IN ('content', 'payload', 'payload_json', 'metadata', 'vector', 'vectors', 'embedding', 'embeddings', 'vector_watermark', 'vector_watermark_json')) BEGIN SELECT RAISE (ABORT, 'memory_v2 operation receipts cannot retain payload data'); END"
+  },
+  "memory_v2_operation_receipts_no_update": {
+    "type": "trigger",
+    "table": "memory_v2_operation_receipts",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_operation_receipts_no_update BEFORE UPDATE ON memory_v2_operation_receipts BEGIN SELECT RAISE (ABORT, 'memory_v2 operation receipts are immutable'); END"
+  },
+  "memory_v2_payloads_digest_delete": {
+    "type": "trigger",
+    "table": "memory_v2_assertion_payloads",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_payloads_digest_delete AFTER DELETE ON memory_v2_assertion_payloads BEGIN DELETE FROM memory_v2_assertion_payload_digests WHERE payload_rowid = OLD.rowid; END"
+  },
+  "memory_v2_payloads_no_update": {
+    "type": "trigger",
+    "table": "memory_v2_assertion_payloads",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_payloads_no_update BEFORE UPDATE ON memory_v2_assertion_payloads BEGIN SELECT RAISE (ABORT, 'memory_v2 assertion payloads are immutable'); END"
+  },
+  "memory_v2_supersession_no_delete": {
+    "type": "trigger",
+    "table": "memory_v2_assertion_supersession",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_supersession_no_delete BEFORE DELETE ON memory_v2_assertion_supersession BEGIN SELECT RAISE (ABORT, 'memory_v2 assertion supersession is immutable'); END"
+  },
+  "memory_v2_supersession_no_update": {
+    "type": "trigger",
+    "table": "memory_v2_assertion_supersession",
+    "sql": "CREATE TRIGGER IF NOT EXISTS memory_v2_supersession_no_update BEFORE UPDATE ON memory_v2_assertion_supersession BEGIN SELECT RAISE (ABORT, 'memory_v2 assertion supersession is immutable'); END"
+  },
+  "metadata": {
+    "type": "table",
+    "table": "metadata",
+    "sql": "CREATE TABLE metadata (\"key\" TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL)"
+  },
+  "read_cache": {
+    "type": "table",
+    "table": "read_cache",
+    "sql": "CREATE TABLE read_cache (project_id TEXT NOT NULL, session_id TEXT NOT NULL, file_path TEXT NOT NULL, mtime_ns INTEGER NOT NULL, mode TEXT NOT NULL, args_hash TEXT NOT NULL, digest TEXT NOT NULL, body BLOB NOT NULL, token_count INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (project_id, session_id, file_path, mode, args_hash))"
+  },
+  "retrieval_anchor_aliases": {
+    "type": "table",
+    "table": "retrieval_anchor_aliases",
+    "sql": "CREATE TABLE retrieval_anchor_aliases (owner_json TEXT NOT NULL CHECK (json_valid(owner_json)), alias_kind TEXT NOT NULL CHECK (length(alias_kind) > 0), locator_digest TEXT NOT NULL CHECK (length(locator_digest) > 0), anchor_id TEXT NOT NULL, PRIMARY KEY (owner_json, alias_kind, locator_digest), UNIQUE (anchor_id, alias_kind, locator_digest), FOREIGN KEY (anchor_id, owner_json) REFERENCES retrieval_anchors (anchor_id, owner_json))"
+  },
+  "retrieval_anchor_aliases_immutable_delete": {
+    "type": "trigger",
+    "table": "retrieval_anchor_aliases",
+    "sql": "CREATE TRIGGER IF NOT EXISTS retrieval_anchor_aliases_immutable_delete BEFORE DELETE ON retrieval_anchor_aliases BEGIN SELECT RAISE (ABORT, 'retrieval anchor aliases are immutable'); END"
+  },
+  "retrieval_anchor_aliases_immutable_update": {
+    "type": "trigger",
+    "table": "retrieval_anchor_aliases",
+    "sql": "CREATE TRIGGER IF NOT EXISTS retrieval_anchor_aliases_immutable_update BEFORE UPDATE ON retrieval_anchor_aliases WHEN NEW.owner_json != OLD.owner_json OR NEW.alias_kind != OLD.alias_kind OR NEW.locator_digest != OLD.locator_digest OR NOT EXISTS (SELECT 1 FROM retrieval_anchor_dispositions AS disposition WHERE disposition.anchor_id = OLD.anchor_id AND disposition.state = 'superseded' AND disposition.reason_class = 'correction' AND disposition.superseded_by = NEW.anchor_id AND disposition.sequence = (SELECT MAX (latest.sequence) FROM retrieval_anchor_dispositions AS latest WHERE latest.anchor_id = OLD.anchor_id)) BEGIN SELECT RAISE (ABORT, 'retrieval anchor alias requires exact supersession'); END"
+  },
+  "retrieval_anchor_derivative_tombstones": {
+    "type": "table",
+    "table": "retrieval_anchor_derivative_tombstones",
+    "sql": "CREATE TABLE retrieval_anchor_derivative_tombstones (source_anchor_id TEXT NOT NULL, owner_json TEXT NOT NULL CHECK (json_valid(owner_json)), derivative_kind TEXT NOT NULL CHECK (derivative_kind IN ('span', 'contribution', 'finding')), derivative_id TEXT NOT NULL CHECK (length(derivative_id) > 0), disposition_id TEXT NOT NULL, effective_at INTEGER NOT NULL, PRIMARY KEY (source_anchor_id, owner_json, derivative_kind, derivative_id, disposition_id), FOREIGN KEY (source_anchor_id, owner_json, derivative_kind, derivative_id) REFERENCES retrieval_anchor_reverse_lineage (source_anchor_id, owner_json, derivative_kind, derivative_id))"
+  },
+  "retrieval_anchor_derivative_tombstones_immutable_delete": {
+    "type": "trigger",
+    "table": "retrieval_anchor_derivative_tombstones",
+    "sql": "CREATE TRIGGER IF NOT EXISTS retrieval_anchor_derivative_tombstones_immutable_delete BEFORE DELETE ON retrieval_anchor_derivative_tombstones BEGIN SELECT RAISE (ABORT, 'retrieval anchor derivative tombstones are immutable'); END"
+  },
+  "retrieval_anchor_derivative_tombstones_immutable_update": {
+    "type": "trigger",
+    "table": "retrieval_anchor_derivative_tombstones",
+    "sql": "CREATE TRIGGER IF NOT EXISTS retrieval_anchor_derivative_tombstones_immutable_update BEFORE UPDATE ON retrieval_anchor_derivative_tombstones BEGIN SELECT RAISE (ABORT, 'retrieval anchor derivative tombstones are immutable'); END"
+  },
+  "retrieval_anchor_dispositions": {
+    "type": "table",
+    "table": "retrieval_anchor_dispositions",
+    "sql": "CREATE TABLE retrieval_anchor_dispositions (sequence INTEGER PRIMARY KEY AUTOINCREMENT, disposition_id TEXT NOT NULL CHECK (length(disposition_id) > 0), anchor_id TEXT NOT NULL, owner_json TEXT NOT NULL CHECK (json_valid(owner_json)), state TEXT NOT NULL CHECK (state IN (\n                'active', 'superseded', 'redacted', 'expired', 'quarantined',\n                'deleted', 'unavailable'\n            )), superseded_by TEXT, reason_class TEXT NOT NULL CHECK (reason_class IN (\n            'user_request', 'retention', 'redaction', 'quarantine',\n            'correction', 'legal_hold', 'source_unavailable'\n        )), effective_at INTEGER NOT NULL, record_json TEXT NOT NULL CHECK (json_valid(record_json)), UNIQUE (owner_json, disposition_id), FOREIGN KEY (anchor_id, owner_json) REFERENCES retrieval_anchors (anchor_id, owner_json), FOREIGN KEY (superseded_by, owner_json) REFERENCES retrieval_anchors (anchor_id, owner_json), CHECK ((state = 'superseded' AND superseded_by IS NOT NULL)\n            OR (state <> 'superseded' AND superseded_by IS NULL)))"
+  },
+  "retrieval_anchor_dispositions_immutable_delete": {
+    "type": "trigger",
+    "table": "retrieval_anchor_dispositions",
+    "sql": "CREATE TRIGGER IF NOT EXISTS retrieval_anchor_dispositions_immutable_delete BEFORE DELETE ON retrieval_anchor_dispositions BEGIN SELECT RAISE (ABORT, 'retrieval anchor dispositions are immutable'); END"
+  },
+  "retrieval_anchor_dispositions_immutable_update": {
+    "type": "trigger",
+    "table": "retrieval_anchor_dispositions",
+    "sql": "CREATE TRIGGER IF NOT EXISTS retrieval_anchor_dispositions_immutable_update BEFORE UPDATE ON retrieval_anchor_dispositions BEGIN SELECT RAISE (ABORT, 'retrieval anchor dispositions are immutable'); END"
+  },
+  "retrieval_anchor_reverse_lineage": {
+    "type": "table",
+    "table": "retrieval_anchor_reverse_lineage",
+    "sql": "CREATE TABLE retrieval_anchor_reverse_lineage (source_anchor_id TEXT NOT NULL, owner_json TEXT NOT NULL CHECK (json_valid(owner_json)), derivative_kind TEXT NOT NULL CHECK (derivative_kind IN ('span', 'contribution', 'finding')), derivative_id TEXT NOT NULL CHECK (length(derivative_id) > 0), direct_evidence INTEGER NOT NULL CHECK (direct_evidence IN (0, 1)), PRIMARY KEY (source_anchor_id, owner_json, derivative_kind, derivative_id), FOREIGN KEY (source_anchor_id, owner_json) REFERENCES retrieval_anchors (anchor_id, owner_json))"
+  },
+  "retrieval_anchor_reverse_lineage_immutable_delete": {
+    "type": "trigger",
+    "table": "retrieval_anchor_reverse_lineage",
+    "sql": "CREATE TRIGGER IF NOT EXISTS retrieval_anchor_reverse_lineage_immutable_delete BEFORE DELETE ON retrieval_anchor_reverse_lineage BEGIN SELECT RAISE (ABORT, 'retrieval anchor reverse lineage is immutable'); END"
+  },
+  "retrieval_anchor_reverse_lineage_immutable_update": {
+    "type": "trigger",
+    "table": "retrieval_anchor_reverse_lineage",
+    "sql": "CREATE TRIGGER IF NOT EXISTS retrieval_anchor_reverse_lineage_immutable_update BEFORE UPDATE ON retrieval_anchor_reverse_lineage BEGIN SELECT RAISE (ABORT, 'retrieval anchor reverse lineage is immutable'); END"
+  },
+  "retrieval_anchors": {
+    "type": "table",
+    "table": "retrieval_anchors",
+    "sql": "CREATE TABLE retrieval_anchors (anchor_id TEXT NOT NULL PRIMARY KEY CHECK (length(anchor_id) > 0), anchor_json TEXT NOT NULL CHECK (json_valid(anchor_json)), owner_json TEXT NOT NULL CHECK (json_valid(owner_json)), projection_generation TEXT NOT NULL CHECK (length(projection_generation) > 0))"
+  },
+  "retrieval_anchors_immutable_delete": {
+    "type": "trigger",
+    "table": "retrieval_anchors",
+    "sql": "CREATE TRIGGER IF NOT EXISTS retrieval_anchors_immutable_delete BEFORE DELETE ON retrieval_anchors BEGIN SELECT RAISE (ABORT, 'retrieval anchors are immutable'); END"
+  },
+  "retrieval_anchors_immutable_update": {
+    "type": "trigger",
+    "table": "retrieval_anchors",
+    "sql": "CREATE TRIGGER IF NOT EXISTS retrieval_anchors_immutable_update BEFORE UPDATE ON retrieval_anchors BEGIN SELECT RAISE (ABORT, 'retrieval anchors are immutable'); END"
+  },
+  "td_runtime_writer_checkpoint_v1": {
+    "type": "table",
+    "table": "td_runtime_writer_checkpoint_v1",
+    "sql": "CREATE TABLE td_runtime_writer_checkpoint_v1 (shard_json TEXT NOT NULL, incarnation INTEGER NOT NULL CHECK (incarnation > 0), authority_epoch INTEGER NOT NULL CHECK (authority_epoch > 0), commit_sequence INTEGER NOT NULL CHECK (commit_sequence > 0), watermark_json TEXT NOT NULL, transaction_scope_json TEXT NOT NULL, original_receipt_json TEXT NOT NULL, operation_id TEXT NOT NULL, durability_json TEXT NOT NULL, committed_at_micros INTEGER NOT NULL, PRIMARY KEY (shard_json, incarnation))"
+  },
+  "td_runtime_writer_idempotency_v2": {
+    "type": "table",
+    "table": "td_runtime_writer_idempotency_v2",
+    "sql": "CREATE TABLE td_runtime_writer_idempotency_v2 (shard_json TEXT NOT NULL, incarnation INTEGER NOT NULL CHECK (incarnation > 0), authority_epoch INTEGER NOT NULL CHECK (authority_epoch > 0), idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, operation_id TEXT NOT NULL, transaction_id TEXT NOT NULL, commit_sequence INTEGER NOT NULL CHECK (commit_sequence > 0), durability_json TEXT NOT NULL, priority_json TEXT NOT NULL, opened_at_micros INTEGER NOT NULL, committed_at_micros INTEGER NOT NULL, PRIMARY KEY (shard_json, incarnation, authority_epoch, idempotency_key))"
+  },
+  "td_runtime_writer_inbox_effect_v1": {
+    "type": "index",
+    "table": "td_runtime_writer_inbox_v1",
+    "sql": "CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_inbox_effect_v1 ON td_runtime_writer_inbox_v1 (target_shard_json, effect_id)"
+  },
+  "td_runtime_writer_inbox_ordering_v1": {
+    "type": "index",
+    "table": "td_runtime_writer_inbox_v1",
+    "sql": "CREATE INDEX IF NOT EXISTS td_runtime_writer_inbox_ordering_v1 ON td_runtime_writer_inbox_v1 (target_shard_json, target_incarnation, target_authority_epoch, ordering_key, source_sequence, effect_id)"
+  },
+  "td_runtime_writer_inbox_v1": {
+    "type": "table",
+    "table": "td_runtime_writer_inbox_v1",
+    "sql": "CREATE TABLE td_runtime_writer_inbox_v1 (target_shard_json TEXT NOT NULL, target_incarnation INTEGER NOT NULL CHECK (target_incarnation > 0), target_authority_epoch INTEGER NOT NULL CHECK (target_authority_epoch > 0), effect_id TEXT NOT NULL, ordering_key TEXT NOT NULL, source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0), target_sequence INTEGER NOT NULL CHECK (target_sequence > 0), identity_json TEXT NOT NULL, receipt_json TEXT NOT NULL, committed_at_micros INTEGER NOT NULL, PRIMARY KEY (target_shard_json, target_incarnation, target_authority_epoch, effect_id))"
+  },
+  "td_runtime_writer_outbox_effect_v1": {
+    "type": "index",
+    "table": "td_runtime_writer_outbox_v1",
+    "sql": "CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_outbox_effect_v1 ON td_runtime_writer_outbox_v1 (source_shard_json, effect_id)"
+  },
+  "td_runtime_writer_outbox_ordering_v1": {
+    "type": "index",
+    "table": "td_runtime_writer_outbox_v1",
+    "sql": "CREATE INDEX IF NOT EXISTS td_runtime_writer_outbox_ordering_v1 ON td_runtime_writer_outbox_v1 (source_shard_json, source_incarnation, source_authority_epoch, ordering_key, source_sequence, effect_id)"
+  },
+  "td_runtime_writer_outbox_state_v1": {
+    "type": "index",
+    "table": "td_runtime_writer_outbox_v1",
+    "sql": "CREATE INDEX IF NOT EXISTS td_runtime_writer_outbox_state_v1 ON td_runtime_writer_outbox_v1 (source_shard_json, source_incarnation, source_authority_epoch, state, updated_at_micros)"
+  },
+  "td_runtime_writer_outbox_v1": {
+    "type": "table",
+    "table": "td_runtime_writer_outbox_v1",
+    "sql": "CREATE TABLE td_runtime_writer_outbox_v1 (source_shard_json TEXT NOT NULL, source_incarnation INTEGER NOT NULL CHECK (source_incarnation > 0), source_authority_epoch INTEGER NOT NULL CHECK (source_authority_epoch > 0), effect_id TEXT NOT NULL, ordering_key TEXT NOT NULL, source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0), state TEXT NOT NULL CHECK (state IN ('pending', 'dispatched', 'effect_unknown', 'acknowledged')), entry_json TEXT NOT NULL, source_receipt_json TEXT NOT NULL, transaction_scope_json TEXT NOT NULL, operation_id TEXT NOT NULL, durability_json TEXT NOT NULL, updated_at_micros INTEGER NOT NULL, PRIMARY KEY (source_shard_json, source_incarnation, source_authority_epoch, effect_id))"
+  }
+}
