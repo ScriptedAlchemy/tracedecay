@@ -1827,8 +1827,9 @@ async fn next_generation(
 ) -> SessionStoreResult<SessionProjectionGenerationV1> {
     let mut rows = conn
         .query(
-            "SELECT COALESCE(MAX(generation), 0) + 1
-             FROM session_temporal_generations WHERE session_id = ?1",
+            "SELECT COALESCE((
+                 SELECT MAX(generation) FROM session_temporal_generations WHERE session_id = ?1
+             ), 0) + 1",
             params![session_id.as_str()],
         )
         .await

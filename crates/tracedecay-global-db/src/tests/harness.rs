@@ -449,6 +449,12 @@ impl RegisteredGlobalDbHarness {
     }
 
     pub async fn restart(self) -> Self {
+        self.restart_after(|_| {}).await
+    }
+
+    /// Closes the runtime, hands the store file to `offline` while nothing
+    /// else holds it, and reopens the runtime on it.
+    pub async fn restart_after(self, offline: impl FnOnce(&std::path::Path)) -> Self {
         let Self {
             registered,
             _database,
@@ -458,6 +464,7 @@ impl RegisteredGlobalDbHarness {
         let path = registered.db_path().to_path_buf();
         drop(registered);
         drop(_database);
+        offline(&path);
         let (registered, database) = open_registered_test_database_with(
             &path,
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
@@ -778,22 +785,37 @@ impl HostAdmissionTestRuntimeV1 {
             .session_database_for_test(scope)?
             .read_snapshot()
             .await?;
+        // A native `USING fts` index covers every row of its table, so the
+        // indexed rows are the table's rows; FTS5 keeps a separate table.
+        let indexed =
+            match tracedecay_runtime_core::db::engine::QueryExecutor::backend_kind(&snapshot) {
+                tracedecay_runtime_core::db::engine::BackendKind::Sqlite => {
+                    "(SELECT COUNT(*) FROM lcm_raw_messages_fts
+                  JOIN lcm_raw_messages raw
+                    ON raw.store_id = lcm_raw_messages_fts.rowid
+                  WHERE raw.provider = ?1 AND raw.session_id = ?2),
+                 (SELECT COUNT(*) FROM lcm_raw_messages_fts)"
+                }
+                tracedecay_runtime_core::db::engine::BackendKind::NativeTurso => {
+                    "(SELECT COUNT(*) FROM lcm_raw_messages
+                  WHERE provider = ?1 AND session_id = ?2),
+                 (SELECT COUNT(*) FROM lcm_raw_messages)"
+                }
+            };
         let mut rows = snapshot
             .query(
-                "SELECT
+                &format!(
+                    "SELECT
                     (SELECT COUNT(*) FROM sessions
                      WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages
                      WHERE provider = ?1 AND session_id = ?2),
-                    (SELECT COUNT(*) FROM lcm_raw_messages_fts
-                     JOIN lcm_raw_messages raw
-                       ON raw.store_id = lcm_raw_messages_fts.rowid
-                     WHERE raw.provider = ?1 AND raw.session_id = ?2),
-                    (SELECT COUNT(*) FROM lcm_raw_messages_fts),
+                    {indexed},
                     (SELECT COUNT(*) FROM session_summary_nodes
                      WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM parse_offsets
-                     WHERE file_path = ?3)",
+                     WHERE file_path = ?3)"
+                ),
                 tracedecay_runtime_core::db::engine::params![
                     provider,
                     session_id,
@@ -1271,6 +1293,24 @@ pub(crate) async fn seed_projected_messages(
 
 /// The mounted writer's rusqlite telemetry for `database`: the SQLite work its
 /// write transactions executed and how they ended.
+/// The engine's VM steps for running `sql` to completion on a raw driver
+/// connection: a work measure that grows with the rows a statement visits.
+#[cfg(test)]
+pub(crate) fn statement_vm_steps(
+    connection: &tracedecay_sql::Connection,
+    sql: &str,
+    params: impl tracedecay_sql::Params,
+) -> u64 {
+    use tracedecay_sql::StatementControl;
+
+    let mut statement = connection.prepare(sql).expect("prepare measured statement");
+    statement.take_counters();
+    let mut rows = statement.query(params).expect("run measured statement");
+    while rows.next().expect("step measured statement").is_some() {}
+    drop(rows);
+    statement.take_counters().vm_steps
+}
+
 pub fn writer_telemetry(database: &RegisteredGlobalDb) -> RepositoryWriterRuntimeSnapshot {
     database
         .runtime_client()

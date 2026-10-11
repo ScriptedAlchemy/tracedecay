@@ -6,6 +6,8 @@ use super::{
     TranscriptPersistenceError,
 };
 
+#[cfg(test)]
+mod full_text_budget;
 pub mod harness;
 #[cfg(test)]
 pub(crate) mod lcm_privacy_rescan;

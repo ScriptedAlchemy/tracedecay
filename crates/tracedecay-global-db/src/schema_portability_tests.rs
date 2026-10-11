@@ -175,16 +175,24 @@ async fn every_registered_store_installs_only_engine_portable_shapes() {
     tracedecay_runtime_core::db::migrations::create_schema_connection(&installer)
         .await
         .unwrap();
-    let mut secure_delete = installer.query("PRAGMA secure_delete", ()).await.unwrap();
-    let secure_delete = secure_delete
-        .next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get::<i64>(0)
-        .unwrap();
-    if secure_delete != 0 {
-        violations.push("project store: schema install enables secure_delete".to_owned());
+    // Deletion is logical on both engines: SQLite must not scrub pages, and the
+    // native engine has no secure deletion to read back.
+    match (
+        tracedecay_sql::ENGINE,
+        installer.query("PRAGMA secure_delete", ()).await,
+    ) {
+        (tracedecay_sql::Engine::Sqlite, Ok(mut rows)) => {
+            let secure_delete = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+            if secure_delete != 0 {
+                violations.push("project store: schema install enables secure_delete".to_owned());
+            }
+        }
+        (tracedecay_sql::Engine::Native, Err(error))
+            if error.to_string().contains("secure deletion") => {}
+        (engine, outcome) => violations.push(format!(
+            "project store: {engine:?} secure_delete probe returned {:?}",
+            outcome.map(|_| "rows")
+        )),
     }
     drop(installer);
     violations.extend(
@@ -305,9 +313,26 @@ impl KeyedTable {
 fn run(connection: &Connection, sql: &str, values: &[Value]) -> Outcome {
     match connection.execute(sql, params_from_iter(values)) {
         Ok(changed) => Outcome::Changed(changed),
-        Err(error) if error.kind() == ErrorKind::Constraint => Outcome::Refused(error.to_string()),
+        Err(error) if error.kind() == ErrorKind::Constraint => {
+            Outcome::Refused(refusing_columns(&error.to_string()))
+        }
         Err(error) => panic!("{sql}: {error}"),
     }
+}
+
+/// The constraint kind and the columns it names. SQLite spells a composite
+/// key `t.a, t.b`; Turso spells it `t.(a, b)`.
+fn refusing_columns(message: &str) -> String {
+    let (kind, target) = message.split_once(": ").unwrap_or((message, ""));
+    let columns = match target.split_once(".(") {
+        Some((_, list)) => list.trim_end_matches(')').to_owned(),
+        None => target
+            .split(", ")
+            .map(|column| column.rsplit_once('.').map_or(column, |(_, name)| name))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    format!("{kind}: {columns}")
 }
 
 fn key_semantics_script(
@@ -479,22 +504,38 @@ fn install_table(installed: &Connection, table: &str, layout_suffix: &str) -> Co
     connection
 }
 
+/// The key-semantics script's results on each table's original WITHOUT ROWID
+/// layout, recorded on `SQLite`. Native has no WITHOUT ROWID layout to run, so
+/// both engines hold the converted layout to this record.
+const WITHOUT_ROWID_KEY_SEMANTICS: &str = include_str!("converted_key_semantics.golden");
+
 #[tokio::test]
 async fn converted_tables_keep_without_rowid_key_semantics() {
     let directory = TempDir::new().unwrap();
     let installed =
         installed_sessions_store(&directory, TestDatabaseRuntimeScope::ProfileSessions).await;
+    let mut recorded = String::new();
     for name in CONVERTED_TABLES {
         let rowid = install_table(&installed, name, "");
-        let without_rowid = install_table(&installed, name, " WITHOUT ROWID");
         let table = KeyedTable::read(&rowid, name);
         assert!(table.key.len() > 1, "{name}: composite key expected");
-        assert_eq!(
-            key_semantics_script(&rowid, &table),
-            key_semantics_script(&without_rowid, &table),
-            "{name}: ROWID layout must keep the WITHOUT ROWID key semantics"
-        );
+        let semantics = key_semantics_script(&rowid, &table);
+        if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Sqlite {
+            let without_rowid = install_table(&installed, name, " WITHOUT ROWID");
+            assert_eq!(
+                semantics,
+                key_semantics_script(&without_rowid, &table),
+                "{name}: ROWID layout must keep the WITHOUT ROWID key semantics"
+            );
+        }
+        let (outcomes, rows) = semantics;
+        recorded.push_str(&format!("{name}\n  {outcomes:?}\n  {rows:?}\n"));
     }
+    assert!(
+        recorded == WITHOUT_ROWID_KEY_SEMANTICS,
+        "ROWID layouts must match the recorded WITHOUT ROWID key semantics; \
+         on SQLite this run is the record for converted_key_semantics.golden:\n{recorded}"
+    );
 }
 
 fn insert_checkpoint(connection: &Connection, shard: &str, incarnation: i64, sequence: i64) {

@@ -20,6 +20,7 @@ async fn verify_reviewed_last_event_tx(
     let mut rows = transaction
         .query(
             "SELECT last_event_id FROM memory_v2_current_facts
+             INDEXED BY sqlite_autoindex_memory_v2_current_facts_1
              WHERE owner_kind = ?1 AND project_id = ?2 AND fact_id = ?3
              LIMIT 1",
             params![key.kind, key.project_id.as_str(), target.fact_id().as_str()],

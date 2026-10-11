@@ -32,7 +32,10 @@ async fn read_observation_frontier(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<i64> {
     let mut rows = conn
-        .query("SELECT COALESCE(MAX(sequence), 0) FROM observations", ())
+        .query(
+            "SELECT COALESCE((SELECT MAX(sequence) FROM observations), 0)",
+            (),
+        )
         .await
         .map_err(audit_read_error)?;
     rows.next()

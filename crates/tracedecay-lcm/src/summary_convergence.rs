@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS lcm_summary_convergence_invalidation_work (
 );
 "#;
 
+/// Metadata JSON is read behind a nested `CASE`: Turso evaluates both sides
+/// of `json_valid(x) AND json_extract(x, ..)`, so malformed metadata would fail
+/// the raw-row write
+/// (`benchmark_data/storage-concurrency/turso-bugs/partial-index-and-short-circuit.md`).
 const SUMMARY_CONVERGENCE_WORK_SQL: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_lcm_summary_convergence_due
     ON lcm_summary_convergence_queue(
@@ -141,11 +145,13 @@ CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_raw_unprotected_update
         ) VALUES (
             NEW.provider, NEW.session_id, NEW.store_id,
             CASE
-              WHEN json_valid(NEW.metadata_json)
-               AND json_extract(
-                   NEW.metadata_json,
-                   '$.ingest_protection.sanitization_receipt'
-               ) IS NOT NULL
+              WHEN CASE
+                  WHEN json_valid(NEW.metadata_json)
+                  THEN json_extract(
+                      NEW.metadata_json,
+                      '$.ingest_protection.sanitization_receipt'
+                  )
+              END IS NOT NULL
               THEN NEW.store_id
               ELSE MAX(0, NEW.store_id - 1)
             END,

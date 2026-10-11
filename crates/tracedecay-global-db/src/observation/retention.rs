@@ -828,7 +828,7 @@ async fn run_anchor_pass(
                     LIMIT 1
                 ) AS effective_at
          FROM retrieval_anchors a
-         WHERE a.anchor_id IN (SELECT value FROM json_each(?4))
+         WHERE a.anchor_id IN (SELECT CAST(value AS TEXT) FROM json_each(?4))
            AND (?1 IS NULL OR a.projection_generation = ?1)
            AND a.anchor_json <> '{ANCHOR_RELEASED_MARKER}'
            AND {RELEASED_DISPOSITION}
@@ -909,7 +909,7 @@ async fn run_observation_pass(
              JOIN retrieval_anchors a ON a.anchor_id = b.anchor_id
              JOIN retrieval_anchor_dispositions d
                ON d.anchor_id = a.anchor_id AND d.owner_json = a.owner_json
-             WHERE b.anchor_id IN (SELECT value FROM json_each(?4))
+             WHERE b.anchor_id IN (SELECT CAST(value AS TEXT) FROM json_each(?4))
                AND (?1 IS NULL OR a.projection_generation = ?1)
                AND d.sequence = (
                    SELECT MAX(d2.sequence)
@@ -977,7 +977,7 @@ async fn run_provenance_pass(
                 ) AS effective_at
          FROM observation_repository_provenance p
          JOIN retrieval_anchors a ON a.anchor_id = p.retrieval_anchor_id
-         WHERE p.retrieval_anchor_id IN (SELECT value FROM json_each(?4))
+         WHERE p.retrieval_anchor_id IN (SELECT CAST(value AS TEXT) FROM json_each(?4))
            AND (?1 IS NULL OR a.projection_generation = ?1)
            AND p.retrieval_anchor_id IS NOT NULL
            AND p.availability_json <> '{PROVENANCE_RELEASED_MARKER}'

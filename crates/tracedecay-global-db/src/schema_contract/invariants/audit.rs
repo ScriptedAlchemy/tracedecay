@@ -436,7 +436,7 @@ impl ProjectionProvenanceRow {
                      FROM json_each(?2) AS requested
                      CROSS JOIN observation_projection_provenance AS provenance
                      WHERE provenance.projector_version = ?1
-                       AND provenance.observation_id = requested.value",
+                       AND provenance.observation_id = CAST(requested.value AS TEXT)",
                     params![SESSION_MESSAGE_PROJECTOR_VERSION, requested.as_str()],
                 )
                 .await
@@ -535,11 +535,12 @@ impl ProjectionOutputOwnership {
                 .query(
                     "SELECT provenance.output_provider, provenance.output_message_id,
                             COALESCE(SUM(provenance.message_created), 0)
-                     FROM observation_projection_provenance AS provenance
-                     JOIN json_each(?1) AS requested
-                       ON provenance.output_provider =
+                     FROM json_each(?1) AS requested
+                     CROSS JOIN observation_projection_provenance AS provenance
+                       INDEXED BY idx_observation_projection_provenance_global_output
+                     WHERE provenance.output_provider =
                             json_extract(requested.value, '$.provider')
-                      AND provenance.output_message_id =
+                       AND provenance.output_message_id =
                             json_extract(requested.value, '$.message_id')
                      GROUP BY provenance.output_provider, provenance.output_message_id",
                     params![requested.as_str()],
@@ -1384,7 +1385,10 @@ async fn validate_projection_authority_suffix_pages(
     // durable skips; loading their observation, state and disposition with
     // separate SQL-channel requests made the exhaustive pass issue five
     // round-trips per row. The page query carries that state together so a
-    // common skip is validated without any per-row database request.
+    // common skip is validated without any per-row database request. Each
+    // correlated count reads `(SELECT ?1)`: Turso seeks only the bound prefix
+    // of a correlated key otherwise and scans the projector's rows
+    // (turso-bugs/correlated-subquery-bound-prefix-scan.md).
     let mut scan_cursor = coverage_start;
     let mut pages_audited = 0_i64;
     loop {
@@ -1393,16 +1397,16 @@ async fn validate_projection_authority_suffix_pages(
                 "SELECT observation.sequence, observation.observation_json,
                         observation.receipt_id,
                         (SELECT COUNT(*) FROM observation_projection_provenance
-                         WHERE projector_version = ?1
+                         WHERE projector_version = (SELECT ?1)
                            AND observation_id = observation.observation_id),
                         (SELECT COUNT(*) FROM observation_projection_dispositions
-                         WHERE projector_version = ?1
+                         WHERE projector_version = (SELECT ?1)
                            AND observation_id = observation.observation_id),
                         (SELECT COUNT(*) FROM observation_projection_aliases
-                         WHERE projector_version = ?1
+                         WHERE projector_version = (SELECT ?1)
                            AND observation_id = observation.observation_id),
                         (SELECT COUNT(*) FROM observation_workflow_facts
-                         WHERE projector_version = ?1
+                         WHERE projector_version = (SELECT ?1)
                            AND observation_id = observation.observation_id),
                         EXISTS(
                             SELECT 1 FROM projection_queue
@@ -2407,16 +2411,6 @@ mod tests {
                 .filter(|sql| sql.contains(needle))
                 .count()
         }
-
-        fn statement_containing(&self, needle: &str) -> String {
-            self.statements
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|sql| sql.contains(needle))
-                .cloned()
-                .unwrap_or_else(|| panic!("no captured statement contained {needle:?}"))
-        }
     }
 
     impl<T: QueryExecutor> QueryExecutor for CountingSnapshot<'_, T> {
@@ -2740,69 +2734,8 @@ mod tests {
             "projected messages must reuse the page authority instead of reading per output"
         );
 
-        let authority_sql =
-            counting.statement_containing("MAX(provenance.message_created) AS projector_owned");
-        let requested = serde_json::to_string(&[serde_json::json!({
-            "provider": "codex",
-            "message_id": "message.record.audit-batch-0"
-        })])
-        .unwrap();
-        let mut rows = snapshot
-            .query(
-                &format!("EXPLAIN QUERY PLAN {authority_sql}"),
-                params![SESSION_MESSAGE_PROJECTOR_VERSION, requested],
-            )
-            .await
-            .unwrap();
-        let mut plan = Vec::new();
-        while let Some(row) = rows.next().await.unwrap() {
-            plan.push(row.get::<String>(3).unwrap());
-        }
-        assert!(
-            plan.iter().any(|detail| {
-                detail.contains("idx_observation_projection_provenance_output")
-                    && detail.contains(
-                        "projector_version=? AND output_provider=? AND output_message_id=?",
-                    )
-            }),
-            "authority lookup must seek each requested output through the exact index: {plan:?}"
-        );
-        assert!(
-            !plan.iter().any(|detail| {
-                detail.contains("idx_observation_projection_provenance_output")
-                    && detail.ends_with("(projector_version=?)")
-            }),
-            "authority lookup regressed to a projector-wide provenance scan: {plan:?}"
-        );
-
-        let provenance_sql = counting
-            .statement_containing("SELECT provenance.observation_id, provenance.output_ordinal");
-        let requested = serde_json::to_string(&["observation.audit-batch-0"]).unwrap();
-        let mut rows = snapshot
-            .query(
-                &format!("EXPLAIN QUERY PLAN {provenance_sql}"),
-                params![SESSION_MESSAGE_PROJECTOR_VERSION, requested],
-            )
-            .await
-            .unwrap();
-        let mut plan = Vec::new();
-        while let Some(row) = rows.next().await.unwrap() {
-            plan.push(row.get::<String>(3).unwrap());
-        }
-        assert!(
-            plan.iter().any(|detail| {
-                detail.contains("observation_projection_provenance")
-                    && detail.contains("projector_version=? AND observation_id=?")
-            }),
-            "provenance lookup must seek each requested observation: {plan:?}"
-        );
-        assert!(
-            !plan.iter().any(|detail| {
-                detail.contains("observation_projection_provenance")
-                    && detail.ends_with("(projector_version=?)")
-            }),
-            "provenance lookup regressed to a projector-wide scan: {plan:?}"
-        );
+        // Each page's reads seeking rather than scanning the projector is held
+        // by `resumed_authority_audit_work_follows_new_observations_not_the_store`.
         // The per-row baseline this replaced spent fifteen reads on every
         // projected message; the batched path must stay comfortably under ten.
         let queries = counting.queries.load(Ordering::Relaxed);

@@ -1096,7 +1096,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::test_support::{self, sqlite_vm_steps};
+    use crate::test_support::{self, vm_steps};
 
     struct CountingQuery<'a> {
         inner: &'a TestConnection,
@@ -1866,7 +1866,7 @@ mod tests {
                 .any(|line| line.contains("idx_lcm_raw_direct_user_candidate")),
             "direct-user candidate must seek the maintained user-role index: {direct_candidate_plan:?}"
         );
-        let direct_candidate_steps = sqlite_vm_steps(
+        let direct_candidate_steps = vm_steps(
             &temp.path().join("sessions.db"),
             &direct_candidate_sql,
             &direct_candidate_values,
@@ -1874,7 +1874,7 @@ mod tests {
         let direct_candidate_limit = rerank_fetch_limit(rerank_fetch_limit(1)) + 1;
         assert!(
             direct_candidate_steps <= direct_candidate_limit * 32,
-            "direct-user candidate used {direct_candidate_steps} SQLite VM steps for {direct_candidate_limit} admitted rows; it must be bounded by the indexed candidate set"
+            "direct-user candidate used {direct_candidate_steps} VM steps for {direct_candidate_limit} admitted rows; it must be bounded by the indexed candidate set"
         );
 
         let single_session = CountingQuery::new(&conn);
@@ -1926,7 +1926,7 @@ mod tests {
                 .any(|line| line.contains("idx_lcm_raw_session_order")),
             "single-session candidate must seek the maintained session index: {session_candidate_plan:?}"
         );
-        let session_candidate_steps = sqlite_vm_steps(
+        let session_candidate_steps = vm_steps(
             &temp.path().join("sessions.db"),
             &session_candidate_sql,
             &session_candidate_values,
@@ -1934,7 +1934,7 @@ mod tests {
         let session_candidate_limit = rerank_fetch_limit(rerank_fetch_limit(1)) + 1;
         assert!(
             session_candidate_steps <= session_candidate_limit * 32,
-            "single-session candidate used {session_candidate_steps} SQLite VM steps for {session_candidate_limit} admitted rows; it must be bounded by the indexed candidate set"
+            "single-session candidate used {session_candidate_steps} VM steps for {session_candidate_limit} admitted rows; it must be bounded by the indexed candidate set"
         );
     }
 

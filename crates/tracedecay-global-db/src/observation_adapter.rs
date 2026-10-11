@@ -1137,14 +1137,19 @@ async fn read_cline_supersessions_from_snapshot(
             .collect::<Vec<_>>(),
     )
     .map_err(|error| runtime_storage_error(operation, error))?;
-    let mut rows = snapshot.query(
-        "SELECT disposition.record_json FROM json_each(?1) AS requested
-         JOIN retrieval_anchor_dispositions AS disposition ON disposition.anchor_id = requested.value
+    let mut rows = snapshot
+        .query(
+            "SELECT disposition.record_json FROM json_each(?1) AS requested
+         JOIN retrieval_anchor_dispositions AS disposition
+           ON disposition.anchor_id = CAST(requested.value AS TEXT)
          WHERE disposition.sequence = (
              SELECT MAX(current.sequence) FROM retrieval_anchor_dispositions AS current
              WHERE current.anchor_id = disposition.anchor_id
-         )", tracedecay_runtime_core::db::engine::params![keys],
-    ).await.map_err(|error| runtime_storage_error(operation, error))?;
+         )",
+            tracedecay_runtime_core::db::engine::params![keys],
+        )
+        .await
+        .map_err(|error| runtime_storage_error(operation, error))?;
     let mut supersessions = HashMap::new();
     while let Some(row) = rows
         .next()
@@ -1407,7 +1412,7 @@ fn observation_batch_row_projection() -> String {
          LEFT JOIN retrieval_anchors AS repository_anchor
            ON repository_anchor.anchor_id = repository.retrieval_anchor_id
          JOIN json_each(?1) AS requested
-           ON requested.value = observation.observation_id"
+           ON CAST(requested.value AS TEXT) = observation.observation_id"
     )
 }
 

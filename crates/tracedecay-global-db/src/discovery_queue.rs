@@ -140,9 +140,11 @@ impl RegisteredGlobalDb {
         let (range_start, range_end) = exclusive_prefix_range(&prefix)?;
         let mut sequence_rows = transaction
             .query(
-                "SELECT COALESCE(MAX(byte_offset), 0)
-                 FROM parse_offsets
-                 WHERE file_path >= ?1 AND file_path < ?2 AND file_id = 1",
+                "SELECT COALESCE((
+                    SELECT MAX(byte_offset)
+                    FROM parse_offsets
+                    WHERE file_path >= ?1 AND file_path < ?2 AND file_id = 1
+                 ), 0)",
                 params![range_start, range_end],
             )
             .await

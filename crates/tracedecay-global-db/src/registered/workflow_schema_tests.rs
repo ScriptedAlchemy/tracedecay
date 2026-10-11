@@ -48,6 +48,13 @@ async fn assert_workflow_schema_reset_without_mutation(malformed_schema: String)
                  INSERT INTO workflow_reset_canary VALUES ('preserve-me');",
             )
             .unwrap();
+        // The main file holds every commit only once the log is copied back;
+        // the native engine does not checkpoint when a connection closes.
+        tracedecay_sql::ConnectionControl::checkpoint(
+            &connection,
+            tracedecay_sql::CheckpointMode::Truncate,
+        )
+        .unwrap();
     }
     let before_bytes = fs::read(&database_path).unwrap();
     let database = TestConnection::open(&database_path);

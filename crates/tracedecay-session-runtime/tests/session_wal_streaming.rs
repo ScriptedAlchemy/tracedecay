@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 use support::{
     BASE_SESSIONS, DrainFixture, MESSAGES_PER_SESSION, PROMPT_TITLE_WORDS, PROVIDER,
     SEED_TIMESTAMP, capture, drain, message_requests, refresh_until_idle, seed_sessions,
-    session_cursor, session_store_path, wal_checkpoint_sequence,
+    session_cursor, session_store_path, wal_checkpoint_sequence, wal_path,
 };
 use tracedecay_session_runtime::session_sync::test_harness::SessionTemporalRefreshWakeState;
 use tracedecay_sessions::admission::{HostAdmission, HostAdmissionScope};
@@ -37,7 +37,7 @@ async fn sustained_stream_with_concurrent_readers_keeps_the_wal_bounded() {
         .unwrap();
     let refresh = Arc::new(SessionTemporalRefreshWakeState::default());
     let (project, scope) = (fixture.project.as_path(), fixture.scope());
-    let wal = session_store_path(&fixture).with_extension("db-wal");
+    let wal = wal_path(&session_store_path(&fixture));
     let streaming = AtomicBool::new(true);
     let reads = AtomicU64::new(0);
     let probe = format!("{}.message.00000", session_cursor(0).session_id.as_str());

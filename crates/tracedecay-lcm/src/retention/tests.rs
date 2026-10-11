@@ -7,6 +7,7 @@ use tracedecay_privacy::sanitize_lcm_payload_text;
 use tracedecay_runtime_core::db::engine::{
     Connection, Executor, IntoParams, QueryExecutor, TestConnection, params,
 };
+use tracedecay_runtime_core::db::native_search::SearchIndex;
 
 use super::*;
 
@@ -460,12 +461,11 @@ async fn drop_removes_the_single_content_copy_and_its_index() -> Result<(), Stri
     let indexed = |conn: &Connection| {
         let conn = conn.clone();
         async move {
-            fetch_i64(
-                &conn,
-                "SELECT COUNT(*) FROM lcm_raw_messages_fts WHERE lcm_raw_messages_fts MATCH 'stored'",
-                (),
-            )
-            .await
+            let sql = format!(
+                "SELECT COUNT(*) {}",
+                SearchIndex::RawMessage.matching_rows(conn.backend_kind(), "raw", "'stored'")
+            );
+            fetch_i64(&conn, &sql, ()).await
         }
     };
     assert_eq!(indexed(conn).await?, 2);

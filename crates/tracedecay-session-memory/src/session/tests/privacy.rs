@@ -183,30 +183,6 @@ async fn registered_denied_retrieval_never_exposes_private_context() {
     assert!(!format!("{outcome:?}").contains(PRIVACY_CANARY));
 }
 
-#[tokio::test]
-async fn registered_quarantined_legacy_source_never_enters_temporal_sinks() {
-    let harness = RegisteredTemporalHarness::open("registered-privacy-quarantine").await;
-    harness.seed_quarantined_legacy_fixture().await;
-    assert_eq!(
-        harness
-            .count(
-                "SELECT COUNT(*) FROM session_occurrences_fts
-                 WHERE session_occurrences_fts MATCH '\"sk-proj-private-canary\"'",
-            )
-            .await,
-        0
-    );
-    assert_eq!(
-        harness
-            .count(
-                "SELECT COUNT(*) FROM session_summary_nodes_fts
-                 WHERE session_summary_nodes_fts MATCH '\"sk-proj-private-canary\"'",
-            )
-            .await,
-        0
-    );
-}
-
 /// Naming two sinks only proves those two are clean. A sink added later, a
 /// new occurrence, summary, or fact index, would carry the quarantined text
 /// with nothing complaining, so sweep every full-text sink the schema defines.
@@ -215,19 +191,16 @@ async fn registered_quarantined_legacy_source_reaches_no_full_text_sink() {
     let harness = RegisteredTemporalHarness::open("registered-privacy-sink-sweep").await;
     harness.seed_quarantined_legacy_fixture().await;
 
-    let sinks = harness.full_text_sinks().await;
-    assert!(
-        !sinks.is_empty(),
-        "the schema must define full-text sinks for this sweep to mean anything"
-    );
-    for sink in sinks {
+    let matches = harness.full_text_sink_matches(PRIVACY_CANARY).await;
+    for sink in ["session_occurrences_fts", "session_summary_nodes_fts"] {
+        assert!(
+            matches.iter().any(|(name, _)| name == sink),
+            "the sweep must cover the {sink} full-text sink: {matches:?}"
+        );
+    }
+    for (sink, count) in matches {
         assert_eq!(
-            harness
-                .count(&format!(
-                    "SELECT COUNT(*) FROM {sink} WHERE {sink} MATCH '\"{PRIVACY_CANARY}\"'"
-                ))
-                .await,
-            0,
+            count, 0,
             "quarantined legacy text reached the {sink} full-text sink"
         );
     }

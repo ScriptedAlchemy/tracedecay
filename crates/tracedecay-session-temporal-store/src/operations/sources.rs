@@ -203,7 +203,7 @@ async fn summary_nodes_by_id(
                     anchor.owner_json
              FROM session_summary_nodes node
              JOIN retrieval_anchors anchor ON anchor.anchor_id = node.summary_anchor_id
-             WHERE node.summary_id IN (SELECT value FROM json_each(?1))",
+             WHERE node.summary_id IN (SELECT CAST(value AS TEXT) FROM json_each(?1))",
             params![encoded_ids],
         )
         .await?;
@@ -789,7 +789,7 @@ async fn payload_authority_created_at_by_ref(
         .query(
             "SELECT payload_ref, created_at FROM lcm_external_payloads
              WHERE session_id = ?1
-               AND payload_ref IN (SELECT value FROM json_each(?2))",
+               AND payload_ref IN (SELECT CAST(value AS TEXT) FROM json_each(?2))",
             params![session_id, encoded_refs],
         )
         .await?;
@@ -821,7 +821,7 @@ async fn verify_payload_bindings(
         .query(
             "SELECT payload_ref, session_id, payload_digest, manifest_json, receipt_id, created_at
              FROM session_external_payload_manifests
-             WHERE payload_ref IN (SELECT value FROM json_each(?1))",
+             WHERE payload_ref IN (SELECT CAST(value AS TEXT) FROM json_each(?1))",
             params![encoded_refs],
         )
         .await?;
@@ -923,7 +923,7 @@ async fn source_summary_availability(
             "SELECT summary_id, availability, reason
              FROM session_summary_availability
              WHERE session_id = ?1 AND generation = ?2
-               AND summary_id IN (SELECT value FROM json_each(?3))",
+               AND summary_id IN (SELECT CAST(value AS TEXT) FROM json_each(?3))",
             params![session_id, generation, encoded_ids],
         )
         .await?;
