@@ -13,11 +13,10 @@ use tracedecay_store::{
     ProfileReadResultV1,
 };
 
-use super::support::{conversion, encode, invalid};
+use super::support::{conversion, encode, invalid, u64_to_i64};
 
 const SNAPSHOT_ENTRY_SCHEMA_VERSION: u16 = 1;
 const AUDIT_PAYLOAD_SCHEMA_VERSION: u16 = 1;
-const AUTHORIZATION_NOT_RECORDED: &str = "not_recorded_by_configuration_store_v1";
 const ACTIVATION_NOT_RECORDED: &str = "not_recorded_by_configuration_store_v1";
 
 #[derive(Clone, Default)]
@@ -194,7 +193,7 @@ fn insert_revision(
                 revision.revision_id.as_str(),
                 key.as_str(),
                 layer_kind,
-                layer_id.as_deref(),
+                layer_id,
                 i64::from(SNAPSHOT_ENTRY_SCHEMA_VERSION),
                 payload,
             ],
@@ -203,7 +202,7 @@ fn insert_revision(
     Ok(())
 }
 
-fn snapshot_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static str, Option<String>) {
+fn snapshot_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static str, String) {
     let layer = provenance
         .iter()
         .find(|candidate| {
@@ -216,15 +215,15 @@ fn snapshot_layer(provenance: &[ConfigurationCandidateV1]) -> (&'static str, Opt
         .map(|candidate| &candidate.layer);
     match layer {
         Some(ConfigurationLayerIdV1::UserProfile { profile_id }) => {
-            ("user_profile", Some(profile_id.as_str().to_owned()))
+            ("user_profile", profile_id.as_str().to_owned())
         }
         Some(ConfigurationLayerIdV1::Project { project_id }) => {
-            ("project", Some(project_id.as_str().to_owned()))
+            ("project", project_id.as_str().to_owned())
         }
         Some(ConfigurationLayerIdV1::Collection { collection_id }) => {
-            ("collection", Some(collection_id.as_str().to_owned()))
+            ("collection", collection_id.as_str().to_owned())
         }
-        Some(ConfigurationLayerIdV1::Default) | None => ("default", None),
+        Some(ConfigurationLayerIdV1::Default) | None => ("default", String::new()),
     }
 }
 
@@ -232,32 +231,36 @@ fn insert_receipt(
     savepoint: &Savepoint<'_>,
     commit: &ConfigurationCommitV1,
 ) -> tracedecay_sql::Result<()> {
-    let authorization = commit
-        .change_plan
-        .as_ref()
-        .map(|plan| plan.authorization_policy_digest.as_str())
-        .unwrap_or(AUTHORIZATION_NOT_RECORDED);
+    let receipt = &commit.receipt;
     savepoint.execute(
         "INSERT INTO configuration_mutation_receipts (
             receipt_id, plan_id, actor_id, idempotency_key,
             base_revision_id, result_revision_id, operation_digest,
-            authorization_policy_digest, activation_status, receipt_digest, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            authorization_policy_epoch, authorization_policy_digest,
+            authority_revalidated_at, activation_status, receipt_digest, created_at,
+            effective_deadline_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
-            commit.receipt.receipt_id.as_str(),
+            receipt.receipt_id.as_str(),
             commit
                 .change_plan
                 .as_ref()
                 .map(|plan| plan.plan_id.as_str()),
-            commit.receipt.actor_id.as_str(),
-            commit.receipt.idempotency_key.as_str(),
-            commit.receipt.base_revision_id.as_str(),
-            commit.receipt.result_revision_id.as_str(),
-            commit.receipt.operation_digest.as_str(),
-            authorization,
+            receipt.actor_id.as_str(),
+            receipt.idempotency_key.as_str(),
+            receipt.base_revision_id.as_str(),
+            receipt.result_revision_id.as_str(),
+            receipt.operation_digest.as_str(),
+            u64_to_i64(
+                receipt.authorization_policy_epoch,
+                "configuration authorization policy epoch",
+            )?,
+            receipt.authorization_policy_digest.as_str(),
+            receipt.authority_revalidated_at.0,
             ACTIVATION_NOT_RECORDED,
-            commit.receipt.receipt_digest.as_str(),
-            commit.receipt.created_at.0,
+            receipt.receipt_digest.as_str(),
+            receipt.created_at.0,
+            receipt.effective_deadline_at.0,
         ],
     )?;
     Ok(())
