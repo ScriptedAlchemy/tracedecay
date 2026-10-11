@@ -399,26 +399,26 @@ mod tests {
     #[tokio::test]
     async fn rmcp_wire_matrix_matches_raw_dispatch_initialize_tools_and_resources() {
         let fixture = RmcpWireFixture::start().await;
-        let initialize_id = fixture.last_response()["id"].clone();
-        let mut initialize_result =
-            crate::mcp::server::initialize_result(crate::mcp::server::SERVER_INSTRUCTIONS)
-                .expect("initialize oracle");
-        initialize_result["protocolVersion"] = json!("2025-11-25");
-        initialize_result["_meta"]["tracedecayInitializeRoute"] = json!({
-            "projectPath": "/wire/oracle",
-            "allowInit": false,
-        });
+        let requested_protocol = fixture
+            .last_request()
+            .params
+            .as_ref()
+            .and_then(|params| params.get("protocolVersion"))
+            .cloned()
+            .expect("RMCP client initialize names a protocol version");
         assert_eq!(
-            fixture.last_response(),
-            serde_json::to_value(JsonRpcResponse::success(initialize_id, initialize_result))
-                .expect("serialize initialize oracle"),
-            "rmcp negotiates the client protocol version while preserving the raw payload",
+            fixture.last_response()["result"]["protocolVersion"],
+            requested_protocol,
+            "a supported client version is echoed on the RMCP wire",
         );
         assert_eq!(
             fixture.last_response()["result"]["_meta"]["tracedecayInitializeRoute"],
             json!({"projectPath": "/wire/oracle", "allowInit": false}),
             "rmcp InitializeResult must preserve daemon-selected route metadata",
         );
+        fixture
+            .assert_last_response_matches_raw_dispatch(true)
+            .await;
 
         fixture
             .client
@@ -791,17 +791,19 @@ mod tests {
         tracedecay_project::product_runtime::register_fixture_product_runtime();
         let initialized: InitializeResult = rmcp_response_result(JsonRpcResponse::success(
             json!(1),
-            crate::mcp::server::initialize_result("TraceDecay instructions")
+            crate::mcp::server::initialize_result("TraceDecay instructions", Some("2024-11-05"))
                 .expect("fixture product runtime registered"),
         ))
         .expect("rmcp must accept the server's own initialize result shape");
 
+        let observed = serde_json::to_value(&initialized).expect("serialize initialized response");
+        assert_eq!(observed["protocolVersion"], json!("2024-11-05"));
+        assert_eq!(observed["instructions"], json!("TraceDecay instructions"));
+        assert_eq!(observed["serverInfo"]["name"], json!("tracedecay"));
         assert_eq!(
-            serde_json::to_value(&initialized).expect("serialize initialized response")["protocolVersion"],
-            json!("2024-11-05")
+            observed["capabilities"],
+            json!({"tools": {"listChanged": true}, "resources": {}})
         );
-        assert!(initialized.capabilities.tools.is_some());
-        assert!(initialized.capabilities.resources.is_some());
     }
 
     #[tokio::test]

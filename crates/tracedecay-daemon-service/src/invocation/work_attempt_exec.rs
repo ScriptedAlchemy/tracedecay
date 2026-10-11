@@ -87,9 +87,11 @@ use super::{Arc, RequestContext};
 use tracedecay_contracts::now_micros;
 
 mod operation_resource;
+mod provider_launch;
 mod provider_output;
 
 use operation_resource::{AttemptAdmissionTimingV1, work_operation_resource_observation};
+use provider_launch::spawn_provider;
 use provider_output::{overflow_outcome, provider_session, read_capped, stream_summary};
 
 fn provider_stdout_artifacts<S: WorkflowArtifactStorePort>(
@@ -1025,8 +1027,8 @@ async fn execute_provider_with_environment<S>(
         }
     }
 
-    let mut child = match command.spawn() {
-        Ok(child) => child,
+    let (mut child, _lifeline) = match spawn_provider(command).await {
+        Ok(launched) => launched,
         Err(error) => {
             tracing::warn!(
                 task = identity.task_id().as_str(),

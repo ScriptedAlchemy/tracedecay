@@ -13,8 +13,8 @@ use tracedecay_mcp::tools::catalog_discovery::{
     catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
 };
 use tracedecay_mcp::{
-    ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, ToolRegistryMode,
-    explore_call_budget, project_catalog_discovery_scope,
+    ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, explore_call_budget,
+    project_catalog_discovery_scope,
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -254,7 +254,6 @@ fn projectless_tools_list_payload() -> std::result::Result<serde_json::Value, St
         &profile_id,
         &authority,
         &project_catalog_discovery_scope(),
-        ToolRegistryMode::HostAvailable,
     )
     .map_err(|error| format!("MCP catalog discovery unavailable: {error}"))?;
     let tools = payload

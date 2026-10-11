@@ -480,8 +480,13 @@ async fn idle_release_drops_unpinned_prepared_pages_and_keeps_pinned_ones() {
     .expect("JSONL payload");
     encoded.push(b'\n');
 
+    // Every test in this binary shares the process-wide page cache, so a
+    // concurrent ingest can capacity-evict any unpinned page. Hold a setup pin
+    // until the cache guard below excludes those evictions.
     let unpinned_path = temp.path().join("unpinned.jsonl");
     std::fs::write(&unpinned_path, &encoded).expect("unpinned JSONL");
+    let unpinned_settled = spin_until_jsonl_change_settled(&unpinned_path);
+    let setup_pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&unpinned_path));
     let (unpinned, _) = super::shared_jsonl_page(
         &unpinned_path,
         StoredCursor::default(),
@@ -498,6 +503,7 @@ async fn idle_release_drops_unpinned_prepared_pages_and_keeps_pinned_ones() {
 
     let pinned_path = temp.path().join("pinned.jsonl");
     std::fs::write(&pinned_path, &encoded).expect("pinned JSONL");
+    let pinned_settled = spin_until_jsonl_change_settled(&pinned_path);
     let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&pinned_path));
     let (pinned, _) = super::shared_jsonl_page(
         &pinned_path,
@@ -509,52 +515,74 @@ async fn idle_release_drops_unpinned_prepared_pages_and_keeps_pinned_ones() {
     .await
     .expect("pinned page");
 
-    let before = {
-        let cache = super::SHARED_JSONL_PAGE_CACHE
-            .get()
-            .expect("shared page cache")
-            .lock()
-            .await;
-        cache.retained_bytes
-    };
+    let mut cache = super::SHARED_JSONL_PAGE_CACHE
+        .get()
+        .expect("shared page cache")
+        .lock()
+        .await;
+    assert_eq!(
+        super::release_unpinned_shared_jsonl_pages(),
+        super::SharedJsonlPageReleaseV1 { pages: 0, bytes: 0 },
+        "idle release must skip a contended cache rather than wait"
+    );
+    drop(setup_pin);
     assert!(
-        before
-            >= unpinned
-                .retained_bytes
-                .saturating_add(pinned.retained_bytes),
-        "ingest left prepared pages in the cache: {before}"
+        Arc::strong_count(&unpinned) >= 2 && Arc::strong_count(&pinned) >= 2,
+        "ingest left both prepared pages shared with later consumers"
     );
 
-    let released = super::release_unpinned_shared_jsonl_pages();
+    let released = super::release_unpinned_cached_jsonl_pages(&mut cache);
     eprintln!(
-        "JSONL_HEAP_PROOF before={before} released_pages={} released_bytes={} unpinned={}",
+        "JSONL_HEAP_PROOF released_pages={} released_bytes={} unpinned={}",
         released.pages, released.bytes, unpinned.retained_bytes
     );
     assert!(
         released.pages >= 1 && released.bytes >= unpinned.retained_bytes,
         "idle release must drop the unpinned prepared page: {released:?}"
     );
-
-    let after = {
-        let cache = super::SHARED_JSONL_PAGE_CACHE
-            .get()
-            .expect("shared page cache")
-            .lock()
-            .await;
-        (
-            cache.retained_bytes,
-            cache
-                .pages
-                .iter()
-                .any(|page| page.key.path == std::fs::canonicalize(&pinned_path).unwrap()),
-        )
-    };
-    assert!(after.1, "a pinned in-flight page must survive idle release");
-    assert!(
-        after.0 < before,
-        "idle release must shrink retained cache bytes from {before} to {}",
-        after.0
+    assert_eq!(
+        Arc::strong_count(&unpinned),
+        1,
+        "idle release must drop the unpinned prepared page"
     );
+    assert!(
+        Arc::strong_count(&pinned) >= 2,
+        "a pinned in-flight page must survive idle release"
+    );
+    drop(cache);
+
+    let (rebuilt, unpinned_hit) = super::shared_jsonl_page(
+        &unpinned_path,
+        StoredCursor::default(),
+        Some(encoded.len() as u64),
+        None,
+        true,
+    )
+    .await
+    .expect("rebuilt unpinned page");
+    let (replayed, pinned_hit) = super::shared_jsonl_page(
+        &pinned_path,
+        StoredCursor::default(),
+        Some(encoded.len() as u64),
+        None,
+        true,
+    )
+    .await
+    .expect("replayed pinned page");
+    if unpinned_settled {
+        assert!(
+            !unpinned_hit,
+            "a later consumer must rebuild the released unpinned page"
+        );
+        assert!(!Arc::ptr_eq(&unpinned, &rebuilt));
+    }
+    if pinned_settled {
+        assert!(
+            pinned_hit,
+            "a later consumer must still share the pinned page"
+        );
+        assert!(Arc::ptr_eq(&pinned, &replayed));
+    }
 }
 
 #[tokio::test]

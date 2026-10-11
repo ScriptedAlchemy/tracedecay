@@ -89,6 +89,7 @@ const CHAIN = {
   has_more_summary_nodes: false,
   counts: {
     message_count: 405,
+    unpublished_message_count: 0,
     source_token_count: 0,
     summary_node_count: 0,
     summary_token_count: 0,

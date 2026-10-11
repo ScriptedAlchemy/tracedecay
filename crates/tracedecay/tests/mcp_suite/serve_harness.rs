@@ -207,13 +207,10 @@ pub fn assert_unenrolled_cwd_serve_session(output: &Output, cwd: &Path) {
 
     let tools = json_rpc_response(&output.stdout, 3);
     assert!(
-        tools["result"]["tools"].as_array().is_some_and(|tools| {
-            tools
-                .iter()
-                .any(|tool| tool["name"] == "tracedecay_runtime")
-        }),
-        "tools/list must advertise the catalog, including the tool called next, \
-         before a project exists: {tools}"
+        tools["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| { tools.iter().any(|tool| tool["name"] == "tracedecay_status") }),
+        "tools/list must advertise the default core before a project exists: {tools}"
     );
 
     let refusal = json_rpc_response(&output.stdout, 2);
@@ -252,7 +249,7 @@ pub fn runtime_project_root(stdout: &[u8], id: i64) -> String {
         .unwrap_or_else(|| panic!("missing runtime response in stdout:\n{stdout}"));
     let text = runtime_response["result"]["content"][0]["text"]
         .as_str()
-        .expect("runtime tool should return text content");
+        .unwrap_or_else(|| panic!("runtime tool should return text content: {runtime_response}"));
     let runtime: Value = serde_json::from_str(text).unwrap();
     runtime["database"]["project_root"]
         .as_str()

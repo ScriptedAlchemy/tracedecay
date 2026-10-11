@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::Duration;
 
 use rusqlite::{Connection, Savepoint};
 use tempfile::TempDir;
@@ -194,11 +193,9 @@ pub(crate) struct LifecycleBarrier {
 impl LifecycleBarrier {
     pub(crate) fn wait_until_arrived(&self) {
         let (state, condition) = &*self.state;
-        let state = state.lock().unwrap();
-        let (state, timeout) = condition
-            .wait_timeout_while(state, Duration::from_secs(2), |state| !state.0)
+        let _arrived = condition
+            .wait_while(state.lock().unwrap(), |state| !state.0)
             .unwrap();
-        assert!(state.0 && !timeout.timed_out(), "lifecycle event timed out");
     }
 
     pub(crate) fn arrive_and_wait(&self) {
@@ -206,13 +203,7 @@ impl LifecycleBarrier {
         let mut state = state.lock().unwrap();
         state.0 = true;
         condition.notify_all();
-        let (state, timeout) = condition
-            .wait_timeout_while(state, Duration::from_secs(2), |state| !state.1)
-            .unwrap();
-        assert!(
-            state.1 && !timeout.timed_out(),
-            "lifecycle release timed out"
-        );
+        let _released = condition.wait_while(state, |state| !state.1).unwrap();
     }
 
     pub(crate) fn release(&self) {

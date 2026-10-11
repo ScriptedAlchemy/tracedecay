@@ -466,7 +466,8 @@ fn validate_record(handle: &str, record: &StoredResponseHandleRecord, path: &Pat
     Ok(())
 }
 
-fn response_handle_for(content: &str) -> String {
+/// Computes the canonical content identity without publishing a stored record.
+pub fn response_handle_for(content: &str) -> String {
     let digest = Sha256::digest(content.as_bytes());
     format!(
         "{HANDLE_PREFIX}{}",

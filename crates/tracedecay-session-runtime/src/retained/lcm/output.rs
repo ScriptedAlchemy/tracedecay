@@ -166,6 +166,7 @@ pub(super) fn description(value: LcmDescribeResponse) -> LcmDescriptionV1 {
         provider: value.provider,
         session_id: value.session_id,
         raw_message_count: value.raw_message_count,
+        unpublished_message_count: value.unpublished_message_count,
         summary_node_count: value.summary_node_count,
         external_payload_count: value.external_payload_count,
         first_store_id: value.first_store_id,

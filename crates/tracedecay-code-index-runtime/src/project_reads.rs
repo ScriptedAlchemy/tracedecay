@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphProjectionStore, InteractiveCatalogReaderLeaseV1,
+};
 use tracedecay_contracts::{Deadline, ResolvedScope, now_micros};
 use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead};
 use tracedecay_query::retrieval::RetrievalPortError;
@@ -69,11 +71,11 @@ fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), Code
 async fn await_rewarm(
     store: &Arc<CodeGraphProjectionStore>,
     request: &CodeGraphReadRequest<'_>,
-) -> Result<(), CodeGraphReadError> {
+) -> Result<Option<Arc<InteractiveCatalogReaderLeaseV1>>, CodeGraphReadError> {
     // A zero budget never blocks: it starts the re-warm and reports it.
     let requirement = request.readiness;
-    if store.await_rewarm_for(Duration::ZERO, requirement).is_ok() {
-        return Ok(());
+    if let Ok(retain) = store.await_rewarm_and_retain_for(Duration::ZERO, requirement) {
+        return Ok(retain);
     }
     let now = now_micros();
     let expires_at =
@@ -88,7 +90,9 @@ async fn await_rewarm(
     let budget =
         Duration::from_micros(u64::try_from(expires_at.0.saturating_sub(now.0)).unwrap_or(0));
     let waiting = Arc::clone(store);
-    let wait = tokio::task::spawn_blocking(move || waiting.await_rewarm_for(budget, requirement));
+    let wait = tokio::task::spawn_blocking(move || {
+        waiting.await_rewarm_and_retain_for(budget, requirement)
+    });
     let settled = match request.live_cancellation {
         Some(signal) => tokio::select! {
             biased;
@@ -98,7 +102,7 @@ async fn await_rewarm(
         None => wait.await,
     };
     match settled {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(retain)) => Ok(retain),
         Ok(Err(pending)) => Err(CodeGraphReadError::Rewarming {
             retry_after_millis: u64::try_from(pending.retry_after.as_millis()).unwrap_or(u64::MAX),
         }),
@@ -346,11 +350,12 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphPro
                 }
             }?;
             refuse_projection_wait(&request)?;
-            await_rewarm(&projection.store, &request).await?;
+            let catalog_retain = await_rewarm(&projection.store, &request).await?;
             VerifiedCodeGraphRead::new(
                 self.authority.scope.clone(),
                 projection.store,
                 projection.freshness,
+                catalog_retain,
             )
         })
     }

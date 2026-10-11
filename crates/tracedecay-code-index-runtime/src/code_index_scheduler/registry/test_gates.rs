@@ -19,8 +19,8 @@ use super::{
     ServingGenerationRollbackOutcomeV1, WorkerStepGateV1, cold_mount_admission_barriers,
     cold_mount_open_controls, cold_mount_post_check_controls, complete_seat_probe_miss_gate,
     graph_decode_gate, opened_published_text_projection_gate, published_text_projection_gate,
-    query_admission_controls, serving_swap_gate, test_gate_root, unique_mounted_for_scope,
-    wait_notified_if_unset,
+    query_admission_controls, serving_swap_gate, test_gate_root,
+    text_projection_store_contention_gate, unique_mounted_for_scope, wait_notified_if_unset,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -76,6 +76,42 @@ impl CodeIndexSchedulerRegistryV1 {
             project_root.display()
         );
         (entered_observed, released)
+    }
+
+    /// Hold the next text projection advance that a held code-generation
+    /// store lock refuses, before the projection decides how to wait.
+    #[cfg(test)]
+    pub fn pause_next_text_projection_store_contention(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, entered_observed) = tokio::sync::oneshot::channel();
+        let (released, release) = tokio::sync::oneshot::channel();
+        let previous = text_projection_store_contention_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                test_gate_root(&project_root),
+                WorkerStepGateV1 { entered, release },
+            );
+        assert!(
+            previous.is_none(),
+            "one store contention gate per worktree: {}",
+            project_root.display()
+        );
+        (entered_observed, released)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_text_projection_store_contention_gate(project_root: &Path) {
+        let gate = text_projection_store_contention_gate()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&test_gate_root(project_root));
+        Self::pass_worker_step_gate(gate).await;
     }
 
     #[cfg(test)]

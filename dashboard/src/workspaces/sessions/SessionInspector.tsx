@@ -667,8 +667,9 @@ function TranscriptMessages({
         {payload.next_cursor != null ? ' · more pages follow' : ' · last available page'}
       </p>
       <p className="text-xs text-text-muted">
-        Stored-message totals can differ from the available transcript. The last available page
-        does not establish that every stored message is represented or explain any difference.
+        {payload.counts.unpublished_message_count > 0
+          ? `${payload.counts.unpublished_message_count.toLocaleString()} stored messages are not yet published to the transcript, so no page can show them until the projection catches up.`
+          : 'Stored-message totals can differ from the available transcript. The last available page does not establish that every stored message is represented or explain any difference.'}
       </p>
       {messages.length > 0 ? (
         <p className="text-xs text-text-muted tabular" data-page-token-provenance>

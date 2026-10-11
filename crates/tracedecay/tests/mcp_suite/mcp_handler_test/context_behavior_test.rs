@@ -327,6 +327,105 @@ async fn tracedecay_context_returns_invoice_total_and_tax_policy() {
 }
 
 #[tokio::test]
+async fn tracedecay_context_serves_sanitized_code_when_catalog_is_ready() {
+    let secret = ["sk", "-test-", "1234567890abcdef"].concat();
+    let source = format!("pub fn billing_token() -> &'static str {{\n    \"{secret}\"\n}}\n");
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).expect("token src dir");
+        fs::write(project.join("src/lib.rs"), &source).expect("token lib.rs");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("token context server");
+    warm_code_index_search(&server, "billing_token").await;
+
+    let payload = context_json(
+        &server,
+        json!({
+            "task": "billing_token",
+            "max_nodes": 1,
+            "include_code": true,
+            "max_code_blocks": 1
+        }),
+    )
+    .await;
+    assert_eq!(payload["task"], "billing_token");
+    assert_eq!(
+        payload["coverage"],
+        json!({
+            "exact": "complete",
+            "lexical": "complete",
+            "graph": "complete",
+            "recall": "full"
+        }),
+        "{payload}"
+    );
+    assert_eq!(
+        code_identity(&payload),
+        json!({
+            "file": "src/lib.rs",
+            "start_line": 1,
+            "end_line": 3,
+            "code": "pub fn billing_token() -> &'static str {\n    \"[TraceDecay redacted: exact credential]\"\n}"
+        }),
+        "{payload}"
+    );
+
+    fixture.harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn tracedecay_context_withholds_code_that_drifted_after_indexing() {
+    let fixture = production_composition_fixture_with_sources(write_billing_sources).await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("drift context server");
+    warm_code_index_search(&server, "invoice_total").await;
+    let request = json!({
+        "task": "invoice_total",
+        "max_nodes": 1,
+        "include_code": true,
+        "max_code_blocks": 1
+    });
+    let indexed = context_json(&server, request.clone()).await;
+    assert_eq!(
+        code_identity(&indexed),
+        json!({
+            "file": "src/lib.rs",
+            "start_line": 1,
+            "end_line": 3,
+            "code": "pub fn invoice_total(cents: u32) -> u32 {\n    cents\n}"
+        }),
+        "{indexed}"
+    );
+
+    fs::write(
+        fixture.project_root.join("src/lib.rs"),
+        "pub fn invoice_total(cents: u32) -> u32 {\n    cents + 1\n}\n\npub trait TaxPolicy {\n    fn tax(&self, cents: u32) -> u32;\n}\n",
+    )
+    .expect("drift billing lib.rs");
+    let drifted = context_json(&server, request).await;
+    assert_eq!(
+        search_identity(&drifted, "invoice_total"),
+        json!({
+            "name": "invoice_total",
+            "qualified_name": "src/lib.rs::invoice_total",
+            "kind": "function",
+            "file": "src/lib.rs",
+            "exact_class": "exact_message",
+            "rank": 1
+        }),
+        "{drifted}"
+    );
+    assert_eq!(drifted["code"], json!([]), "{drifted}");
+
+    fixture.harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn context_preserves_single_name_and_multiword_prose_routing() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).expect("routing source directory");

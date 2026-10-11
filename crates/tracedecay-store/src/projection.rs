@@ -609,6 +609,14 @@ pub enum ProjectionStoreError {
         #[source]
         source: Box<dyn Error + Send + Sync>,
     },
+    /// SQLITE_CORRUPT / SQLITE_NOTADB. Retrying a malformed page cannot
+    /// succeed; callers classify this as blocked and point at repair.
+    #[error("projection store is corrupt: {operation} failed: {source}")]
+    Corrupt {
+        operation: &'static str,
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
+    },
     // Deterministic, content-dependent refusal (the projected output failed
     // pure sanitization/receipt binding). Like `Contract`, it can never
     // succeed on retry: callers record a durable skip disposition and keep
@@ -633,19 +641,66 @@ pub enum ProjectionStoreError {
 }
 
 impl ProjectionStoreError {
-    pub fn durable_detail(&self) -> String {
-        let mut detail = self.to_string();
-        let mut source = self.source();
-        while let Some(current) = source {
-            let message = current.to_string();
-            if !detail.ends_with(&message) {
-                detail.push_str(": ");
-                detail.push_str(&message);
+    pub fn storage(operation: &'static str, source: impl Error + Send + Sync + 'static) -> Self {
+        if error_chain_is_sqlite_disk_image_corrupt(&source) {
+            Self::Corrupt {
+                operation,
+                source: Box::new(source),
             }
-            source = current.source();
+        } else {
+            Self::Storage {
+                operation,
+                source: Box::new(source),
+            }
         }
-        detail
     }
+
+    pub fn is_sqlite_disk_image_corrupt(&self) -> bool {
+        match self {
+            Self::Corrupt { .. } => true,
+            Self::Storage { source, .. } => {
+                error_chain_is_sqlite_disk_image_corrupt(source.as_ref())
+            }
+            _ => false,
+        }
+    }
+
+    pub fn durable_detail(&self) -> String {
+        durable_error_detail(self)
+    }
+}
+
+pub fn durable_error_detail(error: &dyn Error) -> String {
+    let mut detail = error.to_string();
+    let mut source = error.source();
+    while let Some(current) = source {
+        let message = current.to_string();
+        if !detail.ends_with(&message) {
+            detail.push_str(": ");
+            detail.push_str(&message);
+        }
+        source = current.source();
+    }
+    detail
+}
+
+pub fn error_chain_is_sqlite_disk_image_corrupt(error: &(dyn Error + Send + Sync)) -> bool {
+    let mut current: Option<&dyn Error> = Some(error);
+    while let Some(err) = current {
+        if sqlite_disk_image_corrupt_message(&err.to_string()) {
+            return true;
+        }
+        current = err.source();
+    }
+    false
+}
+
+fn sqlite_disk_image_corrupt_message(message: &str) -> bool {
+    message.contains("database disk image is malformed")
+        || message.contains("file is not a database")
+        || message.contains("malformed database schema")
+        || message.contains("SQLITE_CORRUPT")
+        || message.contains("SQLITE_NOTADB")
 }
 
 pub type ProjectionStoreResult<T> = Result<T, ProjectionStoreError>;

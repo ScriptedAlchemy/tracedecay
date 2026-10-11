@@ -23,6 +23,15 @@ pub fn render(view: CanonicalHumanView) -> MarkdownView {
     let mut text = format!("## {}\n", escape_text(&view.heading));
     for field in view.fields {
         match field.value {
+            HumanFieldValue::Markdown(value) => {
+                text.push_str("\n### ");
+                text.push_str(field.label);
+                text.push_str("\n\n");
+                text.push_str(&value);
+                if !value.ends_with('\n') {
+                    text.push('\n');
+                }
+            }
             HumanFieldValue::Block(value) => {
                 text.push_str("\n### ");
                 text.push_str(field.label);

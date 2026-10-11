@@ -307,8 +307,8 @@ mod tests {
         HANDWRITTEN_DEFINITION_OPERATIONS, application_definitions, application_input_schema,
     };
     use crate::definitions::{
-        add_format_property, add_registered_project_selector_properties,
-        get_maximal_tool_definitions, project_input_schema,
+        add_format_property, add_registered_project_selector_properties, get_tool_definitions,
+        project_input_schema,
     };
     use tracedecay_tool_catalog::{ApplicationSurfaceOperation, OperationId};
 
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn code_navigation_reads_publish_only_their_short_tool_names() {
-        let advertised = get_maximal_tool_definitions().expect("advertised definitions");
+        let advertised = get_tool_definitions().expect("advertised definitions");
         for operation in [
             ApplicationSurfaceOperation::CodeCallers,
             ApplicationSurfaceOperation::CodeCallees,
@@ -384,7 +384,7 @@ mod tests {
         let registry = tracedecay_contracts::mcp_executable_binding_registry()
             .expect("application MCP registry");
         let definitions = application_definitions().expect("application definitions");
-        let advertised = get_maximal_tool_definitions().expect("advertised definitions");
+        let advertised = get_tool_definitions().expect("advertised definitions");
 
         for operation in ApplicationSurfaceOperation::ALL {
             let descriptor = handlers

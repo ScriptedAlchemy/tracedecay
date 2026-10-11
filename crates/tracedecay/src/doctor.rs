@@ -170,7 +170,6 @@ pub async fn run_doctor(
     let upload_enabled = join_doctor_check(independent.upload).await?;
     check_user_config(&mut dc, profile.data_dir(), upload_enabled.as_ref());
     independent.network.admit_worldwide(upload_enabled.as_ref());
-    dc.replay_from(join_doctor_check(independent.external_tools).await?);
     dc.replay_from(join_doctor_check(independent.hosts).await?);
     independent
         .network
@@ -194,7 +193,6 @@ struct IndependentDoctorChecks {
     >,
     watcher: tokio::task::JoinHandle<DoctorCounters>,
     upload: tokio::task::JoinHandle<tracedecay_domain::errors::Result<UploadSetting>>,
-    external_tools: tokio::task::JoinHandle<DoctorCounters>,
     hosts: tokio::task::JoinHandle<DoctorCounters>,
     network: DoctorNetworkChecks,
 }
@@ -255,7 +253,6 @@ fn launch_independent_doctor_checks(
                 Ok(UploadSetting::DaemonUnavailable)
             }
         }),
-        external_tools: spawn_doctor_check(|| collect_quiet(check_external_tools)),
         hosts: spawn_doctor_check(move || {
             collect_quiet(|dc| check_host_integrations(dc, &profile_for_hosts, &project_for_hosts))
         }),
@@ -1426,45 +1423,6 @@ fn tracked_hosts(dc: &mut DoctorCounters, profile_root: &Path) -> Vec<String> {
             Vec::new()
         }
     }
-}
-
-/// Check optional external tools that gate optional MCP capabilities.
-#[tracing::instrument(name = "doctor.check.external_tools", level = "trace", skip_all)]
-fn check_external_tools(dc: &mut DoctorCounters) {
-    dc.section("External tools");
-    let diagnostics = tracedecay_mcp::ast_grep_diagnostics_json();
-    let installed = json_bool(&diagnostics, "installed");
-    let rewrite_available = json_bool(&diagnostics, "rewrite_available");
-    let version = diagnostics
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
-    let message = diagnostics
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("ast-grep status unavailable");
-
-    if rewrite_available {
-        dc.pass(&format!("ast-grep {version}: rewrite support available"));
-        return;
-    }
-
-    if installed {
-        dc.warn(&format!(
-            "ast-grep {version}: optional ast-grep-backed tools are unavailable"
-        ));
-    } else {
-        dc.warn("ast-grep not found on PATH; optional ast-grep-backed tools are hidden");
-    }
-    dc.info(message);
-    dc.info("Install or update ast-grep, then rerun `tracedecay install` or `tracedecay update-plugin` if your agent integration caches tool metadata.");
-}
-
-fn json_bool(value: &serde_json::Value, key: &str) -> bool {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
 }
 
 struct DoctorNetworkChecks {

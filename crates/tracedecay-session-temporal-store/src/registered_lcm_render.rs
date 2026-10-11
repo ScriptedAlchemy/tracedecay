@@ -14,7 +14,7 @@ use tracedecay_lcm::contracts::{
     LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, validate_payload_ref,
 };
 use tracedecay_lcm::raw::{RAW_MESSAGE_METADATA_SELECT_COLUMNS, raw_message_metadata_from_row};
-use tracedecay_lcm::schema::SUMMARY_VISIBLE_SQL;
+use tracedecay_lcm::schema::{RAW_MESSAGE_UNPUBLISHED_SQL, SUMMARY_VISIBLE_SQL};
 use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Row, Value, params, params_from_iter};
 
@@ -124,6 +124,7 @@ pub(super) async fn describe(
         provider: request.provider,
         session_id: request.session_id,
         raw_message_count: counts.raw_messages,
+        unpublished_message_count: counts.unpublished_messages,
         summary_node_count: counts.summary_nodes,
         external_payload_count: counts.external_payloads,
         first_store_id: counts.first_store_id,
@@ -263,6 +264,7 @@ struct DescribeCounts {
     external_payloads: i64,
     first_store_id: Option<i64>,
     last_store_id: Option<i64>,
+    unpublished_messages: i64,
 }
 
 async fn describe_counts(
@@ -283,7 +285,10 @@ async fn describe_counts(
                  (SELECT MIN(store_id) FROM lcm_raw_messages
                   WHERE provider = ?1 AND session_id = ?2),
                  (SELECT MAX(store_id) FROM lcm_raw_messages
-                  WHERE provider = ?1 AND session_id = ?2)"
+                  WHERE provider = ?1 AND session_id = ?2),
+                 (SELECT COUNT(*) FROM lcm_raw_messages AS raw
+                  WHERE raw.provider = ?1 AND raw.session_id = ?2
+                    AND {RAW_MESSAGE_UNPUBLISHED_SQL})"
         ),
         params![provider, session_id],
     )
@@ -297,6 +302,7 @@ async fn describe_counts(
         external_payloads: field!(&row, 2)?,
         first_store_id: field!(&row, 3)?,
         last_store_id: field!(&row, 4)?,
+        unpublished_messages: field!(&row, 5)?,
     })
 }
 

@@ -169,14 +169,13 @@ ast-grep uses a pattern language based on concrete code templates, where `$NAME`
 $OBJ.define($NAME, $VALUE)
 ```
 
-tracedecay already shells out to `ast-grep` for `tracedecay_ast_grep_rewrite`. ast-grep is language-aware (the same pattern matches the correct AST nodes across formatting variants).
+tracedecay already runs ast-grep in-process for `tracedecay_ast_grep_search` and `tracedecay_ast_grep_rewrite`. ast-grep is language-aware (the same pattern matches the correct AST nodes across formatting variants).
 
 | | |
 |---|---|
 | **Pro** | Familiar to anyone who has written a code pattern; the pattern looks like the code it matches |
 | **Pro** | Cross-language: the same template works across languages that share call-site syntax |
-| **Con** | External binary required; subprocess per file during sync is slow at scale |
-| **Con** | Optional dependency, users without ast-grep installed get silent no-ops |
+| **Pro** | No external dependency: the engine and grammars are already linked into the binary |
 | **Con** | Less precise than tree-sitter queries: `$NAME` matches any expression, not just string literals |
 
 ### Option C, regex with structural scope

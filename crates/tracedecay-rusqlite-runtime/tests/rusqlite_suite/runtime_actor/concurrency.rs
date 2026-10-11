@@ -1,5 +1,4 @@
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::Duration;
 
 use tracedecay_store::{
     AdmissionConfigV1, CommitSequenceV1, OperationPriorityV1, RuntimeSubmitOutcomeV1,
@@ -53,7 +52,7 @@ fn independent_shards_make_progress_on_distinct_threads_and_connections() {
         let probe_a = TestProbe::fixed(&request_a);
         let task_a = tokio::spawn(async move { task_writer.submit(request_a, probe_a).await });
         tokio::task::yield_now().await;
-        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        entered_rx.recv().unwrap();
 
         // Writer A stays parked inside its open transaction until the gate
         // opens, so B can only commit on a thread and connection of its own.

@@ -14,18 +14,11 @@ use std::process::Command;
 use crate::common::apply_tracedecay_home_env;
 use tempfile::TempDir;
 use tracedecay_mcp::{get_tool_definitions, render_tool_cli_help};
-use tracedecay_runtime_core::ast_grep::{AST_GREP_BIN_ENV, ast_grep_command};
 
-/// The catalog drops `ast_grep_rewrite` when ast-grep is unavailable, and the
-/// child's hermetic `PATH` cannot see an ast-grep the test process found on
-/// the operator's `PATH`. Handing the child the executable this process
-/// resolved keeps both catalogs probing the same host.
 fn isolated_tracedecay_command(home: &TempDir) -> Command {
     let mut command = Command::new(crate::tracedecay_exe());
     apply_tracedecay_home_env(&mut command, home.path());
-    command
-        .current_dir(home.path())
-        .env(AST_GREP_BIN_ENV, ast_grep_command().get_program());
+    command.current_dir(home.path());
     command
 }
 

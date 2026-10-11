@@ -192,7 +192,7 @@ impl DaemonSessionRetrievalService {
         }
     }
 
-    fn converging_projection_unavailable(
+    pub(super) fn converging_projection_unavailable(
         &self,
         unavailable: &SessionRetrievalUnavailable,
     ) -> Option<SessionRetrievalUnavailable> {
@@ -306,6 +306,7 @@ impl DaemonSessionRetrievalService {
                 mut items,
                 freshness,
                 omitted,
+                ..
             } => {
                 // A describe is a point read over a deliberately single-item
                 // page, so a pagination-only partial (zero genuine omissions)
@@ -580,6 +581,7 @@ impl DaemonSessionRetrievalService {
                 mut items,
                 freshness,
                 omitted,
+                ..
             } => {
                 let retrieval =
                     LcmRetrievalOutcome::partial(lcm_data_freshness(freshness), omitted);

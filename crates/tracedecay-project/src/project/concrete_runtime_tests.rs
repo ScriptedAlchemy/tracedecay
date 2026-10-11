@@ -53,6 +53,7 @@ impl CodeGraphProjectionReadPort for FixtureCodeGraphProjection {
                 self.scope.clone(),
                 Arc::clone(&self.store),
                 tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+                None,
             )
         })
     }
