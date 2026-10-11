@@ -40,6 +40,8 @@ its wall-clock stack samples (10 of 202), half of all samples inside
 Fix carried in `scripts/bazel/patches/turso_core-evictable-count-on-commit.patch`:
 `PageCache::notify_page_clean`, called for every committed page in
 `CommitState::WalCommitDone` before `finalize_committed_pages`, raises the
-count for a cached dirty, unspilled page. Measured effect is in
-`benchmark_data/storage-concurrency/native-perf.jsonl` (tags `perf2-h2` and
-`perf2-writer`, engine `native-h2` against `native-base`).
+count for a cached dirty, unspilled page. Measured over five interleaved runs
+(`benchmark_data/storage-concurrency/native-perf.jsonl`, tag `perf2-writer`,
+engine `native-h2` against `native-base`), writer thread only: cycles:u
+65.2 G to 59.5 G (-8.7%), instructions:u 99.3 G to 97.9 G, fastest ingest
+16.9 s to 15.4 s.

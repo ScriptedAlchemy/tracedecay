@@ -28,7 +28,6 @@ const MAX_SQL_PARAMETERS: usize = 32_766;
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const STATEMENT_CACHE_CAPACITY: usize = 128;
 const SLEEP_SLICE: Duration = Duration::from_millis(5);
-const IDENTITY_RECHECK: Duration = Duration::from_millis(10);
 const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `PRAGMA application_id` of every native store: "TDN1".
@@ -155,8 +154,6 @@ struct SlotState {
     // ponytail: one counter per connection, so two statements stepped in
     // alternation share a budget; per-statement counters if that matters.
     ticks: u64,
-    /// When a progress tick last checked the file identity.
-    identity_checked_at: Option<Instant>,
 }
 
 impl GuardSlot {
@@ -199,29 +196,16 @@ impl GuardSlot {
         self.check_with(ExecutionGuard::verify_admission, verify_identity)
     }
 
-    /// The file identity is a `stat` of the pathname, which costs more than
-    /// a thousand VM ops of an insert; a running statement re-checks it once
-    /// per [`IDENTITY_RECHECK`] rather than on every tick.
     fn progress(&self) -> bool {
-        let (over_budget, identity_due) = {
+        let over_budget = {
             let mut state = self.state();
             state.ticks += 1;
-            let now = Instant::now();
-            let identity_due = state
-                .identity_checked_at
-                .is_none_or(|checked| now.duration_since(checked) >= IDENTITY_RECHECK);
-            if identity_due {
-                state.identity_checked_at = Some(now);
-            }
-            (
-                !state.suspended && state.tick_budget.is_some_and(|budget| state.ticks > budget),
-                identity_due,
-            )
+            !state.suspended && state.tick_budget.is_some_and(|budget| state.ticks > budget)
         };
         let verdict = if over_budget {
             Err(Error::OperationLimitExceeded)
         } else {
-            self.check_with(ExecutionGuard::verify, identity_due)
+            self.check()
         };
         match verdict {
             Ok(()) => false,
