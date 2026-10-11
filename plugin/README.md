@@ -65,11 +65,10 @@ never a doubled `tracedecay`.
   `embedded/server.mjs` and `embedded/app.html` like the Cursor native
   extension; `pnpm run check:embedded` guards drift. See
   `chatgpt-extension/README.md`.
-- `.mcp.json`: Claude MCP config. It passes `--claude-code-tool-search` so
-  Claude Code's native tool search can defer non-core tools. Codex deploys
-  `plugin/mcp.json` as `.mcp.json` and keeps plain `serve`. Drop the Claude
-  flag under `ANTHROPIC_BASE_URL` proxies, Foundry, or
-  `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`.
+- `.mcp.json`: Claude MCP config. Claude rewrites the command to the resolved
+  binary path. It passes `serve --full-tool-list` because Claude Code defers
+  tool schemas itself; plain `serve` lists tools outside the always-loaded set
+  as stubs.
 - `mcp-cursor.json`: Cursor MCP config, deployed as `mcp.json`.
 - `.kimi-plugin/plugin.json`: Kimi Code manifest (skills, commands, hooks).
   MCP is registered in Kimi session/user `mcp.json`, not the plugin manifest.

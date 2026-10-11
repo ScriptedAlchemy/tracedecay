@@ -31,6 +31,12 @@ const VM_OP_BUDGET: u64 = 25_000_000;
 
 pub const ENGINE: Engine = Engine::Native;
 
+/// The engine opens the descriptor the driver holds, never the pathname, so
+/// it has no pathname limit of its own.
+pub fn max_database_path_bytes() -> Option<usize> {
+    None
+}
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;

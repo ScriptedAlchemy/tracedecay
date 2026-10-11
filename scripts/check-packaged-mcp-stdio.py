@@ -28,13 +28,10 @@ INSPECTOR_VERSION = os.environ.get(
 )
 REQUIRED_TOOLS = {
     "tracedecay_search",
-    "tracedecay_tool_search",
-    "tracedecay_test_map",
-}
-SEARCHABLE_TOOLS = {
     "tracedecay_diagnostics",
     "tracedecay_impact",
     "tracedecay_affected",
+    "tracedecay_test_map",
 }
 
 
@@ -130,6 +127,13 @@ def wait_for_daemon(
             return
         time.sleep(0.05)
     raise SystemExit("packaged daemon endpoint did not become ready")
+
+
+def problem_of(payload: dict) -> dict:
+    """The typed problem a tool-result error carries in structuredContent."""
+    structured = payload.get("structuredContent")
+    problem = structured.get("problem") if isinstance(structured, dict) else None
+    return problem if isinstance(problem, dict) else {}
 
 
 def main() -> int:
@@ -234,41 +238,6 @@ def main() -> int:
                 "MCP tools/list omitted required tools: " + ", ".join(missing)
             )
 
-        search = inspect(
-            npx,
-            binary,
-            fixture,
-            environment,
-            "--method",
-            "tools/call",
-            "--tool-name",
-            "tracedecay_tool_search",
-            "--tool-arg",
-            "query=",
-        )
-        try:
-            search_payload = json.loads(search.stdout)
-        except json.JSONDecodeError as error:
-            raise SystemExit(
-                "tracedecay_tool_search returned no typed payload: "
-                + search.stderr.strip()
-            ) from error
-        search_text = "\n".join(
-            item.get("text", "")
-            for item in search_payload.get("content", [])
-            if isinstance(item, dict)
-            and item.get("type") == "text"
-            and isinstance(item.get("text"), str)
-        )
-        missing_searchable = sorted(
-            name for name in SEARCHABLE_TOOLS if name not in search_text
-        )
-        if missing_searchable:
-            raise SystemExit(
-                "tracedecay_tool_search omitted withheld tools: "
-                + ", ".join(missing_searchable)
-            )
-
         diagnostics = inspect(
             npx,
             binary,
@@ -301,11 +270,15 @@ def main() -> int:
             raise SystemExit("tracedecay_diagnostics returned no typed text result")
         lowered = diagnostic_text.lower()
         if diagnostic_payload.get("isError") is True:
-            if "unavailable" not in lowered or not any(
-                marker in lowered for marker in ("daemon", "authority", "service")
+            # A fixture without a configured compiler is a typed `unsupported`
+            # problem; a missing daemon authority is `unavailable`.
+            if problem_of(diagnostic_payload).get("kind") not in (
+                "unavailable",
+                "unsupported",
             ):
                 raise SystemExit(
-                    "tracedecay_diagnostics error was not typed as unavailable"
+                    "tracedecay_diagnostics error was not a typed unavailable or "
+                    "unsupported problem: " + diagnostic_text
                 )
         else:
             if diagnostics.returncode != 0:
@@ -347,8 +320,20 @@ def main() -> int:
             "definitely_not_a_tool",
             check=False,
         )
-        if unknown.returncode == 0:
-            raise SystemExit("unknown MCP tool unexpectedly succeeded")
+        try:
+            unknown_payload = json.loads(unknown.stdout)
+        except json.JSONDecodeError as error:
+            raise SystemExit(
+                "unknown MCP tool returned no typed refusal: " + unknown.stderr.strip()
+            ) from error
+        if (
+            unknown_payload.get("isError") is not True
+            or problem_of(unknown_payload).get("code") != "unknown_tool"
+        ):
+            raise SystemExit(
+                "unknown MCP tool was not a typed unknown_tool refusal: "
+                + unknown.stdout.strip()
+            )
     finally:
         terminate(daemon)
 

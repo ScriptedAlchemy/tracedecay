@@ -12,16 +12,16 @@ use tracedecay_domain::{
     ProjectionOutputOrdinalV1, ProviderId, RetentionClass, RetrievalAnchorId,
     RetrievalAnchorRecord, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, TemporalAssertionKindV1, TemporalValidityV1,
-    UtcMicros, derive_exact_observation_anchor_id,
+    UserProfileId, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjection, ObservationProjectionStore, ObservationStore,
     ObservationWrite, ProjectionSkipReason, ProjectionStoreError,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCompletionRequestV1,
-    SessionRefreshFrontierV1, SessionRefreshProgressV1, SessionRefreshStore,
-    SessionRefreshTerminalStateV1, SessionRetrievalStore, SessionStoreError, SessionStoreResult,
-    SessionTemporalProjectionBatchV1,
+    SessionRefreshFrontierV1, SessionRefreshProgressV1, SessionRefreshReceiptRequestV1,
+    SessionRefreshStore, SessionRefreshTerminalStateV1, SessionRetrievalStore, SessionStoreError,
+    SessionStoreResult, SessionTemporalProjectionBatchV1,
 };
 use tracedecay_temporal_query::execution::ExecutionControl;
 
@@ -29,7 +29,8 @@ use super::super::refresh::SessionRefreshRestartStateV1;
 use super::materialize::*;
 use super::record_canonical_observation_effect;
 use crate::handle::SessionTemporalRegisteredDb;
-use crate::test_support::QueryCountingConnection;
+use crate::relations::{SessionRelationProjection, SessionRelationScope};
+use crate::test_support::{FailingRegisteredDb, QueryCountingConnection};
 use crate::{SessionTemporalAccess, SessionTemporalRefreshDiscoveryCursor, SessionTemporalStore};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::{
@@ -800,6 +801,122 @@ async fn terminal_receipt_rejects_corrupted_derived_evidence() {
         .await
         .expect_err("derived evidence corruption must invalidate the terminal receipt");
     assert!(matches!(error, SessionStoreError::Storage { .. }));
+}
+
+#[tokio::test]
+async fn grouped_completion_revalidates_evidence_after_staging() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = temporal_store(&runtime);
+    let session_id = fixture_session("session.projector.staged-evidence-corruption");
+    for ordinal in 0..3 {
+        let (observation, write) = fixture_observation(&session_id, ordinal, None, ordinal > 0);
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+    }
+    let begin = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(3, 0).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let recovery = store
+        .session_refresh_recovery(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let (progress, batch) = store
+        .materialize_session_temporal_refresh_batch_for_test(&recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .persist_session_refresh_projection_batch(progress.clone(), batch)
+        .await
+        .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let access = SessionTemporalAccess::new(database);
+    let control = ExecutionControl::default();
+    let request = SessionRefreshCompletionRequestV1::new(
+        begin.operation_id().clone(),
+        session_id.clone(),
+        progress.frontier(),
+        *progress.coverage(),
+    )
+    .unwrap();
+    let crate::SessionRefreshCompletionStage::Ready {
+        request,
+        relation_projection,
+    } = access
+        .stage_session_refresh_completion(request, &control)
+        .await
+        .unwrap()
+    else {
+        panic!("fresh completion must be staged");
+    };
+    access
+        .record_relation_receipts_group(
+            std::slice::from_ref(relation_projection.as_ref()),
+            &control,
+        )
+        .await
+        .unwrap()
+        .remove(0)
+        .unwrap();
+    let snapshot = database.read_snapshot().await.unwrap();
+    let verified = access
+        .apply_candidate_relation_projection(&snapshot, &relation_projection, &control)
+        .await
+        .unwrap();
+    drop(snapshot);
+    let generation =
+        tracedecay_domain::SessionProjectionGenerationV1::new(verified.generation).unwrap();
+    let validation_snapshot = database.read_snapshot().await.unwrap();
+    super::validate_final_projection_receipt(
+        &validation_snapshot,
+        &session_id,
+        generation,
+        recovery.frozen_watermarks(),
+        &verified,
+        &control,
+    )
+    .await
+    .unwrap();
+    drop(validation_snapshot);
+
+    let transaction = database.begin_write_transaction().await.unwrap();
+    let changed = transaction.execute(
+        "UPDATE session_derived_evidence SET evidence_json = json_set(evidence_json, '$.corrupted', 1)
+         WHERE session_id = ?1 AND generation = ?2",
+        params![session_id.as_str(), i64::try_from(generation.value()).unwrap()],
+    ).await.unwrap();
+    assert!(
+        changed > 0,
+        "fixture must produce receipt-bound derived evidence"
+    );
+    transaction.commit().await.unwrap();
+
+    let error = access
+        .complete_session_refresh_group(vec![(request, verified)], control)
+        .await
+        .unwrap()
+        .remove(0)
+        .expect_err("staged validation must not authorize changed evidence at commit");
+    assert!(matches!(error, SessionStoreError::Storage { .. }));
+    assert!(
+        access
+            .session_refresh_receipt_result(SessionRefreshReceiptRequestV1::new(
+                begin.operation_id().clone(),
+                session_id
+            ))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -3268,4 +3385,174 @@ async fn realistic_user_sessions_dbstat_names_dominant_bytes() {
         print_user_sessions_dbstat(&snapshot, family, n).await;
         previous_family = family;
     }
+}
+
+#[tokio::test]
+async fn grouped_receipt_savepoint_failure_aborts_the_group() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database");
+    let scope = SessionRelationScope::profile_sessions(
+        UserProfileId::new("profile.savepoint-abort").expect("profile"),
+    );
+    let projections = ["session.savepoint-abort-a", "session.savepoint-abort-b"]
+        .iter()
+        .map(|name| SessionRelationProjection {
+            scope: scope.clone(),
+            session_id: fixture_session(name),
+            generation: 1,
+            summaries: Vec::new(),
+            logical_copies: Vec::new(),
+            thread_hierarchy: Vec::new(),
+            agent_hierarchy: Vec::new(),
+            parent_session_id: None,
+            workflow_agents: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let failing = FailingRegisteredDb::fail_nth_prefixed_execute(database, "SAVEPOINT", 2);
+    let access = SessionTemporalAccess::new(&failing);
+    let error = access
+        .record_relation_receipts_group(&projections, &ExecutionControl::default())
+        .await
+        .expect_err("savepoint failure must abort the grouped commit");
+    assert_eq!(
+        error.to_string(),
+        "session-temporal storage operation complete session refresh failed: \
+         SQLite runtime failed: injected savepoint failure"
+    );
+    assert_eq!(
+        fixture_receipt_state(&runtime, &projections[0].session_id).await,
+        None,
+        "the aborted group must not leave the first item's receipt committed"
+    );
+    assert_eq!(
+        fixture_receipt_state(&runtime, &projections[1].session_id).await,
+        None,
+        "the aborted group must not leave a later item's receipt committed"
+    );
+}
+
+async fn fixture_receipt_state(
+    runtime: &HostAdmissionTestRuntimeV1,
+    session_id: &SessionId,
+) -> Option<String> {
+    let snapshot = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database")
+        .read_snapshot()
+        .await
+        .expect("receipt snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT state FROM session_relation_receipts WHERE session_id = ?1",
+            params![session_id.as_str()],
+        )
+        .await
+        .expect("receipt query");
+    rows.next()
+        .await
+        .expect("receipt row")
+        .map(|row| row.get::<String>(0).expect("state"))
+}
+
+/// A failed `{savepoint}_alone` create after a refused batch is the same
+/// transaction boundary failure as a failed base savepoint: the whole
+/// group rolls back, including an earlier item whose refused-batch
+/// fallback already committed a begin under its own savepoint.
+#[tokio::test]
+async fn grouped_begin_alone_savepoint_failure_aborts_the_group() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database");
+    let store = temporal_store(&runtime);
+    let mut items = Vec::new();
+    for (ordinal, session_name) in ["session.savepoint-alone-a", "session.savepoint-alone-b"]
+        .into_iter()
+        .enumerate()
+    {
+        let session_id = fixture_session(session_name);
+        let (observation, write) = fixture_observation(&session_id, ordinal as u64, None, false);
+        Box::pin(persist_fixture(&runtime, observation, write)).await;
+        let request = SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(1, 0).unwrap(),
+        );
+        let crate::SessionRefreshBeginPlanV1::Prepared(recovery) = store
+            .plan_session_refresh_begin(request.clone())
+            .await
+            .expect("plan begin")
+        else {
+            panic!("fresh session must plan a prepared begin");
+        };
+        let (progress, batch) = store
+            .materialize_session_temporal_refresh_batch_for_test(&recovery)
+            .await
+            .expect("materialize batch")
+            .expect("fresh session has a first batch");
+        items.push(crate::SessionRefreshBeginBatchItemV1 {
+            request,
+            accepted_at: recovery.accepted_at(),
+            progress,
+            batch,
+        });
+    }
+    // Item 0's batch refuses at its receipt insert, so its durable begin
+    // commits under `refresh_begin_item_0_alone`. Item 1's batch refuses
+    // the same way, then its `_alone` create fails — a boundary failure
+    // that must abort the whole group rather than acknowledge item 0.
+    let failing = FailingRegisteredDb::fail_prefixed_executes(
+        database,
+        &[
+            ("INSERT INTO session_temporal_projection_receipts", 1),
+            ("SAVEPOINT refresh_begin_item_1_alone", 1),
+        ],
+    );
+    let access = SessionTemporalAccess::new(&failing);
+    let error = access
+        .commit_session_refresh_begin_batch_group(items, ExecutionControl::default())
+        .await
+        .expect_err("the failed _alone savepoint must abort the grouped commit");
+    assert_eq!(
+        error.to_string(),
+        "session-temporal storage operation persist session refresh progress failed: \
+         SQLite runtime failed: injected savepoint failure"
+    );
+    for item in ["session.savepoint-alone-a", "session.savepoint-alone-b"] {
+        assert_eq!(
+            fixture_refresh_state(&runtime, &fixture_session(item)).await,
+            None,
+            "the aborted group must not leave {item}'s begin committed"
+        );
+    }
+}
+
+async fn fixture_refresh_state(
+    runtime: &HostAdmissionTestRuntimeV1,
+    session_id: &SessionId,
+) -> Option<String> {
+    let snapshot = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("profile registered database")
+        .read_snapshot()
+        .await
+        .expect("refresh snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT state FROM session_refresh_operations WHERE session_id = ?1",
+            params![session_id.as_str()],
+        )
+        .await
+        .expect("refresh query");
+    rows.next()
+        .await
+        .expect("refresh row")
+        .map(|row| row.get::<String>(0).expect("state"))
 }

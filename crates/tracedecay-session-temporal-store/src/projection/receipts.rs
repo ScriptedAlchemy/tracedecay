@@ -27,7 +27,7 @@ use crate::sql::{SHARED_GENERATION_TABLES, live_effect_predicate};
     skip_all
 )]
 pub async fn validate_final_projection_receipt(
-    conn: &impl crate::handle::SessionTemporalExec,
+    conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &tracedecay_domain::SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
     watermarks: &tracedecay_store::SessionFrozenWatermarksV1,
@@ -203,7 +203,7 @@ pub(crate) async fn base_source_frontier(
 /// proves only the effects past the base frontier against the assertions
 /// whose subjects it introduced.
 pub(super) async fn validate_canonical_assertion_completeness(
-    conn: &impl crate::handle::SessionTemporalExec,
+    conn: &impl crate::handle::SessionTemporalQuery,
     session_id: &tracedecay_domain::SessionId,
     generation: i64,
     base_frontier: u64,

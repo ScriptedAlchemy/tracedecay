@@ -23,9 +23,10 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1,
     SettingKey, SettingScopeV1, SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY,
     USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
-    USER_UPLOAD_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
-    USER_WORK_EXPERTISE_CONSENT_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
-    WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
+    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1,
+    safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 use tracedecay_domain::{DomainError, validate_index_path_patterns};
@@ -416,6 +417,11 @@ fn register_profile_scalar_settings(
     for (key, default_value, restart_requirement) in [
         (
             USER_UPLOAD_ENABLED_SETTING_KEY,
+            ConfigurationValueV1::Boolean(false),
+            RestartRequirementV1::None,
+        ),
+        (
+            USER_REPEATED_QUERY_HINTS_SETTING_KEY,
             ConfigurationValueV1::Boolean(false),
             RestartRequirementV1::None,
         ),
@@ -866,6 +872,11 @@ mod user_profile_settings_tests {
         for (raw_key, kind, restart) in [
             (
                 USER_UPLOAD_ENABLED_SETTING_KEY,
+                ConfigurationValueKindV1::Boolean,
+                RestartRequirementV1::None,
+            ),
+            (
+                USER_REPEATED_QUERY_HINTS_SETTING_KEY,
                 ConfigurationValueKindV1::Boolean,
                 RestartRequirementV1::None,
             ),

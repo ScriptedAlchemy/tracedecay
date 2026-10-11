@@ -12,9 +12,6 @@ use tracedecay_tool_catalog::{CapabilityId, FeatureId, ProfileId, ScopeDimension
 
 use super::dispatch::McpDispatchMetadataError;
 
-/// The stdio proxy's session-scoped discovery tool, outside the daemon catalog.
-pub const TOOL_SEARCH_NAME: &str = "tracedecay_tool_search";
-
 /// Documented ceiling for the process-wide discovery cache.
 ///
 /// The live key space is profile × capability-set digest × scope digest.

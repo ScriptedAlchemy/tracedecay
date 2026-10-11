@@ -17,6 +17,21 @@ pub const TOKEN_ACCOUNTING_FOOTER_PREFIX: &str = "tracedecay_metrics:";
 pub const CODE_GRAPH_FRESHNESS_TRAILER_PREFIX: &str = "code_graph_freshness:";
 pub const REQUEST_COST_TRAILER_PREFIX: &str = "tracedecay_cost:";
 
+/// Whether a content block is a trailer or footer appended beside the result
+/// rather than part of it.
+pub fn is_beside_result_block(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with(TOKEN_ACCOUNTING_FOOTER_PREFIX)
+        || is_code_graph_freshness_block(text)
+        || text.starts_with(REQUEST_COST_TRAILER_PREFIX)
+}
+
+/// Whether a content block is the stale `code_graph_freshness` trailer.
+pub fn is_code_graph_freshness_block(text: &str) -> bool {
+    text.trim_start()
+        .starts_with(CODE_GRAPH_FRESHNESS_TRAILER_PREFIX)
+}
+
 /// Token estimate for one rendered result: reading its touched files raw
 /// versus the response it actually delivered, both in [`estimated_tokens`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
