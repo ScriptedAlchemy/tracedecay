@@ -141,7 +141,7 @@ fn monitor_loop(
             }
         }
 
-        let _ = reader.refresh();
+        reader.refresh()?;
         tally.record(reader.drain(ring_cursor));
 
         cost_cache.poll_refresh();
