@@ -4209,12 +4209,42 @@ fn verify_layout_dependent_triggers(
         .filter(|(present, _)| *present)
         .flat_map(|(_, layout)| layout.iter().copied())
     {
-        let expected = format!(
-            "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
-        );
+        let expected = stored_trigger_sql(
+            table,
+            &format!(
+                "CREATE TRIGGER {name} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, '{message}'); END"
+            ),
+        )?;
         verify_trigger_schema(connection, name, table, &expected)?;
     }
     Ok(())
+}
+
+/// The schema text the running engine stores for the trigger `ddl` on
+/// `table`. SQLite keeps the statement as written; the native engine renders
+/// it again from its syntax tree. Rendered once per statement per process.
+fn stored_trigger_sql(table: &str, ddl: &str) -> Result<String, CodeLexicalArtifactErrorV1> {
+    static RENDERED: std::sync::LazyLock<std::sync::Mutex<HashMap<String, String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let mut rendered = RENDERED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(sql) = rendered.get(ddl) {
+        return Ok(sql.clone());
+    }
+    let probe = Connection::open_in_memory().map_err(sqlite_error)?;
+    probe
+        .execute_batch(&format!("CREATE TABLE {table}(x); {ddl};"))
+        .map_err(sqlite_error)?;
+    let sql: String = probe
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'trigger'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    rendered.insert(ddl.to_owned(), sql.clone());
+    Ok(sql)
 }
 
 /// `(trigger name, table, operation, abort message)` of one immutability
@@ -7074,19 +7104,29 @@ mod tests {
             unique_payloads: 1,
             ..CodeLexicalCloneIndexCensusV1::default()
         };
-        let receipt = sourceless_test_receipt(
-            metadata_digest,
-            compute_section_digests(&connection, &ActiveControl).expect("section digests"),
-            sealed_census.clone(),
-            sqlite_file_size(&connection).expect("file size"),
-        )
-        .expect("sealed receipt");
-        connection
-            .execute(
-                "UPDATE artifact_state SET receipt = ?1 WHERE singleton = 1",
-                [padded_receipt(&receipt).expect("padded receipt")],
+        // The receipt binds the size of the file that stores it; rewrite it
+        // until the size it names is the size it leaves.
+        let receipt = loop {
+            let receipt = sourceless_test_receipt(
+                metadata_digest.clone(),
+                compute_section_digests(&connection, &ActiveControl).expect("section digests"),
+                sealed_census.clone(),
+                sqlite_file_size(&connection).expect("file size"),
             )
-            .expect("seal the receipt");
+            .expect("sealed receipt");
+            connection
+                .execute(
+                    "UPDATE artifact_state SET receipt = ?1 WHERE singleton = 1",
+                    [padded_receipt(&receipt).expect("padded receipt")],
+                )
+                .expect("seal the receipt");
+            if sqlite_file_size(&connection).expect("file size") == receipt.file_size_bytes() {
+                break receipt;
+            }
+        };
+        connection
+            .checkpoint(tracedecay_sql::CheckpointMode::Truncate)
+            .expect("fold the sealed fixture");
         drop(connection);
 
         let reader = CodeLexicalArtifactReaderV1::open_with_control(

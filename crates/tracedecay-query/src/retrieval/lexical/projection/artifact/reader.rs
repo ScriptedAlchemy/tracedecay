@@ -3695,7 +3695,7 @@ fn map_private_artifact_file_error(error: std::io::Error) -> CodeLexicalArtifact
 fn map_reader_open_error(path: &Path, error: tracedecay_sql::Error) -> CodeLexicalArtifactErrorV1 {
     match path.try_exists() {
         Ok(false) => CodeLexicalArtifactErrorV1::Missing(error.to_string()),
-        Ok(true) | Err(_) => sqlite_error(error),
+        Ok(true) | Err(_) => sqlite_corrupt(error),
     }
 }
 
@@ -3771,6 +3771,17 @@ mod tests {
     use crate::retrieval::ports::RetrievalExecutionControl;
     use crate::retrieval::ports::RetrievalPortError;
     use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+
+    /// Write the fixture's commits into its main file, where a sealed
+    /// artifact holds them; the native engine keeps them in its WAL until a
+    /// checkpoint.
+    fn fold(connection: &Connection) {
+        tracedecay_sql::ConnectionControl::checkpoint(
+            connection,
+            tracedecay_sql::CheckpointMode::Truncate,
+        )
+        .expect("fold the fixture's journal");
+    }
 
     struct AlwaysActiveControl;
 
@@ -3887,6 +3898,7 @@ mod tests {
                      INSERT INTO t SELECT x, zeroblob(100) FROM n;",
                 )
                 .expect("fill integrity fixture");
+            fold(&connection);
         }
         // Damage the table's root page header; the schema page stays intact,
         // so only a structural scan can notice.
@@ -3946,6 +3958,7 @@ mod tests {
                 connection
                     .pragma_update(None, "user_version", 2i64)
                     .expect("mutate the same artifact inode through SQLite");
+                fold(&connection);
             }
             false
         }
@@ -4054,6 +4067,7 @@ mod tests {
         connection
             .pragma_update(None, "user_version", 1i64)
             .expect("seed artifact");
+        fold(&connection);
         drop(connection);
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .expect("make artifact private");
@@ -4172,6 +4186,7 @@ mod tests {
         connection
             .pragma_update(None, "user_version", 1i64)
             .expect("seed artifact");
+        fold(&connection);
         drop(connection);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .expect("make artifact private");
@@ -4218,12 +4233,14 @@ mod tests {
         connection
             .pragma_update(None, "user_version", 1i64)
             .expect("seed original SQLite header");
+        fold(&connection);
         drop(connection);
         std::fs::copy(&artifact_path, &replacement_path).expect("copy replacement SQLite file");
         let replacement = Connection::open(&replacement_path).expect("open replacement SQLite");
         replacement
             .pragma_update(None, "user_version", 2i64)
             .expect("mutate replacement SQLite header");
+        fold(&replacement);
         drop(replacement);
 
         let opened = std::fs::File::open(&artifact_path).expect("retain original file handle");
@@ -4242,10 +4259,22 @@ mod tests {
             super::verify_named_path_identity(&artifact_path, &opened),
             Err(CodeLexicalArtifactErrorV1::Corrupt(_))
         ));
-        let served_version: i64 = served
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .expect("the opened SQLite connection remains bound to the original file");
-        assert_eq!(served_version, 1);
+        // Neither engine serves the replacement: SQLite stays bound to the
+        // original file, and the native engine refuses a pathname that no
+        // longer names the file it holds.
+        let served_version = served.pragma_query_value(None, "user_version", |row| row.get(0));
+        match tracedecay_sql::ENGINE {
+            tracedecay_sql::Engine::Sqlite => assert_eq!(
+                served_version.expect("the opened SQLite connection stays bound to the original"),
+                1i64
+            ),
+            tracedecay_sql::Engine::Native => assert_eq!(
+                tracedecay_sql::ErrorExt::kind(
+                    &served_version.expect_err("the native engine refuses the moved path")
+                ),
+                tracedecay_sql::ErrorKind::Denied
+            ),
+        }
     }
 
     #[cfg(unix)]
@@ -4259,6 +4288,7 @@ mod tests {
         connection
             .pragma_update(None, "user_version", 1i64)
             .expect("seed original SQLite header");
+        fold(&connection);
         drop(connection);
         std::fs::set_permissions(&artifact_path, std::fs::Permissions::from_mode(0o600))
             .expect("make the artifact private");
@@ -4302,6 +4332,7 @@ mod tests {
         connection
             .pragma_update(None, "user_version", 1i64)
             .expect("seed SQLite header");
+        fold(&connection);
         drop(connection);
         std::fs::set_permissions(&artifact_path, std::fs::Permissions::from_mode(0o644))
             .expect("make the artifact publicly readable");

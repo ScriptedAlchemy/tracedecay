@@ -3438,25 +3438,31 @@ fn annotation_uses_mint_no_lexical_artifact_documents() {
 }
 
 /// Historical revision-10 artifact sealed by the pre-interning writer
-/// (`tests/fixtures/lexical-artifact-v10.sqlite`). Readers refuse it as
-/// incompatible, which withdraws the descriptor so the artifact is rebuilt.
+/// (`tests/fixtures/lexical-artifact-v10.sqlite`). SQLite readers refuse it
+/// as incompatible, which withdraws the descriptor so the artifact is
+/// rebuilt. The native engine refuses the SQLite-format file before reading
+/// it, which the reader reports as corrupt rather than an unavailable store a
+/// scheduler would retry.
 #[test]
 fn reader_refuses_historical_v10_writer_artifact_as_incompatible() {
     let checked_in =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lexical-artifact-v10.sqlite");
     let control = ArtifactControl { cancelled: false };
-    let on_disk_revision: i64 = tracedecay_sql::Connection::open(&checked_in)
-        .expect("inspect v10 fixture")
-        .query_row(
-            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("read v10 format revision");
-    assert!(
-        on_disk_revision < i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1),
-        "the checked-in artifact must be behind the revision this build serves, got {on_disk_revision}"
-    );
+    let native = tracedecay_sql::ENGINE == tracedecay_sql::Engine::Native;
+    if !native {
+        let on_disk_revision: i64 = tracedecay_sql::Connection::open(&checked_in)
+            .expect("inspect v10 fixture")
+            .query_row(
+                "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read v10 format revision");
+        assert!(
+            on_disk_revision < i64::from(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1),
+            "the checked-in artifact must be behind the revision this build serves, got {on_disk_revision}"
+        );
+    }
 
     let directory = tempfile::tempdir().expect("private v10 reopen dir");
     let artifact_path = directory.path().join("lexical-artifact-v10.sqlite");
@@ -3481,7 +3487,11 @@ fn reader_refuses_historical_v10_writer_artifact_as_incompatible() {
         panic!("a revision-10 artifact must not be served");
     };
     assert!(
-        matches!(error, CodeLexicalArtifactErrorV1::Incompatible(_)),
+        if native {
+            matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_))
+        } else {
+            matches!(error, CodeLexicalArtifactErrorV1::Incompatible(_))
+        },
         "unexpected error: {error:?}"
     );
 }
