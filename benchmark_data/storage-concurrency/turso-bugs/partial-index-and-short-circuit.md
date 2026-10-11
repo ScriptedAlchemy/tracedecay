@@ -47,3 +47,29 @@ CASE WHEN CASE WHEN json_valid(m) THEN json_extract(m, '$.a') END IS NOT NULL
 reads `$.ingest_protection.sanitization_receipt`) uses that form; before it,
 tombstoning a payload placeholder in a row whose metadata is not JSON failed
 the payload delete (`gc::tests::delete_tombstones_only_the_owner_row`).
+
+## The same gap in a partial index's key
+
+Turso also computes a partial index's key expressions for a row its
+predicate excludes:
+
+```sql
+CREATE TABLE observations (observation_id TEXT PRIMARY KEY,
+  observation_json TEXT NOT NULL, sequence INTEGER NOT NULL);
+CREATE INDEX idx_v ON observations (
+  json_extract(observation_json, '$.identity.source.session_id'), sequence
+) WHERE json_valid(observation_json);
+INSERT INTO observations VALUES ('o1', '{"identity":{"source":{"session_id":"s"}}}', 1);
+UPDATE observations SET observation_json = '{' WHERE observation_id = 'o1';
+```
+
+- SQLite: the UPDATE succeeds and the row leaves the index.
+- Turso: `Parse error: malformed JSON`.
+
+`tracedecay-global-db` `idx_observations_valid_session_sequence` has this
+shape, so a malformed `observation_json` cannot be written on native. Its key
+would need the nested guard,
+`json_extract(CASE WHEN json_valid(observation_json) THEN observation_json END, '$...')`,
+and the lifecycle lookup the same expression. The
+`tracedecay-session-temporal-store` hydration corruption fixture writes `'[]'`
+(valid JSON, not an observation) instead.

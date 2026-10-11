@@ -420,30 +420,36 @@ fn seed_other_run_receipts(
     runs: std::ops::Range<usize>,
     owner_json: &str,
 ) {
-    let mut sql = String::from("BEGIN;");
-    for run in runs {
-        sql.push_str(&format!(
-            "INSERT INTO memory_v2_operation_receipts (
+    let (start, last) = (runs.start, runs.end - 1);
+    let sequence = format!(
+        "WITH RECURSIVE run(n) AS (
+             VALUES({start}) UNION ALL SELECT n + 1 FROM run WHERE n < {last}
+         )"
+    );
+    connection
+        .execute_batch(&format!(
+            "BEGIN;
+             {sequence}
+             INSERT INTO memory_v2_operation_receipts (
                  owner_kind, project_id, operation_id, operation_kind,
                  request_digest, receipt_json, recorded_at
-             ) VALUES (
-                 'profile', '', 'curation.other.{run}', 'curation', 'digest.{run}',
-                 '{{\"automation_run_id\":\"run.other.{run}\"}}', {run}
-             );
+             )
+             SELECT 'profile', '', 'curation.other.' || n, 'curation', 'digest.' || n,
+                    json_object('automation_run_id', 'run.other.' || n), n
+             FROM run;
+             {sequence}
              INSERT INTO memory_v2_automatic_fact_receipts (
                  apply_id, owner_kind, project_id, owner_json, idempotency_key,
                  request_digest, request_json, evidence_json, state,
                  quarantine_reason, recorded_at
-             ) VALUES (
-                 'apply.other.{run}', 'profile', '', '{owner_json}', 'automatic.other.{run}',
-                 'automatic-digest.{run}', '{{\"automation_run_id\":\"run.other.{run}\"}}',
-                 '{{}}', 'quarantined', 'fixture', {run}
-             );"
-        ));
-    }
-    sql.push_str("COMMIT;");
-    connection
-        .execute_batch(&sql)
+             )
+             SELECT 'apply.other.' || n, 'profile', '', '{owner_json}',
+                    'automatic.other.' || n, 'automatic-digest.' || n,
+                    json_object('automation_run_id', 'run.other.' || n),
+                    '{{}}', 'quarantined', 'fixture', n
+             FROM run;
+             COMMIT;"
+        ))
         .expect("seed other runs' receipts under the same owner");
 }
 
