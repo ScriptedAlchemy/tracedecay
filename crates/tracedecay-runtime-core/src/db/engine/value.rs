@@ -161,18 +161,18 @@ fn type_mismatch(column: i32, expected: &'static str, value: &Value) -> Error {
     }
 }
 
-impl From<tracedecay_turso_runtime::Value> for Value {
-    fn from(value: tracedecay_turso_runtime::Value) -> Self {
+impl From<tracedecay_sql::native::Value> for Value {
+    fn from(value: tracedecay_sql::native::Value) -> Self {
         match value {
-            tracedecay_turso_runtime::Value::Null => Self::Null,
-            tracedecay_turso_runtime::Value::Integer(value) => Self::Integer(value),
-            tracedecay_turso_runtime::Value::Real(value) => Self::Real(value),
-            tracedecay_turso_runtime::Value::Text(value) => Self::Text(value),
-            tracedecay_turso_runtime::Value::Blob(value) => Self::Blob(value),
+            tracedecay_sql::native::Value::Null => Self::Null,
+            tracedecay_sql::native::Value::Integer(value) => Self::Integer(value),
+            tracedecay_sql::native::Value::Real(value) => Self::Real(value),
+            tracedecay_sql::native::Value::Text(value) => Self::Text(value),
+            tracedecay_sql::native::Value::Blob(value) => Self::Blob(value),
         }
     }
 }
-impl From<Value> for tracedecay_turso_runtime::Value {
+impl From<Value> for tracedecay_sql::native::Value {
     fn from(value: Value) -> Self {
         match value {
             Value::Null => Self::Null,

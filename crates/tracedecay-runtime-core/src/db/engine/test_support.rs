@@ -184,7 +184,7 @@ impl NativeTestConnection {
         path: &Path,
         authority: Arc<dyn ExactSqlWriteAuthority>,
     ) -> EngineResult<Self> {
-        let database = tracedecay_turso_runtime::Database::open(path)?;
+        let database = tracedecay_sql::native::Database::open(path)?;
         let mut hasher = Sha256::new();
         hasher.update(b"tracedecay.native-engine-test.identity.v1\0");
         hasher.update(path.as_os_str().as_encoded_bytes());

@@ -227,9 +227,9 @@ const SQLITE_INTERRUPT: i32 = 9;
 const SQLITE_IOERR: i32 = 10;
 const SQLITE_CANTOPEN: i32 = 14;
 
-impl From<tracedecay_turso_runtime::Error> for Error {
-    fn from(error: tracedecay_turso_runtime::Error) -> Self {
-        use tracedecay_turso_runtime::Error as Native;
+impl From<tracedecay_sql::native::Error> for Error {
+    fn from(error: tracedecay_sql::native::Error) -> Self {
+        use tracedecay_sql::native::Error as Native;
         let deterministic = error.is_deterministic_refusal();
         let transient_read = error.is_transient_read_failure();
         let transaction_retry = error.requires_transaction_retry();

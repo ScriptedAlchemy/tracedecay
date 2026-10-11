@@ -11,7 +11,7 @@ use std::{
 use turso_core::{DatabaseOpts, OpenOptions, StepResult};
 use turso_parser::ast::Cmd;
 
-use crate::{Error, Result, Rows, Value, policy};
+use super::{Error, Result, Rows, Value, policy};
 
 const MAX_QUERY_ROWS: usize = 10_000;
 const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024;
@@ -29,7 +29,6 @@ pub enum Access {
 pub enum TransactionBehavior {
     Deferred,
     Immediate,
-    Concurrent,
 }
 
 pub type Authority = Arc<dyn Fn() -> std::result::Result<(), String> + Send + Sync>;
@@ -76,7 +75,7 @@ pub struct Database {
     inner: Arc<turso_core::Database>,
     io: Arc<dyn turso_core::IO>,
     #[cfg(unix)]
-    pinned: Option<Arc<crate::pinned_io::PinnedIo>>,
+    pinned: Option<Arc<super::pinned_io::PinnedIo>>,
 }
 
 impl Database {
@@ -103,7 +102,7 @@ impl Database {
     /// The native main-file handle opens that descriptor, never the mutable path.
     #[cfg(unix)]
     pub fn open_pinned(path: &Path, file: std::fs::File) -> Result<Self> {
-        let pinned = crate::pinned_io::PinnedIo::new(path, file)?;
+        let pinned = super::pinned_io::PinnedIo::new(path, file)?;
         let native_file = pinned.open_main()?;
         let path = pinned.canonical_path().to_str().ok_or_else(|| {
             Error::InvalidOperation("native database path is not UTF-8".to_owned())
@@ -178,7 +177,7 @@ pub struct Connection {
     access: Access,
     transaction_active: bool,
     #[cfg(unix)]
-    pinned: Option<Arc<crate::pinned_io::PinnedIo>>,
+    pinned: Option<Arc<super::pinned_io::PinnedIo>>,
 }
 
 impl Connection {
@@ -241,7 +240,6 @@ impl Connection {
         let sql = match behavior {
             TransactionBehavior::Deferred => "BEGIN DEFERRED",
             TransactionBehavior::Immediate => "BEGIN IMMEDIATE",
-            TransactionBehavior::Concurrent => "BEGIN CONCURRENT",
         };
         self.control(sql, guard)?;
         self.transaction_active = true;
@@ -318,29 +316,12 @@ impl Connection {
         Ok(())
     }
 
-    /// Explicitly opts this isolated native database into overlapping
-    /// transactions. It changes the durable journal mode; ordinary opens retain
-    /// WAL and caller SQL cannot acquire this configuration capability.
-    pub fn enable_concurrent_transactions(&mut self, guard: &ExecutionGuard) -> Result<()> {
-        guard.verify()?;
-        if self.access != Access::Writer {
-            return Err(Error::Denied(
-                "reader cannot configure concurrent storage".to_owned(),
-            ));
-        }
-        if self.transaction_active {
-            return Err(Error::InvalidOperation(
-                "configure concurrency within transaction".to_owned(),
-            ));
-        }
-        let sql = "PRAGMA journal_mode=mvcc";
-        let (rows, _) = self.run_command(parse_single(sql)?, sql, &[], guard, true)?;
-        if rows.values != vec![vec![Value::Text("mvcc".to_owned())]] {
-            return Err(Error::Unsupported(
-                "native MVCC journal mode did not apply".to_owned(),
-            ));
-        }
-        Ok(())
+    pub fn total_changes(&self) -> u64 {
+        self.inner.total_changes().max(0).unsigned_abs()
+    }
+
+    pub fn interrupt_handle(&self) -> InterruptHandle {
+        InterruptHandle(Arc::clone(&self.inner))
     }
 
     pub fn checkpoint(&mut self, guard: &ExecutionGuard) -> Result<Rows> {
@@ -527,6 +508,16 @@ impl Connection {
     }
 }
 
+/// Interrupts the connection's running statement from any thread.
+#[derive(Clone)]
+pub struct InterruptHandle(Arc<turso_core::Connection>);
+
+impl InterruptHandle {
+    pub fn interrupt(&self) {
+        self.0.interrupt();
+    }
+}
+
 impl Drop for Connection {
     fn drop(&mut self) {
         // The engine rolls back unfinished transactions when its connection is
@@ -554,7 +545,7 @@ impl ProgressGuard {
     fn install(
         connection: Arc<turso_core::Connection>,
         guard: ExecutionGuard,
-        #[cfg(unix)] pinned: Option<Arc<crate::pinned_io::PinnedIo>>,
+        #[cfg(unix)] pinned: Option<Arc<super::pinned_io::PinnedIo>>,
     ) -> Self {
         let failure = Arc::new(Mutex::new(None));
         let callback_failure = Arc::clone(&failure);

@@ -48,7 +48,7 @@ impl Rows {
         )
     }
 
-    pub(super) fn from_native(rows: tracedecay_turso_runtime::Rows) -> Self {
+    pub(super) fn from_native(rows: tracedecay_sql::native::Rows) -> Self {
         Self::from_parts(
             rows.columns,
             rows.values

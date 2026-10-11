@@ -9,8 +9,8 @@ use std::{
 
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tracedecay_rusqlite_runtime::exact_sql::{ExactSqlWriteAuthority, ExactSqlWriteIntent};
+use tracedecay_sql::native::{Access, Database, ExecutionGuard};
 use tracedecay_store::{OperationPriorityV1, ReaderBudgetV1};
-use tracedecay_turso_runtime::{Access, Database, ExecutionGuard};
 
 use super::{Error, Result, Rows, Value};
 
@@ -133,7 +133,7 @@ impl NativeHandle {
                 let mut connection = this.database.connect(Access::Writer)?;
                 let guard = this.guard(ExactSqlWriteIntent::Execute, cancelled, true);
                 connection.begin(
-                    tracedecay_turso_runtime::TransactionBehavior::Deferred,
+                    tracedecay_sql::native::TransactionBehavior::Deferred,
                     &guard,
                 )?;
                 let result = connection
@@ -211,7 +211,7 @@ impl NativeHandle {
     pub(super) async fn transaction(
         self: &Arc<Self>,
         long_lease: bool,
-        behavior: tracedecay_turso_runtime::TransactionBehavior,
+        behavior: tracedecay_sql::native::TransactionBehavior,
     ) -> Result<Arc<NativeTransaction>> {
         let this = Arc::clone(self);
         let transaction = run(move |cancelled| {
@@ -242,7 +242,7 @@ impl NativeHandle {
             let mut connection = this.database.connect(Access::Reader)?;
             let guard = this.guard(ExactSqlWriteIntent::Query, cancelled, true);
             connection.begin(
-                tracedecay_turso_runtime::TransactionBehavior::Deferred,
+                tracedecay_sql::native::TransactionBehavior::Deferred,
                 &guard,
             )?;
             // BEGIN alone may defer snapshot acquisition until the first read.
@@ -282,7 +282,7 @@ pub(super) struct NativeSnapshot {
 }
 
 struct NativeSnapshotState {
-    connection: Option<tracedecay_turso_runtime::Connection>,
+    connection: Option<tracedecay_sql::native::Connection>,
     lease: Option<NativeReaderLease>,
 }
 
@@ -309,7 +309,7 @@ impl NativeSnapshot {
 }
 
 pub(super) struct NativeTransaction {
-    connection: Mutex<Option<tracedecay_turso_runtime::Connection>>,
+    connection: Mutex<Option<tracedecay_sql::native::Connection>>,
     handle: Arc<NativeHandle>,
     started: Instant,
     last_progress: Arc<Mutex<Instant>>,
@@ -364,9 +364,9 @@ impl NativeTransaction {
         cancelled: Arc<AtomicBool>,
         bounded: bool,
         operation: impl FnOnce(
-            &mut tracedecay_turso_runtime::Connection,
+            &mut tracedecay_sql::native::Connection,
             &ExecutionGuard,
-        ) -> tracedecay_turso_runtime::Result<T>,
+        ) -> tracedecay_sql::native::Result<T>,
     ) -> Result<T> {
         let mut owned = self.connection.lock().map_err(lock_error)?;
         let guard = match self.guard(intent, cancelled, bounded) {
@@ -559,16 +559,16 @@ impl NativeTransaction {
 fn validate_and_convert_params(
     sql: &str,
     values: Vec<Value>,
-) -> tracedecay_turso_runtime::Result<Vec<tracedecay_turso_runtime::Value>> {
+) -> tracedecay_sql::native::Result<Vec<tracedecay_sql::native::Value>> {
     let request = tracedecay_rusqlite_runtime::exact_sql::ExactSqlStatement::new(
         sql.to_owned(),
         values.into_iter().map(Into::into).collect(),
     )
     .map_err(|error| match error {
         tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::RequestLimitExceeded => {
-            tracedecay_turso_runtime::Error::RequestLimitExceeded
+            tracedecay_sql::native::Error::RequestLimitExceeded
         }
-        error => tracedecay_turso_runtime::Error::InvalidOperation(error.to_string()),
+        error => tracedecay_sql::native::Error::InvalidOperation(error.to_string()),
     })?;
     Ok(request
         .params
@@ -625,11 +625,11 @@ impl Drop for NativeReaderLease {
     }
 }
 
-fn terminal_transaction_error(error: &tracedecay_turso_runtime::Error) -> bool {
+fn terminal_transaction_error(error: &tracedecay_sql::native::Error) -> bool {
     matches!(
         error,
-        tracedecay_turso_runtime::Error::Authority(_)
-            | tracedecay_turso_runtime::Error::Cancelled
-            | tracedecay_turso_runtime::Error::DeadlineExceeded
+        tracedecay_sql::native::Error::Authority(_)
+            | tracedecay_sql::native::Error::Cancelled
+            | tracedecay_sql::native::Error::DeadlineExceeded
     ) || error.requires_transaction_retry()
 }

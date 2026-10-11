@@ -3,7 +3,7 @@ use std::sync::Arc;
 use turso_core::{Dialect, Func, LimboError, SqliteDialect};
 use turso_parser::ast::{Cmd, PragmaBody, Stmt};
 
-use crate::{Access, Error, Result};
+use super::{Access, Error, Result};
 
 /// Uses the engine's own parser and name resolution. Function policy therefore
 /// also applies to stored trigger/view bodies and schema-driven re-preparation.

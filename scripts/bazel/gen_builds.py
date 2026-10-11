@@ -899,6 +899,15 @@ def main():
         rustc_flags_attr = (
             f"    rustc_flags = perf_rustc_flags({opt_levels.get(name, opt_default)}),"
         )
+        # The owned-store driver compiles one engine arm, chosen by its
+        # `engine` string flag (`--config=native` in .bazelrc).
+        engine_flag = (p.get("metadata") or {}).get("bazel", {}).get("engine_flag", False)
+        if engine_flag:
+            rustc_flags_attr = (
+                rustc_flags_attr[:-1]
+                + ' + select({":engine_native": [\'--cfg=td_engine="native"\'],'
+                + ' "//conditions:default": []}),'
+            )
         used_names = set()
 
         def unique_name(want):
@@ -932,7 +941,20 @@ def main():
             'load("@rules_rust//cargo:defs.bzl", "cargo_build_script")\n'
             'load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")\n'
             'load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")\n'
+            + ('load("@bazel_skylib//rules:common_settings.bzl", "string_flag")\n' if engine_flag else "")
         )
+        if engine_flag:
+            out.append(
+                "string_flag(\n"
+                '    name = "engine",\n'
+                '    build_setting_default = "sqlite",\n'
+                '    values = ["sqlite", "native"],\n'
+                ")\n\n"
+                "config_setting(\n"
+                '    name = "engine_native",\n'
+                '    flag_values = {":engine": "native"},\n'
+                ")\n"
+            )
 
         if lib_t:
             for (vkind, closure), vfmap in sorted(
