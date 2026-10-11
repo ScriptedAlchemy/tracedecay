@@ -1,0 +1,71 @@
+diff --git a/types.rs b/types.rs
+index a8d6518..1994163 100644
+--- a/types.rs
++++ b/types.rs
+@@ -3147,6 +3147,45 @@ where
+         header_pos += bytes_read;
+ 
+         let serial_type = SerialType::try_from(serial_type_raw)?;
++        let key_info = &index_info.key_info[field_idx];
++
++        // Same-type fields compare in place: an integer against an integer
++        // key, and binary-collated text or a blob against a key of its type.
++        // No NULL is involved, so the sort order alone orients the result.
++        let same_type = match (serial_type_raw, rhs_value) {
++            (1..=6, ValueRef::Numeric(Numeric::Integer(rhs))) => {
++                let lhs = read_integer(&left_packed[data_pos..], serial_type_raw as u8)?;
++                data_pos += serial_type.size();
++                Some(lhs.cmp(rhs))
++            }
++            (8, ValueRef::Numeric(Numeric::Integer(rhs))) => Some(0_i64.cmp(rhs)),
++            (9, ValueRef::Numeric(Numeric::Integer(rhs))) => Some(1_i64.cmp(rhs)),
++            (13.., ValueRef::Text(rhs))
++                if serial_type_raw & 1 == 1
++                    && matches!(key_info.collation, CollationSeq::Binary | CollationSeq::Unset) =>
++            {
++                let lhs = field_bytes(left_packed, data_pos, serial_type.size())?;
++                data_pos += lhs.len();
++                Some(lhs.cmp(rhs.value.as_bytes()))
++            }
++            (12.., ValueRef::Blob(rhs)) if serial_type_raw & 1 == 0 => {
++                let lhs = field_bytes(left_packed, data_pos, serial_type.size())?;
++                data_pos += lhs.len();
++                Some(lhs.cmp(*rhs))
++            }
++            _ => None,
++        };
++        if let Some(comparison) = same_type {
++            let oriented = match key_info.sort_order {
++                SortOrder::Asc => comparison,
++                SortOrder::Desc => comparison.reverse(),
++            };
++            if oriented != std::cmp::Ordering::Equal {
++                return Ok(oriented);
++            }
++            field_idx += 1;
++            continue;
++        }
+ 
+         let lhs_value = match serial_type.kind() {
+             SerialTypeKind::ConstInt0 => ValueRef::Numeric(Numeric::Integer(0)),
+@@ -3159,7 +3198,6 @@ where
+             }
+         };
+ 
+-        let key_info = &index_info.key_info[field_idx];
+         let comparison = match (&lhs_value, rhs_value) {
+             (ValueRef::Text(lhs_text), ValueRef::Text(rhs_text)) => {
+                 key_info.collation.compare_strings(lhs_text, rhs_text)
+@@ -3179,6 +3217,12 @@ where
+     Ok(tie_breaker)
+ }
+ 
++fn field_bytes(payload: &[u8], start: usize, len: usize) -> Result<&[u8]> {
++    payload
++        .get(start..start + len)
++        .ok_or_else(|| LimboError::Corrupt("record field runs past its payload".to_string()))
++}
++
+ const I8_LOW: i64 = -128;
+ const I8_HIGH: i64 = 127;
+ const I16_LOW: i64 = -32768;

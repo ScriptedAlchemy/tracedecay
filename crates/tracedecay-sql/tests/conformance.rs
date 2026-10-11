@@ -49,6 +49,9 @@ conformance!(
     a_copied_back_wal_starts_over_on_the_next_write,
     an_interrupted_write_ends_its_transaction,
     unique_index_entries_stay_findable_under_every_conflict_mode,
+    composite_keys_order_and_find_rows_by_every_field_type,
+    a_statement_that_failed_part_way_reruns_from_the_start,
+    statements_follow_schema_changes_inside_a_write_transaction,
 );
 
 mod cases {
@@ -913,6 +916,123 @@ mod cases {
             mixed.insert(key(i), b);
         }
         verify(&connection, "mixed", &mixed)
+    }
+
+    /// Rows inserted in scattered order under a composite unique key of an
+    /// integer (including 0 and 1, which records store without a body),
+    /// descending text and a blob are found by their key, refuse a repeated
+    /// key, and scan in key order. A key comparison that misreads a field's
+    /// bytes, loses its place in the record, or ignores a field's sort order
+    /// files entries out of key order.
+    pub(super) fn composite_keys_order_and_find_rows_by_every_field_type() -> Result<()> {
+        use std::collections::BTreeSet;
+
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "CREATE TABLE keyed (id INTEGER PRIMARY KEY, n INTEGER NOT NULL, t TEXT NOT NULL, b BLOB NOT NULL);
+             CREATE UNIQUE INDEX keyed_key ON keyed (n, t DESC, b);",
+        )?;
+        let mut keys = BTreeSet::new();
+        let mut insert = connection.prepare("INSERT INTO keyed (n, t, b) VALUES (?1, ?2, ?3)")?;
+        for i in 0..1_500_u64 {
+            let n = (i.wrapping_mul(7_919) % 13) as i64 - 6;
+            let t = format!("t{:03}", i.wrapping_mul(104_729) % 61);
+            let b = (i.wrapping_mul(31) % 89).to_be_bytes()[5..].to_vec();
+            if keys.insert((n, t.clone(), b.clone())) {
+                insert.execute(params![n, t, b])?;
+            } else {
+                let repeated = insert
+                    .execute(params![n, t, b])
+                    .expect_err("a repeated key violates the unique index");
+                assert_eq!(repeated.kind(), ErrorKind::Constraint, "{repeated}");
+            }
+        }
+        drop(insert);
+        let mut expected: Vec<(i64, String, Vec<u8>)> = keys.into_iter().collect();
+        expected.sort_by(|x, y| x.0.cmp(&y.0).then(y.1.cmp(&x.1)).then(x.2.cmp(&y.2)));
+
+        let mut scan = connection.prepare("SELECT n, t, b FROM keyed ORDER BY n, t DESC, b")?;
+        let scanned = scan
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<(i64, String, Vec<u8>)>>>()?;
+        assert_eq!(
+            scanned, expected,
+            "the index scan is the key set in key order"
+        );
+
+        let mut find =
+            connection.prepare("SELECT count(*) FROM keyed WHERE n = ?1 AND t = ?2 AND b = ?3")?;
+        for (n, t, b) in expected.iter().step_by(7) {
+            let found: i64 = find.query_row(params![n, t, b], |row| row.get(0))?;
+            assert_eq!(found, 1, "key ({n}, {t}, {b:?}) is findable");
+            let mut near = b.clone();
+            near.push(0);
+            let missing: i64 = find.query_row(params![n, t, near], |row| row.get(0))?;
+            assert_eq!(missing, 0, "a longer blob is a different key");
+        }
+        Ok(())
+    }
+
+    /// A statement whose run failed part way is rerun from the start: the
+    /// failed run's first row is gone and the rerun inserts both of its rows.
+    /// A statement readmitted without a reset resumes its failed program.
+    pub(super) fn a_statement_that_failed_part_way_reruns_from_the_start() -> Result<()> {
+        let (_directory, _path, connection) = file_database();
+        items(&connection)?;
+        let mut insert = connection.prepare("INSERT INTO items (name) VALUES (?1), (?2)")?;
+        let duplicate = insert
+            .execute(["x", "x"])
+            .expect_err("the second row repeats the first name");
+        assert_eq!(duplicate.kind(), ErrorKind::Constraint, "{duplicate}");
+        assert_eq!(insert.execute(["y", "z"])?, 2);
+        assert_eq!(insert.execute(["v", "w"])?, 2);
+        drop(insert);
+        assert_eq!(names(&connection)?, ["y", "z", "v", "w"]);
+        Ok(())
+    }
+
+    /// Inside one write transaction statements follow the schema as it
+    /// changes: after a savepoint that created a table rolls back, statements
+    /// run against the restored schema, and a statement prepared before
+    /// `CREATE UNIQUE INDEX` refuses a duplicate afterwards. A schema check
+    /// that trusts a cookie from before either change runs the stale program
+    /// or keeps repreparing against a cookie the header no longer holds.
+    pub(super) fn statements_follow_schema_changes_inside_a_write_transaction() -> Result<()> {
+        let (_directory, _path, mut connection) = file_database();
+        connection
+            .execute_batch("CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")?;
+        let mut transaction = connection.transaction()?;
+        transaction.execute("INSERT INTO tags (name) VALUES ('first')", [])?;
+        {
+            let mut savepoint = transaction.savepoint()?;
+            savepoint.execute_batch("CREATE TABLE scratch (x INTEGER)")?;
+            savepoint.execute("INSERT INTO scratch (x) VALUES (1)", [])?;
+            savepoint.rollback()?;
+        }
+        transaction.execute("INSERT INTO tags (name) VALUES ('second')", [])?;
+        {
+            let mut insert = transaction.prepare("INSERT INTO tags (name) VALUES (?1)")?;
+            insert.execute(["third"])?;
+            transaction.execute_batch("CREATE UNIQUE INDEX tags_name ON tags (name)")?;
+            let duplicate = insert
+                .execute(["first"])
+                .expect_err("the index created after prepare refuses a duplicate");
+            assert_eq!(duplicate.kind(), ErrorKind::Constraint, "{duplicate}");
+            insert.execute(["fourth"])?;
+        }
+        transaction.commit()?;
+        let mut select = connection.prepare("SELECT name FROM tags ORDER BY id")?;
+        let tags = select
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>>>()?;
+        assert_eq!(tags, ["first", "second", "third", "fourth"]);
+        let scratch: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name = 'scratch'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(scratch, 0, "the rolled back savepoint's table is gone");
+        Ok(())
     }
 
     pub(super) fn close_rolls_back_and_path_names_the_store() -> Result<()> {

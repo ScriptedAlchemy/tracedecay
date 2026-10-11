@@ -543,6 +543,18 @@ pub(crate) struct Prepared {
     /// INSERT, UPDATE or DELETE: interrupting one ends its transaction.
     write: bool,
     pub(crate) columns: Arc<[String]>,
+    /// Admitted since its last reset. A reset walks every register and
+    /// cursor slot, so a statement already reset when it finished is not
+    /// reset again when it next starts (#3491).
+    ran: bool,
+}
+
+impl Prepared {
+    pub(crate) fn reset(&mut self) -> turso_core::Result<()> {
+        self.statement.reset()?;
+        self.ran = false;
+        Ok(())
+    }
 }
 
 /// A compiled non-DDL statement waiting in the cache for its SQL text.
@@ -666,6 +678,7 @@ impl Connection {
                 ddl: false,
                 write: hit.write,
                 columns: hit.columns,
+                ran: false,
             });
         }
         validate_request(sql, &[])?;
@@ -684,6 +697,7 @@ impl Connection {
             ddl,
             write,
             columns,
+            ran: false,
         })
     }
 
@@ -696,7 +710,7 @@ impl Connection {
     /// Returns a statement to the cache. Statements that changed the schema
     /// are dropped instead.
     pub(crate) fn recycle(&self, mut prepared: Prepared) {
-        if prepared.ddl || prepared.statement.reset().is_err() {
+        if prepared.ddl || prepared.reset().is_err() {
             return;
         }
         prepared.statement.clear_bindings();
@@ -726,7 +740,10 @@ impl Connection {
             self.authorize(&parse_single(&prepared.sql)?, capability)?;
             prepared.capability = capability;
         }
-        prepared.statement.reset()?;
+        if prepared.ran {
+            prepared.reset()?;
+        }
+        prepared.ran = true;
         self.guard.start(self.inner.get_auto_commit())
     }
 

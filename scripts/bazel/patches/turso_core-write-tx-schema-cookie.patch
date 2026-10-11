@@ -1,0 +1,32 @@
+diff --git a/storage/pager.rs b/storage/pager.rs
+index 92a09da..2427bce 100644
+--- a/storage/pager.rs
++++ b/storage/pager.rs
+@@ -2514,6 +2514,8 @@ impl Pager {
+         journal_end_offset: u64,
+     ) -> Result<()> {
+         self.reset_internal_states();
++        // Page 1 may come back from the subjournal with an older schema cookie.
++        self.set_schema_cookie(None);
+ 
+         let subjournal = self.subjournal.read();
+         let Some(subjournal) = subjournal.as_ref() else {
+diff --git a/vdbe/execute.rs b/vdbe/execute.rs
+index 17fc1d9..c167324 100644
+--- a/vdbe/execute.rs
++++ b/vdbe/execute.rs
+@@ -19793,6 +19793,14 @@ fn get_schema_cookie(
+             .with_header(|header| header.schema_cookie.get(), tx_id.as_ref())
+             .map(IOResult::Done)
+             .map_err(Into::into)
++    } else if let Some(cookie) = pager
++        .get_schema_cookie_cached()
++        .filter(|_| pager.holds_write_lock() && pager.get_reserved_space().is_some())
++    {
++        // Under the write lock only this connection changes the header, and
++        // every header write refreshes the cached cookie, so the cache is the
++        // header's value: skip the page 1 read per statement of a bulk write.
++        Ok(IOResult::Done(cookie))
+     } else {
+         pager.get_schema_cookie()
+     }

@@ -1316,7 +1316,7 @@ impl<'c> Statement<'c> {
         let prepared = self.start(params)?;
         while core.step(prepared)? {}
         let changes = prepared.statement.n_change();
-        prepared.statement.reset()?;
+        prepared.reset()?;
         Ok(usize::try_from(changes).unwrap_or(0))
     }
 
@@ -1455,7 +1455,7 @@ impl<'s> Rows<'s> {
 
 impl Drop for Rows<'_> {
     fn drop(&mut self) {
-        if let Err(error) = self.prepared.statement.reset() {
+        if let Err(error) = self.prepared.reset() {
             tracing::warn!(%error, "native statement reset failed");
         }
     }
