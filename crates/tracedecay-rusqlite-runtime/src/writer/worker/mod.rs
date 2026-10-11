@@ -357,53 +357,9 @@ impl Worker {
                     .fail_start(WriterStartError::ConnectionPolicyFailed(error.to_string()));
             }
         };
-        #[cfg(unix)]
-        if let Some(opened_database) = self._opened_database.as_deref()
-            && let Err(error) = opened_database.verify_connection(&connection, &self.canonical_path)
-        {
-            return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
-        }
-        #[cfg(windows)]
-        if let Some(opened_database) = self._opened_database.as_deref()
-            && let Err(error) = opened_database.verify_connection(&connection, &self.path)
-        {
-            return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
-        }
-        #[cfg(unix)]
-        if self.expected_file_identity.is_some()
-            && connection
-                .path()
-                .and_then(|path| std::fs::canonicalize(path).ok())
-                .as_deref()
-                != Some(self.canonical_path.as_path())
-        {
-            return self.fail_start(WriterStartError::OpenedDatabasePathMismatch);
-        }
-        let opened_file_identity = match self.expected_file_identity {
-            Some(expected) => {
-                let actual = match connection::current_identity(&self.path) {
-                    Ok(identity) => identity,
-                    Err(error) => {
-                        return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
-                    }
-                };
-                if actual != expected {
-                    return self.fail_start(WriterStartError::OpenedDatabaseIdentityMismatch {
-                        expected,
-                        actual,
-                    });
-                }
-                Some(actual)
-            }
-            None => None,
-        };
-        let page_cache = match connection::WriterPageCache::new(&connection) {
-            Ok(page_cache) => page_cache,
-            Err(error) => {
-                return self
-                    .fail_start(WriterStartError::ConnectionPolicyFailed(error.to_string()));
-            }
-        };
+        // The open may already have written (the native format stamp, the
+        // journal mode), so from here every abandoned start truncates the WAL
+        // through the controller its shutdown uses.
         let mut checkpoint = match WriterCheckpointController::new(
             RusqliteCheckpointDriver::new(connection),
             checkpoint_config(&self.config),
@@ -411,26 +367,103 @@ impl Worker {
             Ok(checkpoint) => checkpoint,
             Err(_) => return self.fail_start(WriterStartError::CheckpointSetupFailed),
         };
+        #[cfg(all(unix, feature = "test-transport"))]
+        if hold_writer_start_for_test(&self.canonical_path) {
+            return self.abort_start(&mut checkpoint, WriterStartError::StartupChannelClosed);
+        }
+        #[cfg(unix)]
+        if let Some(opened_database) = self._opened_database.as_deref()
+            && let Err(error) =
+                opened_database.verify_connection(checkpoint.connection_mut(), &self.canonical_path)
+        {
+            return self.abort_start(
+                &mut checkpoint,
+                WriterStartError::OpenedDatabaseIdentity(error),
+            );
+        }
+        #[cfg(windows)]
+        if let Some(opened_database) = self._opened_database.as_deref()
+            && let Err(error) =
+                opened_database.verify_connection(checkpoint.connection_mut(), &self.path)
+        {
+            return self.abort_start(
+                &mut checkpoint,
+                WriterStartError::OpenedDatabaseIdentity(error),
+            );
+        }
+        #[cfg(unix)]
+        if self.expected_file_identity.is_some()
+            && checkpoint
+                .connection_mut()
+                .path()
+                .and_then(|path| std::fs::canonicalize(path).ok())
+                .as_deref()
+                != Some(self.canonical_path.as_path())
+        {
+            return self.abort_start(
+                &mut checkpoint,
+                WriterStartError::OpenedDatabasePathMismatch,
+            );
+        }
+        let opened_file_identity = match self.expected_file_identity {
+            Some(expected) => {
+                let actual = match connection::current_identity(&self.path) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        return self.abort_start(
+                            &mut checkpoint,
+                            WriterStartError::OpenedDatabaseIdentity(error),
+                        );
+                    }
+                };
+                if actual != expected {
+                    return self.abort_start(
+                        &mut checkpoint,
+                        WriterStartError::OpenedDatabaseIdentityMismatch { expected, actual },
+                    );
+                }
+                Some(actual)
+            }
+            None => None,
+        };
+        let page_cache = match connection::WriterPageCache::new(checkpoint.connection_mut()) {
+            Ok(page_cache) => page_cache,
+            Err(error) => {
+                return self.abort_start(
+                    &mut checkpoint,
+                    WriterStartError::ConnectionPolicyFailed(error.to_string()),
+                );
+            }
+        };
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .on_thread_park(collect_idle_thread_heap_v1)
             .build()
         {
             Ok(runtime) => runtime,
-            Err(_) => return self.fail_start(WriterStartError::CheckpointSchedulerSetupFailed),
+            Err(_) => {
+                return self.abort_start(
+                    &mut checkpoint,
+                    WriterStartError::CheckpointSchedulerSetupFailed,
+                );
+            }
         };
         #[cfg(any(unix, windows))]
         if let Some(opened_database) = self._opened_database.as_deref()
             && let Err(error) =
                 opened_database.verify_connection(checkpoint.connection_mut(), canonical_path)
         {
-            return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
+            return self.abort_start(
+                &mut checkpoint,
+                WriterStartError::OpenedDatabaseIdentity(error),
+            );
         }
         self.state
             .store(WriterState::Ready as u8, Ordering::Release);
         if self.started.send(Ok(opened_file_identity)).is_err() {
             self.state
                 .store(WriterState::Draining as u8, Ordering::Release);
+            let _ = checkpoint.truncate_at_shutdown();
             return;
         }
         let state = Arc::clone(&self.state);
@@ -460,6 +493,13 @@ impl Worker {
         self.state
             .store(WriterState::Closed as u8, Ordering::Release);
         let _ = self.started.send(Err(error));
+    }
+
+    /// Fails a start whose connection is open. Its WAL is truncated first, so
+    /// the frames the open wrote do not outlive the closed connection.
+    fn abort_start(&self, checkpoint: &mut WriterCheckpointController, error: WriterStartError) {
+        let _ = checkpoint.truncate_at_shutdown();
+        self.fail_start(error);
     }
 
     fn run_loop(
@@ -888,6 +928,33 @@ impl Worker {
 /// The operator's WAL budget arrives on `AdmissionConfigV1` and is validated
 /// against the contract ceilings before the writer starts, so it, not a
 /// crate-local default, is what governs when the controller checkpoints.
+/// Parks the start of the writer for the store
+/// `TRACEDECAY_TEST_HOLD_WRITER_START_STORE` names, after its connection
+/// opened and before the actor runs, while the file
+/// `TRACEDECAY_TEST_HOLD_WRITER_START` names exists. Records `<hold>.entered`
+/// first. Returns whether `<hold>.abort` exists at release: a stand-in for an
+/// opener that abandons the start. Absent from a build without
+/// `test-transport`.
+#[cfg(all(unix, feature = "test-transport"))]
+fn hold_writer_start_for_test(store: &std::path::Path) -> bool {
+    let (Some(hold), Some(target)) = (
+        std::env::var_os("TRACEDECAY_TEST_HOLD_WRITER_START"),
+        std::env::var_os("TRACEDECAY_TEST_HOLD_WRITER_START_STORE"),
+    ) else {
+        return false;
+    };
+    let store = std::fs::canonicalize(store).ok();
+    if store.is_none() || store != std::fs::canonicalize(target).ok() {
+        return false;
+    }
+    let hold = PathBuf::from(hold);
+    let _ = std::fs::write(format!("{}.entered", hold.display()), b"writer");
+    while hold.exists() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    PathBuf::from(format!("{}.abort", hold.display())).exists()
+}
+
 pub(super) fn checkpoint_config(config: &AdmissionConfigV1) -> CheckpointConfig {
     CheckpointConfig::from(&config.wal)
 }
