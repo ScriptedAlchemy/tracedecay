@@ -38,9 +38,8 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
-    /// The dialect of the owned-store engine linked into this binary, which
-    /// the registered exact-SQL runtime drives.
-    pub const LINKED: Self = match tracedecay_sql::ENGINE {
+    /// The dialect of the exact SQL runtime: the engine this build selected.
+    pub const EXACT_SQL: Self = match tracedecay_sql::ENGINE {
         tracedecay_sql::Engine::Sqlite => Self::Sqlite,
         tracedecay_sql::Engine::Native => Self::NativeTurso,
     };
