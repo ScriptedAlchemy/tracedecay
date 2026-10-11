@@ -12,16 +12,15 @@
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
-use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::Result;
-use tracedecay_runtime_core::weak_registry::WeakRegistry;
+use tracedecay_runtime_core::weak_registry::SingleFlightRegistry;
 
 use crate::DaemonSessionRuntimeRegistryV1;
 
 static STANDALONE_SESSION_REGISTRIES: LazyLock<
-    AsyncMutex<WeakRegistry<PathBuf, DaemonSessionRuntimeRegistryV1>>,
-> = LazyLock::new(|| AsyncMutex::new(WeakRegistry::new()));
+    SingleFlightRegistry<PathBuf, DaemonSessionRuntimeRegistryV1>,
+> = LazyLock::new(SingleFlightRegistry::default);
 
 /// Join the process-wide standalone session registry for `identity`.
 ///
@@ -33,11 +32,11 @@ pub async fn join_standalone_session_registry(
 ) -> Result<Arc<DaemonSessionRuntimeRegistryV1>> {
     let profile_key =
         tracedecay_runtime_core::lifecycle_lease::canonical_or_original(identity.profile_root());
-    let registries = STANDALONE_SESSION_REGISTRIES.lock().await;
-    if let Some(registry) = registries.get_live(&profile_key) {
-        return Ok(registry);
-    }
-    let registry = Arc::new(DaemonSessionRuntimeRegistryV1::open(identity).await?);
-    registries.insert(profile_key, &registry);
-    Ok(registry)
+    STANDALONE_SESSION_REGISTRIES
+        .get_or_open(profile_key, || async move {
+            DaemonSessionRuntimeRegistryV1::open(identity)
+                .await
+                .map(Arc::new)
+        })
+        .await
 }

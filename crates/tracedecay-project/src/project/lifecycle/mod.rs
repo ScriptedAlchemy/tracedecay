@@ -12,8 +12,6 @@ use crate::config::{
     open_runtime_configuration_for_registered_database_read_only,
 };
 use crate::project_store_runtime::join_standalone_session_registry;
-#[cfg(any(test, feature = "test-helpers"))]
-use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, registered_enrollment_roots};
@@ -21,6 +19,9 @@ use tracedecay_runtime_core::branch;
 use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
 use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use tracedecay_runtime_core::storage::{self, StoreLayout};
+#[cfg(any(test, feature = "test-helpers"))]
+use tracedecay_runtime_core::weak_registry::SingleFlightRegistry;
+#[cfg(not(any(test, feature = "test-transport")))]
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_store::ProjectId;
@@ -54,13 +55,11 @@ static STANDALONE_MAINTENANCE_SCOPES: LazyLock<
 /// fresh mounts.
 #[cfg(any(test, feature = "test-helpers"))]
 static STANDALONE_TEST_RUNTIMES: LazyLock<
-    AsyncMutex<
-        WeakRegistry<
-            (PathBuf, PathBuf),
-            crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
-        >,
+    SingleFlightRegistry<
+        (PathBuf, PathBuf),
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
     >,
-> = LazyLock::new(|| AsyncMutex::new(WeakRegistry::new()));
+> = LazyLock::new(SingleFlightRegistry::default);
 
 impl TraceDecay {
     #[cfg(not(any(test, feature = "test-transport")))]
@@ -127,22 +126,17 @@ impl TraceDecay {
             tracedecay_runtime_core::lifecycle_lease::canonical_or_original(&profile_root),
             tracedecay_runtime_core::lifecycle_lease::canonical_or_original(project_root),
         );
-        // The async lock is held across construction so two concurrent opens
-        // of the same key cannot race into two runtimes.
-        let runtimes = STANDALONE_TEST_RUNTIMES.lock().await;
-        if let Some(runtime) = runtimes.get_live(&registry_key) {
-            return Ok(runtime);
-        }
-        let runtime = Arc::new(
-            crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-                profile_root,
-                project_root,
-                project_id,
-            )
-            .await?,
-        );
-        runtimes.insert(registry_key, &runtime);
-        Ok(runtime)
+        STANDALONE_TEST_RUNTIMES
+            .get_or_open(registry_key, || async move {
+                crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+                    profile_root,
+                    project_root,
+                    project_id,
+                )
+                .await
+                .map(Arc::new)
+            })
+            .await
     }
 
     /// Initializes a project through the shared registered test runtime for

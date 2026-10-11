@@ -3,8 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
-use tokio::sync::Mutex as AsyncMutex;
-
 use tracedecay_code_index::parallelism::install_worker_plan;
 use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
@@ -26,7 +24,6 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
-use tracedecay_runtime_core::weak_registry::WeakRegistry;
 use tracedecay_store::StoreShardScopeV1;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
@@ -67,19 +64,6 @@ pub enum SessionTemporalFixtureCountV1 {
     RefreshBatchBindings,
     TemporalGenerations,
 }
-
-/// One daemon session runtime registry per profile root, process-wide.
-///
-/// Production runs exactly one daemon per profile, and the profile
-/// session-relation graph store has a single writer (an exclusive Grafeo file
-/// lock), so a second independent registry on the same profile cannot open
-/// it. Every test-runtime construction path (project, profile, sibling, and
-/// repeated opens of the same project) must therefore join the live registry
-/// for its profile. Entries are weak: when the last runtime for a profile
-/// drops, its registry drops with it and the next open starts fresh.
-static SHARED_TEST_SESSION_REGISTRIES: LazyLock<
-    AsyncMutex<WeakRegistry<PathBuf, DaemonSessionRuntimeRegistryV1>>,
-> = LazyLock::new(|| AsyncMutex::new(WeakRegistry::new()));
 
 /// Process-scoped scratch-memory authority shared by every host-admission
 /// fixture in this test binary. Its capacity follows the same RAM-derived
@@ -259,31 +243,16 @@ impl HostAdmissionTestRuntimeV1 {
             1,
             "host-admission-test-runtime",
         )?;
-        let session_registry = {
-            let profile_key = tracedecay_runtime_core::lifecycle_lease::canonical_or_original(
-                identity.profile_root(),
-            );
-            // Held across construction so two concurrent opens of one profile
-            // cannot race into two registries (the loser would fail the
-            // exclusive profile session store open).
-            let registries = SHARED_TEST_SESSION_REGISTRIES.lock().await;
-            match registries.get_live(&profile_key) {
-                Some(registry) => registry,
-                None => {
-                    // The fixture stands in for the composition root: it
-                    // registers the runtime ports with the fixture daemon
-                    // client, exactly as it registers the fixture product
-                    // runtime above.
-                    crate::runtime_ports::register_runtime_ports(
-                        crate::runtime_ports::fixture_daemon_client_ports(),
-                    )?;
-                    let registry =
-                        Arc::new(DaemonSessionRuntimeRegistryV1::open(identity.clone()).await?);
-                    registries.insert(profile_key, &registry);
-                    registry
-                }
-            }
-        };
+        // The fixture stands in for the composition root: it registers the
+        // runtime ports with the fixture daemon client, exactly as it
+        // registers the fixture product runtime above, then joins the
+        // profile's one registry like a standalone open.
+        crate::runtime_ports::register_runtime_ports(
+            crate::runtime_ports::fixture_daemon_client_ports(),
+        )?;
+        let session_registry =
+            crate::project_store_runtime::join_standalone_session_registry(identity.clone())
+                .await?;
         let profile_database = session_registry.profile_database().await?;
         let profile_registered = session_registry.profile_sessions().await?;
         // The session relation graph opens as bounded background work behind
