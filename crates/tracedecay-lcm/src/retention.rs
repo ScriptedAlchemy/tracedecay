@@ -740,6 +740,10 @@ async fn select_retention_candidates<T>(
                 "SELECT {columns}
                  FROM lcm_raw_messages r
                  WHERE r.timestamp IS NOT NULL AND r.timestamp < ?3
+                   -- The cursor's own bound, which native Turso cannot derive
+                   -- from the OR below: without it the range read starts at the
+                   -- oldest row instead of the cursor.
+                   AND r.timestamp >= ?4
                    AND (r.timestamp > ?4 OR (r.timestamp = ?4 AND r.store_id > ?5))
                    AND {PROJECTION_DURABLE}
                    AND (?1 = 'all' OR r.provider = ?1)

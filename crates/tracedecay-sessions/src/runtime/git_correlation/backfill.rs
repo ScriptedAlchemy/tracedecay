@@ -970,12 +970,9 @@ pub(super) async fn session_activity_rows(
 
 /// Changed sessions in journal order. Rewrites keep message identities but
 /// allocate a new history revision in the source transaction.
-const SESSION_ACTIVITY_PAGE_AFTER_SQL: &str = "WITH touched AS (
-         SELECT provider, session_id, sequence AS change_sequence
-         FROM git_history_session_change
-         WHERE sequence > ?1
-     )
-     SELECT touched.provider, touched.session_id,
+/// The journal is read in its own key order, so a page stops at its limit;
+/// native Turso sorts a CTE's rows, which built every session's row first.
+const SESSION_ACTIVITY_PAGE_AFTER_SQL: &str = "SELECT touched.provider, touched.session_id,
             COALESCE(
                 CASE WHEN json_valid(s.metadata_json) THEN NULLIF(json_extract(
                     s.metadata_json, '$.' || s.provider || '_session_cwd'
@@ -987,13 +984,14 @@ const SESSION_ACTIVITY_PAGE_AFTER_SQL: &str = "WITH touched AS (
              WHERE m.provider = s.provider AND m.session_id = s.session_id),
             (SELECT MAX(m.timestamp) FROM lcm_raw_messages m
              WHERE m.provider = s.provider AND m.session_id = s.session_id),
-            COALESCE(s.rowid, touched.change_sequence), touched.change_sequence
-     FROM touched
+            COALESCE(s.rowid, touched.sequence), touched.sequence
+     FROM git_history_session_change AS touched
      -- Native Turso otherwise seeks sessions by the provider prefix of
      -- idx_sessions_parent and reads every session of that provider.
      JOIN sessions s INDEXED BY sqlite_autoindex_sessions_1
        ON s.provider = touched.provider AND s.session_id = touched.session_id
-     ORDER BY touched.change_sequence ASC
+     WHERE touched.sequence > ?1
+     ORDER BY touched.sequence ASC
      LIMIT ?2";
 
 pub(super) async fn session_activity_page_after(
