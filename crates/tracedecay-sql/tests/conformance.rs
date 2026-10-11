@@ -1,47 +1,18 @@
-//! One behavior contract for both engine arms. Every case runs under the
-//! default build and under `--config=native`. A case the native arm cannot run
-//! yet is named in `NATIVE_PENDING` and must fail there with
-//! `ErrorKind::Unsupported`; any other native failure, and any pending case
-//! that starts passing, fails the suite.
+//! One behavior contract for both engine arms: every case runs, with the same
+//! assertions, under the default build and under `--config=native`.
 
 use std::time::Duration;
 
 use tracedecay_sql::{
-    Capability, CheckpointMode, Connection, ConnectionControl, ENGINE, Engine, ErrorExt, ErrorKind,
+    Capability, CheckpointMode, Connection, ConnectionControl, ErrorExt, ErrorKind,
     OptionalExtension, Result, TransactionBehavior, params, params_from_iter, types::Value,
 };
-
-/// Burned down by U6. Each entry names the conformance case it excuses.
-const NATIVE_PENDING: &[&str] = &[
-    "busy_is_classified",
-    "capability_scope_denies_and_restores",
-    "guard_scope_interrupts_running_statement",
-];
-
-fn run(name: &str, case: fn() -> Result<()>) {
-    let pending = ENGINE == Engine::Native && NATIVE_PENDING.contains(&name);
-    match case() {
-        Ok(()) => assert!(
-            !pending,
-            "{name} passes on native; remove it from NATIVE_PENDING"
-        ),
-        Err(error) if pending => {
-            assert_eq!(
-                error.kind(),
-                ErrorKind::Unsupported,
-                "{name} is pending on native but failed with {error}"
-            );
-            println!("NATIVE_PENDING {name}: {error}");
-        }
-        Err(error) => panic!("{name}: {error}"),
-    }
-}
 
 macro_rules! conformance {
     ($($name:ident),+ $(,)?) => {$(
         #[test]
-        fn $name() {
-            run(stringify!($name), cases::$name);
+        fn $name() -> Result<()> {
+            cases::$name()
         }
     )+};
 }
@@ -60,17 +31,6 @@ conformance!(
     guard_scope_interrupts_running_statement,
     page_stats_and_checkpoint_report_the_file,
 );
-
-#[test]
-fn native_pending_names_only_existing_cases() {
-    let source = include_str!("conformance.rs");
-    for name in NATIVE_PENDING {
-        assert!(
-            source.contains(&format!("    pub(super) fn {name}()")),
-            "NATIVE_PENDING names unknown case {name}"
-        );
-    }
-}
 
 mod cases {
     use super::*;

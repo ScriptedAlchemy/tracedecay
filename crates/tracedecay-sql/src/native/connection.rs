@@ -1,28 +1,65 @@
 use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    io::Read,
     num::NonZeroUsize,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, LazyLock, Mutex, OnceLock, PoisonError, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
 
-use turso_core::{DatabaseOpts, OpenOptions, StepResult};
+use turso_core::{DatabaseOpts, IOResult, LimboError, OpenDbAsyncState, OpenOptions, StepResult};
 use turso_parser::ast::Cmd;
 
-use super::{Error, Result, Rows, Value, policy};
+use super::{
+    Error, Result, Rows, Value,
+    confined_io::{self, ConfinedIo},
+    policy,
+};
+use crate::{Capability, FileIdentity, PROGRESS_INTERVAL_OPS};
 
 const MAX_QUERY_ROWS: usize = 10_000;
 const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SQL_BYTES: usize = 1024 * 1024;
 const MAX_SQL_PARAMETERS: usize = 32_766;
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+const STATEMENT_CACHE_CAPACITY: usize = 128;
+const SLEEP_SLICE: Duration = Duration::from_millis(5);
+const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// `PRAGMA application_id` of every native store: "TDN1".
+pub(crate) const APPLICATION_ID: u32 = 0x5444_4E31;
+const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
+
+/// One engine instance per file per process. POSIX record locks do not
+/// exclude the same process, so a second in-process open of a file shares the
+/// live instance instead of starting another engine on it.
+static OPEN_IDENTITIES: LazyLock<Mutex<HashMap<FileIdentity, Weak<Shared>>>> =
+    LazyLock::new(Mutex::default);
+
+fn registry() -> std::sync::MutexGuard<'static, HashMap<FileIdentity, Weak<Shared>>> {
+    OPEN_IDENTITIES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The facade's connection policy. Deleted with the runtime-core facade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Access {
     Reader,
     Writer,
+}
+
+impl From<Access> for Capability {
+    fn from(access: Access) -> Self {
+        match access {
+            Access::Reader => Self::Reader,
+            Access::Writer => Self::Writer,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,12 +69,17 @@ pub enum TransactionBehavior {
 }
 
 pub type Authority = Arc<dyn Fn() -> std::result::Result<(), String> + Send + Sync>;
+type Interrupt = Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// What a running statement re-checks before it starts, between sleep slices
+/// and every [`PROGRESS_INTERVAL_OPS`] VM operations. Nothing here is compiled
+/// into a statement.
 #[derive(Clone)]
 pub struct ExecutionGuard {
     pub deadline: Option<Instant>,
     pub cancelled: Arc<AtomicBool>,
     pub authority: Option<Authority>,
+    pub(crate) interrupt: Option<Interrupt>,
 }
 
 impl ExecutionGuard {
@@ -50,11 +92,21 @@ impl ExecutionGuard {
             deadline,
             cancelled,
             authority,
+            interrupt: None,
+        }
+    }
+
+    pub(crate) fn polling(interrupt: Interrupt) -> Self {
+        Self {
+            deadline: None,
+            cancelled: Arc::default(),
+            authority: None,
+            interrupt: Some(interrupt),
         }
     }
 
     pub fn verify(&self) -> Result<()> {
-        if self.cancelled.load(Ordering::Acquire) {
+        if self.cancelled.load(Ordering::Acquire) || self.interrupt.as_ref().is_some_and(|f| f()) {
             return Err(Error::Cancelled);
         }
         if self
@@ -70,125 +122,628 @@ impl ExecutionGuard {
     }
 }
 
+/// The guards in force on one connection, shared with its progress handler.
+/// Scopes stack; every guard on the stack is checked.
+struct GuardSlot {
+    state: Mutex<SlotState>,
+    confined: Option<Arc<ConfinedIo>>,
+}
+
+#[derive(Default)]
+struct SlotState {
+    guards: Vec<ExecutionGuard>,
+    /// COMMIT and rollback run with every check off.
+    suspended: bool,
+    /// Why the progress handler interrupted the running statement.
+    tripped: Option<Error>,
+}
+
+impl GuardSlot {
+    fn state(&self) -> std::sync::MutexGuard<'_, SlotState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn check(&self) -> Result<()> {
+        let guards = {
+            let state = self.state();
+            if state.suspended {
+                return Ok(());
+            }
+            state.guards.clone()
+        };
+        guards.iter().try_for_each(ExecutionGuard::verify)?;
+        self.confined.as_ref().map_or(Ok(()), |io| io.verify())
+    }
+
+    fn progress(&self) -> bool {
+        match self.check() {
+            Ok(()) => false,
+            Err(error) => {
+                self.state().tripped = Some(error);
+                true
+            }
+        }
+    }
+
+    fn take_tripped(&self) -> Option<Error> {
+        self.state().tripped.take()
+    }
+
+    fn push(&self, guard: ExecutionGuard) {
+        self.state().guards.push(guard);
+    }
+
+    fn pop(&self) {
+        self.state().guards.pop();
+    }
+
+    fn set_suspended(&self, suspended: bool) -> bool {
+        std::mem::replace(&mut self.state().suspended, suspended)
+    }
+}
+
+/// A handle on the process's single engine instance for one store.
 #[derive(Clone)]
 pub struct Database {
-    inner: Arc<turso_core::Database>,
+    shared: Arc<Shared>,
+}
+
+struct Shared {
+    /// Set once the store is admitted and registered.
+    identity: OnceLock<FileIdentity>,
+    engine: Option<Engine>,
+}
+
+struct Engine {
+    database: Arc<turso_core::Database>,
     io: Arc<dyn turso_core::IO>,
-    #[cfg(unix)]
-    pinned: Option<Arc<super::pinned_io::PinnedIo>>,
+    confined: Option<Arc<ConfinedIo>>,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        // An unregistered instance is dropped by its opener, which already
+        // holds the registry.
+        let Some(&identity) = self.identity.get() else {
+            return;
+        };
+        // The engine's descriptors close while the registry is held, so no
+        // reopen can lock the file before this instance has released it.
+        let mut registry = registry();
+        drop(self.engine.take());
+        if registry
+            .get(&identity)
+            .is_some_and(|entry| entry.strong_count() == 0)
+        {
+            registry.remove(&identity);
+        }
+    }
 }
 
 impl Database {
+    /// Opens or creates the store at `path`.
     pub fn open(path: &Path) -> Result<Self> {
-        let path = path.to_str().ok_or_else(|| {
+        Self::open_path(path, true)
+    }
+
+    pub(crate) fn open_path(path: &Path, create: bool) -> Result<Self> {
+        if path.as_os_str() == ":memory:" {
+            return Self::open_memory();
+        }
+        let path = canonical(path)?;
+        let text = path.to_str().ok_or_else(|| {
             Error::InvalidOperation("native database path is not UTF-8".to_owned())
         })?;
-        let io = turso_core::Database::io_for_path(path)?;
-        let options = OpenOptions::new(policy::dialect()).db_opts(
-            DatabaseOpts::new()
-                .with_index_method(true)
-                .with_generated_columns(true),
-        );
-        let inner = turso_core::Database::open(Arc::clone(&io), path, options)?;
+        let mut registry = registry();
+        if let Ok(identity) = confined_io::path_identity(text)
+            && let Some(shared) = registry.get(&identity).and_then(Weak::upgrade)
+        {
+            return Ok(Self { shared });
+        }
+        let file = confined_io::open_regular(&path, create).map_err(|error| {
+            Error::InvalidOperation(format!("open native database {}: {error}", path.display()))
+        })?;
+        let identity = confined_io::held_identity(&file)?;
+        if let Some(shared) = registry.get(&identity).and_then(Weak::upgrade) {
+            // ponytail: the path was renamed onto a live store between stat
+            // and open. Closing this descriptor would drop that store's lock.
+            std::mem::forget(file);
+            return Ok(Self { shared });
+        }
+        let fresh = preflight(&file)?;
+        let confined = Arc::new(ConfinedIo::new(text.to_owned(), file, identity)?);
+        let io: Arc<dyn turso_core::IO> = confined.clone();
+        let main = io.open_file(text, turso_core::OpenFlags::Create, true)?;
+        let storage = Arc::new(turso_core::storage::database::DatabaseFile::new(main));
+        let database = open_engine(
+            &io,
+            text,
+            OpenOptions::new(policy::dialect()).storage(storage),
+        )?;
+        let database = Self {
+            shared: Arc::new(Shared {
+                identity: OnceLock::new(),
+                engine: Some(Engine {
+                    database,
+                    io,
+                    confined: Some(confined),
+                }),
+            }),
+        };
+        database.admit_format(fresh)?;
+        let _ = database.shared.identity.set(identity);
+        registry.insert(identity, Arc::downgrade(&database.shared));
+        Ok(database)
+    }
+
+    fn open_memory() -> Result<Self> {
+        let io = turso_core::Database::io_for_path(":memory:")?;
+        let database = turso_core::Database::open(
+            Arc::clone(&io),
+            ":memory:",
+            OpenOptions::new(policy::dialect()).db_opts(database_options()),
+        )?;
         Ok(Self {
-            inner,
-            io,
-            #[cfg(unix)]
-            pinned: None,
+            shared: Arc::new(Shared {
+                identity: OnceLock::new(),
+                engine: Some(Engine {
+                    database,
+                    io,
+                    confined: None,
+                }),
+            }),
         })
     }
 
-    /// Adopts a read-write descriptor supplied by the canonical file authority.
-    /// The native main-file handle opens that descriptor, never the mutable path.
-    #[cfg(unix)]
-    pub fn open_pinned(path: &Path, file: std::fs::File) -> Result<Self> {
-        let pinned = super::pinned_io::PinnedIo::new(path, file)?;
-        let native_file = pinned.open_main()?;
-        let path = pinned.canonical_path().to_str().ok_or_else(|| {
-            Error::InvalidOperation("native database path is not UTF-8".to_owned())
-        })?;
-        let io: Arc<dyn turso_core::IO> = pinned.clone();
-        let storage = Arc::new(turso_core::storage::database::DatabaseFile::new(
-            native_file,
-        ));
-        let options = OpenOptions::new(policy::pinned_dialect())
-            .storage(storage)
-            .db_opts(
-                DatabaseOpts::new()
-                    .with_index_method(true)
-                    .with_generated_columns(true),
-            );
-        let inner = turso_core::Database::open(Arc::clone(&io), path, options)?;
-        pinned.verify_path()?;
-        Ok(Self {
-            inner,
-            io,
-            pinned: Some(pinned),
-        })
+    /// Stamps a fresh store, and refuses a store whose header lacks the stamp
+    /// (an empty main file can still carry WAL frames from another writer).
+    fn admit_format(&self, fresh: bool) -> Result<()> {
+        let connection = self.connect_with(Capability::Maintenance, false)?;
+        let application_id = connection.pragma_u32("application_id")?;
+        if application_id == APPLICATION_ID {
+            return Ok(());
+        }
+        if fresh && application_id == 0 && connection.pragma_u32("page_count")? == 0 {
+            connection.execute_unchecked(&format!("PRAGMA application_id = {APPLICATION_ID}"))?;
+            return Ok(());
+        }
+        Err(foreign_format())
     }
 
-    #[cfg(not(unix))]
-    pub fn open_pinned(_path: &Path, _file: std::fs::File) -> Result<Self> {
-        Err(Error::Unsupported(
-            "native descriptor adoption is unavailable on this platform".to_owned(),
-        ))
+    fn engine(&self) -> &Engine {
+        self.shared
+            .engine
+            .as_ref()
+            .expect("the engine lives until the last handle drops")
     }
 
-    pub fn opened_file_identity(&self) -> Option<(u64, u64)> {
-        #[cfg(unix)]
-        {
-            self.pinned.as_ref().map(|pinned| {
-                let identity = pinned.identity();
-                (identity.dev, identity.ino)
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            None
-        }
+    pub(crate) fn file_has_moved(&self) -> Result<bool> {
+        self.engine()
+            .confined
+            .as_ref()
+            .map_or(Ok(false), |io| io.has_moved())
     }
 
     pub fn connect(&self, access: Access) -> Result<Connection> {
-        #[cfg(unix)]
-        if let Some(pinned) = &self.pinned {
-            pinned.verify_path()?;
+        self.connect_with(access.into(), false)
+    }
+
+    pub(crate) fn connect_with(
+        &self,
+        capability: Capability,
+        read_only: bool,
+    ) -> Result<Connection> {
+        let engine = self.engine();
+        if let Some(confined) = &engine.confined {
+            confined.verify()?;
         }
-        let inner = self.inner.connect()?;
+        let inner = engine.database.connect()?;
         inner.set_foreign_keys_enabled(true);
         inner.set_sync_mode(turso_core::SyncMode::Normal);
-        inner.set_query_only(access == Access::Reader);
-        inner.set_busy_timeout(Duration::from_secs(5));
-        Ok(Connection {
+        inner.set_busy_timeout(DEFAULT_BUSY_TIMEOUT);
+        // The runtime's checkpoint lane is the only checkpoint scheduler.
+        inner.wal_auto_actions_disable();
+        // Spilling to a temp file would need a path outside the confinement.
+        inner.set_temp_store(turso_core::TempStore::Memory);
+        let guard = Arc::new(GuardSlot {
+            state: Mutex::default(),
+            confined: engine.confined.clone(),
+        });
+        let progress = Arc::clone(&guard);
+        inner.set_progress_handler(
+            PROGRESS_INTERVAL_OPS.unsigned_abs().into(),
+            Some(Box::new(move || progress.progress())),
+        );
+        let connection = Connection {
             inner,
-            io: Arc::clone(&self.io),
-            access,
-            transaction_active: false,
-            #[cfg(unix)]
-            pinned: self.pinned.clone(),
-        })
+            guard,
+            capability: Cell::new(capability),
+            read_only,
+            cache: RefCell::default(),
+            database: self.clone(),
+        };
+        connection.set_capability(capability);
+        Ok(connection)
     }
 }
 
-/// Exclusively owned by one writer actor or reader lease. Never exposes the
-/// underlying connection, compiled program, or an unguarded SQL entrypoint.
+fn database_options() -> DatabaseOpts {
+    DatabaseOpts::new()
+        .with_index_method(true)
+        .with_generated_columns(true)
+}
+
+/// Opens without the engine's path registry: [`OPEN_IDENTITIES`] is the only
+/// registry, keyed by file identity rather than a pathname.
+fn open_engine(
+    io: &Arc<dyn turso_core::IO>,
+    path: &str,
+    options: OpenOptions,
+) -> Result<Arc<turso_core::Database>> {
+    let options = options.db_opts(database_options());
+    let mut state = OpenDbAsyncState::new();
+    loop {
+        match turso_core::Database::do_open_async(&mut state, Arc::clone(io), path, &options)
+            .map_err(|error| *error)?
+        {
+            IOResult::Done(database) => return Ok(database),
+            IOResult::IO(completion) => completion.wait(&**io)?,
+        }
+    }
+}
+
+fn canonical(path: &Path) -> Result<PathBuf> {
+    let name = path.file_name().ok_or_else(|| {
+        Error::InvalidOperation(format!("{} names no database file", path.display()))
+    })?;
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let parent = parent.canonicalize().map_err(|error| {
+        Error::InvalidOperation(format!("resolve {}: {error}", parent.display()))
+    })?;
+    Ok(parent.join(name))
+}
+
+fn foreign_format() -> Error {
+    Error::Engine(LimboError::NotADB)
+}
+
+/// Reads the header before the engine touches the file: an empty file is a
+/// fresh store; anything else must be a SQLite-format file stamped TDN1.
+fn preflight(file: &std::fs::File) -> Result<bool> {
+    let length = file
+        .metadata()
+        .map_err(|error| Error::InvalidOperation(format!("inspect native database: {error}")))?
+        .len();
+    if length == 0 {
+        return Ok(true);
+    }
+    let mut header = [0_u8; 100];
+    let mut reader = file;
+    reader
+        .read_exact(&mut header)
+        .map_err(|_| foreign_format())?;
+    let application_id = u32::from_be_bytes([header[68], header[69], header[70], header[71]]);
+    if &header[..16] != SQLITE_MAGIC || application_id != APPLICATION_ID {
+        return Err(foreign_format());
+    }
+    Ok(false)
+}
+
+/// A compiled statement and the capability it was authorized under.
+pub(crate) struct Prepared {
+    pub(crate) statement: turso_core::Statement,
+    sql: String,
+    capability: Capability,
+    ddl: bool,
+}
+
+/// Exclusively owned by one thread: the writer actor or one reader worker.
 pub struct Connection {
     inner: Arc<turso_core::Connection>,
-    io: Arc<dyn turso_core::IO>,
-    access: Access,
-    transaction_active: bool,
-    #[cfg(unix)]
-    pinned: Option<Arc<super::pinned_io::PinnedIo>>,
+    guard: Arc<GuardSlot>,
+    capability: Cell<Capability>,
+    read_only: bool,
+    cache: RefCell<HashMap<(Capability, String), (turso_core::Statement, bool)>>,
+    database: Database,
 }
 
 impl Connection {
+    pub(crate) fn set_capability(&self, capability: Capability) {
+        self.capability.set(capability);
+        self.inner
+            .set_query_only(self.read_only || capability == Capability::Reader);
+    }
+
+    pub(crate) fn capability(&self) -> Capability {
+        self.capability.get()
+    }
+
+    pub(crate) fn clear_cache(&self) {
+        self.cache.borrow_mut().clear();
+    }
+
+    pub(crate) fn push_guard(&self, guard: ExecutionGuard) {
+        self.guard.push(guard);
+    }
+
+    pub(crate) fn pop_guard(&self) {
+        self.guard.pop();
+    }
+
+    pub(crate) fn database(&self) -> &Database {
+        &self.database
+    }
+
+    pub(crate) fn set_busy_timeout(&self, timeout: Duration) {
+        self.inner.set_busy_timeout(timeout);
+    }
+
+    pub(crate) fn changes(&self) -> u64 {
+        self.inner.total_changes().max(0).unsigned_abs()
+    }
+
+    /// Parses, authorizes under the current capability, and compiles one
+    /// statement; `cached` reuses a statement compiled for the same
+    /// `(capability, sql)`.
+    pub(crate) fn prepare(&self, sql: &str, cached: bool) -> Result<Prepared> {
+        let capability = self.capability();
+        if cached
+            && let Some((statement, ddl)) = self
+                .cache
+                .borrow_mut()
+                .remove(&(capability, sql.to_owned()))
+        {
+            return Ok(Prepared {
+                statement,
+                sql: sql.to_owned(),
+                capability,
+                ddl,
+            });
+        }
+        validate_request(sql, &[])?;
+        let command = parse_single(sql)?;
+        policy::authorize(&command, capability)?;
+        let ddl = policy::is_ddl(&command);
+        let statement = self.compile(command, sql)?;
+        Ok(Prepared {
+            statement,
+            sql: sql.to_owned(),
+            capability,
+            ddl,
+        })
+    }
+
+    fn compile(&self, command: Cmd, sql: &str) -> Result<turso_core::Statement> {
+        self.inner
+            .prepare_translated_cmd(command, sql)
+            .map_err(classify_prepare)
+    }
+
+    /// Returns a statement to the cache. Statements that changed the schema
+    /// are dropped instead.
+    pub(crate) fn recycle(&self, mut prepared: Prepared) {
+        if prepared.ddl || prepared.statement.reset().is_err() {
+            return;
+        }
+        prepared.statement.clear_bindings();
+        let mut cache = self.cache.borrow_mut();
+        if cache.len() >= STATEMENT_CACHE_CAPACITY {
+            cache.clear();
+        }
+        cache
+            .entry((prepared.capability, prepared.sql))
+            .or_insert((prepared.statement, false));
+    }
+
+    /// Readmits a statement before it runs: a statement compiled under
+    /// another capability is re-authorized, and the guards are checked.
+    pub(crate) fn admit(&self, prepared: &mut Prepared) -> Result<()> {
+        let capability = self.capability();
+        if prepared.capability != capability {
+            policy::authorize(&parse_single(&prepared.sql)?, capability)?;
+            prepared.capability = capability;
+        }
+        prepared.statement.reset()?;
+        self.guard.check()
+    }
+
+    pub(crate) fn bind(&self, prepared: &mut Prepared, values: &[Value]) -> Result<()> {
+        validate_request(&prepared.sql, values)?;
+        let expected = prepared.statement.parameters_count();
+        if expected != values.len() {
+            return Err(Error::InvalidOperation(format!(
+                "expected {expected} parameters, received {}",
+                values.len()
+            )));
+        }
+        for (index, value) in values.iter().enumerate() {
+            let position = NonZeroUsize::new(index + 1)
+                .ok_or_else(|| Error::InvalidOperation("parameter index overflow".to_owned()))?;
+            prepared.statement.bind_at(position, value.to_native()?)?;
+        }
+        Ok(())
+    }
+
+    /// Steps until the next row (`true`) or completion (`false`).
+    pub(crate) fn step(&self, prepared: &mut Prepared) -> Result<bool> {
+        let row = self.drive(&mut prepared.statement)?;
+        if !row && prepared.ddl {
+            self.clear_cache();
+        }
+        Ok(row)
+    }
+
+    fn drive(&self, statement: &mut turso_core::Statement) -> Result<bool> {
+        loop {
+            match statement.step() {
+                Ok(StepResult::Row) => return Ok(true),
+                Ok(StepResult::Done) => {
+                    self.guard.take_tripped();
+                    return Ok(false);
+                }
+                Ok(StepResult::IO | StepResult::Yield) => self.database.engine().io.step()?,
+                // The engine's IO loop has nothing to pump while it waits on
+                // another connection's lock: sleep instead of spinning.
+                Ok(StepResult::Sleep { duration }) => self.sleep(duration)?,
+                Ok(StepResult::Busy) => return Err(Error::Busy),
+                Ok(StepResult::Interrupt) | Err(LimboError::Interrupt) => {
+                    return Err(self
+                        .guard
+                        .take_tripped()
+                        .unwrap_or(Error::Engine(LimboError::Interrupt)));
+                }
+                Err(error) => return Err(self.guard.take_tripped().unwrap_or(error.into())),
+            }
+        }
+    }
+
+    fn sleep(&self, duration: Duration) -> Result<()> {
+        let until = Instant::now() + duration;
+        loop {
+            self.guard.check()?;
+            let remaining = until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(());
+            }
+            std::thread::sleep(remaining.min(SLEEP_SLICE));
+        }
+    }
+
+    /// Runs a whole batch after authorizing every statement in it.
+    pub(crate) fn run_batch(&self, sql: &str) -> Result<()> {
+        validate_request(sql, &[])?;
+        let statements = parse_batch(sql)?;
+        let capability = self.capability();
+        for (command, _) in &statements {
+            policy::authorize(command, capability)?;
+        }
+        for (command, input) in statements {
+            let ddl = policy::is_ddl(&command);
+            let mut statement = self.compile(command, input)?;
+            self.guard.check()?;
+            while self.drive(&mut statement)? {}
+            if ddl {
+                self.clear_cache();
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs driver-issued SQL (transaction control, the format stamp) without
+    /// the capability verdict.
+    pub(crate) fn execute_unchecked(&self, sql: &str) -> Result<()> {
+        let mut statement = self.compile(parse_single(sql)?, sql)?;
+        self.guard.check()?;
+        while self.drive(&mut statement)? {}
+        Ok(())
+    }
+
+    /// Runs driver-issued SQL with every guard off: COMMIT and rollback must
+    /// not be interrupted once they start.
+    fn execute_suspended(&self, sql: &str) -> std::result::Result<(), Settlement> {
+        let mut statement = self
+            .compile(parse_single(sql).map_err(Settlement::Refused)?, sql)
+            .map_err(Settlement::Refused)?;
+        let previous = self.guard.set_suspended(true);
+        let result = loop {
+            match self.drive(&mut statement) {
+                Ok(true) => {}
+                Ok(false) => break Ok(()),
+                Err(error) => break Err(Settlement::Unknown(error)),
+            }
+        };
+        self.guard.set_suspended(previous);
+        result
+    }
+
+    fn pragma_u32(&self, name: &str) -> Result<u32> {
+        let sql = format!("PRAGMA {name}");
+        let mut statement = self.compile(parse_single(&sql)?, &sql)?;
+        let value = if self.drive(&mut statement)? {
+            statement.row().and_then(|row| match row.get_value(0) {
+                turso_core::Value::Numeric(turso_core::Numeric::Integer(value)) => {
+                    u32::try_from(*value).ok()
+                }
+                _ => None,
+            })
+        } else {
+            None
+        };
+        value.ok_or_else(|| Error::InvalidOperation(format!("PRAGMA {name} returned no integer")))
+    }
+
+    pub(crate) fn begin_transaction(&self, behavior: TransactionBehavior) -> Result<()> {
+        self.execute_unchecked(match behavior {
+            TransactionBehavior::Deferred => "BEGIN DEFERRED",
+            TransactionBehavior::Immediate => "BEGIN IMMEDIATE",
+        })
+    }
+
+    /// COMMIT runs unguarded. A failure before it is stepped is a refusal;
+    /// any failure after is commit-unknown.
+    pub(crate) fn commit_transaction(&self) -> std::result::Result<(), Settlement> {
+        self.execute_suspended("COMMIT")
+    }
+
+    /// Rollback ignores authority, cancellation and file identity: revocation
+    /// can forbid a commit but never strand a transaction.
+    pub(crate) fn rollback_transaction(&self) -> Result<()> {
+        if self.inner.get_auto_commit() {
+            return Ok(());
+        }
+        self.execute_suspended("ROLLBACK")
+            .map_err(Settlement::into_error)
+    }
+
+    pub(crate) fn savepoint(&self, name: &str) -> Result<()> {
+        self.execute_unchecked(&format!("SAVEPOINT \"{}\"", savepoint_name(name)?))
+    }
+
+    pub(crate) fn release_savepoint(&self, name: &str) -> Result<()> {
+        self.execute_unchecked(&format!("RELEASE \"{}\"", savepoint_name(name)?))
+    }
+
+    pub(crate) fn rollback_to_savepoint(&self, name: &str) -> Result<()> {
+        self.execute_suspended(&format!("ROLLBACK TO \"{}\"", savepoint_name(name)?))
+            .map_err(Settlement::into_error)
+    }
+
+    /// Rolls back to and releases a savepoint, unguarded like rollback.
+    pub(crate) fn abort_savepoint(&self, name: &str) -> Result<()> {
+        self.rollback_to_savepoint(name)?;
+        self.execute_suspended(&format!("RELEASE \"{}\"", savepoint_name(name)?))
+            .map_err(Settlement::into_error)
+    }
+
+    pub fn is_autocommit(&self) -> bool {
+        self.inner.get_auto_commit()
+    }
+
+    pub(crate) fn interrupt_handle(&self) -> InterruptHandle {
+        InterruptHandle(Arc::clone(&self.inner))
+    }
+
+    // The facade the runtime-core `engine::native` module drives. Each call
+    // runs under its own guard.
+
     pub fn execute(
         &mut self,
         sql: &str,
         parameters: &[Value],
         guard: &ExecutionGuard,
     ) -> Result<u64> {
-        let (_, changes) = self.run(sql, parameters, guard, false)?;
-        Ok(changes)
+        self.guarded(guard, |connection| {
+            let mut prepared = connection.prepare(sql, false)?;
+            connection.admit(&mut prepared)?;
+            connection.bind(&mut prepared, parameters)?;
+            while connection.step(&mut prepared)? {}
+            u64::try_from(prepared.statement.n_change()).map_err(|_| {
+                Error::InvalidOperation("negative native changed-row count".to_owned())
+            })
+        })
     }
 
     pub fn query(
@@ -197,314 +752,128 @@ impl Connection {
         parameters: &[Value],
         guard: &ExecutionGuard,
     ) -> Result<Rows> {
-        self.run(sql, parameters, guard, true).map(|(rows, _)| rows)
+        self.guarded(guard, |connection| {
+            let mut prepared = connection.prepare(sql, false)?;
+            connection.admit(&mut prepared)?;
+            connection.bind(&mut prepared, parameters)?;
+            let mut rows = Rows {
+                columns: (0..prepared.statement.num_columns())
+                    .map(|index| prepared.statement.get_column_name(index).into_owned())
+                    .collect(),
+                values: Vec::new(),
+            };
+            let mut bytes = rows.columns.iter().map(String::len).sum::<usize>();
+            while connection.step(&mut prepared)? {
+                let row = prepared.statement.row().ok_or_else(|| {
+                    Error::InvalidOperation("native row missing after row step".to_owned())
+                })?;
+                if rows.values.len() >= MAX_QUERY_ROWS {
+                    return Err(Error::QueryLimitExceeded);
+                }
+                let values: Vec<Value> = row.get_values().map(Value::from_native).collect();
+                bytes = values.iter().fold(bytes, |total, value| {
+                    total.saturating_add(std::mem::size_of::<Value>() + value.payload_len())
+                });
+                if bytes > MAX_QUERY_BYTES {
+                    return Err(Error::QueryLimitExceeded);
+                }
+                rows.values.push(values);
+            }
+            Ok(rows)
+        })
     }
 
     pub fn validate(&mut self, sql: &str, guard: &ExecutionGuard) -> Result<()> {
-        guard.verify()?;
-        #[cfg(unix)]
-        if let Some(pinned) = &self.pinned {
-            pinned.verify_path()?;
-        }
-        let command = parse_single(sql)?;
-        policy::authorize(&command, self.access)?;
-        let _statement = self.inner.prepare_translated_cmd(command, sql)?;
-        guard.verify()
+        self.guarded(guard, |connection| {
+            connection.prepare(sql, false)?;
+            connection.guard.check()
+        })
     }
 
-    /// Validates the entire batch before applying its first statement. It joins
-    /// the actor-owned transaction; it never opens or commits one implicitly.
+    /// Validates the entire batch before applying its first statement. It
+    /// joins the caller's transaction; it never opens or commits one.
     pub fn execute_batch(&mut self, sql: &str, guard: &ExecutionGuard) -> Result<()> {
-        guard.verify()?;
-        let statements = parse_batch(sql)?;
-        for (command, _) in &statements {
-            policy::authorize(command, self.access)?;
-        }
-        for (command, input) in statements {
-            self.run_command(command, input, &[], guard, false)?;
-        }
-        Ok(())
+        self.guarded(guard, |connection| connection.run_batch(sql))
     }
 
     pub fn begin(&mut self, behavior: TransactionBehavior, guard: &ExecutionGuard) -> Result<()> {
-        if self.transaction_active {
+        if !self.is_autocommit() {
             return Err(Error::InvalidOperation(
                 "transaction already active".to_owned(),
             ));
         }
-        if self.access == Access::Reader && behavior != TransactionBehavior::Deferred {
+        if self.capability() == Capability::Reader && behavior != TransactionBehavior::Deferred {
             return Err(Error::Denied(
                 "reader cannot begin a write transaction".to_owned(),
             ));
         }
-        let sql = match behavior {
-            TransactionBehavior::Deferred => "BEGIN DEFERRED",
-            TransactionBehavior::Immediate => "BEGIN IMMEDIATE",
-        };
-        self.control(sql, guard)?;
-        self.transaction_active = true;
-        Ok(())
+        self.guarded(guard, |connection| connection.begin_transaction(behavior))
     }
 
+    /// Checks the guard once, then commits unguarded.
     pub fn commit(&mut self, guard: &ExecutionGuard) -> Result<()> {
-        if !self.transaction_active {
+        if self.is_autocommit() {
             return Err(Error::InvalidOperation(
                 "no transaction to commit".to_owned(),
             ));
         }
-        self.control("COMMIT", guard)?;
-        self.transaction_active = false;
-        Ok(())
+        guard.verify()?;
+        self.commit_transaction().map_err(Settlement::into_error)
     }
 
-    /// Cleanup remains available after cancellation or authority revocation.
-    /// Revocation can forbid a commit, but must never prevent rollback.
     pub fn rollback(&mut self) -> Result<()> {
-        if !self.transaction_active {
-            return Ok(());
-        }
-        let guard = cleanup_guard();
-        self.control("ROLLBACK", &guard)?;
-        self.transaction_active = false;
-        Ok(())
+        self.rollback_transaction()
     }
 
-    pub fn savepoint(&mut self, name: &str, guard: &ExecutionGuard) -> Result<()> {
-        self.savepoint_control("SAVEPOINT", name, guard)
-    }
-    pub fn release_savepoint(&mut self, name: &str, guard: &ExecutionGuard) -> Result<()> {
-        self.savepoint_control("RELEASE", name, guard)
-    }
-    pub fn rollback_savepoint(&mut self, name: &str) -> Result<()> {
-        self.savepoint_control("ROLLBACK TO", name, &cleanup_guard())
-    }
-    pub fn abort_savepoint(&mut self, name: &str) -> Result<()> {
-        let guard = cleanup_guard();
-        self.savepoint_control("ROLLBACK TO", name, &guard)?;
-        self.savepoint_control("RELEASE", name, &guard)
-    }
-
-    pub fn is_autocommit(&self) -> bool {
-        self.inner.get_auto_commit()
-    }
-    pub fn interrupt(&self) {
-        self.inner.interrupt();
-    }
-
-    /// The closed writer selects full synchronization before admitting a
-    /// canonical-state batch. Caller SQL cannot change synchronous mode.
-    pub fn set_full_durability(&mut self, guard: &ExecutionGuard) -> Result<()> {
+    fn guarded<T>(
+        &self,
+        guard: &ExecutionGuard,
+        run: impl FnOnce(&Self) -> Result<T>,
+    ) -> Result<T> {
         guard.verify()?;
-        if self.access != Access::Writer {
-            return Err(Error::Denied("reader cannot change durability".to_owned()));
-        }
-        if !self.inner.get_auto_commit() {
-            return Err(Error::InvalidOperation(
-                "durability cannot change inside a transaction".to_owned(),
-            ));
-        }
-        #[cfg(unix)]
-        if let Some(pinned) = &self.pinned {
-            pinned.verify_path()?;
-        }
-        self.inner.set_sync_mode(turso_core::SyncMode::Full);
-        if self.inner.get_sync_mode() != turso_core::SyncMode::Full {
-            return Err(Error::InvalidOperation(
-                "native full synchronization did not apply".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn total_changes(&self) -> u64 {
-        self.inner.total_changes().max(0).unsigned_abs()
-    }
-
-    pub fn interrupt_handle(&self) -> InterruptHandle {
-        InterruptHandle(Arc::clone(&self.inner))
-    }
-
-    pub fn checkpoint(&mut self, guard: &ExecutionGuard) -> Result<Rows> {
-        if self.access != Access::Writer {
-            return Err(Error::Denied("reader cannot checkpoint storage".to_owned()));
-        }
-        if self.transaction_active {
-            return Err(Error::InvalidOperation(
-                "checkpoint within transaction".to_owned(),
-            ));
-        }
-        self.run_command(
-            parse_single("PRAGMA wal_checkpoint(TRUNCATE)")?,
-            "PRAGMA wal_checkpoint(TRUNCATE)",
-            &[],
-            guard,
-            true,
-        )
-        .map(|(rows, _)| rows)
-    }
-
-    fn savepoint_control(
-        &mut self,
-        prefix: &str,
-        name: &str,
-        guard: &ExecutionGuard,
-    ) -> Result<()> {
-        if !self.transaction_active {
-            return Err(Error::InvalidOperation(
-                "savepoint requires actor-owned transaction".to_owned(),
-            ));
-        }
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            return Err(Error::InvalidOperation(
-                "invalid runtime savepoint identifier".to_owned(),
-            ));
-        }
-        self.control(&format!("{prefix} \"{name}\""), guard)
-    }
-
-    fn control(&mut self, sql: &str, guard: &ExecutionGuard) -> Result<()> {
-        self.run_command(parse_single(sql)?, sql, &[], guard, false)
-            .map(|_| ())
-    }
-
-    fn run(
-        &mut self,
-        sql: &str,
-        parameters: &[Value],
-        guard: &ExecutionGuard,
-        collect: bool,
-    ) -> Result<(Rows, u64)> {
-        guard.verify()?;
-        let command = parse_single(sql)?;
-        policy::authorize(&command, self.access)?;
-        self.run_command(command, sql, parameters, guard, collect)
-    }
-
-    fn run_command(
-        &mut self,
-        command: Cmd,
-        sql: &str,
-        parameters: &[Value],
-        guard: &ExecutionGuard,
-        collect: bool,
-    ) -> Result<(Rows, u64)> {
-        let result = self.run_command_inner(command, sql, parameters, guard, collect);
-        // Native constraint/cancellation paths can end a transaction themselves.
-        // Never retain a facade transaction flag after the engine rolled it back.
-        self.transaction_active = !self.inner.get_auto_commit();
+        self.push_guard(guard.clone());
+        let result = run(self);
+        self.pop_guard();
         result
     }
+}
 
-    fn run_command_inner(
-        &mut self,
-        command: Cmd,
-        sql: &str,
-        parameters: &[Value],
-        guard: &ExecutionGuard,
-        collect: bool,
-    ) -> Result<(Rows, u64)> {
-        guard.verify()?;
-        validate_request(sql, parameters)?;
-        #[cfg(unix)]
-        if let Some(pinned) = &self.pinned {
-            pinned.verify_path()?;
+/// How a statement that ends a transaction failed.
+pub(crate) enum Settlement {
+    /// Nothing was stepped; the transaction is unchanged.
+    Refused(Error),
+    /// The statement was stepped and failed; durability is unknown.
+    Unknown(Error),
+}
+
+impl Settlement {
+    pub(crate) fn into_error(self) -> Error {
+        match self {
+            Self::Refused(error) | Self::Unknown(error) => error,
         }
-        let progress_guard = ProgressGuard::install(
-            Arc::clone(&self.inner),
-            guard.clone(),
-            #[cfg(unix)]
-            self.pinned.clone(),
-        );
-        let mut statement = self.inner.prepare_translated_cmd(command, sql)?;
-        if statement.parameters_count() != parameters.len() {
-            return Err(Error::InvalidOperation(format!(
-                "expected {} parameters, received {}",
-                statement.parameters_count(),
-                parameters.len()
-            )));
+    }
+}
+
+fn savepoint_name(name: &str) -> Result<&str> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(Error::InvalidOperation(
+            "invalid runtime savepoint identifier".to_owned(),
+        ));
+    }
+    Ok(name)
+}
+
+/// Function denials surface from the engine's name resolution as parse errors.
+fn classify_prepare(error: LimboError) -> Error {
+    match error {
+        LimboError::ParseError(message) if message.contains(policy::DENIED_FUNCTION) => {
+            Error::Denied(message)
         }
-        for (index, value) in parameters.iter().enumerate() {
-            let position = NonZeroUsize::new(index + 1)
-                .ok_or_else(|| Error::InvalidOperation("parameter index overflow".to_owned()))?;
-            statement.bind_at(position, value.to_native()?)?;
-        }
-        let mut rows = Rows {
-            columns: (0..statement.num_columns())
-                .map(|index| statement.get_column_name(index).into_owned())
-                .collect(),
-            values: Vec::new(),
-        };
-        let mut materialized_bytes = rows
-            .columns
-            .iter()
-            .try_fold(std::mem::size_of::<Vec<String>>(), |total, column| {
-                total
-                    .checked_add(std::mem::size_of::<String>())?
-                    .checked_add(column.len())
-            })
-            .ok_or(Error::QueryLimitExceeded)?;
-        loop {
-            guard.verify()?;
-            let step = match statement.step() {
-                Ok(step) => step,
-                Err(error) => {
-                    if let Some(error) = progress_guard.failure()? {
-                        return Err(error);
-                    }
-                    return Err(error.into());
-                }
-            };
-            match step {
-                StepResult::Row => {
-                    if collect {
-                        let row = statement.row().ok_or_else(|| {
-                            Error::InvalidOperation("native row missing after row step".to_owned())
-                        })?;
-                        if rows.values.len() >= MAX_QUERY_ROWS {
-                            return Err(Error::QueryLimitExceeded);
-                        }
-                        materialized_bytes = materialized_bytes
-                            .checked_add(std::mem::size_of::<Vec<Value>>())
-                            .ok_or(Error::QueryLimitExceeded)?;
-                        let mut values = Vec::with_capacity(rows.columns.len());
-                        for value in row.get_values() {
-                            let payload = match value {
-                                turso_core::Value::Text(value) => value.as_str().len(),
-                                turso_core::Value::Blob(value) => value.len(),
-                                _ => 0,
-                            };
-                            materialized_bytes = materialized_bytes
-                                .checked_add(std::mem::size_of::<Value>())
-                                .and_then(|bytes| bytes.checked_add(payload))
-                                .ok_or(Error::QueryLimitExceeded)?;
-                            if materialized_bytes > MAX_QUERY_BYTES {
-                                return Err(Error::QueryLimitExceeded);
-                            }
-                            values.push(Value::from_native(value));
-                        }
-                        rows.values.push(values);
-                    }
-                }
-                StepResult::Done => {
-                    if let Some(error) = progress_guard.failure()? {
-                        return Err(error);
-                    }
-                    let changes = u64::try_from(statement.n_change()).map_err(|_| {
-                        Error::InvalidOperation("negative native changed-row count".to_owned())
-                    })?;
-                    return Ok((rows, changes));
-                }
-                StepResult::IO | StepResult::Yield | StepResult::Sleep { .. } => self.io.step()?,
-                StepResult::Busy => return Err(Error::Busy),
-                StepResult::Interrupt => {
-                    return Err(progress_guard.failure()?.unwrap_or(Error::Cancelled));
-                }
-            }
-        }
+        error => error.into(),
     }
 }
 
@@ -520,70 +889,10 @@ impl InterruptHandle {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        // The engine rolls back unfinished transactions when its connection is
-        // released. Attempt explicit bounded cleanup first; neither cancellation
-        // nor write-authority revocation is allowed to strand an owned transaction.
-        if let Err(error) = self.rollback() {
-            tracing::error!(%error, "native transaction cleanup failed; releasing connection rolls back remaining state");
+        self.cache.get_mut().clear();
+        if let Err(error) = self.rollback_transaction() {
+            tracing::error!(%error, "native transaction cleanup failed; releasing the connection rolls back remaining state");
         }
-    }
-}
-
-fn cleanup_guard() -> ExecutionGuard {
-    ExecutionGuard::new(
-        Some(Instant::now() + Duration::from_secs(5)),
-        Arc::new(AtomicBool::new(false)),
-        None,
-    )
-}
-
-struct ProgressGuard {
-    connection: Arc<turso_core::Connection>,
-    failure: Arc<Mutex<Option<Error>>>,
-}
-impl ProgressGuard {
-    fn install(
-        connection: Arc<turso_core::Connection>,
-        guard: ExecutionGuard,
-        #[cfg(unix)] pinned: Option<Arc<super::pinned_io::PinnedIo>>,
-    ) -> Self {
-        let failure = Arc::new(Mutex::new(None));
-        let callback_failure = Arc::clone(&failure);
-        connection.set_progress_handler(
-            1_000,
-            Some(Box::new(move || {
-                let result = guard.verify().and_then(|()| {
-                    #[cfg(unix)]
-                    if let Some(pinned) = &pinned {
-                        pinned.verify_path()?;
-                    }
-                    Ok(())
-                });
-                if let Err(error) = result {
-                    match callback_failure.lock() {
-                        Ok(mut failure) => *failure = Some(error),
-                        Err(_) => return true,
-                    }
-                    return true;
-                }
-                false
-            })),
-        );
-        Self {
-            connection,
-            failure,
-        }
-    }
-    fn failure(&self) -> Result<Option<Error>> {
-        self.failure
-            .lock()
-            .map(|mut failure| failure.take())
-            .map_err(|_| Error::InvalidOperation("native progress state poisoned".to_owned()))
-    }
-}
-impl Drop for ProgressGuard {
-    fn drop(&mut self) {
-        self.connection.set_progress_handler(0, None);
     }
 }
 
@@ -591,14 +900,13 @@ fn parse_single(sql: &str) -> Result<Cmd> {
     let mut statements = parse_batch(sql)?;
     if statements.len() != 1 {
         return Err(Error::InvalidOperation(
-            "exact SQL requires one statement".to_owned(),
+            "exactly one SQL statement is required".to_owned(),
         ));
     }
     Ok(statements.remove(0).0)
 }
 
 fn parse_batch(sql: &str) -> Result<Vec<(Cmd, &str)>> {
-    validate_request(sql, &[])?;
     let dialect = policy::dialect();
     let mut remaining = sql;
     let mut statements = Vec::new();
@@ -632,19 +940,9 @@ fn validate_request(sql: &str, parameters: &[Value]) -> Result<()> {
     if sql.len() > MAX_SQL_BYTES || parameters.len() > MAX_SQL_PARAMETERS {
         return Err(Error::RequestLimitExceeded);
     }
-    let bytes = parameters
-        .iter()
-        .try_fold(sql.len(), |total, value| {
-            let payload = match value {
-                Value::Text(value) => value.capacity(),
-                Value::Blob(value) => value.capacity(),
-                _ => 0,
-            };
-            total
-                .checked_add(std::mem::size_of::<Value>())?
-                .checked_add(payload)
-        })
-        .ok_or(Error::RequestLimitExceeded)?;
+    let bytes = parameters.iter().fold(sql.len(), |total, value| {
+        total.saturating_add(std::mem::size_of::<Value>() + value.payload_len())
+    });
     if bytes > MAX_REQUEST_BYTES {
         return Err(Error::RequestLimitExceeded);
     }

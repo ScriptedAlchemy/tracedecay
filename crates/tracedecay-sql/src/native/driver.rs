@@ -1,19 +1,23 @@
 //! The rusqlite-shaped surface over the guarded native connection, compiled
-//! only under `--config=native`. Rows are materialized by the guarded layer;
-//! anything the guarded layer cannot yet do returns `ErrorKind::Unsupported`.
+//! only under `--config=native`. Statements stream their rows; every step runs
+//! under the guards in force on the connection when it executes.
 
 use std::{
     borrow::Cow,
-    cell::{Cell, RefCell},
+    cell::Cell,
     fmt,
     marker::PhantomData,
     ops::{BitOr, Deref, DerefMut},
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{Arc, Mutex, PoisonError},
 };
 
-use super::{Access, Database, ExecutionGuard};
+use super::{
+    Database, ExecutionGuard,
+    connection::{Prepared, Settlement},
+};
 pub use super::{InterruptHandle, TransactionBehavior};
 use crate::{
     Capability, CheckpointMode, CheckpointOutcome, ConnectionControl, Engine, ErrorExt, ErrorKind,
@@ -50,7 +54,14 @@ impl Error {
     fn unsupported(operation: &str) -> Self {
         Self::Engine {
             kind: ErrorKind::Unsupported,
-            message: format!("{operation} is not implemented on the native engine yet"),
+            message: format!("{operation} is not supported on the native engine"),
+        }
+    }
+
+    fn commit_outcome_unknown(error: super::Error) -> Self {
+        Self::Engine {
+            kind: ErrorKind::CommitOutcomeUnknown,
+            message: format!("COMMIT failed after it started: {error}"),
         }
     }
 }
@@ -129,6 +140,7 @@ impl From<super::Error> for Error {
                 LimboError::Interrupt => ErrorKind::Interrupted,
                 LimboError::ReadOnly => ErrorKind::ReadOnly,
                 LimboError::SchemaUpdated | LimboError::SchemaConflict => ErrorKind::Schema,
+                LimboError::NotADB => ErrorKind::ForeignFormat,
                 _ => ErrorKind::Other,
             },
             super::Error::InvalidOperation(_)
@@ -139,6 +151,12 @@ impl From<super::Error> for Error {
             kind,
             message: error.to_string(),
         }
+    }
+}
+
+impl From<turso_core::LimboError> for Error {
+    fn from(error: turso_core::LimboError) -> Self {
+        super::Error::from(error).into()
     }
 }
 
@@ -627,15 +645,12 @@ pub enum DropBehavior {
     Panic,
 }
 
-fn unguarded() -> ExecutionGuard {
-    ExecutionGuard::new(None, Arc::new(AtomicBool::new(false)), None)
-}
-
-/// One thread-owned native connection with rusqlite's method surface.
+/// One thread-owned native connection with rusqlite's method surface. A
+/// read-write open starts with no statement restriction, as a SQLite
+/// connection without an authorizer does; a read-only open is a reader.
 pub struct Connection {
-    inner: RefCell<super::Connection>,
+    core: super::Connection,
     savepoint_depth: Cell<usize>,
-    _database: Database,
 }
 
 impl Connection {
@@ -650,37 +665,28 @@ impl Connection {
     pub fn open_with_flags(path: impl AsRef<Path>, flags: OpenFlags) -> Result<Self> {
         let path = path.as_ref();
         let memory = path.as_os_str() == ":memory:";
+        let read_only = flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY);
         if !memory && !flags.contains(OpenFlags::SQLITE_OPEN_CREATE) && !path.exists() {
             return Err(Error::InvalidPath(path.to_owned()));
         }
-        let database = Database::open(path)?;
-        let access = if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            Access::Reader
+        let database = Database::open_path(path, !read_only)?;
+        let capability = if read_only {
+            Capability::Reader
         } else {
-            Access::Writer
+            Capability::Maintenance
         };
         Ok(Self {
-            inner: RefCell::new(database.connect(access)?),
+            core: database.connect_with(capability, read_only)?,
             savepoint_depth: Cell::new(0),
-            _database: database,
         })
     }
 
-    fn fetch(&self, sql: &str, values: Vec<Value>) -> Result<super::Rows> {
-        Ok(self.inner.borrow_mut().query(sql, &values, &unguarded())?)
-    }
-
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> Result<usize> {
-        let values = params.bind_values()?;
-        let changes = self
-            .inner
-            .borrow_mut()
-            .execute(sql, &values, &unguarded())?;
-        Ok(usize::try_from(changes).unwrap_or(usize::MAX))
+        self.prepare_cached(sql)?.execute(params)
     }
 
     pub fn execute_batch(&self, sql: &str) -> Result<()> {
-        Ok(self.inner.borrow_mut().execute_batch(sql, &unguarded())?)
+        Ok(self.core.run_batch(sql)?)
     }
 
     pub fn query_row<T, P, F>(&self, sql: &str, params: P, f: F) -> Result<T>
@@ -688,23 +694,23 @@ impl Connection {
         P: Params,
         F: FnOnce(&Row<'_>) -> Result<T>,
     {
-        let mut rows = Rows::new(self.fetch(sql, params.bind_values()?)?);
-        match rows.next()? {
-            Some(row) => f(row),
-            None => Err(Error::QueryReturnedNoRows),
-        }
+        self.prepare_cached(sql)?.query_row(params, f)
     }
 
     pub fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
-        self.inner.borrow_mut().validate(sql, &unguarded())?;
         Ok(Statement {
             connection: self,
-            sql: sql.to_owned(),
+            prepared: Some(self.core.prepare(sql, false)?),
+            cached: false,
         })
     }
 
     pub fn prepare_cached(&self, sql: &str) -> Result<CachedStatement<'_>> {
-        self.prepare(sql).map(CachedStatement)
+        Ok(CachedStatement(Statement {
+            connection: self,
+            prepared: Some(self.core.prepare(sql, true)?),
+            cached: true,
+        }))
     }
 
     pub fn transaction(&mut self) -> Result<Transaction<'_>> {
@@ -715,7 +721,7 @@ impl Connection {
         &mut self,
         behavior: TransactionBehavior,
     ) -> Result<Transaction<'_>> {
-        self.inner.borrow_mut().begin(behavior, &unguarded())?;
+        self.core.begin_transaction(behavior)?;
         Ok(Transaction {
             connection: self,
             drop_behavior: DropBehavior::Rollback,
@@ -755,19 +761,20 @@ impl Connection {
     }
 
     pub fn is_autocommit(&self) -> bool {
-        self.inner.borrow().is_autocommit()
+        self.core.is_autocommit()
     }
 
     pub fn total_changes(&self) -> u64 {
-        self.inner.borrow().total_changes()
+        self.core.changes()
     }
 
-    pub fn busy_timeout(&self, _timeout: std::time::Duration) -> Result<()> {
-        Err(Error::unsupported("busy_timeout"))
+    pub fn busy_timeout(&self, timeout: std::time::Duration) -> Result<()> {
+        self.core.set_busy_timeout(timeout);
+        Ok(())
     }
 
     pub fn get_interrupt_handle(&self) -> InterruptHandle {
-        self.inner.borrow().interrupt_handle()
+        self.core.interrupt_handle()
     }
 
     fn next_savepoint_name(&self) -> String {
@@ -780,6 +787,15 @@ impl Connection {
         self.savepoint_depth
             .set(self.savepoint_depth.get().saturating_sub(1));
     }
+
+    fn commit(&self) -> Result<()> {
+        self.core
+            .commit_transaction()
+            .map_err(|settlement| match settlement {
+                Settlement::Refused(error) => error.into(),
+                Settlement::Unknown(error) => Error::commit_outcome_unknown(error),
+            })
+    }
 }
 
 fn schema_prefix(schema: Option<&str>) -> String {
@@ -789,38 +805,58 @@ fn schema_prefix(schema: Option<&str>) -> String {
 }
 
 impl ConnectionControl for Connection {
-    fn set_capability(&self, _capability: Capability) -> Result<()> {
-        Err(Error::unsupported("set_capability"))
+    fn set_capability(&self, capability: Capability) -> Result<()> {
+        self.core.set_capability(capability);
+        Ok(())
     }
 
     fn with_capability<T>(
         &self,
-        _scoped: Capability,
-        _base: Capability,
-        _operation: impl FnOnce(&Self) -> Result<T>,
+        scoped: Capability,
+        base: Capability,
+        operation: impl FnOnce(&Self) -> Result<T>,
     ) -> Result<T> {
-        Err(Error::unsupported("with_capability"))
+        self.core.set_capability(scoped);
+        let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
+        self.core.clear_cache();
+        self.core.set_capability(base);
+        match result {
+            Ok(result) => result,
+            Err(payload) => resume_unwind(payload),
+        }
     }
 
     fn guard_scope<T>(
         &self,
-        _should_interrupt: impl FnMut() -> bool + Send + 'static,
-        _operation: impl FnOnce(&Self) -> T,
+        should_interrupt: impl FnMut() -> bool + Send + 'static,
+        operation: impl FnOnce(&Self) -> T,
     ) -> Result<T> {
-        Err(Error::unsupported("guard_scope"))
+        let poll = Mutex::new(should_interrupt);
+        self.core
+            .push_guard(ExecutionGuard::polling(Arc::new(move || {
+                (poll.lock().unwrap_or_else(PoisonError::into_inner))()
+            })));
+        let result = catch_unwind(AssertUnwindSafe(|| operation(self)));
+        self.core.pop_guard();
+        match result {
+            Ok(value) => Ok(value),
+            Err(payload) => resume_unwind(payload),
+        }
     }
 
     fn checkpoint(&self, mode: CheckpointMode) -> Result<CheckpointOutcome> {
-        if mode != CheckpointMode::Truncate {
-            return Err(Error::unsupported("non-truncate checkpoint"));
-        }
-        let rows = self.inner.borrow_mut().checkpoint(&unguarded())?;
-        let mut rows = Rows::new(rows);
-        let row = rows.next()?.ok_or(Error::QueryReturnedNoRows)?;
-        Ok(CheckpointOutcome {
-            busy: row.get::<_, i64>(0)? != 0,
-            log_frames: row.get(1)?,
-            checkpointed_frames: row.get(2)?,
+        let mode = match mode {
+            CheckpointMode::Passive => "PASSIVE",
+            CheckpointMode::Full => "FULL",
+            CheckpointMode::Restart => "RESTART",
+            CheckpointMode::Truncate => "TRUNCATE",
+        };
+        self.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |row| {
+            Ok(CheckpointOutcome {
+                busy: row.get::<_, i64>(0)? != 0,
+                log_frames: row.get(1)?,
+                checkpointed_frames: row.get(2)?,
+            })
         })
     }
 
@@ -837,7 +873,7 @@ impl ConnectionControl for Connection {
     }
 
     fn file_has_moved(&self) -> Result<bool> {
-        Err(Error::unsupported("file_has_moved"))
+        Ok(self.core.database().file_has_moved()?)
     }
 }
 
@@ -860,14 +896,15 @@ impl Transaction<'_> {
         self.drop_behavior = drop_behavior;
     }
 
+    /// Any failure after COMMIT starts is [`ErrorKind::CommitOutcomeUnknown`].
     pub fn commit(mut self) -> Result<()> {
         self.drop_behavior = DropBehavior::Ignore;
-        Ok(self.connection.inner.borrow_mut().commit(&unguarded())?)
+        self.connection.commit()
     }
 
     pub fn rollback(mut self) -> Result<()> {
         self.drop_behavior = DropBehavior::Ignore;
-        Ok(self.connection.inner.borrow_mut().rollback()?)
+        Ok(self.connection.core.rollback_transaction()?)
     }
 
     pub fn finish(mut self) -> Result<()> {
@@ -880,13 +917,12 @@ fn finish_transaction(connection: &Connection, behavior: DropBehavior) -> Result
     if connection.is_autocommit() {
         return Ok(());
     }
-    let mut inner = connection.inner.borrow_mut();
     match behavior {
-        DropBehavior::Commit => inner.commit(&unguarded()).or_else(|error| {
-            inner.rollback()?;
+        DropBehavior::Commit => connection.commit().or_else(|error| {
+            connection.core.rollback_transaction()?;
             Err(error)
         })?,
-        DropBehavior::Rollback => inner.rollback()?,
+        DropBehavior::Rollback => connection.core.rollback_transaction()?,
         DropBehavior::Ignore => {}
         DropBehavior::Panic => panic!("transaction dropped unexpectedly"),
     }
@@ -920,19 +956,19 @@ pub struct Savepoint<'c> {
 impl<'c> Savepoint<'c> {
     fn open(connection: &'c Connection) -> Result<Self> {
         let owns_transaction = connection.is_autocommit();
-        let mut inner = connection.inner.borrow_mut();
         if owns_transaction {
-            inner.begin(TransactionBehavior::Deferred, &unguarded())?;
+            connection
+                .core
+                .begin_transaction(TransactionBehavior::Deferred)?;
         }
         let name = connection.next_savepoint_name();
-        if let Err(error) = inner.savepoint(&name, &unguarded()) {
+        if let Err(error) = connection.core.savepoint(&name) {
             connection.release_savepoint_name();
             if owns_transaction {
-                inner.rollback()?;
+                connection.core.rollback_transaction()?;
             }
             return Err(error.into());
         }
-        drop(inner);
         Ok(Self {
             connection,
             name,
@@ -960,11 +996,7 @@ impl<'c> Savepoint<'c> {
 
     /// Rolls back to the savepoint and keeps it active, as rusqlite does.
     pub fn rollback(&mut self) -> Result<()> {
-        Ok(self
-            .connection
-            .inner
-            .borrow_mut()
-            .rollback_savepoint(&self.name)?)
+        Ok(self.connection.core.rollback_to_savepoint(&self.name)?)
     }
 
     pub fn finish(mut self) -> Result<()> {
@@ -978,21 +1010,16 @@ impl<'c> Savepoint<'c> {
         }
         self.finished = true;
         self.connection.release_savepoint_name();
-        let mut inner = self.connection.inner.borrow_mut();
+        let core = &self.connection.core;
         match behavior {
             DropBehavior::Commit => {
-                inner.release_savepoint(&self.name, &unguarded())?;
+                core.release_savepoint(&self.name)?;
                 if self.owns_transaction {
-                    inner.commit(&unguarded())?;
+                    self.connection.commit()?;
                 }
             }
-            DropBehavior::Rollback => {
-                if self.owns_transaction {
-                    inner.rollback()?;
-                } else {
-                    inner.abort_savepoint(&self.name)?;
-                }
-            }
+            DropBehavior::Rollback if self.owns_transaction => core.rollback_transaction()?,
+            DropBehavior::Rollback => core.abort_savepoint(&self.name)?,
             DropBehavior::Ignore => {}
             DropBehavior::Panic => panic!("savepoint dropped unexpectedly"),
         }
@@ -1016,20 +1043,55 @@ impl Drop for Savepoint<'_> {
     }
 }
 
+/// A compiled statement. A statement from `prepare_cached` returns to the
+/// connection's `(capability, sql)` cache when dropped.
 pub struct Statement<'c> {
     connection: &'c Connection,
-    sql: String,
+    prepared: Option<Prepared>,
+    cached: bool,
 }
 
-impl Statement<'_> {
+impl<'c> Statement<'c> {
+    fn start<P: Params>(&mut self, params: P) -> Result<&mut Prepared> {
+        let values = params.bind_values()?;
+        let core = &self.connection.core;
+        let prepared = self
+            .prepared
+            .as_mut()
+            .expect("a statement holds its program until dropped");
+        let expected = prepared.statement.parameters_count();
+        if expected != values.len() {
+            return Err(Error::InvalidParameterCount(values.len(), expected));
+        }
+        core.admit(prepared)?;
+        core.bind(prepared, &values)?;
+        Ok(prepared)
+    }
+
     pub fn execute<P: Params>(&mut self, params: P) -> Result<usize> {
-        self.connection.execute(&self.sql, params)
+        let connection = self.connection;
+        let core = &connection.core;
+        let prepared = self.start(params)?;
+        while core.step(prepared)? {}
+        let changes = prepared.statement.n_change();
+        prepared.statement.reset()?;
+        Ok(usize::try_from(changes).unwrap_or(0))
     }
 
     pub fn query<P: Params>(&mut self, params: P) -> Result<Rows<'_>> {
-        Ok(Rows::new(
-            self.connection.fetch(&self.sql, params.bind_values()?)?,
-        ))
+        let connection = self.connection;
+        let core = &connection.core;
+        let prepared = self.start(params)?;
+        let columns = (0..prepared.statement.num_columns())
+            .map(|index| prepared.statement.get_column_name(index).into_owned())
+            .collect();
+        Ok(Rows {
+            core,
+            prepared,
+            columns,
+            current: None,
+            done: false,
+        })
     }
 
     pub fn query_map<T, P, F>(&mut self, params: P, f: F) -> Result<MappedRows<'_, F>>
@@ -1048,11 +1110,25 @@ impl Statement<'_> {
         P: Params,
         F: FnOnce(&Row<'_>) -> Result<T>,
     {
-        self.connection.query_row(&self.sql, params, f)
+        let mut rows = self.query(params)?;
+        match rows.next()? {
+            Some(row) => f(row),
+            None => Err(Error::QueryReturnedNoRows),
+        }
     }
 
     pub fn exists<P: Params>(&mut self, params: P) -> Result<bool> {
         Ok(self.query(params)?.next()?.is_some())
+    }
+}
+
+impl Drop for Statement<'_> {
+    fn drop(&mut self) {
+        if let Some(prepared) = self.prepared.take()
+            && self.cached
+        {
+            self.connection.core.recycle(prepared);
+        }
     }
 }
 
@@ -1071,29 +1147,52 @@ impl DerefMut for CachedStatement<'_> {
     }
 }
 
+/// Steps its statement one row per [`Rows::next`]. Dropping it resets the
+/// statement, which ends the read it holds open.
 pub struct Rows<'s> {
+    core: &'s super::Connection,
+    prepared: &'s mut Prepared,
     columns: Rc<[String]>,
-    values: std::vec::IntoIter<Vec<Value>>,
     current: Option<Row<'s>>,
+    done: bool,
 }
 
 impl<'s> Rows<'s> {
-    fn new(rows: super::Rows) -> Self {
-        Self {
-            columns: rows.columns.into(),
-            values: rows.values.into_iter(),
-            current: None,
-        }
-    }
-
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<&Row<'s>>> {
-        self.current = self.values.next().map(|values| Row {
-            columns: Rc::clone(&self.columns),
-            values,
-            _statement: PhantomData,
-        });
-        Ok(self.current.as_ref())
+        self.current = None;
+        if self.done {
+            return Ok(None);
+        }
+        match self.core.step(self.prepared) {
+            Ok(true) => {
+                let row = self.prepared.statement.row().ok_or_else(|| {
+                    super::Error::InvalidOperation("native row missing after row step".to_owned())
+                })?;
+                self.current = Some(Row {
+                    columns: Rc::clone(&self.columns),
+                    values: row.get_values().map(Value::from_native).collect(),
+                    _statement: PhantomData,
+                });
+                Ok(self.current.as_ref())
+            }
+            Ok(false) => {
+                self.done = true;
+                Ok(None)
+            }
+            Err(error) => {
+                self.done = true;
+                Err(error.into())
+            }
+        }
+    }
+}
+
+impl Drop for Rows<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.prepared.statement.reset() {
+            tracing::warn!(%error, "native statement reset failed");
+        }
     }
 }
 
