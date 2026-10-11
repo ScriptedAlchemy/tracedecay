@@ -3,23 +3,28 @@
 //!
 //! Evidence is canonical: the logical path ([`is_test_file`]), parser-attested
 //! test annotations and `#[cfg(test)]` gates joined through `Annotates` edges,
-//! and extracted spans and qualified names. A name alone never makes a symbol
-//! test code. Inside a test file, a `test` prefix marks the unannotated test
-//! functions that pytest, Go's `testing`, and JUnit 3 discover by name.
+//! and the `Contains` edges that bind each gate to the items it encloses. A
+//! name alone never makes a symbol test code. Inside a test file, a runner
+//! prefix ([`name_discovered_test_prefix`]) marks only the unannotated test
+//! functions that pytest, Go's `testing`, JUnit 3, PHPUnit, and minitest
+//! discover by name.
 
 use std::collections::{HashMap, HashSet};
 
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
-use tracedecay_code_index::{is_test_file, is_test_gate_marker, is_test_marker};
-use tracedecay_domain::{CanonicalRelationEdgeV1, RelationEdgeKindV1};
+use tracedecay_code_index::{
+    is_test_file, is_test_gate_marker, is_test_marker, name_discovered_test_prefix,
+};
+use tracedecay_domain::{CanonicalRelationEdgeV1, RelationEdgeKindV1, SymbolOccurrenceId};
 
 #[derive(Default)]
 pub(crate) struct TestClassification {
     /// Targets of a test annotation such as `#[test]` or `#[tokio::test]`.
     annotated: HashSet<String>,
-    /// Zero-based inclusive line ranges of `#[cfg(test)]` items, by file.
-    gated_lines: HashMap<String, Vec<(u32, u32)>>,
+    /// The `#[cfg(test)]` items plus every symbol they enclose through
+    /// `Contains` edges.
+    gated: HashSet<String>,
     /// `dir` for each `#[cfg(test)]` module: `dir.rs` and every file below
     /// `dir/` hold that module's out-of-line code.
     gated_module_dirs: HashSet<String>,
@@ -27,7 +32,8 @@ pub(crate) struct TestClassification {
 
 impl TestClassification {
     /// `symbols` pairs records with their logical paths. `edges` must hold the
-    /// `Annotates` edges into those symbols; other edge kinds are ignored.
+    /// `Annotates` and `Contains` edges into those symbols; other edge kinds
+    /// are ignored.
     pub(crate) fn new<'a>(
         symbols: &[(&str, &'a LineageSymbolRecordV1)],
         edges: impl IntoIterator<Item = &'a CanonicalRelationEdgeV1>,
@@ -43,49 +49,62 @@ impl TestClassification {
         }
         let mut classification = Self::default();
         let mut gated = HashSet::new();
+        let mut stack = Vec::new();
+        let mut children: HashMap<&SymbolOccurrenceId, Vec<&SymbolOccurrenceId>> = HashMap::new();
         for edge in edges {
-            if edge.kind != RelationEdgeKindV1::Annotates {
-                continue;
+            match edge.kind {
+                RelationEdgeKindV1::Annotates if test_markers.contains(&edge.from_occurrence) => {
+                    classification
+                        .annotated
+                        .insert(edge.to_occurrence.as_str().to_owned());
+                }
+                RelationEdgeKindV1::Annotates if gate_markers.contains(&edge.from_occurrence) => {
+                    if gated.insert(&edge.to_occurrence) {
+                        stack.push(&edge.to_occurrence);
+                    }
+                }
+                RelationEdgeKindV1::Contains => {
+                    children
+                        .entry(&edge.from_occurrence)
+                        .or_default()
+                        .push(&edge.to_occurrence);
+                }
+                _ => {}
             }
-            if test_markers.contains(&edge.from_occurrence) {
-                classification
-                    .annotated
-                    .insert(edge.to_occurrence.as_str().to_owned());
-            } else if gate_markers.contains(&edge.from_occurrence) {
-                gated.insert(&edge.to_occurrence);
+        }
+        // A `#[cfg(test)]` item makes everything it encloses test code. Line
+        // spans cannot tell siblings sharing one line apart, so containment
+        // walks the parser's `Contains` edges instead.
+        while let Some(parent) = stack.pop() {
+            for &child in children.get(parent).into_iter().flatten() {
+                if gated.insert(child) {
+                    stack.push(child);
+                }
             }
         }
         for (file, record) in symbols {
             if !gated.contains(&record.occurrence) {
                 continue;
             }
-            let last_line = record
-                .start_line
-                .saturating_add(record.line_span.saturating_sub(1));
-            classification
-                .gated_lines
-                .entry((*file).to_owned())
-                .or_default()
-                .push((record.start_line, last_line));
             if record.kind == "module"
                 && let Some(dir) = rust_module_dir(file, &record.qualified_name)
             {
                 classification.gated_module_dirs.insert(dir);
             }
         }
+        classification.gated = gated
+            .into_iter()
+            .map(|occurrence| occurrence.as_str().to_owned())
+            .collect();
         classification
     }
 
     /// Code that exists only to test: a test file, a test annotation's target,
-    /// or anything a `#[cfg(test)]` item encloses.
+    /// a `#[cfg(test)]` item, or anything such an item encloses.
     pub(crate) fn is_test_code(&self, file: &str, record: &LineageSymbolRecordV1) -> bool {
         is_test_file(file)
             || self.is_test_annotated(record.occurrence.as_str())
-            || self.gated_lines.get(file).is_some_and(|ranges| {
-                ranges
-                    .iter()
-                    .any(|(first, last)| (*first..=*last).contains(&record.start_line))
-            })
+            || self.gated.contains(record.occurrence.as_str())
             || file
                 .strip_suffix(".rs")
                 .is_some_and(|stem| self.gated_module_dirs.contains(stem))
@@ -94,14 +113,14 @@ impl TestClassification {
                 .any(|(end, _)| self.gated_module_dirs.contains(&file[..end]))
     }
 
-    /// A test a runner invokes itself, which is live with no caller.
+    /// A test a runner invokes itself, which is live with no caller: a test
+    /// annotation's target, or an unannotated `test*` function in a test file
+    /// whose language discovers tests by name.
     pub(crate) fn is_test_entrypoint(&self, file: &str, record: &LineageSymbolRecordV1) -> bool {
         self.is_test_annotated(record.occurrence.as_str())
             || (is_test_file(file)
-                && record
-                    .simple_name
-                    .get(..4)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("test")))
+                && name_discovered_test_prefix(file)
+                    .is_some_and(|prefix| record.simple_name.starts_with(prefix)))
     }
 
     pub(crate) fn is_test_annotated(&self, occurrence: &str) -> bool {
@@ -223,20 +242,35 @@ mod tests {
         }
     }
 
-    fn annotates(
+    fn edge(
+        kind: RelationEdgeKindV1,
         from: &LineageSymbolRecordV1,
         to: &LineageSymbolRecordV1,
     ) -> CanonicalRelationEdgeV1 {
         CanonicalRelationEdgeV1 {
             from_occurrence: from.occurrence.clone(),
             to_occurrence: to.occurrence.clone(),
-            kind: RelationEdgeKindV1::Annotates,
+            kind,
             authority: EdgeAuthorityV1::SyntaxExact,
             evidence_span: SourceSpan {
                 start_byte: 0,
                 end_byte: 1,
             },
         }
+    }
+
+    fn annotates(
+        from: &LineageSymbolRecordV1,
+        to: &LineageSymbolRecordV1,
+    ) -> CanonicalRelationEdgeV1 {
+        edge(RelationEdgeKindV1::Annotates, from, to)
+    }
+
+    fn contains(
+        from: &LineageSymbolRecordV1,
+        to: &LineageSymbolRecordV1,
+    ) -> CanonicalRelationEdgeV1 {
+        edge(RelationEdgeKindV1::Contains, from, to)
     }
 
     #[test]
@@ -255,6 +289,15 @@ mod tests {
             "src/lib.rs::tests::helper",
             "function",
             (2, 4),
+            None,
+        );
+        // A production function on the gated item's own line is a sibling the
+        // parser did not enclose; a line range alone could not tell them apart.
+        let same_line = record(
+            "symbol.same_line",
+            "src/lib.rs::same_line",
+            "function",
+            (1, 1),
             None,
         );
         let feature_gate = record(
@@ -289,17 +332,24 @@ mod tests {
             &gate,
             &gated,
             &member,
+            &same_line,
             &feature_gate,
             &shared,
             &shared_member,
             &after,
         ]
         .map(|record| (file, record));
-        let edges = [annotates(&gate, &gated), annotates(&feature_gate, &shared)];
+        let edges = [
+            annotates(&gate, &gated),
+            annotates(&feature_gate, &shared),
+            contains(&gated, &member),
+            contains(&shared, &shared_member),
+        ];
         let classification = TestClassification::new(&symbols, &edges);
 
         assert!(classification.is_test_code(file, &gated));
         assert!(classification.is_test_code(file, &member));
+        assert!(!classification.is_test_code(file, &same_line));
         assert!(!classification.is_test_code(file, &shared_member));
         assert!(!classification.is_test_code(file, &after));
         assert!(classification.is_test_code("src/tests/deep.rs", &after));
@@ -309,10 +359,70 @@ mod tests {
     }
 
     #[test]
+    fn gated_closure_reaches_nested_members_only() {
+        let file = "src/lib.rs";
+        let gate = record(
+            "symbol.gate",
+            "src/lib.rs::@cfg",
+            "annotation_usage",
+            (0, 0),
+            Some("#[cfg(test)]"),
+        );
+        let outer = record("symbol.outer", "src/lib.rs::tests", "module", (1, 8), None);
+        let inner = record(
+            "symbol.inner",
+            "src/lib.rs::tests::deep",
+            "module",
+            (2, 6),
+            None,
+        );
+        let deep = record(
+            "symbol.deep",
+            "src/lib.rs::tests::deep::helper",
+            "function",
+            (3, 5),
+            None,
+        );
+        let outside = record(
+            "symbol.outside",
+            "src/lib.rs::outside::helper",
+            "function",
+            (3, 5),
+            None,
+        );
+        let parent = record(
+            "symbol.parent",
+            "src/lib.rs::outside",
+            "module",
+            (2, 6),
+            None,
+        );
+        let symbols =
+            [&gate, &outer, &inner, &deep, &outside, &parent].map(|record| (file, record));
+        let edges = [
+            annotates(&gate, &outer),
+            contains(&outer, &inner),
+            contains(&inner, &deep),
+            contains(&parent, &outside),
+        ];
+        let classification = TestClassification::new(&symbols, &edges);
+
+        assert!(classification.is_test_code(file, &deep));
+        assert!(!classification.is_test_code(file, &outside));
+    }
+
+    #[test]
     fn test_names_are_entrypoints_only_inside_test_files() {
         let pytest = record(
             "symbol.pytest",
             "tests/test_client.py::test_connect",
+            "function",
+            (0, 1),
+            None,
+        );
+        let go_test = record(
+            "symbol.go_test",
+            "pkg/client_test.go::TestConnect",
             "function",
             (0, 1),
             None,
@@ -327,8 +437,39 @@ mod tests {
         let classification = TestClassification::new(&[], &[]);
 
         assert!(classification.is_test_entrypoint("tests/test_client.py", &pytest));
+        assert!(classification.is_test_entrypoint("pkg/client_test.go", &go_test));
         assert!(!classification.is_test_entrypoint("src/client.rs", &production));
         assert!(!classification.is_test_code("src/client.rs", &production));
+    }
+
+    #[test]
+    fn a_test_name_prefix_is_no_rust_entrypoint() {
+        let rust_helper = record(
+            "symbol.rust_helper",
+            "tests/integration.rs::test_helper",
+            "function",
+            (0, 1),
+            None,
+        );
+        let rust_test = record(
+            "symbol.rust_test",
+            "tests/integration.rs::runs_integration",
+            "function",
+            (0, 1),
+            None,
+        );
+        let go_helper = record(
+            "symbol.go_helper",
+            "pkg/client_test.go::connect",
+            "function",
+            (0, 1),
+            None,
+        );
+        let classification = TestClassification::new(&[], &[]);
+
+        assert!(!classification.is_test_entrypoint("tests/integration.rs", &rust_helper));
+        assert!(!classification.is_test_entrypoint("tests/integration.rs", &rust_test));
+        assert!(!classification.is_test_entrypoint("pkg/client_test.go", &go_helper));
     }
 
     #[test]

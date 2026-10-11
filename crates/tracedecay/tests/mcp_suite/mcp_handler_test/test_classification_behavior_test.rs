@@ -2,15 +2,18 @@
 //! share one test classification over the indexed generation.
 //!
 //! Production code whose name or directory merely starts with `test` stays
-//! visible: `test_connection` and `testimony` in `src/lib.rs`, and `connect`
-//! in `src/testnet/client.rs`. Test code is what a path marker, a test
-//! annotation, or `#[cfg(test)]` proves: the `tests/` directory, `#[test]` and
-//! `#[tokio::test]`, the inline `#[cfg(test)] mod tests`, and the out-of-line
-//! `#[cfg(test)] mod gated;` in `src/gated.rs`.
+//! visible: `test_connection` and `testimony` in `src/lib.rs`, `connect` in
+//! `src/testnet/client.rs`, and `same_line`, the sibling sharing a line with
+//! `#[cfg(test)] fn cfg_only`. Test code is what a path marker, a test
+//! annotation, or `#[cfg(test)]` proves: the `tests/` directory, `#[test]`
+//! and `#[tokio::test]`, `cfg_only`, the inline `#[cfg(test)] mod tests`,
+//! and the out-of-line `#[cfg(test)] mod gated;` in `src/gated.rs`.
 //!
 //! Each report keeps its own handling of that classification. Test risk leaves
 //! all test code out of its census. Dead code and health treat only actual
-//! tests as entrypoints, so an uncalled test helper is still dead code.
+//! tests as entrypoints, so an uncalled test helper is still dead code —
+//! including `test_helper`, a `test*` name in a Rust test file, which the
+//! Rust runner never invokes without `#[test]`.
 
 #![cfg(feature = "test-transport")]
 
@@ -36,6 +39,9 @@ fn testimony() -> i32 {
 
 /// skip-test-coverage
 pub fn skipped_on_purpose() {}
+
+#[cfg(test)]
+fn cfg_only() {} fn same_line() {}
 
 #[cfg(test)]
 mod gated;
@@ -74,7 +80,7 @@ fn write_sources(project: &Path) {
     fs::write(project.join("src/gated.rs"), "fn gated_helper() {}\n").unwrap();
     fs::write(
         project.join("tests/integration.rs"),
-        "fn integration_helper() {}\n\n#[test]\nfn runs_integration() {}\n",
+        "fn integration_helper() {}\n\nfn test_helper() {}\n\n#[test]\nfn runs_integration() {}\n",
     )
     .unwrap();
 }
@@ -160,10 +166,11 @@ async fn reports_share_one_classification_and_keep_production_test_names_visible
         json!({
             "rows": [
                 {"name": "connect", "file": "src/testnet/client.rs", "attribution_method": "none"},
+                {"name": "same_line", "file": "src/lib.rs", "attribution_method": "none"},
                 {"name": "test_connection", "file": "src/lib.rs", "attribution_method": "closure"},
                 {"name": "testimony", "file": "src/lib.rs", "attribution_method": "none"},
             ],
-            "total_functions": 3,
+            "total_functions": 4,
             "tested": 1,
             "skipped": 1,
             "excluded": 0,
@@ -211,9 +218,12 @@ async fn reports_share_one_classification_and_keep_production_test_names_visible
 
     let dead = call_json(&fixture, "tracedecay_dead_code", json!({"format": "json"})).await;
     let expected_private_dead = json!([
+        {"name": "cfg_only", "file": "src/lib.rs"},
         {"name": "connect", "file": "src/testnet/client.rs"},
         {"name": "gated_helper", "file": "src/gated.rs"},
         {"name": "integration_helper", "file": "tests/integration.rs"},
+        {"name": "same_line", "file": "src/lib.rs"},
+        {"name": "test_helper", "file": "tests/integration.rs"},
         {"name": "testimony", "file": "src/lib.rs"},
     ]);
     assert_eq!(
@@ -230,10 +240,13 @@ async fn reports_share_one_classification_and_keep_production_test_names_visible
     assert_eq!(
         dead_code_census(&dead_with_public),
         json!([
+            {"name": "cfg_only", "file": "src/lib.rs"},
             {"name": "connect", "file": "src/testnet/client.rs"},
             {"name": "gated_helper", "file": "src/gated.rs"},
             {"name": "integration_helper", "file": "tests/integration.rs"},
+            {"name": "same_line", "file": "src/lib.rs"},
             {"name": "skipped_on_purpose", "file": "src/lib.rs"},
+            {"name": "test_helper", "file": "tests/integration.rs"},
             {"name": "testimony", "file": "src/lib.rs"},
         ]),
         "include_public adds the uncalled public function and still no actual test: {dead_with_public}"
@@ -258,8 +271,8 @@ async fn reports_share_one_classification_and_keep_production_test_names_visible
     .await;
     assert_eq!(
         redundancy(&health),
-        json!({"dead_count": 4, "total_fns": 10}),
-        "health counts every function and the same four dead functions: {health}"
+        json!({"dead_count": 7, "total_fns": 13}),
+        "health counts every function and the same seven dead functions: {health}"
     );
     let gated_health = call_json(
         &fixture,

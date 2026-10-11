@@ -40,6 +40,8 @@ pub mod unmounted_files;
 
 pub use self::intake::CodeIndexIntake;
 
+use self::languages::LanguageRegistry;
+
 /// Whether an extracted symbol is a parser-attested test annotation.
 ///
 /// Callers combine this marker with the canonical `Annotates` edge instead of
@@ -108,6 +110,43 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
         .as_bytes()
         .windows(needle.len())
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+/// The test-name prefixes a runner discovers as runnable tests, by canonical
+/// language identity: pytest's `test_*` functions, Go's `Test*` functions,
+/// JUnit 3's and PHPUnit's `test*` methods, and minitest's `test_*` methods.
+const NAME_DISCOVERED_TEST_PREFIXES: [(&str, &str); 5] = [
+    ("go", "Test"),
+    ("java", "test"),
+    ("php", "test"),
+    ("python", "test_"),
+    ("ruby", "test_"),
+];
+
+/// The name prefix whose matching functions a runner invokes itself in
+/// `path`'s language, or `None` when that language only runs annotated or
+/// explicitly called tests: a `test`-prefixed Rust function needs `#[test]`,
+/// and Jest a `test(...)` call, so a prefixed name in those files is still
+/// ordinary code.
+pub fn name_discovered_test_prefix(path: &str) -> Option<&'static str> {
+    let extension = std::path::Path::new(path)
+        .extension()?
+        .to_str()?
+        .to_lowercase();
+    let language = language_descriptors()
+        .descriptor_for_extension(&extension)?
+        .language
+        .as_str();
+    NAME_DISCOVERED_TEST_PREFIXES
+        .iter()
+        .find(|(known, _)| *known == language)
+        .map(|(_, prefix)| *prefix)
+}
+
+fn language_descriptors() -> &'static languages::StaticLanguageRegistry {
+    static REGISTRY: std::sync::OnceLock<languages::StaticLanguageRegistry> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(languages::StaticLanguageRegistry::new)
 }
 
 #[cfg(test)]
