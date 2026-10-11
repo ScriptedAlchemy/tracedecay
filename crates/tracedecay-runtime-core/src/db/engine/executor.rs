@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use super::{
     BackendKind, Connection, Error, IntoParams, ReadConnection, ReadSnapshot, Result, Rows,
     Transaction, WriteStatement,
@@ -17,17 +15,6 @@ pub trait QueryExecutor {
 #[allow(async_fn_in_trait)]
 pub trait WalCheckpointExecutor: QueryExecutor {
     async fn checkpoint_wal_truncate(&self) -> Result<Rows>;
-}
-
-#[allow(async_fn_in_trait)]
-pub trait DatabaseAttachmentExecutor {
-    async fn attach_database(&self, path: &Path, database_name: &str) -> Result<()>;
-}
-
-impl DatabaseAttachmentExecutor for Transaction {
-    async fn attach_database(&self, path: &Path, database_name: &str) -> Result<()> {
-        Transaction::attach_database(self, path, database_name).await
-    }
 }
 
 impl WalCheckpointExecutor for Connection {

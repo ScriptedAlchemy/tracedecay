@@ -207,12 +207,11 @@ that are legal SQL but forbidden domain transitions.
 
 `crates/tracedecay-rusqlite-runtime/src/connection/mod.rs:930` installs
 reader/writer/maintenance authorizers. Reader connections are query-only;
-ordinary writers cannot arbitrarily attach databases, change destructive
-schema, create virtual tables/triggers or load extensions. Exact SQL has a
-separate stricter transaction-control and database-lifecycle policy at
-`exact_sql/guard.rs:40`: temporary tables/indexes are allowed, temporary
-triggers/views are denied, ATTACH/DETACH require the actor's fixed lifecycle
-capability, and pragmas are allowlisted.
+no connection mode can attach or detach databases, and ordinary writers cannot
+change destructive schema, create virtual tables/triggers or load extensions.
+Exact SQL has a separate stricter transaction-control policy at
+`exact_sql/guard.rs`: temporary tables/indexes are allowed, temporary
+triggers/views and ATTACH/DETACH are denied, and pragmas are allowlisted.
 
 The baseline ambient inserted-ID API and its update-hook tracker were removed
 in the implemented caller migration. Analytics, graph publication, observations,

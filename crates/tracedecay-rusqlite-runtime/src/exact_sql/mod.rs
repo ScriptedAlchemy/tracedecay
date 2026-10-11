@@ -27,7 +27,6 @@ const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SQL_BYTES: usize = 1024 * 1024;
 const MAX_SQL_PARAMETERS: usize = 32_766;
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
-const MAX_EXACT_SQL_ATTACHMENTS: i32 = 4;
 const EXACT_SQL_PROGRESS_INTERVAL_OPS: i32 = 1_000;
 #[cfg(not(test))]
 const EXACT_SQL_EXECUTION_LIMIT: Duration = Duration::from_secs(30);
@@ -65,7 +64,7 @@ pub use types::*;
 pub(crate) use command::{WriterCommand, reject_writer_command, run_writer_command};
 
 use command::{TransactionCommand, TransactionLeaseState};
-use guard::{AuthorizedDatabaseOperation, with_exact_sql_guard};
+use guard::with_exact_sql_guard;
 
 type ExactSqlQuery = dyn Fn(ExactSqlStatement, OperationPriorityV1, Duration) -> Result<ExactSqlRows, ExactSqlError>
     + Send
@@ -751,37 +750,6 @@ enum RollbackDispatch {
 }
 
 impl ExactSqlTransaction {
-    fn enqueue_attach_database(
-        &self,
-        attachment: ExactSqlAttachment,
-    ) -> Result<async_channel::Receiver<Result<(), ExactSqlError>>, ExactSqlError> {
-        let sender = self
-            .commands
-            .as_ref()
-            .ok_or(ExactSqlError::TransactionClosed)?;
-        let (reply, response) = async_channel::bounded(1);
-        sender
-            .try_send(TransactionCommand::Attach { attachment, reply })
-            .map_err(|error| map_transaction_send_error(error, &self.lease))?;
-        Ok(response)
-    }
-    pub fn attach_database(&self, attachment: ExactSqlAttachment) -> Result<(), ExactSqlError> {
-        let lease = Arc::clone(&self.lease);
-        recv_writer_reply(self.enqueue_attach_database(attachment)?)
-            .map_err(|_| transaction_terminal_error(&lease))?
-    }
-
-    pub async fn attach_database_async(
-        &self,
-        attachment: ExactSqlAttachment,
-    ) -> Result<(), ExactSqlError> {
-        let lease = Arc::clone(&self.lease);
-        self.enqueue_attach_database(attachment)?
-            .recv()
-            .await
-            .map_err(|_| transaction_terminal_error(&lease))?
-    }
-
     pub fn validate(&self, statement: ExactSqlStatement) -> Result<(), ExactSqlError> {
         match self.dispatch(SqlRequest::Validate(statement))? {
             SqlResult::Validated => Ok(()),
@@ -1048,7 +1016,6 @@ fn execute_request(
         repeated_authority,
         crate::connection::authorize_writer,
         true,
-        None,
         || match request {
             SqlRequest::Validate(statement) => connection
                 .prepare_cached(&statement.sql)
@@ -1139,59 +1106,6 @@ fn execute_statement(
     Ok(ExactSqlExecuteResult { changed_rows })
 }
 
-fn attach_database(
-    connection: &Connection,
-    attachment: &ExactSqlAttachment,
-    pinned_transaction: bool,
-    shutdown_requested: Option<Arc<AtomicBool>>,
-    execution_deadline: Option<Instant>,
-) -> Result<(), ExactSqlError> {
-    let sql = format!("ATTACH DATABASE ?1 AS \"{}\"", attachment.database_name());
-    let statement = ExactSqlStatement::new(
-        sql,
-        vec![ExactSqlValue::Text(attachment.filename().to_owned())],
-    )?;
-    with_exact_sql_guard(
-        connection,
-        pinned_transaction,
-        false,
-        shutdown_requested,
-        execution_deadline,
-        true,
-        None,
-        crate::connection::authorize_writer,
-        true,
-        Some(AuthorizedDatabaseOperation::Attach),
-        || execute_statement(connection, statement).map(|_| ()),
-    )
-}
-
-fn detach_database(
-    connection: &Connection,
-    database_name: &str,
-    shutdown_requested: Option<Arc<AtomicBool>>,
-) -> Result<(), ExactSqlError> {
-    if !valid_database_name(database_name) {
-        return Err(ExactSqlError::InvalidAttachment);
-    }
-    let sql = format!("DETACH DATABASE \"{database_name}\"");
-    with_exact_sql_guard(
-        connection,
-        false,
-        false,
-        shutdown_requested,
-        None,
-        true,
-        None,
-        crate::connection::authorize_writer,
-        true,
-        Some(AuthorizedDatabaseOperation::Detach(
-            database_name.to_owned(),
-        )),
-        || execute_batch(connection, &sql).map(|_| ()),
-    )
-}
-
 fn execute_batch(connection: &Connection, sql: &str) -> Result<ExactSqlBatchResult, ExactSqlError> {
     let before = connection.total_changes();
     connection
@@ -1222,7 +1136,6 @@ pub(crate) fn execute_query(
         None,
         crate::connection::authorize_reader,
         false,
-        None,
         || execute_query_unchecked(connection, request),
     )
 }

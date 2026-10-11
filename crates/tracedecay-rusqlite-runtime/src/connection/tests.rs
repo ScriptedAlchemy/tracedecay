@@ -201,10 +201,37 @@ fn maintenance_mode_makes_schema_exceptions_explicit() {
     connection
         .execute_batch("CREATE TABLE maintained(value); DROP TABLE maintained;")
         .expect("maintenance schema operation");
-    assert_eq!(connection.limit(Limit::SQLITE_LIMIT_ATTACHED).unwrap(), 4);
-    connection
-        .execute_batch("ATTACH DATABASE ':memory:' AS maintenance_aux; DETACH maintenance_aux;")
-        .expect("maintenance attachment");
+}
+
+/// Fails if any connection mode lets `ATTACH`/`DETACH` past its authorizer.
+/// Every mode also caps attachments at zero, so only `SQLITE_AUTH` at
+/// prepare proves the authorizer, not the run-time limit, refused it.
+#[test]
+fn attach_and_detach_are_denied_in_every_connection_mode() {
+    let file = database();
+    for mode in [
+        ConnectionMode::Writer,
+        ConnectionMode::Reader,
+        ConnectionMode::Maintenance,
+    ] {
+        let connection = open(file.path(), mode).expect("connection policy");
+        assert_eq!(connection.limit(Limit::SQLITE_LIMIT_ATTACHED).unwrap(), 0);
+        for sql in [
+            "ATTACH DATABASE ':memory:' AS denied_input",
+            // SQLite reports a parameter-bound filename as an unknown action.
+            "ATTACH DATABASE ?1 AS denied_input",
+            "DETACH DATABASE denied_input",
+        ] {
+            let error = connection
+                .prepare(sql)
+                .expect_err("ATTACH/DETACH must be refused");
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(ErrorCode::AuthorizationForStatementDenied),
+                "{mode:?} must deny `{sql}` at the authorizer, got {error:?}"
+            );
+        }
+    }
 }
 
 #[test]

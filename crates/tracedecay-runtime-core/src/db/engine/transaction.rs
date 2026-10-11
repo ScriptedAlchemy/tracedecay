@@ -1,10 +1,8 @@
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use tracedecay_rusqlite_runtime::exact_sql::{
-    ExactSqlAttachment, ExactSqlTransaction as RuntimeTransaction,
-};
+use tracedecay_rusqlite_runtime::exact_sql::ExactSqlTransaction as RuntimeTransaction;
 
 use super::{Error, IntoParams, Result, Rows, WriteStatement, connection::statement};
 
@@ -114,31 +112,6 @@ impl Transaction {
                 results.push(result.changed_rows as u64);
             }
             Ok(results)
-        })
-        .await
-        .map_err(join_error)?
-    }
-
-    pub async fn attach_database(&self, path: &Path, database_name: &str) -> Result<()> {
-        if matches!(&self.runtime, Runtime::Native(_)) {
-            return Err(Error::invalid_operation(
-                "native Turso database attachment is unsupported",
-            ));
-        }
-        let runtime = self.sqlite_runtime()?;
-        let filename = path.to_str().ok_or_else(|| {
-            super::Error::invalid_operation("SQLite attachment path is not valid UTF-8")
-        })?;
-        let attachment = ExactSqlAttachment::new(filename.to_owned(), database_name.to_owned())?;
-        tokio::spawn(async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .attach_database_async(attachment)
-                .await
-                .map_err(super::Error::from)
         })
         .await
         .map_err(join_error)?

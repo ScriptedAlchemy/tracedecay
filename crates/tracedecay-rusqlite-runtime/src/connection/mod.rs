@@ -651,7 +651,7 @@ fn finish_open(
         {
             apply_pragmas(&connection, mode, fresh_writer)?;
             assert_compile_options(&connection)?;
-            apply_limits(&connection, mode)?;
+            apply_limits(&connection)?;
             connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
             install_authorizer(&connection, mode)?;
             Ok(connection)
@@ -699,7 +699,7 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
                 Connection::open_with_flags(uri, flags).map_err(|source| policy("open", source))?;
             apply_pragmas(&connection, ConnectionMode::Reader, false)?;
             assert_compile_options(&connection)?;
-            apply_limits(&connection, ConnectionMode::Reader)?;
+            apply_limits(&connection)?;
             connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
             install_authorizer(&connection, ConnectionMode::Reader)?;
             Ok(connection)
@@ -981,15 +981,7 @@ fn assert_compile_options(connection: &Connection) -> Result<(), ConnectionPolic
     Ok(())
 }
 
-fn apply_limits(
-    connection: &Connection,
-    mode: ConnectionMode,
-) -> Result<(), ConnectionPolicyError> {
-    let attached = if mode == ConnectionMode::Maintenance {
-        4
-    } else {
-        0
-    };
+fn apply_limits(connection: &Connection) -> Result<(), ConnectionPolicyError> {
     for (limit, value) in [
         (Limit::SQLITE_LIMIT_LENGTH, 64 * 1024 * 1024),
         (Limit::SQLITE_LIMIT_SQL_LENGTH, 1024 * 1024),
@@ -998,7 +990,7 @@ fn apply_limits(
         (Limit::SQLITE_LIMIT_COMPOUND_SELECT, 100),
         (Limit::SQLITE_LIMIT_VDBE_OP, 25_000_000),
         (Limit::SQLITE_LIMIT_FUNCTION_ARG, 100),
-        (Limit::SQLITE_LIMIT_ATTACHED, attached),
+        (Limit::SQLITE_LIMIT_ATTACHED, 0),
         (Limit::SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 50_000),
         (Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 32_766),
         (Limit::SQLITE_LIMIT_TRIGGER_DEPTH, 32),
@@ -1031,8 +1023,20 @@ pub(crate) fn authorize_reader(context: AuthContext<'_>) -> Authorization {
     authorize(ConnectionMode::Reader, context)
 }
 
-fn authorize_maintenance(_: AuthContext<'_>) -> Authorization {
-    Authorization::Allow
+fn authorize_maintenance(context: AuthContext<'_>) -> Authorization {
+    if matches!(
+        context.action,
+        AuthAction::Attach { .. }
+            | AuthAction::Detach { .. }
+            | AuthAction::Unknown {
+                code: rusqlite::ffi::SQLITE_ATTACH,
+                ..
+            }
+    ) {
+        Authorization::Deny
+    } else {
+        Authorization::Allow
+    }
 }
 
 /// Schema-introspection and integrity-diagnostic pragmas that cannot mutate the

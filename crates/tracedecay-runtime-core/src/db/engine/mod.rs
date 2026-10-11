@@ -15,7 +15,7 @@ mod write_statement;
 
 pub use connection::{Connection, ReadConnection, ReaderPoolSnapshot, ReaderPoolState};
 pub use error::{Error, Result};
-pub use executor::{DatabaseAttachmentExecutor, Executor, QueryExecutor, WalCheckpointExecutor};
+pub use executor::{Executor, QueryExecutor, WalCheckpointExecutor};
 pub use params::{IntoParams, IntoValue, Params, params, params_from_iter};
 pub use row::{Row, Rows};
 pub use snapshot::ReadSnapshot;

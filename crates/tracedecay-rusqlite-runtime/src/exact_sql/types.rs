@@ -100,50 +100,6 @@ impl ExactSqlStatement {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExactSqlAttachment {
-    filename: String,
-    database_name: String,
-}
-
-impl ExactSqlAttachment {
-    pub fn new(
-        filename: impl Into<String>,
-        database_name: impl Into<String>,
-    ) -> Result<Self, ExactSqlError> {
-        let filename = filename.into();
-        let database_name = database_name.into();
-        if filename.is_empty()
-            || filename.len() > MAX_SQL_BYTES
-            || !valid_database_name(&database_name)
-        {
-            return Err(ExactSqlError::InvalidAttachment);
-        }
-        Ok(Self {
-            filename,
-            database_name,
-        })
-    }
-
-    pub fn filename(&self) -> &str {
-        &self.filename
-    }
-
-    pub fn database_name(&self) -> &str {
-        &self.database_name
-    }
-}
-
-pub(super) fn valid_database_name(value: &str) -> bool {
-    let mut chars = value.chars();
-    chars
-        .next()
-        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-        && !value.eq_ignore_ascii_case("main")
-        && !value.eq_ignore_ascii_case("temp")
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExactSqlRow {
     pub values: Vec<ExactSqlValue>,
@@ -325,7 +281,6 @@ pub enum ExactSqlError {
     AuthorityMismatch,
     AuthorityDenied(String),
     IsolatedSemanticEvaluationAuthorityClosed,
-    InvalidAttachment,
     InvalidStatement,
     RequestLimitExceeded,
     TransactionControlDenied,
@@ -360,7 +315,6 @@ impl fmt::Display for ExactSqlError {
             Self::IsolatedSemanticEvaluationAuthorityClosed => {
                 formatter.write_str("isolated semantic evaluation authority is closed")
             }
-            Self::InvalidAttachment => formatter.write_str("exact SQL attachment is invalid"),
             Self::InvalidStatement => formatter.write_str("exact SQL statement is empty"),
             Self::RequestLimitExceeded => {
                 formatter.write_str("exact SQL request exceeded its admission limit")
