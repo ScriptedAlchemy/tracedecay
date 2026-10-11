@@ -27,6 +27,15 @@ const SOURCE_UNAVAILABLE_STATES: &[&str] = &[
     "unavailable",
 ];
 
+// Requested keys are joined, never matched with `IN` after an equality
+// prefix (turso-bugs/in-after-equality-prefix-never-seeks.md).
+pub(crate) const SOURCE_SUMMARY_AVAILABILITY_SQL: &str = "SELECT availability.summary_id,
+            availability.availability, availability.reason
+     FROM (SELECT DISTINCT CAST(value AS TEXT) AS summary_id FROM json_each(?3)) AS requested
+     CROSS JOIN session_summary_availability AS availability
+     WHERE availability.session_id = ?1 AND availability.generation = ?2
+       AND availability.summary_id = requested.summary_id";
+
 struct LoadedSummarySource {
     session_id: String,
     source_horizon_json: String,
@@ -920,10 +929,7 @@ async fn source_summary_availability(
         serde_json::to_string(summary_ids).map_err(|error| LcmError::Db(error.to_string()))?;
     let mut rows = conn
         .query(
-            "SELECT summary_id, availability, reason
-             FROM session_summary_availability
-             WHERE session_id = ?1 AND generation = ?2
-               AND summary_id IN (SELECT CAST(value AS TEXT) FROM json_each(?3))",
+            SOURCE_SUMMARY_AVAILABILITY_SQL,
             params![session_id, generation, encoded_ids],
         )
         .await?;

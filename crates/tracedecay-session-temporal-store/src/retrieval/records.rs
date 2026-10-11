@@ -234,6 +234,8 @@ pub(super) fn build_record_query_with_relations(
                  -- A span or burst is a container: ranking needs where it starts
                  -- and ends, never a census of what sits between. Its interior
                  -- members reach the record read through their own candidates.
+                 -- Each boundary is its own key lookup; a one-member group
+                 -- yields one row twice, which the grouping collapses.
                  SELECT c.ordinal, o.session_id, c.generation, o.occurrence_id,
                         c.anchor_id
                  FROM candidate AS c
@@ -245,9 +247,22 @@ pub(super) fn build_record_query_with_relations(
                   AND derived.evidence_id = c.retriever_record_id
                  JOIN session_occurrences AS o
                    ON o.session_id = derived.session_id
-                  AND o.occurrence_id IN (
-                      derived.first_occurrence_id, derived.last_occurrence_id
-                  )
+                  AND o.occurrence_id = derived.first_occurrence_id
+                  {occurrence_condition}
+                 WHERE c.derived_kind IS NOT NULL
+                 UNION ALL
+                 SELECT c.ordinal, o.session_id, c.generation, o.occurrence_id,
+                        c.anchor_id
+                 FROM candidate AS c
+                 JOIN session_derived_evidence AS derived
+                   ON derived.session_id = c.session_id
+                  AND +derived.generation <= c.generation
+                  AND derived.retrieval_anchor_id = c.anchor_id
+                  AND derived.evidence_kind = c.derived_kind
+                  AND derived.evidence_id = c.retriever_record_id
+                 JOIN session_occurrences AS o
+                   ON o.session_id = derived.session_id
+                  AND o.occurrence_id = derived.last_occurrence_id
                   {occurrence_condition}
                  WHERE c.derived_kind IS NOT NULL
              ) AS source

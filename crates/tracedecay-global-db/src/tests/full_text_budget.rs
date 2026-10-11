@@ -6,6 +6,13 @@
 //! (the native driver's `LimitExceeded`) bounds the search. An index that
 //! materialized its hits inside one operation would do unbounded work the
 //! budget never sees.
+//!
+//! The public read path is covered by this pair rather than by its own test:
+//! every runtime connection applies the engine policy in one place
+//! (`tracedecay-rusqlite-runtime` `connection::apply_policy`), and
+//! `tracedecay-sql` `engine_policy_bounds_vm_operations_per_statement` proves
+//! a policy connection stops a statement at the budget with `LimitExceeded`.
+//! Reaching that budget through retrieval would take tens of millions of hits.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

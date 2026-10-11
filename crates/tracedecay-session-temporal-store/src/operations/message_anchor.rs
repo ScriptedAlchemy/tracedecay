@@ -33,6 +33,23 @@ use tracedecay_store::derive_canonical_projection;
 
 use super::sources::unavailable;
 
+/// Requested messages are joined, never matched with `IN`, so each one seeks
+/// `idx_session_occurrences_message` instead of reading the whole session
+/// (turso-bugs/in-after-equality-prefix-never-seeks.md).
+pub(crate) const MATERIALIZED_OCCURRENCES_SQL: &str = "SELECT DISTINCT occurrence.message_id,
+            occurrence.retrieval_anchor_id, anchor.anchor_json, anchor.owner_json,
+            occurrence.knowledge_at, observation.observation_json, observation.receipt_id
+     FROM (SELECT DISTINCT CAST(value AS TEXT) AS message_id FROM json_each(?3)) AS requested
+     CROSS JOIN session_occurrences occurrence
+     JOIN retrieval_anchors anchor
+       ON anchor.anchor_id = occurrence.retrieval_anchor_id
+     JOIN observations observation
+       ON observation.observation_id = occurrence.source_observation_id
+     WHERE occurrence.session_id = ?1
+       AND occurrence.message_id = requested.message_id
+       AND +occurrence.generation <= ?2
+     ORDER BY occurrence.message_id, occurrence.retrieval_anchor_id";
+
 /// Resolved canonical source binding: anchor id, whether the publication still
 /// has to write an unobserved raw-message anchor row, and the source's
 /// knowledge time.
@@ -126,18 +143,7 @@ async fn resolve_materialized_occurrences(
         serde_json::to_string(message_ids).map_err(|error| LcmError::Db(error.to_string()))?;
     let mut rows = conn
         .query(
-            "SELECT DISTINCT occurrence.message_id, occurrence.retrieval_anchor_id,
-                    anchor.anchor_json, anchor.owner_json, occurrence.knowledge_at,
-                    observation.observation_json, observation.receipt_id
-             FROM session_occurrences occurrence
-             JOIN retrieval_anchors anchor
-               ON anchor.anchor_id = occurrence.retrieval_anchor_id
-             JOIN observations observation
-               ON observation.observation_id = occurrence.source_observation_id
-             WHERE occurrence.session_id = ?1
-               AND +occurrence.generation <= ?2
-               AND occurrence.message_id IN (SELECT CAST(value AS TEXT) FROM json_each(?3))
-             ORDER BY occurrence.message_id, occurrence.retrieval_anchor_id",
+            MATERIALIZED_OCCURRENCES_SQL,
             params![session_id, generation, encoded_ids],
         )
         .await?;

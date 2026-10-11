@@ -13,7 +13,7 @@ use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
 
 mod derived;
 mod materialize;
-mod persist;
+pub(crate) mod persist;
 mod receipts;
 #[cfg(test)]
 mod tests;

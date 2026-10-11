@@ -430,7 +430,10 @@ fn committed_source_cursors(
     let mut statement = snapshot.prepare(
         "SELECT committed_cursor_json FROM observations
          WHERE json_valid(observation_json)
-           AND json_extract(observation_json, '$.identity.source.session_id') = ?1
+           AND json_extract(
+                CASE WHEN json_valid(observation_json) THEN observation_json END,
+                '$.identity.source.session_id'
+           ) = ?1
          ORDER BY sequence ASC",
     )?;
     let rows = statement.query_map([source.session_id().as_str()], |row| {

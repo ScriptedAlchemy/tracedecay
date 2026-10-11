@@ -33,6 +33,59 @@ const EXPAND_OPERATION: &str = "retrieve session temporal page";
 const FREEZE_OPERATION: &str = "freeze session temporal snapshot";
 const MAX_SUMMARY_TOPOLOGY_RELATIONS: usize = MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE * 3;
 
+// Requested keys are joined, never matched with `IN`: Turso seeks an `IN`
+// only on a leading index column, so `session_id = ?1 AND key IN (...)` reads
+// the whole session (turso-bugs/in-after-equality-prefix-never-seeks.md).
+pub(crate) const ANCHOR_ASSERTIONS_SQL: &str = "WITH requested(anchor_id) AS (
+         SELECT DISTINCT CAST(value AS TEXT) FROM json_each(?3)
+     ),
+     matched(assertion_id) AS (
+         SELECT assertion.assertion_id
+         FROM requested
+         CROSS JOIN session_assertions AS assertion
+         WHERE assertion.session_id = ?1
+           AND assertion.subject_anchor_id = requested.anchor_id
+         UNION
+         SELECT assertion.assertion_id
+         FROM requested
+         CROSS JOIN session_assertions AS assertion
+         WHERE assertion.session_id = ?1
+           AND assertion.object_anchor_id = requested.anchor_id
+     )
+     SELECT assertion.assertion_id, assertion.assertion_kind,
+            assertion.subject_anchor_id, assertion.object_anchor_id,
+            assertion.knowledge_at, assertion.valid_time_json, assertion.evidence_json
+     FROM matched
+     CROSS JOIN session_assertions AS assertion
+     WHERE assertion.session_id = ?1
+       AND assertion.assertion_id = matched.assertion_id
+       AND +assertion.generation <= ?2
+       AND (
+           ?4 <> 'as_of'
+           OR (
+               assertion.knowledge_at <= ?5
+               AND json_extract(assertion.valid_time_json, '$.kind') = 'known'
+               AND json_extract(assertion.valid_time_json, '$.valid_at') <= ?5
+           )
+       )
+       AND (
+           ?4 <> 'current'
+           OR NOT EXISTS (
+               SELECT 1
+               FROM session_assertion_supersession AS supersession
+               WHERE supersession.session_id = assertion.session_id
+                 AND +supersession.generation <= ?2
+                 AND supersession.superseded_assertion_id = assertion.assertion_id
+           )
+       )
+     ORDER BY assertion.knowledge_at, assertion.assertion_id";
+
+pub(crate) const SUMMARY_ANCHORS_SQL: &str = "SELECT node.summary_id, node.summary_anchor_id
+     FROM (SELECT DISTINCT CAST(value AS TEXT) AS summary_id FROM json_each(?2)) AS requested
+     CROSS JOIN session_summary_nodes AS node
+     WHERE node.summary_id = requested.summary_id
+       AND node.session_id = ?1";
+
 struct SummarySeed {
     summary_id: SessionSummaryIdV1,
     summary_anchor_id: RetrievalAnchorId,
@@ -415,40 +468,7 @@ async fn assertions_for_anchors(
     .map_err(|error| storage(EXPAND_OPERATION, error))?;
     let mut assertion_rows = read
         .query(
-            "SELECT assertion_id, assertion_kind,
-                    subject_anchor_id, object_anchor_id,
-                    knowledge_at, valid_time_json, evidence_json
-             FROM session_assertions AS assertion
-             WHERE assertion.session_id = ?1
-               AND +assertion.generation <= ?2
-               AND (
-                   assertion.subject_anchor_id IN (SELECT CAST(value AS TEXT) FROM json_each(?3))
-                   OR assertion.object_anchor_id IN (SELECT CAST(value AS TEXT) FROM json_each(?3))
-               )
-               AND (
-                   ?4 <> 'as_of'
-                   OR (
-                       assertion.knowledge_at <= ?5
-                       AND json_extract(
-                           assertion.valid_time_json, '$.kind'
-                       ) = 'known'
-                       AND json_extract(
-                           assertion.valid_time_json, '$.valid_at'
-                       ) <= ?5
-                   )
-               )
-               AND (
-                   ?4 <> 'current'
-                   OR NOT EXISTS (
-                       SELECT 1
-                       FROM session_assertion_supersession AS supersession
-                       WHERE supersession.session_id = assertion.session_id
-                         AND +supersession.generation <= ?2
-                         AND supersession.superseded_assertion_id =
-                             assertion.assertion_id
-                   )
-               )
-             ORDER BY assertion.knowledge_at, assertion.assertion_id",
+            ANCHOR_ASSERTIONS_SQL,
             params![
                 session_id.as_str(),
                 generation,
@@ -488,10 +508,7 @@ async fn summary_anchors_for(
         serde_json::to_string(summary_ids).map_err(|error| storage(EXPAND_OPERATION, error))?;
     let mut rows = read
         .query(
-            "SELECT summary_id, summary_anchor_id
-             FROM session_summary_nodes
-             WHERE session_id = ?1
-               AND summary_id IN (SELECT CAST(value AS TEXT) FROM json_each(?2))",
+            SUMMARY_ANCHORS_SQL,
             params![session_id.as_str(), encoded_ids],
         )
         .await

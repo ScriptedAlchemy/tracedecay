@@ -41,6 +41,7 @@ use tracedecay_temporal_query::snapshot::{
 };
 
 mod relation_graph_tests;
+mod requested_key_seek_tests;
 
 #[test]
 fn relation_reset_remains_a_typed_temporal_reset() {

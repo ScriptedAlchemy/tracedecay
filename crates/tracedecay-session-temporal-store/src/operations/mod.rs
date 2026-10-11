@@ -1,7 +1,7 @@
 mod generation;
-mod message_anchor;
+pub(crate) mod message_anchor;
 mod publication;
-mod sources;
+pub(crate) mod sources;
 
 use std::collections::BTreeMap;
 

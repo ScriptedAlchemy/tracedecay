@@ -1879,7 +1879,7 @@ mod tests {
                  WHERE json_valid(observation_json)
                    AND json_extract(observation_json, '$.__retention_released') IS NULL
                    AND json_extract(
-                        observation_json,
+                        CASE WHEN json_valid(observation_json) THEN observation_json END,
                         '$.identity.source.session_id'
                    ) = ?1
                  ORDER BY sequence DESC

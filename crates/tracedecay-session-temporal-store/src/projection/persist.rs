@@ -766,10 +766,7 @@ pub(super) async fn validate_copy(
     validate_copy_proof(conn, batch, copy).await?;
     let mut rows = conn
         .query(
-            "SELECT occurrence_id, knowledge_at, valid_time_json
-             FROM session_occurrences
-             WHERE session_id = ?1 AND +generation <= ?2
-               AND occurrence_id IN (?3, ?4)",
+            COPY_ENDPOINTS_SQL,
             params![
                 batch.session_id().as_str(),
                 generation,
@@ -1261,6 +1258,54 @@ const CURRENT_ENTITY_VERSION_INSERT: &str = "
         current_occurrence_id = excluded.current_occurrence_id,
         coverage_json = excluded.coverage_json";
 
+/// Both endpoints of a logical copy, each by its own key: `occurrence_id IN
+/// (?3, ?4)` after the session prefix reads the whole session on Turso
+/// (turso-bugs/in-after-equality-prefix-never-seeks.md).
+pub(crate) const COPY_ENDPOINTS_SQL: &str = "SELECT occurrence_id, knowledge_at, valid_time_json
+     FROM session_occurrences
+     WHERE session_id = ?1 AND occurrence_id = ?3 AND +generation <= ?2
+     UNION
+     SELECT occurrence_id, knowledge_at, valid_time_json
+     FROM session_occurrences
+     WHERE session_id = ?1 AND occurrence_id = ?4 AND +generation <= ?2";
+
+/// Recomputes the occurrence-anchor winners of the anchors in `?3`. The
+/// anchors are joined, never matched with `IN`, so each one seeks
+/// `idx_session_occurrences_anchor_order` instead of reading the whole
+/// session (turso-bugs/in-after-equality-prefix-never-seeks.md).
+pub(crate) fn occurrence_anchor_winners_sql() -> String {
+    format!(
+        "WITH ranked AS (
+            SELECT o.retrieval_anchor_id, o.occurrence_id,
+                   COUNT(*) OVER (PARTITION BY o.retrieval_anchor_id) AS occurrence_count,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY o.retrieval_anchor_id
+                       ORDER BY
+                           CASE json_extract(o.valid_time_json, '$.kind')
+                               WHEN 'known' THEN 1 ELSE 0
+                           END DESC,
+                           json_extract(o.valid_time_json, '$.valid_at') DESC,
+                           o.knowledge_at DESC,
+                           o.occurrence_id DESC
+                   ) AS precedence
+            FROM (SELECT DISTINCT CAST(value AS TEXT) AS anchor_id FROM json_each(?3))
+                 AS requested
+            CROSS JOIN session_occurrences AS o
+            WHERE o.session_id = ?1 AND o.retrieval_anchor_id = requested.anchor_id
+              AND +o.generation <= ?2
+         ),
+         winners AS (
+            SELECT 'occurrence_anchor' AS entity_kind,
+                   retrieval_anchor_id AS entity_id,
+                   NULL AS current_assertion_id,
+                   occurrence_id AS current_occurrence_id,
+                   json_object('occurrence_count', occurrence_count) AS coverage_json
+            FROM ranked WHERE precedence = 1
+         )
+         {CURRENT_ENTITY_VERSION_INSERT}"
+    )
+}
+
 #[tracing::instrument(
     name = "session_temporal.projection.rebuild_occurrences",
     level = "trace",
@@ -1282,34 +1327,7 @@ pub(super) async fn rebuild_current_occurrences(
         .map_err(|error| storage(PERSIST_OPERATION, error))?;
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
     conn.execute(
-        &format!(
-            "WITH ranked AS (
-                SELECT retrieval_anchor_id, occurrence_id,
-                       COUNT(*) OVER (PARTITION BY retrieval_anchor_id) AS occurrence_count,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY retrieval_anchor_id
-                           ORDER BY
-                               CASE json_extract(valid_time_json, '$.kind')
-                                   WHEN 'known' THEN 1 ELSE 0
-                               END DESC,
-                               json_extract(valid_time_json, '$.valid_at') DESC,
-                               knowledge_at DESC,
-                               occurrence_id DESC
-                       ) AS precedence
-                FROM session_occurrences
-                WHERE session_id = ?1 AND +generation <= ?2
-                  AND retrieval_anchor_id IN (SELECT CAST(value AS TEXT) FROM json_each(?3))
-             ),
-             winners AS (
-                SELECT 'occurrence_anchor' AS entity_kind,
-                       retrieval_anchor_id AS entity_id,
-                       NULL AS current_assertion_id,
-                       occurrence_id AS current_occurrence_id,
-                       json_object('occurrence_count', occurrence_count) AS coverage_json
-                FROM ranked WHERE precedence = 1
-             )
-             {CURRENT_ENTITY_VERSION_INSERT}"
-        ),
+        &occurrence_anchor_winners_sql(),
         params![
             batch.session_id().as_str(),
             generation,

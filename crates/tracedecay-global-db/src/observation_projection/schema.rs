@@ -343,10 +343,15 @@ pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
     // The first cut of this index was not partial and refused any malformed
     // observation_json row; stores that installed it under the old name drop
     // it here (derived object, no data) before the partial replacement builds.
+    // Turso computes the key even for rows the predicate excludes, so the key
+    // guards its own extraction (turso-bugs/partial-index-and-short-circuit.md).
     "DROP INDEX IF EXISTS idx_observations_session_sequence;
      CREATE INDEX IF NOT EXISTS idx_observations_valid_session_sequence
      ON observations (
-        json_extract(observation_json, '$.identity.source.session_id'),
+        json_extract(
+            CASE WHEN json_valid(observation_json) THEN observation_json END,
+            '$.identity.source.session_id'
+        ),
         sequence
      ) WHERE json_valid(observation_json);",
     "CREATE INDEX IF NOT EXISTS idx_observations_identity_receipt
