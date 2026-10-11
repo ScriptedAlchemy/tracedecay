@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
@@ -8,7 +10,7 @@ use tracedecay_lcm::LcmError;
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCompletionRequestV1,
     SessionRefreshDispositionV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
-    SessionRefreshProgressV1, SessionRefreshStore, SessionStoreError,
+    SessionRefreshProgressV1, SessionRefreshStore, SessionStoreError, SessionStoreResult,
 };
 
 use super::history::{
@@ -944,6 +946,12 @@ async fn reject_staged_completion<'a>(
     error: SessionStoreError,
     report: &mut SessionTemporalRefreshPassReport,
 ) {
+    if matches!(error, SessionStoreError::DeadlineExceeded) {
+        report.last_error = Some(format!("{error:?}"));
+        report.deadline_errors += 1;
+        report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
+        return;
+    }
     if is_retryable_storage(&error) {
         report.last_error = Some(format!("{error:?}"));
         report.retryable_errors += 1;
@@ -969,6 +977,65 @@ async fn reject_staged_completion<'a>(
     report.terminal_errors += 1;
 }
 
+/// A timed-out writer transaction rolls back its whole group. Retrying each
+/// item alone under the same operation deadline lets every individually
+/// affordable item commit, and a degraded pass waits for at most one more
+/// timeout per item than the group's own.
+async fn commit_refresh_groups<T, F, Fut>(
+    item_count: usize,
+    deadline: Duration,
+    mut commit: F,
+) -> SessionStoreResult<Vec<SessionStoreResult<T>>>
+where
+    F: FnMut(Range<usize>) -> Fut,
+    Fut: Future<Output = SessionStoreResult<Vec<SessionStoreResult<T>>>>,
+{
+    if let Some(outcomes) = commit_refresh_group(0..item_count, deadline, &mut commit).await? {
+        return Ok(outcomes);
+    }
+    let mut outcomes = Vec::with_capacity(item_count);
+    if item_count == 1 {
+        outcomes.push(Err(SessionStoreError::DeadlineExceeded));
+        return Ok(outcomes);
+    }
+    for item in 0..item_count {
+        match commit_refresh_group(item..item + 1, deadline, &mut commit).await? {
+            Some(alone) => outcomes.extend(alone),
+            None => outcomes.push(Err(SessionStoreError::DeadlineExceeded)),
+        }
+    }
+    Ok(outcomes)
+}
+
+/// `None` when the group's transaction did not commit within `deadline`.
+async fn commit_refresh_group<T, F, Fut>(
+    range: Range<usize>,
+    deadline: Duration,
+    commit: &mut F,
+) -> SessionStoreResult<Option<Vec<SessionStoreResult<T>>>>
+where
+    F: FnMut(Range<usize>) -> Fut,
+    Fut: Future<Output = SessionStoreResult<Vec<SessionStoreResult<T>>>>,
+{
+    let items = range.len();
+    let result = tokio::time::timeout(
+        deadline,
+        tracing::Instrument::instrument(
+            commit(range),
+            tracing::trace_span!("session_temporal.commit_refresh_group", items),
+        ),
+    )
+    .await;
+    match result {
+        Err(_) | Ok(Err(SessionStoreError::DeadlineExceeded)) => Ok(None),
+        Ok(Err(error)) => Err(error),
+        Ok(Ok(outcomes)) if outcomes.len() == items => Ok(Some(outcomes)),
+        Ok(Ok(_)) => Err(SessionStoreError::InvalidStateTransition {
+            context: "refresh group returned inconsistent item count",
+        }),
+    }
+}
+
 async fn commit_deferred_begins<'a>(
     access: &SessionTemporalAccess<'_, RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
@@ -983,19 +1050,12 @@ async fn commit_deferred_begins<'a>(
         .into_iter()
         .map(|deferred| (deferred.item, deferred.prepared))
         .unzip();
-    let outcomes = match tokio::time::timeout(
-        policy.operation_deadline,
-        access.commit_session_refresh_begin_batch_group(items, state.completion_control()),
-    )
+    let outcomes = match commit_refresh_groups(items.len(), policy.operation_deadline, |range| {
+        access.commit_session_refresh_begin_batch_group(&items[range], state.completion_control())
+    })
     .await
     {
-        Err(_) => {
-            report.last_error = Some("begin_commit_deadline_exceeded".to_string());
-            report.deadline_errors += 1;
-            report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
-            return;
-        }
-        Ok(Err(error)) => {
+        Err(error) => {
             report.last_error = Some(format!("{error:?}"));
             if is_retryable_storage(&error) {
                 report.retryable_errors += 1;
@@ -1005,7 +1065,7 @@ async fn commit_deferred_begins<'a>(
             }
             return;
         }
-        Ok(Ok(outcomes)) => outcomes,
+        Ok(outcomes) => outcomes,
     };
     for (mut prepared, outcome) in prepared.into_iter().zip(outcomes) {
         match outcome {
@@ -1021,6 +1081,11 @@ async fn commit_deferred_begins<'a>(
             Ok(SessionRefreshBeginBatchOutcomeV1::Joined) => {
                 prepared.disarm();
                 report.joined += 1;
+            }
+            Err(SessionStoreError::DeadlineExceeded) => {
+                report.last_error = Some("begin_commit_deadline_exceeded".to_string());
+                report.deadline_errors += 1;
+                report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
             }
             Err(error) if is_retryable_storage(&error) => {
                 report.last_error = Some(format!("{error:?}"));
@@ -1052,30 +1117,25 @@ async fn drain_staged_completions<'a>(
         .iter()
         .map(|item| item.projection.clone())
         .collect::<Vec<_>>();
-    let receipt_outcomes = match tokio::time::timeout(
-        policy.operation_deadline,
-        access.record_relation_receipts_group(&projections, &state.completion_control()),
-    )
-    .await
-    {
-        Err(_) => {
-            report.last_error = Some("receipt_deadline_exceeded".to_string());
-            report.deadline_errors += 1;
-            report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
-            return;
-        }
-        Ok(Err(error)) => {
-            report.last_error = Some(format!("{error:?}"));
-            if is_retryable_storage(&error) {
-                report.retryable_errors += 1;
-                report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
-            } else {
-                report.terminal_errors += 1;
+    let receipt_control = state.completion_control();
+    let receipt_outcomes =
+        match commit_refresh_groups(projections.len(), policy.operation_deadline, |range| {
+            access.record_relation_receipts_group(&projections[range], &receipt_control)
+        })
+        .await
+        {
+            Err(error) => {
+                report.last_error = Some(format!("{error:?}"));
+                if is_retryable_storage(&error) {
+                    report.retryable_errors += 1;
+                    report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
+                } else {
+                    report.terminal_errors += 1;
+                }
+                return;
             }
-            return;
-        }
-        Ok(Ok(outcomes)) => outcomes,
-    };
+            Ok(outcomes) => outcomes,
+        };
     let mut survivors = Vec::with_capacity(staged.len());
     for (item, outcome) in staged.into_iter().zip(receipt_outcomes) {
         match outcome {
@@ -1135,30 +1195,25 @@ async fn drain_staged_completions<'a>(
         .iter()
         .map(|(item, verified)| (item.request.clone(), verified.clone()))
         .collect::<Vec<_>>();
-    let outcomes = match tokio::time::timeout(
-        policy.operation_deadline,
-        access.complete_session_refresh_group(complete_items, state.completion_control()),
-    )
-    .await
-    {
-        Err(_) => {
-            report.last_error = Some("completion_deadline_exceeded".to_string());
-            report.deadline_errors += 1;
-            report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
-            return;
-        }
-        Ok(Err(error)) => {
-            report.last_error = Some(format!("{error:?}"));
-            if is_retryable_storage(&error) {
-                report.retryable_errors += 1;
-                report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
-            } else {
-                report.terminal_errors += 1;
+    let outcomes =
+        match commit_refresh_groups(complete_items.len(), policy.operation_deadline, |range| {
+            access
+                .complete_session_refresh_group(&complete_items[range], state.completion_control())
+        })
+        .await
+        {
+            Err(error) => {
+                report.last_error = Some(format!("{error:?}"));
+                if is_retryable_storage(&error) {
+                    report.retryable_errors += 1;
+                    report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
+                } else {
+                    report.terminal_errors += 1;
+                }
+                return;
             }
-            return;
-        }
-        Ok(Ok(outcomes)) => outcomes,
-    };
+            Ok(outcomes) => outcomes,
+        };
     for ((item, _), outcome) in applied.into_iter().zip(outcomes) {
         match outcome {
             Ok(_) => report.completed += 1,
@@ -1709,9 +1764,152 @@ pub async fn run_session_temporal_refresh_pass(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_domain::SessionId;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::params;
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+
+    const SLOW_ITEM_WORK: Duration = Duration::from_secs(31);
+
+    /// Commits 16 items whose `slow` members exceed the 30-second deadline
+    /// alone and whose others take 3 seconds, so the whole group never fits.
+    /// Returns the simulated time the commit waited.
+    async fn timed_refresh_group_progress(slow: &[usize]) -> Duration {
+        let harness = RegisteredGlobalDbHarness::open("refresh-group-progress").await;
+        let database = &harness.registered;
+        let transaction = database.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "CREATE TABLE refresh_group_progress (item INTEGER PRIMARY KEY)",
+                (),
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        tokio::time::pause();
+        // Native database IO must finish on real time; only the simulated
+        // per-item work below may advance the writer's Tokio deadline.
+        let manual_clock = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        let started = tokio::time::Instant::now();
+        let outcomes = commit_refresh_groups(16, Duration::from_secs(30), |range| async move {
+            let transaction = database
+                .begin_write_transaction()
+                .await
+                .map_err(|error| SessionStoreError::storage("begin refresh group", error))?;
+            for item in range.clone() {
+                transaction
+                    .execute(
+                        "INSERT INTO refresh_group_progress (item) VALUES (?1)",
+                        params![item as i64],
+                    )
+                    .await
+                    .map_err(|error| SessionStoreError::storage("write refresh group", error))?;
+                let work = if slow.contains(&item) {
+                    SLOW_ITEM_WORK
+                } else {
+                    Duration::from_secs(3)
+                };
+                tokio::time::advance(work).await;
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|error| SessionStoreError::storage("commit refresh group", error))?;
+            Ok(range.map(Ok).collect())
+        })
+        .await
+        .unwrap();
+        let waited = started.elapsed();
+        manual_clock.abort();
+        tokio::time::resume();
+
+        assert_eq!(outcomes.len(), 16);
+        for (item, outcome) in outcomes.into_iter().enumerate() {
+            if slow.contains(&item) {
+                assert!(matches!(outcome, Err(SessionStoreError::DeadlineExceeded)));
+            } else {
+                assert_eq!(outcome.unwrap(), item);
+            }
+        }
+        let snapshot = database.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query("SELECT item FROM refresh_group_progress ORDER BY item", ())
+            .await
+            .unwrap();
+        let mut committed = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            committed.push(row.get::<i64>(0).unwrap() as usize);
+        }
+        assert_eq!(
+            committed,
+            (0..16)
+                .filter(|item| !slow.contains(item))
+                .collect::<Vec<_>>(),
+            "cancelled groups must roll back before their items are retried"
+        );
+        waited
+    }
+
+    #[tokio::test]
+    async fn timed_refresh_groups_commit_individually_affordable_items() {
+        timed_refresh_group_progress(&[]).await;
+    }
+
+    #[tokio::test]
+    async fn timed_refresh_groups_do_not_starve_items_after_a_slow_one() {
+        timed_refresh_group_progress(&[0]).await;
+    }
+
+    #[tokio::test]
+    async fn timed_refresh_groups_wait_at_most_one_timeout_per_item_beyond_the_group() {
+        let every_item = (0..16).collect::<Vec<_>>();
+        let waited = timed_refresh_group_progress(&every_item).await;
+        assert!(
+            waited <= SLOW_ITEM_WORK * 17,
+            "a pass of 16 slow items must not hold the worker for {waited:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_completion_stays_claimable_by_the_next_pass() {
+        let harness = RegisteredGlobalDbHarness::open("refresh-timed-out-completion").await;
+        let store = SessionTemporalStore::new(harness.registered.as_ref());
+        store
+            .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+                SessionId::new("timed-out-completion").unwrap(),
+                SessionRefreshFrontierV1::new(0, 0).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let recovery = store.running_session_refreshes().await.unwrap().remove(0);
+        let state = SessionTemporalRefreshWakeState::default();
+        assert!(state.claim_terminal_attempt(&recovery));
+        let mut report = SessionTemporalRefreshPassReport::default();
+
+        reject_staged_completion(
+            &store,
+            &state,
+            ClaimedTerminalAttempt::new(&state, recovery.clone()),
+            SessionStoreError::DeadlineExceeded,
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(
+            report.retry_class,
+            Some(SessionTemporalRefreshRetryClass::Deadline)
+        );
+        assert_eq!(report.terminal_errors, 0);
+        assert!(
+            state.claim_terminal_attempt(&recovery),
+            "a completion that missed its deadline must be retried, not held as terminal"
+        );
+    }
 
     #[test]
     fn deterministic_storage_refusals_are_not_retryable() {

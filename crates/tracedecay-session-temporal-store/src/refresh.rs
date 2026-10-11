@@ -840,7 +840,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     )]
     pub async fn commit_session_refresh_begin_batch_group(
         &self,
-        items: Vec<SessionRefreshBeginBatchItemV1>,
+        items: &[SessionRefreshBeginBatchItemV1],
         execution_control: ExecutionControl,
     ) -> SessionStoreResult<Vec<SessionStoreResult<SessionRefreshBeginBatchOutcomeV1>>> {
         let transaction = self
@@ -849,7 +849,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .await
             .map_err(|error| storage(PERSIST_REFRESH, error))?;
         let mut outcomes = Vec::with_capacity(items.len());
-        for (index, item) in items.into_iter().enumerate() {
+        for (index, item) in items.iter().enumerate() {
             match commit_begin_batch_item_in_transaction(
                 &transaction,
                 index,
@@ -1176,7 +1176,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
     )]
     pub async fn complete_session_refresh_group(
         &self,
-        items: Vec<(SessionRefreshCompletionRequestV1, SessionRelationProjection)>,
+        items: &[(SessionRefreshCompletionRequestV1, SessionRelationProjection)],
         execution_control: ExecutionControl,
     ) -> SessionStoreResult<Vec<SessionStoreResult<SessionRefreshReceiptV1>>> {
         let transaction = self
@@ -1185,7 +1185,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             .await
             .map_err(|error| storage(COMPLETE_REFRESH, error))?;
         let mut receipts = Vec::with_capacity(items.len());
-        for (index, (request, relation_projection)) in items.into_iter().enumerate() {
+        for (index, (request, relation_projection)) in items.iter().enumerate() {
             let savepoint = format!("refresh_complete_item_{index}");
             if let Err(error) = transaction
                 .execute(&format!("SAVEPOINT {savepoint}"), ())
@@ -1196,8 +1196,8 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             }
             let receipt = complete_session_refresh_in_transaction(
                 &transaction,
-                request,
-                &relation_projection,
+                request.clone(),
+                relation_projection,
                 &execution_control,
             )
             .await;
@@ -3307,7 +3307,7 @@ async fn rollback_begin_item_savepoint(
 async fn commit_begin_batch_item_in_transaction(
     transaction: &impl SessionTemporalWriteTxn,
     index: usize,
-    item: SessionRefreshBeginBatchItemV1,
+    item: &SessionRefreshBeginBatchItemV1,
     execution_control: &ExecutionControl,
 ) -> SessionStoreResult<SessionStoreResult<SessionRefreshBeginBatchOutcomeV1>> {
     let savepoint = format!("refresh_begin_item_{index}");
@@ -3317,7 +3317,7 @@ async fn commit_begin_batch_item_in_transaction(
         progress,
         batch,
     } = item;
-    if let Err(error) = validate_progress_batch_identity(&progress, &batch) {
+    if let Err(error) = validate_progress_batch_identity(progress, batch) {
         return Ok(Err(error));
     }
     let authoritative_validation_time = now_micros(PERSIST_REFRESH)?;
@@ -3325,26 +3325,30 @@ async fn commit_begin_batch_item_in_transaction(
         .execute(&format!("SAVEPOINT {savepoint}"), ())
         .await
         .map_err(|error| storage(PERSIST_REFRESH, error))?;
-    let (operation_id, binding) =
-        match begin_session_refresh_in_transaction(transaction, request.clone(), accepted_at).await
-        {
-            Err(error) => {
-                rollback_begin_item_savepoint(transaction, &savepoint).await?;
-                return Ok(Err(error));
-            }
-            Ok(SessionRefreshBeginTxnOutcome::Joined { .. }) => {
-                rollback_begin_item_savepoint(transaction, &savepoint).await?;
-                return Ok(Ok(SessionRefreshBeginBatchOutcomeV1::Joined));
-            }
-            Ok(SessionRefreshBeginTxnOutcome::Started {
-                operation_id,
-                binding,
-                ..
-            }) => (operation_id, binding),
-        };
+    let (operation_id, binding) = match begin_session_refresh_in_transaction(
+        transaction,
+        request.clone(),
+        *accepted_at,
+    )
+    .await
+    {
+        Err(error) => {
+            rollback_begin_item_savepoint(transaction, &savepoint).await?;
+            return Ok(Err(error));
+        }
+        Ok(SessionRefreshBeginTxnOutcome::Joined { .. }) => {
+            rollback_begin_item_savepoint(transaction, &savepoint).await?;
+            return Ok(Ok(SessionRefreshBeginBatchOutcomeV1::Joined));
+        }
+        Ok(SessionRefreshBeginTxnOutcome::Started {
+            operation_id,
+            binding,
+            ..
+        }) => (operation_id, binding),
+    };
     let diverged = operation_id != *progress.operation_id()
-        || validate_batch_binding(&binding, &batch).is_err()
-        || validate_progress_binding(&binding, &progress).is_err();
+        || validate_batch_binding(&binding, batch).is_err()
+        || validate_progress_binding(&binding, progress).is_err();
     if diverged {
         transaction
             .execute(&format!("RELEASE SAVEPOINT {savepoint}"), ())
@@ -3355,8 +3359,8 @@ async fn commit_begin_batch_item_in_transaction(
     match persist_begin_batch_in_transaction(
         transaction,
         &binding,
-        &progress,
-        &batch,
+        progress,
+        batch,
         authoritative_validation_time,
         execution_control,
     )
@@ -3368,7 +3372,7 @@ async fn commit_begin_batch_item_in_transaction(
                 .await
                 .map_err(|error| storage(PERSIST_REFRESH, error))?;
             Ok(Ok(SessionRefreshBeginBatchOutcomeV1::Persisted {
-                progress: Box::new(progress),
+                progress: Box::new(progress.clone()),
                 receipt: Box::new(receipt),
             }))
         }
@@ -3383,7 +3387,8 @@ async fn commit_begin_batch_item_in_transaction(
             // begin commit leaves exactly this durable begin, so replay
             // must not depend on which path wrote it.
             let outcome =
-                begin_session_refresh_in_transaction(transaction, request, accepted_at).await;
+                begin_session_refresh_in_transaction(transaction, request.clone(), *accepted_at)
+                    .await;
             Ok(match outcome {
                 Err(error) => {
                     rollback_begin_item_savepoint(transaction, &alone).await?;

@@ -15,8 +15,7 @@ rust_library(
     crate_name = "tracedecay_sessions",
     edition = crate_edition(),
     compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures_provider_normalization_claude", "//tests:fixtures_provider_normalization_cursor", "//tests:fixtures_provider_normalization_cursor_composer", "//tests:fixtures_provider_normalization_hermes", "//tests:fixtures_provider_normalization_kiro", "//tests:fixtures_provider_normalization_vibe", "//tests:fixtures_transcript_golden_cline_like_expected", "//tests:fixtures_transcript_golden_cline_like_input", "//tests:fixtures_transcript_golden_pi"],
     version = "0.1.0",
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-framing:tracedecay-framing", "//crates/tracedecay-lcm:tracedecay-lcm", "//crates/tracedecay-privacy:tracedecay-privacy", "//crates/tracedecay-private-fs:tracedecay-private-fs", "//crates/tracedecay-runtime-core:tracedecay-runtime-core", "//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime", "//crates/tracedecay-store:tracedecay-store"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
@@ -32,8 +31,7 @@ rust_library(
     crate_name = "tracedecay_sessions",
     edition = crate_edition(),
     compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures_provider_normalization_claude", "//tests:fixtures_provider_normalization_cursor", "//tests:fixtures_provider_normalization_cursor_composer", "//tests:fixtures_provider_normalization_hermes", "//tests:fixtures_provider_normalization_kiro", "//tests:fixtures_provider_normalization_vibe", "//tests:fixtures_transcript_golden_cline_like_expected", "//tests:fixtures_transcript_golden_cline_like_input", "//tests:fixtures_transcript_golden_pi"],
     version = "0.1.0",
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-framing:tracedecay-framing__+test-helpers__dev", "//crates/tracedecay-lcm:tracedecay-lcm__+test-helpers__dev", "//crates/tracedecay-privacy:tracedecay-privacy__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__dev", "//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-helpers_+test-transport__dev", "//crates/tracedecay-store:tracedecay-store__dev"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
@@ -49,8 +47,7 @@ rust_library(
     crate_name = "tracedecay_sessions",
     edition = crate_edition(),
     compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)
-        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
+        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures_provider_normalization_claude", "//tests:fixtures_provider_normalization_cursor", "//tests:fixtures_provider_normalization_cursor_composer", "//tests:fixtures_provider_normalization_hermes", "//tests:fixtures_provider_normalization_kiro", "//tests:fixtures_provider_normalization_vibe", "//tests:fixtures_transcript_golden_cline_like_expected", "//tests:fixtures_transcript_golden_cline_like_input", "//tests:fixtures_transcript_golden_pi"],
     version = "0.1.0",
     deps = all_crate_deps(normal = True) + ["//crates/tracedecay-capture:tracedecay-capture", "//crates/tracedecay-contracts:tracedecay-contracts", "//crates/tracedecay-domain:tracedecay-domain", "//crates/tracedecay-framing:tracedecay-framing", "//crates/tracedecay-lcm:tracedecay-lcm__d56f61a14c8", "//crates/tracedecay-privacy:tracedecay-privacy", "//crates/tracedecay-private-fs:tracedecay-private-fs", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__dbc848ed4f4", "//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime", "//crates/tracedecay-store:tracedecay-store"],
     proc_macro_deps = all_crate_deps(proc_macro = True),
@@ -72,8 +69,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
+    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True),
 )
 
 rust_test(
@@ -89,8 +86,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(1),
     crate_features = ["test-helpers"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"],
+    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True),
 )
 
 filegroup(
@@ -110,7 +107,7 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(1),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
-        + ["//tests:fixtures"],
+        + ["//tests:fixtures_provider_normalization_claude", "//tests:fixtures_provider_normalization_cursor", "//tests:fixtures_provider_normalization_cursor_composer", "//tests:fixtures_provider_normalization_hermes", "//tests:fixtures_provider_normalization_kiro", "//tests:fixtures_provider_normalization_vibe", "//tests:fixtures_transcript_golden_cline_like_expected", "//tests:fixtures_transcript_golden_cline_like_input", "//tests:fixtures_transcript_golden_pi"],
     data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 

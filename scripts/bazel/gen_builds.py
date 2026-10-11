@@ -739,9 +739,11 @@ def main():
         pkg_dir, group_rel = owner_pkg(repo_rel)
         pkg_rel = "/".join(repo_rel.parts[len(pkg_dir.split("/")):])
         gname = group_rel.replace("/", "_") or pkg_dir
+        entry = {"files": set(), "glob": group_rel}
         if (pkg_dir, gname) == ("tests", "fixtures"):
-            gname = "shared_fixtures"
-        entry = out_of_pkg.setdefault((pkg_dir, gname), {"files": set(), "glob": group_rel})
+            # Loose files only: each fixture subdirectory is its own group.
+            gname, entry["pattern"] = "shared_fixtures", "fixtures/*"
+        entry = out_of_pkg.setdefault((pkg_dir, gname), entry)
         entry["files"].add(pkg_rel)
         if sources:
             gname += "_sources"
@@ -827,7 +829,7 @@ def main():
         """(in_crate_globs, filegroup_labels) for include_str!/include_bytes!
         paths escaping the crate. `extra_dirs` are additional source dirs to
         scan (dirs of files pulled in via #[path]). Dirs already covered by
-        the standard resource globs or //tests:fixtures are skipped."""
+        the standard resource globs are skipped."""
         crate_dir = Path(p["manifest_path"]).parent
         covered = tuple(crate_dir / d for d in RESOURCE_DIRS)
         local, labels = set(), set()
@@ -845,8 +847,6 @@ def main():
                     repo_rel = resolved.relative_to(REPO)
                 except ValueError:
                     continue
-                if repo_rel.parts[0] == "tests":
-                    continue  # covered by //tests:fixtures
                 if crate_dir in resolved.parents or resolved.parent == crate_dir:
                     if not any(d in resolved.parents for d in covered):
                         local.add(
@@ -857,6 +857,16 @@ def main():
                 glabel, _, _ = group_label(repo_rel)
                 labels.add(glabel)
         return sorted(local), sorted(labels)
+
+    def shared_fixture_data(t, extra_dirs=()):
+        """' + ["//tests:fixtures"]' when a target's sources name a
+        tests/fixtures path outside include_str!/include_bytes!, which reads
+        it at run time. Includes are compile_data from extra_compile_data."""
+        reads = any(
+            "tests/fixtures" in RE_INCLUDE.sub("", text)
+            for _, text in target_sources(t, tuple(extra_dirs))
+        )
+        return ' + ["//tests:fixtures"]' if reads else ""
 
     def needed_bin_exes(p, t, extra_dirs=()):
         """CARGO_BIN_EXE_<name> literals a target's sources compile, mapped to
@@ -1040,8 +1050,7 @@ def main():
                     f'    crate_name = "{lib_t["name"]}",',
                     '    edition = crate_edition(),',
                     '    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True)\n'
-                    '        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)\n'
-                    '        + ["//tests:fixtures"]'
+                    '        + glob(["assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)'
                     + (f" + [{q(COMPILE_DATA_EXTRA[name])}]" if COMPILE_DATA_EXTRA.get(name) else "")
                     + (f" + glob([{q(inc_local)}], allow_empty = True)" if inc_local else "")
                     + (f" + [{q(inc_labels)}]" if inc_labels else "")
@@ -1198,9 +1207,9 @@ def main():
                     "proc_macro = True, proc_macro_dev = True),",
                     '    aliases = aliases(normal = True, normal_dev = True),',
                     rustc_flags_attr,
-                    '    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)\n'
-                    '        + ["//tests:fixtures"],',
-                    '    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"]'
+                    '    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),',
+                    '    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)'
+                    + shared_fixture_data(t, bin_pulled)
                     + test_data(name, test_name) + ",",
                     "    runfiles_env = " + env_dict(runfiles_env) + "," if runfiles_env else None,
                     ")\n",
@@ -1251,12 +1260,11 @@ def main():
             )
             # Suites read the shared fixtures as ../../tests/fixtures from the
             # crate directory, where the launcher starts them.
-            data += ' + ["//tests:fixtures"]'
+            data += shared_fixture_data(t, mod_pulled)
             # include_str!/include_bytes! are compile-time inputs. They cover crate-root
-            # resource dirs beside tests/ and repo-root fixtures under //tests.
+            # resource dirs beside tests/; inc_labels_t covers repository files.
             compile_data = (
                 'glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)'
-                ' + ["//tests:fixtures"]'
             )
             if inc_local_t:
                 compile_data += (
@@ -1347,12 +1355,12 @@ def main():
                 "proc_macro = True, proc_macro_dev = True),",
                 '    aliases = aliases(normal = True, normal_dev = True),',
                 rustc_flags_attr,
-                '    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)\n'
-                '        + ["//tests:fixtures"]'
+                '    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)'
                 + (f"\n        + glob([{q(inc_local)}], allow_empty = True)" if inc_local else "")
                 + (f"\n        + [{q(inc_labels)}]" if inc_labels else "")
                 + ",",
-                '    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"]'
+                '    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)'
+                + shared_fixture_data(lib_t, lib_pulled)
                 + test_data(name, "unit_test") + ",",
                 "    runfiles_env = " + env_dict(lib_runfiles_env) + ","
                 if lib_runfiles_env
@@ -1386,7 +1394,7 @@ def main():
         name member crate roots, so they need none."""
         rules = []
         for gname, entry in sorted(by_pkg.get(pkg_dir, {}).items()):
-            pattern = f'{entry["glob"]}/**'
+            pattern = entry.get("pattern", f'{entry["glob"]}/**')
             exclude = ""
             if entry.get("sources"):
                 pattern += "/*.rs"
