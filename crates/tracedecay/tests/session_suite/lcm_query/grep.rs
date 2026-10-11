@@ -450,77 +450,71 @@ async fn one_stored_body_serves_search_grep_and_expand_redacted() {
     let store_ids =
         insert_raw_messages(&db, "cursor", "session-1", std::slice::from_ref(&body)).await;
 
-    let snapshot_path = tmp.path().join("single-copy-snapshot.db");
-    db.snapshot_session_database_for_test(HostAdmissionScope::Profile, &snapshot_path)
-        .await
-        .unwrap();
-    let connection = tracedecay_sql::Connection::open(&snapshot_path).unwrap();
-    let tables: Vec<(String, Vec<String>)> = connection
-        .prepare(
-            "SELECT name FROM sqlite_master
-             WHERE type = 'table' AND sql NOT LIKE 'CREATE VIRTUAL TABLE%'
-               AND name NOT LIKE '%\\_fts\\_%' ESCAPE '\\'",
-        )
-        .unwrap()
-        .query_map((), |row| row.get::<_, String>(0))
-        .unwrap()
-        .map(Result::unwrap)
-        .map(|table| {
-            let columns = connection
-                .prepare(&format!("SELECT name FROM pragma_table_xinfo('{table}')"))
+    let read = |sql: String| {
+        let db = &db;
+        async move {
+            db.read_session_database_for_test(HostAdmissionScope::Profile, &sql)
+                .await
                 .unwrap()
-                .query_map((), |row| row.get::<_, String>(0))
-                .unwrap()
-                .map(Result::unwrap)
-                .collect();
-            (table, columns)
-        })
-        .collect();
-    let mut stored_copies = Vec::new();
-    for (table, columns) in &tables {
-        for column in columns {
-            // Generated retrieval columns derive from `content`; they are not
-            // stored copies.
-            if table == "lcm_raw_messages"
-                && matches!(column.as_str(), "snippet_text" | "index_text")
-            {
-                continue;
-            }
-            let holding: i64 = connection
-                .query_row(
-                    &format!(
-                        "SELECT COUNT(*) FROM \"{table}\"
-                         WHERE instr(CAST(\"{column}\" AS TEXT), 'orchard ledger rotation') > 0"
-                    ),
-                    (),
-                    |row| row.get(0),
-                )
-                .unwrap();
-            if holding > 0 {
-                stored_copies.push(format!("{table}.{column}"));
-            }
         }
+    };
+    let mut tables: Vec<(String, Vec<String>)> = Vec::new();
+    for row in read(
+        "SELECT name FROM sqlite_master
+         WHERE type = 'table' AND sql NOT LIKE 'CREATE VIRTUAL TABLE%'
+           AND name NOT LIKE '%\\_fts\\_%' ESCAPE '\\'"
+            .to_owned(),
+    )
+    .await
+    {
+        let table: String = row.get(0).unwrap();
+        let columns = read(format!("SELECT name FROM pragma_table_xinfo('{table}')"))
+            .await
+            .iter()
+            .map(|column| column.get(0).unwrap())
+            .collect();
+        tables.push((table, columns));
     }
-    assert_eq!(stored_copies, vec!["lcm_raw_messages.content".to_owned()]);
-    let secret_holders = tables
-        .iter()
-        .flat_map(|(table, columns)| columns.iter().map(move |column| (table, column)))
-        .filter(|(table, column)| {
-            connection
-                .query_row(
-                    &format!(
+    let holders = |needle: &str| {
+        let needle = needle.to_owned();
+        let tables = &tables;
+        let read = &read;
+        async move {
+            let mut holding = Vec::new();
+            for (table, columns) in tables {
+                for column in columns {
+                    let count: i64 = read(format!(
                         "SELECT COUNT(*) FROM \"{table}\"
-                         WHERE instr(CAST(\"{column}\" AS TEXT), ?1) > 0"
-                    ),
-                    [&secret],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap()
-                > 0
+                         WHERE instr(CAST(\"{column}\" AS TEXT), '{needle}') > 0"
+                    ))
+                    .await[0]
+                        .get(0)
+                        .unwrap();
+                    if count > 0 {
+                        holding.push((table.clone(), column.clone()));
+                    }
+                }
+            }
+            holding
+        }
+    };
+    // Generated retrieval columns derive from `content`; they are not stored
+    // copies.
+    let stored_copies: Vec<String> = holders("orchard ledger rotation")
+        .await
+        .into_iter()
+        .filter(|(table, column)| {
+            !(table == "lcm_raw_messages"
+                && matches!(column.as_str(), "snippet_text" | "index_text"))
         })
-        .count();
-    assert_eq!(secret_holders, 0, "the credential must be redacted at rest");
-    drop(connection);
+        .map(|(table, column)| format!("{table}.{column}"))
+        .collect();
+    assert_eq!(stored_copies, vec!["lcm_raw_messages.content".to_owned()]);
+    assert_eq!(
+        holders(&secret).await,
+        Vec::new(),
+        "the credential must be redacted at rest"
+    );
 
     let searched = db
         .search_session_messages_for_test(

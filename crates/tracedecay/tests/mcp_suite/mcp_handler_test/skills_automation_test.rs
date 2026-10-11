@@ -1,5 +1,4 @@
 #[cfg(feature = "test-transport")]
-use crate::fixture;
 use crate::support::*;
 use serde_json::json;
 use std::fs;
@@ -147,10 +146,10 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
     let profile = crate::common::isolated_profile_under_home(&dir.path().join("home"));
     let cg = TestTraceDecay::new(
-        fixture::init_project_from_template_with_options(
+        Box::pin(tracedecay_project::project::TraceDecay::init_with_options(
             &project,
             TraceDecayOpenOptions::for_profile(&profile),
-        )
+        ))
         .await
         .unwrap(),
     );

@@ -1,8 +1,4 @@
 //! Fixture setup shared by every provider module in this suite.
-//!
-//! Note: nextest runs each test in its own process, so per-process caches
-//! (like `common::write_empty_global_db_schema`'s DB template) do not pay
-//! off here, each test opens exactly one project session DB anyway.
 
 use std::path::{Path, PathBuf};
 

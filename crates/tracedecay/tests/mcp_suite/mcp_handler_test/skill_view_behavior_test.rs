@@ -13,7 +13,6 @@ use tracedecay_automation_runtime::automation::managed_skills::{
 use tracedecay_automation_runtime::automation::skill_usage::load_skill_usage_record;
 use tracedecay_project::project::TraceDecayOpenOptions;
 
-use crate::fixture;
 use crate::mcp_server_test::support::{
     jsonrpc_request, response_with_id, run_client_connection_with_messages,
 };
@@ -59,10 +58,10 @@ async fn open_skill_view_server() -> SkillViewServer {
     std::fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").expect("fixture source");
     let profile = crate::common::isolated_profile_under_home(&dir.path().join("home"));
     let graph = TestTraceDecay::new(
-        fixture::init_project_from_template_with_options(
+        Box::pin(tracedecay_project::project::TraceDecay::init_with_options(
             &project,
             TraceDecayOpenOptions::for_profile(&profile),
-        )
+        ))
         .await
         .expect("initialized skill-view project"),
     );

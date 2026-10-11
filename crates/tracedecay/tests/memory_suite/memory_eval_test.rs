@@ -252,10 +252,6 @@ fn initialize_fixture_project(fixture: &Fixture) {
         .expect("tokio runtime");
     runtime.block_on(async {
         common::register_process_runtime_ports();
-        common::write_empty_global_db_schema(
-            &profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
-        )
-        .await;
         let tracedecay = TraceDecay::init_with_options(&fixture.project_path, options)
             .await
             .unwrap_or_else(|error| panic!("initialize fixture project: {error}"));

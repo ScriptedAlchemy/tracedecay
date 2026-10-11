@@ -3735,7 +3735,7 @@ async fn daemon_reopens_retained_receipts_without_reset() {
         .path()
         .join(".tracedecay")
         .join(tracedecay_store::StoreFile::Profile.file_name());
-    common::write_empty_global_db_schema(&db_path).await;
+    common::install_profile_schema(db_path.parent().unwrap()).await;
     {
         let db = tracedecay_sql::Connection::open(&db_path).unwrap();
         // Older schema versions are refused with typed reset-required at
