@@ -807,9 +807,19 @@ impl Connection {
     }
 
     /// COMMIT runs unguarded. A failure before it is stepped is a refusal;
-    /// any failure after is commit-unknown.
+    /// any failure after is commit-unknown, except a constraint: deferred
+    /// foreign keys are checked before COMMIT writes anything, so that
+    /// transaction is known not to be durable.
     pub(crate) fn commit_transaction(&self) -> std::result::Result<(), Settlement> {
         self.execute_suspended("COMMIT")
+            .map_err(|settlement| match settlement {
+                Settlement::Unknown(
+                    error @ Error::Engine(
+                        LimboError::Constraint(_) | LimboError::ForeignKeyConstraint(_),
+                    ),
+                ) => Settlement::Refused(error),
+                settlement => settlement,
+            })
     }
 
     /// Rollback ignores authority, cancellation and file identity: revocation

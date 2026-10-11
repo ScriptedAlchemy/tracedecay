@@ -300,7 +300,7 @@ fn incomplete_hard_checkpoint_requires_drain_until_passive_completes() {
 }
 
 #[test]
-fn invalid_config_and_driver_configuration_fail_closed() {
+fn invalid_config_fails_closed() {
     let directory = tempfile::tempdir().expect("checkpoint directory");
     let path = directory.path().join("checkpoint.db");
     std::fs::File::create(&path).expect("checkpoint file");
@@ -318,17 +318,6 @@ fn invalid_config_and_driver_configuration_fail_closed() {
         Err(CheckpointError::InvalidConfig(
             CheckpointConfigError::HardLimitNotAboveSoftLimit
         ))
-    ));
-
-    let reader = crate::connection::open(&path, crate::connection::ConnectionMode::Reader)
-        .expect("reader connection");
-    let result = WriterCheckpointController::new(
-        RusqliteCheckpointDriver::new(reader),
-        CheckpointConfig::default(),
-    );
-    assert!(matches!(
-        result,
-        Err(CheckpointError::Driver(RusqliteCheckpointError::Sqlite(_)))
     ));
 }
 

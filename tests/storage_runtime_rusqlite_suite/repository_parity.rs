@@ -1,9 +1,9 @@
 use std::fmt::Debug;
 
-use rusqlite::Connection;
 use tempfile::TempDir;
 use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_rusqlite_runtime::repository::RepositoryPhysicalAttachmentFactory;
+use tracedecay_sql::Connection;
 use tracedecay_store::{
     AdmissionConfigV1, ConsistencyModeV1, OperationPriorityV1, RuntimeCancellationIdV1,
     RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeReadOperationV1,

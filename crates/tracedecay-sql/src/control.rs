@@ -255,6 +255,24 @@ pub fn file_identity(_file: &File) -> io::Result<FileIdentity> {
     ))
 }
 
+/// Whether `stored`, read from `sqlite_schema.sql`, is the DDL `declared`
+/// installed. SQLite stores the statement as written; the native engine
+/// re-renders it from its parse tree, so only spacing, case, a trailing `;`
+/// and `IF NOT EXISTS` may differ there.
+pub fn stored_schema_matches(stored: &str, declared: &str) -> bool {
+    fn rendered(sql: &str) -> String {
+        sql.chars()
+            .filter(|character| !character.is_whitespace() && *character != ';')
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+            .replace("ifnotexists", "")
+    }
+    match crate::ENGINE {
+        Engine::Sqlite => stored == declared,
+        Engine::Native => rendered(stored) == rendered(declared),
+    }
+}
+
 /// The pragmas [`Capability::ExactSql`] may run, on either engine.
 pub(crate) fn is_allowed_exact_sql_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
     is_exact_sql_read_pragma(pragma_name, pragma_value)

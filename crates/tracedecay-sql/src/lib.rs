@@ -15,7 +15,7 @@ use sqlite as engine;
 pub use control::{
     Capability, CheckpointMode, CheckpointOutcome, ConnectionControl, Engine, EnginePolicy,
     ErrorExt, ErrorKind, FileIdentity, PROGRESS_INTERVAL_OPS, PageStats, StatementControl,
-    StatementCounters, TransactionControl, file_identity, path_identity,
+    StatementCounters, TransactionControl, file_identity, path_identity, stored_schema_matches,
 };
 pub use engine::{
     CachedStatement, Connection, DropBehavior, Error, InterruptHandle, MappedRows, OpenFlags,

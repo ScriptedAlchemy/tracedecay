@@ -449,8 +449,10 @@ impl Worker {
             eprintln!(
                 "[tracedecay] rusqlite writer worker panicked; writer is now faulted: {message}"
             );
-            state.store(WriterState::Faulted as u8, Ordering::Release);
+            // Settle the telemetry first: a caller that observes the fault
+            // reads final counts.
             telemetry.fault_unsettled();
+            state.store(WriterState::Faulted as u8, Ordering::Release);
         }
     }
 

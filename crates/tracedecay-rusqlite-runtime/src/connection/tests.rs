@@ -41,12 +41,14 @@ fn writer_mode_applies_wal_integrity_and_write_policy() {
         .pragma_query_value(None, "journal_mode", |row| row.get(0))
         .expect("journal mode");
     assert_eq!(journal.to_ascii_lowercase(), "wal");
-    assert_eq!(pragma_i64(&connection, "wal_autocheckpoint"), 0);
+    // Native has none of these pragmas: its connections disable automatic
+    // checkpoints when they open and never trust schema-defined functions.
     if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Sqlite {
+        assert_eq!(pragma_i64(&connection, "wal_autocheckpoint"), 0);
         assert_eq!(pragma_i64(&connection, "synchronous"), 1);
+        assert_eq!(pragma_i64(&connection, "trusted_schema"), 0);
     }
     assert_eq!(pragma_i64(&connection, "foreign_keys"), 1);
-    assert_eq!(pragma_i64(&connection, "trusted_schema"), 0);
     connection
         .execute("INSERT INTO items VALUES (2)", [])
         .expect("ordinary writer DML");
@@ -72,6 +74,20 @@ fn writer_bounds_the_retained_wal_file_to_the_soft_limit_ceiling() {
     let file = database();
     let connection = open(file.path(), ConnectionMode::Writer).expect("writer policy");
 
+    if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Native {
+        // Native has no retained-size bound: a TRUNCATE checkpoint returns
+        // every WAL block.
+        connection
+            .execute("INSERT INTO items VALUES (2)", [])
+            .expect("write WAL frame");
+        let wal = sidecar_path(file.path(), "-wal");
+        assert!(std::fs::metadata(&wal).expect("WAL exists").len() > 0);
+        connection
+            .checkpoint(tracedecay_sql::CheckpointMode::Truncate)
+            .expect("truncate checkpoint");
+        assert_eq!(std::fs::metadata(&wal).expect("WAL kept").len(), 0);
+        return;
+    }
     assert_eq!(
         pragma_i64(&connection, "journal_size_limit"),
         i64::try_from(WAL_SOFT_LIMIT_BYTES).expect("soft limit fits in i64"),
@@ -333,6 +349,19 @@ fn worker_open_path_stays_on_the_pinned_file_across_an_a_b_a_swap() {
 
     std::fs::rename(&path, &retired).unwrap();
     std::fs::rename(&replacement, &path).unwrap();
+    if tracedecay_sql::ENGINE == tracedecay_sql::Engine::Native {
+        // No descriptor is pinned: closing one would drop the engine's lock.
+        // The canonical path is opened and the swapped file is refused.
+        assert_eq!(worker_path, path);
+        assert_eq!(
+            pinned.verify_current_path(&path),
+            Err(OpenedDatabaseFileError::Replaced)
+        );
+        std::fs::rename(&path, &replacement).unwrap();
+        std::fs::rename(&retired, &path).unwrap();
+        pinned.verify_current_path(&path).unwrap();
+        return;
+    }
     assert_eq!(std::fs::read(&worker_path).unwrap(), b"original");
 
     std::fs::rename(&path, &replacement).unwrap();
@@ -364,8 +393,12 @@ fn reader_and_writer_open_paths_share_one_sidecar_policy() {
     let writer_path = pinned.writer_open_path(&path).unwrap();
     assert_eq!(reader_path, writer_path);
 
+    // The native engine refuses a symlinked pathname and fences the file's
+    // identity itself, so it always opens the canonical path.
     #[cfg(unix)]
-    if cfg!(any(target_os = "linux", target_os = "android")) {
+    if cfg!(any(target_os = "linux", target_os = "android"))
+        && tracedecay_sql::ENGINE == tracedecay_sql::Engine::Sqlite
+    {
         assert!(reader_path.starts_with("/proc/self/fd/"));
     } else {
         assert_eq!(reader_path, path);
@@ -399,6 +432,61 @@ fn writer_identity_fence_rejects_a_replacement_hidden_by_path_restore() {
         pinned.verify_connection(&connection, &path),
         Err(OpenedDatabaseFileError::Replaced)
     );
+}
+
+const HELD_STORE_CHILD: &str = "TRACEDECAY_RUNTIME_HELD_STORE";
+
+/// Identity checks around a live writer must not release the engine's
+/// exclusive lock: on the native engine, closing any descriptor of the store
+/// drops every POSIX record lock this process holds on it, so a second process
+/// could open the store under the writer.
+#[cfg(unix)]
+#[test]
+fn identity_checks_keep_the_writer_store_owned_by_this_process() {
+    const TEST_NAME: &str =
+        "connection::tests::identity_checks_keep_the_writer_store_owned_by_this_process";
+    if let Ok(path) = std::env::var(HELD_STORE_CHILD) {
+        match Connection::open(&path).and_then(|connection| {
+            connection.execute_batch("CREATE TABLE IF NOT EXISTS taken(value INTEGER)")
+        }) {
+            Ok(()) => println!("OUTCOME=opened"),
+            Err(error) => println!("OUTCOME={:?}", error.kind()),
+        }
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(directory.path())
+        .unwrap()
+        .join("held.db");
+    let pinned = OpenedDatabaseFile::create_new(&path).unwrap();
+    let writer_path = pinned.writer_open_path(&path).unwrap();
+    let writer = open_writer(&writer_path, Some(&pinned), &path).expect("writer opens");
+    writer
+        .execute_batch("CREATE TABLE IF NOT EXISTS held(value INTEGER)")
+        .unwrap();
+    pinned.verify_current_path(&path).unwrap();
+    pinned.verify_connection(&writer, &path).unwrap();
+    drop(OpenedDatabaseFile::pin(&path).unwrap());
+    drop(pinned.try_clone().unwrap());
+
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+        .env(HELD_STORE_CHILD, &path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "child failed: {stdout}");
+    let expected = match tracedecay_sql::ENGINE {
+        tracedecay_sql::Engine::Native => "OUTCOME=OwnedElsewhere",
+        // SQLite shares a WAL store across processes.
+        tracedecay_sql::Engine::Sqlite => "OUTCOME=opened",
+    };
+    assert!(
+        stdout.contains(expected),
+        "expected {expected}, child printed: {stdout}"
+    );
+    drop(writer);
 }
 
 #[cfg(windows)]

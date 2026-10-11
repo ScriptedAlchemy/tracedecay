@@ -43,6 +43,8 @@ conformance!(
     statements_report_columns_and_conversions_carry_into_errors,
     unchecked_transactions_commit_or_roll_back_through_a_shared_borrow,
     close_rolls_back_and_path_names_the_store,
+    deferred_constraint_at_commit_is_a_refusal_that_rolls_back,
+    busy_checkpoint_reports_the_wal_it_could_not_reset,
 );
 
 mod cases {
@@ -105,6 +107,13 @@ mod cases {
             connection.query_row("SELECT name FROM items", [], |row| row.get::<_, String>(0));
         let error = missing.expect_err("an empty table has no first row");
         assert_eq!(error.kind(), ErrorKind::NoRows);
+        // Callers store and compare these messages, so both engines word
+        // them alike.
+        assert_eq!(error.to_string(), "Query returned no rows");
+        assert_eq!(
+            Error::InvalidParameterName("stored digest mismatch".to_owned()).to_string(),
+            "Invalid parameter name: stored digest mismatch"
+        );
         let optional = connection
             .query_row("SELECT name FROM items", [], |row| row.get::<_, String>(0))
             .optional()?;
@@ -517,6 +526,34 @@ mod cases {
         Ok(())
     }
 
+    /// A reader's snapshot blocks a TRUNCATE checkpoint: the outcome is busy
+    /// and still counts the WAL it left in place.
+    pub(super) fn busy_checkpoint_reports_the_wal_it_could_not_reset() -> Result<()> {
+        let (_directory, path, writer) = file_database();
+        writer.apply_engine_policy()?;
+        writer.execute_batch("PRAGMA journal_mode = WAL")?;
+        items(&writer)?;
+        writer.execute("INSERT INTO items (name) VALUES ('seen')", [])?;
+        let mut reader = Connection::open(&path)?;
+        reader.apply_engine_policy()?;
+        let snapshot = reader.transaction()?;
+        let seen: i64 = snapshot.query_row("SELECT count(*) FROM items", [], |row| row.get(0))?;
+        assert_eq!(seen, 1);
+        writer.execute("INSERT INTO items (name) VALUES ('unseen')", [])?;
+
+        let outcome = writer.checkpoint(CheckpointMode::Truncate)?;
+        assert!(outcome.busy, "the snapshot blocks the reset: {outcome:?}");
+        assert!(outcome.log_frames > 0, "{outcome:?}");
+        assert!(
+            (0..=outcome.log_frames).contains(&outcome.checkpointed_frames),
+            "{outcome:?}"
+        );
+        drop(snapshot);
+        let cleared = writer.checkpoint(CheckpointMode::Truncate)?;
+        assert!(!cleared.busy, "{cleared:?}");
+        Ok(())
+    }
+
     pub(super) fn statement_work_grows_with_its_target_not_unrelated_rows() -> Result<()> {
         let connection = Connection::open_in_memory()?;
         connection
@@ -673,6 +710,34 @@ mod cases {
         drop(dropped);
         assert!(connection.is_autocommit());
         assert_eq!(names(&connection)?, ["kept"]);
+        Ok(())
+    }
+
+    /// A deferred foreign key is checked before COMMIT writes anything: the
+    /// failure is a known refusal, not an unknown outcome, and nothing stays.
+    pub(super) fn deferred_constraint_at_commit_is_a_refusal_that_rolls_back() -> Result<()> {
+        let mut connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE child (
+                id INTEGER PRIMARY KEY,
+                parent INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED
+             );",
+        )?;
+        let transaction = connection.transaction()?;
+        transaction.execute("INSERT INTO child VALUES (1, 9)", [])?;
+        let error = transaction
+            .commit()
+            .expect_err("the dangling child refuses the commit");
+        assert_eq!(error.kind(), ErrorKind::Constraint, "{error}");
+        assert!(
+            connection.is_autocommit(),
+            "the refused transaction is gone"
+        );
+        let children: i64 =
+            connection.query_row("SELECT count(*) FROM child", [], |row| row.get(0))?;
+        assert_eq!(children, 0);
         Ok(())
     }
 

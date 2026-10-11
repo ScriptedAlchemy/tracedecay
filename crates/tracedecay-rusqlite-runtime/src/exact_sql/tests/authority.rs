@@ -53,12 +53,29 @@ fn writer_actor_allows_only_product_schema_pragmas() {
     for pragma in [
         "PRAGMA foreign_keys = ON",
         "PRAGMA defer_foreign_keys = ON",
-        "PRAGMA secure_delete = ON",
         "PRAGMA user_version = 24",
     ] {
         channel
             .execute_batch(pragma.to_owned())
             .unwrap_or_else(|error| panic!("{pragma} must remain available: {error}"));
+    }
+    // The native engine has no secure deletion; accepting the pragma would
+    // fabricate a privacy guarantee.
+    let secure_delete = channel.execute_batch("PRAGMA secure_delete = ON".to_owned());
+    match tracedecay_sql::ENGINE {
+        tracedecay_sql::Engine::Sqlite => {
+            secure_delete.expect("PRAGMA secure_delete = ON must remain available");
+        }
+        tracedecay_sql::Engine::Native => assert!(
+            matches!(
+                secure_delete,
+                Err(ExactSqlError::Sqlite {
+                    kind: ErrorKind::Unsupported,
+                    ..
+                })
+            ),
+            "{secure_delete:?}"
+        ),
     }
     for pragma in [
         "PRAGMA auto_vacuum = INCREMENTAL",
@@ -101,8 +118,8 @@ fn writer_actor_allows_temp_tables_and_indexes_but_not_temp_triggers_or_views() 
                     projector_owned INTEGER NOT NULL CHECK(projector_owned IN (0, 1)),
                     owner_count INTEGER NOT NULL CHECK(owner_count > 0),
                     PRIMARY KEY(projector_version, output_provider, output_message_id)
-                 ) WITHOUT ROWID;"
-                .to_owned(),
+                 );"
+            .to_owned(),
         )
         .expect("projection output-state cache must be creatable");
     channel

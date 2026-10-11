@@ -98,7 +98,13 @@ fn an_interrupted_statement_leaves_the_rollback_to_its_caller() {
         )
         .expect_err("the execution guard must interrupt a statement past its deadline");
     assert!(
-        matches!(&error, ExactSqlError::Sqlite { message, .. } if message.contains("interrupted")),
+        matches!(
+            &error,
+            ExactSqlError::Sqlite {
+                kind: ErrorKind::Interrupted,
+                ..
+            }
+        ),
         "expected the interrupted statement, got: {error}"
     );
 

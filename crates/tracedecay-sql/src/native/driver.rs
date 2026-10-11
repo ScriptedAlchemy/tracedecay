@@ -72,31 +72,38 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // rusqlite's wording, which stored messages and callers compare.
         match self {
-            Self::QueryReturnedNoRows => formatter.write_str("query returned no rows"),
-            Self::InvalidParameterName(name) => write!(formatter, "invalid parameter name: {name}"),
+            Self::QueryReturnedNoRows => formatter.write_str("Query returned no rows"),
+            Self::InvalidParameterName(name) => write!(formatter, "Invalid parameter name: {name}"),
             Self::InvalidParameterCount(actual, expected) => write!(
                 formatter,
-                "wrong number of parameters: {actual} supplied, {expected} expected"
+                "Wrong number of parameters passed to query. Got {actual}, needed {expected}"
             ),
-            Self::InvalidColumnIndex(index) => write!(formatter, "invalid column index: {index}"),
-            Self::InvalidColumnName(name) => write!(formatter, "invalid column name: {name}"),
+            Self::InvalidColumnIndex(index) => write!(formatter, "Invalid column index: {index}"),
+            Self::InvalidColumnName(name) => write!(formatter, "Invalid column name: {name}"),
             Self::InvalidColumnType(index, name, kind) => {
                 write!(
                     formatter,
-                    "invalid column type {kind} at index {index}, name {name}"
+                    "Invalid column type {kind} at index: {index}, name: {name}"
                 )
             }
+            Self::FromSqlConversionFailure(UNKNOWN_COLUMN, _, error) => error.fmt(formatter),
             Self::FromSqlConversionFailure(index, kind, error) => write!(
                 formatter,
-                "conversion error from type {kind} at index {index}: {error}"
+                "Conversion error from type {kind} at index: {index}, {error}"
             ),
-            Self::ToSqlConversionFailure(error) => write!(formatter, "{error}"),
-            Self::IntegralValueOutOfRange(index, value) => {
-                write!(formatter, "integer {value} out of range at index {index}")
+            Self::ToSqlConversionFailure(error) => error.fmt(formatter),
+            Self::IntegralValueOutOfRange(UNKNOWN_COLUMN, value) => {
+                write!(formatter, "Integer {value} out of range")
             }
-            Self::InvalidQuery => formatter.write_str("query is not read-only"),
-            Self::InvalidPath(path) => write!(formatter, "invalid path: {}", path.display()),
+            Self::IntegralValueOutOfRange(index, value) => {
+                write!(formatter, "Integer {value} out of range at index {index}")
+            }
+            Self::InvalidQuery => formatter.write_str("Query is not read-only"),
+            Self::InvalidPath(path) => {
+                write!(formatter, "Invalid path: {}", path.to_string_lossy())
+            }
             Self::Engine { message, .. } => formatter.write_str(message),
         }
     }
@@ -933,16 +940,32 @@ impl ConnectionControl for Connection {
             CheckpointMode::Restart => "RESTART",
             CheckpointMode::Truncate => "TRUNCATE",
         };
-        let outcome = self.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |row| {
-            Ok(CheckpointOutcome {
-                busy: row.get::<_, i64>(0)? != 0,
-                log_frames: row.get(1)?,
-                checkpointed_frames: row.get(2)?,
-            })
-        })?;
-        self.core
-            .record_checkpoint(outcome.checkpointed_frames.max(0).unsigned_abs())?;
-        Ok(outcome)
+        let (busy, log_frames, checkpointed_frames) =
+            self.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? != 0,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })?;
+        let (log_frames, checkpointed_frames) = match (log_frames, checkpointed_frames) {
+            (Some(log), Some(checkpointed)) => {
+                self.core
+                    .record_checkpoint(checkpointed.max(0).unsigned_abs())?;
+                (log, checkpointed)
+            }
+            // The engine leaves both counts NULL when the checkpoint is busy;
+            // report the WAL as it stands, as SQLite does.
+            _ => {
+                let (log, checkpointed) = self.core.wal_frames()?;
+                (frames(log)?, frames(checkpointed)?)
+            }
+        };
+        Ok(CheckpointOutcome {
+            busy,
+            log_frames,
+            checkpointed_frames,
+        })
     }
 
     fn page_stats(&self) -> Result<PageStats> {
@@ -1004,9 +1027,12 @@ impl<'c> Transaction<'c> {
     }
 
     /// Any failure after COMMIT starts is [`ErrorKind::CommitOutcomeUnknown`].
+    /// A transaction still open after a failed COMMIT is rolled back by the
+    /// drop, as rusqlite's is.
     pub fn commit(mut self) -> Result<()> {
+        self.connection.commit()?;
         self.drop_behavior = DropBehavior::Ignore;
-        self.connection.commit()
+        Ok(())
     }
 
     pub fn rollback(mut self) -> Result<()> {
