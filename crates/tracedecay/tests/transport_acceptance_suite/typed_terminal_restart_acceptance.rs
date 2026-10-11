@@ -61,10 +61,10 @@ use crate::common::{
 };
 
 /// The main file of `file` under `dir` plus the sidecars a live WAL-mode
-/// store of the compiled engine keeps beside it.
+/// store of the compiled engine keeps beside it, in path order.
 fn live_store_family(dir: &Path, file: tracedecay_store::StoreFile) -> Vec<std::path::PathBuf> {
     let main = file.file_name();
-    std::iter::once(main.to_owned())
+    let mut family: Vec<_> = std::iter::once(main.to_owned())
         .chain(
             tracedecay_store::StoreFile::SIDECAR_SUFFIXES
                 .iter()
@@ -72,7 +72,9 @@ fn live_store_family(dir: &Path, file: tracedecay_store::StoreFile) -> Vec<std::
                 .map(|suffix| format!("{main}{suffix}")),
         )
         .map(|name| dir.join(name))
-        .collect()
+        .collect();
+    family.sort();
+    family
 }
 
 const TOOL_DEADLINE_ENV: &str = "TRACEDECAY_TOOL_DEADLINE_MS";
