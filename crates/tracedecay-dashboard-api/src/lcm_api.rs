@@ -122,8 +122,6 @@ pub struct DashboardLcmCanonicalSummaryV1 {
 #[derive(Clone, Debug, Default)]
 pub struct DashboardLcmCanonicalStatsV1 {
     pub message_count: i64,
-    /// Messages counted in `message_count` that the temporal transcript has
-    /// not published, so no page can serve them yet.
     pub unpublished_message_count: i64,
     pub summary_node_count: i64,
     pub summary_token_count: Option<i64>,

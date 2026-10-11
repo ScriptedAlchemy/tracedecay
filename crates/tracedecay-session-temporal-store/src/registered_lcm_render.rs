@@ -286,7 +286,7 @@ async fn describe_counts(
                   WHERE provider = ?1 AND session_id = ?2),
                  (SELECT MAX(store_id) FROM lcm_raw_messages
                   WHERE provider = ?1 AND session_id = ?2),
-                 (SELECT COUNT(*) FROM lcm_raw_messages AS raw
+                 (SELECT COUNT(*) FROM lcm_raw_messages raw
                   WHERE raw.provider = ?1 AND raw.session_id = ?2
                     AND {RAW_MESSAGE_UNPUBLISHED_SQL})"
         ),

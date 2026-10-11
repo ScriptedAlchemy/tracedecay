@@ -397,10 +397,8 @@ impl DashboardLcmReadAdapter {
             }
         };
         let mut total_omitted = omitted.saturating_add(partial_description_count);
-        // The terminal page ends the transcript short of the counted messages
-        // by at least the unpublished ones. The retrieval and describe
-        // partiality can flag that same projection lag, so the measured count
-        // is never added to them: the larger omission stands.
+        // Describe partiality can already record this lag, so a terminal page
+        // keeps the larger omission instead of adding the unpublished count.
         if !canonical_page.has_more {
             total_omitted = total_omitted.max(
                 canonical_page

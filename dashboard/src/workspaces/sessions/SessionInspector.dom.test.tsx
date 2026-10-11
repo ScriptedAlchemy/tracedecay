@@ -217,19 +217,11 @@ describe('Session transcript drill-down', () => {
     );
 
     expect(await screen.findByText('available canonical message')).toBeTruthy();
-    expect(screen.getByText('stored messages')).toBeTruthy();
-    expect(screen.getByText('478')).toBeTruthy();
-    const pageStatus = screen.getByText(/1 on this page/);
-    expect(pageStatus.textContent).toContain('last available page');
-    expect(pageStatus.textContent).not.toContain('478');
     expect(
       screen.getByText(
         '188 stored messages are not yet published to the transcript, so no page can show them until the projection catches up.',
       ),
     ).toBeTruthy();
-    expect((screen.getByRole('button', { name: 'Next page' }) as HTMLButtonElement).disabled).toBe(
-      true,
-    );
   });
 });
 

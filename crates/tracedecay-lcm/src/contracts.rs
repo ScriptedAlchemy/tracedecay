@@ -385,9 +385,7 @@ pub struct LcmDescribeResponse {
     pub provider: String,
     pub session_id: String,
     pub raw_message_count: i64,
-    /// Raw messages the session's active temporal generation has not
-    /// published. Transcript reads cannot page them yet, so a read reaches at
-    /// most `raw_message_count - unpublished_message_count` messages.
+    /// A transcript read reaches at most `raw_message_count` minus this count.
     pub unpublished_message_count: i64,
     pub summary_node_count: i64,
     pub external_payload_count: i64,

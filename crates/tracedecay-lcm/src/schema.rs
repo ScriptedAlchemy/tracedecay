@@ -50,14 +50,11 @@ pub const SUMMARY_VISIBLE_SQL: &str = "EXISTS (
       AND visible_availability.availability = 'available'
 )";
 
-/// Publication rule over an `lcm_raw_messages` row aliased `raw`: the row is
-/// unpublished while its session's active temporal generation holds no
-/// occurrence of an observation that projected it. Transcript reads page
-/// occurrences, not raw rows, so a read never serves an unpublished row, for
-/// example while the temporal projection lags the raw store. The match
-/// follows projection provenance rather than
-/// the message id because a legacy projection alias renames the raw row but
-/// not its occurrence.
+/// Publication rule over an `lcm_raw_messages` row aliased `raw`: unpublished
+/// while the session's active generation holds no occurrence of an observation
+/// that projected it. The match follows projection provenance rather than the
+/// message id, because a legacy projection alias renames the raw row but not
+/// its occurrence.
 pub const RAW_MESSAGE_UNPUBLISHED_SQL: &str = "NOT EXISTS (
     SELECT 1
     FROM observation_projection_provenance published_provenance
