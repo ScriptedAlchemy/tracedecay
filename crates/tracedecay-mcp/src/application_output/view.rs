@@ -497,8 +497,6 @@ fn push_hierarchy_roots(items: &[Value], rendered: &mut String) -> Option<()> {
     Some(())
 }
 
-/// One relation, implementation, or signature match: its symbol line, the
-/// traversal annotations, then its signature when present.
 fn push_symbol_entry(item: &Value, rendered: &mut String) -> Option<()> {
     let symbol = item.get("symbol").unwrap_or(item);
     rendered.push_str(&symbol_line(symbol)?);
@@ -610,25 +608,15 @@ mod tests {
 
     use super::{
         BindingId, CanonicalHumanView, HumanField, HumanFieldValue, evidence_status,
-        payload_preview as payload_field,
+        payload_preview,
     };
-
-    fn payload_preview(
-        operation: &str,
-        payload: Option<&serde_json::Value>,
-    ) -> serde_json::Result<String> {
-        match payload_field(operation, payload)? {
-            HumanFieldValue::Block(value) | HumanFieldValue::Markdown(value) => Ok(value),
-            field => panic!("unexpected payload field: {field:?}"),
-        }
-    }
 
     fn visible_payload(operation: &str, payload: Option<&serde_json::Value>) -> String {
         super::super::markdown::render(CanonicalHumanView {
             heading: operation.to_owned(),
             fields: vec![HumanField {
                 label: "Payload",
-                value: payload_field(operation, payload).expect("payload field"),
+                value: payload_preview(operation, payload).expect("payload field"),
             }],
         })
         .as_str()
@@ -926,9 +914,12 @@ mod tests {
 
         assert_eq!(
             preview,
-            "src/lib.rs::Shape (trait) src/lib.rs:1 node_id=t\n\
-             |- implements src/lib.rs::Base (struct) src/lib.rs:5 node_id=b\n  \
-             |- extends src/lib.rs::Derived (class) src/lib.rs:9 node_id=d"
+            HumanFieldValue::Block(
+                "src/lib.rs::Shape (trait) src/lib.rs:1 node_id=t\n\
+                 |- implements src/lib.rs::Base (struct) src/lib.rs:5 node_id=b\n  \
+                 |- extends src/lib.rs::Derived (class) src/lib.rs:9 node_id=d"
+                    .to_owned()
+            )
         );
     }
 
