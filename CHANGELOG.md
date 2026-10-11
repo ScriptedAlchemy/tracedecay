@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance Improvements
 
-* **sql:** spill native Turso sorts to a confined `{main}-tmp` directory, read result rows in place, and keep file identity off the per-statement writer path so lexical ingest/search no longer force an in-memory temp store ([#3491](https://github.com/ScriptedAlchemy/tracedecay/issues/3491))
+* **sql:** spill native Turso sorts to a confined `{main}-tmp` directory, read result rows in place, and keep file identity off the per-statement writer path
+* **query:** assign clone occurrence ordinals in the writer and resolve payload ordinals with chunked `IN` lists instead of one `SELECT` per body
+* **sql:** dump commit/fsync/drive timings when `TRACEDECAY_SQL_PROFILE=1`
 
 ### Bug Fixes
 
