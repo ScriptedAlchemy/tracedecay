@@ -941,12 +941,15 @@ mod tests {
     }
 
     #[test]
-    fn context_lane_preview_closes_open_code_fence_before_truncation_note() {
+    fn context_lane_preview_omits_partial_code_before_truncation_note() {
         let markdown = format!("### Code\n```rust\n{}\n", "fn demo() {}\n".repeat(1_000));
 
         let preview = context_markdown_lane_preview(&markdown);
 
-        assert!(preview.contains("```\n\n... lane truncated"));
+        assert_eq!(
+            preview,
+            "### Code\n\n... lane truncated; retrieve the full response handle for omitted details.\n"
+        );
     }
 
     #[test]

@@ -112,11 +112,10 @@ fn context_markdown(
         }
     } else {
         for block in code {
-            let _ = writeln!(
-                output,
-                "#### {}:{}\n```\n{}\n```",
-                block.file, block.start_line, block.code,
-            );
+            let _ = writeln!(output, "#### {}:{}", block.file, block.start_line);
+            let mut code = Md::new();
+            code.code("", &block.code);
+            output.push_str(&code.render());
         }
     }
     output.push('\n');

@@ -521,9 +521,9 @@ mod tests {
     use serde_json::json;
     use tracedecay_contracts::retrieval::DerivesSymbolV1;
     use tracedecay_contracts::retrieval::{
-        CodeGraphReadFreshnessV1, ContextExtensionPointV1, ContextModeV1, ContextPlanV1,
-        ContextResultV1, ContextRetrievalPlanV1, ContextRetrievalRouteV1, ContextStageV1,
-        PrimitiveFreshnessStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
+        CodeGraphReadFreshnessV1, ContextCodeBlockV1, ContextExtensionPointV1, ContextModeV1,
+        ContextPlanV1, ContextResultV1, ContextRetrievalPlanV1, ContextRetrievalRouteV1,
+        ContextStageV1, PrimitiveFreshnessStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
         PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
         PrimitiveSymbolLocationV1, ServedCodeGraphGenerationV1, TodoMarkerV1, TodosResultV1,
     };
@@ -662,6 +662,67 @@ mod tests {
                 memory: ContextStageV1::Unavailable,
             },
         }
+    }
+
+    #[test]
+    fn context_preview_keeps_symbols_whole_and_retains_full_response() {
+        let root = tempfile::tempdir().expect("response handles");
+        let small = "pub fn small() -> &'static str { \"café\" }";
+        let large = format!(
+            "pub fn large() {{\n{}    finish();\n}}",
+            "    process();\n".repeat(2_000)
+        );
+        let mut context = plan_context();
+        context.code = vec![
+            ContextCodeBlockV1 {
+                node_id: "symbol.small".to_owned(),
+                file: "src/lib.rs".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                code: small.to_owned(),
+            },
+            ContextCodeBlockV1 {
+                node_id: "symbol.large".to_owned(),
+                file: "src/lib.rs".to_owned(),
+                start_line: 3,
+                end_line: 2_005,
+                code: large.clone(),
+            },
+        ];
+        let rendered = render_graph_tool(
+            Some(root.path()),
+            &json!({}),
+            GraphToolCompletionV1 {
+                result: GraphToolResultV1::Context(Box::new(context)),
+                touched_files: Vec::new(),
+                code_graph: None,
+                analytics: None,
+                cost: None,
+            },
+        )
+        .expect("context preview");
+        let text = texts(&rendered).join("");
+        assert!(
+            text.contains(small),
+            "the small symbol must remain byte-exact"
+        );
+        assert!(
+            !text.contains("pub fn large()"),
+            "the preview must omit an oversized symbol rather than split its body"
+        );
+        assert!(text.contains("### Extension Points"));
+        let handle = text
+            .split("handle `")
+            .nth(1)
+            .and_then(|tail| tail.split('`').next())
+            .expect("retrieval handle");
+        let stored = retrieve_response_handle(root.path(), handle, current_timestamp())
+            .expect("stored full context");
+        let ResponseHandleLookup::Found(record) = stored else {
+            panic!("the omitted symbol must remain retrievable");
+        };
+        assert!(record.content.contains(small));
+        assert!(record.content.contains(&large));
     }
 
     #[test]

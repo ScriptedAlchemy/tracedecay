@@ -259,21 +259,20 @@ fn markdown_truncation_preview(text: &str, budget: usize) -> String {
     }
     let has_late_priority = CONTEXT_PRIORITY_HEADINGS
         .iter()
-        .any(|heading| text.find(heading).is_some_and(|idx| idx > budget));
+        .any(|heading| markdown_heading_at(text, heading).is_some_and(|idx| idx > budget));
     if !has_late_priority {
         return markdown_prefix_preview(text, budget);
     }
 
     let prefix_budget = budget.saturating_mul(2) / 3;
-    let prefix = utf8_prefix_at_or_before(text, prefix_budget);
+    let prefix = whole_markdown_prefix(text, prefix_budget);
     let prefix_len = prefix.len();
     let mut preview = prefix.to_string();
-    close_open_markdown_fence(&mut preview);
     let mut remaining = budget.saturating_sub(preview.len());
     let mut preserved = String::new();
 
     for heading in CONTEXT_PRIORITY_HEADINGS {
-        let Some(start) = text.find(heading) else {
+        let Some(start) = markdown_heading_at(text, heading) else {
             continue;
         };
         if start < prefix_len {
@@ -291,10 +290,9 @@ fn markdown_truncation_preview(text: &str, budget: usize) -> String {
         remaining -= section_header.len();
 
         let section = markdown_section_at(text, start);
-        let section_preview = utf8_prefix_at_or_before(section, remaining);
+        let section_preview = whole_markdown_prefix(section, remaining);
         preserved.push_str(section_preview);
         let section_truncated = section_preview.len() < section.len();
-        close_open_markdown_fence(&mut preserved);
         remaining = budget.saturating_sub(preview.len() + preserved.len());
         if section_truncated && remaining >= 5 {
             preserved.push_str("\n...");
@@ -310,37 +308,89 @@ fn markdown_truncation_preview(text: &str, budget: usize) -> String {
 }
 
 fn markdown_prefix_preview(text: &str, budget: usize) -> String {
-    let mut preview = utf8_prefix_at_or_before(text, budget).to_string();
-    close_open_markdown_fence(&mut preview);
-    preview
+    whole_markdown_prefix(text, budget).to_string()
+}
+
+fn markdown_heading_at(text: &str, heading: &str) -> Option<usize> {
+    let mut fence = MarkdownFence::default();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if !fence.is_open() && line.trim_end().starts_with(heading) {
+            return Some(offset);
+        }
+        fence.observe(line);
+        offset += line.len();
+    }
+    None
 }
 
 fn markdown_section_at(text: &str, start: usize) -> &str {
     let rest = &text[start..];
-    let end = ["\n## ", "\n### "]
-        .into_iter()
-        .filter_map(|marker| rest[1..].find(marker).map(|idx| idx + 1))
-        .min()
-        .unwrap_or(rest.len());
-    &rest[..end]
-}
-
-fn close_open_markdown_fence(markdown: &mut String) {
-    if has_open_markdown_fence(markdown) {
-        if !markdown.ends_with('\n') {
-            markdown.push('\n');
+    let mut fence = MarkdownFence::default();
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        if offset > 0 && !fence.is_open() && (line.starts_with("## ") || line.starts_with("### ")) {
+            return &rest[..offset];
         }
-        markdown.push_str("```");
+        fence.observe(line);
+        offset += line.len();
     }
+    rest
 }
 
-pub fn has_open_markdown_fence(markdown: &str) -> bool {
-    markdown
-        .lines()
-        .filter(|line| line.trim_start().starts_with("```"))
-        .count()
-        % 2
-        == 1
+/// Generated code blocks are indivisible preview units; omitted bytes remain
+/// in the retained response rather than appearing as a synthetically closed body.
+pub(crate) fn whole_markdown_prefix(markdown: &str, budget: usize) -> &str {
+    let prefix = utf8_prefix_at_or_before(markdown, budget);
+    let mut fence = MarkdownFence::default();
+    let mut opening = None;
+    let mut offset = 0;
+    for line in markdown.split_inclusive('\n') {
+        if offset >= prefix.len() {
+            break;
+        }
+        let was_open = fence.is_open();
+        fence.observe(line);
+        if !was_open && fence.is_open() {
+            opening = Some(offset);
+        } else if !fence.is_open() && offset + line.len() <= prefix.len() {
+            opening = None;
+        }
+        offset += line.len();
+        if offset > prefix.len() {
+            break;
+        }
+    }
+    &prefix[..opening.unwrap_or(prefix.len())]
+}
+
+#[derive(Default)]
+pub(crate) struct MarkdownFence {
+    opening: Option<(u8, usize)>,
+}
+
+impl MarkdownFence {
+    pub(crate) fn is_open(&self) -> bool {
+        self.opening.is_some()
+    }
+
+    pub(crate) fn observe(&mut self, line: &str) {
+        let line = line.trim_start();
+        let Some(marker @ (b'`' | b'~')) = line.bytes().next() else {
+            return;
+        };
+        let width = line.bytes().take_while(|byte| *byte == marker).count();
+        if width < 3 {
+            return;
+        }
+        if let Some((open_marker, open_width)) = self.opening {
+            if marker == open_marker && width >= open_width && line[width..].trim().is_empty() {
+                self.opening = None;
+            }
+        } else {
+            self.opening = Some((marker, width));
+        }
+    }
 }
 
 struct TruncatedResponseHandle {
@@ -512,12 +562,23 @@ impl Md {
     }
 
     pub fn code(&mut self, lang: &str, body: &str) -> &mut Self {
-        let _ = writeln!(self.buf, "```{lang}");
+        let width = body
+            .split_inclusive('\n')
+            .map(|line| {
+                line.trim_start()
+                    .bytes()
+                    .take_while(|byte| *byte == b'`')
+                    .count()
+            })
+            .fold(2, usize::max)
+            .saturating_add(1);
+        let fence = "`".repeat(width);
+        let _ = writeln!(self.buf, "{fence}{lang}");
         self.buf.push_str(body);
         if !body.ends_with('\n') {
             self.buf.push('\n');
         }
-        self.buf.push_str("```\n");
+        let _ = writeln!(self.buf, "{fence}");
         self
     }
 
