@@ -122,7 +122,13 @@ async fn graceful_stop_truncates_profile_and_project_store_wals() {
     .await;
 
     let (graph_db, _) = project_stores(environment.home(), &project);
-    let stores = [environment.home().join(".tracedecay/global.db"), graph_db];
+    let stores = [
+        environment
+            .home()
+            .join(".tracedecay")
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
+        graph_db,
+    ];
     for store in &stores {
         assert!(
             wal_bytes(store) > 0,
@@ -175,6 +181,74 @@ async fn stop_during_project_open_truncates_project_store_wals() {
         );
     }
     assert_clean_shutdown_log(&fs::read_to_string(&log_path).expect("daemon log"));
+}
+
+/// Every store WAL under `root` that still holds frames, with its size.
+fn retained_wals(root: &Path) -> Vec<(PathBuf, u64)> {
+    let mut retained = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("readable profile directory") {
+            let path = entry.expect("profile directory entry").path();
+            let metadata = fs::symlink_metadata(&path).expect("profile entry metadata");
+            if metadata.is_dir() {
+                pending.push(path);
+            } else if path.to_string_lossy().ends_with("-wal") && metadata.len() > 0 {
+                retained.push((path, metadata.len()));
+            }
+        }
+    }
+    retained
+}
+
+/// A stop that cancels the open after its production owners registered must
+/// still release every store lease those owners took, so each store closes
+/// and truncates its WAL. The hold parks the open at exactly that point and
+/// lets the stop's cancellation through.
+#[tokio::test]
+async fn stop_after_owner_registration_releases_every_store_lease() {
+    let (environment, project) = IsolatedHome::new();
+    let project = project.canonicalize().expect("canonical fixture project");
+    initialize_repository(&project);
+    let log_path = environment.scratch().join("stop-after-owners.log");
+    let hold = environment.scratch().join("hold-after-independent-owners");
+    fs::write(&hold, b"hold").expect("hold file");
+    let socket = daemon_socket_path(environment.home());
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
+        command.env("TRACEDECAY_TEST_HOLD_AFTER_INDEPENDENT_OWNERS", &hold);
+    });
+
+    let init = init_until_open_phase(
+        environment.home(),
+        &project,
+        &log_path,
+        "independent_owners_registered",
+    )
+    .await;
+    stop_daemon_gracefully(&mut daemon);
+    settle_interrupted_init(init, &socket);
+
+    let log = fs::read_to_string(&log_path).expect("daemon log");
+    assert!(
+        log.contains(&format!(
+            "event=project_server_warmup outcome=cancelled project={}",
+            project.display()
+        )),
+        "the stop must cancel the held open; log={log}"
+    );
+    assert_clean_shutdown_log(&log);
+    let (graph_db, sessions_db) = project_stores(environment.home(), &project);
+    assert!(graph_db.is_file(), "{} was mounted", graph_db.display());
+    assert!(
+        sessions_db.is_file(),
+        "{} was mounted",
+        sessions_db.display()
+    );
+    assert_eq!(
+        retained_wals(&environment.home().join(".tracedecay")),
+        Vec::<(PathBuf, u64)>::new(),
+        "a stop after owner registration keeps no store WAL"
+    );
 }
 
 #[tokio::test]

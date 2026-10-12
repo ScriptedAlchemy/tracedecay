@@ -725,7 +725,7 @@ fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (AgentTaskEr
     // runs its first line, so the pid comes from the spawn event, not from a
     // file the child may never write.
     let started = StartedCodexProcesses::default();
-    let _capture = tracedecay_runtime_core::logging::set_tracing_capture(
+    let _capture = tracedecay_domain::test_fixtures::set_tracing_capture(
         tracing_subscriber::registry().with(started.clone()),
     );
     let (err, fake) = run_backend_for_behavior(behavior, timeout);

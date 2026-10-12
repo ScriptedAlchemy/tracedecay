@@ -470,6 +470,68 @@ fn in_process_opens_share_one_engine_by_file_identity() {
     holder.commit(&guard).unwrap();
 }
 
+/// Catches a process-wide open lock: while one store's open is held inside
+/// format admission, another store must still open, and a second open of the
+/// held store must wait for that open and share its engine.
+#[test]
+fn a_held_open_delays_only_opens_of_its_own_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let held_path = directory.path().join("held.tdb");
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let held = std::thread::spawn({
+        let path = held_path.clone();
+        move || {
+            connection::pause_next_admit_on_this_thread((entered_tx, release_rx));
+            Database::open(&path)
+        }
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the held open reaches format admission");
+    let joiner = std::thread::spawn({
+        let path = held_path.clone();
+        move || Database::open(&path)
+    });
+    let (other_tx, other_rx) = std::sync::mpsc::channel();
+    let other_path = directory.path().join("other.tdb");
+    let other = std::thread::spawn(move || {
+        let _ = other_tx.send(Database::open(&other_path).map(drop));
+    });
+    other_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("another store's open must not wait for the held open")
+        .unwrap();
+    other.join().unwrap();
+    assert!(
+        !joiner.is_finished(),
+        "a second open of the held store must wait for its first open"
+    );
+    release_tx.send(()).unwrap();
+    let first = held.join().unwrap().unwrap();
+    let second = joiner.join().unwrap().unwrap();
+
+    let guard = execution_guard();
+    let mut holder = first.connect(Access::Writer).unwrap();
+    holder.execute("CREATE TABLE t(x)", &[], &guard).unwrap();
+    holder
+        .begin(TransactionBehavior::Immediate, &guard)
+        .unwrap();
+    holder
+        .execute("INSERT INTO t VALUES (1)", &[], &guard)
+        .unwrap();
+    let mut contender = second.connect(Access::Writer).unwrap();
+    contender.set_busy_timeout(Duration::ZERO);
+    assert!(
+        matches!(
+            contender.execute("INSERT INTO t VALUES (2)", &[], &guard),
+            Err(Error::Busy)
+        ),
+        "the waiting open started a second engine instance"
+    );
+    holder.commit(&guard).unwrap();
+}
+
 /// Catches an engine that opens, rewrites or stamps a file that is not a
 /// TraceDecay native store.
 #[test]
@@ -543,16 +605,19 @@ fn foreign_files_are_refused_before_the_engine_touches_them() {
     );
 }
 
-/// Catches the engine reaching a path other than its main file and WAL.
+/// Catches the engine reaching a path other than its main file, its WAL and
+/// the files it makes in its own temporary directory, and a temporary
+/// directory a dead process left behind that survives the claim or outlives
+/// the store.
 #[test]
-fn confined_io_admits_only_the_main_file_and_its_wal() {
+fn confined_io_admits_only_the_main_file_its_wal_and_its_temp_directory() {
     use turso_core::{IO, OpenFlags};
     let directory = tempfile::tempdir().unwrap();
     let main = directory.path().join("store.tdb");
     let file = confined_io::open_regular(&main, true).unwrap();
     let identity = confined_io::held_identity(&file).unwrap();
     let main = main.to_str().unwrap().to_owned();
-    let io = confined_io::ConfinedIo::new(main.clone(), file, identity).unwrap();
+    let io = confined_io::ConfinedIo::new(main.clone(), file, identity, true).unwrap();
     let elsewhere = directory.path().join("elsewhere");
     for path in [
         elsewhere.to_str().unwrap().to_owned(),
@@ -583,6 +648,114 @@ fn confined_io_admits_only_the_main_file_and_its_wal() {
     io.open_file(&format!("{main}-wal"), OpenFlags::Create, false)
         .unwrap();
     io.remove_file(&format!("{main}-wal")).unwrap();
+
+    let temp = std::path::PathBuf::from(format!("{main}-tmp"));
+    let dead_sort = temp.join("dead-sort");
+    std::fs::create_dir_all(&dead_sort).unwrap();
+    std::fs::write(
+        dead_sort.join("tursodb_temp_file"),
+        b"a dead process's spill",
+    )
+    .unwrap();
+    assert_eq!(
+        io.temp_dir(),
+        None,
+        "before the store lock is held the directory may be another process's"
+    );
+    assert!(dead_sort.exists(), "nothing is cleared before the claim");
+    io.claim_temp().unwrap();
+    assert!(!temp.exists(), "the claim clears what a dead process left");
+    assert_eq!(io.temp_dir(), Some(temp.clone()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&temp).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "the temporary directory is private");
+    }
+    std::fs::create_dir(temp.join("sort")).unwrap();
+    let spill = temp.join("sort").join("tursodb_temp_file");
+    let spill = spill.to_str().unwrap();
+    drop(io.open_file(spill, OpenFlags::Create, false).unwrap());
+    let loose = temp.join("loose");
+    assert!(
+        io.open_file(loose.to_str().unwrap(), OpenFlags::Create, false)
+            .is_err(),
+        "only files in engine-made subdirectories are admitted"
+    );
+    assert!(!loose.exists());
+    assert!(io.remove_file(spill).is_err());
+    drop(io);
+    assert!(
+        !temp.exists(),
+        "closing the store removes its temporary directory"
+    );
+}
+
+/// Catches a writable open sharing a read-only engine that logs to memory,
+/// whose commits would vanish with that log.
+#[test]
+fn writable_open_refuses_a_store_held_read_only_with_a_memory_log() {
+    let (directory, database) = database();
+    let path = directory.path().join("native.tdb");
+    let guard = execution_guard();
+    let mut writer = database.connect(Access::Writer).unwrap();
+    writer
+        .execute("CREATE TABLE entries(body TEXT)", &[], &guard)
+        .unwrap();
+    writer.checkpoint(&guard).unwrap();
+    drop(writer);
+    drop(database);
+    std::fs::remove_file(directory.path().join("native.tdb-wal")).unwrap();
+
+    let read_only = Database::open_path(&path, false).unwrap();
+    assert!(
+        matches!(Database::open(&path), Err(Error::InvalidOperation(_))),
+        "a writable open shared the read-only engine's memory log"
+    );
+    drop(read_only);
+    Database::open(&path)
+        .unwrap()
+        .connect(Access::Writer)
+        .unwrap()
+        .execute("INSERT INTO entries VALUES('kept')", &[], &guard)
+        .unwrap();
+}
+
+/// Catches a refusal broader than the memory log: a reader pool opened
+/// read-only before its store's writer must not lock that writer out when the
+/// engine logs to the WAL on disk, and the writer's commits must persist.
+#[test]
+fn writable_open_shares_a_read_only_engine_logging_to_disk() {
+    let (directory, database) = database();
+    let path = directory.path().join("native.tdb");
+    let guard = execution_guard();
+    database
+        .connect(Access::Writer)
+        .unwrap()
+        .execute("CREATE TABLE entries(body TEXT)", &[], &guard)
+        .unwrap();
+    drop(database);
+    assert!(directory.path().join("native.tdb-wal").exists());
+
+    let read_only = Database::open_path(&path, false).unwrap();
+    let writable = Database::open(&path).unwrap();
+    writable
+        .connect(Access::Writer)
+        .unwrap()
+        .execute("INSERT INTO entries VALUES('kept')", &[], &guard)
+        .unwrap();
+    drop(writable);
+    drop(read_only);
+    assert_eq!(
+        Database::open(&path)
+            .unwrap()
+            .connect(Access::Reader)
+            .unwrap()
+            .query("SELECT body FROM entries", &[], &guard)
+            .unwrap()
+            .values,
+        vec![vec![Value::Text("kept".to_owned())]]
+    );
 }
 
 /// Catches a connection that keeps using a store whose pathname now names a
@@ -625,6 +798,181 @@ fn identity_fence_rejects_replacement_and_unlink_recreate() {
         writer.execute("INSERT INTO entries VALUES('must not apply')", &[], &guard),
         Err(Error::Denied(_))
     ));
+}
+
+/// Catches an engine fenced on the first name it was opened by: a handle on
+/// that name outlives a rename, the file is reopened under its new name, and
+/// every statement on the new handle is refused because the old name is gone.
+/// The renamed-away handle and a replaced name must still be refused.
+#[test]
+fn identity_fence_follows_each_handles_own_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let staging = directory.path().join("staging.tdb");
+    let published = directory.path().join("published.tdb");
+    let guard = execution_guard();
+    let outliving = Database::open(&staging).unwrap();
+    outliving
+        .connect(Access::Writer)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE entries(body TEXT); INSERT INTO entries VALUES('staged');",
+            &guard,
+        )
+        .unwrap();
+    std::fs::rename(&staging, &published).unwrap();
+
+    let reopened = Database::open(&published).unwrap();
+    let mut reader = reopened.connect(Access::Reader).unwrap();
+    assert_eq!(
+        reader
+            .query("SELECT body FROM entries", &[], &guard)
+            .unwrap()
+            .values,
+        vec![vec![Value::Text("staged".to_owned())]],
+        "the handle opened under the file's current name must serve it"
+    );
+    assert!(
+        matches!(outliving.connect(Access::Reader), Err(Error::Denied(_))),
+        "the handle whose name was renamed away must be refused"
+    );
+
+    std::fs::rename(&published, directory.path().join("retired.tdb")).unwrap();
+    std::fs::write(&published, b"replacement").unwrap();
+    assert!(
+        matches!(
+            reader.query("SELECT body FROM entries", &[], &guard),
+            Err(Error::Denied(_))
+        ),
+        "a handle whose name now names another file must be refused"
+    );
+}
+
+/// Catches progress ticks that stop re-checking the file identity: the store
+/// is renamed away while a long join runs, and the join must stop as denied
+/// rather than run on until its deadline.
+#[test]
+fn identity_fence_interrupts_a_running_statement() {
+    let (directory, database) = database();
+    let path = directory.path().join("native.tdb");
+    let guard = execution_guard();
+    let mut writer = database.connect(Access::Writer).unwrap();
+    writer
+        .execute("CREATE TABLE t(x INTEGER)", &[], &guard)
+        .unwrap();
+    let rows = (0..2000).map(|x| format!("({x})")).collect::<Vec<_>>();
+    writer
+        .execute(
+            &format!("INSERT INTO t VALUES {}", rows.join(",")),
+            &[],
+            &guard,
+        )
+        .unwrap();
+    let staged = directory.path().join("renamed.tdb");
+    let mover = {
+        let (path, staged) = (path.clone(), staged.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            std::fs::rename(path, staged).unwrap();
+        })
+    };
+    let outcome = writer.query("SELECT count(*) FROM t a, t b, t c", &[], &guard);
+    mover.join().unwrap();
+    assert!(
+        matches!(outcome, Err(Error::Denied(_))),
+        "a replaced store stops the running statement: {outcome:?}"
+    );
+    std::fs::rename(&staged, &path).unwrap();
+}
+
+/// Catches a file-backed sort that cannot spill inside the confinement or
+/// whose temporary directory outlives the store: a sort larger than the
+/// engine's buffer completes under `temp_store = FILE` by spilling into the
+/// store's `-tmp` directory, and closing the store removes it.
+#[test]
+fn file_sorts_spill_inside_the_store_and_leave_nothing_behind() {
+    let (directory, database) = database();
+    let temp = std::fs::canonicalize(directory.path())
+        .unwrap()
+        .join("native.tdb-tmp");
+    let guard = execution_guard();
+    let mut connection = database
+        .connect_with(Capability::Maintenance, false)
+        .unwrap();
+    connection
+        .execute("PRAGMA temp_store = 1", &[], &guard)
+        .unwrap();
+    connection
+        .execute("CREATE TABLE t(k INTEGER, body TEXT)", &[], &guard)
+        .unwrap();
+    let body = "x".repeat(1000);
+    for batch in 0..8 {
+        let rows = (batch * 500..(batch + 1) * 500)
+            .map(|k| format!("({k}, '{body}')"))
+            .collect::<Vec<_>>();
+        connection
+            .execute(
+                &format!("INSERT INTO t VALUES {}", rows.join(",")),
+                &[],
+                &guard,
+            )
+            .unwrap();
+    }
+    let sorted = connection
+        .query("SELECT k FROM t ORDER BY body DESC, k DESC", &[], &guard)
+        .unwrap()
+        .values;
+    assert_eq!(sorted.len(), 4000);
+    assert_eq!(sorted[0], vec![Value::Integer(3999)]);
+    assert_eq!(sorted[3999], vec![Value::Integer(0)]);
+    assert!(temp.is_dir(), "the sort spilled into {}", temp.display());
+    drop(connection);
+    drop(database);
+    assert!(
+        !temp.exists(),
+        "closing the store removes {}",
+        temp.display()
+    );
+}
+
+/// Catches a commit that leaves the page cache's evictable count short of the
+/// pages it cleaned (`turso_core-evictable-count-on-commit.patch`): every
+/// later page allocation then falls to the spill check's full recount of the
+/// cache, so that work jumps after the first commit and stays there as the
+/// store grows instead of matching the first commit.
+#[test]
+fn spill_check_work_per_commit_stays_flat_as_the_store_grows() {
+    const CACHE_PAGES: u64 = 200;
+    let (_directory, database) = database();
+    let guard = execution_guard();
+    let mut connection = database
+        .connect_with(Capability::Maintenance, false)
+        .unwrap();
+    connection
+        .execute(&format!("PRAGMA cache_size = {CACHE_PAGES}"), &[], &guard)
+        .unwrap();
+    connection
+        .execute("CREATE TABLE t(body TEXT)", &[], &guard)
+        .unwrap();
+    // One row per page, three cache-fulls per commit.
+    let insert = format!(
+        "INSERT INTO t VALUES {}",
+        vec!["(?1)"; 3 * CACHE_PAGES as usize].join(",")
+    );
+    let body = [Value::Text("x".repeat(3_000))];
+    let walked = (0..6)
+        .map(|_| {
+            let before = page_cache_entries_walked();
+            connection.execute(&insert, &body, &guard).unwrap();
+            page_cache_entries_walked() - before
+        })
+        .collect::<Vec<_>>();
+    let first = walked[0];
+    assert!(
+        walked
+            .iter()
+            .all(|&commit| commit <= 2 * first + 2 * CACHE_PAGES),
+        "entries walked per commit grew with the store: {walked:?}"
+    );
 }
 
 /// (voluntary context switches, CPU clock ticks) of the calling thread.

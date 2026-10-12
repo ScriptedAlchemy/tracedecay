@@ -16,7 +16,7 @@ use turso_parser::ast::Cmd;
 
 use super::{
     Error, Result, Rows, Value,
-    confined_io::{self, ConfinedIo},
+    confined_io::{self, ConfinedIo, Fence},
     policy,
 };
 use crate::{Capability, FileIdentity, PROGRESS_INTERVAL_OPS};
@@ -36,12 +36,59 @@ const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
 /// One engine instance per file per process. POSIX record locks do not
 /// exclude the same process, so a second in-process open of a file shares the
-/// live instance instead of starting another engine on it.
-static OPEN_IDENTITIES: LazyLock<Mutex<HashMap<FileIdentity, Weak<Shared>>>> =
+/// live instance instead of starting another engine on it. This lock only
+/// finds a file's [`Slot`]; opens run under the slot, so a slow open holds up
+/// only opens of its own file.
+static OPEN_IDENTITIES: LazyLock<Mutex<HashMap<FileIdentity, Weak<Slot>>>> =
     LazyLock::new(Mutex::default);
 
-fn registry() -> std::sync::MutexGuard<'static, HashMap<FileIdentity, Weak<Shared>>> {
-    lock(&OPEN_IDENTITIES)
+/// One file's place in the registry. Its lock serializes the opens and the
+/// last close of that file.
+struct Slot {
+    identity: FileIdentity,
+    live: Mutex<Weak<Shared>>,
+}
+
+impl Slot {
+    fn for_identity(identity: FileIdentity) -> Arc<Self> {
+        let mut slots = lock(&OPEN_IDENTITIES);
+        if let Some(slot) = slots.get(&identity).and_then(Weak::upgrade) {
+            return slot;
+        }
+        let slot = Arc::new(Self {
+            identity,
+            live: Mutex::default(),
+        });
+        slots.insert(identity, Arc::downgrade(&slot));
+        slot
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut slots = lock(&OPEN_IDENTITIES);
+        if slots
+            .get(&self.identity)
+            .is_some_and(|slot| slot.strong_count() == 0)
+        {
+            slots.remove(&self.identity);
+        }
+    }
+}
+
+#[cfg(test)]
+type AdmitPause = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
+#[cfg(test)]
+thread_local! {
+    static ADMIT_PAUSE: RefCell<Option<AdmitPause>> = const { RefCell::new(None) };
+}
+
+/// The next format admission on this thread reports `entered`, then waits for
+/// `release`.
+#[cfg(test)]
+pub(super) fn pause_next_admit_on_this_thread(pause: AdmitPause) {
+    ADMIT_PAUSE.with(|slot| *slot.borrow_mut() = Some(pause));
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -138,7 +185,7 @@ impl ExecutionGuard {
 /// Scopes stack; every guard on the stack is checked.
 struct GuardSlot {
     state: Mutex<SlotState>,
-    confined: Option<Arc<ConfinedIo>>,
+    fence: Option<Fence>,
 }
 
 #[derive(Default)]
@@ -162,10 +209,14 @@ impl GuardSlot {
     }
 
     fn check(&self) -> Result<()> {
-        self.check_with(ExecutionGuard::verify)
+        self.check_with(ExecutionGuard::verify, true)
     }
 
-    fn check_with(&self, verify: impl Fn(&ExecutionGuard) -> Result<()>) -> Result<()> {
+    fn check_with(
+        &self,
+        verify: impl Fn(&ExecutionGuard) -> Result<()>,
+        verify_identity: bool,
+    ) -> Result<()> {
         let guards = {
             let state = self.state();
             if state.suspended {
@@ -174,16 +225,22 @@ impl GuardSlot {
             state.guards.clone()
         };
         guards.iter().try_for_each(verify)?;
-        self.confined.as_ref().map_or(Ok(()), |io| io.verify())
+        match &self.fence {
+            Some(fence) if verify_identity => fence.verify(),
+            _ => Ok(()),
+        }
     }
 
     /// Admits a statement about to start: its budget restarts and the guards
     /// are checked. A scope's interrupt poll is not: as on SQLite, only a
     /// running statement is polled, so a statement that finishes within one
-    /// progress interval is never interrupted.
-    fn start(&self) -> Result<()> {
+    /// progress interval is never interrupted. The file identity is checked
+    /// when `verify_identity`: every statement that starts a transaction, so
+    /// a statement inside an open transaction relies on the check that
+    /// opened it and on the progress ticks.
+    fn start(&self, verify_identity: bool) -> Result<()> {
         self.state().ticks = 0;
-        self.check_with(ExecutionGuard::verify_admission)
+        self.check_with(ExecutionGuard::verify_admission, verify_identity)
     }
 
     fn progress(&self) -> bool {
@@ -227,11 +284,13 @@ impl GuardSlot {
 #[derive(Clone)]
 pub struct Database {
     shared: Arc<Shared>,
+    /// The name this handle opened; `None` in memory.
+    fence: Option<Fence>,
 }
 
 struct Shared {
     /// Set once the store is admitted and registered.
-    identity: OnceLock<FileIdentity>,
+    slot: OnceLock<Arc<Slot>>,
     engine: Option<Engine>,
     /// `(WAL checkpoint sequence, frames copied back)` after the driver's
     /// last checkpoint; the engine keeps its backfill count private.
@@ -247,20 +306,14 @@ struct Engine {
 impl Drop for Shared {
     fn drop(&mut self) {
         // An unregistered instance is dropped by its opener, which already
-        // holds the registry.
-        let Some(&identity) = self.identity.get() else {
+        // holds its slot.
+        let Some(slot) = self.slot.get() else {
             return;
         };
-        // The engine's descriptors close while the registry is held, so no
-        // reopen can lock the file before this instance has released it.
-        let mut registry = registry();
+        // The engine's descriptors close while the slot is held, so no reopen
+        // can lock the file before this instance has released it.
+        let _live = lock(&slot.live);
         drop(self.engine.take());
-        if registry
-            .get(&identity)
-            .is_some_and(|entry| entry.strong_count() == 0)
-        {
-            registry.remove(&identity);
-        }
     }
 }
 
@@ -270,7 +323,9 @@ impl Database {
         Self::open_path(path, true)
     }
 
-    pub(crate) fn open_path(path: &Path, create: bool) -> Result<Self> {
+    /// A read-only open never creates the file, and its engine logs to memory
+    /// when no WAL is on disk, so a writable open cannot share it then.
+    pub(crate) fn open_path(path: &Path, writable: bool) -> Result<Self> {
         if path.as_os_str() == ":memory:" {
             return Self::open_memory();
         }
@@ -278,24 +333,77 @@ impl Database {
         let text = path.to_str().ok_or_else(|| {
             Error::InvalidOperation("native database path is not UTF-8".to_owned())
         })?;
-        let mut registry = registry();
-        if let Ok(identity) = confined_io::path_identity(text)
-            && let Some(shared) = registry.get(&identity).and_then(Weak::upgrade)
-        {
-            return Ok(Self { shared });
-        }
-        let file = confined_io::open_regular(&path, create).map_err(|error| {
-            Error::InvalidOperation(format!("open native database {}: {error}", path.display()))
-        })?;
-        let identity = confined_io::held_identity(&file)?;
-        if let Some(shared) = registry.get(&identity).and_then(Weak::upgrade) {
+        let open = || {
+            let file = confined_io::open_regular(&path, writable).map_err(|error| {
+                Error::InvalidOperation(format!("open native database {}: {error}", path.display()))
+            })?;
+            let identity = confined_io::held_identity(&file)?;
+            Ok::<_, Error>((file, identity))
+        };
+        // A live store is found before a second descriptor on it could drop
+        // its locks.
+        let (file, identity) = if let Ok(identity) = confined_io::path_identity(text) {
+            let slot = Slot::for_identity(identity);
+            let mut live = lock(&slot.live);
+            if let Some(shared) = live.upgrade() {
+                drop(live);
+                return Self::share(shared, text, identity, writable);
+            }
+            let (file, held) = open()?;
+            if held == identity {
+                return Self::start(&slot, &mut live, file, identity, text, writable);
+            }
+            (file, held)
+        } else {
+            open()?
+        };
+        let slot = Slot::for_identity(identity);
+        let mut live = lock(&slot.live);
+        if let Some(shared) = live.upgrade() {
+            drop(live);
             // ponytail: the path was renamed onto a live store between stat
             // and open. Closing this descriptor would drop that store's lock.
             std::mem::forget(file);
-            return Ok(Self { shared });
+            return Self::share(shared, text, identity, writable);
         }
+        Self::start(&slot, &mut live, file, identity, text, writable)
+    }
+
+    /// A new handle on a live engine, fenced on the name it was opened by.
+    fn share(
+        shared: Arc<Shared>,
+        text: &str,
+        identity: FileIdentity,
+        writable: bool,
+    ) -> Result<Self> {
+        let logs_to_memory = shared
+            .engine
+            .as_ref()
+            .and_then(|engine| engine.confined.as_ref())
+            .is_some_and(|io| io.logs_to_memory());
+        if writable && logs_to_memory {
+            return Err(Error::InvalidOperation(
+                "native database is open read-only in this process with no WAL on disk".to_owned(),
+            ));
+        }
+        Ok(Self {
+            shared,
+            fence: Some(Fence::new(text, identity)),
+        })
+    }
+
+    /// Starts the engine for a file no instance in this process holds, under
+    /// that file's slot.
+    fn start(
+        slot: &Arc<Slot>,
+        live: &mut Weak<Shared>,
+        file: std::fs::File,
+        identity: FileIdentity,
+        text: &str,
+        writable: bool,
+    ) -> Result<Self> {
         let header = preflight(&file)?;
-        let confined = Arc::new(ConfinedIo::new(text.to_owned(), file, identity)?);
+        let confined = Arc::new(ConfinedIo::new(text.to_owned(), file, identity, writable)?);
         let io: Arc<dyn turso_core::IO> = confined.clone();
         #[cfg(all(unix, feature = "test-helpers"))]
         let io = super::crash_io::wrap(io);
@@ -306,9 +414,10 @@ impl Database {
             text,
             OpenOptions::new(policy::dialect()).storage(storage),
         )?;
+        confined.claim_temp()?;
         let database = Self {
             shared: Arc::new(Shared {
-                identity: OnceLock::new(),
+                slot: OnceLock::new(),
                 engine: Some(Engine {
                     database,
                     io,
@@ -316,10 +425,11 @@ impl Database {
                 }),
                 checkpointed: Mutex::default(),
             }),
+            fence: Some(Fence::new(text, identity)),
         };
         database.admit_format(header)?;
-        let _ = database.shared.identity.set(identity);
-        registry.insert(identity, Arc::downgrade(&database.shared));
+        let _ = database.shared.slot.set(Arc::clone(slot));
+        *live = Arc::downgrade(&database.shared);
         Ok(database)
     }
 
@@ -332,7 +442,7 @@ impl Database {
         )?;
         Ok(Self {
             shared: Arc::new(Shared {
-                identity: OnceLock::new(),
+                slot: OnceLock::new(),
                 engine: Some(Engine {
                     database,
                     io,
@@ -340,6 +450,7 @@ impl Database {
                 }),
                 checkpointed: Mutex::default(),
             }),
+            fence: None,
         })
     }
 
@@ -348,6 +459,11 @@ impl Database {
     /// unstamped first page straight to the main file, and the preflight reads
     /// only the main file.
     fn admit_format(&self, header: Header) -> Result<()> {
+        #[cfg(test)]
+        if let Some((entered, release)) = ADMIT_PAUSE.with(RefCell::take) {
+            let _ = entered.send(());
+            let _ = release.recv();
+        }
         let connection = self.connect_with(Capability::Maintenance, false)?;
         let application_id = connection.pragma_u32("application_id")?;
         if application_id == APPLICATION_ID && header == Header::Stamped {
@@ -372,16 +488,13 @@ impl Database {
             .expect("the engine lives until the last handle drops")
     }
 
-    /// The canonical path of a file store; `None` in memory.
+    /// The canonical path this handle opened; `None` in memory.
     pub(crate) fn path(&self) -> Option<&str> {
-        self.engine().confined.as_ref().map(|io| io.main())
+        self.fence.as_ref().map(Fence::name)
     }
 
     pub(crate) fn file_has_moved(&self) -> Result<bool> {
-        self.engine()
-            .confined
-            .as_ref()
-            .map_or(Ok(false), |io| io.has_moved())
+        self.fence.as_ref().map_or(Ok(false), Fence::has_moved)
     }
 
     pub fn connect(&self, access: Access) -> Result<Connection> {
@@ -394,8 +507,8 @@ impl Database {
         read_only: bool,
     ) -> Result<Connection> {
         let engine = self.engine();
-        if let Some(confined) = &engine.confined {
-            confined.verify()?;
+        if let Some(fence) = &self.fence {
+            fence.verify()?;
         }
         let inner = engine.database.connect()?;
         inner.set_foreign_keys_enabled(true);
@@ -406,11 +519,12 @@ impl Database {
         inner.set_busy_timeout(DEFAULT_BUSY_TIMEOUT);
         // The runtime's checkpoint lane is the only checkpoint scheduler.
         inner.wal_auto_actions_disable();
-        // Spilling to a temp file would need a path outside the confinement.
+        // Sorts stay in memory unless a connection opts into the store's
+        // private temporary directory with `PRAGMA temp_store = FILE`.
         inner.set_temp_store(turso_core::TempStore::Memory);
         let guard = Arc::new(GuardSlot {
             state: Mutex::default(),
-            confined: engine.confined.clone(),
+            fence: self.fence.clone(),
         });
         let progress = Arc::clone(&guard);
         inner.set_progress_handler(
@@ -530,6 +644,14 @@ pub(crate) struct Prepared {
     ddl: bool,
     /// INSERT, UPDATE or DELETE: interrupting one ends its transaction.
     write: bool,
+    pub(crate) columns: Arc<[String]>,
+}
+
+/// A compiled non-DDL statement waiting in the cache for its SQL text.
+struct Cached {
+    statement: turso_core::Statement,
+    write: bool,
+    columns: Arc<[String]>,
 }
 
 /// Exclusively owned by one thread: the writer actor or one reader worker.
@@ -541,8 +663,9 @@ pub struct Connection {
     /// capability scope fails even if its operation swallowed the error.
     transaction_control_denied: Cell<bool>,
     read_only: bool,
-    /// Compiled non-DDL statements and whether each writes.
-    cache: RefCell<HashMap<(Capability, String), (turso_core::Statement, bool)>>,
+    /// Compiled non-DDL statements by `(capability, sql)`, nested so a hit
+    /// moves the owned SQL key out instead of allocating a lookup key.
+    cache: RefCell<HashMap<Capability, HashMap<String, Cached>>>,
     database: Database,
 }
 
@@ -632,17 +755,19 @@ impl Connection {
     pub(crate) fn prepare(&self, sql: &str, cached: bool) -> Result<Prepared> {
         let capability = self.capability();
         if cached
-            && let Some((statement, write)) = self
+            && let Some((sql, hit)) = self
                 .cache
                 .borrow_mut()
-                .remove(&(capability, sql.to_owned()))
+                .get_mut(&capability)
+                .and_then(|statements| statements.remove_entry(sql))
         {
             return Ok(Prepared {
-                statement,
-                sql: sql.to_owned(),
+                statement: hit.statement,
+                sql,
                 capability,
                 ddl: false,
-                write,
+                write: hit.write,
+                columns: hit.columns,
             });
         }
         validate_request(sql, &[])?;
@@ -651,12 +776,16 @@ impl Connection {
         let ddl = policy::is_ddl(&command);
         let write = policy::is_write(&command);
         let statement = self.compile(command, sql)?;
+        let columns = (0..statement.num_columns())
+            .map(|index| statement.get_column_name(index).into_owned())
+            .collect();
         Ok(Prepared {
             statement,
             sql: sql.to_owned(),
             capability,
             ddl,
             write,
+            columns,
         })
     }
 
@@ -674,16 +803,25 @@ impl Connection {
         }
         prepared.statement.clear_bindings();
         let mut cache = self.cache.borrow_mut();
-        if cache.len() >= STATEMENT_CACHE_CAPACITY {
+        if cache.values().map(HashMap::len).sum::<usize>() >= STATEMENT_CACHE_CAPACITY {
             cache.clear();
         }
         cache
-            .entry((prepared.capability, prepared.sql))
-            .or_insert((prepared.statement, prepared.write));
+            .entry(prepared.capability)
+            .or_default()
+            .entry(prepared.sql)
+            .or_insert(Cached {
+                statement: prepared.statement,
+                write: prepared.write,
+                columns: prepared.columns,
+            });
     }
 
     /// Readmits a statement before it runs: a statement compiled under
-    /// another capability is re-authorized, and the guards are checked.
+    /// another capability is re-authorized, and the guards are checked. The
+    /// file identity is checked only when the statement starts a transaction,
+    /// since a `stat` per statement of a bulk transaction is measurable
+    /// writer-thread time (#3491).
     pub(crate) fn admit(&self, prepared: &mut Prepared) -> Result<()> {
         let capability = self.capability();
         if prepared.capability != capability {
@@ -691,11 +829,15 @@ impl Connection {
             prepared.capability = capability;
         }
         prepared.statement.reset()?;
-        self.guard.start()
+        self.guard.start(self.inner.get_auto_commit())
     }
 
-    pub(crate) fn bind(&self, prepared: &mut Prepared, values: &[Value]) -> Result<()> {
-        validate_request(&prepared.sql, values)?;
+    pub(crate) fn bind(
+        &self,
+        prepared: &mut Prepared,
+        values: Vec<turso_core::Value>,
+    ) -> Result<()> {
+        validate_request(&prepared.sql, &values)?;
         let expected = prepared.statement.parameters_count();
         if expected != values.len() {
             return Err(Error::InvalidOperation(format!(
@@ -703,10 +845,10 @@ impl Connection {
                 values.len()
             )));
         }
-        for (index, value) in values.iter().enumerate() {
+        for (index, value) in values.into_iter().enumerate() {
             let position = NonZeroUsize::new(index + 1)
                 .ok_or_else(|| Error::InvalidOperation("parameter index overflow".to_owned()))?;
-            prepared.statement.bind_at(position, value.to_native()?)?;
+            prepared.statement.bind_at(position, value)?;
         }
         Ok(())
     }
@@ -809,7 +951,7 @@ impl Connection {
             let ddl = policy::is_ddl(&command);
             let write = policy::is_write(&command);
             let mut statement = self.compile(command, input)?;
-            self.guard.start()?;
+            self.guard.start(true)?;
             while self
                 .drive(&mut statement)
                 .map_err(|error| self.end_interrupted_write(&mut statement, write, error))?
@@ -826,7 +968,7 @@ impl Connection {
     /// the capability verdict.
     pub(crate) fn execute_unchecked(&self, sql: &str) -> Result<()> {
         let mut statement = self.compile(parse_single(sql)?, sql)?;
-        self.guard.start()?;
+        self.guard.start(true)?;
         while self.drive(&mut statement)? {}
         Ok(())
     }
@@ -938,7 +1080,7 @@ impl Connection {
         self.guarded(guard, |connection| {
             let mut prepared = connection.prepare(sql, false)?;
             connection.admit(&mut prepared)?;
-            connection.bind(&mut prepared, parameters)?;
+            connection.bind(&mut prepared, native_values(parameters)?)?;
             while connection.step(&mut prepared)? {}
             u64::try_from(prepared.statement.n_change()).map_err(|_| {
                 Error::InvalidOperation("negative native changed-row count".to_owned())
@@ -955,7 +1097,7 @@ impl Connection {
         self.guarded(guard, |connection| {
             let mut prepared = connection.prepare(sql, false)?;
             connection.admit(&mut prepared)?;
-            connection.bind(&mut prepared, parameters)?;
+            connection.bind(&mut prepared, native_values(parameters)?)?;
             let mut rows = Rows {
                 columns: (0..prepared.statement.num_columns())
                     .map(|index| prepared.statement.get_column_name(index).into_owned())
@@ -1140,12 +1282,21 @@ fn parse_batch(sql: &str) -> Result<Vec<(Cmd, &str)>> {
     Ok(statements)
 }
 
-fn validate_request(sql: &str, parameters: &[Value]) -> Result<()> {
+fn native_values(parameters: &[Value]) -> Result<Vec<turso_core::Value>> {
+    parameters.iter().cloned().map(Value::into_native).collect()
+}
+
+fn validate_request(sql: &str, parameters: &[turso_core::Value]) -> Result<()> {
     if sql.len() > MAX_SQL_BYTES || parameters.len() > MAX_SQL_PARAMETERS {
         return Err(Error::RequestLimitExceeded);
     }
     let bytes = parameters.iter().fold(sql.len(), |total, value| {
-        total.saturating_add(std::mem::size_of::<Value>() + value.payload_len())
+        let payload = match value {
+            turso_core::Value::Text(text) => text.as_str().len(),
+            turso_core::Value::Blob(blob) => blob.len(),
+            _ => 0,
+        };
+        total.saturating_add(std::mem::size_of::<Value>() + payload)
     });
     if bytes > MAX_REQUEST_BYTES {
         return Err(Error::RequestLimitExceeded);

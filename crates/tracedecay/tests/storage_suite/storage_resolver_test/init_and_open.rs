@@ -20,10 +20,16 @@ async fn trace_decay_init_defaults_to_profile_shard_without_repo_marker() {
 
     assert_eq!(cg.store_layout().storage_mode, StorageMode::ProfileSharded);
     assert_path_eq(&cg.store_layout().data_root, &shard_root);
-    assert_path_eq(cg.db_path(), shard_root.join("tracedecay.db"));
+    assert_path_eq(
+        cg.db_path(),
+        shard_root.join(tracedecay_store::StoreFile::Project.file_name()),
+    );
     assert_eq!(profile.discover_project_root(&child), Some(project.clone()));
     assert!(
-        !project.join(".tracedecay/tracedecay.db").exists(),
+        !project
+            .join(".tracedecay")
+            .join(tracedecay_store::StoreFile::Project.file_name())
+            .exists(),
         "profile-sharded init must not create a repo-local graph DB"
     );
     assert!(

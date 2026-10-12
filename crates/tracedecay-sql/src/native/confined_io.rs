@@ -1,16 +1,20 @@
-//! The engine's entire filesystem: the pinned main file and its `-wal`
-//! sidecar. Every other open or remove fails, so no SQL can make the engine
-//! touch a path the runtime did not hand it.
+//! The engine's entire filesystem: the pinned main file, its `-wal` sidecar
+//! and the private `-tmp` directory its sorts and ephemeral tables spill to.
+//! Every other open or remove fails, so no SQL can make the engine touch a
+//! path the runtime did not hand it.
 
 use std::{
     fs::{self, File, OpenOptions},
     io,
-    path::Path,
-    sync::{Arc, Mutex, PoisonError},
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use turso_core::{
-    IO, LimboError, OpenFlags,
+    IO, LimboError, MemoryIO, OpenFlags,
     io::{
         Clock, FileId,
         clock::{MonotonicInstant, WallClockInstant},
@@ -24,51 +28,151 @@ pub(crate) struct ConfinedIo {
     delegate: Arc<dyn IO>,
     main: String,
     wal: String,
+    /// Holds one engine-made subdirectory per temporary file. It belongs to
+    /// this instance only once the engine holds the store's lock: before
+    /// that it may be another process's.
+    temp: PathBuf,
+    owns_temp: AtomicBool,
     identity: FileIdentity,
     /// Descriptors stay open for the engine's lifetime: closing any descriptor
     /// of a file drops every POSIX record lock this process holds on it,
     /// including the engine's exclusive lock. The main file is first.
     held: Mutex<Vec<File>>,
+    /// Set for a read-only store. SQLite opens one without creating a `-wal`
+    /// beside it; when none exists the engine reads an empty in-memory log.
+    read_only_wal: Option<MemoryIO>,
 }
 
 impl ConfinedIo {
-    pub(crate) fn new(main: String, file: File, identity: FileIdentity) -> Result<Self> {
+    pub(crate) fn new(
+        main: String,
+        file: File,
+        identity: FileIdentity,
+        writable: bool,
+    ) -> Result<Self> {
         Ok(Self {
             delegate: turso_core::Database::io_for_path(&main)?,
             wal: format!("{main}-wal"),
+            temp: PathBuf::from(format!("{main}-tmp")),
+            owns_temp: AtomicBool::new(false),
             main,
             identity,
             held: Mutex::new(vec![file]),
+            read_only_wal: (!writable).then(MemoryIO::new),
         })
     }
 
-    #[cfg_attr(not(td_engine = "native"), allow(dead_code))]
-    pub(crate) fn main(&self) -> &str {
-        &self.main
+    /// Whether the engine logs to the in-memory WAL of a read-only store,
+    /// where a writer's commits would be lost.
+    pub(crate) fn logs_to_memory(&self) -> bool {
+        self.read_only_wal
+            .as_ref()
+            .is_some_and(|memory| memory.open_file(&self.wal, OpenFlags::None, false).is_ok())
     }
 
-    /// Fails when the main pathname no longer names the held file.
-    pub(crate) fn verify(&self) -> Result<()> {
-        if self.has_moved()? {
-            return Err(Error::Denied(
-                "native database pathname no longer identifies the held file".to_owned(),
-            ));
+    /// Takes the temporary directory once the engine holds the store's lock,
+    /// discarding whatever a process that died mid-sort left there.
+    pub(crate) fn claim_temp(&self) -> Result<()> {
+        match fs::remove_dir_all(&self.temp) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::InvalidOperation(format!(
+                    "clear native temporary directory {}: {error}",
+                    self.temp.display()
+                )));
+            }
         }
+        self.owns_temp.store(true, Ordering::Release);
         Ok(())
     }
 
-    pub(crate) fn has_moved(&self) -> Result<bool> {
-        match path_identity(&self.main) {
-            Ok(identity) => Ok(identity != self.identity),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
-            Err(error) => Err(Error::InvalidOperation(format!(
-                "inspect native database path: {error}"
-            ))),
+    /// Whether `path` is a file in one of the engine's temporary
+    /// subdirectories.
+    fn is_temp(&self, path: &str) -> bool {
+        Path::new(path).parent().and_then(Path::parent) == Some(self.temp.as_path())
+    }
+
+    /// The in-memory log of a read-only store with no WAL on disk, once the
+    /// engine asks for its WAL.
+    fn memory_wal(
+        &self,
+        flags: OpenFlags,
+        direct: bool,
+    ) -> turso_core::Result<Option<Arc<dyn turso_core::File>>> {
+        let Some(memory) = &self.read_only_wal else {
+            return Ok(None);
+        };
+        if let Ok(file) = memory.open_file(&self.wal, OpenFlags::None, direct) {
+            return Ok(Some(file));
         }
+        match fs::symlink_metadata(&self.wal) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => memory
+                .open_file(&self.wal, flags | OpenFlags::Create, direct)
+                .map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// Fails when the pathname the engine opened no longer names the held
+    /// file, so the engine never opens its main file through a swapped name.
+    fn verify(&self) -> Result<()> {
+        verify_names(&self.main, self.identity)
     }
 
     fn held(&self) -> std::sync::MutexGuard<'_, Vec<File>> {
         self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// One handle's pathname, bound to the file it named when the handle opened.
+/// An engine is shared by every in-process name of its file, so each handle
+/// checks its own name: a handle on a name renamed away is refused, while a
+/// handle opened under the file's current name keeps serving.
+#[derive(Clone)]
+pub(crate) struct Fence {
+    name: Arc<str>,
+    identity: FileIdentity,
+}
+
+impl Fence {
+    pub(crate) fn new(name: &str, identity: FileIdentity) -> Self {
+        Self {
+            name: name.into(),
+            identity,
+        }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Fails when this handle's pathname no longer names the held file.
+    pub(crate) fn verify(&self) -> Result<()> {
+        verify_names(&self.name, self.identity)
+    }
+
+    pub(crate) fn has_moved(&self) -> Result<bool> {
+        has_moved(&self.name, self.identity)
+    }
+}
+
+fn verify_names(path: &str, identity: FileIdentity) -> Result<()> {
+    if has_moved(path, identity)? {
+        return Err(Error::Denied(
+            "native database pathname no longer identifies the held file".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn has_moved(path: &str, identity: FileIdentity) -> Result<bool> {
+    match path_identity(path) {
+        Ok(current) => Ok(current != identity),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(Error::InvalidOperation(format!(
+            "inspect native database path: {error}"
+        ))),
     }
 }
 
@@ -163,6 +267,11 @@ impl IO for ConfinedIo {
         flags: OpenFlags,
         direct: bool,
     ) -> turso_core::Result<Arc<dyn turso_core::File>> {
+        if path == self.wal
+            && let Some(file) = self.memory_wal(flags, direct)?
+        {
+            return Ok(file);
+        }
         let mut held = self.held();
         if path == self.main {
             self.verify().map_err(limbo)?;
@@ -170,6 +279,9 @@ impl IO for ConfinedIo {
             let wal = open_regular(Path::new(path), flags.contains(OpenFlags::Create))
                 .map_err(|error| LimboError::InvalidArgument(format!("open {path}: {error}")))?;
             held.push(wal);
+        } else if self.is_temp(path) {
+            drop(held);
+            return self.delegate.open_file(path, flags, direct);
         } else {
             return Err(refused(path));
         }
@@ -220,6 +332,20 @@ impl IO for ConfinedIo {
         self.delegate.register_fixed_buffer(pointer, length)
     }
 
+    fn temp_dir(&self) -> Option<PathBuf> {
+        if !self.owns_temp.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(&self.temp) {
+            Ok(()) => Some(self.temp.clone()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Some(self.temp.clone()),
+            Err(_) => None,
+        }
+    }
+
     fn file_id(&self, path: &str) -> turso_core::Result<FileId> {
         if path == self.main {
             return Ok(FileId {
@@ -231,6 +357,14 @@ impl IO for ConfinedIo {
             return Err(refused(path));
         }
         self.delegate.file_id(path)
+    }
+}
+
+impl Drop for ConfinedIo {
+    fn drop(&mut self) {
+        if self.owns_temp.load(Ordering::Acquire) {
+            let _ = fs::remove_dir_all(&self.temp);
+        }
     }
 }
 

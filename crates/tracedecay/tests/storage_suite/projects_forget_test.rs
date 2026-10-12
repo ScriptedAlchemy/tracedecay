@@ -72,7 +72,10 @@ async fn register_project_fixture(
     db.upsert_store_artifact(StoreArtifactUpsert {
         store_id: store.store_id,
         artifact_kind: "graph_db".to_string(),
-        relpath: format!("projects/{project_id}/tracedecay.db"),
+        relpath: format!(
+            "projects/{project_id}/{}",
+            tracedecay_store::StoreFile::Project.file_name()
+        ),
         size_bytes: Some(4096),
         schema_version: None,
         updated_at: Some(103),
@@ -81,8 +84,16 @@ async fn register_project_fixture(
     .unwrap();
     let store_dir = profile_root.join("projects").join(project_id);
     fs::create_dir_all(store_dir.join("branches")).unwrap();
-    fs::write(store_dir.join("tracedecay.db"), b"graph bytes").unwrap();
-    fs::write(store_dir.join("sessions.db"), b"session bytes").unwrap();
+    fs::write(
+        store_dir.join(tracedecay_store::StoreFile::Project.file_name()),
+        b"graph bytes",
+    )
+    .unwrap();
+    fs::write(
+        store_dir.join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        b"session bytes",
+    )
+    .unwrap();
     store_dir
 }
 
@@ -163,11 +174,14 @@ async fn forget_project_removes_exactly_one_registered_project() {
 
     assert!(!store_dir_a.exists(), "forgotten store bytes are removed");
     assert!(
-        store_dir_b.join("tracedecay.db").exists(),
+        store_dir_b
+            .join(tracedecay_store::StoreFile::Project.file_name())
+            .exists(),
         "sibling store bytes must survive byte-identical"
     );
     assert_eq!(
-        fs::read(store_dir_b.join("sessions.db")).unwrap(),
+        fs::read(store_dir_b.join(tracedecay_store::StoreFile::ProjectSessions.file_name()))
+            .unwrap(),
         b"session bytes"
     );
 
@@ -236,7 +250,7 @@ async fn forget_project_keep_store_retires_rows_but_preserves_bytes() {
     }
 
     assert_eq!(
-        fs::read(store_dir.join("tracedecay.db")).unwrap(),
+        fs::read(store_dir.join(tracedecay_store::StoreFile::Project.file_name())).unwrap(),
         b"graph bytes",
         "--keep-store must preserve the store bytes exactly"
     );

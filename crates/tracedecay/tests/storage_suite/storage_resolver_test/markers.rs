@@ -93,7 +93,9 @@ fn profile_sharded_layout_maps_marker_to_profile_store_paths() {
     assert_eq!(layout.data_root, data_root);
     assert_eq!(
         layout.graph_db_path,
-        profile.join("projects/proj_123/tracedecay.db")
+        profile
+            .join("projects/proj_123")
+            .join(tracedecay_store::StoreFile::Project.file_name())
     );
     assert_eq!(
         layout.branch_meta_path,
@@ -101,7 +103,9 @@ fn profile_sharded_layout_maps_marker_to_profile_store_paths() {
     );
     assert_eq!(
         layout.sessions_db_path,
-        profile.join("projects/proj_123/sessions.db")
+        profile
+            .join("projects/proj_123")
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name())
     );
     assert_eq!(
         layout.response_handle_root,

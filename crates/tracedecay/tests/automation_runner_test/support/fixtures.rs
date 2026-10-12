@@ -43,7 +43,7 @@ use super::{project_memory_owner, test_automation_run_control};
 pub(crate) fn fixture_open_options(project_root: &Path) -> TraceDecayOpenOptions {
     let profile_root = project_root.join(".tracedecay").join("fixture-profile");
     TraceDecayOpenOptions {
-        global_db_path: Some(profile_root.join("global.db")),
+        global_db_path: Some(profile_root.join(tracedecay_store::StoreFile::Profile.file_name())),
         profile_root: Some(profile_root),
     }
 }

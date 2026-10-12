@@ -38,7 +38,7 @@ fn projectless_handshake(
         allow_init: false,
         allow_initialize_root_routing: false,
         client_identity: DaemonClientIdentity {
-            global_db_path: profile_root.join("global.db"),
+            global_db_path: profile_root.join(tracedecay_store::StoreFile::Profile.file_name()),
             profile_root: profile_root.to_path_buf(),
         },
         client_version: client_version.to_owned(),

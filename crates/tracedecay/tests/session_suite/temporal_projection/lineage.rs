@@ -58,12 +58,7 @@ async fn only_explicit_typed_copy_proof_persists_copy_edges() {
     .await
     .unwrap();
     assert_eq!(
-        scalar_runtime(
-            &runtime,
-            "SELECT COUNT(*) FROM session_occurrences_fts
-             WHERE session_occurrences_fts MATCH 'same'"
-        )
-        .await,
+        scalar_runtime(&runtime, &occurrence_search_count_sql("same")).await,
         2
     );
 }

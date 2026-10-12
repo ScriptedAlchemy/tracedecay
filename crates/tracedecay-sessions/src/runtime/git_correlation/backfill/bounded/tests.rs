@@ -292,7 +292,13 @@ async fn touch(store: &TestStore, session_id: &str) -> i64 {
 async fn convergence_writes_evidence_and_frontier_atomically() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     store.fail_next_write();
 
     let failed = converge_git_evidence_pass(&store, &SystemGit, None)
@@ -356,7 +362,13 @@ async fn convergence_writes_evidence_and_frontier_atomically() {
 async fn history_change_journal_survives_upserts_reinstall_and_rollback() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     let initial = scalar(
         &store,
         "SELECT MAX(sequence) FROM git_history_session_change",
@@ -465,7 +477,13 @@ async fn in_place_history_rewrites_revisit_and_retract_old_inference() {
     for rewrite_message in [true, false] {
         let repository = repository_fixture();
         let directory = tempfile::tempdir().unwrap();
-        let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+        let store = prepare_store(
+            &directory
+                .path()
+                .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+            repository.path(),
+        )
+        .await;
         store
             .connection
             .execute("UPDATE sessions SET started_at = NULL, ended_at = NULL", ())
@@ -563,7 +581,13 @@ async fn in_place_history_rewrites_revisit_and_retract_old_inference() {
 async fn reflog_inference_attributes_the_captured_span_and_retracts_alone() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     let active_at = head_commit_time(repository.path());
     store
         .connection
@@ -691,7 +715,13 @@ async fn reflog_inference_attributes_the_captured_span_and_retracts_alone() {
 async fn conflicting_captured_branch_keeps_the_inferred_span() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     let active_at = head_commit_time(repository.path());
     store
         .connection
@@ -766,7 +796,13 @@ async fn conflicting_captured_branch_keeps_the_inferred_span() {
 async fn folded_inference_absorbs_the_segment_window() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     let active_at = head_commit_time(repository.path());
     let transaction = store.open_write_transaction().await.unwrap();
     let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
@@ -841,7 +877,13 @@ async fn folded_inference_absorbs_the_segment_window() {
 async fn branchless_capture_extension_retracts_and_requeues_inference() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     let active_at = head_commit_time(repository.path());
     let apply_observation = |ts: i64| GitEvidenceBatch {
         observations: vec![crate::runtime::git_correlation::SpanObservation {
@@ -962,7 +1004,13 @@ async fn branchless_capture_extension_retracts_and_requeues_inference() {
 async fn branchless_capture_beyond_an_inferred_window_opens_its_own_span() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     let active_at = head_commit_time(repository.path());
     let apply_observation = |ts: i64| GitEvidenceBatch {
         observations: vec![crate::runtime::git_correlation::SpanObservation {
@@ -1059,7 +1107,13 @@ async fn branchless_capture_beyond_an_inferred_window_opens_its_own_span() {
 async fn revisit_keeps_captured_commit_evidence_on_the_surviving_span() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     let active_at = head_commit_time(repository.path());
     store
         .connection
@@ -1190,7 +1244,13 @@ async fn revisit_keeps_captured_commit_evidence_on_the_surviving_span() {
 async fn revisit_restores_the_capture_window_a_fold_unioned() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     let active_at = head_commit_time(repository.path());
     store
         .connection
@@ -1307,7 +1367,13 @@ async fn revisit_restores_the_capture_window_a_fold_unioned() {
 async fn folded_span_keeps_capture_growth_through_revisit() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     let active_at = head_commit_time(repository.path());
     store
         .connection
@@ -1431,7 +1497,13 @@ async fn folded_span_keeps_capture_growth_through_revisit() {
 async fn never_recorded_evidence_converges_as_a_typed_no_op() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     store
         .connection
         .execute_batch("DELETE FROM sessions")
@@ -1472,7 +1544,11 @@ fn unavailable_attribution_target_is_a_retryable_error() {
 async fn archived_branch_is_limited_coverage_without_losing_observed_span() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = TestStore::open(&directory.path().join("sessions.db"));
+    let store = TestStore::open(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+    );
     let archived = crate::runtime::git_correlation::SessionGitSpan {
         span_id: "span-archived".to_owned(),
         provider: "codex".to_owned(),
@@ -1527,7 +1603,9 @@ async fn convergence_permanent_exclusion_advances_frontier() {
     let plain_directory = tempfile::tempdir().unwrap();
     let database_directory = tempfile::tempdir().unwrap();
     let store = prepare_store(
-        &database_directory.path().join("sessions.db"),
+        &database_directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
         plain_directory.path(),
     )
     .await;
@@ -1574,7 +1652,9 @@ fn options(dry_run: bool) -> BackfillOptions {
 async fn persisted_partial_reopens_and_converges_exactly_once() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("sessions.db");
+    let database = directory
+        .path()
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     let store = prepare_store(&database, repository.path()).await;
     let partial = run_bounded_history_index_page(
         &store,
@@ -1625,7 +1705,13 @@ async fn incremental_unborn_history_settles_without_masking_source_failures() {
     let repository = tempfile::tempdir().unwrap();
     git(repository.path(), &["init", "-b", "main"]);
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     store
         .connection
         .execute_batch("UPDATE sessions SET ended_at = 1")
@@ -1726,7 +1812,13 @@ async fn unborn_history_converges_and_later_activity_indexes_first_commit() {
     let repository = tempfile::tempdir().unwrap();
     git(repository.path(), &["init", "-b", "main"]);
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     store
         .connection
         .execute_batch("UPDATE sessions SET ended_at = 1")
@@ -1801,7 +1893,9 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
     let repository = repository_fixture();
     append_linear_history(repository.path(), MAX_GRAPH_PAGE_EXAMINED_NODES + 1);
     let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("sessions.db");
+    let database = directory
+        .path()
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     let store = prepare_store(&database, repository.path()).await;
     let timestamp = i64::try_from(MAX_GRAPH_PAGE_EXAMINED_NODES + 1).unwrap();
     store
@@ -1885,7 +1979,13 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
 async fn publish_verification_restart_rejects_same_path_repository_replacement() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     let control =
         BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10));
     let row = SessionActivityRow {
@@ -1997,7 +2097,13 @@ async fn out_of_window_deep_history_is_bounded_and_resumes_from_durable_graph_st
     let repository = repository_fixture();
     append_linear_history(repository.path(), MAX_GRAPH_PAGE_EXAMINED_NODES + 1);
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        repository.path(),
+    )
+    .await;
     let timestamp = i64::try_from(MAX_GRAPH_PAGE_EXAMINED_NODES + 1).unwrap();
     store
         .connection
@@ -2057,7 +2163,13 @@ async fn resume_uses_sealed_canonical_worktree_after_alias_repoint() {
     initialize_repository(&replacement);
     symlink(&canonical, &alias).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), &alias).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        &alias,
+    )
+    .await;
 
     run_bounded_history_index_page(
         &store,
@@ -2141,7 +2253,13 @@ async fn non_utf8_canonical_worktree_resumes_exactly_then_fails_typed_publish() 
     initialize_repository(&replacement);
     symlink(&canonical, &alias).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let store = prepare_store(&directory.path().join("sessions.db"), &alias).await;
+    let store = prepare_store(
+        &directory
+            .path()
+            .join(tracedecay_store::StoreFile::ProjectSessions.file_name()),
+        &alias,
+    )
+    .await;
 
     run_bounded_history_index_page(
         &store,
@@ -2189,7 +2307,9 @@ async fn changed_session_discards_sealed_candidate_before_publishing_new_revisio
     let old_activity = head_commit_time(repository.path());
     let new_activity = old_activity.checked_add(1).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("sessions.db");
+    let database = directory
+        .path()
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     let store = prepare_store(&database, repository.path()).await;
     store
         .connection
@@ -2260,7 +2380,9 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
         head_commit_time(valid_repository.path()).max(malformed_activity.checked_add(1).unwrap());
     let recovered_activity = valid_activity.checked_add(1).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("sessions.db");
+    let database = directory
+        .path()
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     let store = prepare_store(&database, malformed_repository.path()).await;
     store
         .connection
@@ -2342,7 +2464,9 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
 async fn dry_run_leaves_progress_evidence_and_frontier_untouched() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("sessions.db");
+    let database = directory
+        .path()
+        .join(tracedecay_store::StoreFile::ProjectSessions.file_name());
     let store = prepare_store(&database, repository.path()).await;
     let outcome = run_bounded_history_index_page(
         &store,

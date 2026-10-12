@@ -220,6 +220,12 @@ fn open_builder_connection(
     connection
         .set_capability(Capability::Maintenance)
         .map_err(sqlite_error)?;
+    // Finalization sorts every staged posting; spilling them to the store's
+    // private temporary directory bounds that sort to the engine's sort
+    // buffer instead of the whole staged table.
+    connection
+        .pragma_update(None, "temp_store", 1i64)
+        .map_err(sqlite_error)?;
     Ok(connection)
 }
 

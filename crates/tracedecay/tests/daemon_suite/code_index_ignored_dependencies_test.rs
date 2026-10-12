@@ -18,7 +18,8 @@ use tracedecay_runtime_core::path_safety::{
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeGraphActivationPolicyV1, CodeIndexIgnoredDependencyIndexOutcomeV1,
     CodeIndexIgnoredDependencyRefusalV1, CodeIndexIgnoredDependencyRequestV1,
-    CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1,
+    CodeIndexOwnerSignalsV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
+    LatestCompleteCodeIndexV1,
 };
 
 mod branch_publication_tests;
@@ -165,16 +166,39 @@ async fn wait_for_initial_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
 ) -> CodeGenerationId {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(generation) = registry.latest_generation_id(project_root).await {
-                break generation;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
+    on_scheduler_signals(
+        registry,
+        project_root,
+        "initial generation publication",
+        || registry.latest_generation_id(project_root),
+    )
     .await
-    .expect("initial generation publication")
+}
+
+/// Re-reads `probe` on every scheduler signal for `project_root` until it
+/// answers. A parked worker publishes nothing more, so its park ends the wait.
+async fn on_scheduler_signals<T, F>(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    awaited: &str,
+    mut probe: impl FnMut() -> F,
+) -> T
+where
+    F: std::future::Future<Output = Option<T>>,
+{
+    let mut signals = CodeIndexOwnerSignalsV1::subscribe(registry, project_root).await;
+    loop {
+        if let Some(found) = probe().await {
+            return found;
+        }
+        if let Some(park) = registry.convergence_park(project_root).await {
+            panic!("{awaited}: the worker parked: {park:?}");
+        }
+        signals
+            .changed()
+            .await
+            .unwrap_or_else(|_| panic!("{awaited}: the scheduler registry closed"));
+    }
 }
 
 async fn wait_for_generation_change(
@@ -182,18 +206,18 @@ async fn wait_for_generation_change(
     project_root: &Path,
     previous: &CodeGenerationId,
 ) -> CodeGenerationId {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(generation) = registry.latest_generation_id(project_root).await
-                && &generation != previous
-            {
-                break generation;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
+    on_scheduler_signals(
+        registry,
+        project_root,
+        "changed generation publication",
+        || async {
+            registry
+                .latest_generation_id(project_root)
+                .await
+                .filter(|generation| generation != previous)
+        },
+    )
     .await
-    .expect("changed generation publication")
 }
 
 async fn latest(
@@ -210,20 +234,22 @@ async fn latest_for_generation(
     project_root: &Path,
     expected: Option<&CodeGenerationId>,
 ) -> LatestCompleteCodeIndexV1 {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(latest) = registry.latest_complete_fresh(project_root).await
-                && expected.is_none_or(|expected| {
-                    expected == &latest.generation().manifest().generation_id
+    on_scheduler_signals(
+        registry,
+        project_root,
+        &format!("serving generation {expected:?} seating"),
+        || async {
+            registry
+                .latest_complete_fresh(project_root)
+                .await
+                .filter(|latest| {
+                    expected.is_none_or(|expected| {
+                        expected == &latest.generation().manifest().generation_id
+                    })
                 })
-            {
-                break latest;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
+        },
+    )
     .await
-    .unwrap_or_else(|error| panic!("serving generation {expected:?} did not seat: {error}"))
 }
 
 async fn wait_for_reconciling(registry: &CodeIndexSchedulerRegistryV1, expected: u64) {

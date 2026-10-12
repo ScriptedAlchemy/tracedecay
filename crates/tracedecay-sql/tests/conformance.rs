@@ -47,7 +47,10 @@ conformance!(
     deferred_constraint_at_commit_is_a_refusal_that_rolls_back,
     busy_checkpoint_reports_the_wal_it_could_not_reset,
     a_copied_back_wal_starts_over_on_the_next_write,
+    read_only_open_reads_without_creating_a_wal,
     an_interrupted_write_ends_its_transaction,
+    bound_limit_and_offset_restart_on_every_subquery_rescan,
+    unique_index_entries_stay_findable_under_every_conflict_mode,
 );
 
 mod cases {
@@ -826,6 +829,122 @@ mod cases {
         Ok(())
     }
 
+    /// Catches a read-only open that leaves a `-wal` beside a sealed file,
+    /// which content-addressed inventories refuse as an unknown file.
+    pub(super) fn read_only_open_reads_without_creating_a_wal() -> Result<()> {
+        let (_directory, path, connection) = file_database();
+        items(&connection)?;
+        connection.execute("INSERT INTO items (name) VALUES ('sealed')", [])?;
+        connection.checkpoint(CheckpointMode::Truncate)?;
+        drop(connection);
+        let mut wal = path.clone().into_os_string();
+        wal.push("-wal");
+        let wal = std::path::PathBuf::from(wal);
+        if wal.exists() {
+            assert_eq!(std::fs::metadata(&wal).expect("wal").len(), 0);
+            std::fs::remove_file(&wal).expect("remove the folded WAL");
+        }
+
+        let reader = Connection::open_with_flags(
+            &path,
+            tracedecay_sql::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | tracedecay_sql::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        assert_eq!(names(&reader)?, ["sealed"]);
+        assert!(!wal.exists(), "an open read-only store has no WAL file");
+        drop(reader);
+        assert!(!wal.exists(), "a closed read-only store left a WAL file");
+        Ok(())
+    }
+
+    /// Every row is findable through each unique index, and each index scans
+    /// in key order, after inserts that probe, skip, ignore and replace in
+    /// scattered key order. An index entry written at a stale cursor position
+    /// breaks both.
+    pub(super) fn unique_index_entries_stay_findable_under_every_conflict_mode() -> Result<()> {
+        use std::collections::BTreeMap;
+
+        fn key(i: u64) -> String {
+            format!("k{:05}", i.wrapping_mul(7_919) % 10_007)
+        }
+        fn number(i: u64) -> i64 {
+            (i.wrapping_mul(104_729) % 99_991) as i64
+        }
+        fn verify(
+            connection: &Connection,
+            table: &str,
+            rows: &BTreeMap<String, i64>,
+        ) -> Result<()> {
+            for (a, b) in rows {
+                let by_a: Option<i64> = connection
+                    .query_row(&format!("SELECT b FROM {table} WHERE a = ?1"), [a], |row| {
+                        row.get(0)
+                    })
+                    .optional()?;
+                assert_eq!(by_a, Some(*b), "{table}: row {a} lost from the a index");
+                let by_b: Option<String> = connection
+                    .query_row(&format!("SELECT a FROM {table} WHERE b = ?1"), [b], |row| {
+                        row.get(0)
+                    })
+                    .optional()?;
+                assert_eq!(
+                    by_b.as_ref(),
+                    Some(a),
+                    "{table}: row {b} lost from the b index"
+                );
+            }
+            let mut statement = connection.prepare(&format!("SELECT a FROM {table} ORDER BY a"))?;
+            let scanned = statement
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<String>>>()?;
+            assert_eq!(
+                scanned,
+                rows.keys().cloned().collect::<Vec<_>>(),
+                "{table}: the a index scan is not the row set in key order"
+            );
+            Ok(())
+        }
+
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "CREATE TABLE pairs (id INTEGER PRIMARY KEY, a TEXT NOT NULL UNIQUE, b INTEGER NOT NULL UNIQUE);
+             CREATE TABLE mixed (id INTEGER PRIMARY KEY, a TEXT NOT NULL UNIQUE, b INTEGER NOT NULL UNIQUE ON CONFLICT REPLACE);",
+        )?;
+        let mut pairs = BTreeMap::new();
+        let mut plain = connection.prepare("INSERT INTO pairs (a, b) VALUES (?1, ?2)")?;
+        for i in 0..600 {
+            plain.execute(params![key(i), number(i)])?;
+            pairs.insert(key(i), number(i));
+        }
+        let mut upsert = connection
+            .prepare("INSERT INTO pairs (a, b) VALUES (?1, ?2) ON CONFLICT(a) DO NOTHING")?;
+        for i in 300..900 {
+            let b = 200_000 + i as i64;
+            upsert.execute(params![key(i), b])?;
+            pairs.entry(key(i)).or_insert(b);
+        }
+        let mut ignore =
+            connection.prepare("INSERT OR IGNORE INTO pairs (a, b) VALUES (?1, ?2)")?;
+        for i in 850..1_000 {
+            let b = number(i % 700);
+            ignore.execute(params![key(i), b])?;
+            if !pairs.contains_key(&key(i)) && !pairs.values().any(|existing| *existing == b) {
+                pairs.insert(key(i), b);
+            }
+        }
+        verify(&connection, "pairs", &pairs)?;
+
+        let mut mixed = BTreeMap::new();
+        let mut replace = connection.prepare("INSERT INTO mixed (a, b) VALUES (?1, ?2)")?;
+        for i in 0..500 {
+            let b = number(i % 150);
+            replace.execute(params![key(i), b])?;
+            mixed.retain(|_, existing| *existing != b);
+            mixed.insert(key(i), b);
+        }
+        verify(&connection, "mixed", &mixed)
+    }
+
     pub(super) fn close_rolls_back_and_path_names_the_store() -> Result<()> {
         let (_directory, path, connection) = file_database();
         items(&connection)?;
@@ -842,6 +961,80 @@ mod cases {
             names(&reopened)?.is_empty(),
             "close rolled back the open write"
         );
+        Ok(())
+    }
+
+    /// Each statement runs a nested query again for every outer row. The
+    /// CROSS JOIN keeps the CTE on the inner side, and its unindexable join
+    /// key keeps Turso from materializing it once into a seek index; the
+    /// correlated subquery reruns per row by definition. A bound LIMIT or
+    /// OFFSET must count from its bound value on every run, as a literal does
+    /// (turso-bugs/cte-limit-parameter-drops-groups.md).
+    pub(super) fn bound_limit_and_offset_restart_on_every_subquery_rescan() -> Result<()> {
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "CREATE TABLE facts (obs TEXT NOT NULL, ord INTEGER NOT NULL);
+             INSERT INTO facts VALUES ('a', 1), ('a', 2), ('b', 3);",
+        )?;
+        let joined = |subquery: &str| {
+            format!(
+                "WITH m AS ({subquery})
+                 SELECT f.ord, m.obs FROM facts f CROSS JOIN m
+                 WHERE m.obs || '' = f.obs ORDER BY f.ord"
+            )
+        };
+        let grouped = "SELECT obs, MIN(ord) AS first FROM facts GROUP BY obs ORDER BY first";
+        let compound = "SELECT obs, ord FROM facts WHERE ord = 1
+             UNION ALL SELECT obs, ord FROM facts WHERE ord = 3";
+        let cases: [(String, &[i64], &[(i64, &str)]); 5] = [
+            (
+                joined(&format!("{grouped} LIMIT ?1")),
+                &[4],
+                &[(1, "a"), (2, "a"), (3, "b")],
+            ),
+            (
+                joined(&format!("{grouped} LIMIT ?1 OFFSET ?2")),
+                &[1, 1],
+                &[(3, "b")],
+            ),
+            (
+                joined(&format!("{compound} LIMIT ?1 OFFSET ?2")),
+                &[1, 1],
+                &[(3, "b")],
+            ),
+            (
+                joined(&format!("{compound} ORDER BY 2 LIMIT ?1 OFFSET ?2")),
+                &[1, 1],
+                &[(3, "b")],
+            ),
+            (
+                "SELECT f.ord, COALESCE((SELECT g.obs FROM facts g WHERE g.ord >= f.ord
+                     ORDER BY g.ord LIMIT ?1 OFFSET ?2), '-')
+                 FROM facts f ORDER BY f.ord"
+                    .to_owned(),
+                &[1, 1],
+                &[(1, "a"), (2, "b"), (3, "-")],
+            ),
+        ];
+        let mut mismatches = Vec::new();
+        for (sql, bound, expected) in cases {
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement
+                .query_map(params_from_iter(bound.iter()), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>>>()?;
+            let expected = expected
+                .iter()
+                .map(|&(ord, obs)| (ord, obs.to_owned()))
+                .collect::<Vec<_>>();
+            if rows != expected {
+                mismatches.push(format!(
+                    "{sql}\n  bound {bound:?}: got {rows:?}, want {expected:?}"
+                ));
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
         Ok(())
     }
 }

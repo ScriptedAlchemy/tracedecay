@@ -13,7 +13,10 @@ use tracedecay_domain::{
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::db::engine::BackendKind;
+use tracedecay_runtime_core::db::native_search::SearchIndex;
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::runtime::store_access::session_fts_query;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationWrite, ProjectionPersistOutcome, ProjectionStoreError,
@@ -382,30 +385,27 @@ fn search_session_messages(
         .unwrap();
 
     if results.len() < limit {
-        let fts_query = terms
-            .iter()
-            .map(|term| format!("\"{}\"*", term.replace('"', "")))
-            .collect::<Vec<_>>()
-            .join(" OR ");
+        let backend = BackendKind::EXACT_SQL;
+        let fts_query = session_fts_query(&terms.join(" "), backend);
         let mut statement = conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT message.provider, message.message_id, message.session_id, message.role,
                         message.timestamp, message.ordinal,
                         COALESCE(message.content, message.placeholder_text, ''), message.kind,
                         message.model, message.tool_names, message.source_path,
                         message.source_offset, message.metadata_json
-                 FROM lcm_raw_messages_fts
-                 JOIN lcm_raw_messages AS message
-                   ON message.store_id = lcm_raw_messages_fts.rowid
-                 JOIN sessions AS session
-                   ON session.provider = message.provider
-                  AND session.session_id = message.session_id
-                 WHERE lcm_raw_messages_fts MATCH ?1
+                 {}
                    AND message.provider = ?2
-                   AND (?3 IS NULL OR session.project_key = ?3 OR session.project_path = ?3)
-                 ORDER BY bm25(lcm_raw_messages_fts)
+                   AND EXISTS (
+                       SELECT 1 FROM sessions AS session
+                       WHERE session.provider = message.provider
+                         AND session.session_id = message.session_id
+                         AND (?3 IS NULL OR session.project_key = ?3 OR session.project_path = ?3)
+                   )
+                 ORDER BY message.store_id
                  LIMIT ?4",
-            )
+                SearchIndex::RawMessage.matching_rows(backend, "message", "?1")
+            ))
             .unwrap();
         let transcript_results = statement
             .query_map(

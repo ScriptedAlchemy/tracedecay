@@ -488,8 +488,12 @@ fn assert_no_transcript_adjacent_fallback_writer(
     assert!(
         !transcript
             .parent()
-            .map(|parent| parent.join("sessions.db").exists()
-                || parent.join("tracedecay.db").exists()
+            .map(|parent| parent
+                .join(tracedecay_store::StoreFile::ProjectSessions.file_name())
+                .exists()
+                || parent
+                    .join(tracedecay_store::StoreFile::Project.file_name())
+                    .exists()
                 || parent.join(".tracedecay").exists())
             .unwrap_or(false),
         "provider ingest must not create a transcript-adjacent fallback writer"

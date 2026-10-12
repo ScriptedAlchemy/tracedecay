@@ -89,7 +89,9 @@ async fn hook_branch_write_lands_in_a_sealed_single_store_generation() {
         tracedecay_runtime_core::branch::BranchAddOutcome::Added
     );
     assert!(
-        shard_root.join("tracedecay.db").exists(),
+        shard_root
+            .join(tracedecay_store::StoreFile::Project.file_name())
+            .exists(),
         "the single project graph store must serve the branch"
     );
     assert!(

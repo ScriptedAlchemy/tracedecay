@@ -71,7 +71,7 @@ async fn active_project_reports_the_opened_checkout() {
 fn assert_identity(opened: &OpenedCheckout, payload: &Value) {
     let project_root = opened.project_root.display().to_string();
     let data_root = opened.profile_root.join("projects").join(PROJECT_ID);
-    let graph_db = data_root.join("tracedecay.db");
+    let graph_db = data_root.join(tracedecay_store::StoreFile::Project.file_name());
     let common_dir = opened
         .project_root
         .join(".git")
@@ -127,7 +127,12 @@ fn assert_identity(opened: &OpenedCheckout, payload: &Value) {
     );
     assert_eq!(
         payload["storage"]["sessions_db_path"],
-        json!(data_root.join("sessions.db").display().to_string()),
+        json!(
+            data_root
+                .join(tracedecay_store::StoreFile::ProjectSessions.file_name())
+                .display()
+                .to_string()
+        ),
         "{payload}"
     );
     assert_eq!(

@@ -17,7 +17,7 @@ use tracedecay_project::project::TraceDecay;
 
 fn open_options(profile_root: &Path) -> tracedecay_project::project::TraceDecayOpenOptions {
     tracedecay_project::project::TraceDecayOpenOptions {
-        global_db_path: Some(profile_root.join("global.db")),
+        global_db_path: Some(profile_root.join(tracedecay_store::StoreFile::Profile.file_name())),
         profile_root: Some(profile_root.to_path_buf()),
     }
 }

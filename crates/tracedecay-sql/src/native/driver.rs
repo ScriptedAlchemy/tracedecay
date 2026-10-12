@@ -10,7 +10,6 @@ use std::{
     ops::{BitOr, Deref, DerefMut},
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
-    rc::Rc,
     sync::{Arc, Mutex, PoisonError},
 };
 
@@ -311,6 +310,22 @@ pub mod types {
         }
     }
 
+    impl<'a> From<&'a turso_core::Value> for ValueRef<'a> {
+        fn from(value: &'a turso_core::Value) -> Self {
+            match value {
+                turso_core::Value::Null => Self::Null,
+                turso_core::Value::Numeric(turso_core::Numeric::Integer(value)) => {
+                    Self::Integer(*value)
+                }
+                turso_core::Value::Numeric(turso_core::Numeric::Float(value)) => {
+                    Self::Real(f64::from(*value))
+                }
+                turso_core::Value::Text(value) => Self::Text(value.as_str().as_bytes()),
+                turso_core::Value::Blob(value) => Self::Blob(value),
+            }
+        }
+    }
+
     impl Value {
         pub fn data_type(&self) -> Type {
             ValueRef::from(self).data_type()
@@ -547,38 +562,45 @@ impl<T: ToSql + ?Sized> ToSql for Arc<T> {
     }
 }
 
-fn bind(value: &(impl ToSql + ?Sized)) -> Result<Value> {
-    Ok(match value.to_sql()? {
-        ToSqlOutput::Owned(value) => value,
-        ToSqlOutput::Borrowed(ValueRef::Text(bytes)) => Value::Text(
-            String::from_utf8(bytes.to_vec())
-                .map_err(|error| Error::ToSqlConversionFailure(Box::new(error)))?,
-        ),
-        ToSqlOutput::Borrowed(value) => Value::column_result(value)
-            .map_err(|error| Error::ToSqlConversionFailure(Box::new(error)))?,
-    })
+/// Converts a parameter straight into the engine's value, copying borrowed
+/// text and blobs once; the engine copies it again into its parameter slot.
+fn bind(value: &(impl ToSql + ?Sized)) -> Result<turso_core::Value> {
+    match value.to_sql()? {
+        ToSqlOutput::Owned(value) => Ok(value.into_native()?),
+        ToSqlOutput::Borrowed(value) => Ok(match value {
+            ValueRef::Null => turso_core::Value::Null,
+            ValueRef::Integer(value) => turso_core::Value::from_i64(value),
+            ValueRef::Real(value) => turso_core::Value::from_f64(value),
+            ValueRef::Text(bytes) => turso_core::Value::build_text(
+                std::str::from_utf8(bytes)
+                    .map_err(|error| Error::ToSqlConversionFailure(Box::new(error)))?
+                    .to_owned(),
+            ),
+            ValueRef::Blob(bytes) => super::value::native_blob(bytes)?,
+        }),
+    }
 }
 
 /// Positional parameters. Named parameters are not part of the owned surface.
 pub trait Params {
-    fn bind_values(self) -> Result<Vec<Value>>;
+    fn bind_values(self) -> Result<Vec<turso_core::Value>>;
 }
 
 impl Params for () {
-    fn bind_values(self) -> Result<Vec<Value>> {
+    fn bind_values(self) -> Result<Vec<turso_core::Value>> {
         Ok(Vec::new())
     }
 }
 
 // The only impl for an empty array, so `execute(sql, [])` is unambiguous.
 impl Params for [&(dyn ToSql + Send + Sync); 0] {
-    fn bind_values(self) -> Result<Vec<Value>> {
+    fn bind_values(self) -> Result<Vec<turso_core::Value>> {
         Ok(Vec::new())
     }
 }
 
 impl Params for &[&dyn ToSql] {
-    fn bind_values(self) -> Result<Vec<Value>> {
+    fn bind_values(self) -> Result<Vec<turso_core::Value>> {
         self.iter().map(|value| bind(*value)).collect()
     }
 }
@@ -586,12 +608,12 @@ impl Params for &[&dyn ToSql] {
 macro_rules! params_for_arrays {
     ($($count:literal)+) => {$(
         impl<T: ToSql + ?Sized> Params for &[&T; $count] {
-            fn bind_values(self) -> Result<Vec<Value>> {
+            fn bind_values(self) -> Result<Vec<turso_core::Value>> {
                 self.iter().map(|value| bind(*value)).collect()
             }
         }
         impl<T: ToSql> Params for [T; $count] {
-            fn bind_values(self) -> Result<Vec<Value>> {
+            fn bind_values(self) -> Result<Vec<turso_core::Value>> {
                 self.iter().map(|value| bind(value)).collect()
             }
         }
@@ -602,7 +624,7 @@ params_for_arrays!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 2
 macro_rules! params_for_tuples {
     ($(($($field:tt $name:ident),+))+) => {$(
         impl<$($name: ToSql),+> Params for ($($name,)+) {
-            fn bind_values(self) -> Result<Vec<Value>> {
+            fn bind_values(self) -> Result<Vec<turso_core::Value>> {
                 Ok(vec![$(bind(&self.$field)?),+])
             }
         }
@@ -638,7 +660,7 @@ where
     I: IntoIterator,
     I::Item: ToSql,
 {
-    fn bind_values(self) -> Result<Vec<Value>> {
+    fn bind_values(self) -> Result<Vec<turso_core::Value>> {
         self.0.into_iter().map(|value| bind(&value)).collect()
     }
 }
@@ -798,11 +820,13 @@ impl Connection {
         value: V,
     ) -> Result<()> {
         let literal = match bind(&value)? {
-            Value::Null => "NULL".to_owned(),
-            Value::Integer(value) => value.to_string(),
-            Value::Real(value) => value.to_string(),
-            Value::Text(value) => format!("'{}'", value.replace('\'', "''")),
-            Value::Blob(_) => return Err(Error::unsupported("blob pragma value")),
+            turso_core::Value::Null => "NULL".to_owned(),
+            turso_core::Value::Numeric(turso_core::Numeric::Integer(value)) => value.to_string(),
+            turso_core::Value::Numeric(turso_core::Numeric::Float(value)) => {
+                f64::from(value).to_string()
+            }
+            turso_core::Value::Text(value) => format!("'{}'", value.as_str().replace('\'', "''")),
+            turso_core::Value::Blob(_) => return Err(Error::unsupported("blob pragma value")),
         };
         self.execute_batch(&format!(
             "PRAGMA {}{name} = {literal}",
@@ -1228,7 +1252,7 @@ pub struct Statement<'c> {
     connection: &'c Connection,
     prepared: Option<Prepared>,
     cached: bool,
-    columns: Rc<[String]>,
+    columns: Arc<[String]>,
     /// The engine's lifetime counters when last taken. A cached program
     /// keeps counting across uses, so only the difference is this caller's.
     counted: Cell<StatementCounters>,
@@ -1246,9 +1270,7 @@ impl fmt::Debug for Statement<'_> {
 impl<'c> Statement<'c> {
     fn new(connection: &'c Connection, prepared: Prepared, cached: bool) -> Self {
         let counted = Cell::new(engine_counters(&prepared));
-        let columns = (0..prepared.statement.num_columns())
-            .map(|index| prepared.statement.get_column_name(index).into_owned())
-            .collect();
+        let columns = Arc::clone(&prepared.columns);
         Self {
             connection,
             prepared: Some(prepared),
@@ -1284,7 +1306,7 @@ impl<'c> Statement<'c> {
             return Err(Error::InvalidParameterCount(values.len(), expected));
         }
         core.admit(prepared)?;
-        core.bind(prepared, &values)?;
+        core.bind(prepared, values)?;
         Ok(prepared)
     }
 
@@ -1301,7 +1323,7 @@ impl<'c> Statement<'c> {
     pub fn query<P: Params>(&mut self, params: P) -> Result<Rows<'_>> {
         let connection = self.connection;
         let core = &connection.core;
-        let columns = Rc::clone(&self.columns);
+        let columns = Arc::clone(&self.columns);
         let prepared = self.start(params)?;
         Ok(Rows {
             core,
@@ -1395,7 +1417,7 @@ impl DerefMut for CachedStatement<'_> {
 pub struct Rows<'s> {
     core: &'s super::Connection,
     prepared: &'s mut Prepared,
-    columns: Rc<[String]>,
+    columns: Arc<[String]>,
     current: Option<Row<'s>>,
     done: bool,
 }
@@ -1413,8 +1435,8 @@ impl<'s> Rows<'s> {
                     super::Error::InvalidOperation("native row missing after row step".to_owned())
                 })?;
                 self.current = Some(Row {
-                    columns: Rc::clone(&self.columns),
-                    values: row.get_values().map(Value::from_native).collect(),
+                    columns: Arc::clone(&self.columns),
+                    current: std::ptr::from_ref(row),
                     _statement: PhantomData,
                 });
                 Ok(self.current.as_ref())
@@ -1456,9 +1478,12 @@ where
     }
 }
 
+/// The statement's current result row, read in place rather than copied.
 pub struct Row<'s> {
-    columns: Rc<[String]>,
-    values: Vec<Value>,
+    columns: Arc<[String]>,
+    /// Valid until the statement steps again, which needs the `&mut Rows`
+    /// that every `&Row` borrows.
+    current: *const turso_core::Row,
     _statement: PhantomData<&'s ()>,
 }
 
@@ -1486,14 +1511,23 @@ impl RowIndex for &str {
 }
 
 impl Row<'_> {
+    fn value(&self, index: usize) -> Result<ValueRef<'_>> {
+        // SAFETY: see `current`; `self` is borrowed from the `Rows` whose
+        // statement owns the row.
+        let row = unsafe { &*self.current };
+        if index >= row.len() {
+            return Err(Error::InvalidColumnIndex(index));
+        }
+        Ok(ValueRef::from(row.get_value(index)))
+    }
+
     pub fn get_ref<I: RowIndex>(&self, index: I) -> Result<ValueRef<'_>> {
-        let index = index.index(&self.columns)?;
-        Ok(ValueRef::from(&self.values[index]))
+        self.value(index.index(&self.columns)?)
     }
 
     pub fn get<I: RowIndex, T: FromSql>(&self, index: I) -> Result<T> {
         let index = index.index(&self.columns)?;
-        let value = ValueRef::from(&self.values[index]);
+        let value = self.value(index)?;
         T::column_result(value).map_err(|error| match error {
             FromSqlError::InvalidType => {
                 Error::InvalidColumnType(index, self.columns[index].clone(), value.data_type())

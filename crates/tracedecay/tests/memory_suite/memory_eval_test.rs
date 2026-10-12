@@ -244,7 +244,7 @@ fn initialize_fixture_project(fixture: &Fixture) {
     let profile_root = fixture.home_path.join(".tracedecay");
     let options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
-        global_db_path: Some(profile_root.join("global.db")),
+        global_db_path: Some(profile_root.join(tracedecay_store::StoreFile::Profile.file_name())),
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -252,7 +252,6 @@ fn initialize_fixture_project(fixture: &Fixture) {
         .expect("tokio runtime");
     runtime.block_on(async {
         common::register_process_runtime_ports();
-        common::write_empty_global_db_schema(&profile_root.join("global.db")).await;
         let tracedecay = TraceDecay::init_with_options(&fixture.project_path, options)
             .await
             .unwrap_or_else(|error| panic!("initialize fixture project: {error}"));

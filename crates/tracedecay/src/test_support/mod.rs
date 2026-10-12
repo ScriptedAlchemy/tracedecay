@@ -8,6 +8,7 @@ use tracedecay_code_index::graph_projection::{
     CodeGraphCatalogReleaseV1, CodeGraphProjectionStore,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 pub mod git;
 #[cfg(any(test, feature = "test-transport"))]
@@ -29,6 +30,19 @@ pub async fn hold_after_core_publish_for_test() -> Result<()> {
 /// for a store mount that cannot observe cancellation from inside.
 pub async fn hold_after_project_sessions_for_test() -> Result<()> {
     hold_for_test("TRACEDECAY_TEST_HOLD_AFTER_PROJECT_SESSIONS", b"sessions").await
+}
+
+/// Park a project open after it registered its independent production owners
+/// when `TRACEDECAY_TEST_HOLD_AFTER_INDEPENDENT_OWNERS` names a file. The
+/// open's cancellation also releases it, so a stop lands while those owners
+/// are live and the open fails at its next cancellation boundary.
+pub async fn hold_after_independent_owners_for_test(
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    tokio::select! {
+        held = hold_for_test("TRACEDECAY_TEST_HOLD_AFTER_INDEPENDENT_OWNERS", b"owners") => held,
+        () = cancellation.cancelled() => Ok(()),
+    }
 }
 
 /// Releases `store`'s interactive catalog once nothing holds it. `Busy` means

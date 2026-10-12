@@ -120,7 +120,9 @@ async fn seed_store(
         project_root: project_root.to_path_buf(),
         data_root: data_root.clone(),
         graph_db_relpath: PathBuf::from("graph.db"),
-        sessions_db_relpath: PathBuf::from("sessions.db"),
+        sessions_db_relpath: PathBuf::from(
+            tracedecay_store::StoreFile::ProjectSessions.file_name(),
+        ),
         branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
         sessions_schema_digest: None,
     };

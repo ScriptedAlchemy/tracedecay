@@ -1,0 +1,49 @@
+diff --git a/translate/insert.rs b/translate/insert.rs
+index 1f5d207..ce156e2 100644
+--- a/translate/insert.rs
++++ b/translate/insert.rs
+@@ -959,7 +959,14 @@ pub fn translate_insert(
+     let statement_replace = matches!(ctx.on_conflict, ResolveType::Replace);
+     let skip_replace_indexes = has_ddl_replace && !statement_replace;
+     if has_upsert || !statement_replace {
+-        emit_commit_phase(program, resolver, &insertion, &ctx, skip_replace_indexes)?;
++        emit_commit_phase(
++            program,
++            resolver,
++            &insertion,
++            &ctx,
++            skip_replace_indexes,
++            !statement_replace && !on_replace,
++        )?;
+     }
+ 
+     resolver.register_affinities.clear();
+@@ -1379,12 +1386,17 @@ fn emit_partial_index_check(
+ // We re-check partial-index predicates against the NEW image, produce packed records,
+ // and insert into all applicable indexes, we do not re-probe uniqueness here, as preflight
+ // already guaranteed non-conflict.
++//
++// `probes_positioned`: no REPLACE deletion ran during preflight, so every
++// unique index cursor still sits where its NoConflict probe left it, which is
++// the insertion point of the new key (SQLite's OPFLAG_USESEEKRESULT).
+ fn emit_commit_phase(
+     program: &mut ProgramBuilder,
+     resolver: &Resolver,
+     insertion: &Insertion,
+     ctx: &InsertEmitCtx,
+     skip_replace_indexes: bool,
++    probes_positioned: bool,
+ ) -> Result<()> {
+     let indices: Vec<_> = resolver.with_schema(ctx.database_id, |s| {
+         s.get_indices(ctx.table.name.as_str()).cloned().collect()
+@@ -1440,7 +1452,9 @@ fn emit_commit_phase(
+             record_reg,
+             unpacked_start: Some(idx_start_reg),
+             unpacked_count: Some((num_cols + 1) as u32),
+-            flags: IdxInsertFlags::new().nchange(true),
++            flags: IdxInsertFlags::new()
++                .nchange(true)
++                .use_seek(probes_positioned && index.unique),
+         });
+ 
+         if let Some(lbl) = commit_skip_label {

@@ -23,7 +23,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tokio::sync::OnceCell;
 use tracedecay_project::project::TraceDecayOpenOptions;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::config::{GLOBAL_DB_PATH_ENV, ProfileRoot, USER_DATA_DIR_ENV};
@@ -52,10 +51,6 @@ pub mod host_sources {
         "../../../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/skill.md"
     );
 }
-
-static EMPTY_LCM_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
-static EMPTY_GLOBAL_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
-static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 
 /// Registers this process's product runtime provider with the canonical test
 /// fixture provider, so an in-process daemon handshake has a truthful binary
@@ -813,7 +808,11 @@ pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
     apply_hermetic_child_env(command, &home);
     command
         .env(USER_DATA_DIR_ENV, home.join(".tracedecay"))
-        .env(GLOBAL_DB_PATH_ENV, home.join(".tracedecay/global.db"))
+        .env(
+            GLOBAL_DB_PATH_ENV,
+            home.join(".tracedecay")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
+        )
         // A child must never inherit a socket that reaches a daemon running
         // under another profile.
         .env(
@@ -1659,170 +1658,20 @@ impl LcmTestStore<'_> {
 }
 
 pub async fn open_lcm_db(tmp: &TempDir) -> LcmTestRuntime {
-    let profile_root = tmp.path().join(".tracedecay");
-    let db_path = tracedecay_store::StoreFile::ProfileSessions.path(&profile_root);
-    if !db_path.exists() {
-        seed_lcm_db_from_template(&db_path).await;
-    }
-    LcmTestRuntime::open(&profile_root).await
+    LcmTestRuntime::open(&tmp.path().join(".tracedecay")).await
 }
 
-/// Writes an empty registered-global-schema store at `db_path` from the cached
-/// per-process template, so later opens (fixture seeding, dashboard server
-/// startup) find an existing DB and skip the full schema creation, a large
-/// fixed cost on Windows. The first call in a process pays one real schema
-/// creation to build the template; every further store is a file copy.
-pub async fn write_empty_global_db_schema(db_path: &Path) {
-    let bytes = if db_path.file_name() == Some(OsStr::new("global.db")) {
-        empty_global_db_template().await
-    } else {
-        empty_lcm_db_template().await
-    };
-    seed_database_from_template(db_path, bytes, "global").await;
-
-    // Seeding creates the parent directory under the process umask, and that
-    // parent is the caller's profile root. `load_or_create_pinned` only chmods
-    // a root it created itself, so pre-seeding silently skips the 0700
-    // restriction and `validate_private_profile_root` then fail-closes with
-    // "profile identity root ... must have permissions 0700". This is the same
-    // compensation `isolated_profile_under_home` already applies for the
-    // same reason; the seeding path needs it too.
-    #[cfg(unix)]
-    if let Some(profile_root) = db_path.parent() {
-        fs::set_permissions(profile_root, fs::Permissions::from_mode(0o700)).unwrap_or_else(
-            |err| {
-                panic!(
-                    "failed to restrict seeded test profile root '{}': {err}",
-                    profile_root.display()
-                )
-            },
-        );
-    }
-}
-
-async fn seed_lcm_db_from_template(db_path: &Path) {
-    seed_database_from_template(db_path, empty_lcm_db_template().await, "LCM").await;
-}
-
-async fn seed_database_from_template(db_path: &Path, bytes: &[u8], label: &str) {
-    if let Some(parent) = db_path.parent() {
-        fs::create_dir_all(parent).unwrap_or_else(|err| {
+/// Installs the registered profile schema under `profile_root` by opening its
+/// registered runtime once and closing it again.
+pub async fn install_profile_schema(profile_root: &Path) {
+    HostAdmissionTestRuntimeV1::profile(profile_root)
+        .await
+        .unwrap_or_else(|error| {
             panic!(
-                "failed to create {label} test DB directory '{}': {err}",
-                parent.display()
+                "failed to install the profile schema under '{}': {error}",
+                profile_root.display()
             )
         });
-    }
-    fs::write(db_path, bytes).unwrap_or_else(|err| {
-        panic!(
-            "failed to write {label} test DB template '{}': {err}",
-            db_path.display()
-        )
-    });
-}
-
-/// Opens a fresh graph-schema [`Database`] at `db_path` from a cached
-/// per-process template, skipping the full `create_schema` DDL run, a large
-/// fixed cost on Windows when a suite creates one store per test. The first
-/// call in a process pays one real `Database::initialize` to build the
-/// template; every further store is a file copy plus `Database::open`.
-pub async fn open_graph_db_from_template(db_path: &Path) -> Database {
-    let bytes = EMPTY_GRAPH_DB_TEMPLATE
-        .get_or_init(|| async {
-            let tmp = tempdir_or_panic();
-            let init_path = tmp.path().join("template-graph-init.db");
-            let snapshot_path = tmp.path().join("template-graph.db");
-            let (db, _) = initialize_test_database(&init_path)
-                .await
-                .expect("template graph db initialize");
-            db.close();
-            // The registered runtime's bounded `checkpoint` can leave a fresh
-            // schema in the WAL, so a bare file read would capture an empty (v0)
-            // database. `VACUUM INTO` writes a transactionally consistent
-            // standalone copy of the closed fixture.
-            let template_source =
-                tracedecay_sql::Connection::open(&init_path).expect("open template graph db");
-            template_source
-                .execute(
-                    "VACUUM INTO ?1",
-                    [snapshot_path.to_str().expect("utf-8 template path")],
-                )
-                .expect("template graph db snapshot");
-            drop(template_source);
-            fs::read(&snapshot_path).unwrap_or_else(|err| {
-                panic!(
-                    "failed to read graph test DB template '{}': {err}",
-                    snapshot_path.display()
-                )
-            })
-        })
-        .await;
-    if let Some(parent) = db_path.parent() {
-        fs::create_dir_all(parent).unwrap_or_else(|err| {
-            panic!(
-                "failed to create graph test DB directory '{}': {err}",
-                parent.display()
-            )
-        });
-    }
-    fs::write(db_path, bytes).unwrap_or_else(|err| {
-        panic!(
-            "failed to write graph test DB template '{}': {err}",
-            db_path.display()
-        )
-    });
-    let (db, _) = open_test_database(db_path)
-        .await
-        .unwrap_or_else(|err| panic!("failed to open templated graph db: {err}"));
-    db
-}
-
-async fn empty_lcm_db_template() -> &'static [u8] {
-    EMPTY_LCM_DB_TEMPLATE
-        .get_or_init(|| async {
-            let tmp = tempdir_or_panic();
-            let profile_root = tmp.path().join(".tracedecay");
-            let snapshot_path = tmp.path().join("template-session.db");
-            let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
-                .await
-                .expect("template session runtime open");
-            runtime
-                .snapshot_session_database_for_test(HostAdmissionScope::Profile, &snapshot_path)
-                .await
-                .expect("template session database snapshot");
-            drop(runtime);
-            fs::read(&snapshot_path).unwrap_or_else(|err| {
-                panic!(
-                    "failed to read LCM test DB template '{}': {err}",
-                    snapshot_path.display()
-                )
-            })
-        })
-        .await
-}
-
-async fn empty_global_db_template() -> &'static [u8] {
-    EMPTY_GLOBAL_DB_TEMPLATE
-        .get_or_init(|| async {
-            let tmp = tempdir_or_panic();
-            let profile_root = tmp.path().join(".tracedecay");
-            let snapshot_path = tmp.path().join("template-global.db");
-            let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
-                .await
-                .expect("template global runtime open");
-            runtime
-                .snapshot_profile_database_for_test(&snapshot_path)
-                .await
-                .expect("template global database snapshot");
-            drop(runtime);
-            fs::read(&snapshot_path).unwrap_or_else(|err| {
-                panic!(
-                    "failed to read global test DB template '{}': {err}",
-                    snapshot_path.display()
-                )
-            })
-        })
-        .await
 }
 
 pub fn session_record(

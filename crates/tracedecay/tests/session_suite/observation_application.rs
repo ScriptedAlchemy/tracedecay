@@ -37,8 +37,9 @@ const OBSERVATION_TABLES: &[&str] = &[
     "observation_projection_provenance",
     "observation_projection_checkpoints",
     "sessions",
+    // The message search index reads its rows and text from this table on
+    // both engines; `session_message_search_count` covers what it matches.
     "lcm_raw_messages",
-    "lcm_raw_messages_fts",
 ];
 
 fn source(session_id: &str) -> ObservationSourceIdentityV1 {
@@ -98,34 +99,24 @@ async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
 }
 
 async fn table_counts(runtime: &HostAdmissionTestRuntimeV1) -> Vec<i64> {
-    let snapshot = TempDir::new().unwrap();
-    let database_path = snapshot.path().join("sessions.db");
-    runtime
-        .snapshot_session_database_for_test(HostAdmissionScope::Profile, &database_path)
-        .await
-        .unwrap();
-    let conn = tracedecay_sql::Connection::open(database_path).unwrap();
-    OBSERVATION_TABLES
-        .iter()
-        .map(|table| {
-            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), (), |row| {
-                row.get(0)
-            })
-            .unwrap()
-        })
-        .collect()
+    let mut counts = Vec::with_capacity(OBSERVATION_TABLES.len());
+    for table in OBSERVATION_TABLES {
+        let rows = runtime
+            .read_session_database_for_test(
+                HostAdmissionScope::Profile,
+                &format!("SELECT COUNT(*) FROM {table}"),
+            )
+            .await
+            .unwrap();
+        counts.push(rows[0].get(0).unwrap());
+    }
+    counts
 }
 
 async fn durable_text(runtime: &HostAdmissionTestRuntimeV1) -> Vec<String> {
-    let snapshot = TempDir::new().unwrap();
-    let database_path = snapshot.path().join("sessions.db");
     runtime
-        .snapshot_session_database_for_test(HostAdmissionScope::Profile, &database_path)
-        .await
-        .unwrap();
-    let conn = tracedecay_sql::Connection::open(database_path).unwrap();
-    let mut statement = conn
-        .prepare(
+        .read_session_database_for_test(
+            HostAdmissionScope::Profile,
             "SELECT observation_json FROM observations
              UNION ALL SELECT receipt_json FROM sanitization_receipts
              UNION ALL SELECT source_json || scope_json || cursor_json FROM source_cursors
@@ -142,16 +133,13 @@ async fn durable_text(runtime: &HostAdmissionTestRuntimeV1) -> Vec<String> {
              UNION ALL SELECT provider || message_id || session_id || role ||
                  COALESCE(content, placeholder_text, '') ||
                  COALESCE(kind, '') || COALESCE(model, '') || COALESCE(tool_names, '') ||
-                 COALESCE(metadata_json, '') FROM lcm_raw_messages
-             UNION ALL SELECT index_text || role || COALESCE(kind, '') || COALESCE(model, '') ||
-                 COALESCE(tool_names, '') FROM lcm_raw_messages_fts",
+                 COALESCE(metadata_json, '') || COALESCE(index_text, '') FROM lcm_raw_messages",
         )
-        .unwrap();
-    statement
-        .query_map((), |row| row.get(0))
+        .await
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
+        .iter()
+        .map(|row| row.get(0).unwrap())
+        .collect()
 }
 
 async fn session_message_search_count(

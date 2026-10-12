@@ -457,8 +457,11 @@ mod tests {
         std::fs::create_dir_all(store_root.join("payloads")).unwrap();
         let debris = store_root.join("sessions.db.corrupt-incident");
         let scratch = store_root.join("recovery-scratch-incident");
-        let live = store_root.join("sessions.db");
-        let live_wal = store_root.join("sessions.db-wal");
+        let live = store_root.join(tracedecay_store::StoreFile::ProjectSessions.file_name());
+        let live_wal = store_root.join(format!(
+            "{}-wal",
+            tracedecay_store::StoreFile::ProjectSessions.file_name()
+        ));
         std::fs::write(&debris, b"debris payload").unwrap();
         std::fs::write(&scratch, b"scratch").unwrap();
         std::fs::write(&live, b"live database").unwrap();
@@ -545,7 +548,9 @@ mod tests {
         let profile = tempfile::tempdir().unwrap();
         let store_root = profile.path().join("stores/store.debris");
         std::fs::create_dir_all(store_root.join("live")).unwrap();
-        let live = store_root.join("live/tracedecay.db");
+        let live = store_root
+            .join("live")
+            .join(tracedecay_store::StoreFile::Project.file_name());
         std::fs::write(&live, b"live database").unwrap();
         std::os::unix::fs::symlink(store_root.join("live"), store_root.join("branches")).unwrap();
 

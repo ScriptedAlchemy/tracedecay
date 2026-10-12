@@ -590,7 +590,7 @@ fn store_owner_key_collapses_profile_and_store_aliases() {
 
     let direct = store_owner_key_from_paths(
         &profile,
-        &profile.join("global.db"),
+        &profile.join(tracedecay_store::StoreFile::Profile.file_name()),
         Some("project-id".to_string()),
         &store,
         &store.join("graph.db"),
@@ -598,7 +598,7 @@ fn store_owner_key_collapses_profile_and_store_aliases() {
     .expect("direct owner");
     let aliased = store_owner_key_from_paths(
         &profile_alias,
-        &profile_alias.join("global.db"),
+        &profile_alias.join(tracedecay_store::StoreFile::Profile.file_name()),
         Some("project-id".to_string()),
         &store_alias,
         &store_alias.join("graph.db"),
@@ -625,7 +625,7 @@ fn parallel_client_instances_share_one_engine_but_scope_and_profile_do_not() {
 
     let owner = store_owner_key_from_paths(
         &profile,
-        &profile.join("global.db"),
+        &profile.join(tracedecay_store::StoreFile::Profile.file_name()),
         Some("project-id".to_string()),
         &store,
         &store.join("graph.db"),
@@ -677,7 +677,7 @@ fn parallel_client_instances_share_one_engine_but_scope_and_profile_do_not() {
 
     let other_owner = store_owner_key_from_paths(
         &other_profile,
-        &other_profile.join("global.db"),
+        &other_profile.join(tracedecay_store::StoreFile::Profile.file_name()),
         Some("project-id".to_string()),
         &store,
         &store.join("graph.db"),
@@ -703,7 +703,8 @@ fn parallel_client_instances_share_one_engine_but_scope_and_profile_do_not() {
 fn database_owner_registry_rekeys_and_evicts_stale_routes() {
     let owner = StoreOwnerKey {
         profile_root: PathBuf::from("/profile"),
-        global_db_path: PathBuf::from("/profile/global.db"),
+        global_db_path: PathBuf::from("/profile")
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_id: Some("project".to_string()),
         store_root: PathBuf::from("/store"),
         graph_db_path: PathBuf::from("/store/main.db"),
@@ -722,7 +723,8 @@ fn database_owner_registry_rekeys_and_evicts_stale_routes() {
     };
     let route = ProjectRouteKey {
         profile_root: PathBuf::from("/profile"),
-        global_db_path: PathBuf::from("/profile/global.db"),
+        global_db_path: PathBuf::from("/profile")
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_path: PathBuf::from("/project"),
         scope_prefix: Some("src".to_string()),
     };
@@ -818,7 +820,8 @@ async fn failed_rekey_cancels_the_route_waiters_but_not_project_open() {
 fn database_owner_registry_race_keeps_first_server_and_binds_route() {
     let owner = StoreOwnerKey {
         profile_root: PathBuf::from("/profile"),
-        global_db_path: PathBuf::from("/profile/global.db"),
+        global_db_path: PathBuf::from("/profile")
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_id: Some("project".to_string()),
         store_root: PathBuf::from("/store"),
         graph_db_path: PathBuf::from("/store/main.db"),
@@ -830,7 +833,8 @@ fn database_owner_registry_race_keeps_first_server_and_binds_route() {
     };
     let route = ProjectRouteKey {
         profile_root: PathBuf::from("/profile"),
-        global_db_path: PathBuf::from("/profile/global.db"),
+        global_db_path: PathBuf::from("/profile")
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_path: PathBuf::from("/project-alias"),
         scope_prefix: None,
     };
@@ -850,7 +854,8 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
         ProjectServerKey {
             owner: StoreOwnerKey {
                 profile_root: PathBuf::from("/profile"),
-                global_db_path: PathBuf::from("/profile/global.db"),
+                global_db_path: PathBuf::from("/profile")
+                    .join(tracedecay_store::StoreFile::Profile.file_name()),
                 project_id: Some(name.to_string()),
                 store_root: PathBuf::from(format!("/store/{name}")),
                 graph_db_path: PathBuf::from(format!("/store/{name}/graph.db")),
@@ -863,7 +868,8 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
     fn route(name: &str) -> ProjectRouteKey {
         ProjectRouteKey {
             profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
+            global_db_path: PathBuf::from("/profile")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_path: PathBuf::from(format!("/project/{name}")),
             scope_prefix: None,
         }
@@ -999,7 +1005,8 @@ fn database_owner_registry_hides_bounded_insert_until_core_publication() {
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
+            global_db_path: PathBuf::from("/profile")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("pending".to_owned()),
             store_root: PathBuf::from("/store/pending"),
             graph_db_path: PathBuf::from("/store/pending/graph.db"),
@@ -1009,7 +1016,8 @@ fn database_owner_registry_hides_bounded_insert_until_core_publication() {
     };
     let route = ProjectRouteKey {
         profile_root: PathBuf::from("/profile"),
-        global_db_path: PathBuf::from("/profile/global.db"),
+        global_db_path: PathBuf::from("/profile")
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_path: PathBuf::from("/project/pending"),
         scope_prefix: None,
     };
@@ -1041,7 +1049,8 @@ async fn graph_pressure_retires_only_settled_response_idle_owners() {
         ProjectServerKey {
             owner: StoreOwnerKey {
                 profile_root: PathBuf::from("/profile"),
-                global_db_path: PathBuf::from("/profile/global.db"),
+                global_db_path: PathBuf::from("/profile")
+                    .join(tracedecay_store::StoreFile::Profile.file_name()),
                 project_id: Some(name.to_owned()),
                 store_root: PathBuf::from(format!("/store/{name}")),
                 graph_db_path: PathBuf::from(format!("/store/{name}/graph.db")),
@@ -1054,7 +1063,8 @@ async fn graph_pressure_retires_only_settled_response_idle_owners() {
     fn route(name: &str) -> ProjectRouteKey {
         ProjectRouteKey {
             profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
+            global_db_path: PathBuf::from("/profile")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_path: PathBuf::from(format!("/project/{name}")),
             scope_prefix: None,
         }
@@ -1197,7 +1207,8 @@ fn database_owner_registry_upgrades_only_the_published_core_and_preserves_aliase
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
+            global_db_path: PathBuf::from("/profile")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("upgrade".to_owned()),
             store_root: PathBuf::from("/store/upgrade"),
             graph_db_path: PathBuf::from("/store/upgrade/graph.db"),
@@ -1207,7 +1218,8 @@ fn database_owner_registry_upgrades_only_the_published_core_and_preserves_aliase
     };
     let route = |project_path: &str| ProjectRouteKey {
         profile_root: PathBuf::from("/profile"),
-        global_db_path: PathBuf::from("/profile/global.db"),
+        global_db_path: PathBuf::from("/profile")
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_path: PathBuf::from(project_path),
         scope_prefix: None,
     };
@@ -1272,7 +1284,8 @@ fn database_owner_registry_removal_retires_every_route_alias() {
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
+            global_db_path: PathBuf::from("/profile")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("unhealthy".to_owned()),
             store_root: PathBuf::from("/store/unhealthy"),
             graph_db_path: PathBuf::from("/store/unhealthy/graph.db"),
@@ -1282,7 +1295,8 @@ fn database_owner_registry_removal_retires_every_route_alias() {
     };
     let route = |project_path: &str| ProjectRouteKey {
         profile_root: PathBuf::from("/profile"),
-        global_db_path: PathBuf::from("/profile/global.db"),
+        global_db_path: PathBuf::from("/profile")
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_path: PathBuf::from(project_path),
         scope_prefix: None,
     };
@@ -1300,7 +1314,8 @@ fn failed_core_upgrade_retires_the_rekeyed_owner_without_quarantine() {
     let old = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
+            global_db_path: PathBuf::from("/profile")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("upgrade-failure".to_owned()),
             store_root: PathBuf::from("/store/upgrade-failure"),
             graph_db_path: PathBuf::from("/store/upgrade-failure/main.db"),
@@ -1312,7 +1327,8 @@ fn failed_core_upgrade_retires_the_rekeyed_owner_without_quarantine() {
     new.owner.graph_db_path = PathBuf::from("/store/upgrade-failure/feature.db");
     let route = ProjectRouteKey {
         profile_root: PathBuf::from("/profile"),
-        global_db_path: PathBuf::from("/profile/global.db"),
+        global_db_path: PathBuf::from("/profile")
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_path: PathBuf::from("/project"),
         scope_prefix: None,
     };
@@ -1329,7 +1345,8 @@ fn failed_optional_upgrade_restores_the_ready_core() {
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
+            global_db_path: PathBuf::from("/profile")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("degraded-upgrade".to_owned()),
             store_root: PathBuf::from("/store/degraded-upgrade"),
             graph_db_path: PathBuf::from("/store/degraded-upgrade/main.db"),
@@ -1339,7 +1356,8 @@ fn failed_optional_upgrade_restores_the_ready_core() {
     };
     let route = ProjectRouteKey {
         profile_root: PathBuf::from("/profile"),
-        global_db_path: PathBuf::from("/profile/global.db"),
+        global_db_path: PathBuf::from("/profile")
+            .join(tracedecay_store::StoreFile::Profile.file_name()),
         project_path: PathBuf::from("/project"),
         scope_prefix: None,
     };
@@ -1374,7 +1392,8 @@ async fn project_rekey_awaits_stale_automation_owner_before_replacement() {
     let old = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
+            global_db_path: PathBuf::from("/profile")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("project".to_string()),
             store_root: PathBuf::from("/store"),
             graph_db_path: PathBuf::from("/store/old.db"),
@@ -1417,7 +1436,8 @@ async fn shutdown_waits_for_blocked_automation_retirement_reaper_and_is_idempote
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
+            global_db_path: PathBuf::from("/profile")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("project".to_string()),
             store_root: PathBuf::from("/store"),
             graph_db_path: PathBuf::from("/store/automation.db"),
@@ -1503,7 +1523,8 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
     let old = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
+            global_db_path: PathBuf::from("/profile")
+                .join(tracedecay_store::StoreFile::Profile.file_name()),
             project_id: Some("project".to_string()),
             store_root: PathBuf::from("/store"),
             graph_db_path: PathBuf::from("/store/old.db"),
