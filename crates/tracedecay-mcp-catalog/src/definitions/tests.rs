@@ -521,3 +521,17 @@ mod search_schema_tests {
         );
     }
 }
+
+#[test]
+fn every_catalog_tool_has_a_category() {
+    let unclassified: Vec<String> = get_tool_definitions()
+        .expect("tool definitions")
+        .into_iter()
+        .filter(|definition| crate::ToolCategory::of(&definition.name).is_none())
+        .map(|definition| definition.name)
+        .collect();
+    assert!(
+        unclassified.is_empty(),
+        "unclassified tools: {unclassified:?}"
+    );
+}
