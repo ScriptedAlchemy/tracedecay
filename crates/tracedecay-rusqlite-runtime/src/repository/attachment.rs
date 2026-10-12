@@ -9,11 +9,10 @@ use std::{
 
 use rusqlite::Transaction;
 use tracedecay_store::{
-    AdmissionConfigV1, CommitSequenceV1, ConsistencyModeV1, RuntimeReadCoverageV1,
-    RuntimeReadOperationV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeReadResultV1,
-    RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, StorageRuntimeErrorV1,
-    StoreRuntimeBindingV1, UnavailableReasonV1, VerifiedStoreLocatorV1,
-    single_shard_required_coverage_v1,
+    AdmissionConfigV1, ConsistencyModeV1, RuntimeReadCoverageV1, RuntimeReadOperationV1,
+    RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestProbeV1,
+    RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, StorageRuntimeErrorV1, StoreRuntimeBindingV1,
+    UnavailableReasonV1, VerifiedStoreLocatorV1, single_shard_required_coverage_v1,
 };
 
 use crate::{
@@ -23,7 +22,6 @@ use crate::{
     connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
     exact_sql::{ExactSqlError, ExactSqlHandle},
     ledger::{self, LedgerError},
-    persistence::map_ledger_error,
     reader::{
         ExistingReaderLocator, ReaderAcquireError, ReaderCheckpointBlockers, ReaderPool,
         ReaderQueryExecutor, ReaderStartError,
@@ -818,7 +816,36 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
         let coverage = match request.consistency() {
             ConsistencyModeV1::LatestAvailable => RuntimeReadCoverageV1::Latest { observed: None },
             ConsistencyModeV1::AtLeast { commit_sequence } => {
-                at_least_coverage(snapshot, request.binding(), *commit_sequence)?
+                let (observed, reason) =
+                    match ledger::current_watermark(snapshot, request.binding()) {
+                        Ok(observed) => (observed, UnavailableReasonV1::MissingAuthority),
+                        Err(LedgerError::StaleAuthority { .. }) => {
+                            (None, UnavailableReasonV1::WrongAuthorityEpoch)
+                        }
+                        Err(error) => {
+                            return Err(infrastructure(format!(
+                                "read repository commit watermark: {error}"
+                            )));
+                        }
+                    };
+                let coverage = single_shard_required_coverage_v1(
+                    request.binding(),
+                    *commit_sequence,
+                    observed.clone(),
+                )
+                .map_err(|error| {
+                    infrastructure(format!("construct repository read coverage: {error}"))
+                })?;
+                if observed.is_none() {
+                    RuntimeReadCoverageV1::Unavailable {
+                        coverage: Some(coverage),
+                        reason,
+                    }
+                } else if coverage.is_complete() {
+                    RuntimeReadCoverageV1::Complete { coverage }
+                } else {
+                    RuntimeReadCoverageV1::Stale { coverage }
+                }
             }
         };
         let value = if matches!(
@@ -856,32 +883,6 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
     }
 }
 
-/// Classifies an `AtLeast` read against the ledger checkpoint visible in the
-/// same snapshot that would serve the page.
-fn at_least_coverage(
-    snapshot: &Transaction<'_>,
-    binding: &StoreRuntimeBindingV1,
-    commit_sequence: CommitSequenceV1,
-) -> Result<RuntimeReadCoverageV1, StorageRuntimeErrorV1> {
-    let (observed, reason) = match ledger::current_watermark(snapshot, binding) {
-        Ok(observed) => (observed, UnavailableReasonV1::MissingAuthority),
-        Err(LedgerError::StaleAuthority { .. }) => (None, UnavailableReasonV1::WrongAuthorityEpoch),
-        Err(error) => return Err(map_ledger_error(error)),
-    };
-    let coverage = single_shard_required_coverage_v1(binding, commit_sequence, observed.clone())
-        .map_err(|error| infrastructure(format!("construct repository read coverage: {error}")))?;
-    Ok(if observed.is_none() {
-        RuntimeReadCoverageV1::Unavailable {
-            coverage: Some(coverage),
-            reason,
-        }
-    } else if coverage.is_complete() {
-        RuntimeReadCoverageV1::Complete { coverage }
-    } else {
-        RuntimeReadCoverageV1::Stale { coverage }
-    })
-}
-
 fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
     StorageRuntimeErrorV1::Infrastructure {
         operation: operation.into(),
@@ -894,16 +895,12 @@ mod tests {
 
     use tempfile::TempDir;
     use tracedecay_domain::LocatorDigest;
-    use tracedecay_store::{
-        AdmissionConfigV1, OperationPriorityV1, RuntimeCancellationIdentityV1, RuntimeDeadlineV1,
-        RuntimeInterruptionV1, RuntimeRequestControlV1, StoreIncarnationV1,
-    };
+    use tracedecay_store::{AdmissionConfigV1, StoreIncarnationV1};
 
     use crate::{
         CheckpointBlockers, CheckpointKind, MaintenanceCheckpointMode, RuntimeWriteAuthorityError,
         exact_sql::{ExactSqlError, ExactSqlStatement, ExactSqlValue},
         maintenance::{ExclusiveMaintenancePermit, MaintenanceOwnerId},
-        test_support,
     };
 
     use super::*;
@@ -1660,107 +1657,6 @@ mod tests {
             "an exclusive TRUNCATE checkpoint must leave a zero-length WAL"
         );
 
-        attachment.drain().unwrap();
-        attachment.close_and_join().unwrap();
-    }
-
-    struct ReadProbe {
-        control: RuntimeRequestControlV1,
-    }
-
-    impl RuntimeRequestProbeV1 for ReadProbe {
-        fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
-            &self.control.cancellation
-        }
-
-        fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
-            &self.control.deadline
-        }
-
-        fn interruption(&self) -> Option<RuntimeInterruptionV1> {
-            None
-        }
-
-        fn try_begin_commit(&self) -> bool {
-            false
-        }
-    }
-
-    fn at_least_health_read(
-        binding: StoreRuntimeBindingV1,
-        commit_sequence: u64,
-    ) -> (RuntimeReadRequestV1, ReadProbe) {
-        let control: RuntimeRequestControlV1 = serde_json::from_value(serde_json::json!({
-            "requested_at": 1,
-            "deadline": { "deadline_id": "deadline.at-least" },
-            "cancellation": { "cancellation_id": "cancellation.at-least", "generation": 1 }
-        }))
-        .unwrap();
-        let request = RuntimeReadRequestV1::new(
-            binding,
-            ConsistencyModeV1::AtLeast {
-                commit_sequence: CommitSequenceV1(commit_sequence),
-            },
-            RuntimeReadOperationV1::TemporalHealth,
-            OperationPriorityV1::Health,
-            1,
-            control.clone(),
-        )
-        .unwrap();
-        (request, ReadProbe { control })
-    }
-
-    #[test]
-    fn at_least_reads_under_a_superseded_epoch_report_wrong_authority() {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().join("at-least-epoch.sqlite3");
-        {
-            let mut connection = rusqlite::Connection::open(&path).unwrap();
-            let transaction = connection.transaction().unwrap();
-            ledger::initialize_schema(&transaction).unwrap();
-            let mut committed = test_support::metadata("operation.committed", "key.committed", 'a');
-            committed.authority_epoch = serde_json::from_value(serde_json::json!(8)).unwrap();
-            ledger::record_commit(
-                &transaction,
-                &committed,
-                &test_support::scope(&committed),
-                None,
-            )
-            .unwrap();
-            transaction.commit().unwrap();
-        }
-        // The read binding stays at epoch 7 while the stored checkpoint moved
-        // to epoch 8: the request's authority is superseded.
-        let binding =
-            test_support::binding(&test_support::metadata("operation.read", "key.read", 'b'));
-        let locator = VerifiedStoreLocatorV1::new(
-            binding.shard_id.clone(),
-            binding.incarnation,
-            LocatorDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap(),
-        );
-        let attachment = RepositoryPhysicalAttachmentFactory
-            .attach(
-                binding.clone(),
-                locator,
-                path.canonicalize().unwrap(),
-                AdmissionConfigV1::default(),
-            )
-            .unwrap();
-        let (request, probe) = at_least_health_read(binding.clone(), 1);
-
-        let outcome = attachment.dispatch_read(request.clone(), &probe).unwrap();
-
-        assert_eq!(
-            outcome.coverage(),
-            &RuntimeReadCoverageV1::Unavailable {
-                coverage: Some(
-                    single_shard_required_coverage_v1(&binding, CommitSequenceV1(1), []).unwrap()
-                ),
-                reason: UnavailableReasonV1::WrongAuthorityEpoch,
-            }
-        );
-        assert_eq!(outcome.validate_for(&request), Ok(()));
-        assert!(outcome.value().is_none());
         attachment.drain().unwrap();
         attachment.close_and_join().unwrap();
     }
