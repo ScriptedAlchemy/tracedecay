@@ -585,30 +585,8 @@ impl HostIntegrationCatalogV1 {
         &self.capabilities
     }
 
-    pub fn stock_host_capabilities(&self, host: HostKindV1) -> &[HostCapabilityRecordV1; 5] {
-        match host {
-            HostKindV1::ClaudeCode => &STOCK_HOST_CAPABILITIES[0],
-            HostKindV1::CursorDesktop => &STOCK_HOST_CAPABILITIES[1],
-            HostKindV1::CursorCloud => &STOCK_HOST_CAPABILITIES[2],
-            HostKindV1::Codex => &STOCK_HOST_CAPABILITIES[3],
-            HostKindV1::Hermes => &STOCK_HOST_CAPABILITIES[4],
-            HostKindV1::Kiro => &STOCK_HOST_CAPABILITIES[5],
-            HostKindV1::ClineFamily => &STOCK_HOST_CAPABILITIES[6],
-            HostKindV1::Cline => &STOCK_HOST_CAPABILITIES[7],
-            HostKindV1::RooCode => &STOCK_HOST_CAPABILITIES[8],
-            HostKindV1::Kilo => &STOCK_HOST_CAPABILITIES[9],
-            HostKindV1::KimiCode => &STOCK_HOST_CAPABILITIES[10],
-            HostKindV1::OpenCode => &STOCK_HOST_CAPABILITIES[11],
-            HostKindV1::Gemini => &STOCK_HOST_CAPABILITIES[12],
-            HostKindV1::Copilot => &STOCK_HOST_CAPABILITIES[13],
-            HostKindV1::Devin => &STOCK_HOST_CAPABILITIES[14],
-            HostKindV1::Zed => &STOCK_HOST_CAPABILITIES[15],
-            HostKindV1::Antigravity => &STOCK_HOST_CAPABILITIES[16],
-            HostKindV1::Vibe => &STOCK_HOST_CAPABILITIES[17],
-            HostKindV1::Pi => &STOCK_HOST_CAPABILITIES[18],
-            HostKindV1::FactoryDroid => &STOCK_HOST_CAPABILITIES[19],
-            HostKindV1::ChatGpt => &STOCK_HOST_CAPABILITIES[20],
-        }
+    pub const fn stock_host_capabilities(&self, host: HostKindV1) -> [HostCapabilityRecordV1; 5] {
+        canonical_stock_host_capabilities(host)
     }
 
     pub fn stock_host_capability_views(&self) -> Vec<StockHostCapabilityViewV1> {
@@ -616,7 +594,7 @@ impl HostIntegrationCatalogV1 {
             .into_iter()
             .map(|host| StockHostCapabilityViewV1 {
                 host,
-                capabilities: *self.stock_host_capabilities(host),
+                capabilities: self.stock_host_capabilities(host),
             })
             .collect()
     }
@@ -639,7 +617,7 @@ impl HostIntegrationCatalogV1 {
     pub fn host_capability_digest(&self, host: HostKindV1) -> Result<[u8; 32], DomainError> {
         canonical_json_bytes(&StockHostCapabilityViewV1 {
             host,
-            capabilities: *self.stock_host_capabilities(host),
+            capabilities: self.stock_host_capabilities(host),
         })
         .map(|bytes| Sha256::digest(bytes).into())
     }
@@ -698,30 +676,6 @@ impl HostIntegrationCatalogV1 {
     }
 }
 
-const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 21] = [
-    canonical_stock_host_capabilities(HostKindV1::ClaudeCode),
-    canonical_stock_host_capabilities(HostKindV1::CursorDesktop),
-    canonical_stock_host_capabilities(HostKindV1::CursorCloud),
-    canonical_stock_host_capabilities(HostKindV1::Codex),
-    canonical_stock_host_capabilities(HostKindV1::Hermes),
-    canonical_stock_host_capabilities(HostKindV1::Kiro),
-    canonical_stock_host_capabilities(HostKindV1::ClineFamily),
-    canonical_stock_host_capabilities(HostKindV1::Cline),
-    canonical_stock_host_capabilities(HostKindV1::RooCode),
-    canonical_stock_host_capabilities(HostKindV1::Kilo),
-    canonical_stock_host_capabilities(HostKindV1::KimiCode),
-    canonical_stock_host_capabilities(HostKindV1::OpenCode),
-    canonical_stock_host_capabilities(HostKindV1::Gemini),
-    canonical_stock_host_capabilities(HostKindV1::Copilot),
-    canonical_stock_host_capabilities(HostKindV1::Devin),
-    canonical_stock_host_capabilities(HostKindV1::Zed),
-    canonical_stock_host_capabilities(HostKindV1::Antigravity),
-    canonical_stock_host_capabilities(HostKindV1::Vibe),
-    canonical_stock_host_capabilities(HostKindV1::Pi),
-    canonical_stock_host_capabilities(HostKindV1::FactoryDroid),
-    canonical_stock_host_capabilities(HostKindV1::ChatGpt),
-];
-
 #[derive(Serialize)]
 struct HostIntegrationCatalogAuthorityPayloadV1<'a> {
     observation_catalog: &'a HostIntegrationCatalogV1,
@@ -729,7 +683,7 @@ struct HostIntegrationCatalogAuthorityPayloadV1<'a> {
 }
 
 pub fn stock_host_capabilities(host: HostKindV1) -> [HostCapabilityRecordV1; 5] {
-    *host_integration_catalog_v1().stock_host_capabilities(host)
+    canonical_stock_host_capabilities(host)
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]

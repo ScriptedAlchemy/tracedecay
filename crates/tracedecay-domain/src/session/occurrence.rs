@@ -83,8 +83,6 @@ pub enum SessionContractError {
     NoncontiguousDerivedEvidenceOrdinals,
     #[error("derived evidence endpoints do not match the ordered manifest")]
     DerivedEvidenceEndpointMismatch,
-    #[error("derived evidence session identity mismatches its members")]
-    DerivedEvidenceSessionMismatch,
     #[error("derived evidence authority must be derived_projection")]
     DerivedEvidenceAuthorityMismatch,
 }
