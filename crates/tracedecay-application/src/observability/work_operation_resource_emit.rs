@@ -7,8 +7,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityEmissionOutcomeV1,
-    ObservabilityProducerIdentityV1, WorkOwnerObservationResultV1, execution_owner_fact_envelope,
+    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityProducerIdentityV1,
+    WorkOwnerObservationResultV1, execution_owner_fact_envelope,
 };
 
 /// Offers one resource receipt only for the exact persisted terminal attempt.
@@ -40,13 +40,7 @@ pub fn record_work_operation_resource(
         Ok(envelope) => envelope,
         Err(_) => return WorkOwnerObservationResultV1::Unavailable,
     };
-    match producer.try_emit_owner_fact(envelope) {
-        Ok(ObservabilityEmissionOutcomeV1::Enqueued) => WorkOwnerObservationResultV1::Enqueued,
-        Ok(ObservabilityEmissionOutcomeV1::DroppedAtCapacity) => {
-            WorkOwnerObservationResultV1::DroppedAtCapacity
-        }
-        Err(_) => WorkOwnerObservationResultV1::Unavailable,
-    }
+    super::work_retry_leak_emit::offer(producer, envelope)
 }
 
 fn work_operation_resource_observation_envelope(

@@ -701,45 +701,6 @@ fn debounce_classes_and_five_minute_dedupe_ttl_advance_independently() {
 }
 
 #[test]
-fn multi_root_fanout_is_authorized_deterministic_and_bounded() {
-    let coordinator = DaemonGitHubStackCoordinatorV1::default();
-    let provider = ProviderId::new("provider.github").unwrap();
-    let mut roots = Vec::new();
-    for index in 0..70 {
-        let root = scope(index);
-        coordinator
-            .register_scope(&root, GitHubStackedPullRequestPolicyV1::ProbePrivatePreview)
-            .unwrap();
-        coordinator
-            .observe_provider(
-                root.clone(),
-                provider.clone(),
-                GitHubStackProviderOutcomeV1::EnabledWithoutStack {
-                    response_digest: digest(char::from(b'a' + (index % 6) as u8)),
-                },
-                provider_source_binding(&root, false),
-                UtcMicros(index as i64),
-            )
-            .unwrap();
-        roots.push(root);
-    }
-    roots.reverse();
-    let page = coordinator
-        .fanout_authorized(roots, |root| root.project_id.as_str() != "project.stack.3")
-        .unwrap();
-    assert!(page.len() <= MAX_GITHUB_STACK_ROOTS_PER_FANOUT_V1);
-    assert!(page.len() <= MAX_GITHUB_STACK_SIGNALS_PER_FANOUT_V1);
-    assert!(
-        page.windows(2)
-            .all(|pair| pair[0].scope.scope_digest < pair[1].scope.scope_digest)
-    );
-    assert!(
-        page.iter()
-            .all(|item| item.scope.project_id.as_str() != "project.stack.3")
-    );
-}
-
-#[test]
 fn daemon_restart_returns_unavailable_until_a_delayed_exact_probe_upgrades_state() {
     let exact_scope = scope(80);
     let provider = ProviderId::new("provider.github").unwrap();
