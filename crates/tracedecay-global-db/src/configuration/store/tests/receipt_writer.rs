@@ -26,7 +26,7 @@ use tracedecay_store::{
 
 use super::super::revision::insert_revision;
 use super::super::{ConfigurationStoreError, GlobalDbConfigurationControlStore};
-use super::{id, root_revision};
+use super::{id, protected_commit, root_revision, source_binding_snapshot};
 use crate::registered::RegisteredGlobalDb;
 use crate::tests::harness::open_registered_test_database_fixture;
 
@@ -661,5 +661,186 @@ async fn outbox_enqueue_dispatch_and_acknowledge_commit_through_the_registry() {
     assert_eq!(
         count_rows(&db, "SELECT COUNT(*) FROM td_runtime_writer_outbox_v1").await,
         1
+    );
+}
+
+/// A repository commit lands the same immutable projections the global-db
+/// writer writes: a snapshot carrying source bindings leaves a
+/// `configuration_source_bindings` row for the new revision.
+#[tokio::test]
+async fn repository_commit_writes_configuration_projection_rows() {
+    let root = root_revision();
+    let (_directory, db, _owner) = publish_profile("profile-projections.db").await;
+    seed_root(&db, &root).await;
+    let mut commit = child_commit(&root, "projected");
+    commit.next_revision.snapshot = source_binding_snapshot(&commit.next_revision.revision_id);
+    let request = submit_request(
+        db.binding(),
+        "operation.configuration.projected",
+        "key.configuration.projected",
+        21,
+        RepositoryWritePayloadV1::Configuration(Box::new(commit.clone())),
+    );
+    let outcome = dispatch(&db, request)
+        .await
+        .unwrap_or_else(|error| panic!("repository projected commit failed: {error:?}"));
+    require_committed(outcome, "repository projected commit");
+
+    assert_eq!(
+        i64_cell(
+            &db,
+            "SELECT COUNT(*) FROM configuration_source_bindings WHERE revision_id = ?1",
+            commit.next_revision.revision_id.as_str(),
+        )
+        .await,
+        1,
+        "the repository writer projects the snapshot's source bindings"
+    );
+    let binding_id = text_cell(
+        &db,
+        "SELECT binding_id FROM configuration_source_bindings WHERE revision_id = ?1",
+        commit.next_revision.revision_id.as_str(),
+    )
+    .await;
+    assert_eq!(binding_id, "binding.authoritative.fixture");
+    assert_eq!(
+        text_cell(
+            &db,
+            "SELECT authority_kind FROM configuration_source_bindings WHERE revision_id = ?1",
+            commit.next_revision.revision_id.as_str(),
+        )
+        .await,
+        "project"
+    );
+}
+
+/// A malformed stored activation row must stop the desired-state advance
+/// instead of being copied into a new event: both writers fail typed and
+/// leave no revision behind.
+#[tokio::test]
+async fn both_writers_reject_a_malformed_stored_activation_row() {
+    let root = root_revision();
+    let (_directory, db, _owner) = publish_profile("profile-corrupt-activation.db").await;
+    seed_root(&db, &root).await;
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .expect("corrupt row transaction");
+    transaction
+        .execute(
+            "INSERT INTO configuration_component_activation_events (
+                component, desired_revision_id, observed_revision_id,
+                last_working_revision_id, restart_required, activation_error_code, occurred_at
+             ) VALUES ('corrupt ', ?1, NULL, NULL, 0, NULL, 2)",
+            params![root.revision_id.as_str()],
+        )
+        .await
+        .expect("seed corrupt activation row");
+    transaction.commit().await.expect("commit corrupt row");
+
+    let commit = child_commit(&root, "corrupt-advance");
+    let request = submit_request(
+        db.binding(),
+        "operation.configuration.corrupt-advance",
+        "key.configuration.corrupt-advance",
+        22,
+        RepositoryWritePayloadV1::Configuration(Box::new(commit.clone())),
+    );
+    let error = dispatch(&db, request)
+        .await
+        .expect_err("a malformed stored activation row must fail the commit");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("component name"),
+        "malformed stored activation reported: {rendered}"
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_revisions").await,
+        1,
+        "the rejected commit leaves no revision row"
+    );
+    assert_eq!(
+        count_rows(
+            &db,
+            "SELECT COUNT(*) FROM configuration_component_activation_events WHERE component = 'corrupt '",
+        )
+        .await,
+        1,
+        "the malformed row is not propagated into a new event"
+    );
+
+    let store_error = GlobalDbConfigurationControlStore::new_registered(&db)
+        .commit(commit)
+        .await
+        .expect_err("the global-db writer fails the same malformed row");
+    assert!(
+        matches!(store_error, ConfigurationStoreError::InvalidData(_)),
+        "global-db reports the malformed row as invalid data: {store_error}"
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_revisions").await,
+        1
+    );
+}
+
+/// The repository writer binds a plan commit to the stored plan: a commit
+/// naming a plan that was never saved is stale and writes nothing; once the
+/// plan exists, the same commit lands and appends its terminal event.
+#[tokio::test]
+async fn repository_commit_requires_the_stored_change_plan() {
+    let root = root_revision();
+    let (_directory, db, _owner) = publish_profile("profile-plan-binding.db").await;
+    seed_root(&db, &root).await;
+    let (plan_record, commit) = protected_commit(&root);
+
+    let request = submit_request(
+        db.binding(),
+        "operation.configuration.stale-plan",
+        "key.configuration.stale-plan",
+        23,
+        RepositoryWritePayloadV1::Configuration(Box::new(commit.clone())),
+    );
+    let error = dispatch(&db, request)
+        .await
+        .expect_err("a commit naming an unsaved plan is stale");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("stale"),
+        "unsaved plan reported: {rendered}"
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_revisions").await,
+        1
+    );
+
+    let store = GlobalDbConfigurationControlStore::new_registered(&db);
+    ConfigurationRevisionStore::save_change_plan(&store, &plan_record)
+        .await
+        .expect("save the plan the commit names");
+    let request = submit_request(
+        db.binding(),
+        "operation.configuration.bound-plan",
+        "key.configuration.bound-plan",
+        24,
+        RepositoryWritePayloadV1::Configuration(Box::new(commit.clone())),
+    );
+    let outcome = dispatch(&db, request)
+        .await
+        .unwrap_or_else(|error| panic!("bound plan commit failed: {error:?}"));
+    require_committed(outcome, "bound plan commit");
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_revisions").await,
+        2
+    );
+    assert_eq!(
+        text_cell(
+            &db,
+            "SELECT event_kind FROM configuration_change_plan_events
+             WHERE plan_id = ?1 ORDER BY sequence DESC LIMIT 1",
+            commit.change_plan.as_ref().unwrap().plan_id.as_str(),
+        )
+        .await,
+        "applied",
+        "the repository writer appends the terminal plan event"
     );
 }

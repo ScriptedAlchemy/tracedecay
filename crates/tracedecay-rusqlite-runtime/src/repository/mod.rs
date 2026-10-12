@@ -27,6 +27,7 @@
 
 mod attachment;
 mod configuration;
+mod configuration_projection;
 mod configuration_receipt;
 mod diagnostics;
 mod external_source;
@@ -52,10 +53,12 @@ pub use attachment::{
     RepositoryWriterRuntimeSnapshot,
 };
 pub use configuration::ConfigurationExecutor;
+pub use configuration_projection::configuration_projection_statements;
 pub use configuration_receipt::{
     ADVANCE_COMPONENT_DESIRED_STATE_SQL, CONFIGURATION_ACTIVATION_DESIRED_RECORDED,
-    INSERT_CONFIGURATION_MUTATION_RECEIPT_SQL, advance_component_desired_state,
-    configuration_entry_layer, insert_mutation_receipt,
+    INSERT_CONFIGURATION_MUTATION_RECEIPT_SQL, LATEST_COMPONENT_ACTIVATION_STATES_SQL,
+    StoredComponentActivationState, advance_component_desired_state, configuration_entry_layer,
+    insert_mutation_receipt, validate_activation_error_code, validate_component_name,
 };
 pub use diagnostics::DiagnosticExecutor;
 pub use external_source::{EXTERNAL_SOURCE_SCHEMA_V1, ExternalSourceExecutor};

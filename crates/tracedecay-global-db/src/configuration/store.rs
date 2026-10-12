@@ -14,16 +14,15 @@ use super::schema::ConfigurationSchemaError;
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use thiserror::Error;
 use tracedecay_domain::configuration::{
-    ACCESS_RULES_SETTING_KEY, AuthorityRef, CandidateDispositionV1, ChangePlanId,
-    CodeIndexWorkerSelectionV1, ConfigurationAuditEvent, ConfigurationAuditEventId,
-    ConfigurationAuditEventKindV1, ConfigurationCandidateV1, ConfigurationIdempotencyKey,
-    ConfigurationLayerIdV1, ConfigurationReceiptId, ConfigurationRevisionId,
-    ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, ProtectedChange, ProtectedChangePlan,
-    ProtectedChangeSnapshotError, RETIRED_CORE_SETTING_KEYS_V1, RedactedConfigurationChangeV1,
-    RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY,
-    SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1, SettingKey, SourceKindV1,
-    USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+    ACCESS_RULES_SETTING_KEY, CandidateDispositionV1, ChangePlanId, CodeIndexWorkerSelectionV1,
+    ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationAuditEventKindV1,
+    ConfigurationCandidateV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
+    ConfigurationReceiptId, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
+    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
+    ProtectedChange, ProtectedChangePlan, ProtectedChangeSnapshotError,
+    RETIRED_CORE_SETTING_KEYS_V1, RedactedConfigurationChangeV1, RollbackModeV1,
+    SOURCE_BINDINGS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1,
+    SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
     USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
@@ -548,9 +547,10 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
         occurred_at: UtcMicros,
     ) -> ConfigurationOperationFuture<'_, ()> {
         Box::pin(async move {
-            validate_component_name(&component).map_err(map_store_error)?;
+            validate_component_name(&component)
+                .map_err(|reason| map_store_error(invalid_store_data(reason)))?;
             validate_activation_error_code(activation_error_code.as_deref())
-                .map_err(map_store_error)?;
+                .map_err(|reason| map_store_error(invalid_store_data(reason)))?;
             let transaction = self
                 .db
                 .begin_write_transaction()
@@ -973,7 +973,8 @@ impl OwnedGlobalDbConfigurationControlStore {
     ) -> ConfigurationOperationFuture<'_, Option<ConfigurationCurrentStateV1>> {
         let db = self.database();
         Box::pin(async move {
-            validate_component_name(&component).map_err(map_store_error)?;
+            validate_component_name(&component)
+                .map_err(|reason| map_store_error(invalid_store_data(reason)))?;
             let read = db
                 .read_snapshot()
                 .await
