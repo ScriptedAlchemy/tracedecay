@@ -288,20 +288,14 @@ impl ExactAdmissionAuthority for CentralExactAdmissionAuthorityV1 {
             ));
             literals.push(literal);
         }
-        for atom in exact_query_atoms(query) {
-            let field = atom
-                .field
-                .or_else(|| classify_unprefixed_exact(atom.text.as_str(), atom.quoted));
-            let Some(field) = field else {
-                continue;
-            };
-            if !exact_field_accepts(field, &atom.text) {
-                continue;
+        let mut push = |field: ExactFieldV1, text: &str| {
+            if !exact_field_accepts(field, text) {
+                return;
             }
-            let (canonical_bytes, _) = canonicalize_exact(field, &atom.text);
+            let (canonical_bytes, _) = canonicalize_exact(field, text);
             let literal = ExactLiteralV1 {
                 field,
-                original_bytes: atom.text.into_bytes(),
+                original_bytes: text.as_bytes().to_vec(),
                 canonical_bytes,
             };
             if seen.insert((
@@ -310,6 +304,30 @@ impl ExactAdmissionAuthority for CentralExactAdmissionAuthorityV1 {
                 literal.canonical_bytes.clone(),
             )) {
                 literals.push(literal);
+            }
+        };
+        let atoms = exact_query_atoms(query);
+        for atom in &atoms {
+            if let Some(field) = atom
+                .field
+                .or_else(|| classify_unprefixed_exact(atom.text.as_str(), atom.quoted))
+            {
+                push(field, &atom.text);
+            }
+        }
+        // A query of bare words may spell one identifier (`store response
+        // handle`). Each word alone is an exact literal, so without the
+        // joined spelling every symbol named `store` would outrank the
+        // definition the words name. Only the whole query is joined: joining
+        // its sub-runs turns natural-language pairs such as `dirty state`
+        // into exact hits that bury the answer.
+        if atoms.len() > 1
+            && atoms
+                .iter()
+                .all(|atom| atom.field.is_none() && !atom.quoted && is_identifier(&atom.text))
+        {
+            for spelled in spelled_identifiers(&atoms) {
+                push(ExactFieldV1::Identifier, &spelled);
             }
         }
         literals
@@ -395,6 +413,29 @@ fn exact_query_atoms(query: &str) -> Vec<ExactQueryAtom> {
         });
     }
     atoms
+}
+
+/// The snake_case, camelCase, and PascalCase identifiers `words` spell.
+fn spelled_identifiers(words: &[ExactQueryAtom]) -> [String; 3] {
+    let capitalized = |word: &str| {
+        let mut chars = word.chars();
+        chars
+            .next()
+            .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+            .unwrap_or_default()
+    };
+    let snake = words
+        .iter()
+        .map(|word| word.text.as_str())
+        .collect::<Vec<_>>()
+        .join("_");
+    let tail = words[1..]
+        .iter()
+        .map(|word| capitalized(&word.text))
+        .collect::<String>();
+    let camel = words[0].text.clone() + &tail;
+    let pascal = capitalized(&words[0].text) + &tail;
+    [snake, camel, pascal]
 }
 
 fn is_contextual_error_text(value: &str) -> bool {
