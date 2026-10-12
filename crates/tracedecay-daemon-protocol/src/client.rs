@@ -171,17 +171,6 @@ pub struct ResolvedBinding {
     pub result_schema: SchemaRef,
 }
 
-/// Resolves a visible, callable surface binding without exposing why lookup
-/// failed. `None` intentionally conflates unknown, hidden, unavailable, and
-/// incompatible operations.
-pub trait BindingResolver {
-    fn resolve_binding(
-        &self,
-        surface: BindingSurface,
-        request: &BindingResolution,
-    ) -> Option<ResolvedBinding>;
-}
-
 /// Metadata-only resolver backed by one immutable catalog snapshot.
 pub struct CatalogBindingResolver<'a> {
     catalog: &'a CatalogSnapshotV1,
@@ -191,10 +180,11 @@ impl<'a> CatalogBindingResolver<'a> {
     pub fn new(catalog: &'a CatalogSnapshotV1) -> Self {
         Self { catalog }
     }
-}
 
-impl BindingResolver for CatalogBindingResolver<'_> {
-    fn resolve_binding(
+    /// Resolves a visible, callable surface binding without exposing why
+    /// lookup failed. `None` intentionally conflates unknown, hidden,
+    /// unavailable, and incompatible operations.
+    pub fn resolve_binding(
         &self,
         surface: BindingSurface,
         request: &BindingResolution,
@@ -239,7 +229,7 @@ impl BindingResolver for CatalogBindingResolver<'_> {
 ///
 /// The surface is selected by adapter code, never decoded from user input.
 pub fn resolve_dispatch<T>(
-    resolver: &impl BindingResolver,
+    resolver: &CatalogBindingResolver<'_>,
     surface: BindingSurface,
     input: DispatchInput<T>,
 ) -> Result<DispatchedInvocation<T>, DispatchError> {

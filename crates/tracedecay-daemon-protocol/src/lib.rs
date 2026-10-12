@@ -69,7 +69,7 @@ pub use application_surface::{
     separate_application_tool_request,
 };
 pub use client::{
-    AdapterInvocation, BindingResolution, BindingResolver, BoundInvocation, CanonicalInvocation,
+    AdapterInvocation, BindingResolution, BoundInvocation, CanonicalInvocation,
     CatalogBindingResolver, DaemonInvocationClient, DaemonInvocationDelivery,
     DaemonInvocationError, DaemonInvocationExecutor, DaemonInvocationExecutorFuture,
     DaemonInvocationResult, DaemonLspSessionClient, DispatchError, DispatchInput,

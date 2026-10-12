@@ -11,10 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
     DeliverySettlementOutcomeV1, DeliverySettlementV1, DeliverySurfaceFamilyV1,
-    canonical_json_bytes, canonical_sha256, sha256_hex_suffix,
+    canonical_json_bytes,
 };
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, is_owned_temporary_name, read_bounded, sync_directory, sync_file_at,
@@ -687,14 +688,13 @@ pub fn hook_delivery_receipt_spool_root(
 fn receipt_id_for_settlement(
     settlement: &DeliverySettlementV1,
 ) -> Result<[u8; 16], HookDeliverySpoolError> {
-    let digest = canonical_sha256(&(
+    let canonical = canonical_json_bytes(&(
         "tracedecay.hook-delivery-source-receipt.v1",
         StableReceiptIdentity::from_settlement(settlement),
     ))
     .map_err(|_| HookDeliverySpoolError::InvalidReceipt)?;
-    let hex = sha256_hex_suffix(digest.as_str()).ok_or(HookDeliverySpoolError::InvalidReceipt)?;
     let mut receipt_id = [0_u8; 16];
-    decode_hex_prefix(hex, &mut receipt_id)?;
+    receipt_id.copy_from_slice(&Sha256::digest(&canonical)[..16]);
     Ok(receipt_id)
 }
 
@@ -755,27 +755,6 @@ fn valid_receipt_name(name: &str) -> bool {
         && name[..32]
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn decode_hex_prefix(hex: &str, output: &mut [u8; 16]) -> Result<(), HookDeliverySpoolError> {
-    if hex.len() < 32 {
-        return Err(HookDeliverySpoolError::InvalidReceipt);
-    }
-    for (index, slot) in output.iter_mut().enumerate() {
-        let offset = index * 2;
-        let high = decode_nibble(hex.as_bytes()[offset])?;
-        let low = decode_nibble(hex.as_bytes()[offset + 1])?;
-        *slot = (high << 4) | low;
-    }
-    Ok(())
-}
-
-fn decode_nibble(byte: u8) -> Result<u8, HookDeliverySpoolError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        _ => Err(HookDeliverySpoolError::InvalidReceipt),
-    }
 }
 
 #[cfg(test)]
@@ -1012,6 +991,23 @@ mod tests {
         let mut settlement = receipt().settlement;
         settlement.attempt.owner_event_id = format!("hook:native:fixture-{index}");
         HookDeliverySourceReceiptV1::new(settlement).expect("receipt")
+    }
+
+    /// Receipt ids name persisted spool files, so they stay the leading 16
+    /// bytes of the settlement's canonical manifest digest.
+    #[test]
+    fn receipt_id_is_the_canonical_digest_prefix() {
+        let receipt = receipt();
+        let digest = tracedecay_domain::canonical_sha256(&(
+            "tracedecay.hook-delivery-source-receipt.v1",
+            StableReceiptIdentity::from_settlement(&receipt.settlement),
+        ))
+        .unwrap();
+        let hex = tracedecay_domain::sha256_hex_suffix(digest.as_str()).unwrap();
+        assert_eq!(
+            tracedecay_domain::canonical_text::encode_lowercase_hex(&receipt.receipt_id),
+            hex[..32]
+        );
     }
 
     fn receipt() -> HookDeliverySourceReceiptV1 {
