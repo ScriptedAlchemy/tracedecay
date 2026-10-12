@@ -221,10 +221,6 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Tool dispatch is one registry match onto the owning handler future."
-    )]
     pub(super) async fn execute_tool_dispatch(
         &self,
         cg: &TraceDecay,
@@ -265,10 +261,10 @@ impl McpServer {
             ToolCallRegistryOptions {
                 resolved_project_route,
                 application_invocation_executor,
-                application_invocation_target,
                 application_request_id,
                 application_deadline,
                 application_cancellation,
+                application_invocation_target,
                 ..self.tool_call_registry_options(session_sync_service.as_deref())
             },
         );

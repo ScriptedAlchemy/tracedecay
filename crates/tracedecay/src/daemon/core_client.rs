@@ -282,10 +282,6 @@ pub(super) fn authority_absent(error: &TraceDecayError) -> bool {
 }
 
 #[tracing::instrument(name = "daemon.core.call_tool", level = "trace", skip_all)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "A tool call and its liveness poll share one client deadline and must complete as one RPC."
-)]
 pub(crate) async fn call_tool_with_liveness_poll(
     socket_path: &Path,
     handshake: &DaemonHandshake,
