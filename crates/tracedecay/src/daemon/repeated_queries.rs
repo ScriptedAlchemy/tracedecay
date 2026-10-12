@@ -628,4 +628,411 @@ mod tests {
         assert!(quoted.starts_with(r#"{"query":"éé"#), "{quoted}");
         assert!(quoted.ends_with("é..."), "{quoted}");
     }
+
+    /// What the final call of a corpus case should get: `Useful` and `Missed`
+    /// cases are loops, `Quiet` and `KnownFalsePositive` cases are legitimate
+    /// work; `Missed` and `KnownFalsePositive` record the heuristic's ceiling.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    enum Label {
+        Useful,
+        Quiet,
+        KnownFalsePositive,
+        Missed,
+    }
+
+    impl Label {
+        /// The label a case earns from whether its final call drew a hint.
+        fn observed(self, hinted: bool) -> Self {
+            match (self, hinted) {
+                (Self::Useful | Self::Missed, true) => Self::Useful,
+                (Self::Useful | Self::Missed, false) => Self::Missed,
+                (Self::Quiet | Self::KnownFalsePositive, true) => Self::KnownFalsePositive,
+                (Self::Quiet | Self::KnownFalsePositive, false) => Self::Quiet,
+            }
+        }
+    }
+
+    struct Step {
+        tool: &'static str,
+        arguments: &'static str,
+        answer: &'static str,
+        is_error: bool,
+    }
+
+    const fn ok(tool: &'static str, arguments: &'static str, answer: &'static str) -> Step {
+        Step {
+            tool,
+            arguments,
+            answer,
+            is_error: false,
+        }
+    }
+
+    struct Case {
+        name: &'static str,
+        class: &'static str,
+        steps: &'static [Step],
+        label: Label,
+    }
+
+    const SEARCH: &str = "tracedecay_search";
+    const STOCK: &str = "reserve_stock in src/orders.rs holds warehouse stock for each order line";
+    const ROLLBACK: &str =
+        "release_stock in src/orders.rs returns held stock when an order is cancelled";
+    const TOTALS: &str = "compute_total in src/pricing.rs sums line prices then applies tax";
+    const CALLERS: &str = "checkout and invoice_preview call compute_total";
+    const CALLERS_PAGE_2: &str = "refund_quote and cart_summary call compute_total";
+
+    /// Synthetic sessions over the agent-adoption orders fixture. The label is
+    /// what the final call should get; a heuristic change that moves a case
+    /// must move its label and the totals below with it.
+    const CORPUS: &[Case] = &[
+        Case {
+            name: "identical_search_same_answer",
+            class: "stuck loop",
+            steps: &[
+                ok(SEARCH, r#"{"query":"where is stock reserved"}"#, STOCK),
+                ok(SEARCH, r#"{"query":"where is stock reserved"}"#, STOCK),
+            ],
+            label: Label::Useful,
+        },
+        Case {
+            name: "rephrased_search_circling",
+            class: "stuck loop",
+            steps: &[
+                ok(SEARCH, r#"{"query":"where is stock reserved"}"#, STOCK),
+                ok(SEARCH, r#"{"query":"where is the stock reserved"}"#, STOCK),
+            ],
+            label: Label::Useful,
+        },
+        Case {
+            name: "identical_grep_with_selector",
+            class: "stuck loop",
+            steps: &[
+                ok(
+                    "tracedecay_grep",
+                    r#"{"pattern":"reserve_stock","project_selector":{"project_id":"orders-fixture"}}"#,
+                    STOCK,
+                ),
+                ok(
+                    "tracedecay_grep",
+                    r#"{"pattern":"reserve_stock","project_selector":{"project_id":"orders-fixture"}}"#,
+                    STOCK,
+                ),
+            ],
+            label: Label::Useful,
+        },
+        Case {
+            name: "identical_body_three_calls_back",
+            class: "stuck loop",
+            steps: &[
+                ok(
+                    "tracedecay_source_body",
+                    r#"{"node_id":"fn:src/orders.rs:reserve_stock"}"#,
+                    STOCK,
+                ),
+                ok(
+                    "tracedecay_callers",
+                    r#"{"node_id":"fn:src/orders.rs:reserve_stock"}"#,
+                    "place_order and backorder_retry call reserve_stock",
+                ),
+                ok("tracedecay_grep", r#"{"pattern":"held_stock"}"#, STOCK),
+                ok(
+                    "tracedecay_source_body",
+                    r#"{"node_id":"fn:src/orders.rs:reserve_stock"}"#,
+                    STOCK,
+                ),
+            ],
+            label: Label::Useful,
+        },
+        Case {
+            name: "stemmed_context_rephrase",
+            class: "stuck loop",
+            steps: &[
+                ok(
+                    "tracedecay_context",
+                    r#"{"task":"explain how orders reserve warehouse stock"}"#,
+                    STOCK,
+                ),
+                ok(
+                    "tracedecay_context",
+                    r#"{"task":"explain how an order reserves warehouse stock"}"#,
+                    STOCK,
+                ),
+            ],
+            label: Label::Missed,
+        },
+        Case {
+            name: "narrow_by_path_glob",
+            class: "narrowing",
+            steps: &[
+                ok("tracedecay_grep", r#"{"pattern":"reserve_stock"}"#, STOCK),
+                ok(
+                    "tracedecay_grep",
+                    r#"{"pattern":"reserve_stock","path_glob":"src/orders/**"}"#,
+                    STOCK,
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "narrow_by_added_term",
+            class: "narrowing",
+            steps: &[
+                ok(SEARCH, r#"{"query":"stock reservation"}"#, STOCK),
+                ok(
+                    SEARCH,
+                    r#"{"query":"stock reservation rollback"}"#,
+                    ROLLBACK,
+                ),
+            ],
+            label: Label::KnownFalsePositive,
+        },
+        Case {
+            name: "narrow_with_shared_selector_and_format",
+            class: "narrowing",
+            steps: &[
+                ok(
+                    SEARCH,
+                    r#"{"query":"stock reservation","project_selector":{"project_id":"orders-fixture"},"format":"markdown"}"#,
+                    STOCK,
+                ),
+                ok(
+                    SEARCH,
+                    r#"{"query":"stock rollback","project_selector":{"project_id":"orders-fixture"},"format":"markdown"}"#,
+                    ROLLBACK,
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "next_page_by_cursor",
+            class: "pagination",
+            steps: &[
+                ok(
+                    SEARCH,
+                    r#"{"query":"order total computation tax","limit":5}"#,
+                    TOTALS,
+                ),
+                ok(
+                    SEARCH,
+                    r#"{"query":"order total computation tax","limit":5,"cursor":"b3BhcXVlLWN1cnNvci0x"}"#,
+                    "apply_tax in src/tax.rs rounds each line before compute_total sums it",
+                ),
+                ok(
+                    SEARCH,
+                    r#"{"query":"order total computation tax","limit":5,"cursor":"b3BhcXVlLWN1cnNvci0y"}"#,
+                    "tax_rate in src/tax.rs looks up the rate for the shipping region",
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "callers_next_page_meta_cursor",
+            class: "pagination",
+            steps: &[
+                ok(
+                    "tracedecay_callers",
+                    r#"{"node_id":"fn:src/pricing.rs:compute_total","meta":{"cursor":null,"order":"source_position","projection":"evidence"}}"#,
+                    CALLERS,
+                ),
+                ok(
+                    "tracedecay_callers",
+                    r#"{"node_id":"fn:src/pricing.rs:compute_total","meta":{"cursor":"Y3Vyc29yLTI","order":"source_position","projection":"evidence"}}"#,
+                    CALLERS_PAGE_2,
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "same_query_other_project",
+            class: "changed scope",
+            steps: &[
+                ok(
+                    SEARCH,
+                    r#"{"query":"who calls compute total","project_selector":{"project_id":"orders"}}"#,
+                    CALLERS,
+                ),
+                ok(
+                    SEARCH,
+                    r#"{"query":"who calls compute total","project_selector":{"project_id":"billing"}}"#,
+                    "invoice_run in src/billing.rs calls compute_total",
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "widened_caller_depth",
+            class: "changed scope",
+            steps: &[
+                ok(
+                    "tracedecay_callers",
+                    r#"{"node_id":"fn:src/pricing.rs:compute_total","maximum_depth":1}"#,
+                    CALLERS,
+                ),
+                ok(
+                    "tracedecay_callers",
+                    r#"{"node_id":"fn:src/pricing.rs:compute_total","maximum_depth":3}"#,
+                    "checkout, invoice_preview, and their http handlers call compute_total",
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "other_branch_same_query",
+            class: "changed generation",
+            steps: &[
+                ok(
+                    "tracedecay_branch_search",
+                    r#"{"branch":"main","query":"apply_discount"}"#,
+                    "apply_discount in src/pricing.rs takes a percentage",
+                ),
+                ok(
+                    "tracedecay_branch_search",
+                    r#"{"branch":"feature/pricing-notes","query":"apply_discount"}"#,
+                    "apply_discount in src/pricing.rs takes a discount rule",
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "identical_search_after_reindex",
+            class: "changed generation",
+            steps: &[
+                ok(SEARCH, r#"{"query":"where is stock reserved"}"#, STOCK),
+                ok(
+                    SEARCH,
+                    r#"{"query":"where is stock reserved"}"#,
+                    "reserve_stock moved to src/inventory.rs and holds stock per warehouse",
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "diagnostics_after_edit",
+            class: "repeated verification",
+            steps: &[
+                ok(
+                    "tracedecay_diagnostics",
+                    r#"{"path":"src/orders.rs"}"#,
+                    "error E0308 in src/orders.rs line 42 expected u32 found i64",
+                ),
+                ok(
+                    "tracedecay_str_replace",
+                    r#"{"path":"src/orders.rs","old_str":"let held: i64","new_str":"let held: u32"}"#,
+                    "replaced one occurrence in src/orders.rs",
+                ),
+                ok(
+                    "tracedecay_diagnostics",
+                    r#"{"path":"src/orders.rs"}"#,
+                    "no diagnostics reported for src/orders.rs",
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "test_results_unchanged",
+            class: "repeated verification",
+            steps: &[
+                ok(
+                    "tracedecay_test_results",
+                    r#"{"filter":"orders"}"#,
+                    "orders tests failed reserve_stock_holds_stock assertion",
+                ),
+                ok(
+                    "tracedecay_test_results",
+                    r#"{"filter":"orders"}"#,
+                    "orders tests failed reserve_stock_holds_stock assertion",
+                ),
+            ],
+            label: Label::Useful,
+        },
+        Case {
+            name: "retry_after_failure",
+            class: "repeated verification",
+            steps: &[
+                Step {
+                    tool: SEARCH,
+                    arguments: r#"{"query":"where is stock reserved"}"#,
+                    answer: "project orders-fixture is still opening, retry shortly",
+                    is_error: true,
+                },
+                ok(SEARCH, r#"{"query":"where is stock reserved"}"#, STOCK),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "json_after_markdown",
+            class: "changed presentation",
+            steps: &[
+                ok(
+                    SEARCH,
+                    r#"{"query":"order total computation tax","format":"markdown"}"#,
+                    TOTALS,
+                ),
+                ok(
+                    SEARCH,
+                    r#"{"query":"order total computation tax","format":"json"}"#,
+                    r#"{"results":[{"name":"compute_total","path":"src/pricing.rs"}]}"#,
+                ),
+            ],
+            label: Label::Quiet,
+        },
+    ];
+
+    const CORPUS_TOTALS: [(Label, usize); 4] = [
+        (Label::Useful, 5),
+        (Label::Quiet, 11),
+        (Label::KnownFalsePositive, 1),
+        (Label::Missed, 1),
+    ];
+
+    fn response(id: i64, text: &str, is_error: bool) -> Vec<String> {
+        vec![format!(
+            "{}\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {"content": [{"type": "text", "text": text}], "isError": is_error},
+            })
+        )]
+    }
+
+    #[test]
+    fn the_outcome_corpus_matches_every_label() {
+        let mut table = String::from("name | class | label | observed | hint\n");
+        let mut mismatches = Vec::new();
+        let mut totals = std::collections::BTreeMap::<Label, usize>::new();
+        for case in CORPUS {
+            let mut queries = enabled();
+            let mut last = Vec::new();
+            for (id, step) in (1..).zip(case.steps) {
+                let arguments: Value = serde_json::from_str(step.arguments).expect("arguments");
+                let mut lines = response(id, step.answer, step.is_error);
+                queries.rewrite(Some(&call(id, step.tool, &arguments)), &mut lines, false);
+                last = lines;
+            }
+            let hint = hints(&last).pop();
+            let observed = case.label.observed(hint.is_some());
+            let overlap = hint
+                .as_deref()
+                .and_then(|hint| hint.split(" of its query words").next())
+                .and_then(|clause| clause.rsplit(' ').next())
+                .unwrap_or("-");
+            table.push_str(&format!(
+                "{} | {} | {:?} | {observed:?} | {overlap}\n",
+                case.name, case.class, case.label
+            ));
+            if observed != case.label {
+                mismatches.push(case.name);
+            }
+            *totals.entry(observed).or_default() += 1;
+        }
+        assert!(mismatches.is_empty(), "mismatched {mismatches:?}\n{table}");
+        assert_eq!(
+            totals.into_iter().collect::<Vec<_>>(),
+            CORPUS_TOTALS.to_vec(),
+            "\n{table}"
+        );
+    }
 }
