@@ -601,7 +601,7 @@ impl SharedSourcePoll {
                     }
                 }
                 let registry = registry_snapshot(&poller_state).await;
-                let total_store_bytes = summed_store_bytes(&poller_state).await;
+                let total_store_bytes = project_store_bytes(&poller_state).await;
                 let _ = poller_sender.send(SourcePollSnapshot {
                     initialized: true,
                     registry,
@@ -1052,20 +1052,11 @@ async fn registry_snapshot(state: &DashboardState) -> Option<RegistrySnapshot> {
     })
 }
 
-/// Sum the observed size of the always-held stores (graph + memory) as a coarse
-/// storage-change signal. Returns `None` only when neither pragma read succeeds.
-async fn summed_store_bytes(state: &DashboardState) -> Option<u64> {
-    let mut total: u64 = 0;
-    let mut any = false;
-    if let Some(bytes) = store_total_bytes(&state.graph_conn).await {
-        total = total.saturating_add(bytes);
-        any = true;
-    }
-    if let Some(bytes) = store_total_bytes(&state.mem_db.read_connection()).await {
-        total = total.saturating_add(bytes);
-        any = true;
-    }
-    any.then_some(total)
+/// Observed size of the always-held project store as a coarse storage-change
+/// signal. `graph_conn` is a read connection onto `mem_db`, so the shared
+/// database is measured once. Returns `None` when a pragma read fails.
+async fn project_store_bytes(state: &DashboardState) -> Option<u64> {
+    store_total_bytes(&state.mem_db.read_connection()).await
 }
 
 async fn store_total_bytes(conn: &(impl QueryExecutor + ?Sized)) -> Option<u64> {
@@ -1715,22 +1706,13 @@ mod tests {
         // First poll primes the baselines and emits nothing.
         let primed = state.poll_sources(&scope).await;
         assert_eq!(primed, Vec::new(), "baseline poll must not emit events");
-        let graph_pages = super::pragma_u64(&dash.graph_conn, "page_size")
+        let database_bytes = super::pragma_u64(&dash.mem_db.read_connection(), "page_size")
             .await
-            .expect("graph page size")
-            * super::pragma_u64(&dash.graph_conn, "page_count")
-                .await
-                .expect("graph page count");
-        let memory_pages = super::pragma_u64(&dash.mem_db.read_connection(), "page_size")
-            .await
-            .expect("memory page size")
+            .expect("database page size")
             * super::pragma_u64(&dash.mem_db.read_connection(), "page_count")
                 .await
-                .expect("memory page count");
-        assert_eq!(
-            state.last_store_total_bytes,
-            Some(graph_pages + memory_pages)
-        );
+                .expect("database page count");
+        assert_eq!(state.last_store_total_bytes, Some(database_bytes));
         let mut hasher = DefaultHasher::new();
         0_u64.hash(&mut hasher);
         assert_eq!(
@@ -1768,5 +1750,20 @@ mod tests {
             .await
             .expect("re-armed poller publishes")
             .expect("re-armed poller sender is alive");
+    }
+
+    #[tokio::test]
+    async fn project_store_bytes_counts_the_shared_database_once() {
+        let (_project, dash) = dashboard_state_fixture("project.dashboard-events-bytes").await;
+        let page_size = pragma_u64(&dash.graph_conn, "page_size")
+            .await
+            .expect("page_size");
+        let page_count = pragma_u64(&dash.graph_conn, "page_count")
+            .await
+            .expect("page_count");
+        let database_bytes = page_size * page_count;
+        assert!(database_bytes > 0, "fixture database has pages");
+
+        assert_eq!(project_store_bytes(&dash).await, Some(database_bytes));
     }
 }
