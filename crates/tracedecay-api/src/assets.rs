@@ -43,31 +43,19 @@ pub struct StaticDashboardAsset {
 
 /// Byte authority for a dashboard bundle embedded by an executable build.
 ///
-/// The API crate deliberately receives this narrow source instead of reading
+/// The API crate deliberately receives this static manifest instead of reading
 /// the filesystem or depending on the binary crate. That keeps generated
 /// `OUT_DIR` ownership at the build-script boundary while keeping all HTTP
 /// presentation behavior in the canonical API crate.
-pub trait DashboardAssetSource: Send + Sync + 'static {
-    fn asset_by_path(&self, path: &str) -> Option<StaticDashboardAsset>;
-    fn cache_tag(&self) -> &str;
-}
-
-/// A static asset source for binaries that can expose their generated manifest
-/// as a static slice. It also makes the adapter directly testable without a
-/// filesystem or a second router implementation.
 #[derive(Clone, Copy)]
 pub struct StaticDashboardAssets {
     pub assets: &'static [StaticDashboardAsset],
     pub cache_tag: &'static str,
 }
 
-impl DashboardAssetSource for StaticDashboardAssets {
+impl StaticDashboardAssets {
     fn asset_by_path(&self, path: &str) -> Option<StaticDashboardAsset> {
         self.assets.iter().copied().find(|asset| asset.path == path)
-    }
-
-    fn cache_tag(&self) -> &str {
-        self.cache_tag
     }
 }
 
@@ -76,7 +64,7 @@ impl DashboardAssetSource for StaticDashboardAssets {
 /// It owns `/`, `/static/{*tail}`, and the fallback for client-side routes.
 /// `/api` and `/api/**` deliberately answer `404` from the fallback, so a
 /// mistyped or unavailable API path never becomes a successful HTML response.
-pub fn static_dashboard_router(source: Arc<dyn DashboardAssetSource>) -> Router {
+pub fn static_dashboard_router(source: Arc<StaticDashboardAssets>) -> Router {
     Router::new()
         .route("/", get(app_index))
         .route("/static/{*tail}", get(app_static))
@@ -84,63 +72,47 @@ pub fn static_dashboard_router(source: Arc<dyn DashboardAssetSource>) -> Router 
         .with_state(source)
 }
 
+#[tracing::instrument(name = "api.http.assets", level = "trace", skip_all)]
 async fn app_index(
-    State(source): State<Arc<dyn DashboardAssetSource>>,
+    State(source): State<Arc<StaticDashboardAssets>>,
     headers: HeaderMap,
 ) -> Response {
-    {
-        let _span = tracing::trace_span!("api.http.assets").entered();
-        {
-            match source.asset_by_path("index.html") {
-                Some(asset) => {
-                    app_response(&headers, asset, source.cache_tag(), CachePolicy::Revalidate)
-                }
-                None => StatusCode::NOT_FOUND.into_response(),
-            }
-        }
+    match source.asset_by_path("index.html") {
+        Some(asset) => app_response(&headers, asset, source.cache_tag, CachePolicy::Revalidate),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
+#[tracing::instrument(name = "api.http.static", level = "trace", skip_all)]
 async fn app_static(
-    State(source): State<Arc<dyn DashboardAssetSource>>,
+    State(source): State<Arc<StaticDashboardAssets>>,
     headers: HeaderMap,
     Path(tail): Path<String>,
 ) -> Response {
-    {
-        let _span = tracing::trace_span!("api.http.static").entered();
-        {
-            let asset_path = format!("static/{tail}");
-            let cache_policy = if fingerprinted_static_asset_path(&asset_path) {
-                CachePolicy::Immutable
-            } else {
-                CachePolicy::Revalidate
-            };
-            match source.asset_by_path(&asset_path) {
-                Some(asset) => app_response(&headers, asset, source.cache_tag(), cache_policy),
-                None => StatusCode::NOT_FOUND.into_response(),
-            }
-        }
+    let asset_path = format!("static/{tail}");
+    let cache_policy = if fingerprinted_static_asset_path(&asset_path) {
+        CachePolicy::Immutable
+    } else {
+        CachePolicy::Revalidate
+    };
+    match source.asset_by_path(&asset_path) {
+        Some(asset) => app_response(&headers, asset, source.cache_tag, cache_policy),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
+#[tracing::instrument(name = "api.http.spa", level = "trace", skip_all)]
 async fn app_spa_fallback(
-    State(source): State<Arc<dyn DashboardAssetSource>>,
+    State(source): State<Arc<StaticDashboardAssets>>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    {
-        let _span = tracing::trace_span!("api.http.spa").entered();
-        {
-            if uri.path() == "/api" || uri.path().starts_with("/api/") {
-                return StatusCode::NOT_FOUND.into_response();
-            }
-            match source.asset_by_path("index.html") {
-                Some(asset) => {
-                    app_response(&headers, asset, source.cache_tag(), CachePolicy::Revalidate)
-                }
-                None => StatusCode::NOT_FOUND.into_response(),
-            }
-        }
+    if uri.path() == "/api" || uri.path().starts_with("/api/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match source.asset_by_path("index.html") {
+        Some(asset) => app_response(&headers, asset, source.cache_tag, CachePolicy::Revalidate),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
