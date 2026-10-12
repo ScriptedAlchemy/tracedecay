@@ -15,9 +15,10 @@ mod rollback;
 
 #[cfg(test)]
 pub use delete_recovery::delete_external_payload;
+pub(crate) use delete_recovery::prepare_external_payload_delete_in_transaction;
 pub use delete_recovery::{
-    CommittedPayloadRemoval, PreparedPayloadDelete, payload_file_fingerprint,
-    remove_committed_payload_file,
+    CommittedPayloadRemoval, PreparedPayloadDelete, delete_external_payload_in_transaction,
+    payload_file_fingerprint, remove_committed_payload_file,
 };
 pub use delete_recovery::{DeleteOpts, DeleteOutcome};
 #[cfg(test)]
@@ -30,38 +31,6 @@ pub use filesystem_authority::{
 };
 pub use filesystem_authority::{ensure_contained, existing_payload_dir, existing_payload_dir_opt};
 pub use rollback::PayloadFileRollback;
-
-pub async fn delete_external_payload_in_transaction(
-    conn: &(impl Executor + ?Sized),
-    storage_root: &Path,
-    payload_ref: &str,
-    opts: &DeleteOpts,
-) -> Result<PreparedPayloadDelete, LcmError> {
-    delete_recovery::delete_external_payload_in_transaction(conn, storage_root, payload_ref, opts)
-        .await
-}
-
-/// Prepares one member of a caller-owned deletion batch. The caller deletes
-/// GC marks only for successful preparations, in one bounded statement after
-/// the batch.
-pub(crate) async fn prepare_external_payload_delete_in_transaction(
-    conn: &(impl Executor + ?Sized),
-    storage_root: &Path,
-    payload_ref: &str,
-    opts: &DeleteOpts,
-) -> Result<PreparedPayloadDelete, LcmError> {
-    delete_recovery::prepare_external_payload_delete_in_transaction(
-        conn,
-        storage_root,
-        payload_ref,
-        opts,
-    )
-    .await
-}
-
-pub fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
-    filesystem_authority::canonical_storage_root(storage_root)
-}
 
 pub fn payload_dir(storage_root: &Path) -> PathBuf {
     storage_root.join("lcm-payloads")

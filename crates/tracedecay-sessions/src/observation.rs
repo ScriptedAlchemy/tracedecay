@@ -373,35 +373,13 @@ struct PersistedObservationCapture {
     durable: DurableObservationCapture,
 }
 
-/// Bounds independent batch preparation.
-///
-/// The daemon owns the actual width selection. Keeping the bound here makes
-/// the application boundary deterministic while allowing composition to pass
-/// the shared, memory-aware daemon plan without creating another CPU pool.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ObservationBatchConcurrency(NonZeroUsize);
-
-impl ObservationBatchConcurrency {
-    pub const fn new(max_in_flight: NonZeroUsize) -> Self {
-        Self(max_in_flight)
-    }
-
-    const fn max_in_flight(self) -> usize {
-        self.0.get()
-    }
-}
-
-impl Default for ObservationBatchConcurrency {
-    fn default() -> Self {
-        Self(NonZeroUsize::MIN)
-    }
-}
-
 /// Application-owned composition of sanitizer and an already-authoritative store.
 pub struct ObservationApplication<S> {
     store: S,
     sanitizer: RecordSanitizerV1,
-    batch_concurrency: ObservationBatchConcurrency,
+    /// Bounds independent batch preparation; the daemon selects the width
+    /// through [`Self::with_background_cpu`].
+    batch_concurrency: NonZeroUsize,
     background_cpu: Option<Arc<ProcessBackgroundCpuV1>>,
 }
 
@@ -413,18 +391,15 @@ where
         Self {
             store,
             sanitizer,
-            batch_concurrency: ObservationBatchConcurrency::default(),
+            batch_concurrency: NonZeroUsize::MIN,
             background_cpu: None,
         }
     }
 
-    /// Applies a narrow injected bound in projectless or test composition.
-    ///
-    /// Production composition must use [`Self::with_background_cpu`] so active
-    /// preparation participates in the process-wide CPU authority.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_batch_concurrency(mut self, batch_concurrency: NonZeroUsize) -> Self {
-        self.batch_concurrency = ObservationBatchConcurrency::new(batch_concurrency);
+    pub(crate) fn with_batch_concurrency(mut self, batch_concurrency: NonZeroUsize) -> Self {
+        self.batch_concurrency = batch_concurrency;
         self
     }
 
@@ -433,7 +408,7 @@ where
     /// store-owned batch transaction.
     #[must_use]
     pub fn with_background_cpu(mut self, background_cpu: Arc<ProcessBackgroundCpuV1>) -> Self {
-        self.batch_concurrency = ObservationBatchConcurrency::new(background_cpu.width());
+        self.batch_concurrency = background_cpu.width();
         self.background_cpu = Some(background_cpu);
         self
     }
@@ -776,7 +751,7 @@ where
     ) -> Result<Vec<PreparedObservationCapture>, ObservationApplicationError> {
         let total = requests.len();
         let mut pending = requests.into_iter().enumerate();
-        let limit = self.batch_concurrency.max_in_flight().min(total);
+        let limit = self.batch_concurrency.get().min(total);
         let mut tasks = JoinSet::new();
         let mut prepared = (0..total).map(|_| None).collect::<Vec<_>>();
 

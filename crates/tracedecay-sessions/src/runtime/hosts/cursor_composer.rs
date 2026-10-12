@@ -51,10 +51,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-pub use capture::{
-    build_cursor_composer_capture_request, build_cursor_composer_envelope_capture_request,
-    capture_cursor_composer_observation,
-};
+pub use capture::build_cursor_composer_capture_request;
 pub use ingest::{CursorComposerSource, DEFAULT_COMPOSER_ENVELOPE_CAP};
 pub use outcome::{
     CursorComposerSweepFailure, CursorComposerSweepOutcome, CursorComposerSweepResult,
