@@ -83,8 +83,7 @@ async fn initialize_codex_daemon_automation_project(
         profile,
         project_path,
         |handshake| async move {
-            let deadline =
-                tokio::time::Instant::now() + crate::tool_command::tool_command_deadline()?;
+            let deadline = crate::tool_command::tool_command_deadline()?;
             crate::commands::admin_project_until(
                 profile,
                 handshake,

@@ -14,7 +14,7 @@ use tracedecay_contracts::retrieval::{
     AdminCliRegistryContextV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
 };
 
-use super::daemon::{admin_cli_result, admin_cli_result_mismatch};
+use super::daemon::{admin_cli_result, admin_cli_result_mismatch, registry_context};
 
 /// Bounds the wait for the profile lifecycle lease after the managed daemon
 /// service is stopped. The stop itself is separately bounded by the service
@@ -793,21 +793,9 @@ fn handle_list_inner(
             if location.status == global::ProjectStorageStatus::Stale
                 && let Some(profile_root) = home_tracedecay.as_deref()
             {
-                let stores = match admin_cli_result(
-                    profile,
-                    None,
-                    AdminCliSurfaceRequestV1::RegistryContext {
-                        project_arg: Some(path.clone()),
-                    },
-                )
-                .await?
-                {
-                    AdminCliResultV1::RegistryContext(AdminCliRegistryContextV1::Ok {
-                        stores,
-                        ..
-                    }) => stores,
-                    AdminCliResultV1::RegistryContext(_) => Vec::new(),
-                    _ => return Err(admin_cli_result_mismatch("registry_context")),
+                let stores = match registry_context(profile, path.clone()).await? {
+                    AdminCliRegistryContextV1::Ok { stores, .. } => stores,
+                    _ => Vec::new(),
                 };
                 if let Some(store) =
                     stores
@@ -818,7 +806,11 @@ fn handle_list_inner(
                                 == Some("code_project")
                         })
                     && let Some(registry_location) =
-                        global::classify_registry_storage_value(path, profile_root, store)
+                        tracedecay_runtime_core::storage::classify_registry_storage_value(
+                            path,
+                            profile_root,
+                            store,
+                        )
                 {
                     location = registry_location;
                 }
