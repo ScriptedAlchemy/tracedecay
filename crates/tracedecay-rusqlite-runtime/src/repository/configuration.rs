@@ -13,9 +13,13 @@ use tracedecay_store::{
     ProfileReadOperationV1, ProfileReadResultV1,
 };
 
+use crate::exact_sql::ExactSqlValue;
+
+use super::configuration_projection::configuration_projection_statements;
 use super::configuration_receipt::{
-    CONFIGURATION_ACTIVATION_DESIRED_RECORDED, advance_component_desired_state,
-    configuration_entry_layer, insert_mutation_receipt,
+    CONFIGURATION_ACTIVATION_DESIRED_RECORDED, STORED_CHANGE_PLAN_SQL, StoredChangePlanColumns,
+    advance_component_desired_state, configuration_entry_layer, decode_stored_change_plan_rows,
+    insert_mutation_receipt,
 };
 use super::support::{conversion, encode, invalid};
 
@@ -45,6 +49,11 @@ impl ConfigurationExecutor {
         if current.as_deref() != Some(commit.expected_base_revision_id.as_str()) {
             return Err(invalid("configuration revision conflict"));
         }
+        if let Some(plan) = &commit.change_plan
+            && !stored_plan_matches(savepoint, plan)?
+        {
+            return Err(invalid("configuration change plan is stale"));
+        }
 
         insert_revision(savepoint, &commit.next_revision)?;
         insert_mutation_receipt(savepoint, commit)?;
@@ -63,13 +72,7 @@ impl ConfigurationExecutor {
                     ));
                 }
             };
-            let next_sequence: i64 = savepoint.query_row(
-                "SELECT COALESCE(MAX(sequence), -1) + 1
-                 FROM configuration_change_plan_events
-                 WHERE plan_id = ?1",
-                [plan.plan_id.as_str()],
-                |row| row.get(0),
-            )?;
+            let next_sequence = next_plan_event_sequence(savepoint, plan)?;
             savepoint.execute(
                 "INSERT INTO configuration_change_plan_events (
                     plan_id, sequence, event_kind, safe_reason_code, occurred_at
@@ -214,6 +217,19 @@ fn insert_revision(
             ],
         )?;
     }
+    for statement in configuration_projection_statements(&revision.revision_id, &revision.snapshot)
+        .map_err(invalid)?
+    {
+        savepoint.execute(
+            &statement.sql,
+            rusqlite::params_from_iter(
+                statement
+                    .params
+                    .into_iter()
+                    .map(ExactSqlValue::into_rusqlite),
+            ),
+        )?;
+    }
     Ok(())
 }
 
@@ -322,80 +338,43 @@ fn receipt_replay(
     Ok(ReceiptReplay::Exact)
 }
 
+fn stored_plan_matches(
+    connection: &rusqlite::Connection,
+    plan: &ProtectedChangePlan,
+) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare(STORED_CHANGE_PLAN_SQL)?;
+    let rows = statement
+        .query_map([plan.plan_id.as_str()], |row| {
+            Ok(StoredChangePlanColumns {
+                plan_id: row.get(0)?,
+                actor_id: row.get(1)?,
+                base_revision_id: row.get(2)?,
+                operation_digest: row.get(3)?,
+                resolved_scope_digest: row.get(4)?,
+                membership_digest: row.get(5)?,
+                authorization_policy_digest: row.get(6)?,
+                policy_epoch: row.get(7)?,
+                expires_at: row.get(8)?,
+                created_at: row.get(9)?,
+                operation_sequence: row.get(10)?,
+                payload_schema_revision: row.get(11)?,
+                sealed_typed_operation: row.get(12)?,
+                operation_row_digest: row.get(13)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let Some(record) = decode_stored_change_plan_rows(rows).map_err(invalid)? else {
+        return Ok(false);
+    };
+    Ok(record.plan == *plan)
+}
+
 fn plan_replay_matches(
     connection: &rusqlite::Connection,
     plan: &ProtectedChangePlan,
     audit: &ConfigurationAuditEvent,
 ) -> rusqlite::Result<bool> {
-    let stored = connection
-        .query_row(
-            "SELECT actor_id, base_revision_id, operation_digest, resolved_scope_digest,
-                    membership_digest, authorization_policy_digest, policy_epoch, expires_at,
-                    created_at
-             FROM configuration_change_plans
-             WHERE plan_id = ?1",
-            [plan.plan_id.as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, i64>(8)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((
-        actor_id,
-        base_revision_id,
-        operation_digest,
-        resolved_scope_digest,
-        membership_digest,
-        authorization_policy_digest,
-        policy_epoch,
-        expires_at,
-        created_at,
-    )) = stored
-    else {
-        return Ok(false);
-    };
-    let policy_epoch = u64::try_from(policy_epoch).map_err(conversion)?;
-    if actor_id != plan.actor_id.as_str()
-        || base_revision_id != plan.base_revision_id.as_str()
-        || operation_digest != plan.operation_digest.as_str()
-        || resolved_scope_digest != plan.resolved_scope_digest.as_str()
-        || membership_digest.as_deref()
-            != plan
-                .membership_digest
-                .as_ref()
-                .map(|digest| digest.as_str())
-        || authorization_policy_digest != plan.authorization_policy_digest.as_str()
-        || policy_epoch != plan.policy_epoch
-        || expires_at != plan.expires_at.0
-        || created_at != plan.created_at.0
-    {
-        return Ok(false);
-    }
-    let payload: Option<Vec<u8>> = connection
-        .query_row(
-            "SELECT sealed_typed_operation
-             FROM configuration_change_plan_operations
-             WHERE plan_id = ?1 AND sequence = 0",
-            [plan.plan_id.as_str()],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(payload) = payload else {
-        return Ok(false);
-    };
-    let stored_payload: serde_json::Value = serde_json::from_slice(&payload).map_err(conversion)?;
-    let expected_plan = serde_json::to_value(plan).map_err(conversion)?;
-    if stored_payload.get("plan") != Some(&expected_plan) {
+    if !stored_plan_matches(connection, plan)? {
         return Ok(false);
     }
     let expected_kind = match audit.event_kind {
@@ -413,6 +392,50 @@ fn plan_replay_matches(
         .filter(|kind| *kind == "applied" || *kind == "rollback_applied")
         .collect::<Vec<_>>();
     Ok(terminals.len() == 1 && terminals[0] == expected_kind)
+}
+
+/// Next plan event sequence, enforcing the lifecycle the global-db writer
+/// enforces: a `dry_run_created` opener, strictly increasing sequences, and no
+/// earlier terminal event.
+fn next_plan_event_sequence(
+    connection: &rusqlite::Connection,
+    plan: &ProtectedChangePlan,
+) -> rusqlite::Result<i64> {
+    let mut statement = connection.prepare(
+        "SELECT sequence, event_kind
+         FROM configuration_change_plan_events
+         WHERE plan_id = ?1
+         ORDER BY sequence ASC",
+    )?;
+    let rows = statement
+        .query_map([plan.plan_id.as_str()], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut saw_dry_run = false;
+    let mut terminal_count = 0usize;
+    let mut last_sequence = None;
+    for (sequence, event_kind) in rows {
+        if sequence < 0 || last_sequence.is_some_and(|previous| sequence <= previous) {
+            return Err(invalid(
+                "configuration plan events are not strictly ordered",
+            ));
+        }
+        if sequence == 0 && event_kind == "dry_run_created" {
+            saw_dry_run = true;
+        }
+        if matches!(event_kind.as_str(), "applied" | "rollback_applied") {
+            terminal_count += 1;
+        }
+        last_sequence = Some(sequence);
+    }
+    if !saw_dry_run || terminal_count != 0 {
+        return Err(invalid("configuration change plan is stale"));
+    }
+    last_sequence
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| invalid("configuration plan event sequence overflow"))
 }
 
 fn read_audit_event(

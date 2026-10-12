@@ -21,7 +21,7 @@ pub enum ExactSqlValue {
 }
 
 impl ExactSqlValue {
-    pub(super) fn into_rusqlite(self) -> Value {
+    pub(crate) fn into_rusqlite(self) -> Value {
         match self {
             Self::Null => Value::Null,
             Self::Integer(value) => Value::Integer(value),
