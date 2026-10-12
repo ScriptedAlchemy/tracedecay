@@ -44,8 +44,8 @@ pub use export::RegisteredAggregateShareExporterV1;
 pub use github_stack_emit::{
     GitHubStackCapabilityObservationResultV1, GitHubStackCapabilityObservationUnavailableV1,
     GitHubStackDriftObservationResultV1, GitHubStackDriftObservationUnavailableV1,
-    GitHubStackDriftRecoveryErrorV1, GitHubStackProbeOwnerMountErrorV1, GitHubStackProbeOwnerV1,
-    record_github_stack_capability, record_github_stack_drifts, recover_open_github_stack_drifts,
+    GitHubStackProbeOwnerMountErrorV1, GitHubStackProbeOwnerV1, record_github_stack_capability,
+    record_github_stack_drifts,
 };
 pub use no_progress_emit::{WorkNoProgressObservationV1, record_no_progress_observation};
 pub use producer::{

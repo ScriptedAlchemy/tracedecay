@@ -9,16 +9,12 @@ use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::TranscriptIngestStats;
-use crate::runtime::source::{TranscriptIngestResult, run_blocking_transcript_section};
+use crate::runtime::source::run_blocking_transcript_section;
 
 use super::DEFAULT_HERMES_SWEEP_BYTES;
-use super::coverage::{
-    drain_hermes_projections_with_admission,
-    drain_hermes_projections_with_admission_and_cancellation,
-};
+use super::coverage::drain_hermes_projections_with_admission_and_cancellation;
 use super::state_db::{
-    try_ingest_state_db_bounded_with_admission, try_ingest_state_db_for_projects,
-    try_ingest_user_state_db_bounded_with_admission,
+    try_ingest_state_db_bounded_with_admission, try_ingest_user_state_db_bounded_with_admission,
 };
 
 fn new_sweep_budget(max_new_bytes: Option<u64>) -> IngestByteBudget {
@@ -89,27 +85,9 @@ pub struct HermesSweepOutcome {
 /// daemon-authorized canonical `project_id` scope in `db`.
 ///
 /// Discovery is bounded to the default user integration (`~/.hermes`) and its
-/// immediate named-profile children; environment overrides are ignored.
-pub async fn ingest_for_project(
-    admission: &dyn HostAdmission,
-    project_root: &Path,
-    project_id: ProjectId,
-) -> Option<TranscriptIngestStats> {
-    Some(
-        ingest_for_project_capped_with_admission_and_cancellation(
-            project_root,
-            project_id,
-            admission,
-            None,
-            &ObservationCancellation::default(),
-        )
-        .await?
-        .stats,
-    )
-}
-
-/// [`ingest_for_project`] with one aggregate logical source-byte budget shared
-/// across every discovered Hermes profile.
+/// immediate named-profile children; environment overrides are ignored. One
+/// aggregate logical source-byte budget is shared across every discovered
+/// Hermes profile.
 pub async fn ingest_for_project_capped_with_admission_and_cancellation(
     project_root: &Path,
     project_id: ProjectId,
@@ -129,120 +107,6 @@ pub async fn ingest_for_project_capped_with_admission_and_cancellation(
         )
         .await,
     )
-}
-
-/// One project-store destination for a shared Hermes source sweep.
-#[derive(Clone)]
-pub struct ProjectIngestDestination<'a> {
-    pub admission: &'a dyn HostAdmission,
-    pub project_root: &'a Path,
-    pub project_id: ProjectId,
-}
-
-/// Ingests Hermes history for several registered projects while opening and
-/// scanning each profile `state.db` only once. Every destination retains its
-/// own authoritative source cursor, advanced atomically with canonical
-/// observation persistence or typed complete-record coverage.
-#[tracing::instrument(
-    name = "sessions.hosts.hermes.ingest_projects",
-    level = "trace",
-    skip_all
-)]
-pub async fn ingest_homes_for_projects(
-    hermes_homes: &[PathBuf],
-    destinations: &[ProjectIngestDestination<'_>],
-) -> TranscriptIngestResult<TranscriptIngestStats> {
-    let mut stats = TranscriptIngestStats::default();
-    let mut budget = new_sweep_budget(None);
-    let sources = {
-        run_blocking_transcript_section("hermes", {
-            let hermes_homes = hermes_homes.to_vec();
-            move || all_profile_sources(&hermes_homes)
-        })
-        .await?
-    };
-    for source in sources {
-        if budget.exhausted() {
-            budget.defer();
-            break;
-        }
-        let eligible = {
-            let roots = destinations
-                .iter()
-                .map(|destination| destination.project_root.to_path_buf())
-                .collect::<Vec<_>>();
-            let real_roots = run_blocking_transcript_section("hermes", move || {
-                roots
-                    .into_iter()
-                    .filter(|root| project_is_real(root))
-                    .collect::<BTreeSet<_>>()
-            })
-            .await?;
-            destinations
-                .iter()
-                .filter(|destination| real_roots.contains(destination.project_root))
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        if eligible.is_empty() {
-            continue;
-        }
-        match try_ingest_state_db_for_projects(&source, &eligible, &mut budget).await {
-            Ok(source_stats) => {
-                stats = stats.merge(source_stats);
-            }
-            Err(error) => {
-                tracing::debug!(
-                    state_db = %source.state_db.display(),
-                    error,
-                    "skipping shared Hermes transcript source"
-                );
-            }
-        }
-    }
-    for destination in destinations {
-        let scope = ObservationScopeV1::Project {
-            project_id: destination.project_id.clone(),
-        };
-        if let Err(error) =
-            drain_hermes_projections_with_admission(destination.admission, &scope).await
-        {
-            tracing::debug!(error, "Hermes shared projection drain deferred");
-        }
-    }
-    Ok(stats)
-}
-
-/// [`ingest_for_project`] with explicit Hermes home directories, the test
-/// seam for pointing the sweep at a temporary home instead of the real
-/// `~/.hermes`.
-pub async fn ingest_homes(
-    admission: &dyn HostAdmission,
-    hermes_homes: &[PathBuf],
-    project_root: &Path,
-    project_id: ProjectId,
-) -> TranscriptIngestStats {
-    ingest_homes_capped_with_admission(hermes_homes, project_root, project_id, admission, None)
-        .await
-        .stats
-}
-
-pub async fn ingest_homes_capped_with_admission(
-    hermes_homes: &[PathBuf],
-    project_root: &Path,
-    project_id: ProjectId,
-    admission: &dyn HostAdmission,
-    max_new_bytes: Option<u64>,
-) -> HermesSweepOutcome {
-    ingest_homes_capped_with_admission_and_cancellation(
-        hermes_homes,
-        project_root,
-        project_id,
-        admission,
-        max_new_bytes,
-        &ObservationCancellation::default(),
-    )
-    .await
 }
 
 #[tracing::instrument(
@@ -350,32 +214,6 @@ pub async fn ingest_user_sessions_capped_with_admission(
         )
         .await,
     )
-}
-
-pub async fn ingest_user_homes(
-    admission: &dyn HostAdmission,
-    hermes_homes: &[PathBuf],
-    registered_roots: &[PathBuf],
-) -> TranscriptIngestStats {
-    ingest_user_homes_capped(admission, hermes_homes, registered_roots, None)
-        .await
-        .stats
-}
-
-pub async fn ingest_user_homes_capped(
-    admission: &dyn HostAdmission,
-    hermes_homes: &[PathBuf],
-    registered_roots: &[PathBuf],
-    max_new_bytes: Option<u64>,
-) -> HermesSweepOutcome {
-    ingest_user_homes_capped_with_admission(
-        admission,
-        hermes_homes,
-        registered_roots,
-        max_new_bytes,
-        &ObservationCancellation::default(),
-    )
-    .await
 }
 
 #[tracing::instrument(name = "sessions.hosts.hermes.ingest_user", level = "trace", skip_all)]
@@ -542,14 +380,21 @@ mod tests {
         std::fs::write(hermes.join("state.db"), "not a sqlite database").unwrap();
         let admission = MemoryHostAdmission::default();
 
-        let first =
-            ingest_user_homes_capped(&admission, std::slice::from_ref(&hermes), &[], None).await;
+        let cancellation = ObservationCancellation::default();
+        let sweep = || {
+            crate::runtime::with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(temp.path()),
+                ingest_user_sessions_capped_with_admission(&admission, &[], None, &cancellation),
+            )
+        };
+
+        let first = sweep().await.expect("hermes home");
         assert!(
             first.source_failures > 0,
             "a corrupt state.db must fail the first sweep"
         );
 
-        let second = ingest_user_homes_capped(&admission, &[hermes], &[], None).await;
+        let second = sweep().await.expect("hermes home");
         assert_eq!(
             second.source_failures, 1,
             "an unchanged unreadable source must not become a successful empty sweep"

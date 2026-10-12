@@ -10,11 +10,9 @@ use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::hosts::cursor::{
     CursorSweepSource, CursorTranscriptIngestStats, cursor_project_slug,
-    ingest_cursor_transcript_event as ingest_cursor_transcript_event_for_project,
-    ingest_cursor_transcript_event_capped as ingest_cursor_transcript_event_capped_for_project,
-    ingest_cursor_user_transcript_event_capped,
-    ingest_cursor_user_transcript_event_capped_with_registered_roots,
     try_ingest_cursor_project_sweep_capped as try_ingest_cursor_project_sweep_capped_for_project,
+    try_ingest_cursor_transcript_event_capped_with_admission,
+    try_ingest_cursor_user_transcript_event_capped_with_admission,
 };
 use tracedecay_sessions::runtime::source::{TranscriptIngestResult, TranscriptSource};
 use tracedecay_sessions::runtime::with_transcript_source_profile;
@@ -33,15 +31,7 @@ async fn ingest_cursor_transcript_event(
     event_json: &str,
     db: &ProjectSessionTestRuntime,
 ) -> CursorTranscriptIngestStats {
-    with_transcript_source_profile(
-        db.transcript_source_profile(),
-        ingest_cursor_transcript_event_for_project(
-            event_json,
-            &db.runtime().facade(),
-            db.project_id().clone(),
-        ),
-    )
-    .await
+    ingest_cursor_transcript_event_capped(event_json, db, None).await
 }
 
 async fn ingest_cursor_transcript_event_capped(
@@ -51,14 +41,15 @@ async fn ingest_cursor_transcript_event_capped(
 ) -> CursorTranscriptIngestStats {
     with_transcript_source_profile(
         db.transcript_source_profile(),
-        ingest_cursor_transcript_event_capped_for_project(
+        try_ingest_cursor_transcript_event_capped_with_admission(
             event_json,
-            &db.runtime().facade(),
             db.project_id().clone(),
+            &db.runtime().facade(),
             max_new_bytes,
         ),
     )
     .await
+    .expect("cursor transcript ingest")
 }
 
 async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
@@ -131,8 +122,14 @@ async fn projectless_cursor_hook_event_uses_user_session_identity() {
         .unwrap();
     let admission = runtime.facade();
 
-    let stats =
-        ingest_cursor_user_transcript_event_capped(&event.to_string(), &admission, None).await;
+    let stats = try_ingest_cursor_user_transcript_event_capped_with_admission(
+        &event.to_string(),
+        &admission,
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
 
     assert_eq!(stats.messages_upserted, 1);
     let session = runtime
@@ -170,13 +167,14 @@ async fn user_cursor_hook_event_rejects_registered_project_transcript_slug() {
         .unwrap();
     let admission = runtime.facade();
 
-    let stats = ingest_cursor_user_transcript_event_capped_with_registered_roots(
+    let stats = try_ingest_cursor_user_transcript_event_capped_with_admission(
         &event.to_string(),
         &admission,
         None,
         &[registered],
     )
-    .await;
+    .await
+    .unwrap();
 
     assert_eq!(stats.messages_upserted, 0);
     assert!(
@@ -221,13 +219,14 @@ async fn user_cursor_hook_event_prefers_exact_workspace_over_colliding_slug() {
         .unwrap();
     let admission = runtime.facade();
 
-    let stats = ingest_cursor_user_transcript_event_capped_with_registered_roots(
+    let stats = try_ingest_cursor_user_transcript_event_capped_with_admission(
         &event.to_string(),
         &admission,
         None,
         &[registered],
     )
-    .await;
+    .await
+    .unwrap();
 
     assert_eq!(stats.messages_upserted, 1);
     let session = runtime
@@ -268,13 +267,14 @@ async fn user_cursor_hook_event_without_workspace_fails_closed_on_slug_collision
         .unwrap();
     let admission = runtime.facade();
 
-    let stats = ingest_cursor_user_transcript_event_capped_with_registered_roots(
+    let stats = try_ingest_cursor_user_transcript_event_capped_with_admission(
         &event.to_string(),
         &admission,
         None,
         &[registered],
     )
-    .await;
+    .await
+    .unwrap();
 
     assert_eq!(stats.messages_upserted, 0);
     assert!(
@@ -441,12 +441,14 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
         "model": "gpt-5.5"
     });
 
-    let stats = ingest_cursor_transcript_event_for_project(
+    let stats = try_ingest_cursor_transcript_event_capped_with_admission(
         &event.to_string(),
-        &runtime.facade(),
         project_id,
+        &runtime.facade(),
+        None,
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(stats.sessions_upserted, 1);
     assert_eq!(stats.messages_upserted, 2);
     assert!(
@@ -863,14 +865,18 @@ async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
         )
         .unwrap();
 
-    let first = ingest_cursor_transcript_event_for_project(
+    // The failed pass either surfaces the write failure or admits nothing.
+    if let Ok(first) = try_ingest_cursor_transcript_event_capped_with_admission(
         &event.to_string(),
-        &broken_db.facade(),
         project_id.clone(),
+        &broken_db.facade(),
+        None,
     )
-    .await;
-    assert_eq!(first.sessions_upserted, 0);
-    assert_eq!(first.messages_upserted, 0);
+    .await
+    {
+        assert_eq!(first.sessions_upserted, 0);
+        assert_eq!(first.messages_upserted, 0);
+    }
     drop(broken_db);
     broken_conn
         .execute_batch("DROP TRIGGER fail_cursor_message_write;")
@@ -882,12 +888,14 @@ async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
     let repaired_db = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
         .await
         .unwrap();
-    let second = ingest_cursor_transcript_event_for_project(
+    let second = try_ingest_cursor_transcript_event_capped_with_admission(
         &event.to_string(),
-        &repaired_db.facade(),
         project_id,
+        &repaired_db.facade(),
+        None,
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(second.sessions_upserted, 1);
     assert_eq!(second.messages_upserted, 1);
 
