@@ -381,6 +381,28 @@ impl CodeIndexWorktreeSchedulerV1 {
         source: &ExactGitTreeSourceV1,
         control: &branch_generations::BranchGenerationReadControlV1,
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
+        self.capture_git_tree_snapshot(source, control, false)
+    }
+
+    /// HEAD's tree standing in for a clean checkout. Git stores a symlink as
+    /// its target path, while worktree capture and every source sweep read
+    /// through the link, so a tree holding a source symlink would seal bytes
+    /// the next sweep disproves. That tree is `GenerationUnavailable` here and
+    /// the checkout is captured from disk instead.
+    pub(super) fn capture_clean_head_tree_snapshot(
+        &self,
+        source: &ExactGitTreeSourceV1,
+        control: &branch_generations::BranchGenerationReadControlV1,
+    ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
+        self.capture_git_tree_snapshot(source, control, true)
+    }
+
+    fn capture_git_tree_snapshot(
+        &self,
+        source: &ExactGitTreeSourceV1,
+        control: &branch_generations::BranchGenerationReadControlV1,
+        refuse_source_links: bool,
+    ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
         control.termination().map_or(Ok(()), Err)?;
         let repository = tracedecay_runtime_core::git_open::open(&self.project_root)
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
@@ -410,6 +432,21 @@ impl CodeIndexWorktreeSchedulerV1 {
             .files()
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
         entries.sort_by(|left, right| left.filepath.cmp(&right.filepath));
+        if refuse_source_links {
+            let registry = StaticLanguageRegistry::new();
+            if entries.iter().any(|entry| {
+                entry.mode.is_link()
+                    && representable_logical_path(entry.filepath.as_ref())
+                        .and_then(|logical_path| Path::new(logical_path).extension())
+                        .and_then(|extension| extension.to_str())
+                        .and_then(|extension| {
+                            registry.descriptor_for_extension(&extension.to_lowercase())
+                        })
+                        .is_some()
+            }) {
+                return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
+            }
+        }
 
         self.capture_git_tree_blobs_snapshot(
             source.reference.clone(),

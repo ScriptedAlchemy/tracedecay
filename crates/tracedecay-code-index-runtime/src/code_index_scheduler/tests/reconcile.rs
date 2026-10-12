@@ -770,6 +770,45 @@ fn unresolvable_active_tree_falls_back_to_full_capture() {
     );
 }
 
+/// Git stores a committed source symlink as its target path, while the
+/// worktree reads through it. Sealing the link text from HEAD's tree left the
+/// first post-publication sweep disproving an unchanged checkout, so every
+/// mount rebuilt once and served the rebuild as dirty.
+#[cfg(unix)]
+#[test]
+fn committed_source_symlink_publishes_a_current_clean_generation() {
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", "pub mod pricing;\n"),
+        ("src/pricing.rs", "pub fn total() -> u64 { 1 }\n"),
+    ]);
+    std::os::unix::fs::symlink("pricing.rs", fixture.path().join("src/pricing_alias.rs"))
+        .expect("source symlink");
+    fixture.commit_all("alias pricing");
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+
+    assert!(
+        !scheduler.request_fresh_now_background(),
+        "the sweep after publication must find the unchanged checkout current"
+    );
+    assert_eq!(
+        scheduler
+            .latest_complete()
+            .expect("published generation")
+            .generation
+            .snapshot()
+            .source_revision
+            .as_ref(),
+        scheduler.identity.head_commit(),
+        "a clean checkout's generation must carry HEAD's revision"
+    );
+}
+
 #[test]
 fn reverted_dirty_file_is_recaptured_from_clean_content() {
     let committed = "pub fn alpha() -> u32 { 1 }\n";
