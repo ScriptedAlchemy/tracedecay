@@ -204,7 +204,7 @@ impl AgentIntegration for CodexIntegration {
 
     fn host_component_registration(
         &self,
-        _component: super::host_bundle::HostComponentV1,
+        component: super::host_bundle::HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
         use super::host_bundle::HostBundleRegistrationStateV1 as State;
@@ -215,6 +215,11 @@ impl AgentIntegration for CodexIntegration {
         match codex_registration_residue(&ctx.home) {
             Ok(false) => return State::Missing,
             Ok(true) => {}
+            Err(()) => return State::Corrupt,
+        }
+        match mcp_registry::standalone_mcp_route(component, &ctx.home, None) {
+            Ok(true) => return State::Current,
+            Ok(false) => {}
             Err(()) => return State::Corrupt,
         }
 
@@ -237,6 +242,15 @@ impl AgentIntegration for CodexIntegration {
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
         use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
+        match mcp_registry::standalone_mcp_route(
+            component,
+            &ctx.home,
+            Some(&install.tracedecay_bin),
+        ) {
+            Ok(true) => return State::Current,
+            Ok(false) => {}
+            Err(()) => return State::Corrupt,
+        }
         match self.host_component_registration(component, ctx) {
             State::Current => {
                 match codex_plugin_activation_state(

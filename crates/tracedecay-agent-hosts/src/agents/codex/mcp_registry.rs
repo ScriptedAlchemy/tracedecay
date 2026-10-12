@@ -106,6 +106,31 @@ pub(super) fn is_mcp_only_component_set(components: &[HostComponentV1]) -> bool 
             || components.contains(&HostComponentV1::OperatorMcp))
 }
 
+/// Whether `component` is an MCP route served by Codex's standalone registry
+/// server, launching `tracedecay_bin` when one is given. This is the MCP-only
+/// install's readback: that install never activates the plugin.
+pub(super) fn standalone_mcp_route(
+    component: HostComponentV1,
+    home: &Path,
+    tracedecay_bin: Option<&str>,
+) -> std::result::Result<bool, ()> {
+    if !matches!(
+        component,
+        HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
+    ) {
+        return Ok(false);
+    }
+    let (_, config) = read_config_table(&codex_config_path(home)).map_err(drop)?;
+    let Some(server) = config
+        .get(CODEX_MCP_SERVERS_KEY)
+        .and_then(|servers| servers.get(CODEX_MCP_SERVER_NAME))
+    else {
+        return Ok(false);
+    };
+    Ok(tracedecay_bin
+        .is_none_or(|bin| server.get("command").and_then(toml::Value::as_str) == Some(bin)))
+}
+
 /// Resolve Codex's own CLI, or fail with the typed requirement.
 ///
 /// Codex owns `[mcp_servers]` in `~/.codex/config.toml`. Its CLI is therefore a
@@ -553,7 +578,7 @@ exit 0"#;
         operation: crate::agents::host_bundle::HostBundleLifecycleOpV1,
         operation_id: u8,
         tracedecay_bin: &str,
-    ) -> Result<(), crate::agents::host_bundle::HostBundleError> {
+    ) -> std::result::Result<(), crate::agents::host_bundle::HostBundleError> {
         use crate::agents::host_bundle::{
             HostBundleWriterV1, HostComponentSetExecutionRequestV1,
             HostComponentSetLifecycleRequestV1, HostComponentSetTransactionV1, HostKindV1,
@@ -667,5 +692,158 @@ exit 0"#;
         .expect("the MCP-only uninstall verifies the server is gone");
 
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), operator);
+    }
+
+    #[cfg(unix)]
+    fn live_receipt(
+        lifecycle: &Path,
+        component: HostComponentV1,
+    ) -> Option<crate::agents::host_bundle::HostBundleInstallReceiptV1> {
+        crate::agents::host_bundle::latest_host_component_receipt_at(
+            lifecycle,
+            crate::agents::host_bundle::HostKindV1::Codex,
+            component,
+        )
+        .unwrap()
+        .filter(|receipt| {
+            receipt.operation != crate::agents::host_bundle::HostBundleLifecycleOpV1::Uninstall
+        })
+    }
+
+    /// A released binary's MCP-only `operator-mcp` install registered the
+    /// standalone server under the legacy identity. The canonical update
+    /// re-registers that one server under `context-mcp`, and the canonical
+    /// uninstall removes it.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_mcp_only_install_updates_and_uninstalls_as_one_server() {
+        use crate::agents::host_bundle::HostBundleLifecycleOpV1;
+
+        const OLD_BIN: &str = "/opt/tracedecay-old/bin/tracedecay";
+        const NEW_BIN: &str = "/opt/tracedecay-new/bin/tracedecay";
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let bin_dir = tempfile::tempdir().unwrap();
+        fake_codex_cli(
+            &bin_dir.path().join("codex"),
+            &bin_dir.path().join("invocations.log"),
+            FAKE_TABLE_SCOPED_REGISTRY_BODY,
+        );
+        let _codex_cli =
+            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
+        let config_path = codex_config_path(home.path());
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let operator = "[mcp_servers.other]\ncommand = \"other\"\n\n";
+        std::fs::write(&config_path, operator).unwrap();
+
+        run_mcp_only_selection(
+            home.path(),
+            lifecycle.path(),
+            HostComponentV1::OperatorMcp,
+            HostBundleLifecycleOpV1::Install,
+            60,
+            OLD_BIN,
+        )
+        .unwrap();
+        assert!(live_receipt(lifecycle.path(), HostComponentV1::OperatorMcp).is_some());
+
+        run_mcp_only_selection(
+            home.path(),
+            lifecycle.path(),
+            HostComponentV1::ContextMcp,
+            HostBundleLifecycleOpV1::Update,
+            61,
+            NEW_BIN,
+        )
+        .expect("the canonical update takes over the legacy standalone server");
+
+        assert_eq!(tracedecay_servers(&config_path), ["other", "tracedecay"]);
+        let config: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(server_command(&config, "tracedecay"), Some(NEW_BIN));
+        assert!(live_receipt(lifecycle.path(), HostComponentV1::OperatorMcp).is_none());
+        assert!(live_receipt(lifecycle.path(), HostComponentV1::ContextMcp).is_some());
+
+        run_mcp_only_selection(
+            home.path(),
+            lifecycle.path(),
+            HostComponentV1::ContextMcp,
+            HostBundleLifecycleOpV1::Uninstall,
+            62,
+            NEW_BIN,
+        )
+        .expect("the canonical uninstall removes the migrated server");
+
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), operator);
+        assert!(live_receipt(lifecycle.path(), HostComponentV1::ContextMcp).is_none());
+    }
+
+    /// Body for a fake `codex` whose `mcp add` writes the tracedecay server and
+    /// also drops every table whose header starts with `region`.
+    #[cfg(unix)]
+    fn fake_registry_dropping(region: &str) -> String {
+        format!(
+            r#"config="$HOME/.codex/config.toml"
+/usr/bin/awk '/^\[/ {{ dropped = index($0, "{region}") == 1 }} !dropped' "$config" > "$config.next"
+printf '[mcp_servers.tracedecay]\ncommand = "%s"\n' "$7" >> "$config.next"
+/bin/mv "$config.next" "$config"
+exit 0"#
+        )
+    }
+
+    /// When Codex's own `mcp add` disturbs an operator peer server, plugin
+    /// activation or hook trust, the MCP-only install refuses and rolls back to
+    /// the operator's exact config, deploys nothing and records no owner.
+    #[cfg(unix)]
+    #[test]
+    fn refused_mcp_only_install_restores_only_what_it_changed() {
+        use crate::agents::host_bundle::HostBundleLifecycleOpV1;
+
+        let operator = "[mcp_servers.other]\ncommand = \"other\"\n\n\
+                        [plugins.\"other@personal\"]\nenabled = true\n\n\
+                        [hooks.state.\"other@personal:hooks/hooks.json:stop:0:0\"]\n\
+                        trusted_hash = \"sha256:00\"\n";
+        for region in ["[mcp_servers.other]", "[plugins.", "[hooks."] {
+            let home = tempfile::tempdir().unwrap();
+            let lifecycle = tempfile::tempdir().unwrap();
+            let bin_dir = tempfile::tempdir().unwrap();
+            fake_codex_cli(
+                &bin_dir.path().join("codex"),
+                &bin_dir.path().join("invocations.log"),
+                &fake_registry_dropping(region),
+            );
+            let _codex_cli =
+                tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
+            let config_path = codex_config_path(home.path());
+            std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+            std::fs::write(&config_path, operator).unwrap();
+
+            run_mcp_only_selection(
+                home.path(),
+                lifecycle.path(),
+                HostComponentV1::ContextMcp,
+                HostBundleLifecycleOpV1::Install,
+                70,
+                "/opt/tracedecay/bin/tracedecay",
+            )
+            .expect_err("a host command that disturbs Codex-owned state is refused");
+
+            assert_eq!(
+                std::fs::read_to_string(&config_path).unwrap(),
+                operator,
+                "{region}"
+            );
+            assert!(
+                !home
+                    .path()
+                    .join(".codex/plugins/tracedecay/.mcp.json")
+                    .exists(),
+                "{region}"
+            );
+            assert!(
+                live_receipt(lifecycle.path(), HostComponentV1::ContextMcp).is_none(),
+                "{region}"
+            );
+        }
     }
 }
