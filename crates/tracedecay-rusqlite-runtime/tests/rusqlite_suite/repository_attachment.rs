@@ -8,14 +8,14 @@ use tracedecay_rusqlite_runtime::repository::{
     ConcreteRepositoryWriteExecutor, RepositoryPhysicalAttachmentFactory,
 };
 use tracedecay_store::{
-    AdmissionConfigV1, ConsistencyModeV1, DiagnosticReadOperationV1, DiagnosticReadResultV1,
-    GENERATION_DIAGNOSTICS_SCHEMA_DDL, OperationPriorityV1, ProjectReadOperationV1,
-    ProjectReadResultV1, RepositoryReadOperationV1, RepositoryReadResultV1,
+    AdmissionConfigV1, CommitSequenceV1, ConsistencyModeV1, DiagnosticReadOperationV1,
+    DiagnosticReadResultV1, GENERATION_DIAGNOSTICS_SCHEMA_DDL, OperationPriorityV1,
+    ProjectReadOperationV1, ProjectReadResultV1, RepositoryReadOperationV1, RepositoryReadResultV1,
     RepositoryWritePayloadV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeReadOperationV1, RuntimeReadRequestV1,
-    RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
+    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeReadCoverageV1, RuntimeReadOperationV1,
+    RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
     SanitizedCleanDiagnosticSnapshotV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
-    VerifiedStoreLocatorV1,
+    UnavailableReasonV1, VerifiedStoreLocatorV1, single_shard_required_coverage_v1,
 };
 
 use tracedecay_domain::test_fixtures::id;
@@ -56,7 +56,10 @@ impl RuntimeRequestProbeV1 for Probe {
     }
 }
 
-fn health_request(binding: StoreRuntimeBindingV1) -> (RuntimeReadRequestV1, Probe) {
+fn health_request(
+    binding: StoreRuntimeBindingV1,
+    consistency: ConsistencyModeV1,
+) -> (RuntimeReadRequestV1, Probe) {
     let cancellation = RuntimeCancellationIdentityV1 {
         cancellation_id: RuntimeCancellationIdV1::new("cancel.repository-health").unwrap(),
         generation: 1,
@@ -72,7 +75,7 @@ fn health_request(binding: StoreRuntimeBindingV1) -> (RuntimeReadRequestV1, Prob
     (
         RuntimeReadRequestV1::new(
             binding,
-            ConsistencyModeV1::LatestAvailable,
+            consistency,
             RuntimeReadOperationV1::TemporalHealth,
             OperationPriorityV1::Health,
             1,
@@ -129,7 +132,7 @@ fn temporal_health_dispatch_uses_the_reserved_reader_lane() {
     let attachment = RepositoryPhysicalAttachmentFactory
         .attach(binding.clone(), locator, path, AdmissionConfigV1::default())
         .unwrap();
-    let (request, probe) = health_request(binding);
+    let (request, probe) = health_request(binding, ConsistencyModeV1::LatestAvailable);
 
     let outcome = attachment.dispatch_read(request, &probe).unwrap();
 
@@ -137,6 +140,47 @@ fn temporal_health_dispatch_uses_the_reserved_reader_lane() {
         outcome.value(),
         Some(RuntimeReadResultV1::TemporalHealth { healthy: true })
     ));
+    attachment.drain().unwrap();
+    attachment.close_and_join().unwrap();
+}
+
+#[test]
+fn at_least_reads_refuse_coverage_without_a_committed_watermark() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("sessions.db");
+    Connection::open(&path).unwrap();
+    let path = path.canonicalize().unwrap();
+    let binding = binding();
+    let locator = VerifiedStoreLocatorV1::new(
+        binding.shard_id.clone(),
+        StoreIncarnationV1::new(1).unwrap(),
+        LocatorDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap(),
+    );
+    let attachment = RepositoryPhysicalAttachmentFactory
+        .attach(binding.clone(), locator, path, AdmissionConfigV1::default())
+        .unwrap();
+    let commit_sequence = CommitSequenceV1(7);
+    let (request, probe) = health_request(
+        binding.clone(),
+        ConsistencyModeV1::AtLeast { commit_sequence },
+    );
+
+    let outcome = attachment.dispatch_read(request.clone(), &probe).unwrap();
+
+    assert!(
+        outcome.value().is_none(),
+        "an uncommitted snapshot must not serve a value"
+    );
+    assert_eq!(
+        outcome.coverage(),
+        &RuntimeReadCoverageV1::Unavailable {
+            coverage: Some(
+                single_shard_required_coverage_v1(&binding, commit_sequence, []).unwrap()
+            ),
+            reason: UnavailableReasonV1::MissingAuthority,
+        }
+    );
+    assert_eq!(outcome.validate_for(&request), Ok(()));
     attachment.drain().unwrap();
     attachment.close_and_join().unwrap();
 }

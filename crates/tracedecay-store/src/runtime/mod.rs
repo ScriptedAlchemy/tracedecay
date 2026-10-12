@@ -23,7 +23,7 @@ mod telemetry;
 
 pub use consistency::{
     CommitSequenceV1, ConsistencyModeV1, FrozenWatermarkCoverageV1, FrozenWatermarkVectorV1,
-    ShardWatermarkV1, SnapshotLeaseV1, WatermarkCoverageStatusV1,
+    ShardWatermarkV1, WatermarkCoverageStatusV1,
 };
 pub use error::{
     CorruptionClassV1, RuntimeCancellationStageV1, SaturationScopeV1,

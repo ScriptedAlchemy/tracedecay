@@ -9,10 +9,10 @@ use std::{
 
 use rusqlite::Transaction;
 use tracedecay_store::{
-    AdmissionConfigV1, ConsistencyModeV1, FrozenWatermarkCoverageV1, FrozenWatermarkVectorV1,
-    RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
-    RuntimeReadResultV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
-    ShardWatermarkV1, StorageRuntimeErrorV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, ConsistencyModeV1, RuntimeReadCoverageV1, RuntimeReadOperationV1,
+    RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestProbeV1,
+    RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, StorageRuntimeErrorV1, StoreRuntimeBindingV1,
+    UnavailableReasonV1, VerifiedStoreLocatorV1, single_shard_required_coverage_v1,
 };
 
 use crate::{
@@ -812,54 +812,64 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
         snapshot: &Transaction<'_>,
         request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
-        let value = match request.operation() {
-            RuntimeReadOperationV1::TemporalHealth => {
-                let healthy = snapshot
-                    .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
-                    .map(|value| value.eq_ignore_ascii_case("ok"))
-                    .map_err(|error| infrastructure(format!("repository quick check: {error}")))?;
-                RuntimeReadResultV1::TemporalHealth { healthy }
-            }
-            RuntimeReadOperationV1::Repository { op } => {
-                let result = self
-                    .repository
-                    .execute(snapshot, op)
-                    .map_err(|error| infrastructure(format!("repository read: {error}")))?;
-                RuntimeReadResultV1::Repository { result }
-            }
-            _ => {
-                return Err(infrastructure(
-                    "repository reader received an unsupported runtime operation",
-                ));
-            }
-        };
         let coverage = match request.consistency() {
             ConsistencyModeV1::LatestAvailable => RuntimeReadCoverageV1::Latest { observed: None },
             ConsistencyModeV1::AtLeast { commit_sequence } => {
-                let observed = ShardWatermarkV1 {
-                    shard_id: request.binding().shard_id.clone(),
-                    incarnation: request.binding().incarnation,
-                    authority_epoch: request.binding().authority_epoch,
-                    commit_sequence: *commit_sequence,
-                };
-                let required =
-                    FrozenWatermarkVectorV1::new([observed.clone()]).map_err(|error| {
-                        infrastructure(format!("construct repository required watermark: {error}"))
+                let observed = crate::ledger::current_watermark(snapshot, request.binding())
+                    .map_err(|error| {
+                        infrastructure(format!("read repository commit watermark: {error}"))
                     })?;
-                let coverage =
-                    FrozenWatermarkCoverageV1::new(required, [observed]).map_err(|error| {
-                        infrastructure(format!("construct repository read coverage: {error}"))
-                    })?;
-                RuntimeReadCoverageV1::Complete { coverage }
-            }
-            ConsistencyModeV1::ExactSnapshot { .. }
-            | ConsistencyModeV1::FrozenWatermarkVector { .. } => {
-                return Err(infrastructure(
-                    "repository reader does not support snapshot consistency",
-                ));
+                let coverage = single_shard_required_coverage_v1(
+                    request.binding(),
+                    *commit_sequence,
+                    observed.clone(),
+                )
+                .map_err(|error| {
+                    infrastructure(format!("construct repository read coverage: {error}"))
+                })?;
+                if observed.is_none() {
+                    RuntimeReadCoverageV1::Unavailable {
+                        coverage: Some(coverage),
+                        reason: UnavailableReasonV1::MissingAuthority,
+                    }
+                } else if coverage.is_complete() {
+                    RuntimeReadCoverageV1::Complete { coverage }
+                } else {
+                    RuntimeReadCoverageV1::Stale { coverage }
+                }
             }
         };
-        RuntimeReadOutcomeV1::new(Some(value), coverage)
+        let value = if matches!(
+            coverage,
+            RuntimeReadCoverageV1::Stale { .. } | RuntimeReadCoverageV1::Unavailable { .. }
+        ) {
+            None
+        } else {
+            Some(match request.operation() {
+                RuntimeReadOperationV1::TemporalHealth => {
+                    let healthy = snapshot
+                        .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                        .map(|value| value.eq_ignore_ascii_case("ok"))
+                        .map_err(|error| {
+                            infrastructure(format!("repository quick check: {error}"))
+                        })?;
+                    RuntimeReadResultV1::TemporalHealth { healthy }
+                }
+                RuntimeReadOperationV1::Repository { op } => {
+                    let result = self
+                        .repository
+                        .execute(snapshot, op)
+                        .map_err(|error| infrastructure(format!("repository read: {error}")))?;
+                    RuntimeReadResultV1::Repository { result }
+                }
+                _ => {
+                    return Err(infrastructure(
+                        "repository reader received an unsupported runtime operation",
+                    ));
+                }
+            })
+        };
+        RuntimeReadOutcomeV1::new(value, coverage)
             .map_err(|error| infrastructure(format!("construct repository read outcome: {error}")))
     }
 }

@@ -1668,31 +1668,12 @@ impl StoreRuntimeRegistry {
         let entries = sources
             .into_iter()
             .map(|source| {
-                let mut observation = source.runtime().observe(self.inner.config.eviction_idle());
-                let physical = source.physical_snapshot();
-                observation.health.writer_present |= physical.writer_present;
-                observation.health.queued_operations = observation
-                    .health
-                    .queued_operations
-                    .saturating_add(physical.queued_operations);
-                observation.health.queued_bytes = observation
-                    .health
-                    .queued_bytes
-                    .saturating_add(physical.queued_bytes);
-                if let Some(wal_bytes) = physical.wal_bytes {
-                    observation.health.wal_bytes = wal_bytes;
+                let observation = source.runtime().observe(self.inner.config.eviction_idle());
+                RuntimeRegistryInventoryEntry {
+                    health: observation.health,
+                    eviction: observation.eviction,
+                    physical: source.physical_snapshot(),
                 }
-                if let Some(memory_estimate_bytes) = physical.memory_estimate_bytes {
-                    observation.health.memory_estimate_bytes = memory_estimate_bytes;
-                }
-                if !physical.healthy
-                    && observation.health.health != super::shard::ShardRuntimeHealth::Faulted
-                {
-                    observation.health.health = super::shard::ShardRuntimeHealth::Degraded;
-                }
-                let mut entry = RuntimeRegistryInventoryEntry::from(observation);
-                entry.physical = physical;
-                entry
             })
             .collect();
         RuntimeRegistryInventory {
