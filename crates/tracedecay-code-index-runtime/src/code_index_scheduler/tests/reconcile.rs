@@ -9183,6 +9183,10 @@ async fn serving_seat_wake_arrives_only_after_the_slot_is_seated() {
         )
         .await
         .expect("mount scheduler");
+    // Releasing a seat also advances the counter, and a parked worker gives an
+    // undemanded seat straight back. Demand it before the first pass can seat,
+    // so the only advance this wait can observe is the install.
+    assert!(registry.request_complete_generation(fixture.path()).await);
     tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, seats.changed())
         .await
         .expect("seating wakes its waiters instead of leaving them to poll")
@@ -10714,6 +10718,9 @@ async fn resident_memory_graph_refusal_serves_text_and_retries_when_memory_is_gi
         fixture.path(),
         SERVING_SEAT_FAILURE_CEILING,
         || async {
+            // The worker parks right after the seat and, undemanded, gives
+            // the decode straight back before this probe can read it.
+            registry.request_complete_generation(fixture.path()).await;
             registry
                 .latest_complete_serving_for_scope(&scope)
                 .await
