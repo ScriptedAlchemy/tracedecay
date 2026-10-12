@@ -1,6 +1,6 @@
 //! Runtime-port wiring for the capabilities the extracted crates invert.
 //!
-//! `tracedecay_sessions::host_ports` and the automation host-I/O bundle are
+//! The automation host-I/O bundle and the daemon client are
 //! process-global `OnceLock` slots that must be filled before any transcript
 //! ingest, host installer, or branch lock runs. [`register_runtime_ports`] is
 //! the complete, idempotent wiring call that fills them. Every underlying
@@ -49,7 +49,6 @@ static DAEMON_CLIENT_PORTS: OnceLock<DaemonClientPortsV1> = OnceLock::new();
 /// project open, all of which fail closed when nothing registered.
 #[tracing::instrument(name = "runtime_ports.register", level = "trace", skip_all)]
 pub fn register_runtime_ports(daemon_client: DaemonClientPortsV1) -> Result<()> {
-    register_session_ports();
     register_agent_host_ports();
     // First registration wins, like every slot below.
     let _ = DAEMON_CLIENT_PORTS.set(daemon_client);
@@ -67,34 +66,6 @@ pub(crate) fn require_runtime_ports() -> Result<DaemonClientPortsV1> {
                       register_runtime_ports before a project opens"
                 .to_owned(),
         })
-}
-
-// tracedecay_sessions::host_ports
-
-fn register_session_ports() {
-    use tracedecay_sessions::host_ports;
-
-    host_ports::unregistered_admission::register(unregistered_admission);
-}
-
-/// Builds an admission facade with no durable authority behind it.
-///
-/// The standalone Codex entry points walk a rollout and count what they *would*
-/// admit; every capture through this facade fails closed because no registered
-/// database is attached.
-fn unregistered_admission(
-    scope: tracedecay_sessions::host_ports::unregistered_admission::Scope,
-) -> Box<dyn tracedecay_sessions::admission::HostAdmission> {
-    use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-    use tracedecay_sessions::host_ports::unregistered_admission::Scope;
-
-    let authorities = match scope {
-        Scope::Project(project_id) => {
-            HostAdmissionAuthorities::unregistered_for_project(project_id)
-        }
-        Scope::Profile => HostAdmissionAuthorities::unregistered_for_profile(),
-    };
-    Box::new(HostAdmissionFacade::new(authorities))
 }
 
 // tracedecay_agent_hosts::ports
