@@ -161,7 +161,7 @@ pub(super) fn workflows_schema() -> Value {
 }
 
 #[cfg(test)]
-mod message_search_definition_tests {
+mod tests {
     use serde_json::{Value, json};
 
     use crate::definitions::tests::handwritten;
@@ -217,32 +217,6 @@ mod message_search_definition_tests {
         assert_eq!(schema["properties"]["limit"]["minimum"], 1);
         assert_eq!(schema["properties"]["limit"]["maximum"], 50);
         assert_eq!(schema["properties"]["cursor"]["type"], "string");
-    }
-}
-
-#[cfg(test)]
-mod lcm_definition_compatibility_tests {
-    use serde_json::Value;
-
-    use crate::definitions::tests::handwritten;
-
-    fn assert_closed_objects(schema: &Value) {
-        if schema.get("type").and_then(Value::as_str) == Some("object") {
-            assert_eq!(
-                schema.get("additionalProperties"),
-                Some(&Value::Bool(false)),
-                "object schema is not closed: {schema}"
-            );
-        }
-        if let Some(object) = schema.as_object() {
-            for value in object.values() {
-                assert_closed_objects(value);
-            }
-        } else if let Some(array) = schema.as_array() {
-            for value in array {
-                assert_closed_objects(value);
-            }
-        }
     }
 
     #[test]
