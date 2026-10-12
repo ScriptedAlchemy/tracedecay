@@ -129,7 +129,7 @@ struct CheckoutTopologySlot {
 
 impl CheckoutTopologySlot {
     fn touch(&self) {
-        self.last_used.store(
+        self.last_used.fetch_max(
             CHECKOUT_TOPOLOGY_USES.fetch_add(1, Ordering::Relaxed),
             Ordering::Relaxed,
         );
@@ -445,20 +445,24 @@ fn checkout_topology_slot(path: &Path) -> Arc<CheckoutTopologySlot> {
         slot.touch();
         return Arc::clone(slot);
     }
-    if slots.len() >= MAX_RETAINED_CHECKOUT_TOPOLOGIES {
-        evict_least_recently_used_settled_slot(&mut slots);
-    }
+    while slots.len() >= MAX_RETAINED_CHECKOUT_TOPOLOGIES
+        && evict_least_recently_used_settled_slot(&mut slots)
+    {}
     let slot = Arc::new(CheckoutTopologySlot::default());
     slot.touch();
     slots.insert(path.to_path_buf(), Arc::clone(&slot));
     slot
 }
 
-/// Drop the least recently used slot whose walk has settled. A slot with a
-/// walk in flight stays, because its owner publishes into that slot and an
-/// evicted one would discard the answer. `try_lock` skips a slot another
+/// Drop the least recently used slot whose walk has settled, reporting
+/// whether one was dropped. A slot with a walk in flight stays, because its
+/// owner publishes into that slot and an evicted one would discard the
+/// answer; the map may then exceed its bound until those walks settle and a
+/// later insertion evicts back down to it. `try_lock` skips a slot another
 /// thread holds, since that thread may be waiting for this map lock.
-fn evict_least_recently_used_settled_slot(slots: &mut HashMap<PathBuf, Arc<CheckoutTopologySlot>>) {
+fn evict_least_recently_used_settled_slot(
+    slots: &mut HashMap<PathBuf, Arc<CheckoutTopologySlot>>,
+) -> bool {
     let victim = slots
         .iter()
         .filter(|(_, slot)| {
@@ -468,9 +472,7 @@ fn evict_least_recently_used_settled_slot(slots: &mut HashMap<PathBuf, Arc<Check
         })
         .min_by_key(|(_, slot)| slot.last_used.load(Ordering::Relaxed))
         .map(|(path, _)| path.clone());
-    if let Some(victim) = victim {
-        slots.remove(&victim);
-    }
+    victim.is_some_and(|victim| slots.remove(&victim).is_some())
 }
 
 /// Whether a retained checkout-root topology still describes the filesystem.
