@@ -57,17 +57,22 @@ use tracedecay_domain::{
 
 /// Admits one retained automation request the way the daemon's composition
 /// root does, with a fixture grant standing in for the registered project
-/// runtime.
+/// runtime. Memory-owning runs are scoped to their project's memory owner.
 async fn admit(
     dashboard_root: &Path,
-    owner: Option<FactOwnerV1>,
+    project_id: Option<&ProjectId>,
     request: AutomationRunRequestV1,
 ) -> AutomationEffectAuthority {
     let operation =
         retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
             .expect("retained operation");
+    let owner = project_id.map(|project_id| FactOwnerV1::Project {
+        project_id: project_id.clone(),
+    });
     let scope = ResolvedScope::new(
-        ProjectId::new("project.automation-runner-test").expect("project"),
+        project_id
+            .cloned()
+            .unwrap_or_else(|| ProjectId::new("project.automation-runner-test").expect("project")),
         RepositoryId::new("repository.automation-runner-test").expect("repository"),
         WorktreeId::new("worktree.automation-runner-test").expect("worktree"),
         None,
@@ -133,13 +138,7 @@ fn admitted_run_id(requested: Option<String>) -> String {
     })
 }
 
-fn project_owner(cx: &AutomationProjectContext) -> Option<FactOwnerV1> {
-    Some(FactOwnerV1::Project {
-        project_id: cx.project_id().clone(),
-    })
-}
-
-trait SettledRun: Clone + Send + 'static {
+trait SettledRun {
     fn ledger_record(&self) -> &AutomationRunLedgerRecord;
     fn committed_receipt(&self) -> Option<&AutomationCommittedReceipt>;
 }
@@ -211,21 +210,10 @@ async fn settle<T: SettledRun>(
             result,
             settlement_guard,
         } => settle_current(authority, result, settlement_guard).await,
-        RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
-            reused,
-            settlement_guard,
-        } => {
-            let prior = authority
-                .start_reused_scheduler_skip_abandonment_observed(reused, settlement_guard, None)
-                .unwrap_or_else(|error| panic!("reused scheduler skip: {error}"))
-                .wait()
-                .await
-                .expect("reused scheduler skip abandonment");
-            panic!(
-                "scheduler skip reused prior terminal {}; the runner result is not settled",
-                prior.run_id
-            )
-        }
+        RetainedAutomationSettlementDisposition::ReusedSchedulerSkip { reused, .. } => panic!(
+            "scheduler skip reused prior terminal {}; settlement discards the runner result",
+            reused.prior_record.run_id
+        ),
     }
 }
 
@@ -241,7 +229,7 @@ pub(crate) async fn settle_memory_curator(
     let request =
         memory_curator_run_request(&run_id, options.fact_review_limit, options.min_confidence)
             .expect("memory curator request");
-    let authority = admit(&cx.dashboard_root, project_owner(cx), request).await;
+    let authority = admit(&cx.dashboard_root, Some(cx.project_id()), request).await;
     options.run_id = Some(run_id);
     let retained = run_memory_curator_with_backend_for_retained_settlement(
         cx,
@@ -267,7 +255,7 @@ pub(crate) async fn settle_session_reflector(
     let run_id = admitted_run_id(options.run_id.take());
     let request =
         session_reflector_run_request(&run_id, &options).expect("session reflector request");
-    let authority = admit(&cx.dashboard_root, project_owner(cx), request).await;
+    let authority = admit(&cx.dashboard_root, Some(cx.project_id()), request).await;
     options.run_id = Some(run_id);
     let retained = run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
         cx,
@@ -292,7 +280,7 @@ pub(crate) async fn settle_skill_writer(
 ) -> AutomationRunResult<SkillWriterAutomationRun> {
     let run_id = admitted_run_id(options.run_id.take());
     let request = skill_writer_run_request(&run_id, &options).expect("skill writer request");
-    let authority = admit(&cx.dashboard_root, project_owner(cx), request).await;
+    let authority = admit(&cx.dashboard_root, Some(cx.project_id()), request).await;
     options.run_id = Some(run_id);
     let retained = run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
         cx,
@@ -474,8 +462,8 @@ pub(crate) async fn settle_combined_review(
     let skill_request =
         skill_writer_run_request(&format!("{run_id}_skills"), &options.skill_writer)
             .expect("skill writer request");
-    let reflector = admit(&cx.dashboard_root, project_owner(cx), reflector_request).await;
-    let skill = admit(&cx.dashboard_root, project_owner(cx), skill_request).await;
+    let reflector = admit(&cx.dashboard_root, Some(cx.project_id()), reflector_request).await;
+    let skill = admit(&cx.dashboard_root, Some(cx.project_id()), skill_request).await;
     options.run_id = Some(run_id);
     let retained = run_combined_review_with_backend_and_retrieval_for_retained_settlement(
         cx,

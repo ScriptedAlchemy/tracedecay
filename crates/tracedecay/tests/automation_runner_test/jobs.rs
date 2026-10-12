@@ -1000,57 +1000,49 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
 async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
-    let profile_root = temp.path().join("profile");
-    fs::create_dir_all(&profile_root).unwrap();
 
     let mut job = sample_job("sched-job");
     job.schedule = Some("manual".to_string());
     let config = enabled_job_config();
-    let backend = ContentBackend::new("unused");
 
-    // Manual schedule: the scheduler skips, recording the skip once.
-    for run_id in ["sched-run-1", "sched-run-2"] {
-        let run = settle_user_job(
+    // Manual schedule: every scheduler tick of the same occurrence reaches
+    // the prefilter, which records the skip once.
+    let mut first = None;
+    for _ in 0..2 {
+        let run = evaluate_and_record_scheduler_skip(
             &dashboard_root,
             &config,
-            &backend,
+            None,
             &job,
-            UserJobRunOptions {
-                trigger: AutomationTrigger::Scheduler,
-                run_id: Some(run_id.to_string()),
-                profile_root: Some(profile_root.clone()),
-                project_root: None,
-                occurrence_anchor_run_id: None,
-            },
+            "sched-occurrence",
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("a manual schedule is never due");
         assert_eq!(run.report["reason"], json!("scheduler_schedule_manual"));
+        first.get_or_insert(run);
     }
-    assert_eq!(backend.calls(), 0);
+    let first = first.unwrap();
     let records = load_run_records(&dashboard_root, 10).await.unwrap();
     assert_eq!(
         records.len(),
         1,
         "repeat scheduler skips must persist only once"
     );
-    assert_eq!(records[0].run_id, "sched-run-1");
+    assert_eq!(records[0].run_id, first.run_id);
 
-    let repeated = settle_user_job(
+    let repeated = evaluate_and_record_scheduler_skip(
         &dashboard_root,
         &config,
-        &backend,
+        None,
         &job,
-        UserJobRunOptions {
-            trigger: AutomationTrigger::Scheduler,
-            run_id: Some("sched-run-3".to_owned()),
-            profile_root: Some(profile_root),
-            project_root: None,
-            occurrence_anchor_run_id: None,
-        },
+        "sched-occurrence",
+        None,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .expect("a manual schedule is never due");
     assert_eq!(
         repeated.ledger_record, records[0],
         "an immediate repeat skip must return the exact durable prior row"
