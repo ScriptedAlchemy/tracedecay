@@ -182,7 +182,7 @@ pub(super) async fn write_project_open_error(
                 .unwrap_or(serde_json::Value::Null);
             project_open_error_response(id, error)
         });
-    write_json_rpc_response(transport, &response).await
+    write_daemon_response(transport, &response).await
 }
 
 /// A `tools/call` refused at project open answers on the MCP tool surface

@@ -736,15 +736,12 @@ pub(crate) async fn send_daemon_request_line(
     handshake: &DaemonHandshake,
     line: &str,
 ) -> Result<Vec<String>> {
-    let request = DaemonProxyRequest::new(line);
-    let (_cancellation_tx, mut cancellation_rx) = tokio::sync::watch::channel(None);
-    send_daemon_request_with_liveness_poll(
+    send_daemon_request_line_with_liveness_poll(
         socket_path,
         handshake,
-        &request,
+        line,
         DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
         None,
-        &mut cancellation_rx,
     )
     .await
 }
