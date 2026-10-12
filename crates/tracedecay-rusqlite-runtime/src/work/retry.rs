@@ -16,6 +16,7 @@ use crate::work::{
     WorkSqliteStorage, authority_params_owned, exact_sql_integer, exact_sql_statement,
     exact_sql_text, registered_work_query,
 };
+use crate::work_attempt::identity_params;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -449,12 +450,4 @@ fn insert_receipt(
         )
         .map_err(|_| WorkAttemptStorageError::Unavailable)?;
     Ok(())
-}
-
-fn identity_params(identity: &WorkAttemptIdentityV1) -> [ExactSqlValue; 3] {
-    [
-        ExactSqlValue::Text(identity.task_id().as_str().to_owned()),
-        ExactSqlValue::Text(identity.run_id().as_str().to_owned()),
-        ExactSqlValue::Text(identity.attempt_id().as_str().to_owned()),
-    ]
 }
