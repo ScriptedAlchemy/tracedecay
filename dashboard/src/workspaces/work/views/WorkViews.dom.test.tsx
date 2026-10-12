@@ -759,4 +759,112 @@ describe('the execution-topology lens', () => {
     expect(reruns?.textContent).toContain('unbound');
     expect(reruns?.querySelector('[data-work-accounting-value]')).toBeNull();
   });
+
+  const UNDECODED_DIMENSIONS = [
+    'duplicate_work',
+    'conflict_confusion',
+    'ready_to_integrated_latency',
+    'stale_stack_age',
+    'operational_leaks',
+    'delivery_fanout',
+  ];
+  const SOURCED_DIMENSIONS = [
+    'concurrency_and_fanout',
+    'integration_outcomes',
+    'github_stack_capability',
+    'blocked_time',
+    'reruns',
+    'duplicate_effects',
+  ];
+  const NOT_TAKEN_HERE = 'rather than one measured as zero';
+
+  async function openCoverage() {
+    const container = await openTopology();
+    await waitFor(() =>
+      expect(container.querySelector('[data-work-accounting-coverage]')).not.toBeNull(),
+    );
+    return {
+      container,
+      coverage: container.querySelector<HTMLDetailsElement>('[data-work-accounting-coverage]')!,
+    };
+  }
+
+  it('reads sourced dimensions first and sets the undecoded ones behind one closed coverage disclosure', async () => {
+    const { container, coverage } = await openCoverage();
+
+    expect(coverage.tagName).toBe('DETAILS');
+    expect(coverage.open).toBe(false);
+    expect(coverage.querySelector('summary')?.textContent).toContain('6 dimensions');
+
+    for (const dimension of UNDECODED_DIMENSIONS) {
+      const entries = container.querySelectorAll(`[data-work-accounting="${dimension}"]`);
+      expect(entries.length, dimension).toBe(1);
+      expect(coverage.contains(entries[0]!), dimension).toBe(true);
+    }
+    for (const dimension of SOURCED_DIMENSIONS) {
+      const card = container.querySelector(`[data-work-accounting="${dimension}"]`)!;
+      expect(card.closest('details'), dimension).toBeNull();
+      expect(
+        card.compareDocumentPosition(coverage) & Node.DOCUMENT_POSITION_FOLLOWING,
+        dimension,
+      ).toBeTruthy();
+    }
+
+    expect(
+      container.querySelector('[data-work-accounting="github_stack_capability"]')?.textContent,
+    ).toContain('no trustworthy capability observation');
+  });
+
+  it('explains the undecoded dimensions once instead of once per measure', async () => {
+    const { container, coverage } = await openCoverage();
+    const coverageText = coverage.textContent ?? '';
+
+    expect(coverageText.split(NOT_TAKEN_HERE).length - 1).toBe(1);
+    expect(coverageText).toContain('work.stack_drift.observed.v1');
+    expect(container.textContent).not.toContain('belongs to the work.stack_drift.observed.v1 event family');
+    expect(coverage.querySelector('[data-work-accounting="duplicate_work"]')?.textContent).toContain(
+      'retry chain and not duplicate work',
+    );
+  });
+
+  it('collapses a sourced card\'s undecoded rungs into its own disclosure', async () => {
+    const { container } = await openCoverage();
+    const concurrency = container.querySelector<HTMLElement>(
+      '[data-work-accounting="concurrency_and_fanout"]',
+    )!;
+    const undecoded = concurrency.querySelector<HTMLDetailsElement>(
+      '[data-work-accounting-undecoded="concurrency_and_fanout"]',
+    );
+
+    expect(undecoded?.tagName).toBe('DETAILS');
+    expect(undecoded?.open).toBe(false);
+    for (const rung of ['accepted', 'admitted', 'useful', 'fanout']) {
+      const row = concurrency.querySelector(`[data-work-accounting-row="${rung}"]`);
+      expect(row?.getAttribute('data-work-accounting-absent'), rung).toBe('unsupported');
+      expect(undecoded?.contains(row), rung).toBe(true);
+    }
+    expect(undecoded?.textContent).toContain('a count and not a width');
+    for (const rung of ['requested', 'active']) {
+      const row = concurrency.querySelector(`[data-work-accounting-row="${rung}"]`);
+      expect(row?.closest('details'), rung).toBeNull();
+    }
+  });
+
+  it('keeps a conflicting reading inline rather than inside any disclosure', async () => {
+    serveWork(undefined, viewsBody(), topologyBody('generation-other'));
+    const { container } = await openCoverage();
+    const concurrency = container.querySelector<HTMLElement>(
+      '[data-work-accounting="concurrency_and_fanout"]',
+    )!;
+
+    for (const rung of ['requested', 'active']) {
+      const row = concurrency.querySelector(`[data-work-accounting-row="${rung}"]`);
+      expect(row?.getAttribute('data-work-accounting-absent'), rung).toBe('conflicting');
+      expect(row?.closest('details'), rung).toBeNull();
+    }
+    const support = concurrency.querySelector('[data-work-accounting-facet="support"]');
+    expect(support?.textContent).toContain('Conflicting');
+    expect(support?.textContent).toContain('unbound');
+    expect(support?.closest('details')).toBeNull();
+  });
 });
