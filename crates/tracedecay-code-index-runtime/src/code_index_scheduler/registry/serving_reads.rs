@@ -160,21 +160,39 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         generation: &CodeGenerationId,
     ) -> Option<Result<super::super::CodeGraphReplayBindingV1, CodeIndexSchedulerErrorV1>> {
+        let generation = generation.clone();
+        self.historical_owner_read(project_root, "sealed replay-binding", move |owner| {
+            owner.sealed_replay_binding(&generation)
+        })
+        .await
+    }
+
+    /// Run one blocking read on the mounted worktree's retained historical
+    /// owner off the async runtime; `None` while `project_root` is not mounted.
+    pub(super) async fn historical_owner_read<T: Send + 'static>(
+        &self,
+        project_root: &Path,
+        read_name: &'static str,
+        read: impl FnOnce(
+            &super::super::HistoricalCodeIndexGenerationOwnerV1,
+        ) -> Result<T, CodeIndexSchedulerErrorV1>
+        + Send
+        + 'static,
+    ) -> Option<Result<T, CodeIndexSchedulerErrorV1>> {
         let project_root = canonical_existing_identity(project_root).ok()?;
-        let historical = {
+        let owner = {
             let mounted = self.mounted.lock().await;
             mounted
                 .get(&project_root)?
                 .historical_generation_owner
                 .clone()
         };
-        let generation = generation.clone();
         Some(
-            tokio::task::spawn_blocking(move || historical.sealed_replay_binding(&generation))
+            tokio::task::spawn_blocking(move || read(&owner))
                 .await
                 .unwrap_or_else(|error| {
                     Err(CodeIndexSchedulerErrorV1::Identity(format!(
-                        "sealed replay-binding read task failed: {error}"
+                        "{read_name} read task failed: {error}"
                     )))
                 }),
         )
