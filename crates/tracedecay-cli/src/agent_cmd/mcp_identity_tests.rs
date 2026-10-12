@@ -2,7 +2,7 @@
 //! between the canonical `context-mcp` component and the legacy
 //! `operator-mcp` selection.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tracedecay_agent_hosts::agents::host_bundle::{
     HostBundleLifecycleOpV1, HostComponentV1, HostKindV1, latest_host_component_receipt_at,
@@ -18,6 +18,7 @@ use crate::cli::{HostBundleCliOptions, HostBundleComponentArg};
 const CURSOR_MCP: &str = ".cursor/plugins/local/tracedecay/mcp.json";
 const CURSOR_CORE_MANIFEST: &str = ".cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json";
 const OLD_BIN: &str = "/opt/tracedecay-old/bin/tracedecay";
+const MID_BIN: &str = "/opt/tracedecay-mid/bin/tracedecay";
 const NEW_BIN: &str = "/opt/tracedecay-new/bin/tracedecay";
 
 fn run(
@@ -98,7 +99,10 @@ fn legacy_operator_mcp_install_updates_under_one_owner() {
     run(home.path(), HostBundleCliOperation::Update, None, NEW_BIN)
         .expect("a plain update converges a legacy operator-mcp install");
 
-    assert_eq!(live_mcp_claims(home.path(), CURSOR_MCP).len(), 1);
+    assert_eq!(
+        live_mcp_claims(home.path(), CURSOR_MCP),
+        [HostComponentV1::ContextMcp]
+    );
     let mcp = std::fs::read_to_string(home.path().join(CURSOR_MCP)).unwrap();
     assert!(mcp.contains(NEW_BIN), "{mcp}");
     assert!(!mcp.contains(OLD_BIN), "{mcp}");
@@ -138,4 +142,107 @@ fn legacy_operator_mcp_selection_uninstalls_only_its_route() {
     assert!(!home.path().join(CURSOR_MCP).exists());
     assert!(home.path().join(CURSOR_CORE_MANIFEST).is_file());
     assert!(live_mcp_claims(home.path(), CURSOR_MCP).is_empty());
+}
+
+fn receipt_path(home: &Path, component_slug: &str) -> PathBuf {
+    resolved_lifecycle_root(&ProfileRoot::under_home(home))
+        .join(".tracedecay-host-bundle-v1")
+        .join(format!("receipt.cursor-desktop.{component_slug}.v1.json"))
+}
+
+/// What a released binary's `--component operator-mcp` run left beside a
+/// default install: a legacy receipt claiming the route the `context-mcp`
+/// receipt claims, with the legacy component's own manifest digest.
+fn seed_legacy_receipt_beside_context_mcp(home: &Path) {
+    let lifecycle_root = resolved_lifecycle_root(&ProfileRoot::under_home(home));
+    let mut legacy = latest_host_component_receipt_at(
+        &lifecycle_root,
+        HostKindV1::CursorDesktop,
+        HostComponentV1::ContextMcp,
+    )
+    .unwrap()
+    .expect("default install owns the MCP route");
+    legacy.component = HostComponentV1::OperatorMcp;
+    legacy.manifest_digest = [7; 32];
+    for artifact in &mut legacy.artifacts {
+        artifact.ownership_marker = artifact
+            .ownership_marker
+            .replace("context-mcp", "operator-mcp");
+    }
+    std::fs::write(
+        receipt_path(home, "operator-mcp"),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+}
+
+fn dual_claim_install(home: &Path) {
+    run(home, HostBundleCliOperation::Install, None, OLD_BIN).unwrap();
+    seed_legacy_receipt_beside_context_mcp(home);
+    assert_eq!(
+        live_mcp_claims(home, CURSOR_MCP),
+        [HostComponentV1::ContextMcp, HostComponentV1::OperatorMcp]
+    );
+}
+
+#[test]
+fn dual_claim_update_retires_the_legacy_receipt() {
+    let home = tempfile::tempdir().unwrap();
+    dual_claim_install(home.path());
+
+    run(home.path(), HostBundleCliOperation::Update, None, NEW_BIN).unwrap();
+
+    assert_eq!(
+        live_mcp_claims(home.path(), CURSOR_MCP),
+        [HostComponentV1::ContextMcp]
+    );
+    assert!(!receipt_path(home.path(), "operator-mcp").exists());
+    let mcp = std::fs::read_to_string(home.path().join(CURSOR_MCP)).unwrap();
+    assert!(mcp.contains(NEW_BIN), "{mcp}");
+}
+
+/// The legacy receipt records the bytes on disk while the `context-mcp`
+/// receipt still records an older render, so only the legacy receipt proves
+/// ownership of what is deployed.
+#[test]
+fn dual_claim_divergent_digests_update_converges() {
+    let home = tempfile::tempdir().unwrap();
+    run(home.path(), HostBundleCliOperation::Install, None, OLD_BIN).unwrap();
+    let old_context_receipt = std::fs::read(receipt_path(home.path(), "context-mcp")).unwrap();
+    run(home.path(), HostBundleCliOperation::Update, None, MID_BIN).unwrap();
+    seed_legacy_receipt_beside_context_mcp(home.path());
+    std::fs::write(
+        receipt_path(home.path(), "context-mcp"),
+        old_context_receipt,
+    )
+    .unwrap();
+
+    run(home.path(), HostBundleCliOperation::Update, None, NEW_BIN)
+        .expect("the receipt matching disk proves ownership");
+
+    assert_eq!(
+        live_mcp_claims(home.path(), CURSOR_MCP),
+        [HostComponentV1::ContextMcp]
+    );
+    assert!(!receipt_path(home.path(), "operator-mcp").exists());
+    let mcp = std::fs::read_to_string(home.path().join(CURSOR_MCP)).unwrap();
+    assert!(mcp.contains(NEW_BIN), "{mcp}");
+}
+
+#[test]
+fn dual_claim_operator_uninstall_leaves_no_dangling_owner() {
+    let home = tempfile::tempdir().unwrap();
+    dual_claim_install(home.path());
+
+    run(
+        home.path(),
+        HostBundleCliOperation::Uninstall,
+        Some(HostBundleComponentArg::OperatorMcp),
+        OLD_BIN,
+    )
+    .unwrap();
+
+    assert!(!home.path().join(CURSOR_MCP).exists());
+    assert!(live_mcp_claims(home.path(), CURSOR_MCP).is_empty());
+    assert!(home.path().join(CURSOR_CORE_MANIFEST).is_file());
 }
