@@ -3,11 +3,13 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { EMPTY_COMPARE_SELECTION, type CompareSelection } from './compareLayout.ts';
+import { readCompareSelection, type CompareSelection } from './compareLayout.ts';
 import { CompareView } from './CompareView.tsx';
 
 const NOW_MICROS = 1_753_003_600_000_000;
 const REVISION = 'a'.repeat(40);
+/** What the page reads from a URL that names no comparison. */
+const EMPTY_SELECTION = readCompareSelection(new URLSearchParams());
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -87,7 +89,7 @@ describe('Compare prefill', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
     const view = render(
       <QueryClientProvider client={client}>
-        <CompareView selection={EMPTY_COMPARE_SELECTION} onSelectionChange={() => undefined} />
+        <CompareView selection={EMPTY_SELECTION} onSelectionChange={() => undefined} />
       </QueryClientProvider>,
     );
 
@@ -98,7 +100,7 @@ describe('Compare prefill', () => {
     // Same client, new parent render: primitive effect deps must not refill.
     view.rerender(
       <QueryClientProvider client={client}>
-        <CompareView selection={EMPTY_COMPARE_SELECTION} onSelectionChange={() => undefined} />
+        <CompareView selection={EMPTY_SELECTION} onSelectionChange={() => undefined} />
       </QueryClientProvider>,
     );
 
@@ -130,7 +132,7 @@ describe('Compare prefill', () => {
   });
 });
 
-function renderCompare(selection: CompareSelection = EMPTY_COMPARE_SELECTION) {
+function renderCompare(selection: CompareSelection = EMPTY_SELECTION) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   return render(
     <QueryClientProvider client={client}>

@@ -5,8 +5,7 @@ use tracedecay_contracts::{
     ResultContractRef, SafeDiagnostic,
 };
 use tracedecay_daemon_protocol::{
-    BindingResolution, BindingResolver, CatalogBindingResolver, ResolvedBinding,
-    decode_retained_request,
+    BindingResolution, CatalogBindingResolver, ResolvedBinding, decode_retained_request,
 };
 use tracedecay_daemon_service::application_surface::{
     application_surface_catalog_ref, parse_http_application_surface_request,

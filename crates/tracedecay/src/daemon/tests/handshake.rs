@@ -11,22 +11,8 @@ pub(super) async fn daemon_round_trip(
     handshake: &DaemonHandshake,
     request: Value,
 ) -> Vec<Value> {
-    let (server_stream, client_stream) =
-        tokio::net::UnixStream::pair().expect("daemon socket pair");
-    let server = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(
-            server_stream,
-            engine,
-        ))
-        .await
-    });
-    let (reader, mut writer) = client_stream.into_split();
-    super::write_test_auth_preface(&mut writer).await;
-    writer
-        .write_all(handshake.to_line().expect("handshake json").as_bytes())
-        .await
-        .expect("write handshake");
-    writer.write_all(b"\n").await.expect("write newline");
+    let (reader, mut writer, server) =
+        super::handshake_authenticated_test_client(engine, handshake).await;
     writer
         .write_all(request.to_string().as_bytes())
         .await
@@ -319,11 +305,7 @@ async fn wire_drifted_handshake_reads_typed_refusal_then_clean_eof() {
     let _database_scope =
         enter_test_daemon_database_scope(&client_identity.profile_root, "handshake-refusal-test");
 
-    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(super::serve_authenticated_test_client(server, engine));
-
-    let (reader, mut writer) = client.into_split();
-    super::write_test_auth_preface(&mut writer).await;
+    let (reader, mut writer, server_task) = super::connect_authenticated_test_client(engine).await;
     // Valid JSON that is not this daemon's handshake shape, followed by the
     // pipelined first request a real client writes before it starts reading.
     writer
@@ -382,11 +364,7 @@ async fn non_json_handshake_reads_invalid_handshake_refusal() {
         "handshake-invalid-refusal-test",
     );
 
-    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(super::serve_authenticated_test_client(server, engine));
-
-    let (reader, mut writer) = client.into_split();
-    super::write_test_auth_preface(&mut writer).await;
+    let (reader, mut writer, server_task) = super::connect_authenticated_test_client(engine).await;
     writer
         .write_all(b"GET / HTTP/1.1\n")
         .await

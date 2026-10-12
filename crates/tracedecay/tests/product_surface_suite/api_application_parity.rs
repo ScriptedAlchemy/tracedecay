@@ -13,8 +13,8 @@ use tracedecay_contracts::{
     RequestId, ResultContractRef, RetryDirective, SafeDiagnostic, StreamEvent,
 };
 use tracedecay_daemon_protocol::{
-    ApplicationSurfaceRequest, BindingResolution, BindingResolver, CatalogBindingResolver,
-    FeedbackSurfaceRequest, RequestedOutputFormat,
+    ApplicationSurfaceRequest, BindingResolution, CatalogBindingResolver, FeedbackSurfaceRequest,
+    RequestedOutputFormat,
 };
 use tracedecay_daemon_service::application_surface::{
     resolve_application_surface_dispatch, resolve_http_application_surface_dispatch,

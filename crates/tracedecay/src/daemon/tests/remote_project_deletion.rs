@@ -5,8 +5,8 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay_domain::ProjectId;
 
-use super::bootstrap::{enroll_project_on_disk_only, run_git};
-use super::{enter_test_daemon_database_scope, test_daemon_engine_for_profile};
+use super::bootstrap::enroll_project_on_disk_only;
+use super::{enter_test_daemon_database_scope, git, test_daemon_engine_for_profile};
 use crate::daemon::remote_deletion::{
     RemoteDeletionFailure, RemoteDeletionFailureCode, RemoteDeletionPhase,
     RemoteDeletionReceiptTarget, RemoteDeletionRuntimeOwners, RemoteDeletionStatus,
@@ -22,8 +22,8 @@ async fn remote_project_deletion_removes_only_its_profile_shard_and_fences_repla
     let unrelated_project = root.join("unrelated-repository");
     std::fs::create_dir_all(&project).expect("create repository");
     std::fs::create_dir_all(&unrelated_project).expect("create unrelated repository");
-    run_git(&project, &["init", "--quiet"]);
-    run_git(&unrelated_project, &["init", "--quiet"]);
+    git(&project, &["init", "--quiet"]);
+    git(&unrelated_project, &["init", "--quiet"]);
     let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_remote_deleted");
     let unrelated_layout =
         enroll_project_on_disk_only(&unrelated_project, &profile_root, "proj_remote_live");
@@ -151,7 +151,7 @@ async fn remote_project_deletion_unregisters_context_scout_owner() {
     let profile_root = root.join(".tracedecay");
     let project = root.join("repository");
     std::fs::create_dir_all(&project).expect("create repository");
-    run_git(&project, &["init", "--quiet"]);
+    git(&project, &["init", "--quiet"]);
     let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_remote_scout");
     std::fs::remove_file(&layout.graph_db_path).expect("remove synthetic graph file");
     std::fs::write(layout.data_root.join("payload.txt"), "remote payload")

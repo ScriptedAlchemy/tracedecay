@@ -485,6 +485,13 @@ impl CodeGraphProjectionStore {
         self.interactive_catalog.release()
     }
 
+    /// Run `release` once, when the last live graph reader on this store
+    /// drops, on the thread that drops it. `false` when no reader is live.
+    pub fn park_release_after_reads_drain(&self, release: Arc<dyn Fn() + Send + Sync>) -> bool {
+        self.interactive_catalog
+            .park_release_after_reads_drain(release)
+    }
+
     /// What a graph read would find right now: warm, or the warming state it
     /// would answer because the engine or the catalog is not resident.
     pub fn serving_warmth(&self) -> Result<CodeGraphServingWarmthV1, CodeGraphProjectionError> {

@@ -18,7 +18,7 @@ import type {
  * must say which of them it includes.
  */
 
-export type PricingClass = SavingsPricingClassV1;
+type PricingClass = SavingsPricingClassV1;
 
 export interface ProviderRow {
   provider: string;
@@ -156,14 +156,14 @@ export function sumReportedTokens(rows: readonly ProviderRow[]): {
   return { tokens, reported, unreported };
 }
 
-export interface SeriesPoint {
+interface SeriesPoint {
   /** Priced dollars that day; null when the provider had nothing priced. */
   pricedCostUsd: number | null;
   usageEvents: number;
   unpricedEvents: number;
 }
 
-export interface ProviderSeries {
+interface ProviderSeries {
   provider: string;
   /** One entry per `days` index; null where the provider had no usage. */
   points: (SeriesPoint | null)[];
@@ -226,7 +226,7 @@ export function buildSpendSeries(
   };
 }
 
-export interface ModelRow {
+interface ModelRow {
   provider: string;
   /** Null when the usage observation carried no model identity. */
   model: string | null;

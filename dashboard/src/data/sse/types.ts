@@ -23,7 +23,7 @@ export const MAX_QUEUED_BYTES = 10 * 1024 * 1024; // 10 MiB
 export const MAX_OBSERVED_IDENTITIES = 2 * MAX_QUEUED_EVENTS;
 
 /** Stable identity of a stream connection generation. */
-export interface StreamIdentity {
+interface StreamIdentity {
   /** Opaque stream ID (a workspace/projection SSE channel). */
   stream_id: string;
   /**
@@ -34,7 +34,7 @@ export interface StreamIdentity {
 }
 
 /** Monotone revision pair carried by every event. */
-export interface EventRevision {
+interface EventRevision {
   /** Per-stream event sequence revision. Strictly increases with no gaps. */
   event_revision: number;
   /** Revision of the entity/projection the event mutates. */

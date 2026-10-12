@@ -649,16 +649,20 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             HostAdmissionScope::Project
         }
         "hermes" => {
-            let hermes_home = tmp.path().join("hermes-home");
-            write_hermes_native_fixture(&hermes_home, &project).await;
-            let stats = hermes::ingest_homes_capped_with_admission(
-                &[hermes_home],
-                &project,
-                project_id.clone(),
-                &facade,
-                None,
+            let hermes_user_home = tmp.path().join("hermes-user");
+            write_hermes_native_fixture(&hermes_user_home.join(".hermes"), &project).await;
+            let stats = tracedecay_sessions::runtime::with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(&hermes_user_home),
+                hermes::ingest_for_project_capped_with_admission_and_cancellation(
+                    &project,
+                    project_id.clone(),
+                    &facade,
+                    None,
+                    &ObservationCancellation::default(),
+                ),
             )
             .await
+            .expect("hermes home")
             .stats;
             assert!(stats.messages_upserted > 0, "Hermes native fixture");
             HostAdmissionScope::Project

@@ -871,7 +871,8 @@ fn hermes_profile_binding_admission_is_identical_at_both_entry_points() {
         let bundle = manifest(host, b"bundle");
         let mut request = execution(host, HostBundleLifecycleOpV1::Install, 96, true);
         request.lifecycle.hermes_profile_bindings = bindings;
-        let previewed = dry_run_host_bundle_lifecycle_at(
+        let previewed = dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
+            artifacts.path(),
             artifacts.path(),
             &bundle,
             &request,
@@ -1046,7 +1047,8 @@ fn lifecycle_preserves_ownership_receipts_and_rollback_plan() {
     drop(writer);
 
     let second = manifest(HostKindV1::KimiCode, b"second");
-    let preview = dry_run_host_bundle_lifecycle_at(
+    let preview = dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
+        root.path(),
         root.path(),
         &second,
         &execution(

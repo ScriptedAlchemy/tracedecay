@@ -4,8 +4,7 @@ use serde_json::Value;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     RedundancyScopeV1, RedundancySurfaceRequestV1, SimilarCoverageV1, SimilarFamilyV1,
-    SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1, SimilarSurfaceRequestV1,
-    SimilarTargetV1,
+    SimilarMatchClassV1, SimilarResultV1, SimilarSurfaceRequestV1, SimilarTargetV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{CursorBindingV1, decode_bound_cursor, encode_bound_cursor};
@@ -101,7 +100,7 @@ pub async fn compute_similar(
             "the selected source is outside the authorized repository scope",
         ));
     }
-    let source = similar_occurrence(&similar.source.occurrence);
+    let source = similar.source.occurrence.similar_occurrence();
     let mut touched_files = vec![source.path.clone()];
     let mut complete = true;
     let families = similar
@@ -125,7 +124,7 @@ pub async fn compute_similar(
                         && member.occurrence.repository_id == repository_id
                 })
                 .map(|member| {
-                    let occurrence = similar_occurrence(&member.occurrence);
+                    let occurrence = member.occurrence.similar_occurrence();
                     touched_files.push(occurrence.path.clone());
                     occurrence
                 })
@@ -333,21 +332,6 @@ pub async fn compute_redundancy(
         GraphToolResultV1::Redundancy(outcome),
         touched_files,
     ))
-}
-
-fn similar_occurrence(
-    occurrence: &tracedecay_code_index::clones::CloneBodyOccurrenceV1,
-) -> SimilarOccurrenceV1 {
-    SimilarOccurrenceV1 {
-        project_id: occurrence.project_id.clone(),
-        repository_id: occurrence.repository_id.clone(),
-        worktree_id: occurrence.worktree_id.clone(),
-        source_generation: occurrence.source_generation.clone(),
-        snapshot_digest: occurrence.snapshot_digest.clone(),
-        symbol_occurrence_id: occurrence.symbol_occurrence_id.clone(),
-        path: occurrence.path.clone(),
-        body_span: occurrence.body_span,
-    }
 }
 
 #[cfg(test)]

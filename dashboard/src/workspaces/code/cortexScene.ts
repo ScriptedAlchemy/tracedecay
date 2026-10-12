@@ -17,7 +17,7 @@ import { directoryOf } from './cortexRelief.ts';
 /** Module label for a symbol with no served file path. Printed, never blank. */
 export const NO_PATH_MODULE = '(path absent)';
 
-export interface SceneNode {
+interface SceneNode {
   readonly id: string;
   readonly label: string;
   readonly kind: string;
@@ -27,7 +27,7 @@ export interface SceneNode {
   readonly module: string;
 }
 
-export interface SceneEdge {
+interface SceneEdge {
   readonly source: string;
   readonly target: string;
   readonly kind: string;
@@ -111,7 +111,7 @@ export function modulesOf(scene: CortexScene): { module: string; members: SceneN
 }
 
 /** Highest served degree first; absent degree after every measured one. */
-export function sortByDegree<T extends { degree: number | null; label: string; id: string }>(
+function sortByDegree<T extends { degree: number | null; label: string; id: string }>(
   nodes: readonly T[],
 ): T[] {
   return [...nodes].sort(
@@ -226,10 +226,6 @@ export function project(camera: Camera, x: number, y: number): { x: number; y: n
   return { x: x * camera.k + camera.tx, y: y * camera.k + camera.ty };
 }
 
-export function unproject(camera: Camera, x: number, y: number): { x: number; y: number } {
-  return { x: (x - camera.tx) / camera.k, y: (y - camera.ty) / camera.k };
-}
-
 /* ---- painter contract ---------------------------------------------------- */
 
 /** Token colours sampled from the night-window block; a canvas cannot read CSS. */
@@ -281,7 +277,7 @@ export interface CortexPainter<L> {
 
 /* ---- shared marks -------------------------------------------------------- */
 
-export function traceKindMark(
+function traceKindMark(
   ctx: CanvasRenderingContext2D,
   shape: KindShape,
   x: number,

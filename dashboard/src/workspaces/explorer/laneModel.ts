@@ -37,7 +37,7 @@ import {
 } from './model.ts';
 
 /** Which coordinator source answers for each source lane. */
-export const LANE_SOURCE_ID: Record<SourceLaneId, ExplorerSourceIdV1> = {
+const LANE_SOURCE_ID: Record<SourceLaneId, ExplorerSourceIdV1> = {
   code: 'code_graph',
   sessions: 'sessions',
   knowledge: 'knowledge',

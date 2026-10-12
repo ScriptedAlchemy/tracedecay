@@ -9,6 +9,7 @@ use tracedecay_code_index::parallelism::{
     collect_idle_installed_worker_heaps, collect_installed_worker_heaps_when_idle,
 };
 use tracedecay_code_index_retention::code_index_generations::code_index_store_root;
+use tracedecay_maintenance::clock::now_secs_i64;
 use tracedecay_maintenance::compaction_receipt::record_live_compaction_outcome;
 use tracedecay_maintenance::generation::{
     run_project_generation_maintenance, run_registered_project_generation_maintenance,
@@ -1118,10 +1119,6 @@ pub(super) fn retention_maintenance_enabled(
         || retention.observation.enabled
         || retention.orphan_store_gc_days.is_some()
         || retention.compaction.is_some()
-}
-
-pub(crate) fn now_secs_i64() -> Result<i64, &'static str> {
-    tracedecay_maintenance::clock::now_secs_i64()
 }
 
 #[cfg(test)]

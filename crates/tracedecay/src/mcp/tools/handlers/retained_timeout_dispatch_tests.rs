@@ -4,7 +4,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_contracts::retained_surfaces::{
     AutomationRunRequestV1, AutomationTaskRequestV1, FactStoreCurateResultV1,
@@ -19,14 +19,15 @@ use tracedecay_contracts::{
     SafeDiagnostic,
 };
 use tracedecay_domain::{
-    ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, RunId, UtcMicros,
-    WorktreeId,
+    ActorId, ComponentVersion, ProjectId, RepositoryId, RunId, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::EffectClass;
 
-use super::dispatch_test_support::SelectorProfile;
+use super::dispatch_test_support::{registered_lib_fixture, tool_json};
 use super::*;
-use tracedecay_project::project::TraceDecay;
+use crate::daemon::retained_test_support::{
+    forward_application_surface, ignore_feedback_observations,
+};
 
 use tracedecay_domain::test_fixtures::digest;
 
@@ -82,15 +83,6 @@ fn deadline_from_now(offset: Duration) -> Deadline {
         tracedecay_contracts::now_micros().0.saturating_add(offset),
     ))
     .expect("fixture deadline")
-}
-
-fn mcp_payload(result: ToolResult) -> Value {
-    serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("retained MCP JSON result"),
-    )
-    .expect("retained MCP JSON envelope")
 }
 
 fn fact_store_curate_run(
@@ -197,15 +189,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for FactStoreCurateSucc
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
-            else {
-                return Err(tracedecay_contracts::InvocationError::Unavailable);
-            };
-            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
-                .await
-        })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -262,17 +246,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for FactStoreCurateSuc
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 struct ExpiredDeadlineExecutor {
@@ -291,15 +265,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for ExpiredDeadlineExec
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
-            else {
-                return Err(tracedecay_contracts::InvocationError::Unavailable);
-            };
-            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
-                .await
-        })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -344,34 +310,19 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ExpiredDeadlineExe
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 #[tokio::test]
 async fn fact_store_curate_forwards_only_bounds_and_preserves_canonical_success() {
     let dir = TempDir::new().expect("fixture directory");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("fact-store-curate-success");
-    std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
-    std::fs::write(project.join("src/lib.rs"), "pub fn curate_success() {}\n")
-        .expect("fixture source");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "fact-store-curate-success",
+        "pub fn curate_success() {}\n",
         "project.mcp-fact-store-curate-success",
     )
-    .await
-    .expect("registered retained fixture");
+    .await;
     let executor = FactStoreCurateSuccessExecutor {
         calls: AtomicUsize::new(0),
         scope: retained_scope(),
@@ -400,7 +351,7 @@ async fn fact_store_curate_forwards_only_bounds_and_preserves_canonical_success(
     )
     .await
     .expect("canonical fact-store curation result");
-    let payload = mcp_payload(result);
+    let payload = tool_json(&result);
 
     assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
     assert_eq!(payload["request_id"], request_id.as_str());
@@ -420,18 +371,13 @@ async fn fact_store_curate_forwards_only_bounds_and_preserves_canonical_success(
 #[tokio::test]
 async fn fact_store_curate_expired_deadline_does_not_mutate() {
     let dir = TempDir::new().expect("fixture directory");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("fact-store-curate-deadline");
-    std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
-    std::fs::write(project.join("src/lib.rs"), "pub fn curate_deadline() {}\n")
-        .expect("fixture source");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "fact-store-curate-deadline",
+        "pub fn curate_deadline() {}\n",
         "project.mcp-fact-store-curate-deadline",
     )
-    .await
-    .expect("registered retained fixture");
+    .await;
     let executor = ExpiredDeadlineExecutor {
         calls: AtomicUsize::new(0),
         mutations: AtomicUsize::new(0),
@@ -502,15 +448,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for PostCommitPartialEf
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
-            else {
-                return Err(tracedecay_contracts::InvocationError::Unavailable);
-            };
-            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
-                .await
-        })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -542,17 +480,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PostCommitPartialE
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 struct PreCommitInterruptionExecutor {
@@ -571,15 +499,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for PreCommitInterrupti
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
-            else {
-                return Err(tracedecay_contracts::InvocationError::Unavailable);
-            };
-            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
-                .await
-        })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -624,34 +544,19 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PreCommitInterrupt
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 #[tokio::test]
 async fn fact_store_curate_rejects_a_partial_receipt_from_another_scope() {
     let dir = TempDir::new().expect("fixture directory");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("fact-store-curate-scope-mismatch");
-    std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
-    std::fs::write(project.join("src/lib.rs"), "pub fn curate_scope() {}\n")
-        .expect("fixture source");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "fact-store-curate-scope-mismatch",
+        "pub fn curate_scope() {}\n",
         "project.mcp-fact-store-curate-scope-mismatch",
     )
-    .await
-    .expect("registered retained fixture");
+    .await;
     let request_id = RequestId::new("request.retained.mcp.fact-store-curate-scope-mismatch")
         .expect("request id");
     let authority_scope = ResolvedScope::new(
@@ -695,18 +600,13 @@ async fn fact_store_curate_rejects_a_partial_receipt_from_another_scope() {
 #[tokio::test]
 async fn fact_store_curate_pre_commit_cancellation_does_not_mutate() {
     let dir = TempDir::new().expect("fixture directory");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("fact-store-curate-cancelled");
-    std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
-    std::fs::write(project.join("src/lib.rs"), "pub fn retained_cancel() {}\n")
-        .expect("fixture source");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "fact-store-curate-cancelled",
+        "pub fn retained_cancel() {}\n",
         "project.mcp-fact-store-curate-cancelled",
     )
-    .await
-    .expect("registered retained fixture");
+    .await;
     let executor = PreCommitInterruptionExecutor {
         calls: AtomicUsize::new(0),
         mutations: AtomicUsize::new(0),
@@ -759,15 +659,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for WireProblemExecutor
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
-            else {
-                return Err(tracedecay_contracts::InvocationError::Unavailable);
-            };
-            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
-                .await
-        })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -796,33 +688,19 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for WireProblemExecuto
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 #[tokio::test]
 async fn a_stale_refresh_frontier_reaches_mcp_as_typed_detail() {
     let dir = TempDir::new().expect("fixture directory");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("session-refresh-stale-frontier");
-    std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
-    std::fs::write(project.join("src/lib.rs"), "pub fn refresh() {}\n").expect("fixture source");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "session-refresh-stale-frontier",
+        "pub fn refresh() {}\n",
         "project.mcp-session-refresh-stale-frontier",
     )
-    .await
-    .expect("registered retained fixture");
+    .await;
     let executor = WireProblemExecutor {
         problem: ApplicationProblem::from_detail(
             tracedecay_contracts::ApplicationProblemDetailV1::StaleRefreshFrontier {
@@ -902,7 +780,7 @@ async fn a_stale_refresh_frontier_reaches_mcp_as_typed_detail() {
                 assert!(text.contains(line), "missing `{line}` in:\n{text}");
             }
         } else {
-            assert_eq!(mcp_payload(result)["problem"], problem);
+            assert_eq!(tool_json(&result)["problem"], problem);
         }
     }
     cg.close();

@@ -1,5 +1,4 @@
-//! Deterministic memory-hygiene rules: secret-like content detection and
-//! transient run-output detection.
+//! Deterministic memory-hygiene rules: secret-like content detection.
 //!
 //! These are conservative, rule-based checks, no model is ever invoked from
 //! Rust. Standalone tracedecay only *rejects* secret-like writes and *proposes*
@@ -9,21 +8,10 @@
 
 use std::sync::OnceLock;
 
-use regex::Regex;
-
 use tracedecay_privacy::detector_kernel::{
     CredentialPattern, CredentialPatternKind, CredentialPatternProfile, CredentialRuleSetError,
     compile_credential_patterns, looks_high_entropy_token,
 };
-
-fn compile_patterns(
-    patterns: &[(&'static str, &'static str)],
-) -> Result<Vec<(Regex, &'static str)>, regex::Error> {
-    patterns
-        .iter()
-        .map(|(pattern, reason)| Regex::new(pattern).map(|regex| (regex, *reason)))
-        .collect()
-}
 
 fn regex_set() -> Result<&'static [CredentialPattern], &'static CredentialRuleSetError> {
     static PATTERNS: OnceLock<Result<Vec<CredentialPattern>, CredentialRuleSetError>> =
@@ -62,46 +50,6 @@ pub fn detect_secret_like(content: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn transient_regexes() -> Result<&'static [(Regex, &'static str)], &'static regex::Error> {
-    static PATTERNS: OnceLock<Result<Vec<(Regex, &'static str)>, regex::Error>> = OnceLock::new();
-    PATTERNS.get_or_init(|| {
-        compile_patterns(&[
-            (
-                r"(?i)\b(localhost|127\.0\.0\.1|0\.0\.0\.0):\d{2,5}\b",
-                "ephemeral local port",
-            ),
-            (r"(?i)\bpid\s*[:=#]?\s*\d{2,}\b", "process id"),
-            (r"/tmp/[A-Za-z0-9._-]+", "one-off /tmp path"),
-            (
-                r"(?i)\b(listening on|started in \d+\s*ms|exit code \d+|finished in \d+(\.\d+)?s)\b",
-                "run-log output",
-            ),
-        ])
-    })
-    .as_deref()
-}
-
-/// Flags facts that look like ephemeral run output (ports, PIDs, one-off
-/// /tmp paths, run-log lines) rather than durable knowledge. Used ONLY by the
-/// curation planner to mark prune CANDIDATES, never to reject or delete
-/// anything on its own.
-pub fn detect_transient(content: &str) -> Option<String> {
-    let Ok(patterns) = transient_regexes() else {
-        return Some("transient detector unavailable".to_string());
-    };
-    let mut reasons: Vec<&str> = Vec::new();
-    for (regex, reason) in patterns {
-        if regex.is_match(content) && !reasons.contains(reason) {
-            reasons.push(reason);
-        }
-    }
-    if reasons.is_empty() {
-        None
-    } else {
-        Some(reasons.join(", "))
-    }
 }
 
 #[cfg(test)]
@@ -184,59 +132,6 @@ mod tests {
         assert_eq!(
             secret_reason("Use the sk-test-742913 fixture profile for dry runs"),
             Some("known credential prefix")
-        );
-    }
-
-    #[test]
-    fn pattern_compilation_errors_are_not_dropped() {
-        assert!(matches!(
-            compile_patterns(&[("(", "invalid fixture")]),
-            Err(regex::Error::Syntax(_))
-        ));
-        let compiled = compile_patterns(&[("a+", "valid fixture")]).unwrap();
-        assert_eq!(
-            compiled
-                .iter()
-                .map(|(regex, reason)| (regex.as_str(), *reason))
-                .collect::<Vec<_>>(),
-            vec![("a+", "valid fixture")]
-        );
-    }
-
-    #[test]
-    fn transient_detection_flags_run_output() {
-        assert_eq!(
-            detect_transient("dashboard listening on http://127.0.0.1:43817").as_deref(),
-            Some("ephemeral local port, run-log output")
-        );
-        assert_eq!(
-            detect_transient("server started with pid 48213").as_deref(),
-            Some("process id")
-        );
-        assert_eq!(
-            detect_transient("wrote scratch file /tmp/tracedecay-aborted.json").as_deref(),
-            Some("one-off /tmp path")
-        );
-        assert_eq!(
-            detect_transient("build finished in 12.4s with exit code 0").as_deref(),
-            Some("run-log output")
-        );
-    }
-
-    #[test]
-    fn transient_detection_ignores_durable_facts() {
-        assert_eq!(
-            detect_transient("The dashboard binds 127.0.0.1 with an ephemeral port"),
-            None
-        );
-        assert_eq!(
-            detect_transient("Curation hard-deletes losers; there is no archive"),
-            None
-        );
-        assert_eq!(
-            detect_transient("The dashboard binds 127.0.0.1:43817 with an ephemeral port")
-                .as_deref(),
-            Some("ephemeral local port")
         );
     }
 }

@@ -39,8 +39,7 @@ use tracedecay_contracts::{
 use tracedecay_tool_catalog::BindingId;
 
 pub use assets::{
-    DashboardAssetSource, StaticAssetEncoding, StaticDashboardAsset, StaticDashboardAssets,
-    static_dashboard_router,
+    StaticAssetEncoding, StaticDashboardAsset, StaticDashboardAssets, static_dashboard_router,
 };
 pub use handoff::{
     HandoffApplicationOwner, HandoffHttpRequest, HandoffInvocationFuture, HandoffOperation,

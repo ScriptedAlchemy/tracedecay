@@ -76,10 +76,6 @@ unit_test = "large"
 # `--all-features` is test-only because it includes `test-transport`.
 default = ["production"]
 
-# Opt-in spill for graph index buffers. Never in `default` or `production`.
-# See `crates/tracedecay-graph-db/Cargo.toml` for why the live LPG stays in RAM.
-graph-disk-tier = ["tracedecay-graph-db/graph-disk-tier"]
-
 production = [
     "token-counting",
     "lite",

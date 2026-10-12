@@ -87,7 +87,7 @@ export const LANES: readonly LaneSpec[] = [
   },
 ];
 
-export interface Signal {
+interface Signal {
   /** The payload field this number came from, shown verbatim to the user. */
   readonly field: string;
   readonly value: number;
@@ -308,7 +308,7 @@ export function knowledgeHits(
   });
 }
 
-export interface FacetCount {
+interface FacetCount {
   readonly id: string;
   readonly label: string;
   readonly count: number;

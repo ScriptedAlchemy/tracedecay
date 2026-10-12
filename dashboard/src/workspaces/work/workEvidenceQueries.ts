@@ -10,7 +10,7 @@ import { workQueryKey } from '../../data/query/work.ts';
 import { callWork, type WorkResult } from './workApi.ts';
 import { WORK_RETRIEVE_EVIDENCE_ROUTE } from './workRoutes.ts';
 
-export const WORK_EVIDENCE_PAGE_SIZE = 25;
+const WORK_EVIDENCE_PAGE_SIZE = 25;
 export type WorkEvidenceTemporalKind = TemporalModeV1['kind'];
 
 /** Translate the browser's explicitly UTC-labelled cutoff into the temporal

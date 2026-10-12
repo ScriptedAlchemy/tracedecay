@@ -42,7 +42,7 @@ const TASK_FAMILY = 'task_activity';
  * per-project, and inventing a scoped subscription is not this row's business,
  * so the scoping happens here, over what the buffer already holds.
  */
-export interface TaskActivityWindow {
+interface TaskActivityWindow {
   /** Task pulses the window holds that this scope can claim. */
   readonly observed: number;
   /**
@@ -136,7 +136,7 @@ export function taskActivityReading(
  * frame would read a new number over the top of whatever the user was doing,
  * which is why the live region carries the link and the chip carries the rest.
  */
-export function taskActivityLink(link: SseConnectionState): string {
+function taskActivityLink(link: SseConnectionState): string {
   switch (link) {
     case 'offline':
       return 'Work task activity: stream unreachable';
@@ -169,7 +169,7 @@ export function WorkTaskActivity({ kind }: { kind: DomainStateKind }) {
 }
 
 /** One task pulse the ledger can claim for the reported scope. */
-export interface TaskActivityRow {
+interface TaskActivityRow {
   readonly eventId: string;
   /** Server observation time in microseconds, as the envelope carried it. */
   readonly observedAtMicros: number | null;
@@ -189,7 +189,7 @@ export interface TaskActivityRow {
  * observation time is parsed here because the envelope carries it as a
  * string; an unparsable stamp is `null`, never a guessed instant.
  */
-export function taskActivityRows(
+function taskActivityRows(
   pulses: readonly LiveActivityPulse[],
   scope: DashboardScope,
 ): readonly TaskActivityRow[] {

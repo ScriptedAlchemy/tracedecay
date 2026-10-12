@@ -758,7 +758,7 @@ fn dry_run_canonical_component_set(
         options,
         home,
         lifecycle_root,
-        Some(context),
+        context,
     )?;
     eprintln!(
         "{} {:?}: plan={}, registration_base={}, registration_current={}, artifacts={}, confirmation={}",
@@ -855,29 +855,20 @@ fn preview_canonical_component_set(
     options: &crate::cli::HostBundleCliOptions,
     home: &Path,
     lifecycle_root: &Path,
-    context: Option<&ComponentSetApplyContext>,
+    context: &ComponentSetApplyContext,
 ) -> tracedecay_domain::errors::Result<
     tracedecay_agent_hosts::agents::host_bundle::HostComponentSetLifecyclePreviewV1,
 > {
     let request = component_set_request(component_set, operation, options.yes, options.adopt)?;
-    let mut registration = match context {
-        Some(context) => {
-            CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin_and_dashboard(
-                profile,
-                agent_id,
-                home,
-                request.lifecycle.operation,
-                context.tracedecay_bin.clone(),
-                context.dashboard,
-            )?
-        }
-        None => CatalogHostComponentRegistrationAuthority::new(
+    let mut registration =
+        CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin_and_dashboard(
             profile,
             agent_id,
             home,
             request.lifecycle.operation,
-        )?,
-    };
+            context.tracedecay_bin.clone(),
+            context.dashboard,
+        )?;
     tracedecay_agent_hosts::agents::host_bundle::dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
         home,
         lifecycle_root,
@@ -1622,7 +1613,7 @@ mod tests {
             &options,
             home.path(),
             lifecycle.path(),
-            None,
+            &ComponentSetApplyContext::resolved(),
         )
         .unwrap_err()
         .to_string();
@@ -1647,7 +1638,7 @@ mod tests {
             &confirmed,
             home.path(),
             lifecycle.path(),
-            None,
+            &ComponentSetApplyContext::resolved(),
         )
         .expect("explicit adoption authority must let the same repair plan");
         assert_eq!(

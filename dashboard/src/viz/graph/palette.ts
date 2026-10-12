@@ -51,11 +51,3 @@ export function palette(element: HTMLElement): GraphPalette {
     light,
   };
 }
-
-export function rgb([r, g, b]: [number, number, number]): string {
-  return `rgb(${r}, ${g}, ${b})`;
-}
-
-export function rgba([r, g, b]: [number, number, number], alpha: number): string {
-  return `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, alpha)).toFixed(3)})`;
-}

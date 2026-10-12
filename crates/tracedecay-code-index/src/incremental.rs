@@ -8,22 +8,18 @@
 //! belong to exactly one declared generation, so mixed snapshots are rejected
 //! before a change manifest can cross the projection boundary.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rayon::prelude::*;
 use thiserror::Error;
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkId,
-    CodeSearchChunkV1, FileOccurrenceId, SymbolOccurrenceId,
+    CodeSearchChunkV1, FileOccurrenceId,
 };
 
-use super::chunks::{ChunkingFailureV1, CodeFileChunksV1, symbol_occurrence_id};
-use super::generations::{FileExtractionActionV1, GenerationIncrementPlanV1, placeholder_digest};
-use super::lineage::{
-    GenerationSymbolIndexV1, LineageResolutionErrorV1, LineageSymbolRecordV1,
-    SymbolLineageCandidateV1, SymbolLineageResolver,
-};
+use super::chunks::{ChunkingFailureV1, CodeFileChunksV1};
+use super::generations::placeholder_digest;
 
 /// Chunk-manifest construction and comparison failures.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -36,30 +32,10 @@ pub enum ChunkIncrementErrorV1 {
     DuplicateChunk(CodeSearchChunkId),
     #[error("file occurrence {0} occurs more than once in generation evidence")]
     DuplicateFileOccurrence(FileOccurrenceId),
-    #[error("symbol occurrence {0} occurs more than once in re-extracted evidence")]
-    DuplicateReextractedSymbol(SymbolOccurrenceId),
     #[error("a chunk manifest is not canonical: {0}")]
     NonCanonical(crate::noncanonical::NonCanonicalCauseV1),
     #[error("code-index parallel worker runtime failed: {0}")]
     Parallelism(#[from] crate::parallelism::CodeIndexParallelismErrorV1),
-    #[error("the increment plan does not match the supplied prior generation")]
-    PriorGenerationMismatch,
-    #[error("the increment plan references missing prior file occurrence {0}")]
-    MissingPriorFile(FileOccurrenceId),
-    #[error("the increment plan references missing re-extracted file occurrence {0}")]
-    MissingReextractedFile(FileOccurrenceId),
-    #[error("the increment plan references missing prior symbol occurrence {0}")]
-    MissingPriorSymbol(SymbolOccurrenceId),
-    #[error("the re-extracted chunks reference missing symbol occurrence {0}")]
-    MissingReextractedSymbol(SymbolOccurrenceId),
-}
-
-/// Canonical outputs of executing one generation increment plan.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GenerationIncrementMaterializationV1 {
-    pub chunks: GenerationChunkManifestV1,
-    pub symbols: GenerationSymbolIndexV1,
-    pub lineage: Vec<SymbolLineageCandidateV1>,
 }
 
 /// The canonical chunks produced for one immutable code generation.
@@ -173,193 +149,6 @@ impl GenerationChunkManifestV1 {
     }
 }
 
-/// Execute the storage-neutral file actions of one generation increment.
-///
-/// Carry-forward always rematerializes generation-local file and symbol
-/// occurrences before constructing the next chunk and lineage manifests.
-#[tracing::instrument(
-    name = "code_index.build.increment_materialize",
-    level = "trace",
-    skip_all
-)]
-pub fn materialize_generation_increment(
-    plan: &GenerationIncrementPlanV1,
-    generation_id: CodeGenerationId,
-    prior_files: &[CodeFileChunksV1],
-    reextracted_files: Vec<CodeFileChunksV1>,
-    prior_symbols: &GenerationSymbolIndexV1,
-    reextracted_symbols: Vec<Arc<LineageSymbolRecordV1>>,
-) -> Result<GenerationIncrementMaterializationV1, ChunkIncrementErrorV1> {
-    if prior_symbols.generation_id != plan.prior_generation
-        || prior_files
-            .iter()
-            .any(|file| file.document.generation_id != plan.prior_generation)
-    {
-        return Err(ChunkIncrementErrorV1::PriorGenerationMismatch);
-    }
-
-    let mut prior_files_by_occurrence = BTreeMap::new();
-    for file in prior_files {
-        if prior_files_by_occurrence
-            .insert(file.document.file_occurrence_id.clone(), file)
-            .is_some()
-        {
-            return Err(ChunkIncrementErrorV1::DuplicateFileOccurrence(
-                file.document.file_occurrence_id.clone(),
-            ));
-        }
-    }
-    let prior_files = prior_files_by_occurrence;
-    let mut reextracted_files_by_occurrence = BTreeMap::new();
-    for file in reextracted_files {
-        let file_occurrence_id = file.document.file_occurrence_id.clone();
-        if reextracted_files_by_occurrence
-            .insert(file_occurrence_id.clone(), file)
-            .is_some()
-        {
-            return Err(ChunkIncrementErrorV1::DuplicateFileOccurrence(
-                file_occurrence_id,
-            ));
-        }
-    }
-    let mut reextracted_files = reextracted_files_by_occurrence;
-    let prior_symbols_by_occurrence = prior_symbols
-        .symbols
-        .iter()
-        .map(|symbol| (symbol.occurrence.clone(), symbol))
-        .collect::<BTreeMap<_, _>>();
-    let mut reextracted_symbols_by_occurrence = BTreeMap::new();
-    for symbol in reextracted_symbols {
-        let occurrence = symbol.occurrence.clone();
-        if reextracted_symbols_by_occurrence
-            .insert(occurrence.clone(), symbol)
-            .is_some()
-        {
-            return Err(ChunkIncrementErrorV1::DuplicateReextractedSymbol(
-                occurrence,
-            ));
-        }
-    }
-    let mut reextracted_symbols = reextracted_symbols_by_occurrence;
-
-    let mut files = Vec::new();
-    let mut symbols = Vec::new();
-    for file_plan in &plan.files {
-        match &file_plan.action {
-            FileExtractionActionV1::CarryForward {
-                file_occurrence_id,
-                prior_file_occurrence_id,
-                content_digest,
-            } => {
-                let prior = prior_files.get(prior_file_occurrence_id).ok_or_else(|| {
-                    ChunkIncrementErrorV1::MissingPriorFile(prior_file_occurrence_id.clone())
-                })?;
-                if &prior.document.content_digest != content_digest {
-                    return Err(ChunkIncrementErrorV1::NonCanonical(
-                        crate::noncanonical::NonCanonicalCauseV1::new(
-                            crate::noncanonical::NonCanonicalReasonCodeV1::CarryForwardDigestMismatch,
-                        ),
-                    ));
-                }
-                let rematerialized_occurrences = prior
-                    .chunks
-                    .iter()
-                    .filter_map(|chunk| chunk.anchor.symbol_occurrence_id.as_ref())
-                    .map(|prior_occurrence| {
-                        let symbol = prior_symbols_by_occurrence
-                            .get(prior_occurrence)
-                            .ok_or_else(|| {
-                                ChunkIncrementErrorV1::MissingPriorSymbol(prior_occurrence.clone())
-                            })?;
-                        symbol_occurrence_id(file_occurrence_id, &symbol.identity)
-                            .map(|current| (prior_occurrence.clone(), current))
-                            .map_err(map_chunking_error)
-                    })
-                    .collect::<Result<BTreeMap<_, _>, _>>()?;
-                let current = prior
-                    .rematerialize_for_generation(
-                        generation_id.clone(),
-                        file_occurrence_id.clone(),
-                        &rematerialized_occurrences,
-                    )
-                    .map_err(map_chunking_error)?;
-                let occurrence_map = prior
-                    .chunks
-                    .iter()
-                    .zip(&current.chunks)
-                    .filter_map(|(prior, current)| {
-                        prior
-                            .anchor
-                            .symbol_occurrence_id
-                            .as_ref()
-                            .zip(current.anchor.symbol_occurrence_id.as_ref())
-                    })
-                    .map(|(prior, current)| (prior.clone(), current.clone()))
-                    .collect::<BTreeMap<_, _>>();
-                for (prior_occurrence, current_occurrence) in occurrence_map {
-                    let prior_symbol = prior_symbols_by_occurrence
-                        .get(&prior_occurrence)
-                        .ok_or_else(|| {
-                            ChunkIncrementErrorV1::MissingPriorSymbol(prior_occurrence.clone())
-                        })?;
-                    // The occurrence is rewritten for the new generation, so
-                    // this record genuinely diverges from the shared prior row.
-                    let mut current_symbol = LineageSymbolRecordV1::clone(prior_symbol);
-                    current_symbol.occurrence = current_occurrence;
-                    symbols.push(Arc::new(current_symbol));
-                }
-                files.push(current);
-            }
-            FileExtractionActionV1::ReExtract { file } => {
-                let current = reextracted_files
-                    .remove(&file.file_occurrence_id)
-                    .ok_or_else(|| {
-                        ChunkIncrementErrorV1::MissingReextractedFile(
-                            file.file_occurrence_id.clone(),
-                        )
-                    })?;
-                if current.document.generation_id != generation_id
-                    || current.document.content_digest != file.content_digest
-                {
-                    return Err(ChunkIncrementErrorV1::MixedGeneration);
-                }
-                let occurrences = current
-                    .chunks
-                    .iter()
-                    .filter_map(|chunk| chunk.anchor.symbol_occurrence_id.clone())
-                    .collect::<BTreeSet<_>>();
-                for occurrence in occurrences {
-                    let symbol = reextracted_symbols.remove(&occurrence).ok_or_else(|| {
-                        ChunkIncrementErrorV1::MissingReextractedSymbol(occurrence.clone())
-                    })?;
-                    symbols.push(symbol);
-                }
-                files.push(current);
-            }
-            FileExtractionActionV1::Deleted { .. } => {}
-        }
-    }
-    if !reextracted_files.is_empty() || !reextracted_symbols.is_empty() {
-        return Err(ChunkIncrementErrorV1::NonCanonical(
-            crate::noncanonical::NonCanonicalCauseV1::new(
-                crate::noncanonical::NonCanonicalReasonCodeV1::UnplannedReextractedEvidence,
-            ),
-        ));
-    }
-
-    let chunks = GenerationChunkManifestV1::new(generation_id.clone(), files)?;
-    let symbols =
-        GenerationSymbolIndexV1::new(generation_id, symbols).map_err(map_lineage_error)?;
-    let lineage = SymbolLineageResolver::new()
-        .resolve(prior_symbols, &symbols)
-        .map_err(map_lineage_error)?;
-    Ok(GenerationIncrementMaterializationV1 {
-        chunks,
-        symbols,
-        lineage,
-    })
-}
-
 /// Compare a prior and current generation's canonical chunks.
 ///
 /// `None` means an initial projection and classifies every current chunk as
@@ -453,18 +242,6 @@ fn map_chunking_error(error: ChunkingFailureV1) -> ChunkIncrementErrorV1 {
             ),
         ),
     }
-}
-
-fn map_lineage_error(error: LineageResolutionErrorV1) -> ChunkIncrementErrorV1 {
-    ChunkIncrementErrorV1::NonCanonical(
-        crate::noncanonical::NonCanonicalCauseV1::new(
-            crate::noncanonical::NonCanonicalReasonCodeV1::IdentityValidation,
-        )
-        .with(
-            crate::noncanonical::NonCanonicalDetailKeyV1::Detail,
-            error.to_string(),
-        ),
-    )
 }
 
 #[cfg(test)]

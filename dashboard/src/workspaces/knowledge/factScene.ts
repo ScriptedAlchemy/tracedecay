@@ -21,7 +21,7 @@ import type {
   ProjectMemoryGraphRelationKindV1,
 } from '../../contracts/generated.ts';
 
-export type TrustBandId = 'b80' | 'b60' | 'b40' | 'b20' | 'b00' | 'unmeasured';
+type TrustBandId = 'b80' | 'b60' | 'b40' | 'b20' | 'b00' | 'unmeasured';
 
 /** Edges are inclusive at the lower bound so `0.80` reads in the top band. */
 const BANDS: readonly { id: TrustBandId; lower: number }[] = [
@@ -87,7 +87,7 @@ export interface SceneFact {
   readonly degree: number;
 }
 
-export interface SceneEntity {
+interface SceneEntity {
   readonly nodeId: string;
   readonly label: string;
   /** Fact node ids mentioning this entity, trust descending. */
@@ -140,7 +140,7 @@ export function accessWord(access: PayloadAccessState): string {
 }
 
 /** The identity tail a withheld fact prints: enough to tell two apart. */
-export function factIdTail(factId: string): string {
+function factIdTail(factId: string): string {
   return factId.length > 8 ? `…${factId.slice(-6)}` : factId;
 }
 

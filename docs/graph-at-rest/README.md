@@ -321,14 +321,14 @@ path, and neither is needed for the activation number.
 
 ```text
 # TraceDecay's real schema
-TRACEDECAY_ATREST_MODE=replay TRACEDECAY_ATREST_ROWS=500000 \
-  cargo test -p tracedecay-graph-db --features test-helpers,graph-disk-tier \
-  --test at_rest_snapshot -- --ignored --nocapture --exact at_rest_reopen_probe
+bazel test //crates/tracedecay-graph-db:at_rest_snapshot \
+  --test_env=TRACEDECAY_ATREST_MODE=replay --test_env=TRACEDECAY_ATREST_ROWS=500000 \
+  --test_arg=--ignored --test_arg=--nocapture --test_output=streamed
 
 # schema-neutral
-TRACEDECAY_ATREST_MODE=compact TRACEDECAY_ATREST_ROWS=1000000 \
-  cargo test -p tracedecay-graph-db --features test-helpers,graph-disk-tier \
-  --test at_rest_grafeo_probe -- --ignored --nocapture --exact grafeo_at_rest_probe
+bazel test //crates/tracedecay-graph-db:at_rest_grafeo_probe \
+  --test_env=TRACEDECAY_ATREST_MODE=compact --test_env=TRACEDECAY_ATREST_ROWS=1000000 \
+  --test_arg=--ignored --test_arg=--nocapture --test_output=streamed
 ```
 
 One scenario per process. `TRACEDECAY_ATREST_MODE` is `replay` or `compact`;

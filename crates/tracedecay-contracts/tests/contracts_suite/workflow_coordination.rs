@@ -10,8 +10,9 @@ use tracedecay_contracts::{
     WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkflowCatalogAdmissionError,
     WorkflowCoordinationError, WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort,
     WorkflowDefinitionDisposition, WorkflowDefinitionLifecycleCommand,
-    WorkflowDefinitionLifecycleState, WorkflowDefinitionService, WorkflowDefinitionTransitionEntry,
-    WorkflowDefinitionTransitionOutcome, work_executable_catalog_digest,
+    WorkflowDefinitionLifecycleState, WorkflowDefinitionService,
+    WorkflowDefinitionTransitionOutcome, WorkflowLifecycleOperation,
+    work_executable_catalog_digest,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
@@ -117,7 +118,17 @@ struct FakeDefinitionAuthority {
 struct DefinitionState {
     definitions: BTreeMap<(WorkflowDefinitionId, u64), WorkflowDefinition>,
     dispositions: BTreeMap<(WorkflowDefinitionId, u64), WorkflowDefinitionDisposition>,
-    transitions: Vec<WorkflowDefinitionTransitionEntry>,
+    transitions: Vec<Transition>,
+}
+
+/// One journaled lifecycle step.
+struct Transition {
+    definition_id: WorkflowDefinitionId,
+    definition_version: u64,
+    operation: WorkflowLifecycleOperation,
+    from_state: WorkflowDefinitionLifecycleState,
+    to_state: WorkflowDefinitionLifecycleState,
+    from_revision: u64,
 }
 
 impl WorkflowDefinitionAuthorityPort for FakeDefinitionAuthority {
@@ -223,15 +234,13 @@ impl WorkflowDefinitionAuthorityPort for FakeDefinitionAuthority {
         let mut lifecycle = current.state;
         let mut revision = current.revision;
         for next in path {
-            state.transitions.push(WorkflowDefinitionTransitionEntry {
+            state.transitions.push(Transition {
                 definition_id: command.definition_id.clone(),
                 definition_version: command.definition_version,
                 operation: command.operation,
                 from_state: lifecycle,
                 to_state: *next,
                 from_revision: revision,
-                to_revision: revision + 1,
-                transitioned_at: command.transitioned_at,
             });
             lifecycle = *next;
             revision += 1;
@@ -245,25 +254,6 @@ impl WorkflowDefinitionAuthorityPort for FakeDefinitionAuthority {
         };
         state.dispositions.insert(key, disposition.clone());
         Ok(WorkflowDefinitionTransitionOutcome::Applied(disposition))
-    }
-
-    fn transition_history(
-        &self,
-        definition_id: &WorkflowDefinitionId,
-        definition_version: u64,
-    ) -> Result<Vec<WorkflowDefinitionTransitionEntry>, WorkflowDefinitionAuthorityError> {
-        Ok(self
-            .state
-            .lock()
-            .unwrap()
-            .transitions
-            .iter()
-            .filter(|entry| {
-                entry.definition_id == *definition_id
-                    && entry.definition_version == definition_version
-            })
-            .cloned()
-            .collect())
     }
 }
 
@@ -924,7 +914,7 @@ fn lifecycle_service() -> (
 
 #[test]
 fn the_retained_lifecycle_runs_candidate_validated_active_then_retired() {
-    let (_authority, service, context) = lifecycle_service();
+    let (authority, service, context) = lifecycle_service();
     let registered = service.register(&context, definition(1)).unwrap();
     let definition_id = registered.definition_id().clone();
 
@@ -946,10 +936,14 @@ fn the_retained_lifecycle_runs_candidate_validated_active_then_retired() {
     assert_eq!(active.state, WorkflowDefinitionLifecycleState::Active);
     assert_eq!(active.revision, 3);
 
-    let history = service.lifecycle_history(&definition_id, 1).unwrap();
     assert_eq!(
-        history
+        authority
+            .state
+            .lock()
+            .unwrap()
+            .transitions
             .iter()
+            .filter(|entry| entry.definition_id == definition_id && entry.definition_version == 1)
             .map(|entry| (entry.from_state, entry.to_state))
             .collect::<Vec<_>>(),
         vec![

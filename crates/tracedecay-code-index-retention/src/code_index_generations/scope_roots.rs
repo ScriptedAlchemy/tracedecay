@@ -22,6 +22,7 @@ use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
 #[cfg(test)]
 use super::SCOPE_RETENTION_QUARANTINE_DIRECTORY;
+use super::generation_transactions::entry_exists;
 use super::journal::{
     BoundedJournalSpec, clear_journal, journal_path, load_journal, persist_journal,
     remove_journal_file,
@@ -633,7 +634,12 @@ pub fn execute_scope_root_retention(
             ));
         }
         let scope_root = scope_root_path(store_root, &scope.scope_hash)?;
-        if !scope_directory_exists(&scope_root)? {
+        if !entry_exists(
+            &scope_root,
+            std::fs::FileType::is_dir,
+            "code-index scope path",
+            "directory",
+        )? {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                 "stranded scope '{}' disappeared after the reconciliation mark phase",
                 scope.scope_hash
@@ -1054,25 +1060,6 @@ pub(super) fn validate_scope_root_liveness_proof(
         ));
     }
     Ok(())
-}
-
-pub(super) fn scope_directory_exists(path: &Path) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
-        Ok(_) => Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "code-index scope path '{}' is not a directory",
-            path.display()
-        ))),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) =>
-        {
-            Ok(false)
-        }
-        Err(error) => Err(storage(error)),
-    }
 }
 
 #[cfg(test)]

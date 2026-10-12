@@ -1,6 +1,4 @@
 use std::fmt::Write;
-use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -16,8 +14,9 @@ use tracedecay_domain::{
 };
 
 use super::super::{code_index_search_display_binding, code_index_text_search_display_binding};
+use super::git;
 use tracedecay_code_index_runtime::code_index_scheduler::{
-    CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
+    CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, SharedCodeIndexBytePoolV1,
 };
 use tracedecay_query::code_search::CodeIndexSearchDisplayV1;
 use tracedecay_query::retrieval::hydrate::{
@@ -265,17 +264,16 @@ fn hydration_budget_rejects_payload_read_after_preflight() {
     ));
 }
 
-fn git(root: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {args:?} failed");
+/// A sealed production generation over a committed `src/lib.rs`. Fields drop
+/// in reverse of construction order.
+struct ProductionGeneration {
+    latest: LatestCompleteCodeIndexV1,
+    _scheduler: CodeIndexWorktreeSchedulerV1,
+    _store: TempDir,
+    _project: TempDir,
 }
 
-#[test]
-fn production_chunk_candidate_hydrates_from_frozen_generation() {
+fn production_generation(lib_rs: &str) -> ProductionGeneration {
     let project = TempDir::new().expect("project");
     git(project.path(), &["init", "-q", "-b", "main"]);
     git(project.path(), &["config", "user.name", "TraceDecay Test"]);
@@ -284,11 +282,7 @@ fn production_chunk_candidate_hydrates_from_frozen_generation() {
         &["config", "user.email", "tracedecay@example.invalid"],
     );
     std::fs::create_dir_all(project.path().join("src")).expect("source directory");
-    std::fs::write(
-        project.path().join("src/lib.rs"),
-        "pub fn chunk_target() -> u32 { 7 }\n",
-    )
-    .expect("source");
+    std::fs::write(project.path().join("src/lib.rs"), lib_rs).expect("source");
     git(project.path(), &["add", "."]);
     git(project.path(), &["commit", "-qm", "fixture"]);
 
@@ -302,7 +296,93 @@ fn production_chunk_candidate_hydrates_from_frozen_generation() {
     .expect("scheduler");
     scheduler.reconcile_now().expect("publish generation");
     let latest = scheduler.latest_complete().expect("complete generation");
+    ProductionGeneration {
+        latest,
+        _scheduler: scheduler,
+        _store: store,
+        _project: project,
+    }
+}
+
+fn production_freshness(latest: &LatestCompleteCodeIndexV1) -> SourceFreshness {
+    tracedecay_query::retrieval::graph::production_code_index_freshness(
+        latest.generation().manifest().seal.sealed_at,
+        ComponentRevision::new("policy.code-index.daemon.v1").expect("policy revision"),
+    )
+    .expect("freshness")
+}
+
+/// A single-result request over the sealed generation's snapshot, its
+/// principal, authorization, and profile named after `label`.
+fn production_request(latest: &LatestCompleteCodeIndexV1, label: &str) -> RetrievalRequest {
     let generation = latest.generation();
+    RetrievalRequest {
+        principal: PrincipalId::new(format!("principal.{label}")).expect("principal"),
+        scope: RetrievalScope {
+            privacy_domain: generation.manifest().privacy_domain.clone(),
+            root: SingleRootScopeV1 {
+                repository: generation.snapshot().repository.clone(),
+                worktree: generation.snapshot().worktree.clone(),
+                reference: generation.snapshot().reference.clone(),
+            },
+        },
+        temporal_mode: TemporalModeV1::Current,
+        snapshot: RetrievalSnapshot {
+            watermarks: VectorWatermark::default(),
+            freshness_digest: FreshnessVectorDigest::new(
+                generation.manifest().snapshot_digest.as_str(),
+            )
+            .expect("snapshot freshness"),
+            authorization_revision: AuthorizationRevision::new(format!("authorization.{label}"))
+                .expect("authorization revision"),
+            captured_at: generation.manifest().seal.sealed_at,
+        },
+        profile_id: FusionProfileId::new(format!("profile.{label}")).expect("profile"),
+        budget: RetrievalBudget {
+            max_candidates_per_lane: 1,
+            max_fused_candidates: 1,
+            max_hydrated_results: 1,
+            max_hydration_bytes: 65_536,
+            deadline_micros: None,
+        },
+    }
+}
+
+/// A symbol-anchored hit in the lexical-lane format: the matched `chunk`
+/// rides the provenance as `code-chunk:<generation>:<chunk_id>`.
+fn symbol_chunk_hit(
+    latest: &LatestCompleteCodeIndexV1,
+    symbol_occurrence: &str,
+    chunk: &tracedecay_domain::CodeSearchChunkV1,
+    freshness: &SourceFreshness,
+) -> OccurrenceProvenance {
+    let generation = latest.generation();
+    OccurrenceProvenance {
+        source_occurrence_id: SourceOccurrenceId::new(format!(
+            "code-chunk:{}:{}",
+            generation.manifest().generation_id.as_str(),
+            chunk.id.as_str()
+        ))
+        .expect("chunk source occurrence"),
+        file_occurrence_id: Some(chunk.anchor.file_occurrence_id.clone()),
+        retriever_evidence_anchor: RetrievalAnchorId::new(format!(
+            "code-symbol:{symbol_occurrence}"
+        ))
+        .expect("symbol evidence"),
+        source_namespace: freshness.source_namespace.clone(),
+        repository_id: Some(generation.snapshot().repository.clone()),
+        session_or_thread_id: None,
+        logical_copy_cluster_id: None,
+        logical_copy_evidence_anchor: None,
+        evidence_role: tracedecay_domain::EvidenceRole::Primary,
+        freshness: freshness.clone(),
+    }
+}
+
+#[test]
+fn production_chunk_candidate_hydrates_from_frozen_generation() {
+    let fixture = production_generation("pub fn chunk_target() -> u32 { 7 }\n");
+    let generation = fixture.latest.generation();
     let chunk = generation
         .chunks()
         .chunks()
@@ -314,11 +394,7 @@ fn production_chunk_candidate_hydrates_from_frozen_generation() {
         RetrievalAnchorId::new(format!("code-chunk:{}", chunk_id.as_str())).expect("chunk anchor");
     let source_occurrence = SourceOccurrenceId::new(format!("code-chunk:{}", chunk_id.as_str()))
         .expect("chunk source occurrence");
-    let freshness = tracedecay_query::retrieval::graph::production_code_index_freshness(
-        generation.manifest().seal.sealed_at,
-        ComponentRevision::new("policy.code-index.daemon.v1").expect("policy revision"),
-    )
-    .expect("freshness");
+    let freshness = production_freshness(&fixture.latest);
     let candidate = RankedCandidate {
         candidate: FusedCandidate {
             anchor_id: anchor.clone(),
@@ -349,36 +425,7 @@ fn production_chunk_candidate_hydrates_from_frozen_generation() {
         },
         final_ordinal: 0,
     };
-    let request = RetrievalRequest {
-        principal: PrincipalId::new("principal.chunk-hydration").expect("principal"),
-        scope: RetrievalScope {
-            privacy_domain: generation.manifest().privacy_domain.clone(),
-            root: SingleRootScopeV1 {
-                repository: generation.snapshot().repository.clone(),
-                worktree: generation.snapshot().worktree.clone(),
-                reference: generation.snapshot().reference.clone(),
-            },
-        },
-        temporal_mode: TemporalModeV1::Current,
-        snapshot: RetrievalSnapshot {
-            watermarks: VectorWatermark::default(),
-            freshness_digest: FreshnessVectorDigest::new(
-                generation.manifest().snapshot_digest.as_str(),
-            )
-            .expect("snapshot freshness"),
-            authorization_revision: AuthorizationRevision::new("authorization.chunk-hydration")
-                .expect("authorization revision"),
-            captured_at: generation.manifest().seal.sealed_at,
-        },
-        profile_id: FusionProfileId::new("profile.chunk-hydration").expect("profile"),
-        budget: RetrievalBudget {
-            max_candidates_per_lane: 1,
-            max_fused_candidates: 1,
-            max_hydrated_results: 1,
-            max_hydration_bytes: 65_536,
-            deadline_micros: None,
-        },
-    };
+    let request = production_request(&fixture.latest, "chunk-hydration");
 
     let display_paths =
         tracedecay_code_index_runtime::code_index_executor::CodeIndexDisplayPathIndexV1::for_generation(generation)
@@ -422,30 +469,9 @@ fn production_chunk_candidate_hydrates_from_frozen_generation() {
 
 #[test]
 fn production_symbol_candidate_binds_the_attributed_chunk_window() {
-    let project = TempDir::new().expect("project");
-    git(project.path(), &["init", "-q", "-b", "main"]);
-    git(project.path(), &["config", "user.name", "TraceDecay Test"]);
-    git(
-        project.path(),
-        &["config", "user.email", "tracedecay@example.invalid"],
-    );
-    std::fs::create_dir_all(project.path().join("src")).expect("source directory");
     const BODY: &str = "pub fn chunk_target() -> u32 {\n    7\n}\n";
-    std::fs::write(project.path().join("src/lib.rs"), BODY).expect("source");
-    git(project.path(), &["add", "."]);
-    git(project.path(), &["commit", "-qm", "fixture"]);
-
-    let store = TempDir::new().expect("store");
-    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
-        tracedecay_domain::ProjectId::new("project.code-index-hydration").expect("valid project"),
-        project.path(),
-        store.path().to_path_buf(),
-        Arc::new(SharedCodeIndexBytePoolV1::default()),
-    )
-    .expect("scheduler");
-    scheduler.reconcile_now().expect("publish generation");
-    let latest = scheduler.latest_complete().expect("complete generation");
-    let generation = latest.generation();
+    let fixture = production_generation(BODY);
+    let generation = fixture.latest.generation();
     let chunk = generation
         .chunks()
         .chunks()
@@ -460,39 +486,18 @@ fn production_symbol_candidate_binds_the_attributed_chunk_window() {
         .clone();
     let anchor = RetrievalAnchorId::new(format!("code-symbol:{}", symbol_occurrence.as_str()))
         .expect("symbol anchor");
-    let freshness = tracedecay_query::retrieval::graph::production_code_index_freshness(
-        generation.manifest().seal.sealed_at,
-        ComponentRevision::new("policy.code-index.daemon.v1").expect("policy revision"),
-    )
-    .expect("freshness");
+    let freshness = production_freshness(&fixture.latest);
     let candidate = RankedCandidate {
         candidate: FusedCandidate {
             anchor_id: anchor.clone(),
             logical_evidence_id: LogicalEvidenceId::new(anchor.as_str().to_owned())
                 .expect("logical evidence"),
-            occurrences: vec![OccurrenceProvenance {
-                // Lexical-lane format: the matched chunk rides the
-                // provenance as code-chunk:<generation>:<chunk_id>.
-                source_occurrence_id: SourceOccurrenceId::new(format!(
-                    "code-chunk:{}:{}",
-                    generation.manifest().generation_id.as_str(),
-                    chunk.id.as_str()
-                ))
-                .expect("chunk source occurrence"),
-                file_occurrence_id: Some(chunk.anchor.file_occurrence_id.clone()),
-                retriever_evidence_anchor: RetrievalAnchorId::new(format!(
-                    "code-symbol:{}",
-                    symbol_occurrence.as_str()
-                ))
-                .expect("symbol evidence"),
-                source_namespace: freshness.source_namespace.clone(),
-                repository_id: Some(generation.snapshot().repository.clone()),
-                session_or_thread_id: None,
-                logical_copy_cluster_id: None,
-                logical_copy_evidence_anchor: None,
-                evidence_role: tracedecay_domain::EvidenceRole::Primary,
-                freshness: freshness.clone(),
-            }],
+            occurrences: vec![symbol_chunk_hit(
+                &fixture.latest,
+                symbol_occurrence.as_str(),
+                chunk,
+                &freshness,
+            )],
             exact_class: ExactClass::Approximate,
             source_role: RetrievalSourceRoleV1::default(),
             utility_micros: 1,
@@ -502,36 +507,7 @@ fn production_symbol_candidate_binds_the_attributed_chunk_window() {
         },
         final_ordinal: 0,
     };
-    let request = RetrievalRequest {
-        principal: PrincipalId::new("principal.symbol-hydration").expect("principal"),
-        scope: RetrievalScope {
-            privacy_domain: generation.manifest().privacy_domain.clone(),
-            root: SingleRootScopeV1 {
-                repository: generation.snapshot().repository.clone(),
-                worktree: generation.snapshot().worktree.clone(),
-                reference: generation.snapshot().reference.clone(),
-            },
-        },
-        temporal_mode: TemporalModeV1::Current,
-        snapshot: RetrievalSnapshot {
-            watermarks: VectorWatermark::default(),
-            freshness_digest: FreshnessVectorDigest::new(
-                generation.manifest().snapshot_digest.as_str(),
-            )
-            .expect("snapshot freshness"),
-            authorization_revision: AuthorizationRevision::new("authorization.symbol-hydration")
-                .expect("authorization revision"),
-            captured_at: generation.manifest().seal.sealed_at,
-        },
-        profile_id: FusionProfileId::new("profile.symbol-hydration").expect("profile"),
-        budget: RetrievalBudget {
-            max_candidates_per_lane: 1,
-            max_fused_candidates: 1,
-            max_hydrated_results: 1,
-            max_hydration_bytes: 65_536,
-            deadline_micros: None,
-        },
-    };
+    let request = production_request(&fixture.latest, "symbol-hydration");
 
     let display_paths =
         tracedecay_code_index_runtime::code_index_executor::CodeIndexDisplayPathIndexV1::for_generation(generation)
@@ -555,14 +531,6 @@ fn production_symbol_candidate_binds_the_attributed_chunk_window() {
 
 #[test]
 fn production_symbol_candidate_serves_the_matched_body_piece() {
-    let project = TempDir::new().expect("project");
-    git(project.path(), &["init", "-q", "-b", "main"]);
-    git(project.path(), &["config", "user.name", "TraceDecay Test"]);
-    git(
-        project.path(),
-        &["config", "user.email", "tracedecay@example.invalid"],
-    );
-    std::fs::create_dir_all(project.path().join("src")).expect("source directory");
     // A symbol larger than 64KiB splits into fallback-window pieces. Unique
     // identifiers mark the opening window and a later piece so the binding
     // can be checked by the text it serves, not by chunk metadata.
@@ -577,20 +545,8 @@ fn production_symbol_candidate_serves_the_matched_body_piece() {
         lib_rs.push_str("    let _pad = 2u32;\n");
     }
     write!(lib_rs, "    {FIRST_WINDOW}\n}}\n").expect("fixture closing body");
-    std::fs::write(project.path().join("src/lib.rs"), lib_rs).expect("source");
-    git(project.path(), &["add", "."]);
-    git(project.path(), &["commit", "-qm", "fixture"]);
-
-    let store = TempDir::new().expect("store");
-    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
-        tracedecay_domain::ProjectId::new("project.code-index-hydration").expect("valid project"),
-        project.path(),
-        store.path().to_path_buf(),
-        Arc::new(SharedCodeIndexBytePoolV1::default()),
-    )
-    .expect("scheduler");
-    scheduler.reconcile_now().expect("publish generation");
-    let latest = scheduler.latest_complete().expect("complete generation");
+    let fixture = production_generation(&lib_rs);
+    let latest = &fixture.latest;
     let generation = latest.generation();
 
     let signature_chunk = generation
@@ -624,31 +580,9 @@ fn production_symbol_candidate_serves_the_matched_body_piece() {
 
     let anchor = RetrievalAnchorId::new(format!("code-symbol:{}", symbol_occurrence.as_str()))
         .expect("symbol anchor");
-    let freshness = tracedecay_query::retrieval::graph::production_code_index_freshness(
-        generation.manifest().seal.sealed_at,
-        ComponentRevision::new("policy.code-index.daemon.v1").expect("policy revision"),
-    )
-    .expect("freshness");
-    let chunk_hit = |chunk: &tracedecay_domain::CodeSearchChunkV1| OccurrenceProvenance {
-        source_occurrence_id: SourceOccurrenceId::new(format!(
-            "code-chunk:{}:{}",
-            generation.manifest().generation_id.as_str(),
-            chunk.id.as_str()
-        ))
-        .expect("chunk source occurrence"),
-        file_occurrence_id: Some(chunk.anchor.file_occurrence_id.clone()),
-        retriever_evidence_anchor: RetrievalAnchorId::new(format!(
-            "code-symbol:{}",
-            symbol_occurrence.as_str()
-        ))
-        .expect("symbol evidence"),
-        source_namespace: freshness.source_namespace.clone(),
-        repository_id: Some(generation.snapshot().repository.clone()),
-        session_or_thread_id: None,
-        logical_copy_cluster_id: None,
-        logical_copy_evidence_anchor: None,
-        evidence_role: tracedecay_domain::EvidenceRole::Primary,
-        freshness: freshness.clone(),
+    let freshness = production_freshness(latest);
+    let chunk_hit = |chunk: &tracedecay_domain::CodeSearchChunkV1| {
+        symbol_chunk_hit(latest, symbol_occurrence.as_str(), chunk, &freshness)
     };
     // Fusion orders occurrences by id, so the signature hit can precede
     // the body piece the lane matched; arrange that order directly.
@@ -667,36 +601,7 @@ fn production_symbol_candidate_serves_the_matched_body_piece() {
         },
         final_ordinal: 0,
     };
-    let request = RetrievalRequest {
-        principal: PrincipalId::new("principal.symbol-hydration").expect("principal"),
-        scope: RetrievalScope {
-            privacy_domain: generation.manifest().privacy_domain.clone(),
-            root: SingleRootScopeV1 {
-                repository: generation.snapshot().repository.clone(),
-                worktree: generation.snapshot().worktree.clone(),
-                reference: generation.snapshot().reference.clone(),
-            },
-        },
-        temporal_mode: TemporalModeV1::Current,
-        snapshot: RetrievalSnapshot {
-            watermarks: VectorWatermark::default(),
-            freshness_digest: FreshnessVectorDigest::new(
-                generation.manifest().snapshot_digest.as_str(),
-            )
-            .expect("snapshot freshness"),
-            authorization_revision: AuthorizationRevision::new("authorization.symbol-hydration")
-                .expect("authorization revision"),
-            captured_at: generation.manifest().seal.sealed_at,
-        },
-        profile_id: FusionProfileId::new("profile.symbol-hydration").expect("profile"),
-        budget: RetrievalBudget {
-            max_candidates_per_lane: 1,
-            max_fused_candidates: 1,
-            max_hydrated_results: 1,
-            max_hydration_bytes: 65_536,
-            deadline_micros: None,
-        },
-    };
+    let request = production_request(latest, "symbol-hydration");
 
     let display_paths =
         tracedecay_code_index_runtime::code_index_executor::CodeIndexDisplayPathIndexV1::for_generation(generation)

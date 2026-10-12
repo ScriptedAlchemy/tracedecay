@@ -861,17 +861,13 @@ async fn send_daemon_request_with_liveness_poll(
         .map_or("daemon request", |request| request.method.as_str())
         .to_string();
     let profile_root = &handshake.client_identity.profile_root;
-    let (connection, stream) = match client_deadline {
-        Some(deadline) => {
-            deadline
-                .run("connect", &request_label, async {
-                    connect_to_current_daemon_within(profile_root, socket_path, Some(deadline))
-                        .await
-                })
-                .await?
-        }
-        None => connect_to_current_daemon_within(profile_root, socket_path, None).await?,
-    };
+    let (connection, stream) = DaemonClientDeadline::run_optional(
+        client_deadline,
+        "connect",
+        &request_label,
+        connect_to_current_daemon_within(profile_root, socket_path, client_deadline),
+    )
+    .await?;
     let (reader, mut writer) = stream.into_owned_split();
 
     let write = async {
@@ -883,10 +879,7 @@ async fn send_daemon_request_with_liveness_poll(
         writer.flush().await?;
         Ok(())
     };
-    match client_deadline {
-        Some(deadline) => deadline.run("write", &request_label, write).await?,
-        None => write.await?,
-    }
+    DaemonClientDeadline::run_optional(client_deadline, "write", &request_label, write).await?;
 
     let mut reader = tokio::io::BufReader::new(reader);
     let mut responses = Vec::new();
@@ -899,12 +892,8 @@ async fn send_daemon_request_with_liveness_poll(
             &request_label,
             liveness_poll_interval,
         );
-        let read = async {
-            match client_deadline {
-                Some(deadline) => deadline.run("read", &request_label, read).await,
-                None => read.await,
-            }
-        };
+        let read =
+            DaemonClientDeadline::run_optional(client_deadline, "read", &request_label, read);
         let response_line =
             read_forwarding_cancellation(read, cancellation, &mut cancellation_open, &mut writer)
                 .await?;
@@ -914,28 +903,17 @@ async fn send_daemon_request_with_liveness_poll(
         if response_line.trim().is_empty() {
             continue;
         }
-        let is_matching_response = match client_deadline {
-            Some(deadline) => {
-                deadline
-                    .run("decode", &request_label, async {
-                        Ok(request_id.as_ref().is_some_and(|id| {
-                            serde_json::from_str::<serde_json::Value>(&response_line)
-                                .ok()
-                                .and_then(|value| value.get("id").cloned())
-                                .as_ref()
-                                == Some(id)
-                        }))
-                    })
-                    .await?
-            }
-            None => request_id.as_ref().is_some_and(|id| {
-                serde_json::from_str::<serde_json::Value>(&response_line)
-                    .ok()
-                    .and_then(|value| value.get("id").cloned())
-                    .as_ref()
-                    == Some(id)
-            }),
-        };
+        let is_matching_response =
+            DaemonClientDeadline::run_optional(client_deadline, "decode", &request_label, async {
+                Ok(request_id.as_ref().is_some_and(|id| {
+                    serde_json::from_str::<serde_json::Value>(&response_line)
+                        .ok()
+                        .and_then(|value| value.get("id").cloned())
+                        .as_ref()
+                        == Some(id)
+                }))
+            })
+            .await?;
         responses.push(format!("{response_line}\n"));
         if is_matching_response {
             matched_response = true;

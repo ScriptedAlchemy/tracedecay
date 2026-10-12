@@ -11,7 +11,7 @@
  * audit's coverage is only as complete as this registry.
  */
 
-export interface StorySurface {
+interface StorySurface {
   /** Stable id, used for screenshot / manifest filenames. */
   readonly id: string;
   /** Router path (leading slash) navigated to in the running app. */

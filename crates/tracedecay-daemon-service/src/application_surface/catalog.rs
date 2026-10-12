@@ -8,7 +8,7 @@ use tracedecay_contracts::catalog_composition::{
     CatalogCompositionError, application_catalog_snapshot, build_application_binding_snapshot,
 };
 use tracedecay_daemon_protocol::{
-    ApplicationSurfaceAdapterError, ApplicationSurfaceRequest, BindingResolution, BindingResolver,
+    ApplicationSurfaceAdapterError, ApplicationSurfaceRequest, BindingResolution,
     CatalogBindingResolver, DispatchedInvocation, ResolvedBinding,
 };
 use tracedecay_tool_catalog::{
@@ -89,7 +89,7 @@ pub fn application_surface_catalog() -> Result<CatalogSnapshotV1, ApplicationSur
 }
 
 pub(super) fn resolve_application_binding(
-    resolver: &impl BindingResolver,
+    resolver: &CatalogBindingResolver<'_>,
     surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
 ) -> Option<ResolvedBinding> {

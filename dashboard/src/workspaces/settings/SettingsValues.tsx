@@ -148,7 +148,7 @@ export function ValueCell({ row, query }: { row: ConfigRow; query: string }) {
 }
 
 /** A path reads from its tail: dim the directory, keep the last segment bright. */
-export function PathText({ value, query = '' }: { value: string; query?: string }) {
+function PathText({ value, query = '' }: { value: string; query?: string }) {
   const { head, tail } = splitPath(value);
   return (
     <>
@@ -354,7 +354,7 @@ export function proposalText(value: unknown): string {
 }
 
 /** Marks every occurrence of the active filter inside a literal. */
-export function Highlight({ text, query }: { text: string; query: string }) {
+function Highlight({ text, query }: { text: string; query: string }) {
   const needle = query.trim().toLowerCase();
   if (needle === '') return <>{text}</>;
   const parts: ReactNode[] = [];

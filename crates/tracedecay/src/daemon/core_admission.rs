@@ -76,6 +76,22 @@ impl DaemonClientDeadline {
             )),
         }
     }
+
+    /// Run one client stage under `deadline` when the caller carries one.
+    pub(crate) async fn run_optional<F, T>(
+        deadline: Option<Self>,
+        stage: &'static str,
+        request_label: &str,
+        fut: F,
+    ) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        match deadline {
+            Some(deadline) => deadline.run(stage, request_label, fut).await,
+            None => fut.await,
+        }
+    }
 }
 
 #[derive(Clone)]

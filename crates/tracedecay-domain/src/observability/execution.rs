@@ -296,6 +296,24 @@ closed_enum!(DurationBucketV1 {
     Over7d,
 });
 
+impl DurationBucketV1 {
+    pub const fn from_micros(micros: u64) -> Self {
+        const MINUTE: u64 = 60_000_000;
+        const HOUR: u64 = 60 * MINUTE;
+        const DAY: u64 = 24 * HOUR;
+        match micros {
+            value if value < MINUTE => Self::Under1m,
+            value if value < 5 * MINUTE => Self::From1mTo5m,
+            value if value < 15 * MINUTE => Self::From5mTo15m,
+            value if value < HOUR => Self::From15mTo1h,
+            value if value < 4 * HOUR => Self::From1hTo4h,
+            value if value < DAY => Self::From4hTo24h,
+            value if value < 7 * DAY => Self::From1dTo7d,
+            _ => Self::Over7d,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkStackDriftObservedV1 {
     pub kind: StackDriftKindV1,

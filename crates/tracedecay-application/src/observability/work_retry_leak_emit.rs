@@ -56,7 +56,7 @@ pub(crate) fn work_retry_observation_envelope(
         cause: RerunCauseV1::RuntimeRetry,
         eligible_original_count: 1,
         linked_rerun_count: 1,
-        latency_bucket: duration_bucket(latency),
+        latency_bucket: DurationBucketV1::from_micros(latency),
         coverage: CoverageStateV1::Known,
     });
     let owner_ref = format!(
@@ -141,22 +141,6 @@ pub(super) fn offer(
             WorkOwnerObservationResultV1::DroppedAtCapacity
         }
         Err(_) => WorkOwnerObservationResultV1::Unavailable,
-    }
-}
-
-const fn duration_bucket(micros: u64) -> DurationBucketV1 {
-    const MINUTE: u64 = 60_000_000;
-    const HOUR: u64 = 60 * MINUTE;
-    const DAY: u64 = 24 * HOUR;
-    match micros {
-        value if value < MINUTE => DurationBucketV1::Under1m,
-        value if value < 5 * MINUTE => DurationBucketV1::From1mTo5m,
-        value if value < 15 * MINUTE => DurationBucketV1::From5mTo15m,
-        value if value < HOUR => DurationBucketV1::From15mTo1h,
-        value if value < 4 * HOUR => DurationBucketV1::From1hTo4h,
-        value if value < DAY => DurationBucketV1::From4hTo24h,
-        value if value < 7 * DAY => DurationBucketV1::From1dTo7d,
-        _ => DurationBucketV1::Over7d,
     }
 }
 

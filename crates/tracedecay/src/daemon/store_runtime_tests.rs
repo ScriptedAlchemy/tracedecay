@@ -85,19 +85,6 @@ async fn project_sessions_pending_convergence(
     project_sessions_convergence_fixture(project_name, true).await
 }
 
-async fn project_sessions_current_convergence(
-    project_name: &str,
-) -> (
-    tempfile::TempDir,
-    LocalProfileIdentityAuthorityV1,
-    ProjectId,
-    PathBuf,
-    PathBuf,
-    tracedecay_runtime_core::db::DaemonDatabaseScope,
-) {
-    project_sessions_convergence_fixture(project_name, false).await
-}
-
 async fn project_sessions_convergence_fixture(
     project_name: &str,
     remove_checkpoint: bool,
@@ -1471,55 +1458,11 @@ async fn terminal_shutdown_cancels_and_joins_blocked_schema_convergence() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn background_convergence_commits_the_durable_authority_checkpoint() {
+/// Runs background schema convergence on a fresh project-sessions shard and
+/// returns its durable authority checkpoint's bounded-pass count.
+async fn converged_authority_checkpoint_passes(project_name: &str, pending: bool) -> i64 {
     let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
-        project_sessions_pending_convergence("project.schema-checkpoint").await;
-    let shard_id = StoreShardIdV1::project_sessions(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        project_id.clone(),
-    );
-    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
-        .await
-        .expect("session runtime registry");
-    let database = registry
-        .project_sessions(project_id, [project_root])
-        .await
-        .expect("registered project sessions");
-
-    assert_eq!(
-        wait_for_schema_convergence(&registry, &shard_id).await,
-        RegisteredSchemaConvergenceStatus::Complete
-    );
-    let snapshot = database
-        .read_snapshot()
-        .await
-        .expect("checkpoint read snapshot");
-    let mut rows = snapshot
-        .query(
-            "SELECT bounded_passes_since_exhaustive
-                 FROM authority_audit_checkpoints
-                 WHERE audit_name = 'observation-authority'",
-            (),
-        )
-        .await
-        .expect("read durable authority checkpoint");
-    assert_eq!(
-        rows.next()
-            .await
-            .expect("read checkpoint")
-            .expect("durable checkpoint row")
-            .get::<i64>(0)
-            .expect("decode checkpoint"),
-        0
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn daemon_reopen_resumes_from_the_trusted_authority_checkpoint() {
-    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
-        project_sessions_current_convergence("project.schema-trusted-checkpoint").await;
+        project_sessions_convergence_fixture(project_name, pending).await;
     let shard_id = StoreShardIdV1::project_sessions(
         identity.brain_id().clone(),
         identity.profile_id().clone(),
@@ -1550,13 +1493,26 @@ async fn daemon_reopen_resumes_from_the_trusted_authority_checkpoint() {
         )
         .await
         .expect("read durable authority checkpoint");
+    rows.next()
+        .await
+        .expect("read checkpoint")
+        .expect("durable checkpoint row")
+        .get::<i64>(0)
+        .expect("decode checkpoint")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_convergence_commits_the_durable_authority_checkpoint() {
     assert_eq!(
-        rows.next()
-            .await
-            .expect("read checkpoint")
-            .expect("durable checkpoint row")
-            .get::<i64>(0)
-            .expect("decode checkpoint"),
+        converged_authority_checkpoint_passes("project.schema-checkpoint", true).await,
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_reopen_resumes_from_the_trusted_authority_checkpoint() {
+    assert_eq!(
+        converged_authority_checkpoint_passes("project.schema-trusted-checkpoint", false).await,
         1,
         "daemon reopen must audit only the suffix after a trusted checkpoint"
     );

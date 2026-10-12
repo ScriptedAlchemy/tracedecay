@@ -9,6 +9,7 @@ pub use tracedecay_code_extraction::{
     CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1, CloneTokenStreamV1,
     ConservativeCloneTokenV1,
 };
+use tracedecay_contracts::retrieval::SimilarOccurrenceV1;
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, SourceSpan, SymbolOccurrenceId,
     WorktreeId, canonical_json_bytes,
@@ -71,6 +72,22 @@ pub struct CloneBodyOccurrenceV1 {
     pub body_span: SourceSpan,
     pub payload_digest: ManifestDigest,
     pub eligibility: CloneBodyEligibilityV1,
+}
+
+impl CloneBodyOccurrenceV1 {
+    /// The public similar-read projection of this occurrence.
+    pub fn similar_occurrence(&self) -> SimilarOccurrenceV1 {
+        SimilarOccurrenceV1 {
+            project_id: self.project_id.clone(),
+            repository_id: self.repository_id.clone(),
+            worktree_id: self.worktree_id.clone(),
+            source_generation: self.source_generation.clone(),
+            snapshot_digest: self.snapshot_digest.clone(),
+            symbol_occurrence_id: self.symbol_occurrence_id.clone(),
+            path: self.path.clone(),
+            body_span: self.body_span,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

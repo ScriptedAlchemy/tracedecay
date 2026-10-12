@@ -173,18 +173,3 @@ impl CursorProjectionDrainStats {
         }
     }
 }
-
-pub(in crate::runtime) fn cursor_ingest_or_default(
-    result: &TranscriptIngestResult<CursorTranscriptIngestStats>,
-) -> CursorTranscriptIngestStats {
-    result.as_ref().map_or_else(
-        |_| {
-            tracing::error!(
-                reason_code = "cursor_observation_ingest_failed",
-                "Cursor transcript ingest failed"
-            );
-            CursorTranscriptIngestStats::default()
-        },
-        |stats| *stats,
-    )
-}

@@ -16,7 +16,7 @@ import {
 import { usePayload } from "./usePayload.ts";
 
 /** The plugin mount every route below hangs off (`lib.rs` `project_api_router`). */
-export const MEMORY_BASE = "/api/plugins/holographic";
+const MEMORY_BASE = "/api/plugins/holographic";
 
 /** `GET /fact/{id}/trust-history`: `partial` exactly when `next_after` names
  * the continuation, and never more events than the declared limit. */

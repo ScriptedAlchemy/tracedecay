@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
+use crate::test_support::git::git;
 
 #[tokio::test]
 async fn spawned_loop_is_cancellable_and_joinable() {
@@ -104,7 +105,7 @@ async fn cancelled_pr_teardown_preserves_artifacts_and_retries_exactly() {
     let pr = 5;
     let label = pr_label(pr);
     let tracking_ref = pr_tracking_ref(pr);
-    let head_sha = git_output(repo.path(), &["rev-parse", "HEAD"]);
+    let head_sha = git(repo.path(), &["rev-parse", "HEAD"]);
     let worktree = data_root.path().join("pr-worktrees/pr-5");
     std::fs::create_dir_all(worktree.parent().expect("worktree parent"))
         .expect("create worktree parent");
@@ -408,15 +409,6 @@ async fn reconcile_activates_discovered_pr_head_when_scheduler_is_injected() {
     schedulers.shutdown().await;
 }
 
-fn git(repo: &Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .status()
-        .expect("spawn git");
-    assert!(status.success(), "git {args:?} failed");
-}
-
 /// Runs one Git command and reports only whether it succeeded. Used for
 /// options whose availability depends on the installed Git version.
 fn git_succeeds(repo: &Path, args: &[&str]) -> bool {
@@ -425,20 +417,6 @@ fn git_succeeds(repo: &Path, args: &[&str]) -> bool {
         .current_dir(repo)
         .output()
         .is_ok_and(|output| output.status.success())
-}
-
-/// Runs one Git command and returns its trimmed stdout.
-fn git_output(repo: &Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .expect("spawn git");
-    assert!(output.status.success(), "git {args:?} failed");
-    String::from_utf8(output.stdout)
-        .expect("git output")
-        .trim()
-        .to_owned()
 }
 
 #[tokio::test]
@@ -892,11 +870,7 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
     .unwrap();
     git(repo.path(), &["add", "."]);
     git(repo.path(), &["commit", "-qm", "advance branch head"]);
-    let advanced_head = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
+    let advanced_head = git(repo.path(), &["rev-parse", "HEAD"]);
     git(repo.path(), &["checkout", "-q", "main"]);
 
     let staged_graph = Arc::clone(&graph);
@@ -932,7 +906,7 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
     assert_ne!(initial.worktree, replay.worktree);
     assert!(schedulers.is_worktree_mounted(&initial.worktree).await);
     assert_eq!(
-        git_output(&initial.worktree, &["rev-parse", "HEAD"]).trim(),
+        git(&initial.worktree, &["rev-parse", "HEAD"]),
         initial.head_sha
     );
     assert_eq!(
@@ -1002,11 +976,7 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
             .source_oid,
         replay.head_sha
     );
-    let mounted_head = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(&replay.worktree)
-        .output()
-        .unwrap();
+    let mounted_head = git(&replay.worktree, &["rev-parse", "HEAD"]);
 
     assert_eq!(
         replay.outcome,
@@ -1014,8 +984,7 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
     );
     assert_ne!(initial.head_sha, replay.head_sha);
     assert_eq!(
-        String::from_utf8_lossy(&advanced_head.stdout).trim(),
-        String::from_utf8_lossy(&mounted_head.stdout).trim(),
+        advanced_head, mounted_head,
         "the new candidate must carry the newly resolved branch head"
     );
     schedulers.shutdown().await;
@@ -1041,7 +1010,7 @@ async fn manual_branch_activation_queues_behind_the_exact_lifecycle_before_mutat
             .expect("first lifecycle owner");
     let schedulers = CodeIndexSchedulerRegistryV1::new(2);
     let tracking_refs = || {
-        git_output(
+        git(
             repo.path(),
             &[
                 "for-each-ref",
@@ -1162,7 +1131,7 @@ async fn manual_branch_fails_closed_without_scheduler_before_git_or_state_mutati
     assert_eq!(error.reason_code(), "code_index_scheduler_unavailable");
     assert!(!data_root.join("branch-worktrees").exists());
     assert_eq!(
-        git_output(
+        git(
             repo.path(),
             &[
                 "for-each-ref",
@@ -1213,7 +1182,7 @@ async fn manual_branch_missing_ref_is_typed_failure() {
     );
     assert!(!data_root.join("branch-worktrees").exists());
     assert_eq!(
-        git_output(
+        git(
             repo.path(),
             &[
                 "for-each-ref",
@@ -1255,7 +1224,7 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
     // first, and it takes precedence over any packed entry, so the FIFO stalls
     // that read whether or not the ref was packed away.
     let ref_path = {
-        let reported = std::path::PathBuf::from(git_output(
+        let reported = std::path::PathBuf::from(git(
             repo.path(),
             &["rev-parse", "--git-path", &artifacts.tracking_ref],
         ));

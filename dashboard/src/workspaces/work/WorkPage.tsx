@@ -79,7 +79,7 @@ import { workDagReading } from './workViewsModel.ts';
  * two that are still absent cannot be filled from the ones that are not.
  */
 
-export function workScopeProvenance(scope: DashboardScope): string {
+function workScopeProvenance(scope: DashboardScope): string {
   switch (scope.kind) {
     case 'all':
       return 'canonical task graph · the active project · exact product authority';

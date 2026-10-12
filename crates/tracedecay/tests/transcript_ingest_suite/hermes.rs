@@ -15,10 +15,11 @@ use tracedecay_domain::{
 use tracedecay_lcm::{LcmCompressionRequest, LcmSummarizerMode};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::config::ProfileRoot;
-use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::admission::{HostAdmission, HostAdmissionScope};
+use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::hosts::hermes::{
-    ProjectIngestDestination, ingest_for_project as ingest_for_project_with_id,
-    ingest_homes as ingest_homes_with_id, ingest_homes_for_projects, ingest_user_homes,
+    ingest_for_project_capped_with_admission_and_cancellation,
+    ingest_user_sessions_capped_with_admission,
 };
 use tracedecay_sessions::runtime::source::TranscriptIngestStats;
 use tracedecay_sessions::runtime::{
@@ -40,33 +41,61 @@ use crate::support::{
 
 const SESSION_ID: &str = "20260101_000000_abc123";
 
+/// Runs the production project sweep with `user_home` as the transcript
+/// source profile's home, so discovery reads `<user_home>/.hermes`.
+async fn sweep_project(
+    user_home: &Path,
+    admission: &dyn HostAdmission,
+    project_root: &Path,
+    project_id: ProjectId,
+) -> TranscriptIngestStats {
+    with_transcript_source_profile(
+        ProfileRoot::under_home(user_home),
+        ingest_for_project_capped_with_admission_and_cancellation(
+            project_root,
+            project_id,
+            admission,
+            None,
+            &ObservationCancellation::default(),
+        ),
+    )
+    .await
+    .expect("hermes home")
+    .stats
+}
+
 async fn ingest_for_project(
     user_home: &Path,
     runtime: &ProjectSessionTestRuntime,
     project_root: &Path,
 ) -> TranscriptIngestStats {
     let admission = runtime.runtime().facade();
-    with_transcript_source_profile(
-        ProfileRoot::under_home(user_home),
-        ingest_for_project_with_id(&admission, project_root, runtime.project_id().clone()),
-    )
-    .await
-    .expect("hermes home")
-}
-
-async fn ingest_homes(
-    runtime: &ProjectSessionTestRuntime,
-    hermes_homes: &[PathBuf],
-    project_root: &Path,
-) -> TranscriptIngestStats {
-    let admission = runtime.runtime().facade();
-    ingest_homes_with_id(
+    sweep_project(
+        user_home,
         &admission,
-        hermes_homes,
         project_root,
         runtime.project_id().clone(),
     )
     .await
+}
+
+/// [`ingest_for_project`] for the user home that owns `hermes_home`
+/// (`<home>/.hermes`).
+async fn ingest_hermes_home(
+    runtime: &ProjectSessionTestRuntime,
+    hermes_home: &Path,
+    project_root: &Path,
+) -> TranscriptIngestStats {
+    ingest_for_project(user_home_of(hermes_home), runtime, project_root).await
+}
+
+fn user_home_of(hermes_home: &Path) -> &Path {
+    assert!(
+        hermes_home.ends_with(".hermes"),
+        "{}",
+        hermes_home.display()
+    );
+    hermes_home.parent().expect("Hermes home parent")
 }
 
 async fn ingest_registered_project_provider(
@@ -275,7 +304,7 @@ async fn hermes_state_db_populates_projection_for_session_cwd_project() {
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&linked_worktree)).await;
 
     let db = open_project_session_db(&project).await.unwrap();
-    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
+    let stats = ingest_hermes_home(&db, &hermes_home, &project).await;
     // user + assistant tool-call turn + tool result + assistant reply; the
     // session_meta bootstrap row is skipped.
     assert_eq!(stats.messages_upserted, 4);
@@ -418,7 +447,7 @@ async fn hermes_secret_is_sanitized_before_observation_and_projection() {
     let db = open_project_session_db(&project).await.unwrap();
 
     assert_eq!(
-        ingest_homes(&db, std::slice::from_ref(&hermes_home), &project)
+        ingest_hermes_home(&db, &hermes_home, &project)
             .await
             .messages_upserted,
         4
@@ -446,7 +475,7 @@ async fn hermes_parent_session_id_marks_subagent_session() {
     drop(conn);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
+    let stats = ingest_hermes_home(&db, &hermes_home, &project).await;
     assert_eq!(stats.messages_upserted, 4);
     let session = db
         .get_session("hermes", SESSION_ID)
@@ -544,7 +573,7 @@ async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
         runtime_owned_raw
     );
 
-    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
+    let stats = ingest_hermes_home(&db, &hermes_home, &project).await;
     assert_eq!(stats.messages_upserted, 4);
     // If the Hermes sweep ever switches back to full transcript writes, this
     // message id would overwrite the runtime-owned raw turn with the assistant
@@ -576,14 +605,17 @@ async fn hermes_ingest_is_incremental_and_idempotent() {
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
 
     let db = open_project_session_db(&project).await.unwrap();
-    let homes = [hermes_home.clone()];
     assert_eq!(
-        ingest_homes(&db, &homes, &project).await.messages_upserted,
+        ingest_hermes_home(&db, &hermes_home, &project)
+            .await
+            .messages_upserted,
         4
     );
     // Re-sweep with no new rows is a no-op (rowid cursor already advanced).
     assert_eq!(
-        ingest_homes(&db, &homes, &project).await.messages_upserted,
+        ingest_hermes_home(&db, &hermes_home, &project)
+            .await
+            .messages_upserted,
         0
     );
 
@@ -596,7 +628,7 @@ async fn hermes_ingest_is_incremental_and_idempotent() {
     .unwrap();
     drop(conn);
 
-    let stats = ingest_homes(&db, &homes, &project).await;
+    let stats = ingest_hermes_home(&db, &hermes_home, &project).await;
     assert_eq!(stats.messages_upserted, 1);
     let appended = db
         .get_session_message("hermes", &format!("{SESSION_ID}:6"))
@@ -649,7 +681,7 @@ async fn hermes_incremental_ingest_converges_with_full_rebuild() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
-    let homes = [hermes_home];
+    let user_home = user_home_of(&hermes_home);
     let project_id = mark_test_project(&project);
 
     let incremental = HostAdmissionTestRuntimeV1::project(
@@ -661,9 +693,14 @@ async fn hermes_incremental_ingest_converges_with_full_rebuild() {
     .unwrap();
     let incremental_admission = incremental.facade();
     assert_eq!(
-        ingest_homes_with_id(&incremental_admission, &homes, &project, project_id.clone(),)
-            .await
-            .messages_upserted,
+        sweep_project(
+            user_home,
+            &incremental_admission,
+            &project,
+            project_id.clone()
+        )
+        .await
+        .messages_upserted,
         4
     );
 
@@ -676,9 +713,14 @@ async fn hermes_incremental_ingest_converges_with_full_rebuild() {
     .unwrap();
     drop(conn);
     assert_eq!(
-        ingest_homes_with_id(&incremental_admission, &homes, &project, project_id.clone(),)
-            .await
-            .messages_upserted,
+        sweep_project(
+            user_home,
+            &incremental_admission,
+            &project,
+            project_id.clone()
+        )
+        .await
+        .messages_upserted,
         1
     );
 
@@ -691,7 +733,7 @@ async fn hermes_incremental_ingest_converges_with_full_rebuild() {
     .unwrap();
     let rebuilt_admission = rebuilt.facade();
     assert_eq!(
-        ingest_homes_with_id(&rebuilt_admission, &homes, &project, project_id)
+        sweep_project(user_home, &rebuilt_admission, &project, project_id)
             .await
             .messages_upserted,
         5
@@ -707,11 +749,12 @@ async fn hermes_replacement_replay_preserves_message_identity() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
-    let homes = [hermes_home.clone()];
     let db = open_project_session_db(&project).await.unwrap();
 
     assert_eq!(
-        ingest_homes(&db, &homes, &project).await.messages_upserted,
+        ingest_hermes_home(&db, &hermes_home, &project)
+            .await
+            .messages_upserted,
         4
     );
     let before = hermes_projection_signature(db.runtime()).await;
@@ -732,7 +775,7 @@ async fn hermes_replacement_replay_preserves_message_identity() {
     std::fs::remove_dir_all(original_profile).unwrap();
     std::fs::rename(replacement_profile, original_profile).unwrap();
 
-    let replay = ingest_homes(&db, &homes, &project).await;
+    let replay = ingest_hermes_home(&db, &hermes_home, &project).await;
     assert_eq!(replay.messages_upserted, 0);
     let after = hermes_projection_signature(db.runtime()).await;
     assert_eq!(
@@ -743,7 +786,7 @@ async fn hermes_replacement_replay_preserves_message_identity() {
 }
 
 #[tokio::test]
-async fn hermes_shared_sweep_routes_one_source_to_multiple_project_stores() {
+async fn hermes_sweep_routes_one_source_to_each_project_store() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, first_project) = setup(&tmp);
     let second_project = tmp.path().join("second-project");
@@ -772,25 +815,10 @@ async fn hermes_shared_sweep_routes_one_source_to_multiple_project_stores() {
 
     let first_db = open_project_session_db(&first_project).await.unwrap();
     let second_db = open_sibling_project_session_db(&first_db, &second_project).await;
-    let first_admission = first_db.runtime().facade();
-    let second_admission = second_db.runtime().facade();
-    let destinations = [
-        ProjectIngestDestination {
-            admission: &first_admission,
-            project_root: &first_project,
-            project_id: first_db.project_id().clone(),
-        },
-        ProjectIngestDestination {
-            admission: &second_admission,
-            project_root: &second_project,
-            project_id: second_db.project_id().clone(),
-        },
-    ];
-    let stats = ingest_homes_for_projects(std::slice::from_ref(&hermes_home), &destinations)
-        .await
-        .unwrap();
+    let first = ingest_hermes_home(&first_db, &hermes_home, &first_project).await;
+    let second = ingest_hermes_home(&second_db, &hermes_home, &second_project).await;
 
-    assert_eq!(stats.messages_upserted, 5);
+    assert_eq!(first.messages_upserted + second.messages_upserted, 5);
     assert!(first_db.get_session("hermes", SESSION_ID).await.is_some());
     assert!(
         first_db
@@ -806,10 +834,12 @@ async fn hermes_shared_sweep_routes_one_source_to_multiple_project_stores() {
             .is_some()
     );
     assert_eq!(
-        ingest_homes_for_projects(std::slice::from_ref(&hermes_home), &destinations)
+        ingest_hermes_home(&first_db, &hermes_home, &first_project)
             .await
-            .unwrap()
-            .messages_upserted,
+            .messages_upserted
+            + ingest_hermes_home(&second_db, &hermes_home, &second_project)
+                .await
+                .messages_upserted,
         0
     );
 }
@@ -823,7 +853,7 @@ async fn hermes_session_elsewhere_is_not_ingested() {
     write_hermes_profile(&hermes_home, "test", Some(&other_project)).await;
 
     let db = open_project_session_db(&project).await.unwrap();
-    let stats = ingest_homes(&db, &[hermes_home], &project).await;
+    let stats = ingest_hermes_home(&db, &hermes_home, &project).await;
     assert_eq!(stats.messages_upserted, 0);
     assert_eq!(stats.sessions_upserted, 0);
     assert!(db.get_session("hermes", SESSION_ID).await.is_none());
@@ -862,7 +892,7 @@ async fn sweep_skips_rewound_rows_and_surfaces_reasoning_only_turns() {
     drop(conn);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
+    let stats = ingest_hermes_home(&db, &hermes_home, &project).await;
     // 4 fixture turns + the reasoning-only turn; the rewound row is skipped.
     assert_eq!(stats.messages_upserted, 5);
     assert!(
@@ -927,7 +957,7 @@ async fn sweep_reads_legacy_stores_without_active_or_reasoning_columns() {
     drop(conn);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
+    let stats = ingest_hermes_home(&db, &hermes_home, &project).await;
     assert_eq!(stats.messages_upserted, 1);
     let turn = db
         .get_session_message("hermes", &format!("{SESSION_ID}:1"))
@@ -945,7 +975,7 @@ async fn unpinned_profile_never_maps_to_its_own_home_store() {
 
     // Sweeping an unrelated project must not pick up the unpinned profile.
     let db = open_project_session_db(&unrelated_project).await.unwrap();
-    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &unrelated_project).await;
+    let stats = ingest_hermes_home(&db, &hermes_home, &unrelated_project).await;
     assert_eq!(stats.messages_upserted, 0);
 
     // A Hermes profile directory is not a code project identity.
@@ -957,9 +987,9 @@ async fn unpinned_profile_never_maps_to_its_own_home_store() {
     .await
     .unwrap();
     let profile_admission = profile_db.facade();
-    let stats = ingest_homes_with_id(
+    let stats = sweep_project(
+        user_home_of(&hermes_home),
         &profile_admission,
-        std::slice::from_ref(&hermes_home),
         &profile_dir,
         named_project_id("profile-directory"),
     )
@@ -989,7 +1019,7 @@ async fn unpinned_profile_uses_session_cwd_as_project_provenance() {
     drop(conn);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
+    let stats = ingest_hermes_home(&db, &hermes_home, &project).await;
     assert_eq!(stats.messages_upserted, 4);
     let session = db
         .get_session("hermes", SESSION_ID)
@@ -1031,7 +1061,7 @@ async fn unpinned_projectless_session_routes_only_a_tool_proven_turn() {
     drop(conn);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
+    let stats = ingest_hermes_home(&db, &hermes_home, &project).await;
     assert_eq!(stats.messages_upserted, 4);
     let session = db
         .get_session("hermes", SESSION_ID)
@@ -1080,18 +1110,12 @@ async fn explicit_tool_route_overrides_session_cwd_without_cross_project_duplica
     drop(conn);
 
     let session_db = open_project_session_db(&session_project).await.unwrap();
-    let session_stats = ingest_homes(
-        &session_db,
-        std::slice::from_ref(&hermes_home),
-        &session_project,
-    )
-    .await;
+    let session_stats = ingest_hermes_home(&session_db, &hermes_home, &session_project).await;
     assert_eq!(session_stats.messages_upserted, 0);
     assert!(session_db.get_session("hermes", SESSION_ID).await.is_none());
 
     let tool_db = open_sibling_project_session_db(&session_db, &tool_project).await;
-    let tool_stats =
-        ingest_homes(&tool_db, std::slice::from_ref(&hermes_home), &tool_project).await;
+    let tool_stats = ingest_hermes_home(&tool_db, &hermes_home, &tool_project).await;
     assert_eq!(tool_stats.messages_upserted, 4);
     let session = tool_db
         .get_session("hermes", SESSION_ID)
@@ -1130,12 +1154,18 @@ async fn user_sweep_keeps_canonical_turns_routed_to_registered_projects() {
         .unwrap();
     let admission = user_db.facade();
 
-    let stats = ingest_user_homes(
-        &admission,
-        std::slice::from_ref(&hermes_home),
-        std::slice::from_ref(&registered),
+    let stats = with_transcript_source_profile(
+        ProfileRoot::under_home(user_home_of(&hermes_home)),
+        ingest_user_sessions_capped_with_admission(
+            &admission,
+            std::slice::from_ref(&registered),
+            None,
+            &ObservationCancellation::default(),
+        ),
     )
-    .await;
+    .await
+    .expect("hermes home")
+    .stats;
 
     assert_eq!(stats.messages_upserted, 4);
     assert!(

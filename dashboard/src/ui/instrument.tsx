@@ -160,7 +160,7 @@ export function Panel({
   );
 }
 
-export type ReadoutSize = 'sm' | 'md' | 'lg' | 'xl' | 'display';
+type ReadoutSize = 'sm' | 'md' | 'lg' | 'xl' | 'display';
 
 /** `sm`–`lg` stay on the text scale for cells that sit inside prose rhythm.
  * `xl` and `display` switch to `.td-display`, which retunes tracking and

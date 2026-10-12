@@ -2,21 +2,14 @@ use std::sync::Arc;
 
 use tracedecay_code_index::chunks::{CodeFileChunksV1, content_digest};
 use tracedecay_code_index::chunks::{CodeSearchDocumentV1, CodeSearchEligibilityV1};
-use tracedecay_code_index::generations::{
-    FileExtractionActionV1, FileExtractionPlanV1, GenerationIncrementPlanV1,
-};
 use tracedecay_code_index::incremental::{
-    ChunkIncrementErrorV1, GenerationChunkManifestV1, materialize_generation_increment,
-    plan_chunk_increment,
+    ChunkIncrementErrorV1, GenerationChunkManifestV1, plan_chunk_increment,
 };
-use tracedecay_code_index::lineage::LineageKindV1;
-use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-    CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ComplexityAnalysisV1,
-    FileIdentityDigest, FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest,
-    PolicyRevisionId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SourceSpan,
-    SymbolIdentityDigest, SymbolOccurrenceId,
+    CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, FileOccurrenceId,
+    LanguageDescriptorRevision, PolicyRevisionId, SanitizerRevision, SensitivityDecision,
+    SensitivityLevelV1, SourceSpan, SymbolOccurrenceId,
 };
 
 use tracedecay_domain::test_fixtures::id;
@@ -136,108 +129,6 @@ fn baseline_file(
         "pub fn alpha(value: u32) -> u32 { value + 1 }",
         "pub fn beta(value: u32) -> u32 { value * 2 }",
     )
-}
-
-#[test]
-fn carry_forward_execution_rematerializes_chunks_and_preserves_lineage_continuity() {
-    let prior_generation = generation(1);
-    let current_generation = generation(2);
-    let prior_file = baseline_file(&prior_generation, "file.a.1", "src/lib.rs");
-    let prior_symbols = prior_file
-        .chunks
-        .iter()
-        .filter_map(|chunk| {
-            chunk
-                .anchor
-                .symbol_occurrence_id
-                .as_ref()
-                .map(|occurrence| {
-                    Arc::new(LineageSymbolRecordV1 {
-                        occurrence: occurrence.clone(),
-                        identity: id::<SymbolIdentityDigest>(&format!(
-                            "sha256:{}",
-                            if chunk.sanitized_text.as_str().contains("alpha") {
-                                "a".repeat(64)
-                            } else {
-                                "b".repeat(64)
-                            }
-                        )),
-                        qualified_name: if chunk.sanitized_text.as_str().contains("alpha") {
-                            "crate::alpha"
-                        } else {
-                            "crate::beta"
-                        }
-                        .to_owned(),
-                        kind: "function".to_owned(),
-                        simple_name: if chunk.sanitized_text.as_str().contains("alpha") {
-                            "alpha"
-                        } else {
-                            "beta"
-                        }
-                        .to_owned(),
-                        visibility: "private".to_owned(),
-                        branches: 0,
-                        loops: 0,
-                        max_nesting: 0,
-                        complexity_analysis: ComplexityAnalysisV1::Complete,
-                        line_span: 1,
-                        start_line: 0,
-                        signature: None,
-                        docstring: None,
-                        is_async: false,
-                        derives: Vec::new(),
-                        skip_test_coverage: false,
-                        file_identity: id::<FileIdentityDigest>(&format!(
-                            "sha256:{}",
-                            "f".repeat(64)
-                        )),
-                        content_digest: chunk.content_digest.clone(),
-                    })
-                })
-        })
-        .collect();
-    let prior_symbols =
-        GenerationSymbolIndexV1::new(prior_generation.clone(), prior_symbols).expect("prior index");
-    let plan = GenerationIncrementPlanV1 {
-        prior_generation: prior_generation.clone(),
-        rebuild_triggers: vec![],
-        invalidation_digest: id::<ManifestDigest>(&format!("sha256:{}", "d".repeat(64))),
-        files: vec![FileExtractionPlanV1 {
-            logical_path: "src/lib.rs".to_owned(),
-            action: FileExtractionActionV1::CarryForward {
-                file_occurrence_id: id("file.a.2"),
-                prior_file_occurrence_id: id("file.a.1"),
-                content_digest: prior_file.document.content_digest.clone(),
-            },
-        }],
-        capture_changed_files: vec![],
-        carried_forward: 1,
-        reextract: 0,
-        deleted: 0,
-    };
-
-    let materialized = materialize_generation_increment(
-        &plan,
-        current_generation.clone(),
-        &[prior_file],
-        vec![],
-        &prior_symbols,
-        vec![],
-    )
-    .expect("carry-forward materializes");
-
-    assert_eq!(materialized.chunks.generation_id(), &current_generation);
-    assert_eq!(materialized.symbols.generation_id, current_generation);
-    assert_eq!(materialized.lineage.len(), 2);
-    assert!(
-        materialized
-            .lineage
-            .iter()
-            .all(|candidate| candidate.kind == LineageKindV1::Unchanged)
-    );
-    for candidate in &materialized.lineage {
-        assert_ne!(candidate.prior_occurrence, candidate.current_occurrence);
-    }
 }
 
 fn manifest(

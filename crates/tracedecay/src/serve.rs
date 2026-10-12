@@ -1,7 +1,7 @@
 //! MCP root-URI decoding for the daemon's serve path. The `tracedecay serve`
 //! proxy command itself lives in the CLI crate.
 
-use tracedecay_lsp::percent_hex_nibble;
+use tracedecay_lsp::decode_uri_segment;
 
 pub(crate) fn local_path_from_mcp_root_uri(uri: &str) -> Option<std::path::PathBuf> {
     let path = if let Some(rest) = uri.strip_prefix("file://") {
@@ -17,27 +17,10 @@ pub(crate) fn local_path_from_mcp_root_uri(uri: &str) -> Option<std::path::PathB
     } else {
         uri.to_string()
     };
-    percent_decode_path(&path)
+    decode_uri_segment(&path)
+        .and_then(|decoded| String::from_utf8(decoded).ok())
         .map(strip_windows_drive_slash)
         .map(std::path::PathBuf::from)
-}
-
-fn percent_decode_path(path: &str) -> Option<String> {
-    let bytes = path.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hi = *bytes.get(i + 1)?;
-            let lo = *bytes.get(i + 2)?;
-            decoded.push((percent_hex_nibble(hi)? << 4) | percent_hex_nibble(lo)?);
-            i += 3;
-        } else {
-            decoded.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(decoded).ok()
 }
 
 /// A Windows file URI like `file:///C:/work` decodes to `/C:/work`; the

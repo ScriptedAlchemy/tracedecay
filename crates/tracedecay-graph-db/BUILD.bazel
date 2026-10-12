@@ -147,21 +147,6 @@ rust_test(
 )
 
 rust_test(
-    name = "tiered_storage_rss",
-    srcs = glob(["tests/**/*.rs"], exclude = ["tests/fixtures/**"]),
-    crate_root = "tests/tiered_storage_rss.rs",
-    edition = crate_edition(),
-    version = "0.1.0",
-    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-graph-db:tracedecay-graph-db__+eval-helpers_+test-helpers__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dev", "//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-transport__dev", "//crates/tracedecay-store:tracedecay-store__dev"],
-    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
-    aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = perf_rustc_flags(2),
-    crate_features = ["eval-helpers", "test-helpers"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True),
-)
-
-rust_test(
     name = "code_traversal",
     tags = ["manual"],
     use_libtest_harness = False,

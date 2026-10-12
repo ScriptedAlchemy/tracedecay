@@ -24,7 +24,7 @@ const NO_OUTCOME_LINKAGE =
 const NO_ABLATION_PROJECTION =
   'the canonical Observatory projection has no compatible equal-budget ablation evidence';
 
-export type RetrievalBand = PlanDimensionBand;
+type RetrievalBand = PlanDimensionBand;
 
 /**
  * Source freshness, coverage, and denial, the band that is genuinely measured.
@@ -33,7 +33,7 @@ export type RetrievalBand = PlanDimensionBand;
  * reason, which is an unmeasured metric and a different state from an
  * unprojected one. `readMetric` keeps the two apart.
  */
-export function sourceDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
+function sourceDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
   return [
     {
       id: 'source_coverage',
@@ -77,7 +77,7 @@ export function sourceDimensions(model: ObservatoryReadModelV1): PlanDimension[]
  * plan requires rank, so the card states the requirement and says nothing
  * records it, which is a stronger statement than omitting the row.
  */
-export function retrieverDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
+function retrieverDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
   const projected = (
     id: string,
     label: string,
@@ -119,7 +119,7 @@ export function retrieverDimensions(model: ObservatoryReadModelV1): PlanDimensio
 
 /** Planner, fan-out, and synthesis spans, named individually for the same
  * reason the retriever band is split. */
-export function spanDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
+function spanDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
   const span = (id: string, label: string, requirement: string, metric: string): PlanDimension => ({
     id,
     label,
@@ -149,7 +149,7 @@ export function spanDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
 }
 
 /** Precision, outcome linkage, and equal-budget ablations. */
-export function judgementDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
+function judgementDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
   return [
     {
       id: 'context_precision',

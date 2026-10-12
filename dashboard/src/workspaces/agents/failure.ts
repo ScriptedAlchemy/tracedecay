@@ -26,7 +26,7 @@ import { type CountRow, rankedCounts } from './activity.ts';
  */
 
 /** Outcome words this build reads as a failed call. */
-export const FAILED_OUTCOMES: readonly string[] = [
+const FAILED_OUTCOMES: readonly string[] = [
   'error',
   'failed',
   'failure',
@@ -43,7 +43,7 @@ export const FAILED_OUTCOMES: readonly string[] = [
 /** Outcome words this build reads as a call that did not fail. `observed` is
  * here because hook-routing events carry it and they are not tool calls at
  * all, they are events the fold saw go past. */
-export const SETTLED_OUTCOMES: readonly string[] = [
+const SETTLED_OUTCOMES: readonly string[] = [
   'success',
   'succeeded',
   'ok',
@@ -54,16 +54,16 @@ export const SETTLED_OUTCOMES: readonly string[] = [
   'observed',
 ];
 
-export type OutcomeClass = 'failed' | 'settled' | 'unclassified';
+type OutcomeClass = 'failed' | 'settled' | 'unclassified';
 
-export function classifyOutcome(outcome: string): OutcomeClass {
+function classifyOutcome(outcome: string): OutcomeClass {
   const normalized = outcome.trim().toLowerCase();
   if (FAILED_OUTCOMES.includes(normalized)) return 'failed';
   if (SETTLED_OUTCOMES.includes(normalized)) return 'settled';
   return 'unclassified';
 }
 
-export interface OutcomeReading {
+interface OutcomeReading {
   readonly failed: readonly { label: string; count: number }[];
   readonly settled: readonly { label: string; count: number }[];
   readonly unclassified: readonly { label: string; count: number }[];
@@ -92,7 +92,7 @@ export function readOutcomes(rows: readonly CountRow[]): OutcomeReading {
   };
 }
 
-export interface FailedEvent {
+interface FailedEvent {
   readonly timestamp: number;
   readonly tool: string;
   readonly kind: string;
@@ -140,7 +140,7 @@ const UNCLEAN_ATTEMPT_STATES: ReadonlySet<WorkAttemptStateV1> = new Set<WorkAtte
   'cancellation_escalated',
 ]);
 
-export interface AttemptFailure {
+interface AttemptFailure {
   readonly attemptId: string;
   readonly taskId: string;
   readonly runId: string;

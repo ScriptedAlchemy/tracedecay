@@ -1058,8 +1058,8 @@ async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
     );
     assert!(
         Arc::ptr_eq(
-            primary.service.mutation_queue_for_test(),
-            linked.service.mutation_queue_for_test()
+            primary.service.port.mutation_queue_for_test(),
+            linked.service.port.mutation_queue_for_test()
         ),
         "all Git mutation services must serialize through the daemon registry queue"
     );

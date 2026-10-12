@@ -22,10 +22,10 @@ pub(crate) async fn run(
     // latency is separable from request parsing, render, and delivery
     // settlement.
     let mut response = tracing::Instrument::instrument(
-        crate::work_cli::invoke_work_cli_with_delivery(
+        crate::application_cli::invoke(
             profile,
-            project_root.clone(),
-            operation,
+            &project_root,
+            crate::application_cli::ApplicationOperation::Work(operation),
             body,
         ),
         tracing::trace_span!("cli.work.request"),
