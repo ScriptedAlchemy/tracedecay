@@ -1614,12 +1614,50 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        GitRepositoryError, GitRepositoryTopologyV1, TopologyResult,
-        block_repository_discovery_for_test, observe_repository_discovery,
-        repository_discovery_count_for_test, repository_topology,
+        GitRepositoryError, GitRepositoryTopologyV1, MAX_RETAINED_CHECKOUT_TOPOLOGIES,
+        TopologyResult, block_repository_discovery_for_test, observe_repository_discovery,
+        observe_repository_discovery_for_test, repository_discovery_count_for_test,
+        repository_topology, repository_topology_resolution_count_for_test,
         reset_repository_discovery_for_test, wait_for_topology_callers_for_test,
         wait_until_repository_discovery_blocks,
     };
+
+    /// A full memo makes room by dropping its least recently used path, so a
+    /// root that keeps being asked for survives churn from many one-off
+    /// probes. Clearing the whole memo instead dropped that root too, and a
+    /// deferred route on a slow volume walked again instead of converging.
+    #[test]
+    fn a_full_topology_memo_keeps_a_recently_used_root() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let repository = temporary.path().join("repository");
+        std::fs::create_dir_all(&repository).expect("repository directory");
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet", "-b", "main"])
+            .current_dir(&repository)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        let repository = repository.canonicalize().expect("canonical repository");
+        observe_repository_discovery_for_test(&repository);
+        repository_topology(&repository).expect("retained repository topology");
+
+        let probes = tempfile::tempdir().expect("probe directory");
+        for probe in 0..MAX_RETAINED_CHECKOUT_TOPOLOGIES * 2 {
+            let path = probes.path().join(probe.to_string());
+            std::fs::create_dir_all(&path).expect("probe path");
+            let _ = repository_topology(&path);
+            if probe % 8 == 0 {
+                repository_topology(&repository).expect("repository topology");
+            }
+        }
+
+        assert_eq!(
+            repository_topology_resolution_count_for_test(&repository),
+            1,
+            "a root asked for between probes must stay retained"
+        );
+        reset_repository_discovery_for_test(&repository);
+    }
 
     #[tokio::test]
     async fn discovery_block_retains_entry_for_late_subscribers() {
