@@ -99,11 +99,14 @@ pub(crate) fn load_or_create_pinned(
         });
     }
 
-    let root_existed = profile_root.exists();
-    std::fs::create_dir_all(&profile_root)
-        .map_err(|error| profile_identity_io("create", &profile_root, &error))?;
-    if !root_existed {
-        restrict_new_profile_root(&profile_root)?;
+    if let Some(parent) = profile_root.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| profile_identity_io("create", parent, &error))?;
+    }
+    match tracedecay_private_fs::create_private_directory(&profile_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(profile_identity_io("create", &profile_root, &error)),
     }
     validate_private_profile_root(&profile_root)?;
 
@@ -123,31 +126,50 @@ pub(crate) fn load_or_create_pinned(
         ".{PROFILE_IDENTITY_FILENAME}.{}.tmp",
         record.profile_id.as_str()
     ));
-    tracedecay_runtime_core::db::DatabaseAuthority::publish_record_atomically(
-        &temporary,
-        &path,
-        &bytes,
-        PROFILE_IDENTITY_RECORD_NAME,
-    )?;
-    let persisted =
+    let published = publish_first_record(&temporary, &path, &bytes)
+        .map_err(|error| profile_identity_io("publish", &path, &error))?;
+    let record = if published {
+        record
+    } else {
         read_existing_profile_identity_record(&path)?.ok_or_else(|| TraceDecayError::Config {
             message: format!(
-                "{PROFILE_IDENTITY_RECORD_NAME} '{}' disappeared after publication",
+                "{PROFILE_IDENTITY_RECORD_NAME} '{}' disappeared after a concurrent publication",
                 path.display()
             ),
-        })?;
-    if persisted != record {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "{PROFILE_IDENTITY_RECORD_NAME} '{}' changed during publication",
-                path.display()
-            ),
-        });
-    }
+        })?
+    };
     Ok(LocalProfileIdentityAuthorityV1 {
         profile_root,
         record,
     })
+}
+
+/// Publishes `bytes` at `path` only while no identity exists there. Returns
+/// `false`, leaving the existing record untouched, when another caller
+/// published first, so concurrent first creations converge on one identity.
+fn publish_first_record(temporary: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
+    use std::io::Write;
+    use tracedecay_private_fs::framed_log::{
+        DirectorySyncPolicy, rename_noreplace, sync_parent_directory,
+    };
+
+    let mut file = tracedecay_private_fs::create_private_file(temporary)?;
+    let published = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        match rename_noreplace(temporary, path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        sync_parent_directory(path, DirectorySyncPolicy::Strict)?;
+        Ok(true)
+    })();
+    if !matches!(published, Ok(true)) {
+        let _ = std::fs::remove_file(temporary);
+    }
+    published
 }
 
 fn validate_expected_identity(
@@ -200,19 +222,6 @@ fn profile_identity_io(operation: &str, path: &Path, error: &std::io::Error) -> 
             path.display()
         ),
     }
-}
-
-#[cfg(unix)]
-fn restrict_new_profile_root(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|error| profile_identity_io("restrict", path, &error))
-}
-
-#[cfg(not(unix))]
-fn restrict_new_profile_root(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 fn validate_private_profile_root(path: &Path) -> Result<()> {
