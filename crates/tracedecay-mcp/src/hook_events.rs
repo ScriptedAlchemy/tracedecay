@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use tracedecay_domain::HostIntegrationIdV1;
+use tracedecay_domain::canonical_text::sha256_hex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookEventKind {
@@ -120,11 +121,7 @@ impl HookEvent {
                 push_admission_identity_part(&mut identity, "path", path.as_bytes());
             }
         }
-        format!(
-            "{}:{}",
-            self.agent.as_wire(),
-            tracedecay_session_memory::context::read_cache::digest_bytes(&identity)
-        )
+        format!("{}:{}", self.agent.as_wire(), sha256_hex(&identity))
     }
 }
 
