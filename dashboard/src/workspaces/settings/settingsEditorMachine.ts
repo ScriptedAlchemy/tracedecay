@@ -27,6 +27,7 @@ import {
   planProjectChangeAgainst,
   planUserChangeAgainst,
   sameCodeIndexWorkerSelection,
+  sameStrings,
   type CodeIndexWorkerSettingsChangeSet,
   type CodeIndexWorkerSettingsValues,
   settingsRevisionId,
@@ -713,8 +714,8 @@ function sameProjectValues(
   right: ProjectSettingsValues,
 ): boolean {
   return (
-    sameStringList(left.include, right.include) &&
-    sameStringList(left.exclude, right.exclude) &&
+    sameStrings(left.include, right.include) &&
+    sameStrings(left.exclude, right.exclude) &&
     left.max_file_size === right.max_file_size &&
     left.extract_docstrings === right.extract_docstrings &&
     left.track_call_sites === right.track_call_sites &&
@@ -756,8 +757,4 @@ function sameCodeIndexWorkerStatus(
     left.memory_safe_workers === right.memory_safe_workers &&
     left.limiting_reason === right.limiting_reason
   );
-}
-
-function sameStringList(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
 }

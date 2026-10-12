@@ -19,17 +19,13 @@
 import type { DensityBin, LaneDensity } from '../density.ts';
 import { gradeStroke, type TemporalPalette } from '../palette.ts';
 import type { SceneLane, ScenePath } from '../types.ts';
-import { focusAlpha, hatch, isLifted, pathEnds, recencySpan, resolvedLanes, type SceneFrame } from './frame.ts';
+import { focusAlpha, hatch, isLifted, isLink, pathEnds, recencySpan, resolvedLanes, type SceneFrame } from './frame.ts';
 
 const GRATICULE_PX = 32;
 const CORNER_PX = 4;
 const HALO_PX = 7;
 const HALO_ALPHA = 0.16;
 const BAND_INSET = 3;
-
-function isLink(path: ScenePath): boolean {
-  return path.kind === 'spawn' || path.kind === 'handoff' || path.kind === 'rejoin' || path.kind === 'result';
-}
 
 /** Down the relation instant, a small corner, then along the child rail. */
 function traceRoute(ctx: CanvasRenderingContext2D, path: ScenePath): void {

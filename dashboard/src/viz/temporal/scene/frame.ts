@@ -4,7 +4,7 @@
  */
 import { timeToX } from '../layout.ts';
 import type { SceneDensity } from '../density.ts';
-import type { FocusTreatment, SceneLane, TemporalSceneModel } from '../types.ts';
+import type { FocusTreatment, SceneLane, ScenePath, TemporalSceneModel } from '../types.ts';
 
 export interface SceneFrame {
   readonly model: TemporalSceneModel;
@@ -49,6 +49,10 @@ export function isLifted(focus: FocusTreatment): boolean {
 export function pathEnds(controls: readonly number[]): { x0: number; y0: number; x1: number; y1: number } {
   const n = controls.length;
   return { x0: controls[0] ?? 0, y0: controls[1] ?? 0, x1: controls[n - 2] ?? 0, y1: controls[n - 1] ?? 0 };
+}
+
+export function isLink(path: ScenePath): boolean {
+  return path.kind === 'spawn' || path.kind === 'handoff' || path.kind === 'rejoin' || path.kind === 'result';
 }
 
 /** The page's recency axis on screen: the oldest session start and NOW. */

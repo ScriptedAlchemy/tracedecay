@@ -755,7 +755,7 @@ function unsignedIntegerString(value: number): string | null {
   return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
 }
 
-function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+export function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
