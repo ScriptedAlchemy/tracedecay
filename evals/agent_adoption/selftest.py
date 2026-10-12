@@ -381,7 +381,7 @@ def test_end_to_end():
         with open(os.path.join(rdir, "explore_reserve_stock__claude__bare.stdout.jsonl"), "w") as f:
             f.write("\n".join([claude_tool(TD, {}), claude_result(answer)]) + "\n")
         with open(os.path.join(rdir, "explore_reserve_stock__claude__bare.meta.json"), "w") as f:
-            json.dump({"channel_condition": "bare"}, f)
+            json.dump({"channel_condition": "bare", "repeated_query_hints": "on"}, f)
         # Failed launches are harness failures, not behavioral evidence.
         failed = "explore_reserve_stock__claude__sonnet"
         with open(os.path.join(rdir, failed + ".stdout.jsonl"), "w") as f:
@@ -419,8 +419,13 @@ def test_end_to_end():
         agg = sb["aggregate"]["claude"]
         check("e2e: adoption_rate 1.0", agg["adoption_rate"] == 1.0)
         check("e2e: per-condition present", set(agg["conditions"]) == {"full", "bare"})
-        check("e2e: report has channel table",
-              "Channel efficacy" in open(os.path.join(rdir, "report.md")).read())
+        report = open(os.path.join(rdir, "report.md")).read()
+        check("e2e: report has channel table", "Channel efficacy" in report)
+        check("e2e: run meta hint setting reaches the scoreboard",
+              by_cond["bare"].get("repeated_query_hints") == "on"
+              and by_cond["full"].get("repeated_query_hints") == "off")
+        check("e2e: report compares hint cells",
+              "claude bare hints-on" in report and "claude full hints-off" in report)
 
 
 def test_skill_routing():
@@ -478,7 +483,93 @@ def test_skill_routing():
     check("routing: prose is not invocation", grade.invoked_skills(prose) == [])
 
 
+QUERY_HINT = (grade.REPEATED_QUERY_HINT_PREFIX + " this tracedecay_search call shares 75% of "
+              "its query words with the tracedecay_search call 1 call earlier in this session.")
+SEARCH = "mcp__plugin_tracedecay_graph__tracedecay_search"
+
+
+def claude_tool_result(*texts: str) -> str:
+    return json.dumps({"type": "user", "message": {"content": [{
+        "type": "tool_result", "tool_use_id": "t",
+        "content": [{"type": "text", "text": t} for t in texts]}]}})
+
+
+def test_repeated_query_hints_and_usage():
+    tr = transcript([
+        claude_tool(SEARCH, {"query": "cancel order release stock"}),
+        claude_tool_result("no matches"),
+        claude_tool(SEARCH, {"query": "cancel order restock"}),
+        claude_tool_result("no matches", QUERY_HINT),
+        claude_tool("TodoWrite", {"todos": []}),
+        claude_tool("Read", {"file_path": "src/inventory.rs"}),
+        claude_tool_result("pub fn reserve_stock", QUERY_HINT),
+        json.dumps({"type": "result", "result": "There is no release path; reserve_stock only decrements.",
+                    "total_cost_usd": 0.0421, "num_turns": 5,
+                    "usage": {"input_tokens": 12, "output_tokens": 340,
+                              "cache_creation_input_tokens": 900, "cache_read_input_tokens": 15000}}),
+    ])
+    check("hints: next step is the next meaningful tool, then the answer",
+          grade.repeated_query_hint_next_steps(tr) == ["Read", "answer"],
+          str(grade.repeated_query_hint_next_steps(tr)))
+    check("usage: Claude result cost, turns, and tokens captured",
+          tr.usage == {"total_cost_usd": 0.0421, "num_turns": 5, "input_tokens": 12, "output_tokens": 340,
+                       "cache_creation_input_tokens": 900, "cache_read_input_tokens": 15000}, str(tr.usage))
+
+    # The prefix inside other text (a grep hit on the source, the agent's own
+    # prose) is not a hint block.
+    quoted = transcript([
+        claude_tool("Grep", {"pattern": "repeated_query"}),
+        claude_tool_result('src/daemon/repeated_queries.rs:23:const HINT_PREFIX: &str = "tracedecay_repeated_query:";'),
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": grade.REPEATED_QUERY_HINT_PREFIX + " is the hint prefix"}]}}),
+        claude_result("done"),
+    ])
+    check("hints: quoted prefix is not a hint", grade.repeated_query_hint_next_steps(quoted) == [])
+    check("usage: absent result usage stays null",
+          all(v is None for v in quoted.usage.values()), str(quoted.usage))
+    unanswered = transcript([claude_tool(SEARCH, {"query": "x"}), claude_tool_result(QUERY_HINT)])
+    check("hints: a hint with nothing after it ends the run",
+          grade.repeated_query_hint_next_steps(unanswered) == ["end"])
+
+    codex = grade.load_transcript_lines([
+        json.dumps({"type": "item.started", "item": {"id": "i1", "type": "mcp_tool_call", "server": "tracedecay",
+                                                     "tool": "tracedecay_search", "arguments": {"query": "x"}}}),
+        json.dumps({"type": "item.completed", "item": {"id": "i1", "type": "mcp_tool_call", "server": "tracedecay",
+                                                       "tool": "tracedecay_search", "arguments": {"query": "x"},
+                                                       "result": {"content": [{"type": "text", "text": "hit"},
+                                                                              {"type": "text", "text": QUERY_HINT}]}}}),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1000, "cached_input_tokens": 800,
+                                                        "output_tokens": 50}}),
+        json.dumps({"type": "item.completed", "item": {"id": "i2", "type": "agent_message", "text": "Answer."}}),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 500, "cached_input_tokens": 0,
+                                                        "output_tokens": 10}}),
+    ], "codex")
+    check("hints: Codex MCP result hint is attributed",
+          grade.repeated_query_hint_next_steps(codex) == ["answer"])
+    check("usage: Codex turns summed with cached input split out, no cost",
+          codex.usage["input_tokens"] == 700 and codex.usage["cache_read_input_tokens"] == 800
+          and codex.usage["output_tokens"] == 60 and codex.usage["total_cost_usd"] is None)
+
+    scn = {"id": "s", "category": "repeated_query", "ground_truth": ["reserve_stock"]}
+    on = grade.score_scenario(scn, tr, {}, {"model": "sonnet", "repeated_query_hints": "on"})
+    off = grade.score_scenario(scn, quoted, {}, {"model": "sonnet"})
+    cells = grade.aggregate_cost_and_hints([on, off])
+    check("cost: hints on and off land in separate cells",
+          set(cells) == {"claude/sonnet full hints-on", "claude/sonnet full hints-off"}, str(set(cells)))
+    on_cell = cells.get("claude/sonnet full hints-on", {})
+    check("cost: cell reports cost, prompt tokens, and interventions",
+          on_cell.get("mean_cost_usd") == 0.0421 and on_cell.get("mean_prompt_tokens") == 15912
+          and on_cell.get("hints_total") == 2 and on_cell.get("runs_with_hint") == 1
+          and on_cell.get("hint_next_steps") == {"Read": 1, "answer": 1}, str(on_cell))
+    off_cell = cells.get("claude/sonnet full hints-off", {})
+    check("cost: unreported spend is null, not zero",
+          off_cell.get("mean_cost_usd") is None and off_cell.get("hints_total") == 0)
+
+
 def test_transcript_base_repetitions():
+    check("reps: hints-on suffix carries no identity",
+          grade.parse_transcript_base("trace_callers__claude__opus__bare__qhints__r2")
+          == ("trace_callers", "claude", "bare", "opus"))
     check("reps: matrix basename without rep",
           grade.parse_transcript_base("trace_callers__claude__opus__bare")
           == ("trace_callers", "claude", "bare", "opus"))
@@ -525,6 +616,7 @@ def test_carry_claude_profile():
 def main() -> int:
     test_carry_claude_profile()
     test_transcript_base_repetitions()
+    test_repeated_query_hints_and_usage()
     test_skill_routing()
     check("lint: generated scenario id cannot escape artifacts",
           bool(grade.lint_scenarios({"../escape": {"prompt": "Explain this function."}})))

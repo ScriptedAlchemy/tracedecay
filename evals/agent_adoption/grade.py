@@ -98,6 +98,10 @@ HINT_SOURCE_REL = os.path.join(
     "crates", "tracedecay-agent-hosts", "src", "hooks", "tool_hints.rs"
 )
 
+# The optional repeated-query hint is its own MCP result text block, starting
+# with HINT_PREFIX in crates/tracedecay/src/daemon/repeated_queries.rs.
+REPEATED_QUERY_HINT_PREFIX = "tracedecay_repeated_query:"
+
 
 def find_hint_source(start: str) -> Optional[str]:
     """Walk up from `start` to find the tool-hints source, or None if absent.
@@ -224,6 +228,16 @@ def tool_call(seq: int, raw_name: str, inp: dict) -> ToolCall:
     return call
 
 
+USAGE_FIELDS = (
+    "total_cost_usd",
+    "num_turns",
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
 @dataclass
 class Transcript:
     tools: list[ToolCall]
@@ -234,6 +248,8 @@ class Transcript:
     # discovery-channel attribution. Each entry is either
     #   {"kind": "tool", "call": ToolCall} or {"kind": "ctx", "text": str}
     timeline: list[dict] = field(default_factory=list)
+    # Host-reported spend; a field the host does not report stays None.
+    usage: dict = field(default_factory=lambda: dict.fromkeys(USAGE_FIELDS))
 
     @property
     def meaningful(self) -> list[ToolCall]:
@@ -298,6 +314,7 @@ def parse_claude(lines: list[str], host: str) -> Transcript:
     final_text = ""
     seq = 0
     last_assistant_text = ""
+    usage = dict.fromkeys(USAGE_FIELDS)
     for ln in lines:
         ln = ln.strip()
         if not ln:
@@ -337,9 +354,15 @@ def parse_claude(lines: list[str], host: str) -> Transcript:
             r = obj.get("result")
             if isinstance(r, str) and r.strip():
                 final_text = r
+            tokens = obj.get("usage") or {}
+            usage = {
+                "total_cost_usd": obj.get("total_cost_usd"),
+                "num_turns": obj.get("num_turns"),
+                **{k: tokens.get(k) for k in USAGE_FIELDS[2:]},
+            }
     if not final_text:
         final_text = last_assistant_text
-    return Transcript(tools, final_text, host, timeline=timeline)
+    return Transcript(tools, final_text, host, timeline=timeline, usage=usage)
 
 
 def parse_codex(lines: list[str], host: str) -> Transcript:
@@ -354,6 +377,7 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
     final_text = ""
     seq = 0
     seen_item_ids: set[str] = set()
+    usage = dict.fromkeys(USAGE_FIELDS)
     for ln in lines:
         ln = ln.strip()
         if not ln:
@@ -395,6 +419,20 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
                 except json.JSONDecodeError:
                     args = {"_raw": args}
             _add_tool(tool_call(seq, raw or "", args))
+            # The completed item carries the MCP result, where hint blocks land.
+            blob = "\n".join(_string_leaves(msg.get("result")))
+            if blob.strip():
+                timeline.append({"kind": "ctx", "text": blob})
+        elif t == "turn.completed" and isinstance(msg.get("usage"), dict):
+            # Codex reports cached input as a subset of input_tokens.
+            u = msg["usage"]
+            cached = u.get("cached_input_tokens") or 0
+            for key, value in (
+                ("input_tokens", (u.get("input_tokens") or 0) - cached),
+                ("cache_read_input_tokens", cached),
+                ("output_tokens", u.get("output_tokens") or 0),
+            ):
+                usage[key] = (usage[key] or 0) + value
         elif t in ("exec_command_begin", "exec_command", "command_execution"):
             cmd = msg.get("command") or msg.get("cmd") or ""
             _add_tool(tool_call(seq, "Bash", {"command": cmd}))
@@ -443,7 +481,7 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
                 blob = "\n".join(_string_leaves(msg))
                 if blob.strip():
                     timeline.append({"kind": "ctx", "text": blob})
-    return Transcript(tools, final_text, host, timeline=timeline)
+    return Transcript(tools, final_text, host, timeline=timeline, usage=usage)
 
 
 def load_transcript_lines(lines: list[str], host: str) -> Transcript:
@@ -572,6 +610,32 @@ def attribute_channel(tr: Transcript, condition: str) -> str:
     # Nothing fired before the call: the CLAUDE.md steering block or the MCP tool
     # descriptions are the only prior mention that could have driven it.
     return CH_STEERING
+
+
+def repeated_query_hint_next_steps(tr: Transcript) -> list[str]:
+    """One entry per repeated-query hint block the agent saw: the canonical
+    name of the next meaningful tool call, else "answer" (or "end" when the
+    transcript stops without one)."""
+    steps: list[str] = []
+    for i, ev in enumerate(tr.timeline):
+        if ev["kind"] != "ctx":
+            continue
+        count = sum(
+            line.lstrip().startswith(REPEATED_QUERY_HINT_PREFIX)
+            for line in ev["text"].splitlines()
+        )
+        if not count:
+            continue
+        nxt = next(
+            (
+                later["call"].canon
+                for later in tr.timeline[i + 1:]
+                if later["kind"] == "tool" and later["call"].canon not in IGNORED_TOOLS
+            ),
+            "answer" if tr.final_text.strip() else "end",
+        )
+        steps.extend([nxt] * count)
+    return steps
 
 
 def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict) -> dict:
@@ -715,10 +779,14 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
         "host": tr.host,
         "model": run_meta.get("model"),
         "condition": condition,
+        # Runs from before the knob existed could not enable the hint.
+        "repeated_query_hints": run_meta.get("repeated_query_hints", "off"),
         "channel": channel,
         "score": round(score, 4),
         "subscores": {k: round(v, 4) for k, v in subs.items()},
         "details": details,
+        "usage": tr.usage,
+        "repeated_query_hint_next_steps": repeated_query_hint_next_steps(tr),
         "final_answer_chars": len(tr.final_text),
         "parse_note": tr.parse_note,
         "run_meta": run_meta,
@@ -811,6 +879,47 @@ def aggregate(results: list[dict]) -> dict:
     return agg
 
 
+def _mean(values: list) -> Optional[float]:
+    present = [v for v in values if v is not None]
+    return round(sum(present) / len(present), 4) if present else None
+
+
+def _prompt_tokens(usage: dict) -> Optional[int]:
+    parts = [usage.get(k) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
+    return None if parts[0] is None else sum(p or 0 for p in parts)
+
+
+def aggregate_cost_and_hints(results: list[dict]) -> dict:
+    """Outcome, spend, and hint interventions per host/model x condition x hint
+    setting, so hints-on and hints-off runs of one cell sit side by side."""
+    cells: dict[str, list[dict]] = {}
+    for r in results:
+        host = f"{r['host']}/{r['model']}" if r.get("model") else r["host"]
+        key = f"{host} {r.get('condition', 'full')} hints-{r.get('repeated_query_hints', 'off')}"
+        cells.setdefault(key, []).append(r)
+    out = {}
+    for key, rs in sorted(cells.items()):
+        next_steps: dict[str, int] = {}
+        for r in rs:
+            for step in r.get("repeated_query_hint_next_steps", []):
+                next_steps[step] = next_steps.get(step, 0) + 1
+        usages = [r.get("usage") or {} for r in rs]
+        out[key] = {
+            "n": len(rs),
+            "mean_score": _mean([r["score"] for r in rs]),
+            "outcome_mean": _mean([r["subscores"].get("outcome") for r in rs]),
+            "mean_tool_calls": _mean([r["details"].get("tool_call_count") for r in rs]),
+            "mean_cost_usd": _mean([u.get("total_cost_usd") for u in usages]),
+            "mean_num_turns": _mean([u.get("num_turns") for u in usages]),
+            "mean_prompt_tokens": _mean([_prompt_tokens(u) for u in usages]),
+            "mean_output_tokens": _mean([u.get("output_tokens") for u in usages]),
+            "hints_total": sum(next_steps.values()),
+            "runs_with_hint": sum(1 for r in rs if r.get("repeated_query_hint_next_steps")),
+            "hint_next_steps": next_steps,
+        }
+    return out
+
+
 def render_report(scoreboard: dict) -> str:
     lines = ["# Agent-Adoption Eval Report", ""]
     meta = scoreboard.get("meta", {})
@@ -889,6 +998,24 @@ def render_report(scoreboard: dict) -> str:
                 )
         lines.append("")
 
+    lines.append("## Outcome, cost, and repeated-query hints")
+    lines.append("")
+    lines.append("Prompt tokens include cache reads and writes. `-` means the host did not report it.")
+    lines.append("")
+    lines.append("| cell | n | score | outcome | tools | cost $ | turns | prompt tok | output tok | hints | runs w/ hint | after hint |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+    for cell, c in scoreboard.get("cost_and_hints", {}).items():
+        def num(x, digits=2):
+            return "-" if x is None else f"{x:.{digits}f}"
+        after = ", ".join(f"{k} {v}" for k, v in sorted(c["hint_next_steps"].items())) or "-"
+        lines.append(
+            f"| {cell} | {c['n']} | {num(c['mean_score'])} | {num(c['outcome_mean'])} | "
+            f"{num(c['mean_tool_calls'], 1)} | {num(c['mean_cost_usd'], 4)} | {num(c['mean_num_turns'], 1)} | "
+            f"{num(c['mean_prompt_tokens'], 0)} | {num(c['mean_output_tokens'], 0)} | "
+            f"{c['hints_total']} | {c['runs_with_hint']} | {after} |"
+        )
+    lines.append("")
+
     lines.append("## Per-scenario")
     lines.append("")
     lines.append("| scenario | host | model | cond | score | first tool | agent | channel | forbidden-first | tools/budget | outcome |")
@@ -910,12 +1037,15 @@ def parse_transcript_base(base: str) -> Optional[tuple[str, str, str, str]]:
     """Split a basename into (scenario_id, host, condition, model).
 
     Accepts legacy `<id>__<host>[__<condition>]` and matrix
-    `<id>__<host>__<model>[__<condition>][__r<N>]` shapes. Scenario ids use
-    single underscores, so `__` separators are unambiguous; a trailing `r<N>`
-    is the repetition index and carries no identity.
+    `<id>__<host>__<model>[__<condition>][__qhints][__r<N>]` shapes. Scenario
+    ids use single underscores, so `__` separators are unambiguous; a trailing
+    `r<N>` is the repetition index, and `qhints` only keeps hints-on transcripts
+    apart from hints-off ones (the run meta records the setting).
     """
     parts = base.split("__")
     if len(parts) >= 3 and re.fullmatch(r"r[1-9][0-9]*", parts[-1]):
+        parts.pop()
+    if len(parts) >= 3 and parts[-1] == "qhints":
         parts.pop()
     if len(parts) < 2:
         return None
@@ -1048,6 +1178,7 @@ def main() -> int:
                 per_meta = json.load(f)
         # meta may carry channel_condition; otherwise derive from the filename.
         per_meta.setdefault("channel_condition", condition)
+        per_meta.setdefault("repeated_query_hints", run_meta_all.get("repeated_query_hints", "off"))
         if model:
             per_meta.setdefault("model", model)
         exit_code = per_meta.get("exit_code")
@@ -1089,6 +1220,7 @@ def main() -> int:
             "invalid_runs": invalid_runs,
         },
         "aggregate": aggregate(results),
+        "cost_and_hints": aggregate_cost_and_hints(results),
         "results": results,
     }
 

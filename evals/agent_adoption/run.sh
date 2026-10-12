@@ -35,6 +35,8 @@
 #                        (default: 1; >1 suffixes transcripts with __r<N>)
 #   PARALLEL             concurrent live agent runs (default: 1); runs are
 #                        read-only against shared fixtures, so this is safe
+#   REPEATED_QUERY_HINTS on|off: the eval profile's repeated-query hint setting
+#                        (default: off); on suffixes transcripts with __qhints
 #   TRACEDECAY_BIN       tracedecay binary (default: resolve from PATH)
 #   EVAL_OUT            directory to also copy scoreboard.json + report.md into
 set -euo pipefail
@@ -55,6 +57,9 @@ PARALLEL="${PARALLEL:-1}"
 for knob in REPS PARALLEL; do
   [[ "${!knob}" =~ ^[1-9][0-9]*$ ]] || { echo "error: $knob must be a positive integer" >&2; exit 2; }
 done
+REPEATED_QUERY_HINTS="${REPEATED_QUERY_HINTS:-off}"
+[[ "$REPEATED_QUERY_HINTS" == on || "$REPEATED_QUERY_HINTS" == off ]] ||
+  { echo "error: REPEATED_QUERY_HINTS must be on or off" >&2; exit 2; }
 
 # Ablation matrix. Default is "full" only (all discovery channels on) to keep
 # cost bounded, each extra condition multiplies the number of live agent runs.
@@ -248,6 +253,7 @@ echo "run dir:      $run_dir"
 echo "tracedecay:   $TD ($("$TD" --version 2>/dev/null | head -1))"
 echo "hosts:        $HOSTS   live=$live"
 echo "channels:     $CHANNELS"
+echo "query hints:  $REPEATED_QUERY_HINTS"
 "$TD" disable-upload-counter >/dev/null 2>&1 || true
 
 # ---- build fixtures -------------------------------------------------------- #
@@ -321,12 +327,50 @@ python3 -c 'import json,sys; print(json.dumps({"discount_fact_id": sys.argv[1] o
   "${discount_id:-}" "${currency_id:-}" > "$run_dir/seeded_facts.json"
 echo "  discount_fact_id=$discount_id currency_fact_id=$currency_id"
 
+# Each serve session reads this profile setting when it starts, so it must be
+# set before any agent launches. The write goes through the configuration
+# tool's revision CAS for this isolated profile; the readback proves it took.
+enable_repeated_query_hints() {
+  local key="user.repeated_query_hints.v1" get_args
+  get_args="{\"key\":\"$key\",\"format\":\"json\"}"
+  (cd "$fixture_main" && "$TD" tool configuration_get --args "$get_args") \
+    >"$work/query-hints-before.json" || return 1
+  python3 - "$TRACEDECAY_DATA_DIR/profile-identity.json" "$work/query-hints-before.json" "$key" \
+    >"$work/query-hints-set.json" <<'PY' || return 1
+import json, sys
+profile_id = json.load(open(sys.argv[1]))["profile_id"]
+current = json.load(open(sys.argv[2]))["outcome"]["value"]["payload"]
+print(json.dumps({
+    "layer": {"kind": "user_profile", "profile_id": profile_id},
+    "key": sys.argv[3],
+    "format": "json",
+    "value": {"kind": "boolean", "value": True},
+    "expected_revision": current["revision_id"],
+    "idempotency_key": "configuration.idempotency.agent-eval.query-hints.on",
+}))
+PY
+  (cd "$fixture_main" && "$TD" tool configuration_set --args "@$work/query-hints-set.json") \
+    >"$work/query-hints-set.log" || return 1
+  (cd "$fixture_main" && "$TD" tool configuration_get --args "$get_args") |
+    python3 -c 'import json, sys
+value = json.load(sys.stdin)["outcome"]["value"]["payload"]["effective_value"]
+sys.exit(value != {"kind": "boolean", "value": True})'
+}
+if [[ "$REPEATED_QUERY_HINTS" == on ]]; then
+  echo "enabling repeated-query hints for the eval profile..."
+  if ! enable_repeated_query_hints; then
+    echo "abort: could not enable user.repeated_query_hints.v1 (see $work/query-hints-*)" >&2
+    exit 4
+  fi
+fi
+
 git_sha="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 cat > "$run_dir/meta.json" <<JSON
 {
   "git_sha": "$git_sha",
   "hosts": {"claude": {"models": "$CLAUDE_MODELS"}, "codex": {"models": "$CODEX_MODELS"}},
   "scenario_timeout_s": $SCENARIO_TIMEOUT,
+  "repeated_query_hints": "$REPEATED_QUERY_HINTS",
   "work_dir": "$work"
 }
 JSON
@@ -469,7 +513,7 @@ run_one() {
   end=$(date +%s)
   [[ $rc -eq 124 ]] && timed_out=true
   cat > "$run_dir/${base}.meta.json" <<JSON
-{"scenario_id":"$sid","host":"$host","model":"$model","fixture":"$fixture","channel_condition":"$cond","exit_code":$rc,"duration_s":$((end-start)),"timed_out":$timed_out}
+{"scenario_id":"$sid","host":"$host","model":"$model","fixture":"$fixture","channel_condition":"$cond","repeated_query_hints":"$REPEATED_QUERY_HINTS","exit_code":$rc,"duration_s":$((end-start)),"timed_out":$timed_out}
 JSON
   echo "     $sid [$host/$model/$cond] rc=$rc dur=$((end-start))s bytes=$(wc -c <"$out")"
 }
@@ -495,6 +539,8 @@ while IFS=$'\t' read -r sid host fixture prompt; do
   for model in $models; do
   for ((rep = 1; rep <= REPS; rep++)); do
   base="$(out_base_for "$cond" "$sid" "$host" "$model")"
+  # Keeps on/off transcripts distinct so both runs can be graded together.
+  if [[ "$REPEATED_QUERY_HINTS" == on ]]; then base="${base}__qhints"; fi
   [[ "$REPS" -gt 1 ]] && base="${base}__r${rep}"
   if [[ "$live" != "1" ]]; then
     echo "DRY  $sid [$host/$model/$cond] fixture=$fixture"
