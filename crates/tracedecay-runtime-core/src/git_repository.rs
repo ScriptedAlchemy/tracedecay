@@ -855,9 +855,9 @@ impl GitRepositoryAuthority {
     ///
     /// A retained topology answers the *where* half of a discovery, the
     /// upward walk for `.git` and the canonical form of each directory it
-    /// names, so this opens the repository directly at its own Git directory
-    /// instead of walking the volume again. Live reads (HEAD, refs, status)
-    /// still come from a freshly opened repository.
+    /// names, so this opens the repository directly at its checkout root (its
+    /// Git directory when bare) instead of walking the volume again. Live
+    /// reads (HEAD, refs, status) still come from a freshly opened repository.
     ///
     /// Live defect this exists for: the topology memo only short-circuited
     /// `repository_topology`. Every HEAD read, one per route resolution, from
@@ -884,7 +884,9 @@ impl GitRepositoryAuthority {
     fn open_retained(topology: &GitRepositoryTopologyV1) -> Option<Self> {
         let repository = {
             let _span = tracing::trace_span!("runtime_core.git.repository_open_retained").entered();
-            crate::git_open::open(&topology.git_dir)
+            // A `--separate-git-dir` directory has no link back to its
+            // checkout, so opened by itself it reads as bare.
+            crate::git_open::open(topology.worktree_root.as_ref().unwrap_or(&topology.git_dir))
         }
         .ok()?;
         Some(Self {
