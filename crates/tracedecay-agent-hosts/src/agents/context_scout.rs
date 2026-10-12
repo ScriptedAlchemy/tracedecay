@@ -789,6 +789,7 @@ fn validated_model_candidate(
     let output_tokens = serialized_token_count(&output)?;
     if !base.durable()
         || !safe_suggestion_text(&output.suggestion_text)
+        || !unsupported_code_tokens(&base.suggestion_text, &output.suggestion_text).is_empty()
         || output.suggestion_text.len() > limits.max_text_bytes
         || output_tokens > limits.max_model_output_tokens
         || output.cited_anchor_ids.len() > limits.max_evidence
@@ -805,6 +806,29 @@ fn validated_model_candidate(
         suggestion_text: output.suggestion_text,
         ..base.clone()
     })
+}
+
+/// Code-like tokens of `refined` that never occur in `original`. The model
+/// sees only the original text, so such a token is an invented identifier,
+/// path, or number presented under the original's exact citations.
+fn unsupported_code_tokens<'a>(original: &str, refined: &'a str) -> BTreeSet<&'a str> {
+    refined
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '_' | ':' | '/' | '.' | '-'))
+        })
+        .map(|token| token.trim_matches(['.', ',', ':', ';', '-']))
+        .filter(|token| code_like_token(token) && !original.contains(token))
+        .collect()
+}
+
+fn code_like_token(token: &str) -> bool {
+    token.contains(['_', '/', '.'])
+        || token.contains("::")
+        || token.bytes().any(|byte| byte.is_ascii_digit())
+        || token
+            .as_bytes()
+            .windows(2)
+            .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
 }
 
 fn validate_candidate_set(
@@ -2404,6 +2428,127 @@ mod tests {
                 ContextScoutModelOutcomeV1::Succeeded
             )
         );
+    }
+
+    #[cfg(feature = "token-counting")]
+    struct RewritingModel(&'static str);
+
+    #[cfg(feature = "token-counting")]
+    impl ContextScoutModelAssistantV1 for RewritingModel {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            ContextScoutModelBackendV1::CodexAppServer
+        }
+
+        fn propose(
+            &self,
+            request: ContextScoutModelRequestV1,
+            _execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            let text = self.0;
+            Box::pin(async move {
+                let candidate = request
+                    .candidates
+                    .first()
+                    .ok_or(ContextScoutModelErrorV1::InvalidOutput)?;
+                Ok(ContextScoutModelProposalV1 {
+                    candidate: ContextScoutModelCandidateV1 {
+                        selected_dedupe_key: candidate.dedupe_key,
+                        suggestion_text: text.to_owned(),
+                        cited_anchor_ids: candidate.citation_anchor_ids.clone(),
+                    },
+                    receipt: model_receipt(),
+                })
+            })
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    async fn refine_diagnostic(refined: &'static str) -> ContextScoutSelectionV1 {
+        let diagnostic = ContextScoutCandidateV1 {
+            category: ContextScoutCategoryV1::Diagnostic,
+            suggestion_text: "error[E0308]: mismatched types in order_total at src/orders.rs:42"
+                .to_owned(),
+            ..candidate(1, 10)
+        };
+        select_model_assisted_context_scout(
+            &input(vec![diagnostic]),
+            ContextScoutLimitsV1::bounded_defaults(),
+            &RewritingModel(refined),
+            model_execution(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[cfg(feature = "token-counting")]
+    fn selected_text(selection: &ContextScoutSelectionV1) -> &str {
+        let ContextScoutDecisionV1::Ready { envelope } = &selection.decision else {
+            panic!("selection should stay ready");
+        };
+        &envelope.candidate.suggestion_text
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn refinement_inventing_identifiers_falls_back_to_deterministic_text() {
+        for invented in [
+            "Fix the mismatched types in apply_tax at src/orders.rs:42 (E0308).",
+            "Fix the mismatched types in order_total at src/billing.rs (E0308).",
+            "Fix the mismatched types in order_total at src/orders.rs:42 (E0308) via TaxRate.",
+        ] {
+            let selection = refine_diagnostic(invented).await;
+            assert_eq!(
+                (selection.route, selection.model_outcome),
+                (
+                    ContextScoutRouteV1::DeterministicFallback,
+                    ContextScoutModelOutcomeV1::InvalidOutput
+                ),
+                "{invented}"
+            );
+            assert_eq!(
+                selected_text(&selection),
+                "error[E0308]: mismatched types in order_total at src/orders.rs:42"
+            );
+            assert!(selection.model_receipt.is_none());
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn faithful_rewording_keeps_the_model_refinement() {
+        let reworded = "Fix the mismatched types in order_total at src/orders.rs:42 (E0308).";
+        let selection = refine_diagnostic(reworded).await;
+        assert_eq!(
+            (selection.route, selection.model_outcome),
+            (
+                ContextScoutRouteV1::ModelAssisted,
+                ContextScoutModelOutcomeV1::Succeeded
+            )
+        );
+        assert_eq!(selected_text(&selection), reworded);
+    }
+
+    #[test]
+    fn unsupported_code_tokens_flag_only_code_like_tokens_absent_from_the_original() {
+        let original = "error[E0308]: mismatched types in order_total at src/orders.rs:42";
+        for (refined, expected) in [
+            ("Plain words only, rewritten freely.", vec![]),
+            ("Check order_total in src/orders.rs:42 for E0308.", vec![]),
+            ("Check apply_tax.", vec!["apply_tax"]),
+            ("See src/billing.rs.", vec!["src/billing.rs"]),
+            ("Line 43 instead.", vec!["43"]),
+            ("Use TaxRate or orderTotal.", vec!["TaxRate", "orderTotal"]),
+            ("Call orders::total now.", vec!["orders::total"]),
+            ("Open config.toml first.", vec!["config.toml"]),
+            ("Rust CI is red; well-known issue.", vec![]),
+            ("apply_tax and apply_tax again.", vec!["apply_tax"]),
+        ] {
+            assert_eq!(
+                unsupported_code_tokens(original, refined),
+                BTreeSet::from_iter(expected),
+                "{refined}"
+            );
+        }
     }
 
     #[test]
