@@ -25,6 +25,8 @@ pub struct RuntimeRegistryAggregateSnapshot {
     pub reopening: u32,
     pub faulted: u32,
     pub closed: u32,
+    /// Retained in the shipped wire contract; no runtime proves positive health.
+    pub healthy: u32,
     pub degraded: u32,
     pub unknown_health: u32,
     pub pinned_profiles: u32,
@@ -142,6 +144,7 @@ impl RuntimeRegistrySnapshot {
                 reopening: aggregate.states.reopening,
                 faulted: aggregate.states.faulted,
                 closed: aggregate.states.closed,
+                healthy: 0,
                 degraded: aggregate.health.degraded,
                 unknown_health: aggregate.health.unknown,
                 pinned_profiles: aggregate.pinned_profiles,
@@ -331,9 +334,28 @@ mod tests {
     };
     use std::time::Duration;
     use tracedecay_store::{
-        BrainId, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1,
-        StoreShardIdV1, UserProfileId,
+        AdmissionConfigV1, BrainId, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1,
+        StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId,
     };
+
+    #[test]
+    fn aggregate_wire_retains_the_released_healthy_count() {
+        let projection = crate::shard_runtime::telemetry::project_runtime_telemetry(
+            &crate::shard_runtime::telemetry::RuntimeRegistryInventory {
+                admission: AdmissionConfigV1::default(),
+                global_queued_bytes: None,
+                opening_shards: 1,
+                entries: Vec::new(),
+            },
+        );
+        let value =
+            serde_json::to_value(RuntimeRegistrySnapshot::from_projection(projection)).unwrap();
+        assert_eq!(
+            value["aggregate"].get("healthy"),
+            Some(&serde_json::json!(0))
+        );
+        assert_eq!(value["aggregate"]["unknown_health"], 1);
+    }
 
     #[test]
     fn shard_wire_uses_canonical_binding_and_preserves_unknown_usage() {
