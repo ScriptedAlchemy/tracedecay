@@ -11,11 +11,6 @@ import { AgentsPage } from '../agents/AgentsPage.tsx';
 import { LoomPage } from '../loom/LoomPage.tsx';
 import { SessionsPage } from './SessionsPage.tsx';
 
-/**
- * One session followed across the three workspaces that read it: Sessions,
- * then Agents, then Loom, then back to Sessions, by the links each one offers,
- * with the project scope carried on every hop.
- */
 const server = fixtureServer();
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
 beforeEach(() => {

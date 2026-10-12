@@ -1,14 +1,9 @@
-/**
- * One session, opened in the other workspaces that read it. Sessions holds its
- * transcript, Loom its place in time, Agents its place in the delegation tree;
- * each names the session in its own URL form, and the project scope rides
- * along the way the rail carries it.
- */
 import type { LucideIcon } from 'lucide-react';
 import { Bot, MessagesSquare, Waypoints } from 'lucide-react';
 import { Link } from 'react-router';
 import { scopedWorkspacePath, useScope, type DashboardScope } from '../../data/scope/store.ts';
-import { LOOM_PARAMS, loomSessionValue } from '../loom/loomUrl.ts';
+import { sessionLaneId } from '../../viz/temporal/journey.ts';
+import { LOOM_PARAMS } from '../loom/loomUrl.ts';
 import { writeSessionSelection, type SessionSelection } from './model.ts';
 
 export type SessionWorkspace = 'sessions' | 'loom' | 'agents';
@@ -19,8 +14,6 @@ const PIVOTS: Record<SessionWorkspace, { label: string; icon: LucideIcon }> = {
   agents: { label: 'Open in Agents', icon: Bot },
 };
 
-/** A provider-less session reaches Loom as the bare id, the form Delivery has
- * always linked with; Loom resolves it against its page without guessing. */
 export function sessionHref(
   target: SessionWorkspace,
   session: SessionSelection,
@@ -33,13 +26,11 @@ export function sessionHref(
     LOOM_PARAMS.session,
     session.provider === null
       ? session.sessionId
-      : loomSessionValue({ provider: session.provider, sessionId: session.sessionId }),
+      : sessionLaneId(session.provider, session.sessionId),
   );
   return `${pathname}?${params.toString()}`;
 }
 
-/** No Loom link for a provider-less session: in a workspace that could not
- * tell two providers apart, a Loom lane would be a guess. */
 export function SessionPivots({
   session,
   from,

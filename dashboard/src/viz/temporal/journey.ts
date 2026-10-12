@@ -96,13 +96,16 @@ function compareStrings(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/** The lane's provider when the store recorded none (`''`). */
-export const UNRECORDED_PROVIDER = 'unknown';
+const UNRECORDED_PROVIDER = 'unknown';
 
-/** The lane a stored session is drawn on: the only place a recorded empty
- * provider becomes {@link UNRECORDED_PROVIDER}. */
 export function sessionLaneId(provider: string, sessionId: string): string {
   return laneIdOf(provider || UNRECORDED_PROVIDER, sessionId);
+}
+
+/** The provider a lane tuple names, or null when its provider was never
+ * recorded. A provider literally called `unknown` is indistinguishable. */
+export function recordedProvider(laneProvider: string): string | null {
+  return laneProvider === '' || laneProvider === UNRECORDED_PROVIDER ? null : laneProvider;
 }
 
 function isFinitePositive(value: unknown): value is number {

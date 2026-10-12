@@ -231,7 +231,6 @@ export function membershipHref(
 ): string | null {
   switch (basis.kind) {
     case 'session_git_relation':
-      // The basis names no provider, so Loom resolves the bare id.
       return sessionHref('loom', { provider: null, sessionId: basis.session_id }, scope);
     case 'shared_work_objective':
     case 'explicit_handoff':

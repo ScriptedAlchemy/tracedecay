@@ -39,7 +39,6 @@ export function resolveSubject(
   const selected = selectedId === null ? undefined : byId.get(selectedId);
   if (selected && selected.kind === 'session') return { kind: 'session', mark: selected, mode: 'selected' };
   if (selectedId !== null && selected === undefined) {
-    // Selected and in the reading, but a bundle or the depth limit folded it.
     return {
       kind: 'none',
       detail: 'the selected session is folded out of the field; open its bundle or generation to inspect it',

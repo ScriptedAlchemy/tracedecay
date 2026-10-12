@@ -105,7 +105,6 @@ const KIND: Record<EvidenceGrade, EvidenceGradeKind> = {
   UNAVAILABLE: 'unavailable',
 };
 
-/** The tag ladder's grade on the field's ladder: one ladder in two cases. */
 export function gradeKind(grade: EvidenceGrade): EvidenceGradeKind {
   return KIND[grade];
 }

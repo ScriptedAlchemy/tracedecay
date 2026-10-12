@@ -64,8 +64,7 @@ export type RowsPerPage = (typeof ROWS_PER_PAGE_OPTIONS)[number];
  */
 export const TIMELINE_WINDOW_OPTIONS = [30, 90, 400, 2000] as const;
 export type TimelineWindow = (typeof TIMELINE_WINDOW_OPTIONS)[number];
-/** The route's own default when no `limit` is sent, and Loom's busiest-day
- * window, so the two read one timeline. */
+/** The route's own default when no `limit` is sent. */
 export const DEFAULT_TIMELINE_WINDOW: TimelineWindow = 400;
 
 export interface SessionsViewState {
@@ -100,8 +99,6 @@ function oneOf<T extends number>(raw: string | null, options: readonly T[], fall
   return (options as readonly number[]).includes(parsed) ? (parsed as T) : fallback;
 }
 
-/** The selection a `sessionId` / `sessionProvider` link names. Sessions and
- * Agents both read it; an empty provider names none. */
 export function readSessionSelection(params: URLSearchParams): SessionSelection | null {
   const sessionId = params.get(PARAM.sessionId);
   const provider = params.get(PARAM.provider);
@@ -110,8 +107,6 @@ export function readSessionSelection(params: URLSearchParams): SessionSelection 
     : null;
 }
 
-/** Writes or clears the selection on a copy of the params, leaving every
- * other param untouched. */
 export function writeSessionSelection(
   params: URLSearchParams,
   selection: SessionSelection | null,
@@ -226,8 +221,8 @@ type IndexJoin<R> =
   /** More than one loaded row answers to the id; a selection without a
    * provider cannot pick between providers and does not. */
   | { kind: 'ambiguous'; rows: readonly R[] }
-  /** The loaded rows hold no such session. Not "the session does not
-   * exist", a page or a tree is one window over the store. */
+  /** The loaded index page holds no such row. Not "the session does not
+   * exist", the page is one window over the store. */
   | { kind: 'absent' };
 
 export function joinIndexRow<R extends { provider: string; session_id: string }>(

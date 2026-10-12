@@ -181,7 +181,6 @@ export function AgentInspector({
           </button>
         ) : null}
       </header>
-      {/* A hovered subject vanishes when the pointer leaves for a link. */}
       {mode === 'inspecting' ? null : (
         <SessionPivots session={{ provider: node.provider, sessionId: node.session_id }} from="agents" />
       )}

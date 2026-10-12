@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoomPage } from './LoomPage.tsx';
-import { loomSessionValue } from './loomUrl.ts';
+import { sessionHref } from '../sessions/SessionPivots.tsx';
 import { useScope } from '../../data/scope/store.ts';
 import { applicationSuccess } from '../../test/applicationEnvelope.ts';
 import { responseWithBodyPendingUntilAbort } from '../../test/pendingBody.ts';
@@ -789,13 +789,12 @@ describe('LoomPage', () => {
     expect(agents.searchParams.get('sessionProvider')).toBe('cursor');
   });
 
-  it('selects a session whose provider was never recorded through the link Loom writes for it', async () => {
+  it('selects a session whose provider was never recorded through the link other workspaces write', async () => {
     const temporal = structuredClone(TEMPORAL);
     temporal.payload.sessions[0]!.provider = '';
-    const value = loomSessionValue({ provider: '', sessionId: 'sess-open' });
     renderLoom(
       { ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } },
-      `/loom?loomSession=${encodeURIComponent(value)}`,
+      sessionHref('loom', { provider: '', sessionId: 'sess-open' }, useScope.getState().scope),
     );
     const thread = await screen.findByRole('region', { name: 'Loaded execution' });
     expect(thread.textContent).toContain('Deliver Git primitive runtime');

@@ -7,7 +7,7 @@
  * window or a filter the reader never asked for.
  */
 import { assertNever, type LoomSessionRowV1 } from '../../contracts/generated.ts';
-import { sessionLaneId, UNRECORDED_PROVIDER } from '../../viz/temporal/journey.ts';
+import { recordedProvider, sessionLaneId } from '../../viz/temporal/journey.ts';
 import { joinIndexRow, type SessionSelection } from '../sessions/model.ts';
 import {
   JOURNEY_EVENT_KINDS,
@@ -31,13 +31,6 @@ export const LOOM_PARAMS = {
  * time this store could have recorded and is treated as malformed. */
 const EPOCH_FLOOR = 1_000_000_000;
 
-/**
- * `loomSession` has two shipped forms: the lane id, a JSON tuple
- * `["provider","session_id"]` that Loom itself writes, and a bare session id
- * (Delivery's link), which names no provider. Anything that is not a
- * two-string tuple is a bare id. Loom never rewrites either; a click writes the
- * lane id, so links converge without an effect.
- */
 type LoomSessionParam =
   | { readonly kind: 'lane'; readonly laneId: string; readonly selection: SessionSelection }
   | { readonly kind: 'bare_id'; readonly selection: SessionSelection };
@@ -50,8 +43,7 @@ export function parseLoomSession(raw: string | null): LoomSessionParam | null {
   return {
     kind: 'lane',
     laneId: sessionLaneId(provider, sessionId),
-    // The lane sentinel covers a recorded empty provider, so it names none.
-    selection: { provider: provider === '' || provider === UNRECORDED_PROVIDER ? null : provider, sessionId },
+    selection: { provider: recordedProvider(provider), sessionId },
   };
 }
 
@@ -69,17 +61,10 @@ function parseTuple(raw: string): [string, string] | null {
   }
 }
 
-/** The lane id the field draws for a stored session. */
-export function loomSessionValue(session: { provider: string; sessionId: string }): string {
-  return sessionLaneId(session.provider, session.sessionId);
-}
-
 export type LoomSelection =
   | { readonly kind: 'none' }
   | { readonly kind: 'lane'; readonly laneId: string; readonly row: LoomSessionRowV1 }
-  /** A bare id more than one provider answers to on this page. */
   | { readonly kind: 'ambiguous'; readonly selection: SessionSelection; readonly count: number }
-  /** Named, but not on the loaded page. */
   | { readonly kind: 'outside_page'; readonly selection: SessionSelection };
 
 export function resolveLoomSession(

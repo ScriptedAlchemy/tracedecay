@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LoomSessionRowV1 } from '../../contracts/generated.ts';
 import {
-  loomSessionValue,
   parseHiddenKinds,
   parseLaneSet,
   parseLoomSession,
@@ -88,11 +87,6 @@ describe('loomUrl', () => {
     expect(parseLoomSession('["claude"]')).toMatchObject({ kind: 'bare_id' });
   });
 
-  it('writes the lane id the field draws, including the unrecorded-provider lane', () => {
-    expect(loomSessionValue({ provider: 'claude', sessionId: 'a' })).toBe('["claude","a"]');
-    expect(loomSessionValue({ provider: '', sessionId: 'a' })).toBe('["unknown","a"]');
-  });
-
   it('resolves a link against the loaded page without guessing between providers', () => {
     const claude = row('claude', 'shared');
     const codex = row('codex', 'shared');
@@ -104,7 +98,6 @@ describe('loomUrl', () => {
     expect(resolve('["codex","shared"]')).toEqual({ kind: 'lane', laneId: '["codex","shared"]', row: codex });
     expect(resolve('["unknown","quiet"]')).toEqual({ kind: 'lane', laneId: '["unknown","quiet"]', row: unrecorded });
     expect(resolve('quiet')).toEqual({ kind: 'lane', laneId: '["unknown","quiet"]', row: unrecorded });
-    // The empty-provider tuple older Sessions links wrote lands on the same lane.
     expect(resolve('["","quiet"]')).toEqual({ kind: 'lane', laneId: '["unknown","quiet"]', row: unrecorded });
     expect(resolve('shared')).toEqual({
       kind: 'ambiguous',
