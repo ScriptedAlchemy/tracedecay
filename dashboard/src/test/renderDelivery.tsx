@@ -7,11 +7,11 @@ import { DeliveryPage } from '../workspaces/delivery/DeliveryPage.tsx';
 import { fixtureEnvelope } from './fixtureEnvelope.ts';
 
 /** Prints the router's current search string so a test can assert URL state. */
-export function LocationProbe() {
+function LocationProbe() {
   return <output data-testid="location">{useLocation().search}</output>;
 }
 
-export function serveRoutes(routes: Record<string, { status: number; body: unknown }>) {
+function serveRoutes(routes: Record<string, { status: number; body: unknown }>) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     const hit = Object.entries(routes).find(([path]) => url.includes(path));

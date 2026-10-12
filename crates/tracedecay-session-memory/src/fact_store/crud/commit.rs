@@ -517,7 +517,7 @@ async fn insert_assertion(
         .await
         .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
 
-    for (ordinal, superseded) in superseded_assertions(assertion.kind()).iter().enumerate() {
+    for (ordinal, superseded) in assertion.kind().supersedes().iter().enumerate() {
         transaction
             .execute(
                 "INSERT INTO memory_v2_assertion_supersession(
@@ -653,14 +653,6 @@ async fn insert_assertion(
     Ok(())
 }
 
-fn superseded_assertions(kind: &FactAssertionKindV1) -> Vec<&FactAssertionId> {
-    match kind {
-        FactAssertionKindV1::Correction { supersedes } => vec![supersedes],
-        FactAssertionKindV1::Merge { supersedes } => supersedes.iter().collect(),
-        FactAssertionKindV1::Initial => Vec::new(),
-    }
-}
-
 async fn assertion_exists(
     transaction: &Transaction<'_>,
     assertion_id: &FactAssertionId,
@@ -739,8 +731,10 @@ async fn assertion_matches(
     {
         stored_supersession.push(row_string(&row, 0, QUERY_OPERATION)?);
     }
-    let expected_supersession = superseded_assertions(assertion.kind())
-        .into_iter()
+    let expected_supersession = assertion
+        .kind()
+        .supersedes()
+        .iter()
         .map(|id| id.as_str().to_owned())
         .collect::<Vec<_>>();
     if stored_supersession != expected_supersession {

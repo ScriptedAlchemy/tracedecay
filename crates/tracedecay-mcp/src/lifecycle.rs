@@ -300,13 +300,12 @@ impl StartupCatchUpMachineV1 {
     }
 }
 
-/// Owns response admission, revocation, and forced cancellation for one
-/// daemon-retained project server.
+/// Owns response admission and revocation for one daemon-retained project
+/// server.
 #[derive(Clone)]
 pub struct ProjectServerResponseLifecycle {
     response_gate: Arc<tokio::sync::RwLock<()>>,
     response_revoked: tracedecay_runtime_core::cancellation::CancellationToken,
-    request_abort: tracedecay_runtime_core::cancellation::CancellationToken,
 }
 
 impl Default for ProjectServerResponseLifecycle {
@@ -314,7 +313,6 @@ impl Default for ProjectServerResponseLifecycle {
         Self {
             response_gate: Arc::new(tokio::sync::RwLock::new(())),
             response_revoked: tracedecay_runtime_core::cancellation::CancellationToken::new(),
-            request_abort: tracedecay_runtime_core::cancellation::CancellationToken::new(),
         }
     }
 }
@@ -335,10 +333,6 @@ impl ProjectServerResponseLifecycle {
 
     pub async fn wait_for_request_drain(&self) {
         let _guard = self.response_gate.write().await;
-    }
-
-    pub fn abort_requests(&self) {
-        self.request_abort.cancel();
     }
 
     pub fn response_gate(&self) -> &Arc<tokio::sync::RwLock<()>> {

@@ -290,7 +290,7 @@ export function QueryActivityStatus() {
  * `offline` are disconnected; refusals and unreadable bodies are their own
  * words. Nothing here is ever folded into a blank or a green zero.
  */
-export interface RegistryAuthority {
+interface RegistryAuthority {
   value: string;
   tone: string;
   detail: string | null;

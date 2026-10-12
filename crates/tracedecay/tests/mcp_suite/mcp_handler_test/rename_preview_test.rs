@@ -372,8 +372,12 @@ async fn rename_preview_reads_dense_reference_sources_once_per_file() {
         }
         sources.push((file, source));
     }
+    // Committed under normalization the blobs are LF while the checkout stays
+    // CRLF, as on a Windows `core.autocrlf=true` host: the graph's offsets
+    // index the LF blobs, one byte per line short of the disk text.
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join(".gitattributes"), "*.rs text\n").unwrap();
         for (file, source) in &sources {
             fs::write(project.join(file), source).unwrap();
         }

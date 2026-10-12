@@ -20,7 +20,7 @@ export type WorkTaskLane =
   | { readonly kind: 'uncarded' };
 
 /** One recorded handoff, reduced to the two actors it names. */
-export interface WorkTaskHandoffView {
+interface WorkTaskHandoffView {
   readonly handoffId: string;
   readonly fromActor: string;
   readonly toActor: string;

@@ -28,7 +28,7 @@ import {
   type CortexRegion,
 } from './cortexRelief.ts';
 
-export interface CortexPalette {
+interface CortexPalette {
   readonly surface0: string;
   readonly surface1: string;
   readonly textPrimary: string;
@@ -142,13 +142,13 @@ export function hitRegion(model: CortexModel, x: number, y: number): string | nu
 
 /* ---- the renderer ------------------------------------------------------- */
 
-export interface CortexViewport {
+interface CortexViewport {
   readonly width: number;
   readonly height: number;
   readonly dpr: number;
 }
 
-export interface CortexFrame {
+interface CortexFrame {
   /** Directory the reader has selected, or null. */
   readonly selected: string | null;
   /** Directory of the region containing the workspace's current symbol focus.

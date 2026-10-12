@@ -67,8 +67,6 @@ required-features = ["test-transport"]
 [features]
 default = ["production"]
 production = ["tracedecay/production", "alloc-mimalloc"]
-# Opt-in tiered graph storage; not part of `production`.
-graph-disk-tier = ["tracedecay/graph-disk-tier"]
 token-counting = ["tracedecay/token-counting"]
 lite = ["tracedecay/lite"]
 medium = ["tracedecay/medium"]

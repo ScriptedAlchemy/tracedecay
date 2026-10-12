@@ -1,9 +1,9 @@
 use tempfile::TempDir;
 use tracedecay_runtime_core::path_safety::{canonical_existing_identity, canonical_root_identity};
 
-use super::journey_test_support::git;
 use super::*;
 use crate::daemon::project_composition::ProductionProjectComposition;
+use crate::test_support::git::git;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1,
 };

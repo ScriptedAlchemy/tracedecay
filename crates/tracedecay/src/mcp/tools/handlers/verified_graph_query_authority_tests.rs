@@ -4,7 +4,8 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::dispatch_test_support::{
-    SelectorProfile, dispatch_on_graph_authority, verified_graph_options,
+    SelectorProfile, dispatch_on_graph_authority, registered_lib_fixture, tool_json,
+    verified_graph_options,
 };
 use super::*;
 
@@ -277,12 +278,7 @@ async fn changelog_reports_absent_query_port_as_typed_coverage() {
     )
     .await
     .expect("changelog must answer without a mounted verified graph query");
-    let payload: serde_json::Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("changelog json text"),
-    )
-    .expect("changelog payload");
+    let payload: serde_json::Value = tool_json(&result);
     assert_eq!(payload["status"], "partial");
     assert_eq!(payload["symbol_changes_coverage"]["status"], "unavailable");
     assert_eq!(
@@ -296,17 +292,13 @@ async fn changelog_reports_absent_query_port_as_typed_coverage() {
 #[tokio::test]
 async fn search_and_context_report_absent_query_port_as_typed_evidence() {
     let dir = TempDir::new().expect("authority isolation");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("query-port-absent-search");
-    fs::create_dir_all(project.join("src")).expect("fixture sources");
-    fs::write(project.join("src/lib.rs"), "pub fn widget() {}\n").expect("write fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "query-port-absent-search",
+        "pub fn widget() {}\n",
         "project.query-port-absent-search",
     )
-    .await
-    .expect("registered fixture");
+    .await;
 
     let options = lower_level_ports_without_query(&cg);
     for tool_name in ["tracedecay_search", "tracedecay_context"] {
@@ -322,12 +314,7 @@ async fn search_and_context_report_absent_query_port_as_typed_evidence() {
         let error = dispatch_on_graph_authority(&cg, tool_name, args, options.clone()).await;
         match error {
             Ok(result) => {
-                let payload: serde_json::Value = serde_json::from_str(
-                    result.value["content"][0]["text"]
-                        .as_str()
-                        .expect("json text"),
-                )
-                .expect("payload");
+                let payload: serde_json::Value = tool_json(&result);
                 assert_eq!(
                     payload["verified_graph_evidence"]["reason_code"],
                     "verified-code-graph-read-unavailable",

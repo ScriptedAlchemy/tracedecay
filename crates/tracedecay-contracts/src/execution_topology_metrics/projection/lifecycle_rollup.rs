@@ -662,24 +662,9 @@ fn valid_stack_drift_row(row: &StackDriftRowV1) -> bool {
     payload.validate().is_ok()
         && row.observation_time_micros >= row.event_time_micros
         && row.event_time_micros >= endpoint
-        && duration.is_some_and(|duration| duration_bucket(duration) == row.age_bucket)
+        && duration
+            .is_some_and(|duration| DurationBucketV1::from_micros(duration) == row.age_bucket)
         && digest.is_ok_and(|digest| digest.as_str() == row.content_digest)
-}
-
-const fn duration_bucket(micros: u64) -> DurationBucketV1 {
-    const MINUTE: u64 = 60_000_000;
-    const HOUR: u64 = 60 * MINUTE;
-    const DAY: u64 = 24 * HOUR;
-    match micros {
-        value if value < MINUTE => DurationBucketV1::Under1m,
-        value if value < 5 * MINUTE => DurationBucketV1::From1mTo5m,
-        value if value < 15 * MINUTE => DurationBucketV1::From5mTo15m,
-        value if value < HOUR => DurationBucketV1::From15mTo1h,
-        value if value < 4 * HOUR => DurationBucketV1::From1hTo4h,
-        value if value < DAY => DurationBucketV1::From4hTo24h,
-        value if value < 7 * DAY => DurationBucketV1::From1dTo7d,
-        _ => DurationBucketV1::Over7d,
-    }
 }
 
 fn merge_dimensions_match(rollup: &ExecutionTopologyLifecycleRollupV1) -> bool {

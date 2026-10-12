@@ -13,6 +13,7 @@ use tracedecay_runtime_core::config::ProfileRoot;
 use crate::agent_cmd::{
     HostLifecycleCompletion, HostLifecycleSummary, load_host_lifecycle_user_config,
 };
+use crate::commands::{RestoreWording, join_outcome_and_restore};
 use crate::upgrade::UpgradeOutcome;
 use tracedecay_daemon_control as daemon_control;
 use tracedecay_domain::errors::StoreResetRequiredV1;
@@ -163,7 +164,12 @@ pub(crate) fn restart_daemon_service(
     };
     let operation_result = refresh_daemon_service(profile, stopped_state);
     let restore_result = guard.finish_with_state(desired_state);
-    match combine_operation_and_restore("daemon restart", operation_result, restore_result)? {
+    match join_outcome_and_restore(
+        RestoreWording::DaemonState,
+        "daemon restart",
+        operation_result,
+        restore_result,
+    )? {
         Some((service_path, socket_path)) => {
             eprintln!(
                 "\x1b[32m✔\x1b[0m Daemon service restarted at {}",
@@ -521,25 +527,6 @@ fn pending_reset_line(store: &StoreResetRequiredV1) -> String {
     )
 }
 
-fn combine_operation_and_restore<T>(
-    operation: &str,
-    operation_result: tracedecay_domain::errors::Result<T>,
-    restore_result: tracedecay_domain::errors::Result<()>,
-) -> tracedecay_domain::errors::Result<T> {
-    match (operation_result, restore_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Err(operation_error), Err(restore_error)) => {
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "{operation} failed: {operation_error}; daemon state restoration also failed: {restore_error}"
-                ),
-            })
-        }
-    }
-}
-
 #[tracing::instrument(name = "cli.update.post", level = "trace", skip_all)]
 pub(crate) async fn run_post_update_command(
     profile: &ProfileRoot,
@@ -566,7 +553,12 @@ pub(crate) async fn run_post_update_command(
         Err(error) => Err(error),
     };
     let restore_result = guard.finish_after_update();
-    combine_operation_and_restore("post-update", operation_result, restore_result)
+    join_outcome_and_restore(
+        RestoreWording::DaemonState,
+        "post-update",
+        operation_result,
+        restore_result,
+    )
 }
 
 // Windows must drop the lease before replacing a running executable, while
@@ -702,7 +694,12 @@ pub(crate) async fn run_post_update_tasks(
     eprintln!("\x1b[32m✔\x1b[0m TraceDecay writers stopped; exclusive maintenance window active.");
     let mutation_result = run_post_update_mutations(profile, no_reinstall, lifecycle_lease).await;
     let restart_result = refresh_daemon_service_after_update(profile, previous_daemon_state);
-    combine_operation_and_restore("post-update maintenance", mutation_result, restart_result)
+    join_outcome_and_restore(
+        RestoreWording::DaemonState,
+        "post-update maintenance",
+        mutation_result,
+        restart_result,
+    )
 }
 
 async fn run_post_update_mutations(

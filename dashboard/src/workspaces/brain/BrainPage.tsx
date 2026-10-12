@@ -323,7 +323,7 @@ function formatHorizon(days: number): string {
 }
 
 /** Counts that used to occupy four tall tiles, as one strip. */
-export function InstrumentReadout({
+function InstrumentReadout({
   items,
 }: {
   items: ReadonlyArray<{ label: string; value: number }>;
@@ -575,7 +575,7 @@ function ProjectRow({
 
 /** Recency as a quiet luminance signal, not an alarm color: bright accent for
  * activity within a day, dimming with age, hollow when dormant for a month. */
-export function RecencyDot({
+function RecencyDot({
   lastSeenAt,
   className,
 }: {

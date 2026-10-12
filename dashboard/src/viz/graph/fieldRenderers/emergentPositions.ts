@@ -3,7 +3,7 @@ import { prepareField } from '../layout.ts';
 import { settleEmergentOffThread } from '../emergentLayout.ts';
 import type { GraphCanvasEdge, GraphCanvasNode } from '../types.ts';
 
-export type EmergentPositions =
+type EmergentPositions =
   | { state: 'pending' }
   | { state: 'failed'; reason: string }
   | { state: 'ready'; positions: ReadonlyMap<string, [number, number]> };

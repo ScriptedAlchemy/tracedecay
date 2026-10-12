@@ -96,7 +96,6 @@ impl McpServer {
     }
 
     pub(crate) fn abort_project_server_requests(&self) {
-        self.project_server_lifecycle.abort_requests();
         // Poison recovery matters most here: skipping this on a poisoned
         // mutex leaves every in-flight request uncancelled and the shutdown
         // drain waits forever.

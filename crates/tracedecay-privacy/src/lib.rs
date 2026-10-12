@@ -16,7 +16,6 @@
 mod assessment;
 mod detect;
 pub mod detector_kernel;
-mod lcm;
 mod privacy_remediation;
 mod rules;
 mod sanitize;
@@ -54,9 +53,6 @@ pub use detect::{
     PrivacyDetectorV1, SanitizationActionV1, SanitizationEvidenceAnchorV1, SanitizationFindingV1,
     SanitizedPayloadVerificationError, sanitize_memory_fact_payload,
     verify_memory_fact_sanitization, verify_sanitized_json_payload,
-};
-pub use lcm::{
-    LcmSensitiveRedactionPolicyV1, LcmSensitiveRedactionV1, redact_lcm_sensitive_payload,
 };
 pub use privacy_remediation::{
     AdmittedPrivacyProjectV1, PrivacyLcmRemediationOutcomeV1, PrivacyMemoryRemediationOutcomeV1,

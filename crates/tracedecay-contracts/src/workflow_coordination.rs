@@ -163,23 +163,6 @@ pub struct WorkflowDefinitionDisposition {
     pub transitioned_at: UtcMicros,
 }
 
-/// One immutable history entry appended by a lifecycle transition.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowDefinitionTransitionEntry {
-    pub definition_id: WorkflowDefinitionId,
-    #[schemars(range(min = 1))]
-    pub definition_version: u64,
-    pub operation: WorkflowLifecycleOperation,
-    pub from_state: WorkflowDefinitionLifecycleState,
-    pub to_state: WorkflowDefinitionLifecycleState,
-    #[schemars(range(min = 1))]
-    pub from_revision: u64,
-    #[schemars(range(min = 2))]
-    pub to_revision: u64,
-    pub transitioned_at: UtcMicros,
-}
-
 /// Compare-and-swap command carried across the effect journal and applied by
 /// the durable authority.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -237,12 +220,6 @@ pub trait WorkflowDefinitionAuthorityPort: Send + Sync {
         &self,
         command: &WorkflowDefinitionLifecycleCommand,
     ) -> Result<WorkflowDefinitionTransitionOutcome, WorkflowDefinitionAuthorityError>;
-
-    fn transition_history(
-        &self,
-        definition_id: &WorkflowDefinitionId,
-        definition_version: u64,
-    ) -> Result<Vec<WorkflowDefinitionTransitionEntry>, WorkflowDefinitionAuthorityError>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -400,119 +377,118 @@ where
         Self { authority }
     }
 
+    #[tracing::instrument(
+        name = "application.workflow.definition.register",
+        level = "trace",
+        skip_all
+    )]
     pub fn register(
         &self,
         context: &RequestContext,
         definition: WorkflowDefinition,
     ) -> Result<WorkflowDefinition, WorkflowCoordinationError> {
-        {
-            let _span = tracing::trace_span!("application.workflow.definition.register").entered();
-            {
-                let definition = prepare_workflow_definition_registration(context, definition)?;
-                match self.authority.insert(&definition) {
-                    Ok(()) => Ok(definition),
-                    Err(WorkflowDefinitionAuthorityError::AlreadyExists) => {
-                        let existing = self
-                            .authority
-                            .load(definition.definition_id(), definition.definition_version())
-                            .map_err(coordination_authority_error)?
-                            .ok_or(WorkflowCoordinationError::ImmutableDefinitionConflict)?;
-                        if existing == definition {
-                            Ok(existing)
-                        } else {
-                            Err(WorkflowCoordinationError::ImmutableDefinitionConflict)
-                        }
-                    }
-                    Err(error) => Err(coordination_authority_error(error)),
+        let definition = prepare_workflow_definition_registration(context, definition)?;
+        match self.authority.insert(&definition) {
+            Ok(()) => Ok(definition),
+            Err(WorkflowDefinitionAuthorityError::AlreadyExists) => {
+                let existing = self
+                    .authority
+                    .load(definition.definition_id(), definition.definition_version())
+                    .map_err(coordination_authority_error)?
+                    .ok_or(WorkflowCoordinationError::ImmutableDefinitionConflict)?;
+                if existing == definition {
+                    Ok(existing)
+                } else {
+                    Err(WorkflowCoordinationError::ImmutableDefinitionConflict)
                 }
             }
+            Err(error) => Err(coordination_authority_error(error)),
         }
     }
 
     /// The preflight for activation: structural shape plus tool-catalog
     /// semantic admission of every step operation.
+    #[tracing::instrument(
+        name = "application.workflow.definition.validate",
+        level = "trace",
+        skip_all
+    )]
     pub fn validate(
         &self,
         definition: WorkflowDefinition,
     ) -> Result<WorkflowDefinitionValidation, WorkflowCoordinationError> {
-        {
-            let _span = tracing::trace_span!("application.workflow.definition.validate").entered();
-            {
-                definition
-                    .validate()
-                    .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
-                admit_workflow_definition_operations(&definition)
-                    .map_err(WorkflowCoordinationError::CatalogAdmissionDenied)?;
-                Ok(WorkflowDefinitionValidation { definition })
-            }
-        }
+        definition
+            .validate()
+            .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
+        admit_workflow_definition_operations(&definition)
+            .map_err(WorkflowCoordinationError::CatalogAdmissionDenied)?;
+        Ok(WorkflowDefinitionValidation { definition })
     }
 
+    #[tracing::instrument(
+        name = "application.workflow.definition.get",
+        level = "trace",
+        skip_all
+    )]
     pub fn get(
         &self,
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
     ) -> Result<WorkflowDefinition, WorkflowCoordinationError> {
-        {
-            let _span = tracing::trace_span!("application.workflow.definition.get").entered();
-            {
-                if definition_version == 0 {
-                    return Err(WorkflowCoordinationError::InvalidDefinition);
-                }
-                self.authority
-                    .load(definition_id, definition_version)
-                    .map_err(coordination_authority_error)?
-                    .ok_or(WorkflowCoordinationError::DefinitionNotFound)
-            }
+        if definition_version == 0 {
+            return Err(WorkflowCoordinationError::InvalidDefinition);
         }
+        self.authority
+            .load(definition_id, definition_version)
+            .map_err(coordination_authority_error)?
+            .ok_or(WorkflowCoordinationError::DefinitionNotFound)
     }
 
+    #[tracing::instrument(
+        name = "application.workflow.definition.list",
+        level = "trace",
+        skip_all
+    )]
     pub fn list(&self) -> Result<Vec<WorkflowDefinition>, WorkflowCoordinationError> {
-        {
-            let _span = tracing::trace_span!("application.workflow.definition.list").entered();
-            {
-                self.authority
-                    .list(None)
-                    .map_err(coordination_authority_error)
-            }
-        }
+        self.authority
+            .list(None)
+            .map_err(coordination_authority_error)
     }
 
+    #[tracing::instrument(
+        name = "application.workflow.definition.history",
+        level = "trace",
+        skip_all
+    )]
     pub fn history(
         &self,
         definition_id: &WorkflowDefinitionId,
     ) -> Result<Vec<WorkflowDefinition>, WorkflowCoordinationError> {
-        {
-            let _span = tracing::trace_span!("application.workflow.definition.history").entered();
-            {
-                self.authority
-                    .list(Some(definition_id))
-                    .map_err(coordination_authority_error)
-            }
-        }
+        self.authority
+            .list(Some(definition_id))
+            .map_err(coordination_authority_error)
     }
 
     /// Admission every activation must clear before its lifecycle transition
     /// is journaled: structural revalidation plus tool-catalog admission of
     /// every step operation. The one authority both activation paths, this
     /// service and the daemon's journaled effect, run.
+    #[tracing::instrument(
+        name = "application.workflow.definition.admit_activation",
+        level = "trace",
+        skip_all
+    )]
     pub fn admit_activation(
         &self,
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
     ) -> Result<(), WorkflowCoordinationError> {
-        {
-            let _span =
-                tracing::trace_span!("application.workflow.definition.admit_activation").entered();
-            {
-                let definition = self.get(definition_id, definition_version)?;
-                definition
-                    .validate()
-                    .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
-                admit_workflow_definition_operations(&definition)
-                    .map_err(WorkflowCoordinationError::CatalogAdmissionDenied)
-            }
-        }
+        let definition = self.get(definition_id, definition_version)?;
+        definition
+            .validate()
+            .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
+        admit_workflow_definition_operations(&definition)
+            .map_err(WorkflowCoordinationError::CatalogAdmissionDenied)
     }
 
     /// Advances a registered definition version to `active`.
@@ -523,6 +499,11 @@ where
     /// payload is revalidated and catalog-admitted here, and the
     /// `candidate -> validated -> active` path is recorded as immutable
     /// history entries by the authority.
+    #[tracing::instrument(
+        name = "application.workflow.definition.activate",
+        level = "trace",
+        skip_all
+    )]
     pub fn activate(
         &self,
         definition_id: &WorkflowDefinitionId,
@@ -530,24 +511,24 @@ where
         expected_revision: u64,
         transitioned_at: UtcMicros,
     ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
-        {
-            let _span = tracing::trace_span!("application.workflow.definition.activate").entered();
-            {
-                self.admit_activation(definition_id, definition_version)?;
-                self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
-                    definition_id: definition_id.clone(),
-                    definition_version,
-                    operation: WorkflowLifecycleOperation::Activate,
-                    expected_revision,
-                    transitioned_at,
-                })
-            }
-        }
+        self.admit_activation(definition_id, definition_version)?;
+        self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
+            definition_id: definition_id.clone(),
+            definition_version,
+            operation: WorkflowLifecycleOperation::Activate,
+            expected_revision,
+            transitioned_at,
+        })
     }
 
     /// Retires an active definition version. Plan 32 keeps retire a terminal
     /// disposition: admitted runs stay pinned to the version they admitted,
     /// and nothing transitions back out.
+    #[tracing::instrument(
+        name = "application.workflow.definition.retire",
+        level = "trace",
+        skip_all
+    )]
     pub fn retire(
         &self,
         definition_id: &WorkflowDefinitionId,
@@ -555,23 +536,23 @@ where
         expected_revision: u64,
         transitioned_at: UtcMicros,
     ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
-        {
-            let _span = tracing::trace_span!("application.workflow.definition.retire").entered();
-            {
-                self.get(definition_id, definition_version)?;
-                self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
-                    definition_id: definition_id.clone(),
-                    definition_version,
-                    operation: WorkflowLifecycleOperation::Retire,
-                    expected_revision,
-                    transitioned_at,
-                })
-            }
-        }
+        self.get(definition_id, definition_version)?;
+        self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
+            definition_id: definition_id.clone(),
+            definition_version,
+            operation: WorkflowLifecycleOperation::Retire,
+            expected_revision,
+            transitioned_at,
+        })
     }
 
     /// Rejects a candidate or validated definition version. Plan 32 keeps
     /// reject a terminal disposition alongside retire.
+    #[tracing::instrument(
+        name = "application.workflow.definition.reject",
+        level = "trace",
+        skip_all
+    )]
     pub fn reject(
         &self,
         definition_id: &WorkflowDefinitionId,
@@ -579,58 +560,33 @@ where
         expected_revision: u64,
         transitioned_at: UtcMicros,
     ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
-        {
-            let _span = tracing::trace_span!("application.workflow.definition.reject").entered();
-            {
-                self.get(definition_id, definition_version)?;
-                self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
-                    definition_id: definition_id.clone(),
-                    definition_version,
-                    operation: WorkflowLifecycleOperation::Reject,
-                    expected_revision,
-                    transitioned_at,
-                })
-            }
-        }
+        self.get(definition_id, definition_version)?;
+        self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
+            definition_id: definition_id.clone(),
+            definition_version,
+            operation: WorkflowLifecycleOperation::Reject,
+            expected_revision,
+            transitioned_at,
+        })
     }
 
+    #[tracing::instrument(
+        name = "application.workflow.definition.disposition",
+        level = "trace",
+        skip_all
+    )]
     pub fn disposition(
         &self,
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
     ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
-        {
-            let _span =
-                tracing::trace_span!("application.workflow.definition.disposition").entered();
-            {
-                if definition_version == 0 {
-                    return Err(WorkflowCoordinationError::InvalidDefinition);
-                }
-                self.authority
-                    .load_disposition(definition_id, definition_version)
-                    .map_err(coordination_authority_error)?
-                    .ok_or(WorkflowCoordinationError::DefinitionNotFound)
-            }
+        if definition_version == 0 {
+            return Err(WorkflowCoordinationError::InvalidDefinition);
         }
-    }
-
-    pub fn lifecycle_history(
-        &self,
-        definition_id: &WorkflowDefinitionId,
-        definition_version: u64,
-    ) -> Result<Vec<WorkflowDefinitionTransitionEntry>, WorkflowCoordinationError> {
-        {
-            let _span =
-                tracing::trace_span!("application.workflow.definition.lifecycle_history").entered();
-            {
-                if definition_version == 0 {
-                    return Err(WorkflowCoordinationError::InvalidDefinition);
-                }
-                self.authority
-                    .transition_history(definition_id, definition_version)
-                    .map_err(coordination_authority_error)
-            }
-        }
+        self.authority
+            .load_disposition(definition_id, definition_version)
+            .map_err(coordination_authority_error)?
+            .ok_or(WorkflowCoordinationError::DefinitionNotFound)
     }
 
     fn apply_lifecycle(
@@ -659,48 +615,48 @@ where
         }
     }
 
+    #[tracing::instrument(
+        name = "application.workflow.definition.diff",
+        level = "trace",
+        skip_all
+    )]
     pub fn diff(
         &self,
         definition_id: &WorkflowDefinitionId,
         from_version: u64,
         to_version: u64,
     ) -> Result<WorkflowDefinitionDiff, WorkflowCoordinationError> {
-        {
-            let _span = tracing::trace_span!("application.workflow.definition.diff").entered();
-            {
-                let from = self.get(definition_id, from_version)?;
-                let to = self.get(definition_id, to_version)?;
-                let from_by_id = from
-                    .steps()
-                    .iter()
-                    .map(|step| (&step.step_id, step))
-                    .collect::<BTreeMap<_, _>>();
-                let to_by_id = to
-                    .steps()
-                    .iter()
-                    .map(|step| (&step.step_id, step))
-                    .collect::<BTreeMap<_, _>>();
-                let changed_steps = from_by_id
-                    .keys()
-                    .copied()
-                    .chain(to_by_id.keys().copied())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .filter(|step_id| from_by_id.get(step_id) != to_by_id.get(step_id))
-                    .cloned()
-                    .collect();
-                Ok(WorkflowDefinitionDiff {
-                    definition_id: definition_id.clone(),
-                    from_version,
-                    to_version,
-                    changed_steps,
-                    policy_changed: from.pinned_policy_digest() != to.pinned_policy_digest(),
-                    configuration_changed: from.pinned_configuration_digest()
-                        != to.pinned_configuration_digest(),
-                    catalog_changed: from.pinned_catalog_digest() != to.pinned_catalog_digest(),
-                })
-            }
-        }
+        let from = self.get(definition_id, from_version)?;
+        let to = self.get(definition_id, to_version)?;
+        let from_by_id = from
+            .steps()
+            .iter()
+            .map(|step| (&step.step_id, step))
+            .collect::<BTreeMap<_, _>>();
+        let to_by_id = to
+            .steps()
+            .iter()
+            .map(|step| (&step.step_id, step))
+            .collect::<BTreeMap<_, _>>();
+        let changed_steps = from_by_id
+            .keys()
+            .copied()
+            .chain(to_by_id.keys().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|step_id| from_by_id.get(step_id) != to_by_id.get(step_id))
+            .cloned()
+            .collect();
+        Ok(WorkflowDefinitionDiff {
+            definition_id: definition_id.clone(),
+            from_version,
+            to_version,
+            changed_steps,
+            policy_changed: from.pinned_policy_digest() != to.pinned_policy_digest(),
+            configuration_changed: from.pinned_configuration_digest()
+                != to.pinned_configuration_digest(),
+            catalog_changed: from.pinned_catalog_digest() != to.pinned_catalog_digest(),
+        })
     }
 }
 
@@ -1164,6 +1120,7 @@ where
         Self { authority }
     }
 
+    #[tracing::instrument(name = "application.workflow.handoff.issue", level = "trace", skip_all)]
     pub fn issue(
         &self,
         context: &RequestContext,
@@ -1172,16 +1129,11 @@ where
         issued_at: UtcMicros,
         frontier: WorkHandoffFrontierV1,
     ) -> Result<TaskHandoffGrant, TaskHandoffError> {
-        {
-            let _span = tracing::trace_span!("application.workflow.handoff.issue").entered();
-            {
-                let grant = prepare_task_handoff_issue(context, scope, token, issued_at, frontier)?;
-                self.authority
-                    .issue(&grant)
-                    .map_err(handoff_authority_error)?;
-                Ok(grant)
-            }
-        }
+        let grant = prepare_task_handoff_issue(context, scope, token, issued_at, frontier)?;
+        self.authority
+            .issue(&grant)
+            .map_err(handoff_authority_error)?;
+        Ok(grant)
     }
 
     /// Consumes the grant once and answers the redemption receipt.
@@ -1190,6 +1142,11 @@ where
     /// holds no lease authority and touches no attempt, projection, or graph
     /// state, so a redeemed handoff can never renew a lease or stand in for
     /// task acceptance.
+    #[tracing::instrument(
+        name = "application.workflow.handoff.redeem",
+        level = "trace",
+        skip_all
+    )]
     pub fn redeem(
         &self,
         context: &RequestContext,
@@ -1197,38 +1154,31 @@ where
         expected_scope: &TaskHandoffScope,
         consumed_at: UtcMicros,
     ) -> Result<TaskHandoffRedeemed, TaskHandoffError> {
+        let token_digest = prepare_task_handoff_redeem(context, token, expected_scope)?;
+        match self
+            .authority
+            .consume(&token_digest, expected_scope, consumed_at)
+            .map_err(handoff_authority_error)?
         {
-            let _span = tracing::trace_span!("application.workflow.handoff.redeem").entered();
-            {
-                let token_digest = prepare_task_handoff_redeem(context, token, expected_scope)?;
-                match self
-                    .authority
-                    .consume(&token_digest, expected_scope, consumed_at)
-                    .map_err(handoff_authority_error)?
-                {
-                    // Bounded per-outcome counters: every non-consumed answer is
-                    // a distinct product decision (lost grant, wrong scope,
-                    // expired lifetime, double redemption), and refusals must be
-                    // recorded with the same weight as successes.
-                    TaskHandoffConsumeOutcome::Consumed { frontier } => {
-                        let frontier_digest = frontier
-                            .digest()
-                            .map_err(|_| TaskHandoffError::InvalidFrontier)?;
-                        Ok(TaskHandoffRedeemed {
-                            scope: expected_scope.clone(),
-                            frontier: *frontier,
-                            frontier_digest,
-                            redeemed_at: consumed_at,
-                        })
-                    }
-                    TaskHandoffConsumeOutcome::Missing => Err(TaskHandoffError::Missing),
-                    TaskHandoffConsumeOutcome::ScopeMismatch => {
-                        Err(TaskHandoffError::ScopeMismatch)
-                    }
-                    TaskHandoffConsumeOutcome::Expired => Err(TaskHandoffError::Expired),
-                    TaskHandoffConsumeOutcome::Replay => Err(TaskHandoffError::Replay),
-                }
+            // Bounded per-outcome counters: every non-consumed answer is
+            // a distinct product decision (lost grant, wrong scope,
+            // expired lifetime, double redemption), and refusals must be
+            // recorded with the same weight as successes.
+            TaskHandoffConsumeOutcome::Consumed { frontier } => {
+                let frontier_digest = frontier
+                    .digest()
+                    .map_err(|_| TaskHandoffError::InvalidFrontier)?;
+                Ok(TaskHandoffRedeemed {
+                    scope: expected_scope.clone(),
+                    frontier: *frontier,
+                    frontier_digest,
+                    redeemed_at: consumed_at,
+                })
             }
+            TaskHandoffConsumeOutcome::Missing => Err(TaskHandoffError::Missing),
+            TaskHandoffConsumeOutcome::ScopeMismatch => Err(TaskHandoffError::ScopeMismatch),
+            TaskHandoffConsumeOutcome::Expired => Err(TaskHandoffError::Expired),
+            TaskHandoffConsumeOutcome::Replay => Err(TaskHandoffError::Replay),
         }
     }
 }

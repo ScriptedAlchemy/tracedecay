@@ -10,8 +10,9 @@ use tracedecay_domain::configuration::{
     ScopeAccessRule, ScopeAccessSubjectV1, SourceKindV1,
 };
 
-use super::journey_test_support::{git, tool_payload};
+use super::journey_test_support::tool_payload;
 use super::*;
+use crate::test_support::git::git;
 
 fn json_arguments(request: impl serde::Serialize) -> serde_json::Value {
     let mut arguments = serde_json::to_value(request).expect("tool request");

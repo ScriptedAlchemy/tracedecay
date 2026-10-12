@@ -17,68 +17,30 @@ use crate::http::{
     invalid_request_response,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum WorkflowOperation {
-    RegisterDefinition,
-    ActivateDefinition,
-    RetireDefinition,
-    RejectDefinition,
-    ValidateDefinition,
-    GetDefinition,
-    ListDefinitions,
-    DefinitionHistory,
-    DiffDefinition,
-    HandoffIssue,
-    HandoffRedeem,
-    StartRun,
-    PauseRun,
-    ResumeRun,
-    CancelRun,
-    GetRun,
+mounted_operations! {
+    pub enum WorkflowOperation;
+    with_key,
+    id_prefix = "operation.workflow.",
+    route_prefix = "workflow",
+    RegisterDefinition: "register_definition", "register-definition";
+    ActivateDefinition: "activate_definition", "activate-definition";
+    RetireDefinition: "retire_definition", "retire-definition";
+    RejectDefinition: "reject_definition", "reject-definition";
+    ValidateDefinition: "validate_definition", "validate-definition";
+    GetDefinition: "get_definition", "get-definition";
+    ListDefinitions: "list_definitions", "list-definitions";
+    DefinitionHistory: "definition_history", "definition-history";
+    DiffDefinition: "diff_definition", "diff-definition";
+    HandoffIssue: "handoff_issue", "handoff-issue";
+    HandoffRedeem: "handoff_redeem", "handoff-redeem";
+    StartRun: "start_run", "start-run";
+    PauseRun: "pause_run", "pause-run";
+    ResumeRun: "resume_run", "resume-run";
+    CancelRun: "cancel_run", "cancel-run";
+    GetRun: "get_run", "get-run";
 }
 
 impl WorkflowOperation {
-    pub const ALL: [Self; 16] = [
-        Self::RegisterDefinition,
-        Self::ActivateDefinition,
-        Self::RetireDefinition,
-        Self::RejectDefinition,
-        Self::ValidateDefinition,
-        Self::GetDefinition,
-        Self::ListDefinitions,
-        Self::DefinitionHistory,
-        Self::DiffDefinition,
-        Self::HandoffIssue,
-        Self::HandoffRedeem,
-        Self::StartRun,
-        Self::PauseRun,
-        Self::ResumeRun,
-        Self::CancelRun,
-        Self::GetRun,
-    ];
-
-    mounted_operation_paths! {
-        with_key,
-        id_prefix = "operation.workflow.",
-        route_prefix = "workflow",
-        RegisterDefinition: "register_definition", "register-definition";
-        ActivateDefinition: "activate_definition", "activate-definition";
-        RetireDefinition: "retire_definition", "retire-definition";
-        RejectDefinition: "reject_definition", "reject-definition";
-        ValidateDefinition: "validate_definition", "validate-definition";
-        GetDefinition: "get_definition", "get-definition";
-        ListDefinitions: "list_definitions", "list-definitions";
-        DefinitionHistory: "definition_history", "definition-history";
-        DiffDefinition: "diff_definition", "diff-definition";
-        HandoffIssue: "handoff_issue", "handoff-issue";
-        HandoffRedeem: "handoff_redeem", "handoff-redeem";
-        StartRun: "start_run", "start-run";
-        PauseRun: "pause_run", "pause-run";
-        ResumeRun: "resume_run", "resume-run";
-        CancelRun: "cancel_run", "cancel-run";
-        GetRun: "get_run", "get-run";
-    }
-
     /// Whether the operation reads without producing a durable effect.
     /// Parity with the catalog's effect class is pinned by
     /// `read_only_operations_mirror_the_catalog_effect_class`.
@@ -92,13 +54,6 @@ impl WorkflowOperation {
                 | Self::DiffDefinition
                 | Self::GetRun
         )
-    }
-
-    pub fn from_route_segment(segment: &str) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|operation| operation.route_segment() == segment)
     }
 }
 

@@ -50,8 +50,8 @@ pub fn home_dir() -> Option<PathBuf> {
 }
 
 /// Project-store half of catch-up. Cross-project search runs user ingestion
-/// once, then calls this per destination; Hermes can be excluded because its
-/// dedicated multi-destination driver scans each source database only once.
+/// once, then calls this per destination; `include_hermes = false` leaves the
+/// Hermes provider out of the pass.
 ///
 /// `project_id` must already be the typed registry or repository-marker identity.
 pub async fn ingest_project_sources_for_provider<A: SessionIngestAuthority>(
@@ -63,37 +63,13 @@ pub async fn ingest_project_sources_for_provider<A: SessionIngestAuthority>(
     provider: Option<SessionProvider>,
     include_hermes: bool,
 ) -> TranscriptIngestOutcome {
-    ingest_project_sources_for_provider_with_cancellation(
-        brain_id,
-        profile_id,
-        registered,
-        project_root,
-        project_id,
-        provider,
-        include_hermes,
-        &ObservationCancellation::default(),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn ingest_project_sources_for_provider_with_cancellation<A: SessionIngestAuthority>(
-    brain_id: &BrainId,
-    profile_id: &UserProfileId,
-    registered: &A,
-    project_root: &Path,
-    project_id: Option<ProjectId>,
-    provider: Option<SessionProvider>,
-    include_hermes: bool,
-    cancellation: &ObservationCancellation,
-) -> TranscriptIngestOutcome {
     ingest_project_sources_for_provider_inner(
         (brain_id, profile_id, registered),
         project_root,
         project_id,
         provider,
         include_hermes,
-        cancellation,
+        &ObservationCancellation::default(),
         None,
     )
     .await
@@ -150,38 +126,6 @@ pub async fn ingest_project_sources_for_provider_bounded<A: SessionIngestAuthori
         None,
     )
     .await
-}
-
-/// Standalone callers do not own a registered runtime and therefore fail
-/// closed for observation providers. Daemon-owned callers must use
-/// [`ingest_project_sources_for_provider`] with their retained registry mount.
-#[cfg(any(test, feature = "test-helpers"))]
-pub async fn ingest_project_sources_for_provider_without_registered_authority<
-    A: SessionIngestAuthority,
->(
-    _db: &A,
-    _project_root: &Path,
-    project_id: Option<ProjectId>,
-    provider: Option<SessionProvider>,
-    _include_hermes: bool,
-) -> TranscriptIngestOutcome {
-    if project_id.is_none() {
-        return TranscriptIngestOutcome::new(
-            TranscriptIngestStats::default(),
-            vec![TranscriptCatchUpFailure::new(
-                provider.map_or("all", SessionProvider::id),
-                "project_identity",
-                "project_identity_missing",
-                false,
-            )],
-        );
-    }
-    TranscriptIngestOutcome::new(
-        TranscriptIngestStats::default(),
-        vec![TranscriptCatchUpFailure::registered_authority_unavailable(
-            provider.map_or("all", SessionProvider::id),
-        )],
-    )
 }
 
 async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(

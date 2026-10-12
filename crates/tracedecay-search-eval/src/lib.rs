@@ -18,7 +18,6 @@ use tracedecay_query::search_quality::{
 
 mod admitted_corpus;
 pub mod candidate_output;
-mod controlled_workloads;
 mod packaged_assets;
 
 #[cfg(test)]
@@ -28,13 +27,6 @@ pub use admitted_corpus::root_admitted_corpus_scope;
 pub use candidate_output::{
     AdmittedCorpusScopeFn, GenerateCandidateOutputsOptions, generate_candidate_outputs,
     no_admitted_corpus_scope, retrieve_partition_query_bytes, write_generate_outputs,
-};
-pub use controlled_workloads::{
-    CURSOR_PARSE_REPORT_FILE, CURSOR_PARSE_WORKLOAD, ControlledOperationDeltaV1,
-    ControlledOperationV1, ControlledWorkloadComparisonV1, ControlledWorkloadErrorV1,
-    ControlledWorkloadReportV1, FRAMED_LOG_REPORT_FILE, FRAMED_LOG_WORKLOAD,
-    compare_controlled_workloads, run_cursor_parse_batch_workload,
-    run_framed_log_durability_workload, write_controlled_workload_reports,
 };
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]

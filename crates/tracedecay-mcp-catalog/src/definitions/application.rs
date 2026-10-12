@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, CatalogContributionV1, OperationId};
 
 use super::application_schema::bound_tagged_union;
-use super::{catalog_invalid, def};
+use super::{catalog_invalid, has_handwritten_definition};
 use crate::{McpCatalogError, ToolDefinition};
 
 /// Guidance carried by the bounded `ConfigurationValueV1` payload on the
@@ -21,114 +21,6 @@ const PROTECTED_CHANGE_GUIDANCE: &str = "Read the affected setting first through
     the daemon validates the change against the canonical ProtectedChange schema before it \
     returns the redacted preview.";
 
-/// Operations whose shipped MCP definition (input schema and description) is
-/// the handwritten `def_*` in [`super`], not a projection of the catalog.
-const HANDWRITTEN_DEFINITION_OPERATIONS: &[ApplicationSurfaceOperation] = &[
-    ApplicationSurfaceOperation::Context,
-    ApplicationSurfaceOperation::Node,
-    ApplicationSurfaceOperation::Impact,
-    ApplicationSurfaceOperation::Similar,
-    ApplicationSurfaceOperation::Redundancy,
-    ApplicationSurfaceOperation::RenamePreview,
-    ApplicationSurfaceOperation::PortStatus,
-    ApplicationSurfaceOperation::PortOrder,
-    ApplicationSurfaceOperation::Todos,
-    ApplicationSurfaceOperation::TestMap,
-    ApplicationSurfaceOperation::TestRisk,
-    ApplicationSurfaceOperation::Gini,
-    ApplicationSurfaceOperation::DependencyDepth,
-    ApplicationSurfaceOperation::Health,
-    ApplicationSurfaceOperation::Dsm,
-    ApplicationSurfaceOperation::Diagnose,
-    ApplicationSurfaceOperation::DeadCode,
-    ApplicationSurfaceOperation::Circular,
-    ApplicationSurfaceOperation::Hotspots,
-    ApplicationSurfaceOperation::UnmountedFiles,
-    ApplicationSurfaceOperation::Rank,
-    ApplicationSurfaceOperation::Largest,
-    ApplicationSurfaceOperation::Coupling,
-    ApplicationSurfaceOperation::InheritanceDepth,
-    ApplicationSurfaceOperation::Distribution,
-    ApplicationSurfaceOperation::Recursion,
-    ApplicationSurfaceOperation::Complexity,
-    ApplicationSurfaceOperation::DocCoverage,
-    ApplicationSurfaceOperation::GodClass,
-    ApplicationSurfaceOperation::UnsafePatterns,
-    ApplicationSurfaceOperation::Constructors,
-    ApplicationSurfaceOperation::FieldSites,
-    ApplicationSurfaceOperation::FindExactSymbol,
-    ApplicationSurfaceOperation::ByQualifiedName,
-    ApplicationSurfaceOperation::Signature,
-    ApplicationSurfaceOperation::Derives,
-    ApplicationSurfaceOperation::Grep,
-    ApplicationSurfaceOperation::AstGrepSearch,
-    ApplicationSurfaceOperation::Affected,
-    ApplicationSurfaceOperation::DiffContext,
-    ApplicationSurfaceOperation::Changelog,
-    ApplicationSurfaceOperation::CommitContext,
-    ApplicationSurfaceOperation::PrContext,
-    ApplicationSurfaceOperation::BranchSearch,
-    ApplicationSurfaceOperation::BranchDiff,
-    ApplicationSurfaceOperation::BranchList,
-    ApplicationSurfaceOperation::Files,
-    ApplicationSurfaceOperation::Config,
-    ApplicationSurfaceOperation::Retrieve,
-    ApplicationSurfaceOperation::AutomationRunList,
-    ApplicationSurfaceOperation::AutomationRunView,
-    ApplicationSurfaceOperation::AutomationRunArtifactView,
-    ApplicationSurfaceOperation::SkillList,
-    ApplicationSurfaceOperation::SkillView,
-    ApplicationSurfaceOperation::HermesSkillBridge,
-    ApplicationSurfaceOperation::Analytics,
-    ApplicationSurfaceOperation::Search,
-    ApplicationSurfaceOperation::RunAffectedTests,
-    ApplicationSurfaceOperation::Dashboard,
-    ApplicationSurfaceOperation::Status,
-    ApplicationSurfaceOperation::ActiveProject,
-    ApplicationSurfaceOperation::RemoteStatus,
-    ApplicationSurfaceOperation::Runtime,
-    ApplicationSurfaceOperation::ProjectList,
-    ApplicationSurfaceOperation::ProjectSearch,
-    ApplicationSurfaceOperation::ProjectContext,
-    ApplicationSurfaceOperation::StrReplace,
-    ApplicationSurfaceOperation::MultiStrReplace,
-    ApplicationSurfaceOperation::InsertAt,
-    ApplicationSurfaceOperation::AstGrepRewrite,
-    ApplicationSurfaceOperation::ReplaceSymbol,
-    ApplicationSurfaceOperation::InsertAtSymbol,
-    ApplicationSurfaceOperation::MoveSymbol,
-    ApplicationSurfaceOperation::RenameSymbol,
-    ApplicationSurfaceOperation::SourceEditReconcile,
-    ApplicationSurfaceOperation::SourceEditRollback,
-    ApplicationSurfaceOperation::FactStoreCurate,
-    ApplicationSurfaceOperation::FactStoreAdd,
-    ApplicationSurfaceOperation::FactStoreSearch,
-    ApplicationSurfaceOperation::FactStoreProbe,
-    ApplicationSurfaceOperation::FactStoreRelated,
-    ApplicationSurfaceOperation::FactStoreReason,
-    ApplicationSurfaceOperation::FactStoreContradict,
-    ApplicationSurfaceOperation::FactStoreGet,
-    ApplicationSurfaceOperation::FactStoreUpdate,
-    ApplicationSurfaceOperation::FactStoreRemove,
-    ApplicationSurfaceOperation::FactStoreSupersede,
-    ApplicationSurfaceOperation::FactStoreList,
-    ApplicationSurfaceOperation::FactFeedback,
-    ApplicationSurfaceOperation::MemoryStatus,
-    ApplicationSurfaceOperation::SessionRefreshStatus,
-    ApplicationSurfaceOperation::SessionRefreshCancel,
-    ApplicationSurfaceOperation::SessionRefreshBegin,
-    ApplicationSurfaceOperation::MessageSearch,
-    ApplicationSurfaceOperation::SessionsFor,
-    ApplicationSurfaceOperation::Workflows,
-    ApplicationSurfaceOperation::LcmStatus,
-    ApplicationSurfaceOperation::LcmDoctor,
-    ApplicationSurfaceOperation::LcmLoadSession,
-    ApplicationSurfaceOperation::LcmGrep,
-    ApplicationSurfaceOperation::LcmDescribe,
-    ApplicationSurfaceOperation::LcmExpand,
-    ApplicationSurfaceOperation::LcmExpandQuery,
-];
-
 /// Project every canonical application handler into its MCP transport view.
 ///
 /// Operation identity comes from `ApplicationHandlerDescriptor`, exposure and
@@ -145,9 +37,7 @@ pub(super) fn application_definitions() -> Result<Vec<ToolDefinition>, McpCatalo
 
     ApplicationSurfaceOperation::ALL
         .into_iter()
-        .filter(|operation| {
-            !HANDWRITTEN_DEFINITION_OPERATIONS.contains(operation) && !operation.is_internal()
-        })
+        .filter(|operation| !has_handwritten_definition(*operation) && !operation.is_internal())
         .map(|operation| {
             let descriptor = handlers.for_surface_operation(operation).ok_or_else(|| {
                 catalog_invalid(
@@ -279,23 +169,12 @@ fn application_manifest<'a>(
         .find(|manifest| manifest.capability_id() == capability_id)
 }
 
-pub(super) fn def_remote_status_read(input_schema: Value) -> ToolDefinition {
-    def(
-        "tracedecay_remote_status",
-        "Read Remote Brain status",
-        "Read the Remote Brain operational plane: listener, enrollment, spool, replay coverage, and failover/recovery state.",
-        input_schema,
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        HANDWRITTEN_DEFINITION_OPERATIONS, application_definitions, application_input_schema,
-    };
+    use super::{application_definitions, application_input_schema};
     use crate::definitions::{
         add_format_property, add_registered_project_selector_properties, get_tool_definitions,
-        project_input_schema,
+        has_handwritten_definition, project_input_schema,
     };
     use tracedecay_tool_catalog::{ApplicationSurfaceOperation, OperationId};
 
@@ -389,7 +268,7 @@ mod tests {
                 executable.capability_id(),
                 descriptor.operation().capability_id()
             );
-            if HANDWRITTEN_DEFINITION_OPERATIONS.contains(&operation) {
+            if has_handwritten_definition(operation) {
                 assert!(
                     definitions
                         .iter()

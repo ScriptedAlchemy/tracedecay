@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::journey_test_support::{git, resolved, tool_answer};
+use super::journey_test_support::{resolved, tool_answer};
 use super::*;
+use crate::test_support::git::git;
 
 const CONVERGENCE_DEADLINE: Duration = Duration::from_secs(90);
 /// One idle discovery recheck (60 s) plus slack for its pass to publish.

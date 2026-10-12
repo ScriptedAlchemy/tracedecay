@@ -24,7 +24,7 @@ const NO_PROGRESS_PROJECTION =
 const NO_BUDGET_REVISION =
   'no accepted performance budget is published; the descriptor revision on a measured card is the projector definition, not an accepted budget';
 
-export type BudgetBand = PlanDimensionBand;
+type BudgetBand = PlanDimensionBand;
 
 /**
  * The percentile band.
@@ -91,7 +91,7 @@ export function spanDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
 /** The resource band: RSS, CPU, and I/O, kept as three dimensions because Plan
  * 26 keeps resources, latency, and tokens as separate axes and never collapses
  * them into one score. */
-export function resourceDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
+function resourceDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
   const resource = (
     id: string,
     label: string,

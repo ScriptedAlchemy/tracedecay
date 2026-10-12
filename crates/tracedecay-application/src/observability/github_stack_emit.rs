@@ -5,17 +5,12 @@
 //! repository mount, then carries the coordinator's four-state outcome and
 //! immutable evidence into the bounded Observatory outbox.
 
-use std::collections::BTreeMap;
-
-use tracedecay_contracts::{
-    MAX_EXECUTION_TOPOLOGY_EVENTS_V1, ObservabilityHorizonV1, ObservabilityQueryPort,
-    ObservabilityQueryV1, context::ResolvedScope,
-};
+use tracedecay_contracts::context::ResolvedScope;
 use tracedecay_domain::{
     CoverageStateV1, GitHubStackCapabilityObservedV1, GitHubStackCapabilityStateV1,
-    GitHubStackCapabilityV1, GitTopologyAnchorTargetV1, IntervalStateV1, ManifestDigest,
-    ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityTerminalResultV1,
-    ObservationScopeV1, UtcMicros, canonical_sha256,
+    GitHubStackCapabilityV1, GitTopologyAnchorTargetV1, ManifestDigest, ObservabilityEnvelopeV1,
+    ObservabilityPayloadV1, ObservabilityTerminalResultV1, ObservationScopeV1, UtcMicros,
+    canonical_sha256,
     configuration::{ReviewTopologyKindV1, WorkTopologyPolicyV1},
     derive_git_topology_anchor_id,
 };
@@ -33,11 +28,9 @@ use super::{
 
 const EVENT_KIND: &str = "work.github_stack_capability.observed.v1";
 const DRIFT_EVENT_KIND: &str = "work.stack_drift.observed.v1";
-const TELEMETRY_DROP_EVENT_KIND: &str = "telemetry.drop.observed.v1";
 const OPERATION: &str = "probe_github_stacked_pull_request_capability";
 const DRIFT_OPERATION: &str = "observe_github_stack_drift";
 const PROBE_REVISION: &str = "github-stack-coordinator.v1";
-const DRIFT_RETENTION_MICROS: i64 = 30 * 86_400_000_000;
 
 /// Exact mount failure. Malformed scope or policy never becomes a misleading
 /// product observation.
@@ -96,17 +89,6 @@ pub enum GitHubStackDriftObservationResultV1 {
         event_kind: &'static str,
         reason: GitHubStackDriftObservationUnavailableV1,
     },
-}
-
-/// Fail-closed reasons for restoring coordinator intervals from the retained
-/// canonical observation authority.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GitHubStackDriftRecoveryErrorV1 {
-    InvalidScope,
-    DatabaseScopeMismatch,
-    ObservationStoreUnavailable,
-    IncompleteCoverage,
-    InvalidEvidence,
 }
 
 /// Project-scoped GitHub stack receipt owner. Observation time and provider state
@@ -450,100 +432,6 @@ pub fn record_github_stack_drifts(
     GitHubStackDriftObservationResultV1::Emitted { enqueued, dropped }
 }
 
-/// Reads the latest retained drift observations and returns only intervals
-/// that remain provably open. A closed interval is monotone: even a later
-/// replay of its open fact cannot reopen it during daemon restart.
-pub async fn recover_open_github_stack_drifts(
-    db: &RegisteredGlobalDb,
-    scope: &ResolvedScope,
-    now: UtcMicros,
-) -> Result<Vec<GitHubStackDriftObservationV1>, GitHubStackDriftRecoveryErrorV1> {
-    scope
-        .validate()
-        .map_err(|_| GitHubStackDriftRecoveryErrorV1::InvalidScope)?;
-    if db.binding().shard_id.scope.project_id() != Some(&scope.project_id) {
-        return Err(GitHubStackDriftRecoveryErrorV1::DatabaseScopeMismatch);
-    }
-    let page = super::RegisteredObservabilityPortV1::new(db)
-        .query(ObservabilityQueryV1 {
-            authorized_scope_ref: scope.project_id.as_str().to_owned(),
-            event_kinds: vec![
-                DRIFT_EVENT_KIND.to_owned(),
-                TELEMETRY_DROP_EVENT_KIND.to_owned(),
-            ],
-            horizon: ObservabilityHorizonV1 {
-                since_micros: now.0.saturating_sub(DRIFT_RETENTION_MICROS),
-                until_micros: now.0.saturating_add(1),
-            },
-            after_watermark: None,
-            limit: MAX_EXECUTION_TOPOLOGY_EVENTS_V1,
-        })
-        .await
-        .map_err(|_| GitHubStackDriftRecoveryErrorV1::ObservationStoreUnavailable)?;
-    if page.coverage != CoverageStateV1::Known || page.next_watermark.is_some() {
-        return Err(GitHubStackDriftRecoveryErrorV1::IncompleteCoverage);
-    }
-    let mut latest = BTreeMap::<ManifestDigest, GitHubStackDriftObservationV1>::new();
-    for event in page.events {
-        let drift = match &event.payload {
-            ObservabilityPayloadV1::WorkStackDrift(drift) if event.dropped_count == 0 => drift,
-            ObservabilityPayloadV1::TelemetryDrop(_) => {
-                return Err(GitHubStackDriftRecoveryErrorV1::IncompleteCoverage);
-            }
-            _ => return Err(GitHubStackDriftRecoveryErrorV1::InvalidEvidence),
-        };
-        let observation = GitHubStackDriftObservationV1::from_persisted(
-            &scope.scope_digest,
-            UtcMicros(event.event_time_micros),
-            drift.clone(),
-        )
-        .map_err(|_| GitHubStackDriftRecoveryErrorV1::InvalidEvidence)?;
-        let identity = ObservabilityProducerIdentityV1 {
-            authorized_scope_ref: event.scope_ref.clone(),
-            process_boot_id: event.process_boot_id.clone(),
-            producer_revision: event.producer_revision.clone(),
-            configuration_revision: event.configuration_revision.clone(),
-            policy_revision: event.policy_revision.clone(),
-        };
-        let expected = stack_drift_envelope(
-            &identity,
-            scope.project_id.as_str(),
-            &scope.scope_digest,
-            &observation,
-        )
-        .map_err(|_| GitHubStackDriftRecoveryErrorV1::InvalidEvidence)?;
-        if !same_drift_owner_fact(&event, &expected) {
-            return Err(GitHubStackDriftRecoveryErrorV1::InvalidEvidence);
-        }
-        match latest.get_mut(&observation.trace_id) {
-            None => {
-                latest.insert(observation.trace_id.clone(), observation);
-            }
-            Some(current) if current.drift.state == IntervalStateV1::Closed => {}
-            Some(current) if observation.drift.state == IntervalStateV1::Closed => {
-                *current = observation;
-            }
-            Some(current) if observation.observed_at > current.observed_at => {
-                *current = observation;
-            }
-            Some(_) => {}
-        }
-    }
-    let mut open_by_kind = BTreeMap::new();
-    for observation in latest.into_values().filter(|observation| {
-        observation.drift.state == IntervalStateV1::Open
-            && observation.drift.coverage == CoverageStateV1::Known
-    }) {
-        if open_by_kind
-            .insert(observation.drift.kind, observation)
-            .is_some()
-        {
-            return Err(GitHubStackDriftRecoveryErrorV1::InvalidEvidence);
-        }
-    }
-    Ok(open_by_kind.into_values().collect())
-}
-
 fn stack_drift_envelope(
     identity: &ObservabilityProducerIdentityV1,
     scope_ref: &str,
@@ -568,25 +456,6 @@ fn stack_drift_envelope(
             payload: ObservabilityPayloadV1::WorkStackDrift(observation.drift.clone()),
         },
     )
-}
-
-fn same_drift_owner_fact(
-    persisted: &ObservabilityEnvelopeV1,
-    expected: &ObservabilityEnvelopeV1,
-) -> bool {
-    persisted.event_id == expected.event_id
-        && persisted.event_kind == expected.event_kind
-        && persisted.idempotency_key == expected.idempotency_key
-        && persisted.trace_id == expected.trace_id
-        && persisted.scope_ref == expected.scope_ref
-        && persisted.capability == expected.capability
-        && persisted.operation == expected.operation
-        && persisted.event_time_micros == expected.event_time_micros
-        && persisted.observation_time_micros == expected.observation_time_micros
-        && persisted.valid_from_micros == expected.valid_from_micros
-        && persisted.valid_until_micros == expected.valid_until_micros
-        && persisted.coverage == expected.coverage
-        && persisted.payload == expected.payload
 }
 
 const fn drift_unavailable(

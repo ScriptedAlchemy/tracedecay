@@ -14,7 +14,7 @@ const WORK_READ_PARTS = [
   'placement-status',
 ] as const;
 
-export type WorkReadPart = (typeof WORK_READ_PARTS)[number];
+type WorkReadPart = (typeof WORK_READ_PARTS)[number];
 
 export function workQueryKey(
   scope: string,

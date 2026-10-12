@@ -4,7 +4,7 @@
  */
 import { timeToX } from '../layout.ts';
 import type { SceneDensity } from '../density.ts';
-import type { FocusTreatment, SceneLane, TemporalSceneModel } from '../types.ts';
+import type { FocusTreatment, SceneLane, ScenePath, TemporalSceneModel } from '../types.ts';
 
 export interface SceneFrame {
   readonly model: TemporalSceneModel;
@@ -17,11 +17,11 @@ export interface SceneFrame {
 }
 
 /** Below this row height a lane cannot hold a glyph plate and aggregates. */
-export const LEGIBLE_PITCH_PX = 22;
+const LEGIBLE_PITCH_PX = 22;
 /** Below this gap between neighbouring marks a lane aggregates. */
-export const COLLIDE_PX = 9;
+const COLLIDE_PX = 9;
 /** The oldest record in the page keeps this share of full luminance. */
-export const RECENCY_FLOOR = 0.5;
+const RECENCY_FLOOR = 0.5;
 
 export function focusAlpha(focus: FocusTreatment): number {
   switch (focus) {
@@ -49,6 +49,10 @@ export function isLifted(focus: FocusTreatment): boolean {
 export function pathEnds(controls: readonly number[]): { x0: number; y0: number; x1: number; y1: number } {
   const n = controls.length;
   return { x0: controls[0] ?? 0, y0: controls[1] ?? 0, x1: controls[n - 2] ?? 0, y1: controls[n - 1] ?? 0 };
+}
+
+export function isLink(path: ScenePath): boolean {
+  return path.kind === 'spawn' || path.kind === 'handoff' || path.kind === 'rejoin' || path.kind === 'result';
 }
 
 /** The page's recency axis on screen: the oldest session start and NOW. */

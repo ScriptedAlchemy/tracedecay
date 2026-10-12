@@ -34,13 +34,13 @@ use tracedecay_contracts::{
     SourceMetadataRequest, TemporalState,
 };
 use tracedecay_domain::{
-    AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
-    CursorBindingMismatchV1, CursorBindingV1, ExactAdmissionRuleRevision, ExactFieldV1,
-    FileOccurrenceId, FreshnessVectorDigest, ManifestDigest, NodeKind, PrincipalId,
+    AuthorizationRevision, CodeGenerationId, CodeGenerationManifestV1, CodeSearchChunkId,
+    ComponentRevision, CursorBindingMismatchV1, CursorBindingV1, ExactAdmissionRuleRevision,
+    ExactFieldV1, FileOccurrenceId, FreshnessVectorDigest, ManifestDigest, NodeKind, PrincipalId,
     QueryNormalizationRevision, RelationEdgeKindV1, RetrievalBudget, RetrievalBudgetUsage,
-    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, SanitizerRevision,
-    ScoreDomainId, SingleRootScopeV1, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
-    VectorWatermark, canonical_sha256,
+    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, SanitizedCodeSnapshotV1,
+    SanitizerRevision, ScoreDomainId, SingleRootScopeV1, SymbolOccurrenceId, TemporalModeV1,
+    UtcMicros, VectorWatermark, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 
@@ -571,48 +571,12 @@ fn remaining_generation_resolution_wait(request: &RequestContext) -> Option<Dura
 
 fn base_request(
     context: &RetrievalPortContext<'_>,
-    latest: &LatestCompleteCodeIndexV1,
+    latest: &impl CallableServingGenerationV1,
     temporal_mode: TemporalModeV1,
     profile: &tracedecay_domain::FusionProfile,
 ) -> Result<RetrievalRequest, String> {
-    let generation = &latest.generation;
-    Ok(RetrievalRequest {
-        principal: typed::<PrincipalId>(context.request.actor().to_string())?,
-        scope: RetrievalScope {
-            privacy_domain: generation.manifest().privacy_domain.clone(),
-            root: SingleRootScopeV1 {
-                repository: generation.snapshot().repository.clone(),
-                worktree: generation.snapshot().worktree.clone(),
-                reference: generation.snapshot().reference.clone(),
-            },
-        },
-        temporal_mode,
-        snapshot: RetrievalSnapshot {
-            watermarks: VectorWatermark::default(),
-            freshness_digest: FreshnessVectorDigest::new(
-                generation.manifest().snapshot_digest.as_str(),
-            )
-            .map_err(|error| error.to_string())?,
-            authorization_revision: AuthorizationRevision::new(format!(
-                "authorization.grant.{}",
-                context.request.grant().revision
-            ))
-            .map_err(|error| error.to_string())?,
-            captured_at: generation.manifest().seal.sealed_at,
-        },
-        profile_id: profile.profile_id.clone(),
-        budget: profile.retrieval_budget,
-    })
-}
-
-fn text_base_request(
-    context: &RetrievalPortContext<'_>,
-    latest: &LatestCodeTextGenerationV1,
-    temporal_mode: TemporalModeV1,
-    profile: &tracedecay_domain::FusionProfile,
-) -> Result<RetrievalRequest, String> {
-    let manifest = latest.metadata().manifest();
-    let snapshot = latest.metadata().snapshot();
+    let manifest = latest.manifest();
+    let snapshot = latest.snapshot();
     Ok(RetrievalRequest {
         principal: typed::<PrincipalId>(context.request.actor().to_string())?,
         scope: RetrievalScope {
@@ -1629,14 +1593,72 @@ fn symbol_signature_line<'a>(
         .filter(|line| !line.is_empty())
 }
 
-struct PreparedCallableQueryV1 {
-    latest: LatestCompleteCodeIndexV1,
+struct PreparedCallableQueryV1<L> {
+    latest: L,
     query: PreparedQueryV1,
 }
 
-struct PreparedTextCallableQueryV1 {
-    latest: LatestCodeTextGenerationV1,
-    query: PreparedQueryV1,
+type PreparedTextCallableQueryV1 = PreparedCallableQueryV1<LatestCodeTextGenerationV1>;
+
+/// A serving generation a callable query resolves and binds its request to:
+/// the complete generation, or its sealed text generation alone.
+trait CallableServingGenerationV1: Sized {
+    fn manifest(&self) -> &CodeGenerationManifestV1;
+    fn snapshot(&self) -> &SanitizedCodeSnapshotV1;
+    async fn resolve(
+        registry: &CodeIndexSchedulerRegistryV1,
+        request: &RequestContext,
+        requested: &CodeGenerationId,
+        page: &tracedecay_contracts::PageRequest,
+        authority: &tracedecay_query::retrieval::QueryAuthorityV1,
+        routing: &PreparedQueryRoutingBindingsV1,
+    ) -> Result<Self, CallableCodeCursorError>;
+}
+
+impl CallableServingGenerationV1 for LatestCompleteCodeIndexV1 {
+    fn manifest(&self) -> &CodeGenerationManifestV1 {
+        self.generation.manifest()
+    }
+
+    fn snapshot(&self) -> &SanitizedCodeSnapshotV1 {
+        self.generation.snapshot()
+    }
+
+    async fn resolve(
+        registry: &CodeIndexSchedulerRegistryV1,
+        request: &RequestContext,
+        requested: &CodeGenerationId,
+        page: &tracedecay_contracts::PageRequest,
+        authority: &tracedecay_query::retrieval::QueryAuthorityV1,
+        routing: &PreparedQueryRoutingBindingsV1,
+    ) -> Result<Self, CallableCodeCursorError> {
+        registry
+            .resolve_serving_generation(request, requested, page, authority, routing)
+            .await
+    }
+}
+
+impl CallableServingGenerationV1 for LatestCodeTextGenerationV1 {
+    fn manifest(&self) -> &CodeGenerationManifestV1 {
+        self.metadata().manifest()
+    }
+
+    fn snapshot(&self) -> &SanitizedCodeSnapshotV1 {
+        self.metadata().snapshot()
+    }
+
+    async fn resolve(
+        registry: &CodeIndexSchedulerRegistryV1,
+        request: &RequestContext,
+        requested: &CodeGenerationId,
+        page: &tracedecay_contracts::PageRequest,
+        authority: &tracedecay_query::retrieval::QueryAuthorityV1,
+        routing: &PreparedQueryRoutingBindingsV1,
+    ) -> Result<Self, CallableCodeCursorError> {
+        registry
+            .resolve_text_serving_generation(request, requested, page, authority, routing)
+            .await
+    }
 }
 
 struct PreparedGraphCallableQueryV1 {
@@ -1676,19 +1698,9 @@ fn metered<T>(
     }
 }
 
-impl PreparedCallableQueryStateV1 for PreparedCallableQueryV1 {
+impl<L: CallableServingGenerationV1> PreparedCallableQueryStateV1 for PreparedCallableQueryV1<L> {
     fn generation(&self) -> &CodeGenerationId {
-        &self.latest.generation.manifest().generation_id
-    }
-
-    fn query(&self) -> &PreparedQueryV1 {
-        &self.query
-    }
-}
-
-impl PreparedCallableQueryStateV1 for PreparedTextCallableQueryV1 {
-    fn generation(&self) -> &CodeGenerationId {
-        &self.latest.metadata().manifest().generation_id
+        &self.latest.manifest().generation_id
     }
 
     fn query(&self) -> &PreparedQueryV1 {
@@ -1729,6 +1741,7 @@ fn prepared_query_binding(
 
 macro_rules! prepare_callable_query_or_return {
     (
+        $latest:ty,
         $registry:expr,
         $context:expr,
         $request:expr,
@@ -1741,42 +1754,7 @@ macro_rules! prepare_callable_query_or_return {
             return unavailable(query_finished_at());
         };
         match $registry
-            .prepare_callable_query(
-                &$context,
-                &$request.scope.generation,
-                &$request.meta.page,
-                $request.meta.temporal,
-                query_binding.clone(),
-            )
-            .await
-        {
-            Ok(prepared) => (prepared, query_binding),
-            Err(error) => {
-                return rejected_cursor(
-                    query_finished_at(),
-                    $request.scope.generation.clone(),
-                    error,
-                );
-            }
-        }
-    }};
-}
-
-macro_rules! prepare_text_callable_query_or_return {
-    (
-        $registry:expr,
-        $context:expr,
-        $request:expr,
-        $operation:expr,
-        [$($parameter:literal => $value:expr),* $(,)?]
-    ) => {{
-        let Ok(query_binding) = prepared_query_binding($operation, vec![
-            $(canonical_sha256(&$value).map(|digest| ($parameter, digest))),*
-        ]) else {
-            return unavailable(query_finished_at());
-        };
-        match $registry
-            .prepare_text_callable_query(
+            .prepare_callable_query::<$latest>(
                 &$context,
                 &$request.scope.generation,
                 &$request.meta.page,
@@ -1861,28 +1839,28 @@ macro_rules! resolve_graph_start_symbol {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
-    async fn prepare_callable_query(
+    async fn prepare_callable_query<L: CallableServingGenerationV1>(
         &self,
         context: &RetrievalPortContext<'_>,
         generation: &CodeGenerationId,
         page: &tracedecay_contracts::PageRequest,
         temporal: TemporalModeV1,
         query_binding: CursorBindingV1,
-    ) -> Result<PreparedCallableQueryV1, CallableCodeCursorError> {
+    ) -> Result<PreparedCallableQueryV1<L>, CallableCodeCursorError> {
         let authority = self
             .query_authority_for_scope(context.request.scope())
             .await
             .ok_or(CallableCodeCursorError::Unavailable)?;
         let routing = prepared_routing_bindings(context, temporal, query_binding, page.page_size)?;
-        let latest = self
-            .resolve_serving_generation(
-                context.request,
-                generation,
-                page,
-                authority.as_ref(),
-                &routing,
-            )
-            .await?;
+        let latest = L::resolve(
+            self,
+            context.request,
+            generation,
+            page,
+            authority.as_ref(),
+            &routing,
+        )
+        .await?;
         let base = base_request(context, &latest, temporal, authority.profile())
             .map_err(|_| CallableCodeCursorError::Unavailable)?;
         let query = PreparedQueryV1::prepare(
@@ -1891,38 +1869,6 @@ impl CodeIndexSchedulerRegistryV1 {
             page.cursor.as_ref().map(OpaqueCursor::as_str),
         )?;
         Ok(PreparedCallableQueryV1 { latest, query })
-    }
-
-    async fn prepare_text_callable_query(
-        &self,
-        context: &RetrievalPortContext<'_>,
-        generation: &CodeGenerationId,
-        page: &tracedecay_contracts::PageRequest,
-        temporal: TemporalModeV1,
-        query_binding: CursorBindingV1,
-    ) -> Result<PreparedTextCallableQueryV1, CallableCodeCursorError> {
-        let authority = self
-            .query_authority_for_scope(context.request.scope())
-            .await
-            .ok_or(CallableCodeCursorError::Unavailable)?;
-        let routing = prepared_routing_bindings(context, temporal, query_binding, page.page_size)?;
-        let latest = self
-            .resolve_text_serving_generation(
-                context.request,
-                generation,
-                page,
-                authority.as_ref(),
-                &routing,
-            )
-            .await?;
-        let base = text_base_request(context, &latest, temporal, authority.profile())
-            .map_err(|_| CallableCodeCursorError::Unavailable)?;
-        let query = PreparedQueryV1::prepare(
-            authority,
-            base,
-            page.cursor.as_ref().map(OpaqueCursor::as_str),
-        )?;
-        Ok(PreparedTextCallableQueryV1 { latest, query })
     }
 
     async fn prepare_graph_callable_query(
@@ -1947,7 +1893,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 &routing,
             )
             .await?;
-        let base = text_base_request(context, &latest, temporal, authority.profile())
+        let base = base_request(context, &latest, temporal, authority.profile())
             .map_err(|_| CallableCodeCursorError::Unavailable)?;
         let query = PreparedQueryV1::prepare(
             authority,
@@ -2845,7 +2791,8 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a ExactOccurrenceRequest,
     ) -> CallableCodeQueryFuture<'a, ExactOccurrenceRecord> {
         Box::pin(async move {
-            let (prepared, query_binding) = prepare_text_callable_query_or_return!(
+            let (prepared, query_binding) = prepare_callable_query_or_return!(
+                LatestCodeTextGenerationV1,
                 self,
                 context,
                 request,
@@ -2868,7 +2815,8 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a PhraseSearchRequest,
     ) -> CallableCodeQueryFuture<'a, LexicalOccurrenceRecord> {
         Box::pin(async move {
-            let (prepared, query_binding) = prepare_text_callable_query_or_return!(
+            let (prepared, query_binding) = prepare_callable_query_or_return!(
+                LatestCodeTextGenerationV1,
                 self,
                 context,
                 request,
@@ -3055,6 +3003,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
             let (prepared, binding) = prepare_callable_query_or_return!(
+                LatestCompleteCodeIndexV1,
                 self,
                 context,
                 request,
@@ -3138,6 +3087,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
             let (prepared, binding) = prepare_callable_query_or_return!(
+                LatestCompleteCodeIndexV1,
                 self,
                 context,
                 request,
@@ -3184,6 +3134,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
             let (prepared, binding) = prepare_callable_query_or_return!(
+                LatestCompleteCodeIndexV1,
                 self,
                 context,
                 request,
@@ -3642,6 +3593,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, SourceMetadataRecord> {
         Box::pin(async move {
             let (prepared, binding) = prepare_callable_query_or_return!(
+                LatestCompleteCodeIndexV1,
                 self,
                 context,
                 request,
@@ -3706,6 +3658,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, CodeFacetRecord> {
         Box::pin(async move {
             let (prepared, binding) = prepare_callable_query_or_return!(
+                LatestCompleteCodeIndexV1,
                 self,
                 context,
                 request,
@@ -3779,6 +3732,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
     ) -> PortFuture<'a, CodeTimelineRecord> {
         Box::pin(async move {
             let (prepared, binding) = prepare_callable_query_or_return!(
+                LatestCompleteCodeIndexV1,
                 self,
                 context,
                 request,
@@ -4061,7 +4015,7 @@ mod tests {
         )
         .expect("request binding");
         let prepared = registry
-            .prepare_text_callable_query(
+            .prepare_callable_query::<LatestCodeTextGenerationV1>(
                 &port_context,
                 &generation,
                 &request.meta.page,

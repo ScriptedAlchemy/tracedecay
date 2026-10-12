@@ -57,7 +57,7 @@ pub(in crate::fact_store) fn project_memory_automatic_fact_request_value(
         "owner": request.owner(),
         "operation_id": request.operation_id().as_str(),
         "content": request.content(),
-        "category": super::super::primitives::project_memory_category_label(request.category()),
+        "category": request.category().as_str(),
         "source_label": request.source_label(),
         "tags": request.tags(),
         "entities": request.entities(),

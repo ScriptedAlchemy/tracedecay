@@ -108,11 +108,6 @@ where
         port.recover_startup(observed_at)?;
         Ok(Self { port })
     }
-
-    #[cfg(test)]
-    pub fn mutation_queue_for_test(&self) -> &std::sync::Arc<RepositoryMutationQueue> {
-        self.port.mutation_queue_for_test()
-    }
 }
 
 impl<S, N, C, A> DaemonGitIndexTransactionService<S, N, C, A>
@@ -128,16 +123,6 @@ where
         cancellation_requested: impl Fn() -> Option<UtcMicros>,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
         self.port.apply_cancellable(request, cancellation_requested)
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
-    pub fn quarantine_preview_for_test(
-        &self,
-        preview: &tracedecay_domain::GitIndexPreviewV1,
-        observed_at: UtcMicros,
-    ) -> Result<(), GitIndexTransactionPortError> {
-        self.port.quarantine_preview_for_test(preview, observed_at)
     }
 }
 

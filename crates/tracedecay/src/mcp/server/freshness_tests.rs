@@ -1,4 +1,5 @@
 use super::{DatabaseOwnerReconciler, McpServer, McpServerConstructionContext};
+use crate::test_support::git::git;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -44,20 +45,6 @@ impl FreshnessRuntime {
             .await
             .expect("registered freshness profile database")
     }
-}
-
-fn git(root: &std::path::Path, args: &[&str]) {
-    let ok = std::process::Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .current_dir(root)
-    .args(args)
-    .output()
-    .expect("git runs")
-    .status
-    .success();
-    assert!(ok, "git {args:?} failed");
 }
 
 struct FreshnessFixtureAuthority {

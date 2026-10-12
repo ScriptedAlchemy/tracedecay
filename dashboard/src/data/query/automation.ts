@@ -325,8 +325,8 @@ const CuratorApplicationProblemClaimSchema = z.object({
 
 /** The admitted run; its terminal is the run-ledger row for `run_id`. */
 export type AutomaticCuratorReceipt = FactStoreCurateResultV1;
-export type AutomaticCuratorPartialEffect = ApplicationProblemEnvelope;
-export type AutomaticCuratorResetRequired = ApplicationProblemEnvelope;
+type AutomaticCuratorPartialEffect = ApplicationProblemEnvelope;
+type AutomaticCuratorResetRequired = ApplicationProblemEnvelope;
 
 export type AutomaticCuratorResult =
   | { outcome: "started"; receipt: AutomaticCuratorReceipt }
@@ -674,7 +674,7 @@ export function tallied<Row>(
 }
 
 /** A tallied list whose handler also names the request cap it applied. */
-export function talliedCapped<Row>(
+function talliedCapped<Row>(
   rows: readonly Row[],
   count: number,
   limit: number,

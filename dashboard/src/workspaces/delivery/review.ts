@@ -19,7 +19,7 @@ import type { EvidenceGrade } from './evidence.ts';
  */
 
 /** `refs/heads/feature/x` → `feature/x`; Compare resolves branch names. */
-export function branchName(branchRef: string): string {
+function branchName(branchRef: string): string {
   return branchRef.startsWith('refs/heads/') ? branchRef.slice('refs/heads/'.length) : branchRef;
 }
 
@@ -53,7 +53,7 @@ export interface ReviewThread {
   readonly compareHref: string;
 }
 
-export interface ReviewFile {
+interface ReviewFile {
   readonly path: string;
   readonly threads: readonly ReviewThread[];
 }

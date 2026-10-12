@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tracedecay_mcp::JsonRpcResponse;
 
+use super::git;
 use crate::daemon::ProductionProjectCompositionHarnessV1;
 
 const IMPACT_TOOL: &str = "tracedecay_feedback_impact";
@@ -31,7 +32,7 @@ async fn feedback_impact_projects_the_published_cycle_and_conceals_other_handles
     std::fs::create_dir_all(project.join("src")).expect("source dir");
     std::fs::write(project.join("src/lib.rs"), PROBE_SOURCE).expect("source file");
     commit_project(&project);
-    let head = git_head(&project);
+    let head = git(&project, &["rev-parse", "HEAD"]);
     let document_uri = url::Url::from_file_path(project.join("src/lib.rs"))
         .expect("document file URI")
         .to_string();
@@ -469,37 +470,10 @@ fn successful_envelope(response: &JsonRpcResponse) -> Value {
 }
 
 fn commit_project(project: &Path) {
-    let git = |arguments: &[&str]| {
-        let status = Command::new("git")
-            .current_dir(project)
-            .args(arguments)
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git {arguments:?}");
-    };
-    git(&["init", "--quiet", "-b", "master"]);
-    git(&["add", "."]);
-    git(&[
-        "-c",
-        "user.name=TraceDecay Test",
-        "-c",
-        "user.email=tracedecay@example.invalid",
-        "commit",
-        "--quiet",
-        "-m",
-        "test: seed feedback impact",
-    ]);
-}
-
-fn git_head(project: &Path) -> String {
-    let output = Command::new("git")
-        .current_dir(project)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .expect("read HEAD");
-    assert!(output.status.success(), "git rev-parse HEAD");
-    String::from_utf8(output.stdout)
-        .expect("HEAD utf-8")
-        .trim()
-        .to_owned()
+    git(project, &["init", "--quiet", "-b", "master"]);
+    git(project, &["add", "."]);
+    git(
+        project,
+        &["commit", "--quiet", "-m", "test: seed feedback impact"],
+    );
 }

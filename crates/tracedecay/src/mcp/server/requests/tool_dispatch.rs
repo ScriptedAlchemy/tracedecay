@@ -1,7 +1,6 @@
 //! Project-route selection, tool-dispatch assembly, and identical-read sharing.
 
 use super::*;
-use crate::mcp::tools::handlers::ServedCodeGraphSlot;
 use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
 
 use tracedecay_mcp::server::{ReadFlightClaim, tool_allows_identical_read_coalescing};
@@ -222,10 +221,6 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Tool dispatch is one registry match onto the owning handler future."
-    )]
     pub(super) async fn execute_tool_dispatch(
         &self,
         cg: &TraceDecay,
@@ -264,70 +259,13 @@ impl McpServer {
             tool_name,
             handler_arguments,
             ToolCallRegistryOptions {
-                global_db: self.registry_db.as_ref(),
-                server_stats: None,
-                accounting_db: self.accounting_db.as_deref(),
-                registered_project_session_db: self.project_session_db.clone(),
-                registered_profile_session_db: self.profile_session_db.clone(),
-                registered_savings_db: self.accounting_db.clone(),
-                dashboard_session_retrieval_service: self
-                    .project_application_retrieval
-                    .as_ref()
-                    .map(|mounted| Arc::clone(&mounted.service)),
-                dashboard_session_retrieval_identity: self
-                    .project_application_retrieval
-                    .as_ref()
-                    .map(|mounted| mounted.identity.clone()),
-                daemon_user_profile_id: self
-                    .profile_identity
-                    .as_ref()
-                    .map(|identity| identity.profile_id().clone()),
-                profile: self.profile.as_ref(),
                 resolved_project_route,
-                automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
-                automation_writer: self.dashboard_automation_writer.clone(),
-                doctor_report_reader: self.dashboard_doctor_report_reader.get().cloned(),
-                remote_operational_status: self.remote_operational_status.clone(),
-                code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
-                code_index_readiness_waiter: self.code_index_readiness_waiter.clone(),
-                feedback_status_reader: self.dashboard_feedback_status_reader.clone(),
-                pr_autotrack_reader: self.dashboard_pr_autotrack_reader.clone(),
-                diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
                 application_invocation_executor,
-                application_invocation_target,
-                dashboard_application_invocation_executor: self
-                    .application_invocation_executor
-                    .clone(),
-                daemon_invocation_service: self.daemon_invocation_service.as_ref(),
-                dashboard_delivery_settlement_authority: self.delivery_settlement_authority.clone(),
                 application_request_id,
                 application_deadline,
                 application_cancellation,
-                code_index_publication_identity: self.code_index_publication_identity.clone(),
-                code_index_reconcile_sink: self.code_index_reconcile_sink.clone(),
-                code_index_search_executor: self.code_index_search_executor.clone(),
-                code_index_similar_executor: self.code_index_similar_executor.clone(),
-                code_index_redundancy_executor: self.code_index_redundancy_executor.clone(),
-                code_index_branch_diff_executor: self.code_index_branch_diff_executor.clone(),
-                code_index_search_authority: self.code_index_search_authority.clone(),
-                admitted_project_scope: self.admitted_project_scope.clone(),
-                code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
-                code_graph_read_admission_port: self.code_graph_read_admission_port.clone(),
-                verified_graph_query_port: self.verified_graph_query_port.clone(),
-                code_index_ignored_dependency_admission: self
-                    .code_index_ignored_dependency_admission
-                    .clone(),
-                generation_census_reader: self.generation_census_reader(),
-                retained_project_server_resolver: self.retained_project_server_resolver.clone(),
-                session_sync_service: session_sync_service.as_deref(),
-                served_code_graph: ServedCodeGraphSlot::default(),
-                session_authorities: tracedecay_mcp::handlers::SessionAuthorities::new(
-                    self.project_session_db.as_ref(),
-                    self.profile_session_db.as_ref(),
-                )
-                .with_profile_identity(self.profile_identity.clone())
-                .with_background_cpu(self.background_cpu.clone())
-                .with_project_lcm_authority(self.project_lcm_authority.as_deref()),
+                application_invocation_target,
+                ..self.tool_call_registry_options(session_sync_service.as_deref())
             },
         );
         // A composed daemon serves one transcript owner. The refresh

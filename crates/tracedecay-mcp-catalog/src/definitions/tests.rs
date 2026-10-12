@@ -176,12 +176,12 @@ fn lcm_history_reads_accept_an_as_of_cutoff() {
     let cutoff = json!({ "kind": "as_of", "cutoff": 1_700_000_000_000_000_i64 });
     for (definition, operation, arguments) in [
         (
-            def_lcm_load_session(),
+            handwritten("tracedecay_lcm_load_session"),
             ApplicationSurfaceOperation::LcmLoadSession,
             json!({ "session_id": "session-a", "temporal_mode": cutoff }),
         ),
         (
-            def_lcm_grep(),
+            handwritten("tracedecay_lcm_grep"),
             ApplicationSurfaceOperation::LcmGrep,
             json!({ "query": "retention", "temporal_mode": cutoff }),
         ),
@@ -367,4 +367,157 @@ fn status_and_skill_view_default_to_summaries() {
         view.input_schema["properties"]["include_support_files"]["default"],
         serde_json::json!(false)
     );
+}
+
+/// One handwritten row's definition before the `tools/list` passes run.
+pub(super) fn handwritten(name: &str) -> ToolDefinition {
+    let registry = tracedecay_contracts::mcp_executable_binding_registry().expect("registry");
+    let tool = HANDWRITTEN_TOOLS
+        .iter()
+        .find(|tool| tool.name == name)
+        .unwrap_or_else(|| panic!("{name} is a handwritten tool"));
+    handwritten_definition(
+        tool,
+        handwritten_input_schema(tool, registry).expect("handwritten schema"),
+    )
+}
+
+fn advertised(name: &str) -> ToolDefinition {
+    get_tool_definitions()
+        .expect("tool definitions")
+        .into_iter()
+        .find(|definition| definition.name == name)
+        .unwrap_or_else(|| panic!("{name} is advertised"))
+}
+
+/// A host keys tools by name, so a second row or a catalog projection that
+/// reuses a handwritten name would shadow one of the two definitions.
+#[test]
+fn every_advertised_tool_name_is_unique() {
+    let definitions = get_tool_definitions().expect("tool definitions");
+    let mut names = BTreeSet::new();
+    for definition in &definitions {
+        assert!(
+            names.insert(definition.name.as_str()),
+            "{} is advertised twice",
+            definition.name
+        );
+    }
+    for tool in HANDWRITTEN_TOOLS {
+        assert!(names.contains(tool.name), "{} is not advertised", tool.name);
+    }
+}
+
+/// Without an advertised `path` an agent cannot scope the report, and a
+/// fixture corpus consumes the whole page before any product source is
+/// reported.
+#[test]
+fn dead_code_advertises_an_optional_path_filter_like_its_siblings() {
+    let definition = advertised("tracedecay_dead_code");
+    assert_eq!(
+        definition.input_schema["properties"]["path"]["type"],
+        json!(["string", "null"])
+    );
+    assert!(
+        definition.input_schema.get("required").is_none(),
+        "every dead-code parameter stays optional"
+    );
+}
+
+#[test]
+fn affected_test_execution_requires_an_explicit_file_manifest() {
+    assert_eq!(
+        advertised("tracedecay_run_affected_tests").input_schema["required"],
+        json!(["changed_paths"])
+    );
+}
+
+#[test]
+fn remove_and_supersede_document_unknown_ids_as_refused() {
+    for name in [
+        "tracedecay_fact_store_remove",
+        "tracedecay_fact_store_supersede",
+    ] {
+        let description = handwritten(name).description;
+        assert!(
+            description.contains("refused as `not_found_or_not_authorized`"),
+            "{name}: {description}"
+        );
+    }
+}
+
+mod search_schema_tests {
+    use tracedecay_contracts::retrieval::{
+        SEARCH_MAX_LEXICAL_ALIASES, SEARCH_MAX_LEXICAL_ANCHORS, SEARCH_MAX_LEXICAL_PROXIMITY_GAP,
+    };
+
+    fn search_schema() -> serde_json::Value {
+        crate::get_tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.name == "tracedecay_search")
+            .expect("tracedecay_search definition")
+            .input_schema
+    }
+
+    /// The schema a `$ref` into the tool schema's `$defs` names, or `node`.
+    fn definition<'a>(
+        schema: &'a serde_json::Value,
+        node: &'a serde_json::Value,
+    ) -> &'a serde_json::Value {
+        match node["$ref"]
+            .as_str()
+            .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        {
+            Some(name) => &schema["$defs"][name],
+            None => node,
+        }
+    }
+
+    #[test]
+    fn search_schema_has_no_semantic_mode_and_keeps_the_cursor() {
+        let schema = search_schema();
+        assert!(schema["properties"]["semantic_mode"].is_null());
+        assert_eq!(
+            schema["properties"]["cursor"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+    }
+
+    #[test]
+    fn search_schema_declares_lexical_routing_parameters() {
+        let schema = search_schema();
+        let anchors = &schema["properties"]["lexical_anchors"];
+        assert_eq!(anchors["type"], serde_json::json!(["array", "null"]));
+        assert_eq!(anchors["items"]["type"], "string");
+        assert_eq!(
+            anchors["maxItems"],
+            serde_json::json!(SEARCH_MAX_LEXICAL_ANCHORS)
+        );
+        assert_eq!(
+            schema["properties"]["prefer_symbol"]["type"],
+            serde_json::json!(["boolean", "null"])
+        );
+        assert_eq!(
+            schema["properties"]["lexical_aliases"]["maxItems"],
+            serde_json::json!(SEARCH_MAX_LEXICAL_ALIASES)
+        );
+        let proximity = definition(
+            &schema,
+            &schema["properties"]["lexical_proximities"]["items"],
+        );
+        assert_eq!(
+            proximity["properties"]["maximum_gap"]["maximum"],
+            serde_json::json!(SEARCH_MAX_LEXICAL_PROXIMITY_GAP)
+        );
+        let filter = definition(
+            &schema,
+            &schema["properties"]["lexical_field_filters"]["items"],
+        );
+        assert!(
+            definition(&schema, &filter["properties"]["field"])["enum"]
+                .as_array()
+                .is_some_and(|fields| fields.contains(&serde_json::json!("documentation")))
+        );
+    }
 }

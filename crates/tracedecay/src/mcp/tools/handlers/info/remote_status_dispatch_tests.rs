@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_contracts::remote::status::{
     RemoteOperationalStatusReadV1, RemoteOperationalStatusV1, RemoteSpoolOperationalStatusV1,
@@ -16,9 +16,8 @@ use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
 
 use crate::mcp::tools::handlers::ToolCallRegistryOptions;
 use crate::mcp::tools::handlers::dispatch_test_support::{
-    SelectorProfile, dispatch_on_graph_authority,
+    SelectorProfile, dispatch_on_graph_authority, tool_json,
 };
-use tracedecay_mcp::ToolResult;
 use tracedecay_project::project::TraceDecay;
 
 fn available_authority() -> CurrentRemoteAuthorityStateV1 {
@@ -60,15 +59,6 @@ fn observed_fixture() -> RemoteOperationalStatusReadV1 {
         status,
         coverage: DoctorCoverageCompletenessV1::Complete,
     }
-}
-
-fn parse_tool_json(result: &ToolResult) -> Value {
-    serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("tool JSON text"),
-    )
-    .expect("parse tool JSON")
 }
 
 #[tokio::test]
@@ -114,7 +104,7 @@ async fn dispatch_returns_provider_json_or_typed_unavailable() {
     .await
     .expect("installed provider dispatches");
     assert_eq!(
-        parse_tool_json(&observed),
+        tool_json(&observed),
         serde_json::to_value(&expected).unwrap()
     );
 
@@ -126,7 +116,7 @@ async fn dispatch_returns_provider_json_or_typed_unavailable() {
     )
     .await
     .expect("absent provider dispatches");
-    let parsed = parse_tool_json(&absent);
+    let parsed = tool_json(&absent);
     assert_eq!(parsed, json!({ "kind": "unavailable" }));
     assert_ne!(parsed, json!({}));
 }

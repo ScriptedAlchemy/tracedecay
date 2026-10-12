@@ -28,7 +28,7 @@ import { cn } from "../../ui/cn.ts";
 
 export type KnowledgeViewKind = "facts" | "geometry" | "curation" | "oplog";
 
-export const KNOWLEDGE_VIEWS: readonly KnowledgeViewKind[] = [
+const KNOWLEDGE_VIEWS: readonly KnowledgeViewKind[] = [
   "facts",
   "geometry",
   "curation",
@@ -37,7 +37,7 @@ export const KNOWLEDGE_VIEWS: readonly KnowledgeViewKind[] = [
 
 /** The query parameter that positions the camera, so a view survives a reload
  * and can be linked to. */
-export const KNOWLEDGE_VIEW_PARAM = "view";
+const KNOWLEDGE_VIEW_PARAM = "view";
 
 export function knowledgeViewLabel(kind: KnowledgeViewKind): string {
   switch (kind) {

@@ -12,8 +12,8 @@ use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::cli::ProjectsAction;
 use crate::commands::{
-    ProfileOfflineAuthority, admin_cli_result, admin_cli_result_mismatch, join_outcome_and_restore,
-    registry_context, take_profile_offline, try_admit_profile_registry,
+    ProfileOfflineAuthority, RestoreWording, admin_cli_result, admin_cli_result_mismatch,
+    join_outcome_and_restore, registry_context, take_profile_offline, try_admit_profile_registry,
 };
 
 const MAX_LIMIT: usize = 1_000;
@@ -113,7 +113,12 @@ async fn handle_projects_forget(
     )
     .await;
     let restore = profile_offline.finish();
-    join_outcome_and_restore("projects forget", outcome, restore)
+    join_outcome_and_restore(
+        RestoreWording::ManagedService,
+        "projects forget",
+        outcome,
+        restore,
+    )
 }
 
 /// The destructive forget body, run inside the profile-offline window. The

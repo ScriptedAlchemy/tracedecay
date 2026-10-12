@@ -46,19 +46,19 @@ import {
 
 /** How many attempts a page asks for. The contract admits 1..=1000; the daemon
  * decides what it can actually return and says so in `coverage`. */
-export const WORK_ATTEMPT_PAGE_SIZE = 250;
+const WORK_ATTEMPT_PAGE_SIZE = 250;
 
 /** The product-visible accounting window. It is finite so the backend can
  * prove the horizon, while still long enough to cover the normal RC operator
  * review. A capped result stays a typed capped result; this request never
  * chases it into an invented total. */
-export const WORK_TOPOLOGY_METRICS_WINDOW_MICROS = 30 * 24 * 60 * 60 * 1_000_000;
-export const WORK_TOPOLOGY_METRICS_MAX_EVENTS = 10_000;
+const WORK_TOPOLOGY_METRICS_WINDOW_MICROS = 30 * 24 * 60 * 60 * 1_000_000;
+const WORK_TOPOLOGY_METRICS_MAX_EVENTS = 10_000;
 
 /** Build the one canonical accounting request shared by Work, Observatory,
  * and Costs consumers. `untilMicros` is injectable for a stable test, but a
  * real read mints its upper bound at fetch time. */
-export function workTopologyMetricsRequest(
+function workTopologyMetricsRequest(
   untilMicros: number = Date.now() * 1_000,
 ): ExecutionTopologyMetricsRequestV1 {
   return {

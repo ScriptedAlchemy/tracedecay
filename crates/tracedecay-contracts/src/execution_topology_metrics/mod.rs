@@ -48,7 +48,7 @@ pub use rollup_read::{
     ExecutionTopologyRollupFragmentPageV1, ExecutionTopologyRollupFragmentQueryV1,
     ExecutionTopologyRollupQueryPort, execution_topology_rollup_metrics,
 };
-pub use support::EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1;
+pub use support::{EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1, worse_state};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

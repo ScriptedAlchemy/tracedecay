@@ -1,13 +1,12 @@
 //! Mounted sealed-generation runtime-census journey coverage.
 
 use std::fs;
-use std::path::Path;
-use std::process::Command;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::mcp::tools::handlers::{ToolCallRegistryOptions, dispatch_on_graph_authority};
+use crate::test_support::git::git;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::project_reads::project_code_index_generation_census_reader;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
@@ -25,9 +24,9 @@ async fn runtime_mcp_refuses_counts_until_the_mounted_graph_can_serve_queries() 
     let source = "fn alpha() {}\nfn beta() { alpha(); }\n";
     fs::create_dir_all(project.join("src")).expect("create fixture source root");
     fs::write(project.join("src/lib.rs"), source).expect("write fixture source");
-    run_git_in(&project, &["init", "-q", "-b", "main"]);
-    run_git_in(&project, &["add", "."]);
-    run_git_in(&project, &["commit", "-qm", "sealed generation fixture"]);
+    git(&project, &["init", "-q", "-b", "main"]);
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-qm", "sealed generation fixture"]);
     let project_id = tracedecay_domain::ProjectId::new("project.mcp-runtime-generation-census")
         .expect("fixture project identity");
     let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
@@ -124,21 +123,4 @@ async fn runtime_mcp_refuses_counts_until_the_mounted_graph_can_serve_queries() 
     schedulers.shutdown().await;
     cg.checkpoint().await.expect("checkpoint fixture database");
     cg.close();
-}
-
-fn run_git_in(root: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
-        .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
-        .output()
-        .expect("git command should run");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }

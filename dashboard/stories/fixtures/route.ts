@@ -9,7 +9,7 @@ import type { Page, Route } from '@playwright/test';
 import { lookupFixture } from './data.ts';
 
 /** Requests no fixture modelled, as `METHOD /path?query`, in arrival order. */
-export type UnmatchedRequests = readonly string[];
+type UnmatchedRequests = readonly string[];
 
 async function fulfillApi(route: Route, unmatched: string[]): Promise<void> {
   const request = route.request();

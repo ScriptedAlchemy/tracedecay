@@ -57,7 +57,7 @@ export interface SceneDensity {
   readonly tailX: number | null;
 }
 
-export interface DensityOptions {
+interface DensityOptions {
   readonly reveal: RevealBoundary | null;
   readonly hiddenKinds: ReadonlySet<JourneyEventKind>;
 }
@@ -89,7 +89,7 @@ interface LaneIndex {
 /** The window-independent half of the density summary: who belongs to each
  * scene lane and which of their records are revealed. Rebuilt only when the
  * loaded page, the bundle membership, the filters or the cursor change. */
-export interface DensityIndex {
+interface DensityIndex {
   readonly lanes: ReadonlyMap<string, LaneIndex>;
   readonly revealTime: number | null;
   readonly headTime: number | null;

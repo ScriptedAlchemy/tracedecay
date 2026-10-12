@@ -64,8 +64,7 @@ pub use model::{
 pub use planner::{
     HOST_BUNDLE_STAGE_ROOT_RELATIVE, HostArtifactActionV1, HostArtifactMutationV1,
     HostBundleLifecycleRequestV1, HostBundleMutationPlanV1, ObservedArtifactKindV1,
-    ObservedHostArtifactV1, dry_run_host_bundle_lifecycle_at,
-    dry_run_host_bundle_lifecycle_with_lifecycle_root_at,
+    ObservedHostArtifactV1, dry_run_host_bundle_lifecycle_with_lifecycle_root_at,
     dry_run_host_component_set_lifecycle_with_lifecycle_root_at, inspect_install_target,
     plan_complete_lifecycle_mutation, plan_lifecycle_mutation,
     plan_verified_complete_lifecycle_mutation,

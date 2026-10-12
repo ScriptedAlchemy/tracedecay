@@ -34,7 +34,7 @@ import type { WorkProductView, WorkTaskView } from './workProductView.ts';
 
 /** The query parameter that selects a task, so a board position survives a
  * reload and can be linked to. */
-export const TASK_PARAM = 'task';
+const TASK_PARAM = 'task';
 
 export function useSelectedTask(): [string | null, (taskId: string | null) => void] {
   const [params, setParams] = useSearchParams();

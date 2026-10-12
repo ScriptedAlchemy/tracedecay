@@ -26,7 +26,7 @@ use dirty::{dirty_claim_is_current, range_has_dirty_day, validate_dirty_claim};
 use frontier::{empty_day_claim_is_current, settle_empty_day_claim, validate_empty_day_claim};
 use types::{
     MAX_FRAGMENT_JSON_BYTES, MAX_FRAGMENT_QUERY_BYTES, OBSERVABILITY_ROLLUP_RETENTION_DAYS_V1,
-    PublishedGeneration, SECONDS_PER_DAY, merge_coverage, validate_day, validate_identifier,
+    PublishedGeneration, SECONDS_PER_DAY, validate_day, validate_identifier,
 };
 
 impl RegisteredGlobalDb {

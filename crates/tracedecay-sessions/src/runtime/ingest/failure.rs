@@ -88,19 +88,6 @@ impl TranscriptCatchUpFailure {
     pub(super) const fn source_scan_partial(provider: &'static str, retryable: bool) -> Self {
         Self::new(provider, "scan", "source_scan_partial", retryable)
     }
-
-    /// Mutable session ingestion requires a retained daemon registry mount.
-    /// Compatibility callers without that mount must fail before touching the
-    /// legacy database or any provider source.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub(super) const fn registered_authority_unavailable(provider: &'static str) -> Self {
-        Self::new(
-            provider,
-            "host_admission",
-            "registered_authority_unavailable",
-            true,
-        )
-    }
 }
 
 impl ProviderRunFailure for TranscriptCatchUpFailure {

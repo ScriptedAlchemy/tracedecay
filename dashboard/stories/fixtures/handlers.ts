@@ -26,7 +26,7 @@ function fixtureResponse(request: Request): Response | undefined {
 }
 
 /** Every modelled `/api` GET, resolved from the pathname to its fixture payload. */
-export const handlers = [
+const handlers = [
   http.get('*/api/events', () =>
     // The event stream is intentionally empty in fixtures: the app degrades to
     // its "offline" liveness state, which is a valid surface to audit.
@@ -93,7 +93,7 @@ const SPA_INDEX_HTML =
   '<!doctype html><html><head><title>TraceDecay</title></head><body><div id="root"></div></body></html>';
 
 /** The response (or transport failure) for one fault. */
-export function faultResponse(fault: HttpFault): Response {
+function faultResponse(fault: HttpFault): Response {
   switch (fault) {
     case 'server_error':
       return new HttpResponse('handler panicked', { status: 500 });

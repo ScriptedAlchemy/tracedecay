@@ -14,7 +14,7 @@ import type { TopologyInteraction } from './DelegationTopology.tsx';
  */
 export type AgentsView = 'topology' | 'timeline';
 
-export const AGENTS_VIEW_PARAM = 'view';
+const AGENTS_VIEW_PARAM = 'view';
 
 const AGENTS_VIEWS: readonly { readonly value: AgentsView; readonly label: string; readonly note: string }[] = [
   { value: 'topology', label: 'Topology', note: 'generations across · rings sized by sessions beneath' },
@@ -82,7 +82,7 @@ export function AgentsViewSwitcher({
 }
 
 /** One accessible name for a mark, whichever renderer draws it. */
-export function markAccessibleName(mark: TopologyMark, selected: boolean): string {
+function markAccessibleName(mark: TopologyMark, selected: boolean): string {
   if (mark.kind === 'bundle') {
     const title = mark.basis === 'remainder' ? mark.label : `${mark.sessions} × ${mark.label}`;
     return `${title}: ${mark.sessions} sessions in generation ${mark.generation}${mark.descendants > 0 ? `, ${mark.descendants} beneath them` : ''}. Open this bundle.`;

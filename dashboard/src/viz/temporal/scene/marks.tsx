@@ -12,8 +12,8 @@ import { formatMoment } from '../../../workspaces/loom/tracks.ts';
 import { EventGlyph } from '../glyphs.tsx';
 import { xToTime } from '../layout.ts';
 import { gradeColorVar, gradeDashArray } from '../palette.ts';
-import type { EvidenceGrade, SceneCluster, SceneLane, SceneNode, ScenePath } from '../types.ts';
-import { focusAlpha, isLifted, pathEnds, recencyAlpha, resolvedLanes, type SceneFrame } from './frame.ts';
+import type { EvidenceGrade, SceneCluster, SceneLane, SceneNode } from '../types.ts';
+import { focusAlpha, isLifted, isLink, pathEnds, recencyAlpha, resolvedLanes, type SceneFrame } from './frame.ts';
 
 /** Focus is a stable 2px cyan ring, shown only for keyboard focus. */
 export const NODE_CLASS = 'cursor-pointer outline-none [&:focus-visible>.td-focus-ring]:opacity-100';
@@ -32,10 +32,6 @@ const GRADE_TAG: Readonly<Record<EvidenceGrade, string>> = {
   stale: 'STALE',
   unavailable: 'UNAVAILABLE',
 };
-
-function isLink(path: ScenePath): boolean {
-  return path.kind === 'spawn' || path.kind === 'handoff' || path.kind === 'rejoin' || path.kind === 'result';
-}
 
 function FocusRing({ x, y, r }: { x: number; y: number; r: number }): JSX.Element {
   return <circle className="td-focus-ring" cx={x} cy={y} r={r} fill="none" stroke="var(--raw-graph-accent)" strokeWidth={2} opacity={0} pointerEvents="none" />;

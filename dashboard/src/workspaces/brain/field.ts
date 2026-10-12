@@ -43,7 +43,7 @@ import {
 
 const DAY_SECONDS = 86_400;
 
-export interface FieldNode {
+interface FieldNode {
   id: string;
   label: string;
   kind: string;
@@ -65,7 +65,7 @@ export interface FieldNode {
  * rank, not exact mass; the cell's bounds are still the measurement, and the
  * members' exact values stay printed.
  */
-export interface FieldCell {
+interface FieldCell {
   id: string;
   column: number;
   /** Member ids in rank order. */
@@ -83,13 +83,13 @@ export interface FieldCell {
   mass: number;
 }
 
-export interface FieldEdge {
+interface FieldEdge {
   source: string;
   target: string;
   kind: string;
 }
 
-export interface FieldColumn {
+interface FieldColumn {
   id: string;
   /** Axis tick label. */
   label: string;
@@ -101,7 +101,7 @@ export interface FieldColumn {
 /** What the mass axis actually holds, so the caption can state the shape the
  * axis has rather than leaving the reader to infer it from a crowd of bodies
  * along the bottom. */
-export interface MassSummary {
+interface MassSummary {
   floor: number;
   ceiling: number;
   median: number;
@@ -140,7 +140,7 @@ export interface RegistryField {
  * bodies on the SAME time ladder, two surfaces that both say "this week" have
  * to mean the same seven days. A second copy of these bounds would drift the
  * first time one of them was tuned. */
-export const RECENCY_COLUMNS: ReadonlyArray<{
+const RECENCY_COLUMNS: ReadonlyArray<{
   id: string;
   label: string;
   bound: string;
@@ -160,7 +160,7 @@ export function indexedMass(project: ProjectRegistryEntry): number {
 }
 
 /** Age in days, floored at zero so a clock skew never reads as the future. */
-export function ageDays(lastSeenAt: number, nowSeconds: number): number {
+function ageDays(lastSeenAt: number, nowSeconds: number): number {
   return Math.max(0, (nowSeconds - lastSeenAt) / DAY_SECONDS);
 }
 
@@ -247,11 +247,11 @@ export function columnIndexFor(lastSeenAt: number, nowSeconds: number): number {
 const COLUMN_HALF_WIDTH = 0.42;
 /** Exported with `bodyRadius` because the scene model draws the mass axis and
  * the body crowns in these same units; a second copy of either would drift. */
-export const MASS_AXIS_HEIGHT = 2.9;
+const MASS_AXIS_HEIGHT = 2.9;
 /** Step size for the sideways nudges that keep bodies off each other. */
 const NUDGE = 0.06;
 /** Height of one mass cell, the unit crowded bodies are packed into. */
-export const CELL_HEIGHT = 0.25;
+const CELL_HEIGHT = 0.25;
 /** Fewer crowded bodies than this overlap in place rather than pack. */
 const PACK_MIN = 4;
 /** Width of a packed cell's grid, inside the column's own half-width. */
@@ -547,7 +547,7 @@ function clearOffset(
 
 /** One of the three counts a registry entry carries, summarised across the
  * whole registry. */
-export interface HoldingChannel {
+interface HoldingChannel {
   label: string;
   /** The value every project shares, when they all share one. */
   uniform: number | null;

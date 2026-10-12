@@ -5,14 +5,15 @@
 //! reports its typed unattached state. Assertions are the JSON a caller reads,
 //! not which helpers ran.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::dispatch_test_support::{SelectorProfile, dispatch_on_graph_authority};
+use super::dispatch_test_support::{
+    dispatch_on_graph_authority, registered_lib_fixture, tool_json,
+};
 use super::*;
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -41,27 +42,18 @@ async fn runtime_payload(cg: &TraceDecay, args: Value) -> Value {
     .await
     .expect("tracedecay_runtime call");
     assert_eq!(result.value["content"][0]["type"], "text");
-    serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("runtime JSON text"),
-    )
-    .expect("parse runtime JSON")
+    tool_json(&result)
 }
 
 async fn runtime_fixture(dir: &TempDir, name: &str) -> TraceDecay {
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join(name);
-    fs::create_dir_all(project.join("src")).expect("create fixture source root");
-    fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").expect("write fixture source");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    registered_lib_fixture(
+        dir.path(),
+        name,
+        "pub fn fixture() {}\n",
         &format!("project.{name}"),
     )
     .await
-    .expect("open mounted runtime fixture");
-    cg
+    .0
 }
 
 fn assert_unavailable_census(database: &Value) {

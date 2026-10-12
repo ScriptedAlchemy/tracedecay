@@ -8,7 +8,7 @@
 
 /** Ordered recency tiers. Position in the order IS the signal, so the meaning
  * survives without colour. */
-export type FreshnessTier = 'live' | 'recent' | 'aging' | 'dormant';
+type FreshnessTier = 'live' | 'recent' | 'aging' | 'dormant';
 
 const MINUTE = 60;
 const HOUR = 3600;

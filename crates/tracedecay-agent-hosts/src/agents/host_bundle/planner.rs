@@ -590,27 +590,9 @@ fn component_set_plan_digest(
         .map_err(|_| HostBundleError::CanonicalizationFailed)
 }
 
-/// Read-only host-root preview used by the official CLI. It verifies the
-/// manifest, reads existing receipts and artifact digests, and produces the
-/// same immutable plan as apply without creating control files or
-/// directories.
-pub fn dry_run_host_bundle_lifecycle_at(
-    root: &Path,
-    manifest: &HostBundleManifestV1,
-    request: &HostBundleExecutionRequestV1,
-    verifier: &impl HostBundleVerificationAdapterV1,
-    competing_extension_claims: &[CompetingHostExtensionClaimV1],
-) -> Result<HostBundleLifecyclePreviewV1, HostBundleError> {
-    dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
-        root,
-        root,
-        manifest,
-        request,
-        verifier,
-        competing_extension_claims,
-    )
-}
-
+/// Read-only host-root preview. It verifies the manifest, reads existing
+/// receipts and artifact digests, and produces the same immutable plan as
+/// apply without creating control files or directories.
 #[tracing::instrument(name = "hosts.agent.host_bundle.dry_run", level = "trace", skip_all)]
 pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
     artifact_root: &Path,

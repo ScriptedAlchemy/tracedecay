@@ -10,14 +10,11 @@ use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::ingest::test_support::{
     IngestPassBounds, PROJECT_INGEST_PROVIDER_FRONTIER_KEY, USER_INGEST_PROVIDER_FRONTIER_KEY,
     ingest_project_sources_for_provider_bounded,
-    ingest_project_sources_for_provider_without_registered_authority,
     ingest_user_global_sources_for_provider_with_roots_bounded,
-    ingest_user_global_sources_for_provider_with_roots_without_registered_authority,
-    ingest_user_global_sources_for_startup_with_db_without_registered_authority,
 };
 use tracedecay_sessions::runtime::ingest::{
     IngestPassCoverage, ingest_project_sources_for_provider,
-    ingest_user_global_sources_for_startup_with_db, registered_project_roots_from,
+    ingest_user_global_sources_for_startup_with_db_and_codex_state, registered_project_roots_from,
 };
 use tracedecay_sessions::runtime::{TranscriptIngestOutcome, with_transcript_source_profile};
 use tracedecay_sessions::{SessionProvider, TranscriptIngestStats};
@@ -156,7 +153,11 @@ async fn missing_project_identity_fails_before_ingest_writes() {
     let runtime = profile_test_runtime().await;
     let authority = runtime.authority();
 
-    let outcome = ingest_project_sources_for_provider_without_registered_authority(
+    let shard = &runtime.database.binding().shard_id;
+
+    let outcome = ingest_project_sources_for_provider(
+        &shard.brain_id,
+        &shard.profile_id,
         &authority,
         temp.path(),
         None,
@@ -167,30 +168,6 @@ async fn missing_project_identity_fails_before_ingest_writes() {
 
     assert_eq!(outcome.failures.len(), 1);
     assert_eq!(outcome.failures[0].reason_code, "project_identity_missing");
-    assert_eq!(outcome.stats, TranscriptIngestStats::default());
-}
-
-#[tokio::test]
-async fn unregistered_project_authority_fails_before_ingest_writes() {
-    let temp = tempfile::tempdir().unwrap();
-    let project_id = scheduler_test_project_id();
-    let runtime = project_test_runtime(temp.path(), project_id.clone()).await;
-    let authority = runtime.authority();
-
-    let outcome = ingest_project_sources_for_provider_without_registered_authority(
-        &authority,
-        temp.path(),
-        Some(project_id),
-        Some(SessionProvider::Vibe),
-        true,
-    )
-    .await;
-
-    assert_eq!(outcome.failures.len(), 1);
-    assert_eq!(
-        outcome.failures[0].reason_code,
-        "registered_authority_unavailable"
-    );
     assert_eq!(outcome.stats, TranscriptIngestStats::default());
 }
 
@@ -227,36 +204,6 @@ async fn mismatched_project_id_fails_before_provider_catch_up() {
         tracedecay_store::StoreShardScopeV1::ProjectSessions {
             project_id: mounted_project_id
         }
-    );
-}
-
-#[tokio::test]
-async fn unregistered_profile_authority_fails_before_ingest_writes() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = profile_test_runtime().await;
-    let authority = runtime.authority();
-
-    let outcome = ingest_user_global_sources_for_provider_with_roots_without_registered_authority(
-        &authority,
-        temp.path(),
-        Some(SessionProvider::Codex),
-        Vec::new(),
-    )
-    .await;
-
-    assert_eq!(outcome.failures.len(), 1);
-    assert_eq!(
-        outcome.failures[0].reason_code,
-        "registered_authority_unavailable"
-    );
-    assert_eq!(outcome.stats, TranscriptIngestStats::default());
-    assert!(
-        runtime
-            .database
-            .get_parse_offset(USER_INGEST_PROVIDER_FRONTIER_KEY)
-            .await
-            .unwrap()
-            .is_none()
     );
 }
 
@@ -461,13 +408,15 @@ async fn cancelled_startup_user_ingest_stops_before_registry_reads() {
     let cancellation = ObservationCancellation::default();
     cancellation.cancel();
 
-    let outcome = ingest_user_global_sources_for_startup_with_db(
+    let codex_discovery = tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub::default();
+    let outcome = ingest_user_global_sources_for_startup_with_db_and_codex_state(
         &shard.brain_id,
         &shard.profile_id,
         &authority,
         &authority,
         temp.path(),
         &cancellation,
+        (&codex_discovery, "session-ingest-test"),
     )
     .await;
 
@@ -478,27 +427,6 @@ async fn cancelled_startup_user_ingest_stops_before_registry_reads() {
             .iter()
             .any(|failure| failure.reason_code == "ingest_pass_cancelled")
     );
-}
-
-#[tokio::test]
-async fn unregistered_startup_authority_fails_before_registry_reads() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = profile_test_runtime().await;
-    let authority = runtime.authority();
-
-    let outcome = ingest_user_global_sources_for_startup_with_db_without_registered_authority(
-        &authority,
-        &authority,
-        temp.path(),
-    )
-    .await;
-
-    assert_eq!(outcome.failures.len(), 1);
-    assert_eq!(
-        outcome.failures[0].reason_code,
-        "registered_authority_unavailable"
-    );
-    assert_eq!(outcome.stats, TranscriptIngestStats::default());
 }
 
 #[tokio::test]

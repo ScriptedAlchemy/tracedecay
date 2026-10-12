@@ -430,6 +430,11 @@ use project_open_handshake::{
 mod project_open_orchestration;
 mod project_routing;
 mod project_server_lifecycle;
+#[cfg(unix)]
+use project_open_orchestration::{
+    await_claimed_project_open, spawn_lifecycle_automation_scheduler_activation,
+    start_lifecycle_project_open,
+};
 use project_open_orchestration::{
     durable_enrollment_resolves_existing_store, ensure_registered_project_route,
 };
@@ -437,11 +442,6 @@ use project_open_orchestration::{
 use project_open_orchestration::{
     portable_cached_project_open_failure, portable_cached_project_server,
     portable_project_server_for_request, schedule_portable_project_server_warmup,
-};
-#[cfg(unix)]
-use project_open_orchestration::{
-    spawn_lifecycle_automation_scheduler_activation, start_lifecycle_project_open,
-    wait_for_project_open_publication,
 };
 // The portable reconciler only exists off-unix (or under test transports), so
 // its import carries the same gate as its definition.

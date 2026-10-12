@@ -14,7 +14,7 @@ import type {
  */
 
 export const HEAD_ALPHA = 'a'.repeat(40);
-export const HEAD_BETA = 'b'.repeat(40);
+const HEAD_BETA = 'b'.repeat(40);
 const BASE_ALPHA = 'c'.repeat(40);
 const MERGE_BASE_ALPHA = 'd'.repeat(40);
 

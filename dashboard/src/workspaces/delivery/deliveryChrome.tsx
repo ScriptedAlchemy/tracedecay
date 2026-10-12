@@ -168,8 +168,3 @@ export function shortSha(sha: string | null | undefined, length = 12): string {
   if (sha === null || sha === undefined || sha === '') return '—';
   return sha.slice(0, length);
 }
-
-export function microsToIso(micros: number | null | undefined): string {
-  if (micros === null || micros === undefined) return 'not observed';
-  return new Date(Math.floor(micros / 1000)).toISOString();
-}

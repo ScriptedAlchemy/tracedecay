@@ -14,7 +14,7 @@ export const MIN_TOUCH_TARGET_PX = 44;
  * Reflow: page-level horizontal scroll, and what is running past the edge.
  * ========================================================================== */
 
-export interface OverflowOffender {
+interface OverflowOffender {
   /**
    * `page-overflow` widens the document itself. `clipped` is content that runs
    * past the viewport inside an ancestor that hides its horizontal overflow.
@@ -30,7 +30,7 @@ export interface OverflowOffender {
 
 /** A region that scrolls horizontally on its own, and whether it announces a
  * name. The plan permits "labeled code/table/graph regions" to do this. */
-export interface InternalScroller {
+interface InternalScroller {
   readonly selector: string;
   /** Lower-case tag name; `aside` is a side rail. */
   readonly tag: string;
@@ -50,7 +50,7 @@ export interface InternalScroller {
  * the overflow heuristics it needs no judgement. A scroller holding text with
  * a zero-height viewport is never intentional.
  */
-export interface CollapsedScroller {
+interface CollapsedScroller {
   readonly selector: string;
   readonly scrollHeight: number;
   readonly clientHeight: number;
@@ -251,7 +251,7 @@ export function sidewaysRailFailures(report: ReflowReport, tag: string): string[
  * Touch targets.
  * ========================================================================== */
 
-export interface UndersizedTarget {
+interface UndersizedTarget {
   readonly selector: string;
   readonly name: string;
   readonly width: number;

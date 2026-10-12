@@ -11,7 +11,7 @@ import { laneStateKind, projectionLaneState, type LaneState } from './journey.ts
  * provider projection green; a `not_published` row names the authority it
  * requires instead of reading as zero.
  */
-export const PROJECTION_ORDER = [
+const PROJECTION_ORDER = [
   ['changes', 'Changes', 'local Git'],
   ['commits', 'Commits', 'local Git'],
   ['pull_requests', 'Pull requests', 'provider read'],
@@ -23,14 +23,14 @@ export const PROJECTION_ORDER = [
   ['agent_usage', 'Agent usage', 'session usage'],
 ] as const satisfies readonly (readonly [keyof DeliveryOverviewV1, string, string])[];
 
-export interface ProjectionRow {
+interface ProjectionRow {
   readonly key: keyof DeliveryOverviewV1;
   readonly label: string;
   readonly source: string;
   readonly state: LaneState;
 }
 
-export function projectionRows(overview: DeliveryOverviewV1): readonly ProjectionRow[] {
+function projectionRows(overview: DeliveryOverviewV1): readonly ProjectionRow[] {
   return PROJECTION_ORDER.map(([key, label, source]) => ({
     key,
     label,

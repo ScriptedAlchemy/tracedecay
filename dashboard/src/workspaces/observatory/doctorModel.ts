@@ -15,7 +15,7 @@ const FAMILY_LABELS: Record<DoctorFindingFamilyV1, string> = {
   memory: 'Memory',
 };
 
-export interface DoctorEvidencePresentation {
+interface DoctorEvidencePresentation {
   label: string;
   tokenClass: string;
   dotClass: string;

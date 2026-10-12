@@ -41,15 +41,15 @@ import {
  */
 export const MAX_POINTS = 24_000;
 /** Camera zoom bounds, relative to the fitted field. */
-export const MIN_ZOOM = 0.5;
-export const MAX_ZOOM = 48;
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 48;
 
 const GOLDEN = Math.PI * (3 - Math.sqrt(5));
 const PAD = { top: 44, right: 150, bottom: 28, left: 56 };
 /** Spatial index cell, in field units; about one body diameter. */
 const INDEX_CELL = 0.25;
 
-export interface PointCloud {
+interface PointCloud {
   /** Unit offsets inside a unit disc, interleaved x,y. */
   offsets: Float32Array;
   /** How many leading points are stores. */
@@ -81,7 +81,7 @@ export function pointCloud(units: { stores: number; artifacts: number }, ratio: 
   return { offsets, stores };
 }
 
-export type Picked = { kind: 'cluster'; cluster: SceneCluster } | { kind: 'body'; body: SceneBody } | null;
+type Picked = { kind: 'cluster'; cluster: SceneCluster } | { kind: 'body'; body: SceneBody } | null;
 
 /** Picking over a spatial index: an unresolved cluster frame first, then the
  * nearest drawn body within reach. Cost is the bodies near the pointer. */

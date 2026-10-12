@@ -58,7 +58,7 @@ pub use observability_rollup::{
     ObservabilityRollupFragmentPageV1, ObservabilityRollupFragmentQueryV1,
     ObservabilityRollupFragmentRecordV1, ObservabilityRollupFrontierV1,
     ObservabilityRollupRebuildReceiptV1, ObservabilityRollupRebuildV1,
-    ObservabilityRollupRetentionReceiptV1,
+    ObservabilityRollupRetentionReceiptV1, merge_coverage,
 };
 pub use observation_adapter::GlobalDbObservationStore;
 pub use observation_projection::{
