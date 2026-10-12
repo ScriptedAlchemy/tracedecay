@@ -23,7 +23,7 @@ mod store;
 
 pub use stack_anchors::{
     GitHubStackAnchorPublicationOutcomeV1, GitHubStackAnchorReadOutcomeV1,
-    GitHubStackDurableObservationV1, ProjectGitHubStackAnchorAuthorityV1,
+    ProjectGitHubStackAnchorAuthorityV1,
 };
 
 use std::collections::BTreeMap;

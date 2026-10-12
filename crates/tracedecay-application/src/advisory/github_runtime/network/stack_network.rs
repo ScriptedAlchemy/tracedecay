@@ -151,8 +151,10 @@ mod tests {
         GitTopologyAnchorAuthority, GitTopologyAnchorResolution, GitTopologyAnchorResolutionOutcome,
     };
     use tracedecay_contracts::{RequestContext, now_micros};
-    use tracedecay_domain::ObservationScopeV1;
-    use tracedecay_domain::{CommitId, ProviderId, UtcMicros};
+    use tracedecay_domain::{
+        CommitId, GitTopologyAnchorTargetV1, ObservationScopeV1, ProviderId, RetrievalAnchorTarget,
+        UtcMicros,
+    };
     use tracedecay_global_db::tests::harness::open_registered_test_database_fixture;
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
 
@@ -168,7 +170,8 @@ mod tests {
     use super::*;
     use crate::advisory::github_runtime::{
         GitHubGraphQlReadRequestV1, GitHubProviderLifecycleV1, GitHubReadResumeV1,
-        GitHubSourceAccessAuthorityV1, ProjectGitHubStackAnchorAuthorityV1,
+        GitHubSourceAccessAuthorityV1, GitHubStackAnchorReadOutcomeV1,
+        ProjectGitHubStackAnchorAuthorityV1,
     };
     use crate::stack_coordinator::{DaemonGitHubStackCoordinatorV1, GitHubStackProviderSnapshotV1};
 
@@ -468,13 +471,42 @@ mod tests {
         .unwrap();
         let anchors =
             ProjectGitHubStackAnchorAuthorityV1::new(database.clone(), scope.clone()).unwrap();
-        let durable = anchors
-            .resolve_published_observation(context.scope(), observation)
+        let GitHubStackAnchorReadOutcomeV1::Current(capability_anchor) = anchors
+            .resolve(
+                &context,
+                &request,
+                &observation.capability_anchor_id,
+                &ReadyStackSourceAccess,
+            )
             .await
-            .unwrap();
-        let snapshot = durable.snapshot_anchor.as_ref().unwrap();
-        let mut lineage = durable.capability_anchor.source_anchors().to_vec();
-        lineage.extend_from_slice(snapshot.source_anchors());
+        else {
+            panic!("the published capability anchor must resolve after restart");
+        };
+        assert_eq!(
+            capability_anchor.target(),
+            &RetrievalAnchorTarget::GitTopology(Box::new(
+                GitTopologyAnchorTargetV1::GitHubStackCapability(observation.capability.clone()),
+            ))
+        );
+        let GitHubStackAnchorReadOutcomeV1::Current(snapshot_anchor) = anchors
+            .resolve(
+                &context,
+                &request,
+                observation.snapshot_anchor_id.as_ref().unwrap(),
+                &ReadyStackSourceAccess,
+            )
+            .await
+        else {
+            panic!("the published snapshot anchor must resolve after restart");
+        };
+        assert_eq!(
+            snapshot_anchor.target(),
+            &RetrievalAnchorTarget::GitTopology(Box::new(
+                GitTopologyAnchorTargetV1::GitHubStackSnapshot(observation.snapshot.unwrap()),
+            ))
+        );
+        let mut lineage = capability_anchor.source_anchors().to_vec();
+        lineage.extend_from_slice(snapshot_anchor.source_anchors());
         for source in lineage {
             let store =
                 tracedecay_global_db::RegisteredGitTopologyAnchorAuthority::new(database.clone());
