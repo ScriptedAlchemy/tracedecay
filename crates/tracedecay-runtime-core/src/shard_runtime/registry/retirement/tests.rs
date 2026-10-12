@@ -1,12 +1,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
+use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_store::{
-    RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1, RuntimePublicationIdV1,
-    StoreAuthorityEpochV1, StoreClientIdV1, StoreIncarnationV1, StoreRuntimeBindingV1,
-    StoreRuntimeRegistryPublicationV1, StoreShardIdV1, VerifiedStoreLocatorV1,
-    canonical_store_locator_digest,
+    RuntimeMaintenanceStateV1, RuntimePublicationIdV1, StoreAuthorityEpochV1, StoreIncarnationV1,
+    StoreRuntimeBindingV1, StoreRuntimeRegistryPublicationV1, StoreShardIdV1,
+    VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
 
 use super::*;
@@ -566,16 +565,6 @@ async fn two_exact_owner_targets_survive_blocked_and_cancelled_retries() {
     drop(second_graph_owner);
 }
 
-fn active_lease(binding: &StoreRuntimeBindingV1, lease_id: &str) -> RuntimeLeaseV1 {
-    RuntimeLeaseV1 {
-        lease_id: RuntimeLeaseIdV1::new(lease_id).unwrap(),
-        binding: binding.clone(),
-        holder: StoreClientIdV1::new("retirement-fixture-client").unwrap(),
-        acquired_at: UtcMicros(0),
-        expires_at: UtcMicros(i64::MAX),
-    }
-}
-
 #[test]
 fn preflight_is_all_or_none_and_foreign_identity_never_transitions_the_live_entry() {
     let directory = tempfile::tempdir().unwrap();
@@ -749,7 +738,7 @@ fn owner_commit_failure_is_terminal_truth_for_the_entire_batch() {
 }
 
 #[test]
-fn client_clone_and_direct_runtime_lease_block_then_release_for_retry() {
+fn client_clones_and_independent_clients_block_then_release_for_retry() {
     let directory = tempfile::tempdir().unwrap();
     let registry = registry();
     let authority = authority(directory.path(), "client-and-direct");
@@ -762,29 +751,20 @@ fn client_clone_and_direct_runtime_lease_block_then_release_for_retry() {
     let first = owner.issue_client_lease().unwrap();
     let first_clone = first.clone();
     let second = owner.issue_client_lease().unwrap();
-    let direct = active_lease(&binding, "retirement.direct-lease");
-    assert!(matches!(
-        registry.acquire_lease(direct.clone()),
-        super::super::StoreRuntimeLeaseAcquireResult::Acquired(_)
-    ));
 
     let blocked = registry.reserve_retirement_batch(vec![target(&binding, &owner)]);
     assert!(matches!(
         blocked,
         StoreRuntimeRetirementResult::Blocked(refusal)
-            if refusal.blockers().iter().any(|blocker| matches!(
-                blocker,
-                StoreRuntimeRetirementBlocker::ClientLeases { count: 2, .. }
-            )) && refusal.blockers().iter().any(|blocker| matches!(
-                blocker,
-                StoreRuntimeRetirementBlocker::RuntimeLeases { count: 1, .. }
-            ))
+            if matches!(
+                refusal.blockers(),
+                [StoreRuntimeRetirementBlocker::ClientLeases { count: 2, .. }]
+            )
     ));
 
     drop(first);
     drop(first_clone);
     drop(second);
-    assert!(registry.release_lease(&binding, &direct.lease_id));
     let StoreRuntimeRetirementResult::Reserved(reservation) =
         registry.reserve_retirement_batch(vec![target(&binding, &owner)])
     else {
@@ -888,10 +868,8 @@ fn operation_profile_and_graph_leases_block_and_dropping_reservation_restores_re
         panic!("dropping every blocker must reserve the exact entry");
     };
     assert!(matches!(
-        registry.acquire_lease(active_lease(&binding, "retirement.retiring")),
-        super::super::StoreRuntimeLeaseAcquireResult::Rejected(
-            StoreRuntimeRegistryFailure::RuntimeRetirementInProgress { .. }
-        )
+        registry.lookup(&binding),
+        StoreRuntimeLookup::Retiring { .. }
     ));
     assert!(matches!(
         registry.profile_authority_pin(&binding.shard_id),

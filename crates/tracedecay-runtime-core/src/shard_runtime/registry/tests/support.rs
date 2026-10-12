@@ -4,12 +4,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracedecay_domain::{
-    BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros, WorktreeId,
+    BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, WorktreeId,
 };
 use tracedecay_store::{
-    CodeShardScopeV1, RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1, StoreClientIdV1,
-    StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1,
-    VerifiedStoreLocatorV1,
+    CodeShardScopeV1, RuntimeMaintenanceStateV1, StoreIncarnationV1, StoreRuntimeBindingV1,
+    StoreShardIdV1, StoreShardScopeV1, VerifiedStoreLocatorV1,
 };
 
 use super::super::*;
@@ -251,15 +250,4 @@ pub(super) async fn wait_for_calls(calls: &AtomicUsize, expected: usize) {
     })
     .await
     .expect("publisher made progress");
-}
-
-pub(super) fn active_lease(binding: &StoreRuntimeBindingV1, lease_id: &str) -> RuntimeLeaseV1 {
-    let now = utc_now();
-    RuntimeLeaseV1 {
-        lease_id: RuntimeLeaseIdV1::new(lease_id).unwrap(),
-        binding: binding.clone(),
-        holder: StoreClientIdV1::new("client.registry").unwrap(),
-        acquired_at: UtcMicros(now.0.saturating_sub(1_000_000)),
-        expires_at: UtcMicros(now.0.saturating_add(60_000_000)),
-    }
 }

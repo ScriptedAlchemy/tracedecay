@@ -259,10 +259,6 @@ pub enum StoreRuntimeRetirementBlocker {
         binding: Box<StoreRuntimeBindingV1>,
         count: usize,
     },
-    RuntimeLeases {
-        binding: Box<StoreRuntimeBindingV1>,
-        count: usize,
-    },
     ProfilePins {
         binding: Box<StoreRuntimeBindingV1>,
         count: usize,
@@ -538,12 +534,6 @@ impl StoreRuntimeRegistry {
                 blockers.push(StoreRuntimeRetirementBlocker::OperationLeases {
                     binding: Box::new(binding.clone()),
                     count: leases.operations,
-                });
-            }
-            if leases.runtime_leases != 0 {
-                blockers.push(StoreRuntimeRetirementBlocker::RuntimeLeases {
-                    binding: Box::new(binding.clone()),
-                    count: leases.runtime_leases,
                 });
             }
             let profile_pins = state
