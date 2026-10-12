@@ -624,6 +624,49 @@ def test_learned_skill_lint():
               grade.lint_learned_skills({"p": {"prompt": "Review my pricing change, please."}}, root) == [])
 
 
+def test_learned_skill_end_to_end():
+    with open(os.path.join(HERE, "scenarios", "learned_pricing_line_item_tax.json")) as f:
+        scn = json.load(f)
+    usage = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 0,
+             "cache_creation_input_tokens": 0}
+    answer = json.dumps({"type": "result", "result": "compute_grand_total, pricing_test, cents",
+                         "usage": usage, "total_cost_usd": 0.1, "num_turns": 2, "duration_ms": 500})
+    with tempfile.TemporaryDirectory() as work:
+        sdir, rdir = os.path.join(work, "scenarios"), os.path.join(work, "run")
+        os.makedirs(sdir)
+        os.makedirs(rdir)
+        with open(os.path.join(sdir, scn["id"] + ".json"), "w") as f:
+            json.dump(scn, f)
+        runs = {
+            "manual": ([claude_tool("Skill", {"skill": LEARNED_SKILL}), answer], LEARNED_SKILL, 0),
+            "none": ([answer], "", 0),
+            "generated": ([], "generated-skill", 124),
+        }
+        for variant, (lines, skill, rc) in runs.items():
+            base = f"{scn['id']}__claude__opus__v-{variant}__r1"
+            with open(os.path.join(rdir, base + ".stdout.jsonl"), "w") as f:
+                f.write("\n".join(lines) + "\n")
+            with open(os.path.join(rdir, base + ".meta.json"), "w") as f:
+                json.dump({"exit_code": rc, "timed_out": rc == 124, "model": "opus",
+                           "learned_skill_variant": variant, "learned_skill_id": skill}, f)
+        rc = subprocess.run(
+            [sys.executable, os.path.join(HERE, "grade.py"), "--run-dir", rdir, "--scenarios", sdir],
+            capture_output=True, text=True)
+        check("learned e2e: grade.py exit 0", rc.returncode == 0, rc.stderr[-400:])
+        sb = json.load(open(os.path.join(rdir, "scoreboard.json")))
+        rows = {r["variant"]: r for r in sb.get("learned_skill", [])}
+        check("learned e2e: manual row counts tp",
+              rows.get("manual", {}).get("routing", {}).get("tp") == 1
+              and rows["manual"]["tokens_total"] == 15 and rows["manual"]["outcome_mean"] == 1.0,
+              str(rows.get("manual")))
+        check("learned e2e: none row routing unknown",
+              rows.get("none", {}).get("routing", {}).get("unknown") == 1)
+        check("learned e2e: timed-out variant counted invalid",
+              rows.get("generated", {}).get("invalid") == 1 and rows["generated"]["n"] == 0)
+        check("learned e2e: report section present",
+              "Learned-skill qualification" in open(os.path.join(rdir, "report.md")).read())
+
+
 def test_carry_claude_profile():
     with tempfile.TemporaryDirectory() as td:
         src = os.path.join(td, "settings.json")
@@ -660,6 +703,7 @@ def main() -> int:
     test_cost_and_corrections()
     test_learned_skill_routing()
     test_learned_skill_lint()
+    test_learned_skill_end_to_end()
     check("lint: generated scenario id cannot escape artifacts",
           bool(grade.lint_scenarios({"../escape": {"prompt": "Explain this function."}})))
     test_lint()
