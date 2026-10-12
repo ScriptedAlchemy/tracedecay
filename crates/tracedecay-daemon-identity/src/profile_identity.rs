@@ -99,11 +99,14 @@ pub(crate) fn load_or_create_pinned(
         });
     }
 
-    let root_existed = profile_root.exists();
-    std::fs::create_dir_all(&profile_root)
-        .map_err(|error| profile_identity_io("create", &profile_root, &error))?;
-    if !root_existed {
-        restrict_new_profile_root(&profile_root)?;
+    if let Some(parent) = profile_root.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| profile_identity_io("create", parent, &error))?;
+    }
+    match tracedecay_private_fs::create_private_directory(&profile_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(profile_identity_io("create", &profile_root, &error)),
     }
     validate_private_profile_root(&profile_root)?;
 
@@ -123,31 +126,50 @@ pub(crate) fn load_or_create_pinned(
         ".{PROFILE_IDENTITY_FILENAME}.{}.tmp",
         record.profile_id.as_str()
     ));
-    tracedecay_runtime_core::db::DatabaseAuthority::publish_record_atomically(
-        &temporary,
-        &path,
-        &bytes,
-        PROFILE_IDENTITY_RECORD_NAME,
-    )?;
-    let persisted =
+    let published = publish_first_record(&temporary, &path, &bytes)
+        .map_err(|error| profile_identity_io("publish", &path, &error))?;
+    let record = if published {
+        record
+    } else {
         read_existing_profile_identity_record(&path)?.ok_or_else(|| TraceDecayError::Config {
             message: format!(
-                "{PROFILE_IDENTITY_RECORD_NAME} '{}' disappeared after publication",
+                "{PROFILE_IDENTITY_RECORD_NAME} '{}' disappeared after a concurrent publication",
                 path.display()
             ),
-        })?;
-    if persisted != record {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "{PROFILE_IDENTITY_RECORD_NAME} '{}' changed during publication",
-                path.display()
-            ),
-        });
-    }
+        })?
+    };
     Ok(LocalProfileIdentityAuthorityV1 {
         profile_root,
         record,
     })
+}
+
+/// Publishes `bytes` at `path` only while no identity exists there. Returns
+/// `false`, leaving the existing record untouched, when another caller
+/// published first, so concurrent first creations converge on one identity.
+fn publish_first_record(temporary: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
+    use std::io::Write;
+    use tracedecay_private_fs::framed_log::{
+        DirectorySyncPolicy, rename_noreplace, sync_parent_directory,
+    };
+
+    let mut file = tracedecay_private_fs::create_private_file(temporary)?;
+    let published = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        match rename_noreplace(temporary, path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        sync_parent_directory(path, DirectorySyncPolicy::Strict)?;
+        Ok(true)
+    })();
+    if !matches!(published, Ok(true)) {
+        let _ = std::fs::remove_file(temporary);
+    }
+    published
 }
 
 fn validate_expected_identity(
@@ -200,19 +222,6 @@ fn profile_identity_io(operation: &str, path: &Path, error: &std::io::Error) -> 
             path.display()
         ),
     }
-}
-
-#[cfg(unix)]
-fn restrict_new_profile_root(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|error| profile_identity_io("restrict", path, &error))
-}
-
-#[cfg(not(unix))]
-fn restrict_new_profile_root(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 fn validate_private_profile_root(path: &Path) -> Result<()> {
@@ -283,6 +292,40 @@ mod tests {
                     .mode()
                     & 0o777,
                 0o600
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_first_creation_converges_on_one_identity() {
+        const CALLERS: usize = 8;
+        let temporary = tempfile::tempdir().unwrap();
+        for round in 0..32 {
+            let profile_root = temporary.path().join(format!("profile-{round}"));
+            let barrier = std::sync::Barrier::new(CALLERS);
+            let results = std::thread::scope(|scope| {
+                let callers = (0..CALLERS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            load_or_create(&profile_root).map_err(|error| error.to_string())
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                callers
+                    .into_iter()
+                    .map(|caller| caller.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+
+            let persisted = load_existing(&profile_root).unwrap();
+            for result in results {
+                assert_eq!(result, Ok(persisted.clone()), "round {round}");
+            }
+            assert_eq!(
+                std::fs::read_dir(&profile_root).unwrap().count(),
+                1,
+                "round {round} left a temporary file"
             );
         }
     }
