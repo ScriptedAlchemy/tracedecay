@@ -33,6 +33,7 @@ struct PreviewSource {
     /// normalization folded every `\r\n` into `\n`; empty when the text has
     /// no `\r` to fold.
     folded_starts: Vec<usize>,
+    folded_len: usize,
 }
 
 struct PreviewWalkControl {
@@ -77,6 +78,7 @@ impl PreviewSource {
             line_starts.push(offset + 1);
         }
         let mut folded_starts = Vec::new();
+        let mut folded_len = 0usize;
         if text.as_bytes().contains(&b'\r') {
             folded_starts.reserve(line_starts.len());
             let mut folded = 0usize;
@@ -89,13 +91,15 @@ impl PreviewSource {
                     text.len()
                 };
                 folded += (end - start) + usize::from(terminated)
-                    - usize::from(terminated && text.as_bytes().get(end - 1) == Some(&b'\r'));
+                    - usize::from(terminated && end > start && text.as_bytes()[end - 1] == b'\r');
             }
+            folded_len = folded;
         }
         Ok(Self {
             text,
             line_starts,
             folded_starts,
+            folded_len,
         })
     }
 
@@ -118,33 +122,57 @@ impl PreviewSource {
 
     #[cfg(test)]
     fn line_for_byte_offset(&self, byte_offset: u64) -> Result<u32> {
-        self.line_for_evidence_offset(byte_offset, "")
+        self.line_in_space(byte_offset, EvidenceSpace::Worktree)
     }
 
-    /// Maps a graph evidence byte offset to a line in the current text. The
-    /// index records offsets in the byte space of the captured source, which
-    /// loses one byte per `\r\n` that commit-time normalization folded into
-    /// `\n`. Both candidate spaces are tried and the one where the offset
-    /// lands on the renamed token wins; an offset that lands on no token keeps
-    /// the worktree space so drifted-but-readable evidence still reports a
-    /// line.
-    fn line_for_evidence_offset(&self, byte_offset: u64, symbol: &str) -> Result<u32> {
+    /// The byte space this file's evidence was captured in, decided by the
+    /// declaration anchors of the edges' source nodes: each caller's
+    /// `source_span.start_byte` and `start_line` live in the captured
+    /// space, so a space under which an anchor byte maps to the anchor line
+    /// is the space every evidence offset in the file shares. Only a
+    /// folded-only verification is decisive — an anchor before the first
+    /// `\r\n` verifies under both spaces. Without one the file keeps the
+    /// worktree reading: raw captures and files whose two spaces are
+    /// identical map correctly there (the unmodified behavior).
+    fn evidence_space(&self, anchors: &[(u64, u32)]) -> EvidenceSpace {
+        let folded = anchors.iter().any(|&(start_byte, start_line)| {
+            usize::try_from(start_byte).is_ok_and(|offset| {
+                self.line_at(offset).ok() != Some(start_line)
+                    && self.folded_line_at(offset) == Some(start_line)
+            })
+        });
+        if folded {
+            EvidenceSpace::Folded
+        } else {
+            EvidenceSpace::Worktree
+        }
+    }
+
+    /// Maps a graph evidence byte offset to a line in the file's capture
+    /// space. The index records offsets in the byte space of the captured
+    /// source, which loses one byte per `\r\n` that commit-time
+    /// normalization folded into `\n`.
+    fn line_in_space(&self, byte_offset: u64, space: EvidenceSpace) -> Result<u32> {
         let offset = usize::try_from(byte_offset).map_err(|_| {
             graph_symbol_corrupt("graph evidence byte offset exceeds this platform".to_owned())
         })?;
-        if offset > self.text.len() {
-            return Err(graph_symbol_corrupt(format!(
-                "graph evidence byte offset {offset} exceeds source length {}",
-                self.text.len()
-            )));
+        match space {
+            EvidenceSpace::Worktree => {
+                if offset > self.text.len() {
+                    return Err(graph_symbol_corrupt(format!(
+                        "graph evidence byte offset {offset} exceeds source length {}",
+                        self.text.len()
+                    )));
+                }
+                self.line_at(offset)
+            }
+            EvidenceSpace::Folded => self.folded_line_at(offset).ok_or_else(|| {
+                graph_symbol_corrupt(format!(
+                    "graph evidence byte offset {offset} exceeds captured source length {}",
+                    self.folded_len
+                ))
+            }),
         }
-        if self.text.as_bytes()[offset..].starts_with(symbol.as_bytes()) {
-            return self.line_at(offset);
-        }
-        if let Some(line) = self.folded_line(offset, symbol) {
-            return Ok(line);
-        }
-        self.line_at(offset)
     }
 
     fn line_at(&self, offset: usize) -> Result<u32> {
@@ -153,21 +181,25 @@ impl PreviewSource {
             .map_err(|_| graph_symbol_corrupt("graph evidence line exceeds u32".to_owned()))
     }
 
-    /// The line `offset` lands on in the folded (`\r\n` -> `\n`) capture space,
-    /// kept only when the renamed token sits at the mapped position.
-    fn folded_line(&self, offset: usize, symbol: &str) -> Option<u32> {
-        if self.folded_starts.is_empty() {
+    /// The line `offset` lands on in the folded (`\r\n` -> `\n`) capture
+    /// space. `None` when the text has nothing to fold or the offset falls
+    /// past the captured end.
+    fn folded_line_at(&self, offset: usize) -> Option<u32> {
+        if self.folded_starts.is_empty() || offset > self.folded_len {
             return None;
         }
         let index = self.folded_starts.partition_point(|start| *start <= offset) - 1;
-        // Folding only removed line terminators, so the folded column is the
-        // raw column inside the same line.
-        let position = self.line_starts[index] + (offset - self.folded_starts[index]);
-        if self.text.as_bytes()[position..].starts_with(symbol.as_bytes()) {
-            return u32::try_from(index).ok();
-        }
-        None
+        u32::try_from(index).ok()
     }
+}
+
+/// Which byte space a file's graph evidence is recorded in: raw worktree
+/// bytes, or the folded (`\r\n` -> `\n`) bytes committed under
+/// normalization.
+#[derive(Clone, Copy)]
+enum EvidenceSpace {
+    Worktree,
+    Folded,
 }
 
 /// Trims and length-caps a source line for use as a preview snippet.
@@ -232,6 +264,11 @@ struct RenameReferenceSiteInput {
     edge_kind: String,
     file: String,
     evidence_start_byte: u64,
+    /// The calling symbol's own declaration anchor — its captured span start
+    /// byte and start line. One file's evidence offsets all live in the same
+    /// captured byte space, so this anchor decides which of the two
+    /// candidate spaces that is.
+    anchor: Option<(u64, u32)>,
 }
 
 struct PreviewFileWalk {
@@ -275,10 +312,18 @@ impl PreviewFileWalk {
                     .line(self.declaration_line as usize)
                     .map(snippet_text);
             }
+            let mut file_inputs = Vec::new();
             while let Some(input) = reference_inputs.next_if(|input| input.file == file) {
+                file_inputs.push(input);
+            }
+            let anchors: Vec<(u64, u32)> = file_inputs
+                .iter()
+                .filter_map(|input| input.anchor)
+                .collect();
+            let space = source.evidence_space(&anchors);
+            for input in file_inputs {
                 self.control.check()?;
-                let line = source
-                    .line_for_evidence_offset(input.evidence_start_byte, &self.result.symbol)?;
+                let line = source.line_in_space(input.evidence_start_byte, space)?;
                 let snippet = reference_line_snippet(&source, Some(line), &self.result.symbol);
                 references.push((
                     input.ordinal,
@@ -403,6 +448,11 @@ pub async fn compute_rename_preview(
                     edge_kind: edge.edge.kind.as_str().to_owned(),
                     file: source_file.to_owned(),
                     evidence_start_byte: edge.edge.evidence_span.start_byte,
+                    anchor: source_node
+                        .binding
+                        .as_ref()
+                        .and_then(|binding| binding.source_span.as_ref())
+                        .map(|span| (span.start_byte, source_metadata.start_line)),
                 });
             }
             (
@@ -466,7 +516,7 @@ pub async fn compute_rename_preview(
 
 #[cfg(test)]
 mod tests {
-    use super::{PreviewSource, PreviewWalkControl};
+    use super::{EvidenceSpace, PreviewSource, PreviewWalkControl};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -509,36 +559,59 @@ mod tests {
     }
 
     #[test]
-    fn evidence_offsets_resolve_against_the_folded_capture_space() {
+    fn folded_starts_survive_an_empty_first_line() {
         let control = PreviewWalkControl {
             cancelled: Arc::new(AtomicBool::new(false)),
             cancellation: None,
             deadline: None,
             budget: crate::tools::dispatch_ceiling::TOOL_DISPATCH_CEILING,
         };
-        // The index captures the committed bytes; commit-time CRLF folding
-        // removes one byte per line while the worktree keeps `\r\n`.
-        let text = "// \u{e9}\u{1f600} pad\r\n".repeat(3) + "call reserve_stock()\r\ntail\r\n";
+        // A `\n` closing an empty first line gives it end == 0: the folded
+        // scan must not underflow `end - 1`.
+        let source = PreviewSource::new("\nblank\r\nlast\r\n".to_owned(), &control).unwrap();
+        assert_eq!(source.line_starts, vec![0, 1, 8, 14]);
+        assert_eq!(source.folded_starts, vec![0, 1, 7, 12]);
+        assert_eq!(source.folded_len, 12);
+    }
+
+    #[test]
+    fn the_caller_anchor_decides_the_evidence_byte_space() {
+        let control = PreviewWalkControl {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            cancellation: None,
+            deadline: None,
+            budget: crate::tools::dispatch_ceiling::TOOL_DISPATCH_CEILING,
+        };
+        // Identical call lines make folded offsets coincide with earlier raw
+        // positions: the capture space comes from the caller's declaration
+        // anchor, not from what an offset happens to point at.
+        let text = "fn decl() {}\r\n".to_owned() + &"    reserve_stock();\r\n".repeat(30);
+        let folded = text.replace("\r\n", "\n");
         let source = PreviewSource::new(text.clone(), &control).unwrap();
-        let folded_offset = text.replace("\r\n", "\n").find("reserve_stock").unwrap() as u64;
-        let raw_offset = text.find("reserve_stock").unwrap() as u64;
-        assert_ne!(folded_offset, raw_offset);
+        // A caller declared on line 25 verifies only under the folded space,
+        // so every evidence offset in the file maps there — including the
+        // call-site offset that reads as line 24 in raw bytes.
+        let anchor = folded.match_indices("reserve_stock").nth(24).unwrap().0 as u64;
+        assert!(matches!(
+            source.evidence_space(&[(anchor, 25)]),
+            EvidenceSpace::Folded
+        ));
         assert_eq!(
-            source
-                .line_for_evidence_offset(folded_offset, "reserve_stock")
-                .unwrap(),
-            3
+            source.line_in_space(anchor, EvidenceSpace::Folded).unwrap(),
+            25
         );
-        assert_eq!(
-            source
-                .line_for_evidence_offset(raw_offset, "reserve_stock")
-                .unwrap(),
-            3
-        );
-        // An offset that lands on no token in either space keeps the raw line.
-        assert_eq!(
-            source.line_for_evidence_offset(2, "reserve_stock").unwrap(),
-            0
-        );
+        assert_eq!(source.line_at(anchor as usize).unwrap(), 24);
+        // A caller anchor that verifies only in worktree bytes (a raw
+        // capture) or in neither space (a drifted capture) keeps the
+        // worktree reading.
+        let raw_anchor = text.match_indices("reserve_stock").nth(25).unwrap().0 as u64;
+        assert!(matches!(
+            source.evidence_space(&[(raw_anchor, 26)]),
+            EvidenceSpace::Worktree
+        ));
+        assert!(matches!(
+            source.evidence_space(&[(2, 9)]),
+            EvidenceSpace::Worktree
+        ));
     }
 }
