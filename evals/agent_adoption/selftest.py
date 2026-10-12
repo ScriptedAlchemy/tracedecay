@@ -493,6 +493,137 @@ def test_transcript_base_repetitions():
           == ("routing_r1", "claude", "full", ""))
 
 
+def test_cost_and_corrections():
+    usage = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 100,
+             "cache_creation_input_tokens": 20}
+    tr = transcript([json.dumps({"type": "result", "result": "ok", "usage": usage,
+                                 "total_cost_usd": 0.25, "num_turns": 3, "duration_ms": 900})])
+    check("cost: Claude result usage parsed",
+          tr.cost["total_tokens"] == 135 and tr.cost["total_cost_usd"] == 0.25
+          and tr.cost["num_turns"] == 3 and tr.cost["duration_ms"] == 900, str(tr.cost))
+    missing = transcript([claude_result("ok")])
+    check("cost: missing Claude usage is unknown, not zero",
+          all(v is None for v in missing.cost.values()), str(missing.cost))
+    codex = grade.load_transcript_lines([
+        json.dumps({"type": "item.completed", "item": {"id": "c1", "type": "command_execution",
+                                                       "command": "false", "exit_code": 1,
+                                                       "status": "failed"}}),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 40, "cached_input_tokens": 30,
+                                                        "output_tokens": 2}}),
+    ], "codex")
+    check("cost: Codex turn usage parsed, cached input not double counted",
+          codex.cost["total_tokens"] == 42 and codex.cost["cache_read_input_tokens"] == 30
+          and codex.cost["total_cost_usd"] is None, str(codex.cost))
+    check("cost: Codex failed command is a tool error", codex.tool_errors == 1)
+    no_usage = grade.load_transcript_lines([json.dumps({"type": "turn.completed"})], "codex")
+    check("cost: missing Codex usage is unknown", no_usage.cost["total_tokens"] is None)
+
+    read = claude_tool("Read", {"file_path": "src/pricing.rs"})
+    tr = transcript([
+        read,
+        json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "x", "is_error": True, "content": "denied"}]}}),
+        read,
+        claude_tool("Read", {"file_path": "src/discount.rs"}),
+        claude_result("one two three"),
+    ])
+    scored = grade.score_scenario({"id": "c", "category": "c"}, tr, {}, {})
+    d = scored["details"]
+    check("corrections: tool error and identical retry counted",
+          (d["tool_errors"], d["repeated_calls"], d["corrections"]) == (1, 1, 2), str(d))
+    check("corrections: review words counted", d["review_words"] == 3)
+    check("cost: scored result carries cost", scored["cost"] == tr.cost)
+
+
+LEARNED_SKILL = "pricing-change-review"
+
+
+def learned_score(expected: bool, invoked: bool, variant: str = "manual", host: str = "claude",
+                  outcome_text: str = "compute_grand_total") -> dict:
+    scn = {"id": "learned", "category": "learned_skill", "ground_truth": ["compute_grand_total"],
+           "learned_skill": {"workflow": "wf", "expected": expected}}
+    lines = [claude_tool("Skill", {"skill": LEARNED_SKILL})] if invoked else []
+    tr = grade.load_transcript_lines(lines + [claude_result(outcome_text)], host)
+    meta = {"learned_skill_variant": variant, "learned_skill_id": LEARNED_SKILL, "model": "opus"}
+    return grade.score_scenario(scn, tr, {}, meta)
+
+
+def test_learned_skill_routing():
+    def outcome(r):
+        return r["details"]["learned_skill_routing"]["outcome"]
+    check("learned: expected and invoked is tp", outcome(learned_score(True, True)) == "tp")
+    check("learned: expected and absent is fn", outcome(learned_score(True, False)) == "fn")
+    check("learned: unexpected invocation is fp", outcome(learned_score(False, True)) == "fp")
+    check("learned: neighbor without invocation is tn", outcome(learned_score(False, False)) == "tn")
+    check("learned: no-skill variant routing unknown",
+          outcome(learned_score(True, True, variant="none")) == "unknown")
+    namespaced = grade.score_scenario(
+        {"id": "learned", "category": "learned_skill",
+         "learned_skill": {"workflow": "wf", "expected": True}},
+        transcript([claude_tool("Skill", {"skill": "tracedecay:" + LEARNED_SKILL}), claude_result("x")]),
+        {}, {"learned_skill_variant": "manual", "learned_skill_id": LEARNED_SKILL})
+    check("learned: namespaced plugin skill is not the learned skill", outcome(namespaced) == "fn")
+    codex = grade.load_transcript_lines([json.dumps({"type": "item.completed", "item": {
+        "id": "m", "type": "agent_message", "text": "compute_grand_total"}})], "codex")
+    codex_scored = grade.score_scenario(
+        {"id": "learned", "category": "learned_skill", "ground_truth": ["compute_grand_total"],
+         "learned_skill": {"workflow": "wf", "expected": True}},
+        codex, {}, {"learned_skill_variant": "manual", "learned_skill_id": LEARNED_SKILL})
+    check("learned: Codex routing unknown, outcome still measured",
+          outcome(codex_scored) == "unknown" and codex_scored["subscores"]["outcome"] == 1)
+    check("learned: outcome independent of invocation",
+          learned_score(True, True, outcome_text="no idea")["subscores"]["outcome"] == 0
+          and learned_score(True, False)["subscores"]["outcome"] == 1)
+
+    check("learned: variant parsed from basename",
+          grade.split_learned_variant("learned_x__claude__opus__v-generated__r2")
+          == ("learned_x__claude__opus__r2", "generated"))
+    check("learned: basename without variant untouched",
+          grade.split_learned_variant("trace_callers__claude__opus__bare")
+          == ("trace_callers__claude__opus__bare", None))
+
+    rows = grade.learned_skill_aggregate(
+        [learned_score(True, True), learned_score(True, False), learned_score(False, False),
+         learned_score(True, True, variant="none")],
+        [{"id": "learned", "host": "claude", "model": "opus", "learned_skill_workflow": "wf",
+          "learned_skill_variant": "manual"}])
+    by_variant = {r["variant"]: r for r in rows}
+    manual, none = by_variant.get("manual", {}), by_variant.get("none", {})
+    check("learned: aggregate counts routing per variant",
+          manual.get("routing") == {"tp": 1, "fn": 1, "fp": 0, "tn": 1, "unknown": 0}
+          and manual.get("n") == 3 and manual.get("invalid") == 1, str(manual))
+    check("learned: unknown routing stays out of tp/fn/fp/tn",
+          none.get("routing") == {"tp": 0, "fn": 0, "fp": 0, "tn": 0, "unknown": 1}, str(none))
+    check("learned: unknown cost excluded from means, counted",
+          manual.get("tokens_mean") is None and manual.get("tokens_unknown") == 3
+          and manual.get("tokens_total") == 0)
+    report = grade.render_report({"meta": {}, "aggregate": {}, "results": [], "learned_skill": rows})
+    check("learned: report table rendered without a verdict",
+          "## Learned-skill qualification" in report
+          and not any(w in report.lower() for w in ("winner", "verdict:", "pass/fail:")))
+
+
+def test_learned_skill_lint():
+    with tempfile.TemporaryDirectory() as root:
+        os.makedirs(os.path.join(root, "wf", "sessions"))
+        with open(os.path.join(root, "wf", "sessions", "a.jsonl"), "w") as f:
+            f.write(json.dumps({"type": "user", "message": {"role": "user",
+                                "content": "Review my pricing change, please."}}) + "\n")
+        ok = {"h": {"prompt": "What should I check before changing totals?",
+                    "learned_skill": {"workflow": "wf", "expected": True}}}
+        leak = {"h": {"prompt": "review my  pricing change, please.",
+                      "learned_skill": {"workflow": "wf", "expected": True}}}
+        unknown = {"h": {"prompt": "x", "learned_skill": {"workflow": "../wf", "expected": True}}}
+        check("learned lint: held-out prompt distinct from sessions passes",
+              grade.lint_learned_skills(ok, root) == [])
+        check("learned lint: generation prompt reused as held-out fails",
+              len(grade.lint_learned_skills(leak, root)) == 1)
+        check("learned lint: unknown workflow fails",
+              len(grade.lint_learned_skills(unknown, root)) == 1)
+        check("learned lint: scenarios without learned_skill ignored",
+              grade.lint_learned_skills({"p": {"prompt": "Review my pricing change, please."}}, root) == [])
+
+
 def test_carry_claude_profile():
     with tempfile.TemporaryDirectory() as td:
         src = os.path.join(td, "settings.json")
@@ -526,6 +657,9 @@ def main() -> int:
     test_carry_claude_profile()
     test_transcript_base_repetitions()
     test_skill_routing()
+    test_cost_and_corrections()
+    test_learned_skill_routing()
+    test_learned_skill_lint()
     check("lint: generated scenario id cannot escape artifacts",
           bool(grade.lint_scenarios({"../escape": {"prompt": "Explain this function."}})))
     test_lint()
