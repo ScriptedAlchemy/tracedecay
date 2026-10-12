@@ -152,10 +152,10 @@ pub struct AnalyzerAdmissionSnapshotV1 {
 }
 
 impl AnalyzerAdmissionSnapshotV1 {
-    pub fn compose<E>(evaluator: &E, input: &AnalyzerAdmissionInputV1) -> Self
-    where
-        E: AnalyzerAdmissionEvaluator,
-    {
+    pub fn compose(
+        evaluator: &AnalyzerAdmissionEvaluatorV1,
+        input: &AnalyzerAdmissionInputV1,
+    ) -> Self {
         let decision = evaluator.evaluate(input);
         let snapshot_digest = policy_digest(ANALYZER_ADMISSION_SNAPSHOT_DOMAIN, &decision);
         Self {
@@ -169,10 +169,6 @@ impl AnalyzerAdmissionSnapshotV1 {
             && self.snapshot_digest.validate().is_ok()
             && self.decision.is_bound_to(input)
     }
-}
-
-pub trait AnalyzerAdmissionEvaluator {
-    fn evaluate(&self, input: &AnalyzerAdmissionInputV1) -> AnalyzerAdmissionDecisionV1;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -218,11 +214,9 @@ impl AnalyzerAdmissionEvaluatorV1 {
             ordered_reason_codes,
         }
     }
-}
 
-impl AnalyzerAdmissionEvaluator for AnalyzerAdmissionEvaluatorV1 {
     #[tracing::instrument(name = "policy.analyzer.evaluate", level = "trace", skip_all)]
-    fn evaluate(&self, input: &AnalyzerAdmissionInputV1) -> AnalyzerAdmissionDecisionV1 {
+    pub fn evaluate(&self, input: &AnalyzerAdmissionInputV1) -> AnalyzerAdmissionDecisionV1 {
         if input.settings.validate().is_err()
             || input.language_id.validate().is_err()
             || input.requested_capability.validate().is_err()

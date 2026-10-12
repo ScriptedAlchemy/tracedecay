@@ -534,7 +534,7 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
         .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
         Ok(MaterializedGitIndexPreview {
             preview,
-            execution: completed_execution(request),
+            execution: completed_execution(&request.context, request.observed_at),
             runner,
             patches,
         })
@@ -590,7 +590,7 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
         .map_err(|_| GitIndexTransactionPortError::NeedsInspection)?;
         Ok(NativeGitIndexApplyResult {
             receipt,
-            execution: completed_apply_execution(request),
+            execution: completed_execution(&request.context, request.observed_at),
         })
     }
 
@@ -639,22 +639,14 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
     }
 }
 
-fn completed_execution(request: &GitIndexPreviewRequestV1) -> OperationReceipt {
+fn completed_execution(
+    context: &tracedecay_contracts::RequestContext,
+    observed_at: UtcMicros,
+) -> OperationReceipt {
     OperationReceipt {
-        started_at: request.observed_at,
-        ended_at: request.observed_at,
-        effective_deadline: request.context.deadline().clone(),
-        cancellation: None,
-        budget: OperationBudgetUsage::default(),
-        termination: OperationTermination::Completed,
-    }
-}
-
-fn completed_apply_execution(request: &GitIndexApplyRequestV1) -> OperationReceipt {
-    OperationReceipt {
-        started_at: request.observed_at,
-        ended_at: request.observed_at,
-        effective_deadline: request.context.deadline().clone(),
+        started_at: observed_at,
+        ended_at: observed_at,
+        effective_deadline: context.deadline().clone(),
         cancellation: None,
         budget: OperationBudgetUsage::default(),
         termination: OperationTermination::Completed,

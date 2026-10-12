@@ -32,7 +32,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    JsonConfigMutation, load_json_file, update_json_config_transactionally,
+    JsonConfigMutation, load_json_file, read_optional_config_bytes,
+    update_json_config_transactionally,
 };
 
 /// Name of Factory Droid's own CLI, which owns `~/.factory/mcp.json`.
@@ -393,16 +394,6 @@ impl AgentIntegration for DroidIntegration {
 /// for the lifecycle, not a preference with a config-editing fallback.
 fn require_droid_cli() -> Result<PathBuf> {
     super::host_cli::require_host_cli(DROID_CLI, DROID_CLI_LIFECYCLE)
-}
-
-fn read_optional_config_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(TraceDecayError::Config {
-            message: format!("failed to read {}: {error}", path.display()),
-        }),
-    }
 }
 
 /// Drive Droid's own registry to add the tracedecay MCP server.

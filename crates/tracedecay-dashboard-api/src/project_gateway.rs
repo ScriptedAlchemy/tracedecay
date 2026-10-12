@@ -29,15 +29,12 @@ pub(super) async fn project_scoped_api_gateway(
     mut req: Request<Body>,
 ) -> Response {
     if is_profile_owned_automation_skills_route(&tail) {
-        return (
+        return gateway_problem(
             StatusCode::NOT_FOUND,
-            Json(json!({
-                "status": "not_project_scoped",
-                "detail": "managed automation skills are profile-owned and are not available through project-qualified routes",
-                "project_id": project_id,
-            })),
-        )
-            .into_response();
+            "not_project_scoped",
+            "managed automation skills are profile-owned and are not available through project-qualified routes",
+            Some(&project_id),
+        );
     }
     if is_graph_search_tail(&tail)
         && let Some(refusal) = graph_binding::refuse_graph_search_scope(
@@ -57,15 +54,12 @@ pub(super) async fn project_scoped_api_gateway(
         && application_read.is_none()
         && !event_delivery_ack
     {
-        return (
+        return gateway_problem(
             StatusCode::METHOD_NOT_ALLOWED,
-            Json(json!({
-                "status": "read_only_project",
-                "detail": "project-scoped dashboard APIs are read-only for non-active projects",
-                "project_id": project_id,
-            })),
-        )
-            .into_response();
+            "read_only_project",
+            "project-scoped dashboard APIs are read-only for non-active projects",
+            Some(&project_id),
+        );
     }
 
     let selected = match runtime.selected_project_state(&project_id).await {
@@ -87,15 +81,12 @@ pub(super) async fn project_scoped_api_gateway(
             .into_response();
         }
         Err(projects::SelectedProjectError::Failed(err)) => {
-            return (
+            return gateway_problem(
                 StatusCode::NOT_FOUND,
-                Json(json!({
-                    "status": "not_found",
-                    "detail": err.to_string(),
-                    "project_id": project_id,
-                })),
-            )
-                .into_response();
+                "not_found",
+                err.to_string(),
+                Some(&project_id),
+            );
         }
     };
 
@@ -106,15 +97,12 @@ pub(super) async fn project_scoped_api_gateway(
         .unwrap_or_default();
     if let Some(read) = application_read {
         let Some(project_graph) = selected.state.project_graph.as_deref() else {
-            return (
+            return gateway_problem(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "status": "unavailable",
-                    "detail": format!("selected project {read} authority is unavailable"),
-                    "project_id": project_id,
-                })),
-            )
-                .into_response();
+                "unavailable",
+                format!("selected project {read} authority is unavailable"),
+                Some(&project_id),
+            );
         };
         let application_runtime =
             if runtime.active_project_id().as_deref() == Some(project_id.as_str()) {
@@ -129,17 +117,12 @@ pub(super) async fn project_scoped_api_gateway(
                 ) {
                     Ok(application_runtime) => application_runtime,
                     Err(err) => {
-                        return (
+                        return gateway_problem(
                             StatusCode::SERVICE_UNAVAILABLE,
-                            Json(json!({
-                                "status": "unavailable",
-                                "detail": format!(
-                                    "selected project {read} authority is unavailable: {err}"
-                                ),
-                                "project_id": project_id,
-                            })),
-                        )
-                            .into_response();
+                            "unavailable",
+                            format!("selected project {read} authority is unavailable: {err}"),
+                            Some(&project_id),
+                        );
                     }
                 }
             };
@@ -149,17 +132,12 @@ pub(super) async fn project_scoped_api_gateway(
         ) {
             Ok(application) => application,
             Err(err) => {
-                return (
+                return gateway_problem(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({
-                        "status": "unavailable",
-                        "detail": format!(
-                            "selected project {read} authority is unavailable: {err}"
-                        ),
-                        "project_id": project_id,
-                    })),
-                )
-                    .into_response();
+                    "unavailable",
+                    format!("selected project {read} authority is unavailable: {err}"),
+                    Some(&project_id),
+                );
             }
         };
         let (router, family) = match read {
@@ -172,14 +150,12 @@ pub(super) async fn project_scoped_api_gateway(
             SelectedProjectApplicationRead::Workflow => (application.http_router, "application/"),
         };
         let Some(operation) = tail.strip_prefix(family) else {
-            return (
+            return gateway_problem(
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "status": "bad_request",
-                    "detail": format!("invalid project-scoped {read} path"),
-                })),
-            )
-                .into_response();
+                "bad_request",
+                format!("invalid project-scoped {read} path"),
+                None,
+            );
         };
         let rewritten = format!("/{operation}{query}");
         return match rewritten.parse::<Uri>() {
@@ -187,24 +163,20 @@ pub(super) async fn project_scoped_api_gateway(
                 *req.uri_mut() = uri;
                 match router.oneshot(req).await {
                     Ok(response) => response,
-                    Err(err) => (
+                    Err(err) => gateway_problem(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "status": "error",
-                            "detail": format!("dashboard {read} route failed: {err}"),
-                        })),
-                    )
-                        .into_response(),
+                        "error",
+                        format!("dashboard {read} route failed: {err}"),
+                        None,
+                    ),
                 }
             }
-            Err(err) => (
+            Err(err) => gateway_problem(
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "status": "bad_request",
-                    "detail": format!("invalid project-scoped {read} path: {err}"),
-                })),
-            )
-                .into_response(),
+                "bad_request",
+                format!("invalid project-scoped {read} path: {err}"),
+                None,
+            ),
         };
     }
     let rewritten = format!("/api/{tail}{query}");
@@ -213,15 +185,28 @@ pub(super) async fn project_scoped_api_gateway(
             *req.uri_mut() = uri;
             forward_project_request(runtime.project_api_router(), selected.state, req).await
         }
-        Err(err) => (
+        Err(err) => gateway_problem(
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "status": "bad_request",
-                "detail": format!("invalid project-scoped dashboard path: {err}"),
-            })),
-        )
-            .into_response(),
+            "bad_request",
+            format!("invalid project-scoped dashboard path: {err}"),
+            None,
+        ),
     }
+}
+
+/// One gateway refusal body; `project_id` is echoed when the refusal is about
+/// that selected project.
+fn gateway_problem(
+    status: StatusCode,
+    label: &str,
+    detail: impl Into<String>,
+    project_id: Option<&str>,
+) -> Response {
+    let mut body = json!({ "status": label, "detail": detail.into() });
+    if let Some(project_id) = project_id {
+        body["project_id"] = json!(project_id);
+    }
+    (status, Json(body)).into_response()
 }
 
 fn is_profile_owned_automation_skills_route(tail: &str) -> bool {

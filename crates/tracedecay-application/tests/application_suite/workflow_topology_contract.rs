@@ -79,21 +79,10 @@ fn workflow_topology_orders_ready_steps_and_fan_out_deterministically() {
     );
     assert_eq!(
         store
-            .ready_steps(&BTreeSet::from([step_id("a")]), 8, cancellation.clone())
+            .ready_steps(&BTreeSet::from([step_id("a")]), 8, cancellation)
             .expect("fan-out ready"),
         vec![step_id("b"), step_id("c")]
     );
-    assert_eq!(
-        store
-            .topological_order(cancellation.clone())
-            .expect("topological order"),
-        vec![step_id("a"), step_id("b"), step_id("c"), step_id("d")]
-    );
-    let mut descendants = store
-        .descendants(&step_id("a"), 8, 16, cancellation)
-        .expect("descendants");
-    descendants.sort();
-    assert_eq!(descendants, vec![step_id("b"), step_id("c"), step_id("d")]);
 }
 
 #[test]

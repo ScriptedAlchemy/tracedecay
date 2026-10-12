@@ -49,7 +49,7 @@ async fn setup_scoped_production_project(scope_prefix: &str) -> ScopedProduction
     fs::create_dir_all(&project_root).unwrap();
     crate::fixture::write_indexed_fixture_sources(&project_root);
     commit_worktree(&project_root, "scoped production context fixture");
-    let harness = ProductionProjectCompositionHarnessV1::open_with_scope_prefix(
+    let harness = crate::support::seeded_composition::open_with_scope_prefix(
         isolation.path(),
         [project_root.clone()],
         scope_prefix,

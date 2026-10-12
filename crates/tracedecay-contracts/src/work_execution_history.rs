@@ -101,7 +101,9 @@ where
     for attempt in attempts {
         let terminal = attempt.terminal();
         let ended_at = terminal.map(WorkTerminalEvidenceV1::observed_at);
-        let terminal_evidence_digest = terminal.map(terminal_digest).cloned();
+        let terminal_evidence_digest = terminal
+            .map(WorkTerminalEvidenceV1::evidence_digest)
+            .cloned();
         if let (Some(terminal), Some(evidence_digest)) =
             (terminal, terminal_evidence_digest.clone())
         {
@@ -188,21 +190,4 @@ where
         attempt_coverage: coverage,
         timing_coverage,
     })
-}
-
-fn terminal_digest(terminal: &WorkTerminalEvidenceV1) -> &ManifestDigest {
-    match terminal {
-        WorkTerminalEvidenceV1::Succeeded {
-            evidence_digest, ..
-        }
-        | WorkTerminalEvidenceV1::Failed {
-            evidence_digest, ..
-        }
-        | WorkTerminalEvidenceV1::TimedOut {
-            evidence_digest, ..
-        }
-        | WorkTerminalEvidenceV1::Cancelled {
-            evidence_digest, ..
-        } => evidence_digest,
-    }
 }

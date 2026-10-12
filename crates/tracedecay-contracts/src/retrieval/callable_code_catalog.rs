@@ -15,7 +15,9 @@ use crate::capability_manifest::{
 };
 use crate::current_application_bindings;
 use crate::error::ApplicationContractError;
-use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
+use crate::handlers::{
+    ApplicationHandlerDescriptor, ApplicationOperation, capability_executable_schema,
+};
 use crate::result::ResultContractRef;
 use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
 use crate::surface_contracts::{
@@ -229,20 +231,13 @@ where
     Request: JsonSchema,
     Response: JsonSchema,
 {
-    let capability_id = code_query_capability_id(kind)?;
-    let manifest = contribution
-        .capabilities()
-        .iter()
-        .find(|manifest| manifest.capability_id() == &capability_id)
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "callable code schema capability",
-        })?;
-    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
-        Request,
-        Response,
-    >(
-        manifest, request_rust_type_path, result_rust_type_path
-    )?)
+    capability_executable_schema::<Request, Response>(
+        contribution,
+        &code_query_capability_id(kind)?,
+        "callable code schema capability",
+        request_rust_type_path,
+        result_rust_type_path,
+    )
 }
 
 /// Existing canonical application surfaces own these semantics. Keeping the

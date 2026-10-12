@@ -360,18 +360,9 @@ pub fn resolved_scope_for_project(
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::git;
     use super::*;
-    use std::process::Command;
     use tempfile::TempDir;
-
-    fn git(root: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git failed: {args:?}");
-    }
 
     fn init_repo(files: &[(&str, &str)]) -> TempDir {
         let root = TempDir::new().expect("root");

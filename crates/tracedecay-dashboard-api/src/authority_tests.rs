@@ -304,7 +304,7 @@ async fn loopback_requests_need_the_listener_access_token() {
 
 /// The router as production serves it.
 ///
-/// [`run_until_shutdown_inner`] wraps every served route in
+/// [`run_until_shutdown_for_tests_with_host_admission`] wraps every served route in
 /// [`with_dashboard_http_admission`], which is what supplies the
 /// [`DashboardHttpRequestControlV1`] extension every canonical read
 /// requires. A bare [`router_with_active_application`] is not a stack that

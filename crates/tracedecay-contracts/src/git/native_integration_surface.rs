@@ -50,7 +50,9 @@ use crate::git::worktree::{
     WorktreeCleanupInspectRequestV1, WorktreeCleanupReconcileRequestV1, WorktreeCleanupRemovalV1,
     WorktreeCleanupRemoveRequestV1, WorktreeInventoryRequestV1,
 };
-use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
+use crate::handlers::{
+    ApplicationHandlerDescriptor, ApplicationOperation, capability_executable_schema,
+};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
@@ -840,20 +842,13 @@ where
     Response: JsonSchema,
 {
     let spec = spec_for(operation)?;
-    let capability_id = CapabilityId::new(spec.capability)?;
-    let manifest = contribution
-        .capabilities()
-        .iter()
-        .find(|manifest| manifest.capability_id() == &capability_id)
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "native integration schema capability",
-        })?;
-    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
-        Request,
-        Response,
-    >(
-        manifest, request_rust_type_path, result_rust_type_path
-    )?)
+    capability_executable_schema::<Request, Response>(
+        contribution,
+        &CapabilityId::new(spec.capability)?,
+        "native integration schema capability",
+        request_rust_type_path,
+        result_rust_type_path,
+    )
 }
 
 fn spec_for(

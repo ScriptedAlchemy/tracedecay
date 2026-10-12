@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{HostCapabilityRecordV1, HostKindV1, canonical_stock_host_capabilities};
+use super::HostKindV1;
 
 #[derive(
     Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
@@ -65,14 +65,6 @@ impl NativeHostIdentityV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "state", content = "identity")]
-pub enum HostHookMappingV1 {
-    Native(NativeHostIdentityV1),
-    Unavailable(NativeHostIdentityV1),
-    NotApplicable,
-}
-
 #[derive(
     Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
 )]
@@ -84,75 +76,15 @@ pub enum HostComponentV1 {
     OperatorMcp,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostAssetRenderPolicyV1 {
-    ManagedEmbedded,
-    StagedManualPlugin,
-    Unavailable,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostActivationPolicyV1 {
-    Managed,
-    ManualHostInstall,
-    Unsupported,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostProjectRegistrationPathV1 {
-    ClaudeProjectDirectory,
-    CursorProjectDirectory,
-    CodexProjectDirectory,
-    DevinProjectDirectory,
-    ZedProjectDirectory,
-    VibeProjectDirectory,
-    HermesProjectDirectory,
-    KiroProjectDirectory,
-    KimiProjectDirectory,
-    OpenCodeProjectDirectory,
-    Unavailable,
-}
-
-impl HostProjectRegistrationPathV1 {
-    pub const fn relative_path(self) -> Option<&'static str> {
-        match self {
-            Self::ClaudeProjectDirectory => Some(".claude"),
-            Self::CursorProjectDirectory => Some(".cursor"),
-            Self::CodexProjectDirectory => Some(".codex"),
-            Self::DevinProjectDirectory => Some(".devin"),
-            Self::ZedProjectDirectory => Some(".zed"),
-            Self::VibeProjectDirectory => Some(".vibe"),
-            Self::HermesProjectDirectory => Some(".hermes"),
-            Self::KiroProjectDirectory => Some(".kiro"),
-            Self::KimiProjectDirectory => Some(".kimi-code"),
-            Self::OpenCodeProjectDirectory => Some(".config/opencode"),
-            Self::Unavailable => None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostDescriptorV1 {
-    host: HostKindV1,
     cli_id: String,
     slug: String,
-    hook: HostHookMappingV1,
-    capabilities: Vec<HostCapabilityRecordV1>,
     components: Vec<HostComponentV1>,
-    asset_render_policy: HostAssetRenderPolicyV1,
-    activation_policy: HostActivationPolicyV1,
-    project_registration_path: HostProjectRegistrationPathV1,
 }
 
 impl HostDescriptorV1 {
-    pub const fn host(&self) -> HostKindV1 {
-        self.host
-    }
-
     pub fn cli_id(&self) -> &str {
         &self.cli_id
     }
@@ -161,28 +93,8 @@ impl HostDescriptorV1 {
         &self.slug
     }
 
-    pub const fn hook(&self) -> HostHookMappingV1 {
-        self.hook
-    }
-
-    pub fn capabilities(&self) -> &[HostCapabilityRecordV1] {
-        &self.capabilities
-    }
-
     pub fn components(&self) -> &[HostComponentV1] {
         &self.components
-    }
-
-    pub const fn asset_render_policy(&self) -> HostAssetRenderPolicyV1 {
-        self.asset_render_policy
-    }
-
-    pub const fn activation_policy(&self) -> HostActivationPolicyV1 {
-        self.activation_policy
-    }
-
-    pub const fn project_registration_path(&self) -> HostProjectRegistrationPathV1 {
-        self.project_registration_path
     }
 }
 
@@ -226,153 +138,28 @@ impl HostKindV1 {
 }
 
 pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
-    use HostActivationPolicyV1::{Managed, ManualHostInstall, Unsupported};
-    use HostAssetRenderPolicyV1::{ManagedEmbedded, StagedManualPlugin, Unavailable};
     use HostComponentV1::{Agent, ContextMcp, Core, OperatorMcp};
-    use HostHookMappingV1::{Native, NotApplicable};
-    use HostProjectRegistrationPathV1::{
-        ClaudeProjectDirectory, CodexProjectDirectory, CursorProjectDirectory,
-        DevinProjectDirectory, HermesProjectDirectory, KimiProjectDirectory, KiroProjectDirectory,
-        OpenCodeProjectDirectory, VibeProjectDirectory, ZedProjectDirectory,
-    };
 
-    let (cli_id, slug, hook, components, asset_render_policy, activation_policy, path) = match host
-    {
-        HostKindV1::ClaudeCode => (
-            "claude",
-            "claude-code",
-            Native(NativeHostIdentityV1::ClaudeCode),
-            vec![Core, ContextMcp, OperatorMcp],
-            ManagedEmbedded,
-            Managed,
-            ClaudeProjectDirectory,
-        ),
+    let (cli_id, slug, components) = match host {
+        HostKindV1::ClaudeCode => ("claude", "claude-code", vec![Core, ContextMcp, OperatorMcp]),
         HostKindV1::CursorDesktop => (
             "cursor",
             "cursor-desktop",
-            Native(NativeHostIdentityV1::CursorDesktop),
             vec![Core, Agent, ContextMcp, OperatorMcp],
-            ManagedEmbedded,
-            Managed,
-            CursorProjectDirectory,
         ),
-        HostKindV1::CursorCloud => (
-            "cursor",
-            "cursor-cloud",
-            Native(NativeHostIdentityV1::CursorCloud),
-            vec![],
-            Unavailable,
-            Unsupported,
-            HostProjectRegistrationPathV1::Unavailable,
-        ),
-        HostKindV1::Codex => (
-            "codex",
-            "codex",
-            Native(NativeHostIdentityV1::Codex),
-            vec![Core, ContextMcp, OperatorMcp],
-            ManagedEmbedded,
-            Managed,
-            CodexProjectDirectory,
-        ),
-        HostKindV1::Devin => (
-            "devin",
-            "devin",
-            NotApplicable,
-            vec![ContextMcp],
-            ManagedEmbedded,
-            Managed,
-            DevinProjectDirectory,
-        ),
-        HostKindV1::Zed => (
-            "zed",
-            "zed",
-            NotApplicable,
-            vec![ContextMcp],
-            ManagedEmbedded,
-            Managed,
-            ZedProjectDirectory,
-        ),
-        HostKindV1::Antigravity => (
-            "antigravity",
-            "antigravity",
-            NotApplicable,
-            vec![ContextMcp],
-            ManagedEmbedded,
-            Managed,
-            HostProjectRegistrationPathV1::Unavailable,
-        ),
-        HostKindV1::Vibe => (
-            "vibe",
-            "vibe",
-            NotApplicable,
-            vec![Core, ContextMcp],
-            ManagedEmbedded,
-            Managed,
-            VibeProjectDirectory,
-        ),
-        HostKindV1::Hermes => (
-            "hermes",
-            "hermes",
-            Native(NativeHostIdentityV1::Hermes),
-            vec![Core],
-            ManagedEmbedded,
-            Managed,
-            HermesProjectDirectory,
-        ),
-        HostKindV1::Kiro => (
-            "kiro",
-            "kiro",
-            Native(NativeHostIdentityV1::Kiro),
-            vec![ContextMcp],
-            ManagedEmbedded,
-            Managed,
-            KiroProjectDirectory,
-        ),
-        HostKindV1::ClineFamily => (
-            "cline",
-            "cline-family",
-            NotApplicable,
-            vec![],
-            Unavailable,
-            Unsupported,
-            HostProjectRegistrationPathV1::Unavailable,
-        ),
-        HostKindV1::Cline => (
-            "cline",
-            "cline",
-            HostHookMappingV1::Unavailable(NativeHostIdentityV1::Cline),
-            vec![ContextMcp],
-            ManagedEmbedded,
-            Managed,
-            HostProjectRegistrationPathV1::Unavailable,
-        ),
-        HostKindV1::RooCode => (
-            "roo-code",
-            "roo-code",
-            HostHookMappingV1::Unavailable(NativeHostIdentityV1::RooCode),
-            vec![ContextMcp],
-            ManagedEmbedded,
-            Managed,
-            HostProjectRegistrationPathV1::Unavailable,
-        ),
-        HostKindV1::Kilo => (
-            "kilo",
-            "kilo",
-            HostHookMappingV1::Unavailable(NativeHostIdentityV1::Kilo),
-            vec![ContextMcp],
-            ManagedEmbedded,
-            Managed,
-            HostProjectRegistrationPathV1::Unavailable,
-        ),
-        HostKindV1::KimiCode => (
-            "kimi",
-            "kimi-code",
-            Native(NativeHostIdentityV1::KimiCode),
-            vec![Core],
-            StagedManualPlugin,
-            ManualHostInstall,
-            KimiProjectDirectory,
-        ),
+        HostKindV1::CursorCloud => ("cursor", "cursor-cloud", vec![]),
+        HostKindV1::Codex => ("codex", "codex", vec![Core, ContextMcp, OperatorMcp]),
+        HostKindV1::Devin => ("devin", "devin", vec![ContextMcp]),
+        HostKindV1::Zed => ("zed", "zed", vec![ContextMcp]),
+        HostKindV1::Antigravity => ("antigravity", "antigravity", vec![ContextMcp]),
+        HostKindV1::Vibe => ("vibe", "vibe", vec![Core, ContextMcp]),
+        HostKindV1::Hermes => ("hermes", "hermes", vec![Core]),
+        HostKindV1::Kiro => ("kiro", "kiro", vec![ContextMcp]),
+        HostKindV1::ClineFamily => ("cline", "cline-family", vec![]),
+        HostKindV1::Cline => ("cline", "cline", vec![ContextMcp]),
+        HostKindV1::RooCode => ("roo-code", "roo-code", vec![ContextMcp]),
+        HostKindV1::Kilo => ("kilo", "kilo", vec![ContextMcp]),
+        HostKindV1::KimiCode => ("kimi", "kimi-code", vec![Core]),
         // ChatGPT registers a connector or plugin only through its own
         // interactive surfaces (developer-mode connector setup, the desktop
         // app's plugin flow); there is no host CLI or local registry file
@@ -380,100 +167,36 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
         // Agent Plugins bundle as receipt-owned source and defers activation
         // to the operator, exactly Kimi's shape. There is no project-local
         // route either.
-        HostKindV1::ChatGpt => (
-            "chatgpt",
-            "chatgpt",
-            NotApplicable,
-            vec![Core],
-            StagedManualPlugin,
-            ManualHostInstall,
-            HostProjectRegistrationPathV1::Unavailable,
-        ),
-        HostKindV1::OpenCode => (
-            "opencode",
-            "opencode",
-            Native(NativeHostIdentityV1::OpenCode),
-            vec![Core, Agent, ContextMcp],
-            ManagedEmbedded,
-            Managed,
-            OpenCodeProjectDirectory,
-        ),
+        HostKindV1::ChatGpt => ("chatgpt", "chatgpt", vec![Core]),
+        HostKindV1::OpenCode => ("opencode", "opencode", vec![Core, Agent, ContextMcp]),
         // Gemini CLI owns extension registration through `gemini extensions
         // install|uninstall`; TraceDecay renders and stages the extension
-        // source and drives those commands, so the assets are managed and the
-        // activation is TraceDecay-driven. There is no project-local route:
+        // source and drives those commands. There is no project-local route:
         // a workspace-scoped extension is installed by running the host CLI
         // inside that workspace, and the lifecycle admits only the profile
         // home as the child working directory.
-        HostKindV1::Gemini => (
-            "gemini",
-            "gemini",
-            NotApplicable,
-            vec![ContextMcp],
-            ManagedEmbedded,
-            Managed,
-            HostProjectRegistrationPathV1::Unavailable,
-        ),
+        HostKindV1::Gemini => ("gemini", "gemini", vec![ContextMcp]),
         // GitHub Copilot owns its MCP registry through `copilot mcp
         // add|remove`; TraceDecay drives those commands and never merges
         // `~/.copilot/mcp-config.json` itself. The one managed artifact is the
-        // receipt-owned component descriptor under `.copilot/tracedecay/`,
-        // which is why the assets are `ManagedEmbedded` and the activation is
-        // `Managed`, exactly Kiro's shape, for exactly Kiro's reason.
-        //
-        // The project registration path is `Unavailable`: Copilot exposes no
-        // project-scoped registry command, and the workspace surface that does
-        // exist (`.vscode/mcp.json`) is written by the operator and only ever
-        // *read* by this integration. Naming a project directory here would
-        // claim a registration route TraceDecay does not drive.
-        HostKindV1::Copilot => (
-            "copilot",
-            "copilot",
-            NotApplicable,
-            vec![ContextMcp],
-            ManagedEmbedded,
-            Managed,
-            HostProjectRegistrationPathV1::Unavailable,
-        ),
+        // receipt-owned component descriptor under `.copilot/tracedecay/`.
+        // Copilot exposes no project-scoped registry command; the workspace
+        // surface that does exist (`.vscode/mcp.json`) is written by the
+        // operator and only ever *read* by this integration.
+        HostKindV1::Copilot => ("copilot", "copilot", vec![ContextMcp]),
         // Pi registers tools, hooks, and skills through its extension API in
         // `~/.pi/agent/extensions`; there is no MCP route, so the component
         // set is Core + Agent only. The extension forwards its lifecycle
         // events to `hook-pi-event`. There is no project-local route.
-        HostKindV1::Pi => (
-            "pi",
-            "pi",
-            Native(NativeHostIdentityV1::Pi),
-            vec![Core, Agent],
-            ManagedEmbedded,
-            Managed,
-            HostProjectRegistrationPathV1::Unavailable,
-        ),
+        HostKindV1::Pi => ("pi", "pi", vec![Core, Agent]),
         // Factory Droid's `droid mcp add|remove` registry owns the MCP
         // document; TraceDecay drives the commands and owns only the
         // receipt-backed component descriptor, Copilot's shape exactly.
-        HostKindV1::FactoryDroid => (
-            "droid",
-            "factory-droid",
-            Native(NativeHostIdentityV1::FactoryDroid),
-            vec![Core, ContextMcp],
-            ManagedEmbedded,
-            Managed,
-            HostProjectRegistrationPathV1::Unavailable,
-        ),
+        HostKindV1::FactoryDroid => ("droid", "factory-droid", vec![Core, ContextMcp]),
     };
     HostDescriptorV1 {
-        host,
         cli_id: cli_id.to_owned(),
         slug: slug.to_owned(),
-        hook,
-        capabilities: canonical_stock_host_capabilities(host).to_vec(),
         components,
-        asset_render_policy,
-        activation_policy,
-        project_registration_path: path,
     }
-}
-
-pub fn host_descriptors_v1() -> Vec<HostDescriptorV1> {
-    HostKindV1::ALL.map(host_descriptor_v1).to_vec()
 }

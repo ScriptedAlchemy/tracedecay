@@ -334,19 +334,6 @@ impl DashboardState {
         }
     }
 
-    fn retain_admitted_authorities(
-        &mut self,
-        code_diagnostics_authority: Option<
-            crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1,
-        >,
-        doctor_report_reader: Option<DoctorReportReader>,
-        remote_operational_status_reader: Option<RemoteOperationalStatusReader>,
-    ) {
-        self.code_diagnostics_authority = code_diagnostics_authority;
-        self.doctor_report_reader = doctor_report_reader;
-        self.remote_operational_status_reader = remote_operational_status_reader;
-    }
-
     pub(crate) fn mount_session_authorities(&mut self, authorities: DashboardSessionAuthoritiesV1) {
         self.lcm_db_path = authorities.project_sessions.db_path().display().to_string();
         self.lcm_db = Some(authorities.project_sessions);
@@ -358,20 +345,15 @@ impl DashboardState {
     }
 }
 
-/// The retained session store for legacy dashboard routes.
-pub struct LcmStoreSelection {
-    pub lcm_db: Option<RegisteredGlobalDbLeaseV1>,
-    pub path: String,
-    pub scope: String,
+/// The retained session store for the dashboard's session-backed routes.
+pub(super) struct LcmStoreSelection {
+    pub(super) lcm_db: Option<RegisteredGlobalDbLeaseV1>,
+    pub(super) path: String,
+    pub(super) scope: String,
 }
 
-pub async fn resolve_lcm_store(
-    cg: &DashboardProjectContext,
-    registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
-) -> LcmStoreSelection {
-    resolve_lcm_store_for_layout(&cg.store_layout, registered_project_session_db)
-}
-
+/// Selects the registered project session store, failing closed to an
+/// unavailable selection when the daemon retained none.
 pub(super) fn resolve_lcm_store_for_layout(
     layout: &StoreLayout,
     registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
@@ -394,13 +376,6 @@ pub fn storage_mode_label(mode: &StorageMode) -> &'static str {
     match mode {
         StorageMode::ProfileSharded => "profile_sharded",
     }
-}
-
-pub fn resolve_project_memory_store(cg: &DashboardProjectContext) -> (String, Arc<Database>) {
-    (
-        cg.dashboard_db_path.display().to_string(),
-        Arc::clone(&cg.dashboard_database),
-    )
 }
 
 /// Resolves the immutable fact owner from the validated project layout.
@@ -452,7 +427,8 @@ pub(super) async fn build_state_inner(
         application_invocation_executor,
         delivery_settlement_authority,
     } = composition;
-    let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
+    let mem_db_path = cg.dashboard_db_path.display().to_string();
+    let mem_db = Arc::clone(&cg.dashboard_database);
     let memory_owner = project_memory_owner(cg)?;
     let (session_authorities, session_authority, session_mount) = match project_sessions {
         DashboardSessionMountV1::Ready(authorities) => (
@@ -478,11 +454,10 @@ pub(super) async fn build_state_inner(
                     authorities.git_correlation_read_authority.clone(),
                 )
             });
-    let lcm = resolve_lcm_store(
-        cg,
+    let lcm = resolve_lcm_store_for_layout(
+        &cg.store_layout,
         session_authorities.map(|authorities| authorities.project_sessions),
-    )
-    .await;
+    );
     let dashboard_root = cg.store_layout.dashboard_root.clone();
     let store_root = cg.store_layout.data_root.clone();
     let storage_mode = storage_mode_label(&cg.store_layout.storage_mode).to_string();
@@ -512,7 +487,7 @@ pub(super) async fn build_state_inner(
     events_delivery::DashboardDeliverySettlementRegistryV1::mount_deadline_reaper(
         &delivery_settlements,
     );
-    let mut state = DashboardState {
+    let state = DashboardState {
         build_version,
         host_io: cg.host_io,
         project_id: cg.store_layout.identity.project_id.clone(),
@@ -555,22 +530,17 @@ pub(super) async fn build_state_inner(
         profile_code_index_worker_settings,
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         derived_snapshots: Arc::new(snapshot_cache::DerivedSnapshotCaches::new()),
-        code_diagnostics_authority: None,
+        code_diagnostics_authority,
         automation_authority,
         automation_observation,
         automation_scheduler_reconciler,
         automation_writer,
-        doctor_report_reader: None,
-        remote_operational_status_reader: None,
+        doctor_report_reader,
+        remote_operational_status_reader,
         application_invocation_executor,
         delivery_settlements,
         event_source_poll: events_api::SharedSourcePoll::default(),
     };
-    state.retain_admitted_authorities(
-        code_diagnostics_authority,
-        doctor_report_reader,
-        remote_operational_status_reader,
-    );
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
     if warm_token_counts {

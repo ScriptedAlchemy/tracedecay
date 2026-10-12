@@ -272,9 +272,6 @@ export function DataRow({
   );
 }
 
-/** Fixed height shared by two-line result rows and their virtualizer. */
-export const RESULT_ROW_HEIGHT = 56;
-
 export function ListCaption({
   children,
   className,

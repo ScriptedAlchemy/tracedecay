@@ -81,14 +81,16 @@ pub(super) const CODEX_CLI_LIFECYCLE: &str = "codex MCP registry lifecycle";
 pub(super) const CODEX_MCP_SERVER_NAME: &str = "tracedecay";
 
 /// TOML key holding Codex's MCP registry.
-const CODEX_MCP_SERVERS_KEY: &str = "mcp_servers";
+pub(super) const CODEX_MCP_SERVERS_KEY: &str = "mcp_servers";
 
 /// TOML key holding Codex's plugin activation records (`tracedecay@…`). Read
 /// only, to prove the registry command left it alone.
-const CODEX_PLUGINS_KEY: &str = "plugins";
+pub(super) const CODEX_PLUGINS_KEY: &str = "plugins";
 
 /// TOML key holding Codex's hook-trust records. Read only, for the same reason.
-const CODEX_HOOKS_KEY: &str = "hooks";
+/// The plugin CLI must never disturb them either; TraceDecay writes its own
+/// managed entries through [`super::sync_codex_hook_trust`], outside any CLI run.
+pub(super) const CODEX_HOOKS_KEY: &str = "hooks";
 
 /// Whether this component set is the MCP-only (non-plugin) install.
 ///
@@ -236,10 +238,25 @@ fn preserved_regions(path: &Path) -> Result<CodexPreservedRegionsV1> {
 /// record) and its preserved regions (for the guard). A missing file is a valid
 /// observation. Codex creates the config on first `mcp add`.
 fn read_config_observation(path: &Path) -> Result<(Option<Vec<u8>>, CodexPreservedRegionsV1)> {
+    let (bytes, config) = read_config_table(path)?;
+    Ok((
+        bytes,
+        CodexPreservedRegionsV1 {
+            mcp_peers: table_peers(&config, CODEX_MCP_SERVERS_KEY, CODEX_MCP_SERVER_NAME, path)?,
+            plugins: config.get(CODEX_PLUGINS_KEY).cloned(),
+            hooks: config.get(CODEX_HOOKS_KEY).cloned(),
+        },
+    ))
+}
+
+/// Read the Codex config once, returning its exact bytes (for the rollback
+/// record) and its parsed table. A missing file has no bytes; a missing or
+/// blank file parses as an empty table.
+pub(super) fn read_config_table(path: &Path) -> Result<(Option<Vec<u8>>, toml::Table)> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((None, CodexPreservedRegionsV1::default()));
+            return Ok((None, toml::Table::new()));
         }
         Err(error) => {
             return Err(TraceDecayError::Config {
@@ -250,47 +267,38 @@ fn read_config_observation(path: &Path) -> Result<(Option<Vec<u8>>, CodexPreserv
             });
         }
     };
-    // Borrow for the parse and keep `bytes` owned, so the exact observed bytes
-    // are what gets recorded for rollback on every return path.
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("{} is not valid UTF-8: {error}", path.display()),
-        })?
-        .to_owned();
+    let text = std::str::from_utf8(&bytes).map_err(|error| TraceDecayError::Config {
+        message: format!("{} is not valid UTF-8: {error}", path.display()),
+    })?;
     if text.trim().is_empty() {
-        return Ok((Some(bytes), CodexPreservedRegionsV1::default()));
+        return Ok((Some(bytes), toml::Table::new()));
     }
-    let config: toml::Table = toml::from_str(&text).map_err(|error| TraceDecayError::Config {
+    let config = toml::from_str(text).map_err(|error| TraceDecayError::Config {
         message: format!("failed to parse {} as TOML: {error}", path.display()),
     })?;
-    let mcp_peers = match config.get(CODEX_MCP_SERVERS_KEY) {
-        None => toml::Table::new(),
-        Some(servers) => {
-            let Some(servers) = servers.as_table() else {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "{}.{CODEX_MCP_SERVERS_KEY} must be a TOML table",
-                        path.display()
-                    ),
-                });
-            };
-            let mut peers = toml::Table::new();
-            for (name, server) in servers {
-                if name.as_str() != CODEX_MCP_SERVER_NAME {
-                    peers.insert(name.clone(), server.clone());
-                }
-            }
-            peers
-        }
+    Ok((Some(bytes), config))
+}
+
+/// The entries of the `key` table other than TraceDecay's own `owned` entry.
+pub(super) fn table_peers(
+    config: &toml::Table,
+    key: &str,
+    owned: &str,
+    path: &Path,
+) -> Result<toml::Table> {
+    let Some(entries) = config.get(key) else {
+        return Ok(toml::Table::new());
     };
-    Ok((
-        Some(bytes),
-        CodexPreservedRegionsV1 {
-            mcp_peers,
-            plugins: config.get(CODEX_PLUGINS_KEY).cloned(),
-            hooks: config.get(CODEX_HOOKS_KEY).cloned(),
-        },
-    ))
+    let Some(entries) = entries.as_table() else {
+        return Err(TraceDecayError::Config {
+            message: format!("{}.{key} must be a TOML table", path.display()),
+        });
+    };
+    Ok(entries
+        .iter()
+        .filter(|(name, _)| name.as_str() != owned)
+        .map(|(name, entry)| (name.clone(), entry.clone()))
+        .collect())
 }
 
 #[cfg(test)]

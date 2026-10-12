@@ -47,7 +47,7 @@ async fn open_status_project() -> StatusProject {
         ],
     );
     let head = git_stdout(&project_root, &["rev-parse", "HEAD"]);
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    let harness = Box::pin(crate::support::seeded_composition::open(
         isolation.path(),
         [project_root.clone()],
     ))
@@ -444,7 +444,7 @@ async fn project_status_lists_only_its_own_memory_owners_and_the_doctor_lists_ev
         );
         canonical_existing_identity(&root).expect("canonical project root")
     });
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    let harness = Box::pin(crate::support::seeded_composition::open(
         isolation.path(),
         roots.clone(),
     ))

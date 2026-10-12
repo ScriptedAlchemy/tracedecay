@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use tracedecay_domain::{CapabilityId as DomainCapabilityId, UtcMicros};
 use tracedecay_policy::routing::{
     CapabilityAvailabilityV1, CapabilityEffectClassV1, ScopeMatchV1, TruthFreshnessRequirementV1,
@@ -7,7 +8,8 @@ use tracedecay_policy::routing::{
 };
 use tracedecay_tool_catalog::{
     ApplicationHandlerDescriptorV1 as CatalogHandlerDescriptor, ApplicationSurfaceOperation,
-    CapabilityId, CatalogContributionV1, SchemaRef, ServiceId, UseCaseId,
+    CapabilityId, CatalogContributionV1, ExecutableSchemaAuthority, SchemaRef, ServiceId,
+    UseCaseId,
 };
 
 use crate::error::ApplicationContractError;
@@ -232,18 +234,6 @@ impl ApplicationHandlerDescriptors {
             .and_then(|use_case_id| self.descriptors.get(use_case_id))
     }
 
-    pub fn surface_operations(
-        &self,
-    ) -> impl Iterator<Item = (ApplicationSurfaceOperation, &ApplicationHandlerDescriptor)> {
-        self.surface_operations
-            .iter()
-            .filter_map(|(operation, use_case_id)| {
-                self.descriptors
-                    .get(use_case_id)
-                    .map(|descriptor| (*operation, descriptor))
-            })
-    }
-
     pub fn catalog_descriptors(&self) -> Vec<CatalogHandlerDescriptor> {
         self.descriptors
             .values()
@@ -349,4 +339,33 @@ pub fn application_handler_descriptors()
         });
     }
     Ok(descriptors)
+}
+
+/// Binds the Rust-owned request/result schema bodies to `capability_id`'s
+/// manifest in `contribution`; `missing_field` names the inconsistency when
+/// the contribution does not register that capability.
+pub(crate) fn capability_executable_schema<Request, Response>(
+    contribution: &CatalogContributionV1,
+    capability_id: &CapabilityId,
+    missing_field: &'static str,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
+) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
+where
+    Request: JsonSchema,
+    Response: JsonSchema,
+{
+    let manifest = contribution
+        .capabilities()
+        .iter()
+        .find(|manifest| manifest.capability_id() == capability_id)
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: missing_field,
+        })?;
+    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
+        Request,
+        Response,
+    >(
+        manifest, request_rust_type_path, result_rust_type_path
+    )?)
 }

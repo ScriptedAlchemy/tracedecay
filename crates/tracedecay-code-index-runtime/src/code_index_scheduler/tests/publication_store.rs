@@ -44,19 +44,16 @@ use super::{
     retention_generations, scheduler, seeded_scope, test_project_id, unix_now_secs,
     with_untouched_fillers,
 };
-use crate::{
-    code_index::production::{
-        CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexColdBuildReasonV1,
-        CodeIndexExecutionControlV1, CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
-        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-        CodeIndexSealedPublicationV1, SEALED_GENERATION_FORMAT_REVISION_V1,
-        SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
-        UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
-    },
-    code_index_scheduler::{
-        CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
-        SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
-    },
+use crate::code_index_scheduler::{
+    CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
+    SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
+};
+use tracedecay_code_index::production::{
+    CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexColdBuildReasonV1,
+    CodeIndexExecutionControlV1, CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
+    CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1, CodeIndexSealedPublicationV1,
+    SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationSegmentReadV1,
+    SharedDecodedContentPoolV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
 };
 
 fn cold(generation: &Arc<CodeIndexPublishedGenerationV1>) -> CodeIndexSealedPublicationV1 {

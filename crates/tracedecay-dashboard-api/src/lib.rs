@@ -6,8 +6,8 @@
 //!   topology, and deterministic FHRR projections derived on read
 //! - `/api/plugins/hermes-lcm/*`   → LCM session store
 //!   (`lcm_raw_messages` / `session_summary_nodes` in the resolved active project
-//!   store where transcript ingest writes; see [`resolve_lcm_store`] for the
-//!   fail-closed authority selection)
+//!   store where transcript ingest writes; the daemon-registered session store
+//!   is the only authority, and its absence fails closed)
 //!
 //! `/api/capabilities` advertises which current TraceDecay authorities are
 //! mounted for the selected project.
@@ -146,10 +146,9 @@ pub use server::{bind_dashboard, validate_dashboard_host};
 pub use state::{
     AdmittedDoctorReportV1, AutomationSchedulerReconcileFuture, AutomationSchedulerReconciler,
     DashboardAutomationObservationFuture, DashboardAutomationObservationRecorderV1, DashboardState,
-    DashboardStateCompositionV1, DoctorReportReadFuture, DoctorReportReader, LcmStoreSelection,
+    DashboardStateCompositionV1, DoctorReportReadFuture, DoctorReportReader,
     RemoteOperationalStatusReader, build_selected_project_state,
-    build_state_with_automation_reconciler, config_error, project_memory_owner, resolve_lcm_store,
-    resolve_project_memory_store, storage_mode_label,
+    build_state_with_automation_reconciler, config_error, project_memory_owner, storage_mode_label,
 };
 #[cfg(feature = "test-transport")]
 pub use test_transport::{

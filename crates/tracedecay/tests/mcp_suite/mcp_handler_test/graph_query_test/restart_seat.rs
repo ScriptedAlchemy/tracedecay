@@ -52,7 +52,7 @@ fn anchor_site() -> (String, String) {
 
 async fn open(isolation: &Path, project: &Path) -> ProductionProjectCompositionHarnessV1 {
     Box::pin(
-        ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        crate::support::seeded_composition::open_for_session_retrieval(
             isolation,
             [project.to_path_buf()],
         ),

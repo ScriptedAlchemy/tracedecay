@@ -36,12 +36,16 @@ pub(crate) fn canonical_tool_name(raw: &str) -> String {
 /// Parse CLI args against the tool's JSON Schema. Returns the JSON object to
 /// hand to the handler, plus side-effects from reserved flags.
 pub(crate) fn parse_invocation(def: &ToolDefinition, args: &[String]) -> Result<ParsedInvocation> {
-    // stdin is a single-shot stream: memoize the first read so that referencing
-    // it more than once in one invocation (e.g. `--field-a @- --field-b @-`)
-    // yields the piped payload each time instead of silently emptying after the
-    // first `read_to_string`.
+    parse_invocation_with_stdin(def, args, memoized_stdin())
+}
+
+/// stdin is a single-shot stream: memoize the first read so that referencing
+/// it more than once in one invocation (e.g. `--field-a @- --field-b @-`)
+/// yields the piped payload each time instead of silently emptying after the
+/// first `read_to_string`.
+fn memoized_stdin() -> impl FnMut() -> Result<String> {
     let mut cached: Option<String> = None;
-    parse_invocation_with_stdin(def, args, || {
+    move || {
         if let Some(cached) = &cached {
             return Ok(cached.clone());
         }
@@ -53,7 +57,19 @@ pub(crate) fn parse_invocation(def: &ToolDefinition, args: &[String]) -> Result<
             })?;
         cached = Some(input.clone());
         Ok(input)
-    })
+    }
+}
+
+/// GNU-style `--flag=value` is accepted everywhere clap is, so accept it here
+/// too: split once on `=` and treat the remainder as the value.
+fn split_inline_value(raw: &str) -> (&str, Option<&str>) {
+    if !raw.starts_with("--") {
+        return (raw, None);
+    }
+    match raw.split_once('=') {
+        Some((flag, value)) => (flag, Some(value)),
+        None => (raw, None),
+    }
 }
 
 /// Parse the schema-independent `--args <object>` form used by reviewed
@@ -65,20 +81,7 @@ pub(crate) fn parse_invocation(def: &ToolDefinition, args: &[String]) -> Result<
 /// request parser before dispatch, so assembling every MCP schema first adds
 /// no validation authority.
 pub(crate) fn parse_whole_payload_invocation(args: &[String]) -> Result<Option<ParsedInvocation>> {
-    let mut cached: Option<String> = None;
-    parse_whole_payload_invocation_with_stdin(args, || {
-        if let Some(cached) = &cached {
-            return Ok(cached.clone());
-        }
-        let mut input = String::new();
-        std::io::stdin()
-            .read_to_string(&mut input)
-            .map_err(|e| TraceDecayError::Config {
-                message: format!("failed to read stdin: {e}"),
-            })?;
-        cached = Some(input.clone());
-        Ok(input)
-    })
+    parse_whole_payload_invocation_with_stdin(args, memoized_stdin())
 }
 
 pub(super) fn parse_whole_payload_invocation_with_stdin(
@@ -90,14 +93,7 @@ pub(super) fn parse_whole_payload_invocation_with_stdin(
     // before deferring would leave the authoritative parser an empty stream.
     let mut preflight = args.iter();
     while let Some(raw) = preflight.next() {
-        let (flag_part, inline_value): (&str, Option<&str>) = if raw.starts_with("--") {
-            match raw.split_once('=') {
-                Some((flag, value)) => (flag, Some(value)),
-                None => (raw.as_str(), None),
-            }
-        } else {
-            (raw.as_str(), None)
-        };
+        let (flag_part, inline_value) = split_inline_value(raw);
         match flag_part {
             "--json" => {}
             "--project" | "--args" => {
@@ -117,14 +113,7 @@ pub(super) fn parse_whole_payload_invocation_with_stdin(
     let mut explicit_args = None;
     let mut iter = args.iter();
     while let Some(raw) = iter.next() {
-        let (flag_part, inline_value): (&str, Option<&str>) = if raw.starts_with("--") {
-            match raw.split_once('=') {
-                Some((flag, value)) => (flag, Some(value)),
-                None => (raw.as_str(), None),
-            }
-        } else {
-            (raw.as_str(), None)
-        };
+        let (flag_part, inline_value) = split_inline_value(raw);
         match flag_part {
             "--json" => out.raw_json = true,
             "--project" => {
@@ -132,20 +121,7 @@ pub(super) fn parse_whole_payload_invocation_with_stdin(
             }
             "--args" => {
                 let raw_args = take_flag_value(&mut iter, "--args", inline_value)?;
-                let json_str = resolve_args_payload(&raw_args, &mut read_stdin)?;
-                let value: Value = serde_json::from_str(&json_str).map_err(|e| {
-                    invalid_arguments(format!(
-                        "--args: invalid JSON: {e}, if the payload contains quotes or \
-                             newlines, pipe it: tracedecay tool <name> --args - <<'JSON' … JSON"
-                    ))
-                })?;
-                if !value.is_object() {
-                    return Err(invalid_arguments(
-                        "--args must be a JSON object, the same object you would \
-                         pass as MCP arguments, e.g. {\"query\":\"…\"}",
-                    ));
-                }
-                explicit_args = Some(value);
+                explicit_args = Some(resolve_args_payload(&raw_args, &mut read_stdin)?);
             }
             _ => return Ok(None),
         }
@@ -185,16 +161,7 @@ pub(super) fn parse_invocation_with_stdin(
 
     let mut iter = args.iter();
     while let Some(raw) = iter.next() {
-        // GNU-style `--flag=value` is accepted everywhere clap is, so accept
-        // it here too: split once on `=` and treat the remainder as the value.
-        let (flag_part, inline_value): (&str, Option<&str>) = if raw.starts_with("--") {
-            match raw.split_once('=') {
-                Some((flag, value)) => (flag, Some(value)),
-                None => (raw.as_str(), None),
-            }
-        } else {
-            (raw.as_str(), None)
-        };
+        let (flag_part, inline_value) = split_inline_value(raw);
         match flag_part {
             "-h" | "--help" => {
                 out.show_help = true;
@@ -206,25 +173,8 @@ pub(super) fn parse_invocation_with_stdin(
                 out.project = Some(take_flag_value(&mut iter, "--project", inline_value)?);
             }
             "--args" => {
-                // `--args` is a whole-payload arg: inline JSON, `-` for stdin,
-                // or a file path (bare or `@`-prefixed). Reading from a file or
-                // stdin sidesteps the kernel's per-argv-string cap
-                // (MAX_ARG_STRLEN, 128 KiB on Linux) for large payloads.
                 let raw_args = take_flag_value(&mut iter, "--args", inline_value)?;
-                let json_str = resolve_args_payload(&raw_args, &mut read_stdin)?;
-                let value: Value = serde_json::from_str(&json_str).map_err(|e| {
-                    invalid_arguments(format!(
-                        "--args: invalid JSON: {e}, if the payload contains quotes or \
-                             newlines, pipe it: tracedecay tool <name> --args - <<'JSON' … JSON"
-                    ))
-                })?;
-                if !value.is_object() {
-                    return Err(invalid_arguments(
-                        "--args must be a JSON object, the same object you would \
-                         pass as MCP arguments, e.g. {\"query\":\"…\"}",
-                    ));
-                }
-                explicit_args = Some(value);
+                explicit_args = Some(resolve_args_payload(&raw_args, &mut read_stdin)?);
             }
             flag if flag.starts_with("--") => {
                 let key = flag.trim_start_matches('-').replace('-', "_");
@@ -625,28 +575,43 @@ fn bind_positionals(
     )))
 }
 
-/// Resolve a `--args` value to its JSON text. `--args` is a *whole-payload*
+/// Resolve a `--args` value to its JSON object. `--args` is a *whole-payload*
 /// argument (the value IS the object): `-` reads stdin and any non-inline value
 /// is a file path, without the `@` sigil that per-key values need. Inline JSON
-/// (starting `{`/`[`) is returned verbatim; `@file` and `@-` are also accepted.
+/// (starting `{`/`[`) is taken verbatim; `@file` and `@-` are also accepted.
+/// Reading from a file or stdin sidesteps the kernel's per-argv-string cap
+/// (MAX_ARG_STRLEN, 128 KiB on Linux) for large payloads.
 fn resolve_args_payload(
     raw: &str,
     read_stdin: &mut impl FnMut() -> Result<String>,
-) -> Result<String> {
+) -> Result<Value> {
     let trimmed = raw.trim_start();
-    if raw == "-" {
-        read_stdin()
+    let json_str = if raw == "-" {
+        read_stdin()?
     } else if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        Ok(raw.to_string())
+        raw.to_string()
     } else if raw.starts_with('@') {
-        resolve_at_file(raw, read_stdin)
+        resolve_at_file(raw, read_stdin)?
     } else {
         std::fs::read_to_string(raw).map_err(|e| {
             invalid_arguments(format!(
                 "--args: `{raw}` is not inline JSON, `-` (stdin), or a readable file: {e}"
             ))
-        })
+        })?
+    };
+    let value: Value = serde_json::from_str(&json_str).map_err(|e| {
+        invalid_arguments(format!(
+            "--args: invalid JSON: {e}, if the payload contains quotes or \
+                 newlines, pipe it: tracedecay tool <name> --args - <<'JSON' … JSON"
+        ))
+    })?;
+    if !value.is_object() {
+        return Err(invalid_arguments(
+            "--args must be a JSON object, the same object you would \
+             pass as MCP arguments, e.g. {\"query\":\"…\"}",
+        ));
     }
+    Ok(value)
 }
 
 /// Coerce a CLI string value to the JSON type declared in the property schema.

@@ -4,10 +4,13 @@
 //! Bodies are moved here unchanged from the per-language copies so extraction
 //! output stays byte-identical.
 
-use tree_sitter::Node as TsNode;
+use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::ExtractionState;
+use crate::common::{ExtractionState, basic_identifier_text, local_node_id};
 use crate::traversal::find_direct_child_by_kind;
+use crate::types::{
+    ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, UnresolvedRef, Visibility,
+};
 
 /// Represents a collected line from the BASIC program for subroutine synthesis.
 pub(crate) struct BasicLine<'a> {
@@ -151,5 +154,161 @@ pub(crate) fn derive_function_name(rem_comments: &[String]) -> String {
         "UNNAMED_SUB".to_string()
     } else {
         trimmed
+    }
+}
+
+/// Collect the parsed top-level `line` nodes whose byte ranges were selected.
+pub(crate) fn collect_selected_lines<'tree>(
+    state: &ExtractionState,
+    tree: &'tree Tree,
+    selected_lines: &[(usize, usize)],
+) -> Vec<BasicLine<'tree>> {
+    let mut lines = Vec::new();
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let node = cursor.node();
+            if node.kind() == "line"
+                && selected_lines.contains(&(node.start_byte(), node.end_byte()))
+                && let Some(basic_line) = parse_line(state, node)
+            {
+                lines.push(basic_line);
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    lines
+}
+
+/// Extract LET statements that are outside subroutines as top-level constants.
+///
+/// Lines like `30 LET MR = 3` or `40 MR = 3` serve as variable initialization.
+/// We treat only top-level LET assignments (those not inside subroutines) as constants.
+pub(crate) fn extract_top_level_lets(state: &mut ExtractionState, lines: &[BasicLine<'_>]) {
+    for_each_top_level_line(lines, |basic_line| {
+        if basic_line.statement_kind == "let_statement" {
+            visit_let_statement(state, basic_line);
+        }
+    });
+}
+
+/// Extract a LET statement as a Const node.
+fn visit_let_statement(state: &mut ExtractionState, basic_line: &BasicLine<'_>) {
+    let Some(statement_list) = find_direct_child_by_kind(basic_line.node, "statement_list") else {
+        return;
+    };
+    let Some(statement) = find_direct_child_by_kind(statement_list, "statement") else {
+        return;
+    };
+    let Some(let_stmt) = find_direct_child_by_kind(statement, "let_statement") else {
+        return;
+    };
+
+    // Extract the variable name from: let_statement -> variable -> identifier
+    let Some(var_node) = find_direct_child_by_kind(let_stmt, "variable") else {
+        return;
+    };
+    let Some(id_node) = find_direct_child_by_kind(var_node, "identifier") else {
+        return;
+    };
+    let name = basic_identifier_text(state.source, id_node);
+
+    let start_line = basic_line.node.start_position().row as u32;
+    let end_line = basic_line.node.end_position().row as u32;
+    let start_column = basic_line.node.start_position().column as u32;
+    let end_column = basic_line.node.end_position().column as u32;
+    let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+    let id = local_node_id(
+        &state.file_path,
+        state.source,
+        &NodeKind::Const,
+        name,
+        basic_line.node,
+    );
+    let text = state.node_text(basic_line.node);
+
+    let graph_node = Node {
+        id: id.clone(),
+        kind: NodeKind::Const,
+        name: name.to_string(),
+        qualified_name,
+        file_path: state.file_path.clone(),
+        start_line,
+        attrs_start_line: start_line,
+        end_line,
+        start_column,
+        end_column,
+        signature: Some(text.trim().to_string()),
+        docstring: None,
+        visibility: Visibility::Pub,
+        is_async: false,
+        branches: 0,
+        loops: 0,
+        returns: 0,
+        max_nesting: 0,
+        unsafe_blocks: 0,
+        unchecked_calls: 0,
+        assertions: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
+        updated_at: state.timestamp,
+        parent_id: None,
+    };
+    state.nodes.push(graph_node);
+
+    if let Some(parent_id) = state.parent_node_id() {
+        state.edges.push(Edge {
+            source: parent_id.to_string(),
+            target: id,
+            kind: EdgeKind::Contains,
+            line: Some(start_line),
+        });
+    }
+}
+
+/// Extract GOSUB/GOTO references from top-level lines (those not part of subroutines).
+pub(crate) fn extract_top_level_calls(state: &mut ExtractionState, lines: &[BasicLine<'_>]) {
+    let file_node_id = state
+        .node_stack
+        .last()
+        .map(|(_, id)| id.clone())
+        .unwrap_or_default();
+    for_each_top_level_line(lines, |line| {
+        walk_for_calls(state, line.node, &file_node_id);
+    });
+}
+
+/// Recursively walk AST nodes looking for `gosub_statement` and `goto_statement`.
+pub(crate) fn walk_for_calls(state: &mut ExtractionState, node: TsNode<'_>, from_node_id: &str) {
+    let kind = node.kind();
+    match kind {
+        "gosub_statement" | "goto_statement" => {
+            if let Some(ln_node) = find_direct_child_by_kind(node, "line_number") {
+                let target = state.node_text(ln_node);
+                state.unresolved_refs.push(UnresolvedRef {
+                    from_node_id: from_node_id.to_string(),
+                    reference_name: target.to_string(),
+                    reference_kind: EdgeKind::Calls,
+                    line: node.start_position().row as u32,
+                    column: node.start_position().column as u32,
+                    file_path: state.file_path.clone(),
+                    unmodeled_import: None,
+                    argument_count: None,
+                });
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            walk_for_calls(state, child, from_node_id);
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
     }
 }

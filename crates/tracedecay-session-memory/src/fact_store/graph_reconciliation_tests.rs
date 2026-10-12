@@ -1863,11 +1863,11 @@ async fn concurrent_schedule_triggers_coalesce_before_spawning_more_work() {
     let runtime = bind_runtime(&database);
 
     assert_eq!(
-        super::schedule_project_memory_graph_reconciliation(database.clone()),
+        super::graph::schedule_project_memory_graph_reconciliation(database.clone()),
         ProjectMemoryGraphReconciliationScheduleV1::Scheduled
     );
     assert_eq!(
-        super::schedule_project_memory_graph_reconciliation(database.clone()),
+        super::graph::schedule_project_memory_graph_reconciliation(database.clone()),
         ProjectMemoryGraphReconciliationScheduleV1::AlreadyScheduled
     );
     wait_for_reconciliation(&runtime).await;
@@ -1881,7 +1881,7 @@ async fn unmounted_reconciliation_is_a_truthful_schedule_state() {
     let (_directory, database) = database("unmounted-reconciliation").await;
 
     assert_eq!(
-        super::schedule_project_memory_graph_reconciliation(database),
+        super::graph::schedule_project_memory_graph_reconciliation(database),
         ProjectMemoryGraphReconciliationScheduleV1::NotMounted
     );
 }
@@ -1897,7 +1897,7 @@ async fn retired_lifecycle_refuses_new_reconciliation_work() {
         .expect("cancel bound reconciler");
 
     assert_eq!(
-        super::schedule_project_memory_graph_reconciliation(database),
+        super::graph::schedule_project_memory_graph_reconciliation(database),
         ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed
     );
 }
@@ -1935,13 +1935,13 @@ async fn retirement_reservation_reports_a_distinct_schedule_outcome_and_drops_cl
         .reserve_retirement()
         .expect("idle reconciler retirement reservation");
     assert_eq!(
-        super::schedule_project_memory_graph_reconciliation(database.clone()),
+        super::graph::schedule_project_memory_graph_reconciliation(database.clone()),
         ProjectMemoryGraphReconciliationScheduleV1::Retiring
     );
     drop(reservation);
 
     assert_eq!(
-        super::schedule_project_memory_graph_reconciliation(database.clone()),
+        super::graph::schedule_project_memory_graph_reconciliation(database.clone()),
         ProjectMemoryGraphReconciliationScheduleV1::Scheduled
     );
     wait_for_reconciliation(&runtime).await;
@@ -1957,7 +1957,7 @@ async fn shutdown_waits_for_blocking_graph_publication_to_observe_cancellation()
         .expect("bound runtime has reconciliation owner");
 
     assert_eq!(
-        super::schedule_project_memory_graph_reconciliation(database.clone()),
+        super::graph::schedule_project_memory_graph_reconciliation(database.clone()),
         ProjectMemoryGraphReconciliationScheduleV1::Scheduled
     );
     wait_for_reconciliation(&runtime).await;
@@ -1981,7 +1981,7 @@ async fn shutdown_waits_for_blocking_graph_publication_to_observe_cancellation()
         "shutdown must leave reconciliation retirement closed"
     );
     assert_eq!(
-        super::schedule_project_memory_graph_reconciliation(database),
+        super::graph::schedule_project_memory_graph_reconciliation(database),
         ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed
     );
 }

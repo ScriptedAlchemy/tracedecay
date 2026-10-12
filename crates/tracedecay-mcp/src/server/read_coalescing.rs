@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::Value;
 use tracedecay_domain::canonical_text::canonical_framed_sha256_bytes;
-use tracedecay_tool_catalog::{ApplicationSurfaceOperation, IdenticalCallPolicyV1};
+use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::ToolResult;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
@@ -199,9 +199,10 @@ pub fn tool_allows_identical_read_coalescing(
     tool_name: &str,
     tool_is_read_only: impl FnOnce(&str) -> bool,
 ) -> bool {
+    // Every owner side effect runs per call; identical calls never share one.
     if ApplicationSurfaceOperation::from_tool_name(tool_name)
         .and_then(ApplicationSurfaceOperation::owner_side_effect)
-        .is_some_and(|entry| entry.identical_calls == IdenticalCallPolicyV1::RunEach)
+        .is_some()
     {
         return false;
     }

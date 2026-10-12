@@ -92,7 +92,7 @@ async fn ignored_dependency_admission_waits_for_the_pre_seat_graph_tail() {
     );
 
     let scheduler = registry
-        .scheduler_for_root(fixture.path())
+        .scheduler_handle(fixture.path())
         .await
         .expect("mounted scheduler");
     let published = tokio::task::spawn_blocking(move || {

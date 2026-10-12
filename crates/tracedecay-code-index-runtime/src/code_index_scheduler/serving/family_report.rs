@@ -15,7 +15,7 @@ use tracedecay_query::retrieval::lexical::{
 };
 
 use super::{ProductionCodeIndexQueryOwnersV1, checkpoint_text_artifact_control};
-use crate::query::retrieval::ports::{RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError};
+use tracedecay_query::retrieval::ports::{RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError};
 
 impl ProductionCodeIndexQueryOwnersV1 {
     pub(crate) fn redundancy(

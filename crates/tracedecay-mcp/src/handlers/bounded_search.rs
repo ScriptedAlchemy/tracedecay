@@ -11,15 +11,17 @@ const SEARCH_SCAN_CEILING: Duration = Duration::from_secs(10);
 static SEARCH_SCAN_SEMAPHORE: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(2)));
 
-pub(crate) struct CancelSearchOnDrop(Arc<AtomicBool>);
+/// Sets the shared flag when dropped: a worker's cancellation request when
+/// its awaiting caller goes away, or its exit marker when the worker ends.
+pub(crate) struct SetFlagOnDrop(Arc<AtomicBool>);
 
-impl CancelSearchOnDrop {
-    pub(crate) fn new(cancelled: Arc<AtomicBool>) -> Self {
-        Self(cancelled)
+impl SetFlagOnDrop {
+    pub(crate) fn new(flag: Arc<AtomicBool>) -> Self {
+        Self(flag)
     }
 }
 
-impl Drop for CancelSearchOnDrop {
+impl Drop for SetFlagOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
     }
@@ -80,7 +82,7 @@ where
         return Err(search_cancelled_error(tool_name));
     }
     let cancelled = Arc::new(AtomicBool::new(false));
-    let cancel_on_drop = CancelSearchOnDrop(Arc::clone(&cancelled));
+    let cancel_on_drop = SetFlagOnDrop(Arc::clone(&cancelled));
     let worker_cancellation = cancellation.clone();
     let outcome = tokio::time::timeout(budget, async move {
         let permit = capacity

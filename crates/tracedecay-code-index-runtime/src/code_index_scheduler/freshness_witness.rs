@@ -41,9 +41,9 @@ use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREA
 
 use super::reconcile::cancelled_code_index_reconcile;
 use super::{CodeIndexSchedulerErrorV1, classification, ignored_dependencies, privacy};
-use crate::code_index::chunks::content_digest;
-use crate::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
-use crate::code_index::parallelism;
+use tracedecay_code_index::chunks::content_digest;
+use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
+use tracedecay_code_index::parallelism;
 
 const FRESHNESS_WITNESS_FILE_NAME: &str = "freshness_witness.v1";
 

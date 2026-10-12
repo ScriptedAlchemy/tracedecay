@@ -25,7 +25,7 @@ pub use startup::{
     subscribe_history_capacity_release,
 };
 pub use user::{
-    CodexHookIngestOutcome, ingest_user_global_sources_for_provider_with_authorities,
+    CodexHookIngestOutcome,
     ingest_user_global_sources_for_provider_with_authorities_and_cancellation,
     registered_project_roots_from, try_ingest_user_codex_sessions_with_db_and_admission,
 };

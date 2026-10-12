@@ -109,7 +109,9 @@ pub(crate) fn render(
     json: bool,
 ) -> Result<String> {
     if json {
-        return Ok(crate::cli::output::json::json_line(outcome)?);
+        return Ok(tracedecay_mcp::application_output::json::json_line(
+            outcome,
+        )?);
     }
     let outcome = outcome
         .as_ref()
@@ -172,8 +174,8 @@ pub(crate) mod tests {
         )
         .expect("construct canonical application problem fixture"));
 
-        let rendered =
-            crate::cli::output::json::json_line(&outcome).expect("application JSON line");
+        let rendered = tracedecay_mcp::application_output::json::json_line(&outcome)
+            .expect("application JSON line");
         let problem: Value =
             serde_json::from_str(rendered.trim_end()).expect("typed application problem JSON");
         assert_eq!(problem["contract"]["schema_id"], schema_id);

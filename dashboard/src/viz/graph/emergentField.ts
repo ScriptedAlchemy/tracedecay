@@ -1,5 +1,5 @@
 import type Graph from 'graphology';
-import { nodeHullFrame, type FieldFrame, type PreparedField } from './layout.ts';
+import type { PreparedField } from './layout.ts';
 
 /**
  * The emergent path: a field whose SHAPE is the finding, settled by
@@ -196,10 +196,4 @@ export function composeConstellation(graph: Graph): void {
       graph.updateNodeAttribute(node, 'y', (y) => (y as number) + dy);
     }
   });
-}
-
-/** The frozen bbox is computed after the settle, so the camera always frames
- * the composed result, not the raw FA2 scatter. */
-export function frameEmergentField(prepared: PreparedField): FieldFrame {
-  return nodeHullFrame(prepared.graph, prepared.realNodes);
 }

@@ -16,7 +16,13 @@ use crate::{
 };
 
 impl CppExtractor {
-    pub(super) fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
+    /// Extract a preprocessor #define (`PreprocessorDef`) or a single enumerator
+    /// (`EnumVariant`), named by its `identifier` child.
+    pub(super) fn visit_identifier_leaf(
+        state: &mut ExtractionState,
+        node: TsNode<'_>,
+        kind: NodeKind,
+    ) {
         let name = find_direct_child_by_kind(node, "identifier").map_or_else(
             || "<anonymous>".to_string(),
             |child| state.node_str(child).to_string(),
@@ -27,16 +33,10 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::PreprocessorDef,
-            &name,
-            node,
-        );
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         state.nodes.push(Node {
             id: id.clone(),
-            kind: NodeKind::PreprocessorDef,
+            kind,
             name,
             qualified_name,
             file_path: state.file_path.clone(),
@@ -140,67 +140,13 @@ impl CppExtractor {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "enumerator" {
-                        Self::extract_single_enumerator(state, child);
+                        Self::visit_identifier_leaf(state, child, NodeKind::EnumVariant);
                     }
                     if !cursor.goto_next_sibling() {
                         break;
                     }
                 }
             }
-        }
-    }
-
-    fn extract_single_enumerator(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
-            || "<anonymous>".to_string(),
-            |child| state.node_str(child).to_string(),
-        );
-        let text = state.node_str(node);
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::EnumVariant,
-            &name,
-            node,
-        );
-        state.nodes.push(Node {
-            id: id.clone(),
-            kind: NodeKind::EnumVariant,
-            name,
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(text.trim().to_string()),
-            docstring: None,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            complexity_analysis: ComplexityAnalysisV1::Complete,
-            updated_at: state.timestamp,
-            parent_id: None,
-        });
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id,
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
         }
     }
 

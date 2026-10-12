@@ -83,7 +83,6 @@ pub enum PublicationDelivery {
     Produced,
     Queued,
     BridgeAcknowledged,
-    Superseded,
     Unknown,
 }
 

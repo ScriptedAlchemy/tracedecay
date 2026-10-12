@@ -1,3 +1,4 @@
+use crate::application_cli::config_error;
 use crate::cli::AutomationConfigAction;
 use crate::resolve_cli_project_root;
 use tracedecay_contracts::retrieval::{
@@ -358,11 +359,5 @@ fn parse_automation_host_mode(
         _ => Err(config_error(format!(
             "unknown automation host mode '{value}' (expected standalone, delegated-host)"
         ))),
-    }
-}
-
-fn config_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
-    tracedecay_domain::errors::TraceDecayError::Config {
-        message: message.into(),
     }
 }

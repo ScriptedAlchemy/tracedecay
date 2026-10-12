@@ -10,7 +10,6 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +20,7 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexReadinessTargetV1, CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
 };
 
-use super::super::tests::OwnerSignals;
+use super::super::tests::{OwnerSignals, commit_fixture_checkout, run_git_in};
 use super::super::{
     CodeIndexBuildProgressSlotStateV1, CodeIndexCadenceTriggerV1, CodeIndexDemandAdmissionV1,
     CodeIndexReconcileAdmissionV1,
@@ -76,9 +75,7 @@ impl Fixture {
         let project = root.path().join("project");
         fs::create_dir_all(project.join("src")).expect("create source root");
         fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("write source");
-        run_git_in(&project, &["init", "-q", "-b", "main"]);
-        run_git_in(&project, &["add", "."]);
-        run_git_in(&project, &["commit", "-qm", "fixture"]);
+        commit_fixture_checkout(&project);
         prepare(&project);
 
         let owners = Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1));
@@ -534,9 +531,7 @@ async fn a_first_mount_refused_by_a_held_store_lock_mounts_on_its_release() {
     let project = root.path().join("project");
     fs::create_dir_all(project.join("src")).expect("create source root");
     fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("write source");
-    run_git_in(&project, &["init", "-q", "-b", "main"]);
-    run_git_in(&project, &["add", "."]);
-    run_git_in(&project, &["commit", "-qm", "fixture"]);
+    commit_fixture_checkout(&project);
     let store = root.path().join("store");
     let canonical = canonical_existing_identity(&project).expect("canonical project");
     let scope_store = super::super::scoped_code_index_store_root(&store, &canonical);
@@ -1503,21 +1498,4 @@ async fn an_empty_python_clone_body_does_not_park_the_worktree() {
     );
     assert_eq!(reading.parked, None, "{reading:?}");
     fixture.registry.shutdown().await;
-}
-
-fn run_git_in(root: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
-        .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
-        .output()
-        .expect("git command should run");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }

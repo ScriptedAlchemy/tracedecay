@@ -1,10 +1,8 @@
 use serde_json::{Value, json};
-use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, CatalogContributionV1, CatalogValidationError, OperationId,
-};
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, CatalogContributionV1, OperationId};
 
 use super::application_schema::bound_tagged_union;
-use super::def;
+use super::{catalog_invalid, def};
 use crate::{McpCatalogError, ToolDefinition};
 
 /// Guidance carried by the bounded `ConfigurationValueV1` payload on the
@@ -152,7 +150,7 @@ pub(super) fn application_definitions() -> Result<Vec<ToolDefinition>, McpCatalo
         })
         .map(|operation| {
             let descriptor = handlers.for_surface_operation(operation).ok_or_else(|| {
-                invalid_application_definition(
+                catalog_invalid(
                     "application MCP handler",
                     "canonical operation has no handler descriptor",
                 )
@@ -160,7 +158,7 @@ pub(super) fn application_definitions() -> Result<Vec<ToolDefinition>, McpCatalo
             let operation_id =
                 OperationId::new(format!("operation.application.{}", operation.as_str())).map_err(
                     |_| {
-                        invalid_application_definition(
+                        catalog_invalid(
                             "application MCP operation ID",
                             "canonical operation name is invalid",
                         )
@@ -170,20 +168,20 @@ pub(super) fn application_definitions() -> Result<Vec<ToolDefinition>, McpCatalo
                 .get(&operation_id)
                 .and_then(|availability| availability.binding())
                 .ok_or_else(|| {
-                    invalid_application_definition(
+                    catalog_invalid(
                         "application MCP executable binding",
                         "canonical operation is not executable",
                     )
                 })?;
             if executable.capability_id() != descriptor.operation().capability_id() {
-                return Err(invalid_application_definition(
+                return Err(catalog_invalid(
                     "application MCP capability",
                     "handler and executable binding disagree",
                 ));
             }
             let manifest = application_manifest(&contributions, executable.capability_id())
                 .ok_or_else(|| {
-                    invalid_application_definition(
+                    catalog_invalid(
                         "application MCP manifest",
                         "executable binding has no owning capability",
                     )
@@ -279,10 +277,6 @@ fn application_manifest<'a>(
         .iter()
         .flat_map(CatalogContributionV1::capabilities)
         .find(|manifest| manifest.capability_id() == capability_id)
-}
-
-fn invalid_application_definition(field: &'static str, reason: &'static str) -> McpCatalogError {
-    CatalogValidationError::InvalidValue { field, reason }.into()
 }
 
 pub(super) fn def_remote_status_read(input_schema: Value) -> ToolDefinition {

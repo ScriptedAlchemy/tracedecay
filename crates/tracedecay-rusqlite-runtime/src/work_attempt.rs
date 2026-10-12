@@ -734,7 +734,7 @@ fn require_run_reservation_admitted(
     }
 }
 
-fn identity_params(identity: &WorkAttemptIdentityV1) -> [ExactSqlValue; 3] {
+pub(crate) fn identity_params(identity: &WorkAttemptIdentityV1) -> [ExactSqlValue; 3] {
     [
         ExactSqlValue::Text(identity.task_id().as_str().to_owned()),
         ExactSqlValue::Text(identity.run_id().as_str().to_owned()),

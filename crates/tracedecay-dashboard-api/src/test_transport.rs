@@ -248,55 +248,7 @@ pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let project_graph_resolver = project_graphs.resolver();
-    run_until_shutdown_inner(
-        cg.as_ref(),
-        DashboardRunRequest {
-            host: endpoint.host,
-            port: endpoint.port,
-            access: endpoint.access,
-            build_version,
-            spa_routes,
-            test_authority: Some(&authority),
-            test_project_graph_resolver: Some(project_graph_resolver),
-            test_project_graph: Some(Arc::clone(&cg)),
-        },
-        shutdown,
-    )
-    .await
-}
-
-struct DashboardRunRequest<'a> {
-    host: &'a str,
-    port: u16,
-    access: DashboardAccessToken,
-    /// The owning composition's build version; served surfaces must report the
-    /// caller's product runtime, never a crate-local substitute.
-    build_version: &'static str,
-    spa_routes: Router,
-    test_authority: Option<&'a DashboardHostAdmissionTestAuthorityV1>,
-    test_project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
-    test_project_graph: Option<Arc<DashboardProjectContext>>,
-}
-
-async fn run_until_shutdown_inner<F>(
-    cg: &DashboardProjectContext,
-    request: DashboardRunRequest<'_>,
-    shutdown: F,
-) -> Result<()>
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    let DashboardRunRequest {
-        host,
-        port,
-        access,
-        build_version,
-        spa_routes,
-        test_authority,
-        test_project_graph_resolver,
-        test_project_graph,
-    } = request;
+    let DashboardTestEndpointV1 { host, port, access } = endpoint;
     // A directly served dashboard is not handed a daemon-owned analyzer broker,
     // so it opens the same one the MCP server mounts. Without it the code
     // diagnostics surface would answer unsupported purely because of which
@@ -309,56 +261,46 @@ where
         )
         .await;
     let state = build_state_inner(
-        cg,
-        test_project_graph,
+        cg.as_ref(),
+        Some(Arc::clone(&cg)),
         // The test harness is the only remaining direct-serve entry; the
         // production dashboard is served by the daemon MCP tool, which warms
         // token counts through its own composition.
         false,
         DashboardStateCompositionV1 {
             build_version,
-            project_graph_resolver: test_project_graph_resolver,
-            code_graph_read_admission: test_authority
-                .and_then(|authority| authority.code_graph_read_admission.clone()),
-            code_graph_projection_read_port: test_authority
-                .and_then(|authority| authority.code_graph_projection_read_port.clone()),
-            code_read_authority: test_authority
-                .and_then(|authority| authority.code_read_authority.clone()),
-            project_sessions: match test_authority {
-                Some(authority) => match &authority.opening_project_sessions {
-                    Some(publication) => DashboardSessionMountV1::Opening(publication.clone()),
-                    None => DashboardSessionMountV1::Ready(authority.project_session_authorities()),
-                },
-                None => DashboardSessionMountV1::Unavailable,
+            project_graph_resolver: Some(project_graphs.resolver()),
+            code_graph_read_admission: authority.code_graph_read_admission.clone(),
+            code_graph_projection_read_port: authority.code_graph_projection_read_port.clone(),
+            code_read_authority: authority.code_read_authority.clone(),
+            project_sessions: match &authority.opening_project_sessions {
+                Some(publication) => DashboardSessionMountV1::Opening(publication.clone()),
+                None => DashboardSessionMountV1::Ready(authority.project_session_authorities()),
             },
-            profile_code_index_worker_settings: test_authority
-                .and_then(|authority| authority.profile_code_index_worker_settings.clone()),
-            delivery_read_authority: test_authority
-                .and_then(|authority| authority.delivery_read_authority.clone()),
-            registered_savings_db: test_authority
-                .map(|authority| authority.profile_database.clone()),
-            automation_authority: test_authority
-                .and_then(|authority| authority.automation_authority.clone()),
+            profile_code_index_worker_settings: authority
+                .profile_code_index_worker_settings
+                .clone(),
+            delivery_read_authority: authority.delivery_read_authority.clone(),
+            registered_savings_db: Some(authority.profile_database.clone()),
+            automation_authority: authority.automation_authority.clone(),
             automation_observation: None,
             automation_scheduler_reconciler: None,
-            automation_writer: test_authority
-                .and_then(|authority| authority.automation_writer.clone())
+            automation_writer: authority
+                .automation_writer
+                .clone()
                 .unwrap_or_else(standalone_dashboard_automation_writer),
             doctor_report_reader: None,
             remote_operational_status_reader: None,
-            code_index_freshness_reader: test_authority
-                .and_then(|authority| authority.code_index_freshness_reader.clone()),
+            code_index_freshness_reader: authority.code_index_freshness_reader.clone(),
             feedback_status_reader: None,
-            pr_autotrack_reader: test_authority
-                .and_then(|authority| authority.pr_autotrack_reader.clone()),
+            pr_autotrack_reader: authority.pr_autotrack_reader.clone(),
             code_diagnostics_broker: Some(code_diagnostics_broker),
-            application_invocation_executor: test_authority
-                .and_then(|authority| authority.application_invocation_executor.clone()),
+            application_invocation_executor: authority.application_invocation_executor.clone(),
             delivery_settlement_authority: None,
         },
     )
     .await?;
-    let app = router(cg, state, spa_routes).await?;
+    let app = router(cg.as_ref(), state, spa_routes).await?;
     let (listener, addr) = bind_dashboard(host, port).await?;
     let url = access.launch_url(addr);
     let app = with_dashboard_http_admission(app, addr, access);

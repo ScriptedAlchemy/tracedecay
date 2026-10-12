@@ -145,23 +145,6 @@ where
     .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })
 }
 
-#[cfg(test)]
-pub fn snapshot_cursor_after(
-    provider: &'static str,
-    session_id: &str,
-    order: u64,
-    scope: ObservationScopeV1,
-    generation: ObservationSourceGenerationV1,
-) -> TranscriptIngestResult<ObservationSourceCursorV1> {
-    Ok(ObservationSourceCursorV1::for_ordering(
-        snapshot_source_identity(provider, session_id)?,
-        scope,
-        generation,
-        ObservationOrderingDomainV1::SnapshotOrder,
-        order + 1,
-    )?)
-}
-
 /// Runs one bounded snapshot sweep for a provider that re-reads complete files.
 ///
 /// Every snapshot provider drives the same loop: bound discovery, defer when

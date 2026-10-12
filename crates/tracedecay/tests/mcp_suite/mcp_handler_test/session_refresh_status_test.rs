@@ -209,7 +209,7 @@ async fn session_refresh_status_reports_the_handle_the_host_holds() {
         ],
     );
 
-    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+    let harness = crate::support::seeded_composition::open_for_session_retrieval(
         &isolation,
         [project.clone()],
     )

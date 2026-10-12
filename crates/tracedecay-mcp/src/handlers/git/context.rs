@@ -1,5 +1,6 @@
 //! `tracedecay_diff_context`, `tracedecay_changelog`, `tracedecay_commit_context`, and `tracedecay_pr_context`.
 
+use super::super::bounded_search::SetFlagOnDrop;
 use super::super::dependency_hints;
 use super::affected::collect_verified_affected_test_files;
 use super::pr_context_cursor::{
@@ -506,24 +507,6 @@ where
         })
 }
 
-struct CancelBlockingGitOnDrop {
-    cancelled: Arc<AtomicBool>,
-}
-
-impl Drop for CancelBlockingGitOnDrop {
-    fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Release);
-    }
-}
-
-struct MarkBlockingGitExited(Arc<AtomicBool>);
-
-impl Drop for MarkBlockingGitExited {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
 #[derive(Clone)]
 struct BlockingGitWorkerState {
     cancelled: Arc<AtomicBool>,
@@ -570,15 +553,13 @@ where
     F: FnOnce(&dyn Fn() -> bool) -> T + Send + 'static,
     T: Send + 'static,
 {
-    let cancel_on_drop = CancelBlockingGitOnDrop {
-        cancelled: Arc::clone(&state.cancelled),
-    };
+    let cancel_on_drop = SetFlagOnDrop::new(Arc::clone(&state.cancelled));
     let worker_cancelled = Arc::clone(&state.cancelled);
     let worker_exited = Arc::clone(&state.exited);
     let worker_request_cancellation = request_cancellation.clone();
     let worker_request_deadline = request_deadline.clone();
     let mut worker = tokio::task::spawn_blocking(move || {
-        let _mark_exited = MarkBlockingGitExited(worker_exited);
+        let _mark_exited = SetFlagOnDrop::new(worker_exited);
         let checkpoint = || {
             worker_cancelled.load(Ordering::Acquire)
                 || worker_request_cancellation

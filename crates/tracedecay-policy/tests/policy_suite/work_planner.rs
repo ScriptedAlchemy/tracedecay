@@ -13,9 +13,9 @@ use tracedecay_policy::work_loop::{
     WORK_CALIBRATION_SUPPORT_FLOOR, WorkBudgetEnvelopeV1, WorkContentLocationClassV1,
     WorkContentLocationLimitV1, WorkEffortClassV1, WorkEvidenceFrontierV1, WorkOrdinalBandV1,
     WorkPriorOutcomeV1, WorkPriorTerminalV1, WorkProposalCancellationV1, WorkProposalDecisionV1,
-    WorkProposalDispositionV1, WorkProposalEvaluator, WorkProposalEvaluatorV1,
-    WorkProposalPolicyInputV1, WorkProposalReasonV1, WorkProposalRuntimeCoverageV1,
-    WorkRouteCandidateV1, WorkRouteOverrideV1, WorkRoutePlanV1, WorkTaskShapeKindV1,
+    WorkProposalDispositionV1, WorkProposalEvaluatorV1, WorkProposalPolicyInputV1,
+    WorkProposalReasonV1, WorkProposalRuntimeCoverageV1, WorkRouteCandidateV1, WorkRouteOverrideV1,
+    WorkRoutePlanV1, WorkTaskShapeKindV1,
 };
 
 const LOCAL_WATERMARK: i64 = 10;
