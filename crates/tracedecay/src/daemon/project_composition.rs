@@ -152,14 +152,11 @@ async fn release_one_idle_project_server_before_open(
             .await;
             super::project_server_lifecycle::retire_project_servers(retired_servers, None).await;
             for data_root in hook_data_roots {
-                if !preserve_shared_root_replay_consumer(&stores.administration, &data_root).await {
-                    super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(&data_root)
-                        .await;
-                }
+                super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(&data_root).await;
             }
-            // Prior same-owner retirements may include a bind eviction that
-            // itself waits on this capacity gate before its owner check —
-            // holding the admission across the wait deadlocks both.
+            // A prior same-owner retirement can be a bind eviction cleanup,
+            // which waits on this capacity gate before its owner check.
+            // Holding the admission across the wait would deadlock both.
             drop(capacity_admission);
             for prior in prior_owner_retirements {
                 prior.wait().await?;
@@ -194,7 +191,7 @@ struct CapacityRetirementStores {
 
 /// The released gate may have let an open remount the retired owner while
 /// the retirement waited on prior same-owner retirements. Fence the
-/// project-wide release behind the gate again and skip a re-served owner —
+/// project-wide release behind the gate again and skip a re-served owner:
 /// its fresh owners are not this retirement's to remove.
 async fn release_capacity_unless_re_served(
     stores: CapacityRetirementStores,
@@ -319,30 +316,19 @@ pub(crate) fn daemon_transcript_source_profile(
 /// eviction both drop the graph's last server without retiring them. Owners
 /// another published server over the same database still serves stay
 /// registered.
-///
-/// Callers run this only while the project-open capacity admission excludes
-/// every in-flight open: a reopen registers its owners before its route
-/// publishes, and without that exclusion the served check cannot tell the
-/// retiring graph's owners from the live replacement's.
 async fn retire_unserved_process_owners(
     store_administration: &StoreAdministration,
-    cg: &Arc<tracedecay_project::project::TraceDecay>,
+    cg: &tracedecay_project::project::TraceDecay,
 ) {
     let graph_db_path = cg.db().canonical_database_path();
-    let serving = store_administration
+    let served = store_administration
         .project_servers()
         .lock()
         .await
         .servers
-        .iter()
-        .find(|(key, _)| same_canonical_path(&key.owner.graph_db_path, graph_db_path))
-        .map(|(_, entry)| Arc::clone(&entry.server));
-    if serving.is_some() {
-        preserve_shared_root_replay_consumer(
-            store_administration,
-            &cg.hook_store_layout().data_root,
-        )
-        .await;
+        .keys()
+        .any(|key| same_canonical_path(&key.owner.graph_db_path, graph_db_path));
+    if served {
         return;
     }
     #[cfg(any(test, feature = "test-helpers"))]
@@ -356,91 +342,6 @@ async fn retire_unserved_process_owners(
     if let Some(project_id) = hook_project_id_for_layout(cg.hook_store_layout()) {
         unregister_registered_context_scout_owner(project_id, graph_db_path);
     }
-}
-
-/// The data root's replay must outlive this retire while a sibling server
-/// still serves it: an incumbent bound to a serving sibling keeps draining;
-/// an unowned, dead, or retired-bound one rebinds under the first serving
-/// sibling's graph. Returns `false` when no sibling serves the root — the
-/// caller retires the consumer outright.
-async fn preserve_shared_root_replay_consumer(
-    store_administration: &StoreAdministration,
-    data_root: &Path,
-) -> bool {
-    let servers = store_administration
-        .project_servers()
-        .lock()
-        .await
-        .servers
-        .values()
-        .map(|entry| Arc::clone(&entry.server))
-        .collect::<Vec<_>>();
-    let mut served_graphs = Vec::new();
-    let mut eligible = None;
-    for server in servers {
-        let graph = server.cg().await;
-        if graph.hook_store_layout().data_root != *data_root {
-            continue;
-        }
-        served_graphs.push(Arc::downgrade(&graph));
-        // Only a sibling exposing every replay authority can host the
-        // consumer; registry order is arbitrary, so a core or degraded
-        // match must not preempt a serving full sibling.
-        if eligible.is_none()
-            && let (Some(delivery_settlements), Some(session_db), Some(background_cpu)) = (
-                server.delivery_settlement_authority(),
-                server.project_session_db(),
-                server.background_cpu_authority(),
-            )
-        {
-            eligible = Some((server, delivery_settlements, session_db, background_cpu));
-        }
-    }
-    if served_graphs.is_empty() {
-        return false;
-    }
-    if !super::hook_v2_replay_consumer::replay_consumer_unserved_or_unowned(
-        data_root,
-        &served_graphs,
-    ) {
-        return true;
-    }
-    let Some((serving, delivery_settlements, session_db, background_cpu)) = eligible else {
-        // The incumbent is unserved and no sibling can host it: report the
-        // root unpreserved so the caller retires it instead of stranding
-        // its records under a graph that cannot drain.
-        return false;
-    };
-    super::hook_v2_replay_consumer::retarget_hook_v2_replay_consumer(
-        serving.cg().await,
-        delivery_settlements,
-        session_db,
-        background_cpu,
-        &served_graphs,
-    );
-    true
-}
-
-/// Retire the process-global owners and drain of one server a route-bind
-/// eviction detached. The task waits out every in-flight project open on the
-/// capacity admission — held from graph construction through route
-/// publication — so its served check cannot race a reopen that registered the
-/// same graph's owners moments before publishing its replacement route.
-async fn retire_bind_evicted_project_server(
-    store_administration: StoreAdministration,
-    capacity_gate: Arc<ProjectOpenGate>,
-    retired_server: Arc<crate::mcp::McpServer>,
-) {
-    #[cfg(any(test, feature = "test-helpers"))]
-    {
-        let _ = crate::test_support::hold_before_evicted_owner_retire_for_test().await;
-    }
-    let open_admission = capacity_gate.lock_owned().await;
-    let graph = retired_server.cg().await;
-    retire_unserved_process_owners(&store_administration, &graph).await;
-    drop(open_admission);
-    drop(graph);
-    super::project_server_lifecycle::retire_project_servers(vec![retired_server], None).await;
 }
 
 /// Borrowed handles every project-open phase reads. A phase future captures
@@ -1216,12 +1117,21 @@ impl ProjectOpenInputs<'_> {
             let store_administration = self.store_administration.clone();
             let capacity_gate = Arc::clone(&capacity_gate);
             retirement_admission.spawn_and_track(owner, async move {
-                retire_bind_evicted_project_server(
-                    store_administration,
-                    capacity_gate,
-                    retired_server,
-                )
-                .await;
+                #[cfg(any(test, feature = "test-helpers"))]
+                {
+                    let _ = crate::test_support::hold_before_evicted_owner_retire_for_test().await;
+                }
+                // A reopen of this project adopts the evicted graph's owners
+                // before its route publishes. Waiting out every in-flight open
+                // lets the served check see that route instead of retiring
+                // owners the reopen now relies on.
+                let open_admission = capacity_gate.lock_owned().await;
+                let graph = retired_server.cg().await;
+                retire_unserved_process_owners(&store_administration, &graph).await;
+                drop(open_admission);
+                drop(graph);
+                super::project_server_lifecycle::retire_project_servers(vec![retired_server], None)
+                    .await;
             });
         }
         // The owner registry guard was dropped before the synchronous

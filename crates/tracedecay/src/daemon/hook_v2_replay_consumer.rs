@@ -402,10 +402,6 @@ struct RegisteredReplayConsumer {
     delivery_settlements:
         Weak<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     task: Option<tokio::task::JoinHandle<()>>,
-    /// The wake this consumer attached to its project's spool watch. Shutdown
-    /// and exit detach by this identity, so a retired consumer can never
-    /// strip the wake a replacement attached.
-    wake: Arc<tokio::sync::Notify>,
     /// The failures of the last finished sweep; `None` before the first.
     last_sweep: Option<Vec<StatusHookReplayFailureV1>>,
 }
@@ -456,84 +452,34 @@ pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
 }
 
 /// Start the per-project replay consumer exactly once per hook data root.
-/// Returns `false` while the running consumer's graph and settlements are
-/// alive: distinct served worktrees share the data root, so a live incumbent
-/// keeps draining for every open of the store. A dead incumbent is displaced.
+/// Returns `false` when one is already running for this root.
 pub(crate) fn register_hook_v2_replay_consumer(
     graph: Arc<tracedecay_project::project::TraceDecay>,
     delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
 ) -> bool {
-    register_hook_v2_replay_consumer_with(
-        graph,
-        delivery_settlements,
-        project_sessions,
-        background_cpu,
-        None,
-    )
-}
-
-/// Rebind the data root's consumer to a still-served graph during retirement.
-/// An incumbent bound outside `served` is displaced even though its graph is
-/// still alive — its server is draining — while a live incumbent bound to a
-/// serving sibling keeps draining for the whole shared store.
-pub(crate) fn retarget_hook_v2_replay_consumer(
-    graph: Arc<tracedecay_project::project::TraceDecay>,
-    delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
-    project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
-    served: &[Weak<tracedecay_project::project::TraceDecay>],
-) -> bool {
-    register_hook_v2_replay_consumer_with(
-        graph,
-        delivery_settlements,
-        project_sessions,
-        background_cpu,
-        Some(served),
-    )
-}
-
-fn register_hook_v2_replay_consumer_with(
-    graph: Arc<tracedecay_project::project::TraceDecay>,
-    delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
-    project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
-    displace_unless_served: Option<&[Weak<tracedecay_project::project::TraceDecay>]>,
-) -> bool {
     let data_root = graph.hook_store_layout().data_root.clone();
     let project_root = graph.project_root().to_path_buf();
     let graph = Arc::downgrade(&graph);
     let delivery_settlements = Arc::downgrade(&delivery_settlements);
-    let wake = Arc::new(tokio::sync::Notify::new());
     match registered_replay_roots().lock() {
         Ok(mut roots) => {
             if roots.get(&data_root).is_some_and(|consumer| {
                 consumer.graph.upgrade().is_some()
                     && consumer.delivery_settlements.upgrade().is_some()
-                    && displace_unless_served.is_none_or(|served| {
-                        !served
-                            .iter()
-                            .any(|weak| Weak::ptr_eq(weak, &consumer.graph))
-                    })
             }) {
                 return false;
             }
-            if let Some(displaced_task) = roots
-                .insert(
-                    data_root.clone(),
-                    RegisteredReplayConsumer {
-                        graph: graph.clone(),
-                        delivery_settlements: delivery_settlements.clone(),
-                        task: None,
-                        wake: Arc::clone(&wake),
-                        last_sweep: None,
-                    },
-                )
-                .and_then(|displaced| displaced.task)
-            {
-                displaced_task.abort();
-            }
+            roots.insert(
+                data_root.clone(),
+                RegisteredReplayConsumer {
+                    graph: graph.clone(),
+                    delivery_settlements: delivery_settlements.clone(),
+                    task: None,
+                    last_sweep: None,
+                },
+            );
         }
         Err(_) => return false,
     }
@@ -542,6 +488,7 @@ fn register_hook_v2_replay_consumer_with(
     let task_delivery_settlements = delivery_settlements.clone();
     let task_project_sessions = project_sessions;
     let task_background_cpu = background_cpu;
+    let wake = Arc::new(tokio::sync::Notify::new());
     spool_watch::attach_consumer(&data_root, &project_root, Arc::clone(&wake));
     let task = tokio::spawn(async move {
         loop {
@@ -583,7 +530,7 @@ fn register_hook_v2_replay_consumer_with(
             )
             .await;
         }
-        spool_watch::detach_consumer(&task_data_root, &wake);
+        spool_watch::detach_consumer(&task_data_root);
         if let Ok(mut roots) = registered_replay_roots().lock()
             && roots
                 .get(&task_data_root)
@@ -604,38 +551,18 @@ fn register_hook_v2_replay_consumer_with(
     true
 }
 
-/// The data root has no registered consumer, or the registered one's graph is
-/// dead or bound outside `served` — the only states a served sibling may take
-/// over during retirement. An incumbent already bound to a serving sibling is
-/// left alone.
-pub(crate) fn replay_consumer_unserved_or_unowned(
-    data_root: &Path,
-    served: &[Weak<tracedecay_project::project::TraceDecay>],
-) -> bool {
-    registered_replay_roots().lock().is_ok_and(|roots| {
-        roots.get(data_root).is_none_or(|consumer| {
-            consumer.graph.upgrade().is_none()
-                || !served
-                    .iter()
-                    .any(|weak| Weak::ptr_eq(weak, &consumer.graph))
-        })
-    })
-}
-
 /// Stop and join the exact project replay consumer before releasing its graph.
 pub(crate) async fn shutdown_hook_v2_replay_consumer(data_root: &Path) {
-    let consumer = registered_replay_roots()
+    let task = registered_replay_roots()
         .lock()
         .ok()
-        .and_then(|mut roots| roots.remove(data_root));
-    let Some(consumer) = consumer else {
-        return;
-    };
-    if let Some(task) = consumer.task {
+        .and_then(|mut roots| roots.remove(data_root))
+        .and_then(|consumer| consumer.task);
+    if let Some(task) = task {
         task.abort();
         let _ = task.await;
     }
-    spool_watch::detach_consumer(data_root, &consumer.wake);
+    spool_watch::detach_consumer(data_root);
 }
 
 #[cfg(test)]
