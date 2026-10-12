@@ -10,7 +10,7 @@ load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")
 
 rust_library(
     name = "tracedecay-code-index-runtime",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/code_index_scheduler/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_index_runtime",
     edition = crate_edition(),
@@ -26,7 +26,7 @@ rust_library(
 
 rust_library(
     name = "tracedecay-code-index-runtime__+full_+lite_+test-helpers_+test-transport__dev",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/code_index_scheduler/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_index_runtime",
     edition = crate_edition(),
@@ -42,7 +42,7 @@ rust_library(
 
 rust_library(
     name = "tracedecay-code-index-runtime__+full_+lite__d108733551e",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/code_index_scheduler/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_index_runtime",
     edition = crate_edition(),
@@ -58,7 +58,7 @@ rust_library(
 
 rust_library(
     name = "tracedecay-code-index-runtime__d8160eaa115",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"]) + glob(["tests/code_index_scheduler/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_code_index_runtime",
     edition = crate_edition(),
@@ -88,7 +88,7 @@ rust_test(
 
 filegroup(
     name = "rustfmt_sources_2024",
-    srcs = depset(glob(["src/**/*.rs"])).to_list(),
+    srcs = depset(glob(["src/**/*.rs"]) + glob(["tests/code_index_scheduler/**/*.rs"])).to_list(),
     tags = ["manual"],
 )
 

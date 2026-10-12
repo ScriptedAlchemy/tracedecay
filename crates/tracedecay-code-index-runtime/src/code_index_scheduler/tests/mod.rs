@@ -46,10 +46,12 @@ mod ignored_dependency_seat_tests;
 mod index_path_policy_tests;
 mod noop_reconcile_tests;
 mod publication_store;
+#[path = "../../../tests/code_index_scheduler/reconcile.rs"]
 mod reconcile;
 mod residency;
 mod retained_configuration_tests;
 mod search_permit_release;
+#[path = "../../../tests/code_index_scheduler/serving.rs"]
 mod serving;
 mod text_artifact_carry_tests;
 
