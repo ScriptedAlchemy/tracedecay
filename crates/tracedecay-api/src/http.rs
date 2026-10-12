@@ -360,6 +360,48 @@ pub(crate) fn invalid_request_response(
     }
 }
 
+/// Admission shared by the JSON operation families mounted beside the
+/// application router. An operation this build does not mount is concealed
+/// the same way an unauthorised one is, so probing a path cannot reveal what
+/// exists; an unreadable body is the family's `invalid_body` problem.
+pub(crate) async fn dispatch_json_operation<Operation, Request, Invocation>(
+    operation: Option<Operation>,
+    request_id: RequestId,
+    body: Result<Json<Value>, JsonRejection>,
+    invalid_body: (&'static str, &'static str),
+    admit: impl FnOnce(Operation, RequestId, Value) -> Request,
+    invoke: impl FnOnce(Request) -> Invocation,
+) -> Response
+where
+    Invocation: Future<Output = Response>,
+{
+    let admitted = {
+        let _span = tracing::trace_span!("api.http.admission").entered();
+        match (operation, body) {
+            (None, _) => Err(adapter_problem_response(
+                request_id,
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+            )),
+            (Some(operation), Ok(Json(body))) => Ok(admit(operation, request_id, body)),
+            (Some(_), Err(_)) => Err(invalid_request_response(
+                request_id,
+                invalid_body.0,
+                invalid_body.1,
+            )),
+        }
+    };
+    match admitted {
+        Ok(request) => {
+            tracing::Instrument::instrument(
+                invoke(request),
+                tracing::trace_span!("api.http.handler"),
+            )
+            .await
+        }
+        Err(response) => response,
+    }
+}
+
 /// Build the catalog-advertised application routes at relative paths.
 ///
 /// The executable nests this router at its root-owned prefix behind

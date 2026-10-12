@@ -9,10 +9,10 @@ use axum::response::Response;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::Value;
-use tracedecay_contracts::{ApplicationProblem, RequestId, RetryDirective};
+use tracedecay_contracts::RequestId;
 
 use crate::http::{
-    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem_response,
+    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, dispatch_json_operation,
     invalid_request_response,
 };
 
@@ -102,37 +102,21 @@ async fn operation<O>(
 where
     O: HandoffApplicationOwner,
 {
-    let match_result = {
-        let _span = tracing::trace_span!("api.http.admission").entered();
-        {
-            match HandoffOperation::parse(&segment) {
-                None => Err(adapter_problem_response(
-                    request_id,
-                    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-                )),
-                Some(operation) => match body {
-                    Ok(Json(body)) => Ok(HandoffHttpRequest {
-                        operation,
-                        request_id,
-                        controls,
-                        body,
-                    }),
-                    Err(_) => Err(invalid_request_response(
-                        request_id,
-                        "handoff.invalid_body",
-                        "The handoff-open request body is invalid or exceeds the configured limit",
-                    )),
-                },
-            }
-        }
-    };
-    let request = match match_result {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-    tracing::Instrument::instrument(
-        async move { owner.invoke_handoff(request).await },
-        tracing::trace_span!("api.http.handler"),
+    dispatch_json_operation(
+        HandoffOperation::parse(&segment),
+        request_id,
+        body,
+        (
+            "handoff.invalid_body",
+            "The handoff-open request body is invalid or exceeds the configured limit",
+        ),
+        |operation, request_id, body| HandoffHttpRequest {
+            operation,
+            request_id,
+            controls,
+            body,
+        },
+        |request| owner.invoke_handoff(request),
     )
     .await
 }
