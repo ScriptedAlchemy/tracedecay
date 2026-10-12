@@ -153,7 +153,7 @@ pub async fn drain_host_spool_once<A, F>(
     root: &Path,
     config: HookSpoolConfigV1,
     project_id: [u8; 16],
-    binding: Option<&HookScopeBindingV1>,
+    resolve_binding: &mut (dyn FnMut([u8; 16]) -> Option<HookScopeBindingV1> + Send),
     now: UtcMicros,
     admit: A,
 ) -> Result<HookReplayPassReportV1, HookSpoolError>
@@ -187,13 +187,9 @@ where
         }
     }
 
-    let Some(binding) = binding.filter(|binding| binding.project_id == project_id) else {
-        // Without a current binding for this project nothing can be
-        // reauthorized. Records stay durable and pending; a later pass retries.
-        pass.binding_unavailable = true;
-        return Ok(pass);
-    };
-
+    // Worktrees sharing the data root publish distinct bindings, so every
+    // record is reauthorized against the binding of its own worktree rather
+    // than whichever one the draining consumer happens to own.
     let batches = spool.claim_replay_batches(now, REPLAY_SESSIONS_PER_PASS)?;
     let mut replay_batches = Vec::with_capacity(batches.len());
     for batch in batches {
@@ -215,8 +211,20 @@ where
     let mut completions = Vec::new();
     for (records, record_count) in replay_batches {
         for (index, record) in records.into_iter().enumerate() {
+            let Some(binding) = resolve_binding(record.envelope.worktree_id)
+                .filter(|binding| binding.project_id == project_id)
+            else {
+                // The record's own worktree has no binding for this project
+                // yet: keep it durable and pending instead of judging it
+                // against a sibling worktree's binding.
+                pass.binding_unavailable = true;
+                completions.push(ReplayCompletion::Retained(1));
+                continue;
+            };
+            // Only a drain authorized for this root (its own binding resolved)
+            // may tombstone a record claiming a foreign project identity.
             if record.envelope.project_id != project_id
-                || record.envelope.validate(binding).is_err()
+                || record.envelope.validate(&binding).is_err()
             {
                 completions.push(ReplayCompletion::Tombstone(
                     record,
@@ -481,7 +489,7 @@ mod tests {
             &hook_v2_spool_root(data_root, HOST),
             HookSpoolConfigV1::stock(HOST),
             PROJECT_ID,
-            published_hook_scope_binding(data_root, WORKTREE_ID, HOST, now).as_ref(),
+            &mut |_| published_hook_scope_binding(data_root, WORKTREE_ID, HOST, now),
             now,
             admit,
         )
@@ -569,7 +577,7 @@ mod tests {
             &spool_root,
             HookSpoolConfigV1::stock(NativeHostIdentityV1::OpenCode),
             PROJECT_ID,
-            Some(&binding),
+            &mut |_| Some(binding.clone()),
             now,
             move |envelope, native_lifecycle| {
                 let captured = Arc::clone(&captured);
@@ -717,7 +725,7 @@ mod tests {
             &spool_root,
             HookSpoolConfigV1::stock(HOST),
             PROJECT_ID,
-            Some(&binding),
+            &mut |_| Some(binding.clone()),
             current,
             |_, _| {
                 set_mode(0o755);
@@ -886,6 +894,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_sibling_worktree_record_waits_for_its_own_binding() {
+        let root = TestRoot::new("sibling-binding");
+        let now = UtcMicros(1_000);
+        let owned = binding(7);
+        let mut sibling = binding(7);
+        sibling.worktree_id = [8; 16];
+        sibling.binding_token = [5; 32];
+        publish_binding(root.path(), &owned, now);
+        spool_envelopes(root.path(), &owned, &[envelope(8, &owned)], now);
+        spool_envelopes(root.path(), &sibling, &[envelope(9, &sibling)], now);
+
+        let report = drain_host_spool_once(
+            &hook_v2_spool_root(root.path(), HOST),
+            HookSpoolConfigV1::stock(HOST),
+            PROJECT_ID,
+            &mut |worktree_id| published_hook_scope_binding(root.path(), worktree_id, HOST, now),
+            now,
+            |_, _| async move { admitted() },
+        )
+        .await
+        .unwrap();
+
+        // The owned record admits; the sibling's stays pending rather than
+        // being judged against a binding it was never authorized under.
+        assert!(report.binding_unavailable);
+        assert_eq!(report.committed, 1);
+        assert_eq!(pending_records(root.path(), now), 1);
+
+        publish_binding(root.path(), &sibling, now);
+        let report = drain_host_spool_once(
+            &hook_v2_spool_root(root.path(), HOST),
+            HookSpoolConfigV1::stock(HOST),
+            PROJECT_ID,
+            &mut |worktree_id| published_hook_scope_binding(root.path(), worktree_id, HOST, now),
+            now,
+            |_, _| async move { admitted() },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.committed, 1);
+        assert_eq!(pending_records(root.path(), now), 0);
+    }
+
+    #[tokio::test]
     async fn a_foreign_project_id_leaves_every_record_pending() {
         let root = TestRoot::new("foreign-project");
         let now = UtcMicros(1_000);
@@ -897,7 +950,7 @@ mod tests {
             &hook_v2_spool_root(root.path(), HOST),
             HookSpoolConfigV1::stock(HOST),
             [9; 16],
-            published_hook_scope_binding(root.path(), binding.worktree_id, HOST, now).as_ref(),
+            &mut |_| published_hook_scope_binding(root.path(), binding.worktree_id, HOST, now),
             now,
             |_, _| async move { admitted() },
         )

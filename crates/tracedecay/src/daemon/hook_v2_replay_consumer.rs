@@ -19,7 +19,7 @@ use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_global_db::DeliverySourceReceiptReadV1;
 use tracedecay_hooks::{
     HookDeliveryReceiptSpoolV1, HookDeliverySourceReceiptV1, HookReplayAdmissionOutcomeV1,
-    HookReplayPassReportV1, HookSpoolConfigV1, HookSpoolV1,
+    HookReplayPassReportV1, HookScopeBindingV1, HookSpoolConfigV1, HookSpoolV1,
     admit_replayed_envelope_with_authoritative_session, drain_host_spool_once, hook_v2_spool_root,
     published_hook_scope_binding,
 };
@@ -331,7 +331,7 @@ async fn redrive_pending_work(
 async fn drain_admitted_host_spool(
     host: NativeHostIdentityV1,
     project_id: Option<[u8; 16]>,
-    worktree_id: &Result<[u8; 16], String>,
+    _worktree_id: &Result<[u8; 16], String>,
     now: UtcMicros,
     graph: &tracedecay_project::project::TraceDecay,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
@@ -351,13 +351,22 @@ async fn drain_admitted_host_spool(
     }
     let project_id =
         project_id.ok_or_else(|| "the project layout has no hook project identity".to_owned())?;
-    let worktree_id = worktree_id.clone()?;
-    let binding = published_hook_scope_binding(data_root, worktree_id, host, now);
+    // Sibling worktrees share this data root with their own bindings: resolve
+    // each record against the binding its worktree published rather than this
+    // graph's alone, caching the published lookup once per worktree per pass.
+    let mut resolved_bindings =
+        std::collections::HashMap::<[u8; 16], Option<HookScopeBindingV1>>::new();
+    let mut resolve_binding = |worktree_id: [u8; 16]| {
+        resolved_bindings
+            .entry(worktree_id)
+            .or_insert_with(|| published_hook_scope_binding(data_root, worktree_id, host, now))
+            .clone()
+    };
     let pass = Box::pin(drain_host_spool_once(
             &root,
             HookSpoolConfigV1::stock(host),
             project_id,
-            binding.as_ref(),
+            &mut resolve_binding,
             now,
             |envelope, native_lifecycle| async move {
                 let lifecycle_for_admission = native_lifecycle.clone();
@@ -480,21 +489,22 @@ pub(crate) fn register_hook_v2_replay_consumer(
 }
 
 /// Rebind the data root's consumer to a still-served graph during retirement.
-/// An incumbent bound to `retiring` is displaced even though its graph is
-/// still alive — the retire ends it — but a live third party's is kept.
+/// An incumbent bound outside `served` is displaced even though its graph is
+/// still alive — its server is draining — while a live incumbent bound to a
+/// serving sibling keeps draining for the whole shared store.
 pub(crate) fn retarget_hook_v2_replay_consumer(
     graph: Arc<tracedecay_project::project::TraceDecay>,
     delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
-    retiring: &Weak<tracedecay_project::project::TraceDecay>,
+    served: &[Weak<tracedecay_project::project::TraceDecay>],
 ) -> bool {
     register_hook_v2_replay_consumer_with(
         graph,
         delivery_settlements,
         project_sessions,
         background_cpu,
-        Some(retiring),
+        Some(served),
     )
 }
 
@@ -503,7 +513,7 @@ fn register_hook_v2_replay_consumer_with(
     delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
-    displace_bound: Option<&Weak<tracedecay_project::project::TraceDecay>>,
+    displace_unless_served: Option<&[Weak<tracedecay_project::project::TraceDecay>]>,
 ) -> bool {
     let data_root = graph.hook_store_layout().data_root.clone();
     let project_root = graph.project_root().to_path_buf();
@@ -515,7 +525,11 @@ fn register_hook_v2_replay_consumer_with(
             if roots.get(&data_root).is_some_and(|consumer| {
                 consumer.graph.upgrade().is_some()
                     && consumer.delivery_settlements.upgrade().is_some()
-                    && !displace_bound.is_some_and(|bound| Weak::ptr_eq(&consumer.graph, bound))
+                    && displace_unless_served.is_none_or(|served| {
+                        !served
+                            .iter()
+                            .any(|weak| Weak::ptr_eq(weak, &consumer.graph))
+                    })
             }) {
                 return false;
             }
@@ -605,14 +619,19 @@ fn register_hook_v2_replay_consumer_with(
 }
 
 /// The data root has no registered consumer, or the registered one's graph is
-/// dead or `bound` — the only states a still-served graph may take over.
-pub(crate) fn replay_consumer_unowned_or_bound_to(
+/// dead or bound outside `served` — the only states a served sibling may take
+/// over during retirement. An incumbent already bound to a serving sibling is
+/// left alone.
+pub(crate) fn replay_consumer_unserved_or_unowned(
     data_root: &Path,
-    bound: &Weak<tracedecay_project::project::TraceDecay>,
+    served: &[Weak<tracedecay_project::project::TraceDecay>],
 ) -> bool {
     registered_replay_roots().lock().is_ok_and(|roots| {
         roots.get(data_root).is_none_or(|consumer| {
-            consumer.graph.upgrade().is_none() || Weak::ptr_eq(&consumer.graph, bound)
+            consumer.graph.upgrade().is_none()
+                || !served
+                    .iter()
+                    .any(|weak| Weak::ptr_eq(weak, &consumer.graph))
         })
     })
 }
