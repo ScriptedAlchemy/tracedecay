@@ -284,3 +284,72 @@ fn problem_identity(envelope: &Value) -> Value {
         "legal_actions": envelope["problem"]["legal_actions"],
     })
 }
+
+const LEMON_SESSION: &str = "lemon-session";
+const TIGHT_BUDGET: u64 = 1024;
+
+/// A context budget smaller than the matched message admits only a prefix of
+/// it and says so, rather than overrunning the budget or dropping the match.
+#[tokio::test]
+async fn lcm_expand_query_reports_a_truncated_block_inside_the_context_budget() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let body = format!("raw lemon details {}", "L".repeat(6000));
+    let lemon =
+        seed_temporal_lcm_session_message(&cg, LEMON_SESSION, "lemon-message", &body, 1).await;
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, LEMON_SESSION, vec![lemon]).await;
+    let server = real_mcp_server(cg).await;
+
+    let result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": LEMON_SESSION,
+            "prompt": "Explain the lemon details",
+            "query": "lemon",
+            "max_tokens": MAX_TOKENS,
+            "context_max_tokens": TIGHT_BUDGET,
+        }),
+    )
+    .await;
+    let payload: Value =
+        serde_json::from_str(extract_real_server_text(&result)).expect("expand-query JSON");
+    let total_chars = u64::try_from(body.chars().count()).unwrap();
+
+    assert_eq!(
+        json!({
+            "needs_synthesis": payload["needs_synthesis"],
+            "context_truncated": payload["context_truncated"],
+            "context_budget": payload["context_budget"],
+            "block_range": payload["context_blocks"][0]["content_range"],
+            "block_count": payload["context_blocks"].as_array().map(Vec::len),
+        }),
+        json!({
+            "needs_synthesis": true,
+            "context_truncated": true,
+            "context_budget": {
+                "requested_max_chars": TIGHT_BUDGET,
+                "used_chars": TIGHT_BUDGET,
+            },
+            "block_range": {
+                "offset": 0,
+                "limit": TIGHT_BUDGET,
+                "returned_chars": TIGHT_BUDGET,
+                "total_chars": total_chars,
+                "truncated": true,
+            },
+            "block_count": 1,
+        }),
+        "{payload}"
+    );
+    let content = payload["context_blocks"][0]["content"]
+        .as_str()
+        .expect("admitted block content");
+    assert!(
+        body.starts_with(content),
+        "the admitted block must be a prefix of the stored message: {content}"
+    );
+
+    server.shutdown().await;
+}
