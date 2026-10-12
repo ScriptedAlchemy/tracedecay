@@ -1,10 +1,8 @@
-//! Dashboard feedback read descriptors and presentation mapping.
+//! Dashboard feedback presentation mapping.
 //!
 //! The executable retains the selected project's daemon and feedback source.
-//! This module owns the closed read-route vocabulary and the truthful
-//! dashboard envelope assembled from an admitted feedback observation model.
-
-use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+//! This module owns the truthful dashboard envelope assembled from an admitted
+//! feedback observation model.
 
 use crate::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessStateV1,
@@ -14,69 +12,6 @@ use crate::read_model::{
 
 /// Operation advertised for re-reading feedback observation status.
 pub const FEEDBACK_STATUS_REFRESH_OPERATION: &str = "feedback_status";
-
-/// One selected-project feedback read bound through the canonical application
-/// invocation router.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DashboardFeedbackReadRouteV1 {
-    pub method: &'static str,
-    /// Project-scoped dashboard tail, without `/api/projects/{id}/`.
-    pub dashboard_tail: &'static str,
-    /// Relative path accepted by [`crate::feedback_application_router`].
-    pub application_path: &'static str,
-    pub operation: ApplicationSurfaceOperation,
-}
-
-const DASHBOARD_FEEDBACK_READ_ROUTES: [DashboardFeedbackReadRouteV1; 4] = [
-    DashboardFeedbackReadRouteV1 {
-        method: "POST",
-        dashboard_tail: "feedback/get",
-        application_path: "/get",
-        operation: ApplicationSurfaceOperation::FeedbackGet,
-    },
-    DashboardFeedbackReadRouteV1 {
-        method: "POST",
-        dashboard_tail: "feedback/expand",
-        application_path: "/expand",
-        operation: ApplicationSurfaceOperation::FeedbackExpand,
-    },
-    DashboardFeedbackReadRouteV1 {
-        method: "POST",
-        dashboard_tail: "feedback/list",
-        application_path: "/list",
-        operation: ApplicationSurfaceOperation::FeedbackList,
-    },
-    DashboardFeedbackReadRouteV1 {
-        method: "POST",
-        dashboard_tail: "feedback/proximity",
-        application_path: "/proximity",
-        operation: ApplicationSurfaceOperation::FeedbackProximity,
-    },
-];
-
-/// Every selected-project feedback read route, in mount order.
-const fn dashboard_feedback_read_routes() -> &'static [DashboardFeedbackReadRouteV1] {
-    &DASHBOARD_FEEDBACK_READ_ROUTES
-}
-
-/// Resolve an exact selected-project feedback read route.
-#[must_use]
-pub fn dashboard_feedback_read_route(
-    method: &str,
-    dashboard_tail: &str,
-) -> Option<&'static DashboardFeedbackReadRouteV1> {
-    dashboard_feedback_read_routes()
-        .iter()
-        .find(|route| route.method == method && route.dashboard_tail == dashboard_tail)
-}
-
-/// Resolve the operation segment accepted by the canonical feedback router.
-pub(crate) fn feedback_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
-    dashboard_feedback_read_routes()
-        .iter()
-        .find(|route| route.application_path.trim_start_matches('/') == operation)
-        .map(|route| route.operation)
-}
 
 /// Coverage emitted by the feedback observation application projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

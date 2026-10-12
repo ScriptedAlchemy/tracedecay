@@ -1,6 +1,5 @@
 //! Canonical public HTTP adapter for daemon-owned handoff opens.
 
-use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -9,23 +8,13 @@ use axum::extract::{DefaultBodyLimit, Extension, Path, State};
 use axum::response::Response;
 use axum::routing::post;
 use axum::{Json, Router};
-use schemars::JsonSchema;
 use serde_json::Value;
-use tracedecay_contracts::{
-    ApplicationProblem, IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1,
-    ListTaskHandoffsRequestV1, ListTaskHandoffsResultV1, OpenInvestigationHandoffRequestV1,
-    OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1, RequestId,
-    RetryDirective,
-};
+use tracedecay_contracts::{ApplicationProblem, RequestId, RetryDirective};
 
 use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem_response,
     invalid_request_response,
 };
-
-fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
-    T::schema_name()
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HandoffOperation {
@@ -59,24 +48,6 @@ impl HandoffOperation {
         ListTaskHandoffs: "list_task_handoffs", "list-task";
         OpenInvestigationHandoff: "open_investigation_handoff", "open-investigation";
         OpenTaskHandoff: "open_task_handoff", "open-task";
-    }
-
-    pub fn request_schema_name(self) -> Cow<'static, str> {
-        match self {
-            Self::IssueTaskHandoff => schema_name::<IssueTaskHandoffRequestV1>(),
-            Self::ListTaskHandoffs => schema_name::<ListTaskHandoffsRequestV1>(),
-            Self::OpenInvestigationHandoff => schema_name::<OpenInvestigationHandoffRequestV1>(),
-            Self::OpenTaskHandoff => schema_name::<OpenTaskHandoffRequestV1>(),
-        }
-    }
-
-    pub fn result_schema_name(self) -> Cow<'static, str> {
-        match self {
-            Self::IssueTaskHandoff => schema_name::<IssueTaskHandoffResultV1>(),
-            Self::ListTaskHandoffs => schema_name::<ListTaskHandoffsResultV1>(),
-            Self::OpenInvestigationHandoff => schema_name::<OpenInvestigationHandoffResultV1>(),
-            Self::OpenTaskHandoff => schema_name::<OpenTaskHandoffResultV1>(),
-        }
     }
 
     fn parse(segment: &str) -> Option<Self> {

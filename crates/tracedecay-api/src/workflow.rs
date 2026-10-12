@@ -1,6 +1,5 @@
 //! Canonical public HTTP adapter for daemon-owned Workflow execution.
 
-use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
@@ -10,28 +9,13 @@ use axum::extract::{DefaultBodyLimit, Extension, Path, State};
 use axum::response::Response;
 use axum::routing::post;
 use axum::{Json, Router};
-use schemars::JsonSchema;
 use serde_json::Value;
-use tracedecay_contracts::{
-    ApplicationProblem, RequestId, RetryDirective, TaskHandoffGrant, TaskHandoffIssueRequest,
-    TaskHandoffRedeemRequest, TaskHandoffRedeemed, WorkflowDefinitionActivateRequest,
-    WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionDisposition,
-    WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
-    WorkflowDefinitionRegisterRequest, WorkflowDefinitionRejectRequest,
-    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
-    WorkflowDefinitionValidation, WorkflowRunCancelRequest, WorkflowRunGetRequest,
-    WorkflowRunPauseRequest, WorkflowRunResumeRequest, WorkflowRunStartRequest,
-};
-use tracedecay_domain::{WorkflowDefinition, WorkflowRunProjection};
+use tracedecay_contracts::{ApplicationProblem, RequestId, RetryDirective};
 
 use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem_response,
     invalid_request_response,
 };
-
-fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
-    T::schema_name()
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum WorkflowOperation {
@@ -95,13 +79,6 @@ impl WorkflowOperation {
         GetRun: "get_run", "get-run";
     }
 
-    pub fn from_operation_key(key: &str) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|operation| operation.operation_key() == key)
-    }
-
     /// Whether the operation reads without producing a durable effect.
     /// Parity with the catalog's effect class is pinned by
     /// `read_only_operations_mirror_the_catalog_effect_class`.
@@ -115,47 +92,6 @@ impl WorkflowOperation {
                 | Self::DiffDefinition
                 | Self::GetRun
         )
-    }
-
-    pub fn request_schema_name(self) -> Cow<'static, str> {
-        match self {
-            Self::RegisterDefinition => schema_name::<WorkflowDefinitionRegisterRequest>(),
-            Self::ActivateDefinition => schema_name::<WorkflowDefinitionActivateRequest>(),
-            Self::RetireDefinition => schema_name::<WorkflowDefinitionRetireRequest>(),
-            Self::RejectDefinition => schema_name::<WorkflowDefinitionRejectRequest>(),
-            Self::ValidateDefinition => schema_name::<WorkflowDefinitionValidateRequest>(),
-            Self::GetDefinition => schema_name::<WorkflowDefinitionGetRequest>(),
-            Self::ListDefinitions => schema_name::<WorkflowDefinitionListRequest>(),
-            Self::DefinitionHistory => schema_name::<WorkflowDefinitionHistoryRequest>(),
-            Self::DiffDefinition => schema_name::<WorkflowDefinitionDiffRequest>(),
-            Self::HandoffIssue => schema_name::<TaskHandoffIssueRequest>(),
-            Self::HandoffRedeem => schema_name::<TaskHandoffRedeemRequest>(),
-            Self::StartRun => schema_name::<WorkflowRunStartRequest>(),
-            Self::PauseRun => schema_name::<WorkflowRunPauseRequest>(),
-            Self::ResumeRun => schema_name::<WorkflowRunResumeRequest>(),
-            Self::CancelRun => schema_name::<WorkflowRunCancelRequest>(),
-            Self::GetRun => schema_name::<WorkflowRunGetRequest>(),
-        }
-    }
-
-    pub fn result_schema_name(self) -> Cow<'static, str> {
-        match self {
-            Self::RegisterDefinition => schema_name::<WorkflowDefinition>(),
-            Self::ActivateDefinition | Self::RetireDefinition | Self::RejectDefinition => {
-                schema_name::<WorkflowDefinitionDisposition>()
-            }
-            Self::ValidateDefinition => schema_name::<WorkflowDefinitionValidation>(),
-            Self::GetDefinition => schema_name::<WorkflowDefinition>(),
-            Self::ListDefinitions | Self::DefinitionHistory => {
-                schema_name::<Vec<WorkflowDefinition>>()
-            }
-            Self::DiffDefinition => schema_name::<WorkflowDefinitionDiff>(),
-            Self::HandoffIssue => schema_name::<TaskHandoffGrant>(),
-            Self::HandoffRedeem => schema_name::<TaskHandoffRedeemed>(),
-            Self::StartRun | Self::PauseRun | Self::ResumeRun | Self::CancelRun | Self::GetRun => {
-                schema_name::<WorkflowRunProjection>()
-            }
-        }
     }
 
     pub fn from_route_segment(segment: &str) -> Option<Self> {

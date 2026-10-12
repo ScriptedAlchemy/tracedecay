@@ -230,50 +230,12 @@ pub type HttpApplicationInvocationFuture = Pin<
     >,
 >;
 
-/// Concrete application owners mounted behind the HTTP adapter.
+/// The application owner mounted behind the HTTP adapter.
 ///
-/// Each method delegates to the corresponding application owner family. The
-/// adapter performs only extraction, owner selection, and canonical encoding.
+/// The adapter performs only extraction, owner admission, and canonical
+/// encoding; every admitted operation is delegated through [`Self::invoke`].
 pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
-    fn exposes_operation(
-        &self,
-        operation: ApplicationSurfaceOperation,
-    ) -> Result<bool, ApplicationContractError> {
-        is_http_application_operation_exposed(operation)
-    }
-
-    fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
-
-    fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
-
-    fn invoke_callable_code(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_primitive(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
-
-    fn invoke_observatory(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_configuration(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_context_scout(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_native_integration(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_retained(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
+    fn invoke(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
 }
 
 impl<F, Fut> HttpApplicationOwners for F
@@ -283,54 +245,7 @@ where
         + Send
         + 'static,
 {
-    fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_callable_code(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_primitive(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_observatory(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_configuration(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_context_scout(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_native_integration(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_retained(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
+    fn invoke(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
         Box::pin((self)(request))
     }
 }
@@ -525,8 +440,16 @@ fn parse_git_read_operation(operation: &str) -> Option<ApplicationSurfaceOperati
     )
 }
 
+/// The closed set of feedback reads the dashboard binds through
+/// [`feedback_application_router`].
 fn parse_feedback_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
-    crate::feedback::feedback_read_operation(operation)
+    match operation {
+        "get" => Some(ApplicationSurfaceOperation::FeedbackGet),
+        "expand" => Some(ApplicationSurfaceOperation::FeedbackExpand),
+        "list" => Some(ApplicationSurfaceOperation::FeedbackList),
+        "proximity" => Some(ApplicationSurfaceOperation::FeedbackProximity),
+        _ => None,
+    }
 }
 
 fn parse_public_feedback_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
@@ -644,7 +567,7 @@ async fn invoke_route<O>(
 where
     O: HttpApplicationOwners,
 {
-    match owners.exposes_operation(operation) {
+    match is_http_application_operation_exposed(operation) {
         Ok(true) => {}
         Ok(false) => {
             return adapter_problem_response(
@@ -662,23 +585,13 @@ where
         Ok(request) => request,
         Err(response) => return *response,
     };
-    let Some(owner_kind) = http_application_owner_kind(request.operation) else {
+    if http_application_owner_kind(request.operation).is_none() {
         return adapter_problem_response(
             request.request_id,
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
         );
-    };
-    let invocation = match owner_kind {
-        HttpApplicationOwnerKind::Git => owners.invoke_git(request),
-        HttpApplicationOwnerKind::Feedback => owners.invoke_feedback(request),
-        HttpApplicationOwnerKind::CallableCode => owners.invoke_callable_code(request),
-        HttpApplicationOwnerKind::Primitive => owners.invoke_primitive(request),
-        HttpApplicationOwnerKind::Observatory => owners.invoke_observatory(request),
-        HttpApplicationOwnerKind::Configuration => owners.invoke_configuration(request),
-        HttpApplicationOwnerKind::ContextScout => owners.invoke_context_scout(request),
-        HttpApplicationOwnerKind::NativeIntegration => owners.invoke_native_integration(request),
-        HttpApplicationOwnerKind::Retained => owners.invoke_retained(request),
-    };
+    }
+    let invocation = owners.invoke(request);
     match tracing::Instrument::instrument(invocation, tracing::trace_span!("api.http.handler"))
         .await
     {
