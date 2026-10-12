@@ -439,6 +439,7 @@ async fn a_rekey_after_a_readmission_lands_every_route_and_request() {
     let b_owner = project_owner("readmitted-rekey-first");
     let c_owner = project_owner("readmitted-rekey-carrier");
     let d_owner = project_owner("readmitted-rekey-final");
+    let e_owner = project_owner("readmitted-rekey-last");
 
     let a_history = Arc::new(HeldHistory::default());
     let a_wake = registry
@@ -544,6 +545,26 @@ async fn a_rekey_after_a_readmission_lands_every_route_and_request() {
     assert!(
         c_wake.wake(),
         "the live route the readmission installed must reach the new owner too"
+    );
+
+    // The destination retains the complete route set it absorbed: a later
+    // D-to-E rekey must still land both handles, or older callers die at
+    // the next move.
+    registry
+        .rekey_project(&d_owner, e_owner.clone(), harness.registered.clone())
+        .await;
+    assert!(registry.project_state(&d_owner).await.is_none());
+    registry
+        .project_state(&e_owner)
+        .await
+        .expect("final destination entry");
+    assert!(
+        a_wake.wake(),
+        "the parked route must survive every successive rekey"
+    );
+    assert!(
+        c_wake.wake(),
+        "the readmission route must survive every successive rekey"
     );
 
     registry.shutdown().await;

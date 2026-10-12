@@ -94,6 +94,10 @@ fn bounded_historical_ingest_permits() -> usize {
 struct SessionTemporalRefreshSchedulerEntry {
     state: Arc<SessionTemporalRefreshWakeState>,
     wake: SessionTemporalRefreshWake,
+    /// Every other route callers hold for this owner, rebound to `state`
+    /// so their `wake()` lands here. A rekey collects the complete set —
+    /// `wake` plus these — into the handoff it owes the new owner.
+    extra_routes: Vec<SessionTemporalRefreshWake>,
     history: Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -115,6 +119,12 @@ fn cancel_supervisor(
 impl SessionTemporalRefreshSchedulerEntry {
     fn cancel(&self) {
         cancel_supervisor(&self.state, &self.history);
+    }
+
+    /// Every route callers hold for this entry, oldest first and ending
+    /// with its primary wake.
+    fn routes(&self) -> impl Iterator<Item = &SessionTemporalRefreshWake> {
+        self.extra_routes.iter().chain(std::iter::once(&self.wake))
     }
 }
 
@@ -417,6 +427,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         SessionTemporalRefreshSchedulerEntry {
             state,
             wake,
+            extra_routes: Vec::new(),
             history,
             task,
         }
@@ -493,16 +504,17 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 {
                     stored.pending_states.push(Arc::clone(&entry.state));
                 }
-                // A re-admitted owner can run under a route its parked
+            }
+            if let Some((_, entry)) = entries.last() {
+                // A re-admitted owner can run under routes its parked
                 // handoff does not hold (a dropped A-to-B, then a C-to-A
                 // readmission installs C's route as A's live wake): keep
-                // every live route so none of its callers is stranded.
-                if !stored
-                    .routes
-                    .iter()
-                    .any(|route| route.same_route(&entry.wake))
-                {
-                    stored.routes.push(entry.wake.clone());
+                // every route the live entry carries so none of its
+                // callers is stranded on a cancelled state.
+                for route in entry.routes() {
+                    if !stored.routes.iter().any(|held| held.same_route(route)) {
+                        stored.routes.push(route.clone());
+                    }
                 }
             }
             let staging = Arc::new(SessionTemporalRefreshWakeState::default());
@@ -516,7 +528,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let (_, entry) = entries.last()?;
         let staging = Arc::new(SessionTemporalRefreshWakeState::default());
         let handoff = SessionTemporalRefreshRekeyHandoff {
-            routes: vec![entry.wake.clone()],
+            routes: entry.routes().cloned().collect(),
             staging: Arc::clone(&staging),
             pending_states: entries
                 .iter()
@@ -569,6 +581,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
             #[allow(clippy::expect_used)]
             let finished = project.remove(&owner).expect("finished entry disappeared");
             let route = finished.wake.clone();
+            let extra_routes = finished.extra_routes.clone();
             let history = finished
                 .history
                 .read()
@@ -581,7 +594,11 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 return inert_session_temporal_refresh_wake();
             }
             self.settle_retired(&retired_owner).await;
-            let entry = self.spawn_entry(database, Some(route), history);
+            let mut entry = self.spawn_entry(database, Some(route), history);
+            entry.extra_routes = extra_routes;
+            for extra in &entry.extra_routes {
+                extra.bind(&entry.state);
+            }
             let wake = entry.wake.clone();
             project.insert(owner, entry);
             return wake;
@@ -761,10 +778,16 @@ impl SessionTemporalRefreshSchedulerRegistry {
             return;
         }
         let mut project = self.project.lock().await;
-        if let Some(existing) = project.get(&new_owner) {
+        if let Some(existing) = project.get_mut(&new_owner) {
             if let Some(handoff) = &handoff {
                 for route in &handoff.routes {
                     route.bind(&existing.state);
+                    // A route merged into an existing destination stays
+                    // associated with that owner so its later rekey
+                    // transfers the complete set too.
+                    if !existing.routes().any(|held| held.same_route(route)) {
+                        existing.extra_routes.push(route.clone());
+                    }
                 }
                 handoff.staging.cancel();
                 handoff.staging.transfer_requests_to(&existing.state);
@@ -775,7 +798,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         }
         self.settle_retired(&SessionTemporalRefreshOwner::Project(new_owner.clone()))
             .await;
-        let entry = self.spawn_entry(
+        let mut entry = self.spawn_entry(
             database,
             handoff
                 .as_ref()
@@ -785,6 +808,9 @@ impl SessionTemporalRefreshSchedulerRegistry {
         if let Some(handoff) = &handoff {
             for route in &handoff.routes {
                 route.bind(&entry.state);
+                if !route.same_route(&entry.wake) {
+                    entry.extra_routes.push(route.clone());
+                }
             }
             handoff.staging.cancel();
             handoff.staging.transfer_requests_to(&entry.state);
