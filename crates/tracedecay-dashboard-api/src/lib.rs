@@ -137,9 +137,6 @@ pub(crate) mod test_support;
 #[cfg(feature = "test-transport")]
 mod test_transport;
 
-pub(crate) use http_admission::{
-    DASHBOARD_REQUEST_CONTROL_MISSING_CODE, DASHBOARD_REQUEST_CONTROL_MISSING_DETAIL,
-};
 pub use http_admission::{
     DashboardHttpRequestControlV1, RequestControl, RequestControlMissing,
     with_dashboard_http_admission,

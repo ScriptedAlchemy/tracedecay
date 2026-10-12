@@ -283,7 +283,7 @@ pub(super) fn selected_project_application_read(
     }
 }
 
-fn is_selected_project_event_delivery_ack(method: &Method, tail: &str) -> bool {
+pub(super) fn is_selected_project_event_delivery_ack(method: &Method, tail: &str) -> bool {
     method == Method::POST && tail == "events/delivery-ack"
 }
 

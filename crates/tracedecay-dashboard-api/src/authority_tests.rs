@@ -1,7 +1,6 @@
 //! Behavioral coverage of dashboard admission, routes, and retained authority.
 
 use std::future::Future;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -10,7 +9,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Method, Request, StatusCode, header};
-use axum::response::{Json, Response};
+use axum::response::Json;
 use axum::routing::{get, post};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -30,7 +29,10 @@ use crate::capabilities::capabilities;
 use crate::http_admission::{
     DASHBOARD_REQUEST_CONTROL_MISSING_CODE, DASHBOARD_REQUEST_CONTROL_MISSING_DETAIL,
 };
-use crate::project_gateway::{SelectedProjectApplicationRead, selected_project_application_read};
+use crate::project_gateway::{
+    SelectedProjectApplicationRead, is_selected_project_event_delivery_ack,
+    selected_project_application_read,
+};
 use crate::request_deadline::{
     DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS, DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS,
     dashboard_http_request_deadline_micros,
