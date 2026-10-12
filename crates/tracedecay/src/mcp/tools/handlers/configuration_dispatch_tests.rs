@@ -9,6 +9,9 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::dispatch_test_support::*;
 use super::*;
+use crate::daemon::retained_test_support::{
+    forward_application_surface, ignore_feedback_observations,
+};
 
 #[derive(Default)]
 struct UnavailableEffectExecutor {
@@ -44,15 +47,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for UnavailableEffectEx
                 .unwrap()
                 .push((binding.operation().as_str().to_owned(), payload.clone()));
         }
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
-            else {
-                return Err(tracedecay_contracts::InvocationError::Unavailable);
-            };
-            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
-                .await
-        })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -85,17 +80,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for UnavailableEffectE
         Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: tracedecay_domain::ManifestDigest,
-        _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 #[tokio::test]

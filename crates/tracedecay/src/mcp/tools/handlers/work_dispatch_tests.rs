@@ -15,6 +15,7 @@ use tracedecay_mcp::handlers::work::work_operation_for_tool;
 
 use super::dispatch_test_support::tool_json;
 use super::invoke_admitted_work_operation;
+use crate::daemon::retained_test_support::ignore_feedback_observations;
 
 /// Refuses the request after recording its closed route. Both transports
 /// must preserve the identical typed Work unavailable envelope.
@@ -54,17 +55,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingWorkExecu
         Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: tracedecay_domain::ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 async fn response_json(response: axum::response::Response) -> Value {

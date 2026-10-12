@@ -8,6 +8,7 @@ use tempfile::TempDir;
 
 use super::dispatch_test_support::*;
 use super::*;
+use crate::daemon::retained_test_support::ignore_feedback_observations;
 use tracedecay_mcp::get_tool_definitions;
 
 /// Records the daemon operation every multi-root tool routes to, then refuses
@@ -54,17 +55,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingMultiRoot
         Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: tracedecay_domain::ManifestDigest,
-        _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 #[tokio::test]

@@ -19,13 +19,15 @@ use tracedecay_contracts::{
     SafeDiagnostic,
 };
 use tracedecay_domain::{
-    ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, RunId, UtcMicros,
-    WorktreeId,
+    ActorId, ComponentVersion, ProjectId, RepositoryId, RunId, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::EffectClass;
 
 use super::dispatch_test_support::{registered_lib_fixture, tool_json};
 use super::*;
+use crate::daemon::retained_test_support::{
+    forward_application_surface, ignore_feedback_observations,
+};
 
 use tracedecay_domain::test_fixtures::digest;
 
@@ -187,15 +189,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for FactStoreCurateSucc
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
-            else {
-                return Err(tracedecay_contracts::InvocationError::Unavailable);
-            };
-            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
-                .await
-        })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -252,17 +246,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for FactStoreCurateSuc
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 struct ExpiredDeadlineExecutor {
@@ -281,15 +265,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for ExpiredDeadlineExec
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
-            else {
-                return Err(tracedecay_contracts::InvocationError::Unavailable);
-            };
-            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
-                .await
-        })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -334,17 +310,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ExpiredDeadlineExe
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 #[tokio::test]
@@ -482,15 +448,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for PostCommitPartialEf
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
-            else {
-                return Err(tracedecay_contracts::InvocationError::Unavailable);
-            };
-            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
-                .await
-        })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -522,17 +480,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PostCommitPartialE
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 struct PreCommitInterruptionExecutor {
@@ -551,15 +499,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for PreCommitInterrupti
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
-            else {
-                return Err(tracedecay_contracts::InvocationError::Unavailable);
-            };
-            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
-                .await
-        })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -604,17 +544,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for PreCommitInterrupt
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 #[tokio::test]
@@ -729,15 +659,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for WireProblemExecutor
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
-            else {
-                return Err(tracedecay_contracts::InvocationError::Unavailable);
-            };
-            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
-                .await
-        })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -766,17 +688,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for WireProblemExecuto
         Box::pin(async move { Ok(response) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: ManifestDigest,
-        _observed_at: UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 #[tokio::test]
