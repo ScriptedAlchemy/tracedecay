@@ -426,7 +426,7 @@ async fn route_bind_eviction_releases_the_evicted_project_stores() {
 /// A route-bind eviction detaches the idle server, but its process-owner
 /// cleanup runs in a detached task. A reopen of the evicted project registers
 /// its owners before its route publishes, so the cleanup must wait out that
-/// open — otherwise it retires the owners the live reopen just adopted. The
+/// open. Otherwise it retires the owners the live reopen just adopted. The
 /// evicting open is parked at its bind until the cleanup parks ahead of its
 /// retire, the reopen is parked at its own bind, and then the reopened
 /// project's replay consumer must still be owned after it publishes.
@@ -556,12 +556,11 @@ async fn route_bind_eviction_cannot_retire_a_reopened_projects_owners() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    // Arm the check hold only now: the reopen's own admission may capacity-
-    // release the evicting project, and that release runs the same unserved-
-    // owner check — parking it here would deadlock the open before its bind.
+    // Arm the check hold only now, so that only the eviction's cleanup can
+    // park on it.
     fs::write(&check_hold, b"hold").expect("hold file");
-    // The replay consumer registers inside the reopen's owner mounts — after
-    // its core route publishes — and keeps the still-live incumbent rather
+    // The replay consumer registers inside the reopen's owner mounts, after
+    // its core route publishes, and keeps the still-live incumbent rather
     // than displacing it. Parking the reopen there leaves it relying on the
     // exact consumer the eviction's kill is staged to remove next.
     let _ = fs::remove_file(&owners_entered);
@@ -571,7 +570,7 @@ async fn route_bind_eviction_cannot_retire_a_reopened_projects_owners() {
     // its capacity admission held. On the unguarded build it runs the served
     // check against the not-yet-bound route and parks inside the retire
     // section; the guarded build queues behind the open's admission until the
-    // route publishes.
+    // open finishes.
     fs::remove_file(&retire_hold).expect("release the held retire");
     // Releasing the bind now would race the cleanup's served check against
     // the reopen's publish at file-poll granularity. The unguarded build
@@ -617,6 +616,135 @@ async fn route_bind_eviction_cannot_retire_a_reopened_projects_owners() {
     );
 
     reopened.close().await;
+    for session in sessions {
+        session.close().await;
+    }
+    stop_daemon_gracefully(&mut daemon);
+    assert_clean_shutdown_log(&fs::read_to_string(&log_path).expect("daemon log"));
+}
+
+/// A capacity retirement waits for the owner's earlier retirements before it
+/// releases the owner's stores, and a route-bind eviction's cleanup of that
+/// owner first waits out the in-flight opens on the capacity admission. The
+/// retirement must not hold that admission across its wait, or it and the
+/// cleanup deadlock and every later open queues behind them. While it waits,
+/// a reopen can serve the owner again; the retirement must then leave the
+/// reopened project's stores alone.
+#[tokio::test]
+async fn capacity_retirement_behind_a_parked_bind_eviction_cleanup_completes() {
+    let (environment, first) = IsolatedHome::new();
+    let mut projects = vec![first];
+    projects.extend((1..=9).map(|ordinal| environment.scratch().join(format!("p{ordinal}"))));
+    let projects = projects
+        .into_iter()
+        .map(|project| {
+            initialize_repository(&project);
+            project.canonicalize().expect("canonical fixture project")
+        })
+        .collect::<Vec<_>>();
+    let (cached, later) = projects.split_at(8);
+    let (incoming, retiring_open) = (later[0].clone(), later[1].clone());
+    let log_path = environment.scratch().join("capacity-behind-eviction.log");
+    let bind_hold = environment.scratch().join("hold-before-route-bind");
+    let bind_entered = PathBuf::from(format!("{}.entered", bind_hold.display()));
+    let retire_hold = environment
+        .scratch()
+        .join("hold-before-evicted-owner-retire");
+    let retire_entered = PathBuf::from(format!("{}.entered", retire_hold.display()));
+    let socket = daemon_socket_path(environment.home());
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
+        command
+            .env("TRACEDECAY_TEST_HOLD_BEFORE_ROUTE_BIND", &bind_hold)
+            .env(
+                "TRACEDECAY_TEST_HOLD_BEFORE_EVICTED_OWNER_RETIRE",
+                &retire_hold,
+            );
+    });
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
+    let handshake = |project: &Path| {
+        tracedecay::daemon::handshake_for_current_client(
+            environment.profile(),
+            Some(project.to_path_buf()),
+            None,
+            false,
+            false,
+        )
+        .expect("project handshake")
+    };
+    let mut sessions = Vec::new();
+    for project in cached {
+        initialize_tracedecay(environment.home(), project);
+        let project_handshake = handshake(project);
+        wait_for_readiness(&socket, &project_handshake, "ready", RECEIPT_TIMEOUT).await;
+        sessions.push(LiveMcpSession::open(environment.home(), &project_handshake).await);
+    }
+
+    // The ninth open binds with the first project idle and evicts it; that
+    // eviction's cleanup parks before it waits on the capacity admission.
+    // Every open passes the hold points, so clear their markers first.
+    let _ = fs::remove_file(&bind_entered);
+    fs::write(&bind_hold, b"hold").expect("hold file");
+    let home = environment.home().to_path_buf();
+    let incoming_open = incoming.clone();
+    let init = std::thread::spawn(move || initialize_tracedecay(&home, &incoming_open));
+    poll_until(
+        Instant::now() + RECEIPT_TIMEOUT,
+        Duration::from_millis(20),
+        || bind_entered.is_file().then_some(()),
+        || "the ninth open never reached its route bind".to_owned(),
+    );
+    sessions.remove(0).close().await;
+    let _ = fs::remove_file(&retire_entered);
+    fs::write(&retire_hold, b"hold").expect("hold file");
+    fs::remove_file(&bind_hold).expect("release the held bind");
+    poll_until(
+        Instant::now() + RECEIPT_TIMEOUT,
+        Duration::from_millis(20),
+        || retire_entered.is_file().then_some(()),
+        || "the eviction cleanup never parked".to_owned(),
+    );
+    init.join().expect("the ninth project initializes");
+
+    // Reopen the evicted project and idle it: the next open's capacity
+    // retirement picks it while its owner's eviction cleanup is still parked.
+    let evicted = cached[0].clone();
+    let evicted_handshake = handshake(&evicted);
+    let reopened = LiveMcpSession::open(environment.home(), &evicted_handshake).await;
+    wait_for_readiness(&socket, &evicted_handshake, "ready", RECEIPT_TIMEOUT).await;
+    reopened.close().await;
+    let home = environment.home().to_path_buf();
+    let retiring_project = retiring_open.clone();
+    let retiring_init = std::thread::spawn(move || initialize_tracedecay(&home, &retiring_project));
+    // The retirement has no observable wait point; give it time to reach its
+    // wait on the parked cleanup before anything else queues for admission.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // While the retirement waits, the evicted project opens again. Its route
+    // is served once more by the time the parked cleanup and the retirement's
+    // store release run.
+    let served_again = LiveMcpSession::open(environment.home(), &evicted_handshake).await;
+    wait_for_readiness(&socket, &evicted_handshake, "ready", RECEIPT_TIMEOUT).await;
+    // An idle server for the retiring open's own bind to evict.
+    sessions.remove(0).close().await;
+    fs::remove_file(&retire_hold).expect("release the parked cleanup");
+
+    let retiring_deadline = Instant::now() + RECEIPT_TIMEOUT;
+    while !retiring_init.is_finished() {
+        assert!(
+            Instant::now() < retiring_deadline,
+            "the open behind the capacity retirement never completed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    retiring_init
+        .join()
+        .expect("the open behind the capacity retirement initializes");
+
+    // The project served again keeps answering: the retirement left its
+    // stores alone.
+    wait_for_readiness(&socket, &evicted_handshake, "ready", RECEIPT_TIMEOUT).await;
+
+    served_again.close().await;
     for session in sessions {
         session.close().await;
     }
