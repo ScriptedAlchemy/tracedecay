@@ -625,25 +625,55 @@ async fn rollup_rebuild_is_idempotent_version_monotone_and_late_correctable() {
 }
 
 #[asupersync::test]
-async fn retention_expires_old_daily_fragments() {
+async fn observability_retention_expires_rollups_past_the_horizon_only() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-query-cap-retention").await;
     harness
         .registered
         .rebuild_observability_rollup(rebuild(
-            "rebuild:many",
+            "rebuild:expired",
             10,
             "execution-topology-projector.v1",
             vec![cell("bounded", "[]", 5)],
         ))
         .await
-        .expect("bounded rollup");
+        .expect("expired-day rollup");
+    let mut retained = rebuild(
+        "rebuild:retained",
+        10,
+        "execution-topology-projector.v1",
+        vec![cell("bounded", "[]", 5)],
+    );
+    retained.day_start_seconds = 20 * DAY;
+    harness
+        .registered
+        .rebuild_observability_rollup(retained)
+        .await
+        .expect("retained-day rollup");
+    harness
+        .registered
+        .append_observability_event(&topology_event("scope:rollup", "topology:old", 5 * DAY + 1))
+        .await
+        .expect("append expired-day topology source");
 
+    // The rollup horizon is 395 days, so day 11 is the first retained day.
     let receipt = harness
         .registered
-        .prune_observability_rollups(406 * DAY)
+        .prune_observability_events(406 * DAY)
         .await
-        .expect("rollup retention");
-    assert_eq!(receipt.expired_generations, 1);
+        .expect("observability retention");
+    assert_eq!(receipt.expired_rollups.expired_generations, 1);
+    assert_eq!(receipt.expired_rollups.expired_journal_entries, 1);
+    assert_eq!(receipt.expired_rollups.expired_dirty_days, 1);
+    assert_eq!(
+        harness
+            .registered
+            .claim_observability_rollup_dirty_day("scope:rollup", "producer:after", 30)
+            .await
+            .expect("claim after retention"),
+        None,
+        "an expired dirty day must not be rebuilt"
+    );
+
     let empty = harness
         .registered
         .query_observability_rollup_fragments(&ObservabilityRollupFragmentQueryV1 {
@@ -655,4 +685,22 @@ async fn retention_expires_old_daily_fragments() {
         .expect("post-retention query");
     assert!(empty.fragments.is_empty());
     assert_eq!(empty.coverage, CoverageStateV1::Partial);
+    let kept = harness
+        .registered
+        .query_observability_rollup_fragments(&ObservabilityRollupFragmentQueryV1 {
+            authorized_scope_ref: "scope:rollup".to_owned(),
+            since_day_start_seconds: 20 * DAY,
+            until_day_start_seconds: 21 * DAY,
+        })
+        .await
+        .expect("retained-day query");
+    assert_eq!(kept.fragments.len(), 1);
+    assert_eq!(kept.fragments[0].day_start_seconds, 20 * DAY);
+
+    let repeat = harness
+        .registered
+        .prune_observability_events(406 * DAY)
+        .await
+        .expect("repeat observability retention");
+    assert_eq!(repeat.expired_rollups.expired_generations, 0);
 }
