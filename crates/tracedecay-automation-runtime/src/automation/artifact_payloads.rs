@@ -290,12 +290,17 @@ pub(super) fn optimizer_diagnosis_payload(
 ) -> Value {
     let (trace_ref, feedback_ref, generated_evals_ref, validation_gate_ref) = refs;
     json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "run_id": ctx.run_id,
         "task": ctx.task_key,
         "loop_stage": "optimizer_diagnosis",
         "status": "generated",
         "summary": optimizer_diagnosis_summary(ctx.record),
+        "diagnosis_basis": {
+            "type": "validation_accept_reject_policy",
+            "measured_improvement": "not_measured",
+            "reason": "derived from validation accept/reject counts and record integrity; no task outcome was measured",
+        },
         "signals": {
             "validation_decision": evals.validation_decision,
             "accepted_count": ctx.record.accepted_count,
@@ -366,7 +371,7 @@ pub(super) fn codex_handoff_payload(
         })
     };
     json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "run_id": ctx.run_id,
         "task": ctx.task_key,
         "loop_stage": "codex_handoff",
@@ -398,6 +403,7 @@ pub(super) fn codex_handoff_payload(
             "eval_count": evals.count,
             "record_integrity_status": evals.record_integrity_status,
             "independent_evaluation_status": INDEPENDENT_EVALUATION_STATUS,
+            "measured_improvement": "not_measured",
             "blockers": gate.blockers.clone(),
             "automatic_application": automatic_application,
         },
@@ -776,6 +782,64 @@ mod tests {
                 "facts": "recall_proxy",
                 "task_improvement": "not_measured",
             }))
+        );
+    }
+
+    #[test]
+    fn optimizer_diagnosis_is_labeled_as_accept_reject_policy_not_measured_improvement() {
+        let (request, response, mut record) = payload_fixture();
+        record.reviewed_count = 1;
+        record.accepted_count = 1;
+        record.applied_ops = Some(json!([{"skill_id": "accepted-skill"}]));
+        record.validation_report = Some(json!({"status": "applied"}));
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = skill_writer_ctx(&request, &response, &record, &outcomes);
+        let refs = ArtifactRefs {
+            trace: json!({"kind": "traces"}),
+            feedback: json!({"kind": "feedback"}),
+            generated_evals: json!({"kind": "generated_evals"}),
+            validation_gate: json!({"kind": "validation_gate"}),
+            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
+        };
+        let evals = generated_eval_payloads(&ctx);
+        let gate = improvement_gate_payload(&ctx, &evals);
+
+        let diagnosis = optimizer_diagnosis_payload(
+            &ctx,
+            (
+                &refs.trace,
+                &refs.feedback,
+                &refs.generated_evals,
+                &refs.validation_gate,
+            ),
+            &evals,
+            &gate,
+        );
+        let handoff = codex_handoff_payload(&ctx, &refs, &evals, &gate);
+
+        assert_eq!(diagnosis["schema_version"], 3);
+        assert_eq!(
+            diagnosis.pointer("/diagnosis_basis/type"),
+            Some(&json!("validation_accept_reject_policy"))
+        );
+        assert_eq!(
+            diagnosis.pointer("/diagnosis_basis/measured_improvement"),
+            Some(&json!("not_measured"))
+        );
+        assert!(
+            !diagnosis["recommendations"][0]["rationale"]
+                .as_str()
+                .unwrap()
+                .contains("regression")
+        );
+        assert_eq!(handoff["schema_version"], 3);
+        assert_eq!(
+            handoff.pointer("/readiness/measured_improvement"),
+            Some(&json!("not_measured"))
+        );
+        assert_eq!(
+            handoff.pointer("/readiness/validation_gate_decision"),
+            Some(&json!("ready_for_handoff"))
         );
     }
 
