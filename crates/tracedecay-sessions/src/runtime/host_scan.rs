@@ -1,6 +1,8 @@
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::observation::ObservationCancellation;
+use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
 
 pub(super) const HOST_SCAN_WINDOW: Duration = Duration::from_secs(2);
 
@@ -96,6 +98,19 @@ impl HostScanBudget {
         true
     }
 
+    /// Charges a discovered path's encoded length, at least one byte, against
+    /// the input bound.
+    pub(super) fn try_charge_path(
+        &mut self,
+        path: &Path,
+        provider: &'static str,
+    ) -> TranscriptIngestResult<bool> {
+        let bytes = u64::try_from(path.as_os_str().as_encoded_bytes().len())
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })?
+            .max(1);
+        Ok(self.try_charge_input(bytes))
+    }
+
     pub(super) const fn deadline(&self) -> Instant {
         self.deadline
     }
@@ -119,4 +134,16 @@ impl HostScanBudget {
     pub(super) const fn evidence(&self) -> HostScanEvidence {
         self.evidence
     }
+}
+
+/// Per-source failures a snapshot host isolates to that source instead of
+/// failing the whole sweep.
+pub(super) fn isolatable_source_error(error: &TranscriptIngestError) -> bool {
+    matches!(
+        error,
+        TranscriptIngestError::ScanIo { .. }
+            | TranscriptIngestError::ScanGenerationChanged { .. }
+            | TranscriptIngestError::NonDurableRecord { .. }
+            | TranscriptIngestError::InvalidSourceIdentity { .. }
+    )
 }
