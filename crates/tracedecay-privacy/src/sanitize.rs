@@ -528,10 +528,10 @@ fn protect_string_field(
     Ok(changed)
 }
 
-/// The filesystem paths a canonical Session fact records. A Codex rollout
-/// path joins `codex/sessions/<date>/rollout-<time>-<uuid>` into one token the
-/// entropy heuristic reads as random, and the marker it left in its place was
-/// stored as the session's transcript path.
+/// The filesystem paths a canonical Session fact records. Replacing one with
+/// the entropy marker leaves a session row a transcript path that names no
+/// file: a Codex rollout path joins `codex/sessions/<date>/rollout-<uuid>`
+/// into a single token that reads as random.
 fn session_locator_paths(payload: &Value) -> Vec<Vec<JsonPathSegment>> {
     let Some((facts_field, Value::Array(facts))) = payload.as_object().and_then(|object| {
         object

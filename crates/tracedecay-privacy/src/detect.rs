@@ -512,10 +512,10 @@ pub(super) fn is_semantically_sensitive_key(key: &NormalizedSensitiveKey) -> boo
         .any(|compound| separated.ends_with(compound))
 }
 
-#[tracing::instrument(name = "runtime_core.privacy.redact_values", level = "trace", skip_all)]
 /// `locators` name string values that hold filesystem paths: credential
 /// patterns still apply to them, the entropy heuristic does not, because a
 /// path's directory and file names join into one token that reads as random.
+#[tracing::instrument(name = "runtime_core.privacy.redact_values", level = "trace", skip_all)]
 pub(crate) fn redact_sensitive_values(
     mut payload: Value,
     sensitive_keys: &BTreeSet<String>,

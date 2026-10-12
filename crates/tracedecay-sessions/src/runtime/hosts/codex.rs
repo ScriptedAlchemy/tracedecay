@@ -211,7 +211,7 @@ struct SettledFileWitness {
 }
 
 impl SettledFileWitness {
-    /// `None` once the file is gone, see [`Self::of`].
+    /// `None` once the file is gone, or for the reasons [`Self::of`] gives.
     fn settled(path: &Path) -> TranscriptIngestResult<Option<Self>> {
         match stat_if_present(path, "stat transcript for convergence")? {
             Some(metadata) => Self::of(path, &metadata),
