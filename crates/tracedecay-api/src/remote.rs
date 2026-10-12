@@ -26,9 +26,10 @@ use tracedecay_contracts::remote::credential_admission::{
     RemoteAuthenticatedSessionV1, RemoteCredentialAdmissionPortV1, RemoteSessionBoundProtocolBodyV1,
 };
 use tracedecay_contracts::remote::protocol::{
-    EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1, RemoteProtocolExecutionControlV1,
-    RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
-    RemoteProtocolResponseV1, RemoteProtocolServiceV1, remote_protocol_problem,
+    CurrentAuthorityRequestV1, EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1,
+    RemoteProtocolExecutionControlV1, RemoteProtocolFailureV1, RemoteProtocolPortV1,
+    RemoteProtocolRequestV1, RemoteProtocolResponseV1, RemoteProtocolServiceV1,
+    remote_protocol_problem,
 };
 use tracedecay_contracts::remote::protocol_owner::RemoteOperationProtocolPortsV1;
 use tracedecay_contracts::remote::query::RemoteQueryRequestV1;
@@ -285,6 +286,7 @@ pub fn remote_protocol_router(
         "/frames/transfer" => RemoteFrameTransferRequestV1, operations.frame_transfer;
         "/query" => RemoteQueryRequestV1, operations.query;
         "/failover" => PromotionConfirmationV1, operations.promotion;
+        "/authority" => CurrentAuthorityRequestV1, operations.authority;
     }
     .layer(DefaultBodyLimit::max(MAX_REMOTE_HTTP_BODY_BYTES))
 }

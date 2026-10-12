@@ -17,12 +17,17 @@ use tracedecay_contracts::remote::capture_protocol::{
     RemoteOfflineCaptureProtocolServiceV1,
 };
 use tracedecay_contracts::remote::credential_admission::{
-    RemoteCredentialAdmissionServiceV1, RemoteCredentialClassV1, RemoteSessionBoundProtocolBodyV1,
+    RemoteCredentialAdmissionServiceV1, RemoteCredentialAuthorityRecordV1, RemoteCredentialClassV1,
+    RemoteCredentialLookupPortV1, RemoteCredentialUseV1, RemoteSessionBoundProtocolBodyV1,
+};
+use tracedecay_contracts::remote::discovery::{
+    RemoteAuthorityDiscoveryV1, remote_authority_result_contract_v1,
 };
 use tracedecay_contracts::remote::protocol::{
-    EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1, RemoteProtocolExecutionControlV1,
-    RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
-    remote_capture_result_contract_v1, remote_enrollment_result_contract_v1,
+    CurrentAuthorityRequestV1, EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1,
+    RemoteProtocolExecutionControlV1, RemoteProtocolFailureV1, RemoteProtocolPortV1,
+    RemoteProtocolRequestV1, RemoteProtocolResponseV1, remote_capture_result_contract_v1,
+    remote_enrollment_result_contract_v1, remote_protocol_problem,
     remote_replay_result_contract_v1,
 };
 use tracedecay_contracts::remote::protocol_owner::RemoteOperationProtocolPortsV1;
@@ -35,9 +40,13 @@ use tracedecay_contracts::remote::replay::{
     RemoteReplayServiceV1,
 };
 use tracedecay_contracts::{
-    ApplicationContractError, CancellationSignal, RequestId, ResultContractRef,
+    ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, CancellationSignal,
+    RequestId, ResultContractRef,
 };
-use tracedecay_domain::{EnrollmentCredentialRecordV1, UtcMicros};
+use tracedecay_domain::{
+    CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1,
+    RemoteAuthorityUnavailableReasonV1, UtcMicros,
+};
 use tracedecay_tool_catalog::SchemaId;
 
 use crate::DaemonInvocationService;
@@ -72,7 +81,7 @@ impl RemoteEnrollmentProtocolPortV1 for DaemonRemoteEnrollmentProtocolPortV1 {
         let observed_at = request.sent_at;
         let registered = match self
             .credentials
-            .storage_for_presented(RemoteCredentialClassV1::EnrollmentGrant, &grant_credential)
+            .storage_for_presented(RemoteCredentialUseV1::InitialEnrollment, &grant_credential)
         {
             Ok(registered) => registered,
             Err(_) => {
@@ -124,7 +133,7 @@ impl RemoteProtocolPortV1<RemoteCaptureRequestV1> for DaemonRemoteCaptureProtoco
         let observed_at = request.sent_at;
         let registered = match self
             .credentials
-            .storage_for_presented(RemoteCredentialClassV1::Enrollment, &credential)
+            .storage_for_presented(RemoteCredentialUseV1::CaptureOffline, &credential)
         {
             Ok(registered) => registered,
             Err(_) => {
@@ -155,6 +164,77 @@ impl RemoteProtocolPortV1<RemoteCaptureRequestV1> for DaemonRemoteCaptureProtoco
     }
 }
 
+struct DaemonRemoteAuthorityDiscoveryPortV1 {
+    credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
+}
+
+impl RemoteProtocolPortV1<CurrentAuthorityRequestV1> for DaemonRemoteAuthorityDiscoveryPortV1 {
+    type Output = RemoteAuthorityDiscoveryV1;
+
+    #[tracing::instrument(name = "daemon.remote.authority_discovery", level = "trace", skip_all)]
+    fn execute(
+        &self,
+        request: RemoteProtocolRequestV1<CurrentAuthorityRequestV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
+        let request_id = request.request_id.clone();
+        let observed_at = request.sent_at;
+        let contract = remote_authority_result_contract_v1()?;
+        let unavailable = |request_id| {
+            remote_authority_unavailable_response(request_id, observed_at, contract.clone())
+        };
+        let Ok(registered) = self
+            .credentials
+            .storage_for_presented(RemoteCredentialUseV1::DiscoverAuthority, &credential)
+        else {
+            return unavailable(request_id);
+        };
+        let Ok(fingerprint) = credential.credential_fingerprint() else {
+            return unavailable(request_id);
+        };
+        let Ok(RemoteCredentialAuthorityRecordV1::Enrollment { receipt, .. }) = registered
+            .storage
+            .credential_by_fingerprint(RemoteCredentialClassV1::Enrollment, &fingerprint)
+        else {
+            return unavailable(request_id);
+        };
+        let (authority, discovery) = match registered
+            .storage
+            .authority_discovery(*receipt, tracedecay_contracts::clock::now_micros())
+        {
+            Ok(answer) => answer,
+            Err(_) => return unavailable(request_id),
+        };
+        let result = match discovery {
+            Some(discovery) => Ok(ApplicationEnvelope {
+                contract: contract.clone(),
+                request_id: request_id.clone(),
+                scope: discovery.policy.scope.clone(),
+                outcome: ApplicationOutcome::Result(discovery),
+                touched_files: Vec::new(),
+                code_graph: None,
+                analytics: None,
+                cost: None,
+            }),
+            None => {
+                let failure = match &authority {
+                    CurrentRemoteAuthorityStateV1::Unavailable {
+                        reason: RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished,
+                        ..
+                    } => RemoteProtocolFailureV1::WriterAuthorityUnpublished,
+                    _ => RemoteProtocolFailureV1::AuthorityUnavailable,
+                };
+                Err(remote_protocol_problem(
+                    contract.clone(),
+                    request_id.clone(),
+                    failure,
+                )?)
+            }
+        };
+        RemoteProtocolResponseV1::new(request_id, authority, result)
+    }
+}
+
 struct DaemonRemoteReplayProtocolPortV1 {
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
     transaction: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
@@ -173,7 +253,7 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for DaemonRemoteReplayProtocolP
         let observed_at = request.sent_at;
         let registered = match self
             .credentials
-            .storage_for_presented(RemoteCredentialClassV1::Enrollment, &credential)
+            .storage_for_presented(RemoteCredentialUseV1::Replay, &credential)
         {
             Ok(registered) => registered,
             Err(_) => {
@@ -300,7 +380,7 @@ macro_rules! impl_daemon_remote_recovery_protocol {
                 let contract = self.$contract.clone();
                 let registered = match self
                     .credentials
-                    .storage_for_presented(RemoteCredentialClassV1::Enrollment, &credential)
+                    .storage_for_presented(RemoteCredentialUseV1::Promote, &credential)
                 {
                     Ok(registered) => registered,
                     Err(_) => {
@@ -361,6 +441,9 @@ pub fn build_daemon_remote_protocol_router(
             invocation,
         )),
         promotion: recovery,
+        authority: Arc::new(DaemonRemoteAuthorityDiscoveryPortV1 {
+            credentials: Arc::clone(&credentials),
+        }),
     };
     let admission = Arc::new(RemoteCredentialAdmissionServiceV1::new(
         DaemonRemoteCredentialLookupV1::new(credentials),

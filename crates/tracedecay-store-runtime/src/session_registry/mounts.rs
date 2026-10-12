@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
-use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
+use tracedecay_domain::{BrainId, BrainNodeId, EnrollmentGrantV1};
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
 use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
 use tracedecay_runtime_core::storage::{
@@ -416,7 +416,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         for database in databases {
             let node_id = RemoteSqliteStorageV1::discover_registered_node(
                 &database,
-                self.identity.brain_id(),
                 self.identity.profile_id(),
             )
             .map_err(|error| {
@@ -903,8 +902,33 @@ impl DaemonSessionRuntimeRegistryV1 {
         node_id: BrainNodeId,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
     ) -> Result<RemoteSqliteStorageV1> {
-        self.mount_remote_node_storage(node_id, keyring, false)
+        self.mount_remote_node_storage(node_id, keyring, None).await
+    }
+
+    /// Mounts the store through which this profile is node `node_id` of
+    /// another profile's Brain. Only an explicit operator join reaches this,
+    /// after the authority authenticated the node's credential; provisioning
+    /// keeps refusing every foreign grant.
+    pub async fn join_remote_node(
+        &self,
+        member_brain: &BrainId,
+        node_id: BrainNodeId,
+    ) -> std::result::Result<RemoteSqliteStorageV1, RemoteNodeOperatorErrorV1> {
+        if member_brain == self.identity.brain_id() {
+            return Err(RemoteNodeOperatorErrorV1::BrainIdentityConflict);
+        }
+        let keyring: Arc<dyn RemoteSpoolKeyringV1> = Arc::new(UnavailableRemoteSpoolKeyringV1);
+        let storage = self
+            .mount_remote_node_storage(node_id, keyring, Some(member_brain))
             .await
+            .map_err(|error| {
+                tracing::warn!(%error, "remote node store mount failed during join");
+                RemoteNodeOperatorErrorV1::Unavailable
+            })?;
+        if storage.member_brain() != member_brain {
+            return Err(RemoteNodeOperatorErrorV1::BrainIdentityConflict);
+        }
+        Ok(storage)
     }
 
     pub async fn provision_remote_node(
@@ -923,12 +947,19 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
         let keyring: Arc<dyn RemoteSpoolKeyringV1> = Arc::new(UnavailableRemoteSpoolKeyringV1);
         let storage = self
-            .mount_remote_node_storage(grant.node_id.clone(), keyring, true)
+            .mount_remote_node_storage(
+                grant.node_id.clone(),
+                keyring,
+                Some(self.identity.brain_id()),
+            )
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "remote node store mount failed during provisioning");
                 RemoteNodeOperatorErrorV1::Unavailable
             })?;
+        if storage.is_joined() {
+            return Err(RemoteNodeOperatorErrorV1::BrainIdentityConflict);
+        }
         storage
             .store_enrollment_grant(&grant, &admission)
             .map_err(|error| match error {
@@ -958,7 +989,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
         node_id: BrainNodeId,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
-        provision_if_new: bool,
+        provision_member_brain: Option<&BrainId>,
     ) -> Result<RemoteSqliteStorageV1> {
         let (database, newly_mounted, existed) = match self.admit_remote_node_owner(&node_id)? {
             super::RemoteNodeOwnerAdmissionV1::Existing(database) => (database, false, true),
@@ -999,10 +1030,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                 (database, true, existed)
             }
         };
-        let storage = if provision_if_new && newly_mounted && !existed {
-            database.provision_remote_storage(keyring)
-        } else {
-            database.remote_storage(keyring)
+        let storage = match provision_member_brain {
+            Some(member_brain) if newly_mounted && !existed => {
+                database.provision_remote_storage(keyring, member_brain)
+            }
+            _ => database.remote_storage(keyring),
         }
         .map_err(|error| {
             session_registry_error("attach Remote Brain node store", error.to_string())
