@@ -83,8 +83,6 @@ SYMBOL = re.compile(r"(?<![\w:])[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]
 MIN_SYMBOL = 6
 MIN_QUOTE = 24
 PAGE_SIZES = (25, 10, 4, 1)
-T = TypeVar("T")
-R = TypeVar("R")
 
 
 # ---------------------------------------------------------------- matching --
@@ -438,24 +436,6 @@ def load_messages(client: TraceDecay, provider: str, session: str, scope: str) -
     raise last
 
 
-def in_order(load: Callable[[T], R], keys: Iterable[T], jobs: int) -> Iterator[tuple[T, R]]:
-    """(key, load(key)) in key order, at most `jobs` loads running or awaiting the consumer.
-
-    Executor.map would submit every key up front and hold each finished session
-    until a slow earlier one is consumed, so memory would grow with the run.
-    """
-    window: deque[tuple[T, Future[R]]] = deque()
-    with ThreadPoolExecutor(jobs) as pool:
-        for key in keys:
-            window.append((key, pool.submit(load, key)))
-            if len(window) >= jobs:
-                head, future = window.popleft()
-                yield head, future.result()
-        while window:
-            head, future = window.popleft()
-            yield head, future.result()
-
-
 def message_order(indexed: tuple[int, dict]) -> tuple:
     index, message = indexed
     metadata = json.loads(message.get("metadata_json") or "{}")
@@ -675,6 +655,28 @@ def sum_rows(rows: list[dict], sessions: int) -> dict:
         for key in optional:
             optional[key], seen[key] = add_optional(optional[key], row.get(key), seen[key])
     return dict(total, **optional, tool="**all**", sessions=sessions)
+
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+def in_order(load: Callable[[T], R], keys: Iterable[T], jobs: int) -> Iterator[tuple[T, R]]:
+    """(key, load(key)) in key order, at most `jobs` loads running or awaiting the consumer.
+
+    Executor.map would submit every key up front and hold each finished session
+    until a slow earlier one is consumed, so memory would grow with the run.
+    """
+    window: deque[tuple[T, Future[R]]] = deque()
+    with ThreadPoolExecutor(jobs) as pool:
+        for key in keys:
+            window.append((key, pool.submit(load, key)))
+            if len(window) >= jobs:
+                head, future = window.popleft()
+                yield head, future.result()
+        while window:
+            head, future = window.popleft()
+            yield head, future.result()
 
 
 def main() -> int:
