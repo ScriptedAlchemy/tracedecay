@@ -1,9 +1,16 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use tracedecay_contracts::ProfileIdentityReadPort;
 use tracedecay_domain::{BrainId, UserProfileId};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
+#[cfg(unix)]
+use tracedecay_private_fs::create_private_directory;
+use tracedecay_private_fs::create_private_file;
+use tracedecay_private_fs::framed_log::{
+    DirectorySyncPolicy, rename_noreplace, sync_parent_directory,
+};
 use tracedecay_runtime_core::storage::{
     PROFILE_IDENTITY_FILENAME, PROFILE_IDENTITY_RECORD_NAME, PROFILE_IDENTITY_SCHEMA_VERSION,
     ProfileIdentityRecordV1, read_existing_profile_identity_record,
@@ -103,10 +110,23 @@ pub(crate) fn load_or_create_pinned(
         std::fs::create_dir_all(parent)
             .map_err(|error| profile_identity_io("create", parent, &error))?;
     }
-    match tracedecay_private_fs::create_private_directory(&profile_root) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(profile_identity_io("create", &profile_root, &error)),
+    #[cfg(windows)]
+    {
+        // The profile root keeps the ACL it was enrolled with: the daemon
+        // authority state directory inside it is private, and the identity
+        // file carries its own private ACL through `create_private_file`.
+        // `DaemonAuthority::acquire` creates this root through an ordinary
+        // path before the first identity is published.
+        std::fs::create_dir_all(&profile_root)
+            .map_err(|error| profile_identity_io("create", &profile_root, &error))?;
+    }
+    #[cfg(unix)]
+    {
+        match create_private_directory(&profile_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(profile_identity_io("create", &profile_root, &error)),
+        }
     }
     validate_private_profile_root(&profile_root)?;
 
@@ -148,12 +168,7 @@ pub(crate) fn load_or_create_pinned(
 /// `false`, leaving the existing record untouched, when another caller
 /// published first, so concurrent first creations converge on one identity.
 fn publish_first_record(temporary: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
-    use std::io::Write;
-    use tracedecay_private_fs::framed_log::{
-        DirectorySyncPolicy, rename_noreplace, sync_parent_directory,
-    };
-
-    let mut file = tracedecay_private_fs::create_private_file(temporary)?;
+    let mut file = create_private_file(temporary)?;
     let published = (|| {
         file.write_all(bytes)?;
         file.sync_all()?;
@@ -326,6 +341,41 @@ mod tests {
                 std::fs::read_dir(&profile_root).unwrap().count(),
                 1,
                 "round {round} left a temporary file"
+            );
+        }
+    }
+
+    #[test]
+    fn load_or_create_on_an_existing_ordinary_root_publishes_a_private_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let profile_root = temporary.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+
+        let authority = load_or_create(&profile_root).unwrap();
+
+        assert_eq!(load_existing(&profile_root).unwrap(), authority);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&profile_root)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        #[cfg(windows)]
+        {
+            let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
+            tracedecay_runtime_core::windows_security::validate_private_file(&path).unwrap();
+            assert!(
+                tracedecay_runtime_core::windows_security::validate_private_directory(
+                    &profile_root
+                )
+                .is_err()
             );
         }
     }
