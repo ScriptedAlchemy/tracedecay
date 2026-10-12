@@ -99,7 +99,7 @@ export function accountingDimensionTitle(dimension: WorkAccountingDimension): st
  * that is down, and a reviewer who greps the kind lands on the projector
  * rather than on a router.
  */
-function accountingEventKind(dimension: WorkAccountingDimension): string {
+export function accountingEventKind(dimension: WorkAccountingDimension): string {
   switch (dimension) {
     case 'concurrency_and_fanout':
       return 'work.execution_topology.sampled.v1';
@@ -260,10 +260,13 @@ export interface WorkAccountingCard {
   readonly matrices: readonly WorkAccountingMatrix[] | null;
   readonly contradictions: readonly WorkAccountingContradiction[];
   readonly provenance: WorkAccountingProvenance;
+  readonly caveat?: string;
 }
 
 export interface WorkTopologyAccountingReading {
   readonly cards: readonly WorkAccountingCard[];
+  readonly stated: readonly WorkAccountingCard[];
+  readonly uncovered: readonly WorkAccountingCard[];
   /** How many of the twelve rendered a headline reading. Printed rather than
    * inferred, because a page of twelve absences and a page of twelve readings
    * are the same shape. */
@@ -271,6 +274,9 @@ export interface WorkTopologyAccountingReading {
 }
 
 // --- Absences ----------------------------------------------------------------
+
+export const METRICS_GAP_REASON =
+  'this ledger does not decode a descriptor for it, so it is a measurement not taken here rather than one measured as zero';
 
 /**
  * The absence a dimension wears when this ledger takes no measurement for it.
@@ -292,8 +298,24 @@ export function metricsGap(
   return {
     available: false,
     state: 'unsupported',
-    detail: `${measure} belongs to the ${kind} event family Plan 26 projects through ExecutionTopologyMetricsV1; this ledger does not decode a descriptor for it, so it is a measurement not taken here rather than one measured as zero.${tail}`,
+    detail: `${measure} belongs to the ${kind} event family Plan 26 projects through ExecutionTopologyMetricsV1; ${METRICS_GAP_REASON}.${tail}`,
   };
+}
+
+export function isUndecoded<T>(
+  channel: WorkChannel<T>,
+): channel is Extract<WorkChannel<T>, { available: false }> {
+  return !channel.available && channel.state === 'unsupported';
+}
+
+export function accountingCardCoverage(card: WorkAccountingCard): 'stated' | 'uncovered' {
+  const slots: WorkChannel<unknown>[] = [
+    card.reading,
+    ...card.rows.map((row) => row.channel),
+    ...(card.matrices ?? []).flatMap((matrix) => matrix.cells.map((cell) => cell.channel)),
+    ...Object.values(card.provenance),
+  ];
+  return card.contradictions.length === 0 && slots.every(isUndecoded) ? 'uncovered' : 'stated';
 }
 
 /** Every facet unavailable, for a dimension nothing in this build can source.
@@ -331,5 +353,6 @@ export function unavailableCard(
     matrices: null,
     contradictions: [],
     provenance: absentProvenance(dimension),
+    caveat: extra,
   };
 }
