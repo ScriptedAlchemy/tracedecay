@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -461,6 +462,23 @@ class HostResultShapes(unittest.TestCase):
         for name in (SEARCH, "mcp__tracedecay__tracedecay_search", "tracedecay_search"):
             self.assertEqual(measure.tool_name(name), "tracedecay_search")
         self.assertIsNone(measure.tool_name("Grep"))
+
+
+class ClientResultShapes(unittest.TestCase):
+    def call(self, structured: dict) -> dict:
+        served = subprocess.CompletedProcess([], 0, json.dumps({"structuredContent": structured}), "")
+        with patch.object(measure.subprocess, "run", return_value=served):
+            return measure.TraceDecay("tracedecay", None).call("tracedecay_retrieve", {"handle": "rh_0"})
+
+    def test_enveloped_and_bare_payloads_both_return_the_payload(self) -> None:
+        page = {"content": "- row\n", "next_offset": None}
+        self.assertEqual(self.call({"outcome": {"outcome": "evidence", "value": {"payload": page}}}), page)
+        self.assertEqual(self.call(page), page)
+
+    def test_problem_is_raised_not_returned(self) -> None:
+        with self.assertRaises(measure.ToolProblem) as raised:
+            self.call({"problem": {"code": "application.retained.budget-refused", "message": "too large"}})
+        self.assertEqual(raised.exception.code, "application.retained.budget-refused")
 
 
 class CommandCoverage(unittest.TestCase):

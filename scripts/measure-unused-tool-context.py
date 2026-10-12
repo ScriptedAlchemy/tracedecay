@@ -377,7 +377,11 @@ class TraceDecay:
         if "problem" in structured:
             problem = structured["problem"]
             raise ToolProblem(problem.get("code", "unknown"), problem.get("message", ""))
-        return structured["outcome"]["value"]["payload"]
+        # Application tools wrap their payload in an outcome envelope;
+        # tracedecay_retrieve serves its page as the structuredContent itself.
+        if "outcome" in structured:
+            return structured["outcome"]["value"]["payload"]
+        return structured
 
 
 def discover(client: TraceDecay, refs: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
