@@ -17,6 +17,8 @@ use automation::{
 };
 mod feedback_component;
 mod feedback_rollback;
+#[cfg(test)]
+mod mcp_identity_tests;
 pub(crate) use feedback_rollback::handle_feedback_rollback_command;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
