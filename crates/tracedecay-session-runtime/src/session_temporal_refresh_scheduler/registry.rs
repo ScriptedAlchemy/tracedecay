@@ -233,7 +233,6 @@ pub struct SessionTemporalRefreshSchedulerRegistry {
     projector: Arc<dyn SessionTemporalRefreshProjector>,
     policy: SessionTemporalRefreshPolicy,
     shutting_down: AtomicBool,
-    #[cfg_attr(not(unix), allow(dead_code))] // held by the unix-only daemon shutdown path
     shutdown_guard: tokio::sync::Mutex<()>,
     project_lifecycle: tokio::sync::Mutex<()>,
     retired_project_owners: std::sync::Mutex<HashSet<StoreOwnerKey>>,
@@ -858,7 +857,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
         }
     }
 
-    #[cfg_attr(not(unix), allow(dead_code))] // invoked by the unix-only daemon shutdown path
     pub async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
         // Cancellation must not wait on the locks below: a readmission or
