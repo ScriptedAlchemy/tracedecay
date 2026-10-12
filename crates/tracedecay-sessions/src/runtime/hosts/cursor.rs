@@ -49,7 +49,7 @@ pub use parent_dispatch_index::{
 pub(in crate::runtime) use projection::CursorSweepIngestOutcome;
 pub use projection::{
     CursorTranscriptIngestStats, try_ingest_cursor_project_sweep_capped,
-    try_ingest_cursor_project_sweep_capped_with_admission, try_ingest_cursor_user_sweep_capped,
+    try_ingest_cursor_project_sweep_capped_with_admission,
     try_ingest_cursor_user_sweep_capped_with_admission,
 };
 pub(super) use projection::{cursor_ingest_or_default, drain_cursor_observation_projections};
@@ -391,7 +391,10 @@ pub async fn try_ingest_cursor_transcript_event(
     admission: &dyn HostAdmission,
     project_id: ProjectId,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_transcript_event_capped(event_json, admission, project_id, None).await
+    try_ingest_cursor_transcript_event_capped_with_admission(
+        event_json, project_id, admission, None,
+    )
+    .await
 }
 
 /// Like [`ingest_cursor_transcript_event`], but bounds how many newly-appended
@@ -405,29 +408,14 @@ pub async fn ingest_cursor_transcript_event_capped(
     max_new_bytes: Option<u64>,
 ) -> CursorTranscriptIngestStats {
     cursor_ingest_or_default(
-        &try_ingest_cursor_transcript_event_capped(
+        &try_ingest_cursor_transcript_event_capped_with_admission(
             event_json,
-            admission,
             project_id,
+            admission,
             max_new_bytes,
         )
         .await,
     )
-}
-
-pub async fn try_ingest_cursor_transcript_event_capped(
-    event_json: &str,
-    admission: &dyn HostAdmission,
-    project_id: ProjectId,
-    max_new_bytes: Option<u64>,
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_transcript_event_capped_with_admission(
-        event_json,
-        project_id,
-        admission,
-        max_new_bytes,
-    )
-    .await
 }
 
 #[tracing::instrument(
@@ -515,22 +503,14 @@ pub async fn ingest_cursor_user_transcript_event_capped(
     max_new_bytes: Option<u64>,
 ) -> CursorTranscriptIngestStats {
     cursor_ingest_or_default(
-        &try_ingest_cursor_user_transcript_event_capped(event_json, admission, max_new_bytes).await,
+        &try_ingest_cursor_user_transcript_event_capped_with_admission(
+            event_json,
+            admission,
+            max_new_bytes,
+            &[],
+        )
+        .await,
     )
-}
-
-pub async fn try_ingest_cursor_user_transcript_event_capped(
-    event_json: &str,
-    admission: &dyn HostAdmission,
-    max_new_bytes: Option<u64>,
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
-        event_json,
-        admission,
-        max_new_bytes,
-        &[],
-    )
-    .await
 }
 
 /// User-scope live ingest guarded by a registry snapshot. The unguarded
@@ -542,7 +522,7 @@ pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
     registered_roots: &[PathBuf],
 ) -> CursorTranscriptIngestStats {
     cursor_ingest_or_default(
-        &try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
+        &try_ingest_cursor_user_transcript_event_capped_with_admission(
             event_json,
             admission,
             max_new_bytes,
@@ -550,21 +530,6 @@ pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
         )
         .await,
     )
-}
-
-pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
-    event_json: &str,
-    admission: &dyn HostAdmission,
-    max_new_bytes: Option<u64>,
-    registered_roots: &[PathBuf],
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_user_transcript_event_capped_with_admission(
-        event_json,
-        admission,
-        max_new_bytes,
-        registered_roots,
-    )
-    .await
 }
 
 pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(

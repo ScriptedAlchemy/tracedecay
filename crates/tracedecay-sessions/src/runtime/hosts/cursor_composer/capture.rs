@@ -16,11 +16,7 @@ use tracedecay_domain::{
     ProviderId, RetentionClass, SessionId,
 };
 
-use crate::admission::HostAdmission;
-use crate::observation::{
-    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
-};
-use crate::runtime::source::TranscriptIngestError;
+use crate::observation::{CaptureObservationRequest, ObservationCancellation};
 use tracedecay_privacy::parse_normalized_observation_record_v1;
 
 use super::PROVIDER;
@@ -115,16 +111,15 @@ pub fn build_cursor_composer_capture_request(
     )
 }
 
-pub async fn capture_cursor_composer_observation(
-    admission: &dyn HostAdmission,
-    request: CaptureObservationRequest,
-) -> Result<CaptureObservationOutcome, TranscriptIngestError> {
-    admission
-        .capture_observation(request)
-        .await
-        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })
-}
-
+/// Capture a `composerData:<composerId>` envelope observation when native
+/// `todos[{id,content,status}]` are present. Uses a distinct `source_key` so the
+/// bubble cursor stream is not displaced by envelope list updates.
+///
+/// Envelope native identity includes a todo checkpoint (authentic
+/// `lastUpdatedAt` when present, otherwise a deterministic content fingerprint
+/// over native todo id/content/status/order) so pending→completed and content
+/// or order revisions admit as new observations without inventing
+/// `WorkflowLifecycle.revision`.
 pub(super) fn build_cursor_composer_envelope_capture_request_for_project(
     composer_id: &str,
     envelope: &Value,
@@ -182,31 +177,4 @@ pub(super) fn build_cursor_composer_envelope_capture_request_for_project(
     )
     .map_err(|error| format!("invalid Cursor composer envelope capture request: {error}"))
     .map(|request| request.with_resume_checkpoint(generation.file_id(), checkpoint))
-}
-
-/// Capture a `composerData:<composerId>` envelope observation when native
-/// `todos[{id,content,status}]` are present. Uses a distinct `source_key` so the
-/// bubble cursor stream is not displaced by envelope list updates.
-///
-/// Envelope native identity includes a todo checkpoint (authentic
-/// `lastUpdatedAt` when present, otherwise a deterministic content fingerprint
-/// over native todo id/content/status/order) so pending→completed and content
-/// or order revisions admit as new observations without inventing
-/// `WorkflowLifecycle.revision`.
-pub fn build_cursor_composer_envelope_capture_request(
-    composer_id: &str,
-    envelope: &Value,
-    scope: ObservationScopeV1,
-    generation: ObservationSourceGenerationV1,
-    expected_cursor: Option<ObservationSourceCursorV1>,
-) -> Result<CaptureObservationRequest, String> {
-    build_cursor_composer_envelope_capture_request_for_project(
-        composer_id,
-        envelope,
-        None,
-        scope,
-        generation,
-        expected_cursor,
-        &ObservationCancellation::default(),
-    )
 }
