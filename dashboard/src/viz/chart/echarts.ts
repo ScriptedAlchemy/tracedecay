@@ -21,9 +21,9 @@ import { CanvasRenderer } from 'echarts/renderers';
 use([LineChart, ScatterChart, GridComponent, TooltipComponent, CanvasRenderer]);
 
 /** Series types this build can actually draw. Keep in step with `use` above. */
-export const REGISTERED_SERIES = ['line', 'scatter'] as const;
+const REGISTERED_SERIES = ['line', 'scatter'] as const;
 
-export type RegisteredSeries = (typeof REGISTERED_SERIES)[number];
+type RegisteredSeries = (typeof REGISTERED_SERIES)[number];
 
 export function isRegisteredSeries(type: string): type is RegisteredSeries {
   return (REGISTERED_SERIES as readonly string[]).includes(type);

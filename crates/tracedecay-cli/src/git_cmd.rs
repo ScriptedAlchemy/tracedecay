@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+use crate::application_cli::config_error;
 use crate::cli::{GitAction, GitDiffScopeArg, GitProjectArgs};
 use crate::{resolve_cli_project_root, tool_command::dispatch_catalogued_cli_operation};
 
@@ -187,13 +188,7 @@ fn required_commit_range_bound(
 ) -> tracedecay_domain::errors::Result<String> {
     value
         .filter(|value| !value.trim().is_empty() && value.trim() == value)
-        .ok_or_else(|| config_error(&format!("--{name} is required with --scope commit-range")))
-}
-
-fn config_error(message: &str) -> tracedecay_domain::errors::TraceDecayError {
-    tracedecay_domain::errors::TraceDecayError::Config {
-        message: message.to_string(),
-    }
+        .ok_or_else(|| config_error(format!("--{name} is required with --scope commit-range")))
 }
 
 #[cfg(test)]

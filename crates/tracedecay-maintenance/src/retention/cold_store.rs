@@ -5,13 +5,13 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use super::{incident_debris, orphan_stores};
+use crate::clock::now_secs_i64;
 
 const COLD_STORE_PAGE_LIMIT: usize = 8;
 const CHECKPOINT_DIRECTORY: &str = "maintenance";
@@ -226,14 +226,6 @@ fn retention_window_secs(days: u64) -> i64 {
         .ok()
         .and_then(|days| days.checked_mul(24 * 60 * 60))
         .unwrap_or(i64::MAX)
-}
-
-fn now_secs_i64() -> Result<i64, &'static str> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "system clock is before the unix epoch")?
-        .as_secs();
-    i64::try_from(seconds).map_err(|_| "system clock exceeds the supported retention range")
 }
 
 #[cfg(test)]

@@ -6,28 +6,12 @@ import {
   StorageTelemetryPayloadV1Schema,
 } from '../../contracts/generated.ts';
 import { doctorEvidencePresentation } from './doctorModel.ts';
-import { budgetPresentation, dimensionDotClass, growthPresentation, refreshOperation, storageFindingLabel, tableGrowthPresentation } from './storageModel.ts';
+import { budgetPresentation, dimensionDotClass, growthPresentation, storageFindingLabel, tableGrowthPresentation } from './storageModel.ts';
 
 const SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
 
 describe('Observatory storage read models', () => {
-  it('renders refresh only from a server-supplied legal action reference', () => {
-    expect(
-      refreshOperation([
-        {
-          kind: 'refresh',
-          operation: 'use-case.dashboard.storage.findings.refresh',
-        },
-      ]),
-    ).toBe('use-case.dashboard.storage.findings.refresh');
-    expect(
-      refreshOperation([
-        {
-          kind: 'request_apply',
-          operation: 'use-case.dashboard.storage.retention.apply',
-        },
-      ]),
-    ).toBeUndefined();
+  it('rejects a legal action kind the server never defined', () => {
     expect(
       DashboardLegalActionRefV1Schema.safeParse({
         kind: 'invented_action',

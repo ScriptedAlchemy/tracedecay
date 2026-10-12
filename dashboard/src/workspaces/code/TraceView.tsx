@@ -30,6 +30,7 @@ import {
 import { PlateField } from '../../viz/trace/PlateField.tsx';
 import { useReducedMotion } from '../../viz/trace/reducedMotion.ts';
 import { CallChain } from './CallChain.tsx';
+import { displayName } from './cortex.ts';
 import { NodeEvidence } from './NodeEvidence.tsx';
 import { TraceList } from './TraceList.tsx';
 import { TraceReadoutStrip } from './TraceReadoutStrip.tsx';
@@ -56,14 +57,6 @@ export interface TraceFocus {
   end_line?: number | null;
   signature?: string | null;
   degree?: number | null;
-}
-
-function displayName(node: {
-  name?: string | null;
-  qualified_name?: string | null;
-  id: string;
-}): string {
-  return node.name ?? node.qualified_name ?? node.id;
 }
 
 /* ---- the surface -------------------------------------------------------- */

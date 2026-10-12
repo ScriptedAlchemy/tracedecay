@@ -24,7 +24,7 @@ export function ringCoreAlpha(mark: TopologyMark, maxDescendants: number): numbe
   return Math.round((0.06 + 0.3 * fraction) * 1000) / 1000;
 }
 
-export const RING_GEOMETRY = {
+const RING_GEOMETRY = {
   minRadius: 6,
   maxRadius: 20,
 } as const;
@@ -43,7 +43,7 @@ export function ringRadius(mark: TopologyMark, maxDescendants: number): number {
 /** What the glyph inside a ring says. `origin` is a session the store records
  * as no one's subagent; `delegate` is a linked child; the other three are the
  * reading's own typed states. */
-export type RingKind = 'origin' | 'delegate' | 'bundle' | 'cut' | 'cycle';
+type RingKind = 'origin' | 'delegate' | 'bundle' | 'cut' | 'cycle';
 
 export function ringKind(mark: TopologyMark): RingKind {
   if (mark.kind === 'bundle') return 'bundle';

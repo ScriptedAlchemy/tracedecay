@@ -16,11 +16,10 @@
 use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::config::ProfileRoot;
 
-use tracedecay_contracts::retrieval::{
-    AdminCliRegistryContextV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
-};
+use tracedecay_contracts::retrieval::AdminCliRegistryContextV1;
 
-use super::daemon::{admin_cli_result, admin_cli_result_mismatch};
+use super::daemon::registry_context;
+use crate::application_cli::config_error;
 
 /// A CLI command's resolved project scope: the registered project identity
 /// and canonical root used by the daemon application boundary.
@@ -37,15 +36,8 @@ pub(crate) async fn resolve_project_scope(
     profile: &ProfileRoot,
     project_path: PathBuf,
 ) -> tracedecay_domain::errors::Result<ResolvedCliScope> {
-    let request = AdminCliSurfaceRequestV1::RegistryContext {
-        project_arg: Some(project_path.clone()),
-    };
-    match admin_cli_result(profile, None, request).await? {
-        AdminCliResultV1::RegistryContext(context) => {
-            scope_from_registry_context(&project_path, &context)
-        }
-        _ => Err(admin_cli_result_mismatch("registry_context")),
-    }
+    let context = registry_context(profile, project_path.clone()).await?;
+    scope_from_registry_context(&project_path, &context)
 }
 
 fn scope_from_registry_context(
@@ -130,10 +122,6 @@ fn canonicalize_absolute_root(
             requested.display()
         ))
     })
-}
-
-fn config_error(message: String) -> tracedecay_domain::errors::TraceDecayError {
-    tracedecay_domain::errors::TraceDecayError::Config { message }
 }
 
 #[cfg(test)]

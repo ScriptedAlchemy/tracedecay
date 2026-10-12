@@ -95,10 +95,10 @@ async fn restart_after_one_worker_pass(
     });
     held_rx.recv().expect("restart scheduler is held");
     drop(admission);
-    wait_for_reconciling(&registry, 1).await;
+    wait_for_reconciling(&registry, fixture.path(), 1).await;
     release_tx.send(()).expect("release restart scheduler");
     lock_thread.join().expect("restart scheduler holder joins");
-    wait_for_reconciling(&registry, 0).await;
+    wait_for_reconciling(&registry, fixture.path(), 0).await;
     registry
 }
 

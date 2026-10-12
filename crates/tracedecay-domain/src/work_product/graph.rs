@@ -52,6 +52,26 @@ pub enum WorkProductRelationV1 {
     },
 }
 
+impl WorkProductRelationV1 {
+    /// Whether `task_id` is an endpoint of this relation.
+    pub fn touches_task(&self, task_id: &TaskId) -> bool {
+        match self {
+            Self::MilestoneContainsTask { task_id: task, .. }
+            | Self::Evidence { task_id: task, .. }
+            | Self::AcceptedAttempt { task_id: task, .. }
+            | Self::Handoff { task_id: task, .. }
+            | Self::ProposalDecision { task_id: task, .. } => task == task_id,
+            Self::Gates {
+                dependency,
+                dependent,
+            } => dependency == task_id || dependent == task_id,
+            Self::Informational { source, target } => source == task_id || target == task_id,
+            Self::CausalCandidate { cause, effect } => cause == task_id || effect == task_id,
+            Self::InitiativeContainsPlan { .. } | Self::PlanContainsMilestone { .. } => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkRelationReplanProposalV1 {

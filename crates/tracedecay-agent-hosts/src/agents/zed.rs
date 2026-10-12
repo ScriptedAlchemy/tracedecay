@@ -23,7 +23,7 @@ use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     McpDoctorLabels, install_mcp_server_entry, load_jsonc_file, report_mcp_registration,
-    uninstall_mcp_server_entry,
+    serve_entry_registration_state, uninstall_mcp_server_entry,
 };
 
 pub struct ZedIntegration;
@@ -195,24 +195,11 @@ fn zed_mcp_registration_state(
     let Ok(settings) = JsonConfigDialect::Jsonc.parse_for_edit(config, &existing) else {
         return HostBundleRegistrationStateV1::Corrupt;
     };
-    let Some(server) = settings.pointer("/context_servers/tracedecay") else {
-        return HostBundleRegistrationStateV1::Missing;
-    };
-    let command_matches = server
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|command| {
-            expected_binary.map_or_else(|| !command.is_empty(), |expected| command == expected)
-        });
-    let serves_tracedecay = server
-        .get("args")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|args| args.len() == 1 && args[0].as_str() == Some("serve"));
-    if server.is_object() && command_matches && serves_tracedecay {
-        HostBundleRegistrationStateV1::Current
-    } else {
-        HostBundleRegistrationStateV1::Repairable
-    }
+    settings
+        .pointer("/context_servers/tracedecay")
+        .map_or(HostBundleRegistrationStateV1::Missing, |server| {
+            serve_entry_registration_state(server, expected_binary)
+        })
 }
 
 /// A host that is not installed is an informational finding, exactly as the

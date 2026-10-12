@@ -978,7 +978,7 @@ fn decode_utf8(value: &str, description: &str) -> Result<String, GraphDbError> {
     })
 }
 
-fn persisted_validation_error(description: &str, error: GraphDbError) -> GraphDbError {
+pub(crate) fn persisted_validation_error(description: &str, error: GraphDbError) -> GraphDbError {
     GraphDbError::Corrupt {
         message: format!("invalid persisted {description}: {error}"),
     }

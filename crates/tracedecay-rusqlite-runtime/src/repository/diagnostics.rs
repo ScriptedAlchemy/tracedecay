@@ -1,8 +1,8 @@
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params, params_from_iter};
 use tracedecay_domain::{
     CodeGenerationId, DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,
-    DiagnosticRecordStateV1, DiagnosticSeverityV1, FileOccurrenceId, GenerationDiagnosticV1,
-    RetrievalAnchorId, SourceSpan, UtcMicros,
+    DiagnosticSeverityV1, FileOccurrenceId, GenerationDiagnosticV1, RetrievalAnchorId, SourceSpan,
+    UtcMicros,
 };
 use tracedecay_store::{
     DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DiagnosticReadOperationV1,
@@ -219,7 +219,7 @@ fn insert_record(
     record: &GenerationDiagnosticV1,
 ) -> rusqlite::Result<()> {
     record.validate().map_err(invalid)?;
-    let (state, state_generation) = state_columns(&record.state);
+    let (state, state_generation) = diagnostic_state_columns(&record.state);
     savepoint.execute(
         "INSERT INTO generation_diagnostics (
             diagnostic_anchor, generation_id, publication_revision,
@@ -250,10 +250,10 @@ fn insert_record(
             u64_to_i64(record.span.start_byte, "diagnostic span start")?,
             u64_to_i64(record.span.end_byte, "diagnostic span end")?,
             record.code,
-            severity_name(record.severity),
+            diagnostic_severity_name(record.severity),
             record.message,
             record.message_digest.as_str(),
-            producer_name(record.provenance.producer_kind),
+            diagnostic_producer_kind_name(record.provenance.producer_kind),
             record.provenance.producer.as_str(),
             record.provenance.analyzer_revision.as_str(),
             record.provenance.configuration_revision.as_str(),
@@ -262,7 +262,7 @@ fn insert_record(
                 .sanitization_receipt
                 .as_ref()
                 .map(|value| value.as_str()),
-            evidence_name(record.evidence_class),
+            diagnostic_evidence_class_name(record.evidence_class),
             record.collected_at.0,
             state,
             state_generation,
@@ -377,33 +377,17 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationDiagno
     Ok(record)
 }
 
-// The mappings below delegate to the shared store codec; only the failure
+// The parsers below delegate to the shared store codec; only the failure
 // wording stays local, because it is observable in this adapter's errors.
-
-fn state_columns(state: &DiagnosticRecordStateV1) -> (&'static str, Option<&str>) {
-    diagnostic_state_columns(state)
-}
-
-fn severity_name(value: DiagnosticSeverityV1) -> &'static str {
-    diagnostic_severity_name(value)
-}
 
 fn parse_severity(value: &str) -> rusqlite::Result<DiagnosticSeverityV1> {
     parse_diagnostic_severity(value)
         .ok_or_else(|| conversion(format!("unknown diagnostic severity {value}")))
 }
 
-fn producer_name(value: DiagnosticProducerKindV1) -> &'static str {
-    diagnostic_producer_kind_name(value)
-}
-
 fn parse_producer(value: &str) -> rusqlite::Result<DiagnosticProducerKindV1> {
     parse_diagnostic_producer_kind(value)
         .ok_or_else(|| conversion(format!("unknown diagnostic producer {value}")))
-}
-
-fn evidence_name(value: DiagnosticEvidenceClassV1) -> &'static str {
-    diagnostic_evidence_class_name(value)
 }
 
 fn parse_evidence(value: &str) -> rusqlite::Result<DiagnosticEvidenceClassV1> {

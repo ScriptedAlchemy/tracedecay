@@ -1,6 +1,5 @@
 //! Canonical public HTTP adapter for daemon-owned Workflow execution.
 
-use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
@@ -10,98 +9,38 @@ use axum::extract::{DefaultBodyLimit, Extension, Path, State};
 use axum::response::Response;
 use axum::routing::post;
 use axum::{Json, Router};
-use schemars::JsonSchema;
 use serde_json::Value;
-use tracedecay_contracts::{
-    ApplicationProblem, RequestId, RetryDirective, TaskHandoffGrant, TaskHandoffIssueRequest,
-    TaskHandoffRedeemRequest, TaskHandoffRedeemed, WorkflowDefinitionActivateRequest,
-    WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionDisposition,
-    WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
-    WorkflowDefinitionRegisterRequest, WorkflowDefinitionRejectRequest,
-    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
-    WorkflowDefinitionValidation, WorkflowRunCancelRequest, WorkflowRunGetRequest,
-    WorkflowRunPauseRequest, WorkflowRunResumeRequest, WorkflowRunStartRequest,
-};
-use tracedecay_domain::{WorkflowDefinition, WorkflowRunProjection};
+use tracedecay_contracts::RequestId;
 
 use crate::http::{
-    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem_response,
+    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, dispatch_json_operation,
     invalid_request_response,
 };
 
-fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
-    T::schema_name()
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum WorkflowOperation {
-    RegisterDefinition,
-    ActivateDefinition,
-    RetireDefinition,
-    RejectDefinition,
-    ValidateDefinition,
-    GetDefinition,
-    ListDefinitions,
-    DefinitionHistory,
-    DiffDefinition,
-    HandoffIssue,
-    HandoffRedeem,
-    StartRun,
-    PauseRun,
-    ResumeRun,
-    CancelRun,
-    GetRun,
+mounted_operations! {
+    pub enum WorkflowOperation;
+    with_key,
+    id_prefix = "operation.workflow.",
+    route_prefix = "workflow",
+    RegisterDefinition: "register_definition", "register-definition";
+    ActivateDefinition: "activate_definition", "activate-definition";
+    RetireDefinition: "retire_definition", "retire-definition";
+    RejectDefinition: "reject_definition", "reject-definition";
+    ValidateDefinition: "validate_definition", "validate-definition";
+    GetDefinition: "get_definition", "get-definition";
+    ListDefinitions: "list_definitions", "list-definitions";
+    DefinitionHistory: "definition_history", "definition-history";
+    DiffDefinition: "diff_definition", "diff-definition";
+    HandoffIssue: "handoff_issue", "handoff-issue";
+    HandoffRedeem: "handoff_redeem", "handoff-redeem";
+    StartRun: "start_run", "start-run";
+    PauseRun: "pause_run", "pause-run";
+    ResumeRun: "resume_run", "resume-run";
+    CancelRun: "cancel_run", "cancel-run";
+    GetRun: "get_run", "get-run";
 }
 
 impl WorkflowOperation {
-    pub const ALL: [Self; 16] = [
-        Self::RegisterDefinition,
-        Self::ActivateDefinition,
-        Self::RetireDefinition,
-        Self::RejectDefinition,
-        Self::ValidateDefinition,
-        Self::GetDefinition,
-        Self::ListDefinitions,
-        Self::DefinitionHistory,
-        Self::DiffDefinition,
-        Self::HandoffIssue,
-        Self::HandoffRedeem,
-        Self::StartRun,
-        Self::PauseRun,
-        Self::ResumeRun,
-        Self::CancelRun,
-        Self::GetRun,
-    ];
-
-    mounted_operation_paths! {
-        with_key,
-        id_prefix = "operation.workflow.",
-        route_prefix = "workflow",
-        RegisterDefinition: "register_definition", "register-definition";
-        ActivateDefinition: "activate_definition", "activate-definition";
-        RetireDefinition: "retire_definition", "retire-definition";
-        RejectDefinition: "reject_definition", "reject-definition";
-        ValidateDefinition: "validate_definition", "validate-definition";
-        GetDefinition: "get_definition", "get-definition";
-        ListDefinitions: "list_definitions", "list-definitions";
-        DefinitionHistory: "definition_history", "definition-history";
-        DiffDefinition: "diff_definition", "diff-definition";
-        HandoffIssue: "handoff_issue", "handoff-issue";
-        HandoffRedeem: "handoff_redeem", "handoff-redeem";
-        StartRun: "start_run", "start-run";
-        PauseRun: "pause_run", "pause-run";
-        ResumeRun: "resume_run", "resume-run";
-        CancelRun: "cancel_run", "cancel-run";
-        GetRun: "get_run", "get-run";
-    }
-
-    pub fn from_operation_key(key: &str) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|operation| operation.operation_key() == key)
-    }
-
     /// Whether the operation reads without producing a durable effect.
     /// Parity with the catalog's effect class is pinned by
     /// `read_only_operations_mirror_the_catalog_effect_class`.
@@ -115,54 +54,6 @@ impl WorkflowOperation {
                 | Self::DiffDefinition
                 | Self::GetRun
         )
-    }
-
-    pub fn request_schema_name(self) -> Cow<'static, str> {
-        match self {
-            Self::RegisterDefinition => schema_name::<WorkflowDefinitionRegisterRequest>(),
-            Self::ActivateDefinition => schema_name::<WorkflowDefinitionActivateRequest>(),
-            Self::RetireDefinition => schema_name::<WorkflowDefinitionRetireRequest>(),
-            Self::RejectDefinition => schema_name::<WorkflowDefinitionRejectRequest>(),
-            Self::ValidateDefinition => schema_name::<WorkflowDefinitionValidateRequest>(),
-            Self::GetDefinition => schema_name::<WorkflowDefinitionGetRequest>(),
-            Self::ListDefinitions => schema_name::<WorkflowDefinitionListRequest>(),
-            Self::DefinitionHistory => schema_name::<WorkflowDefinitionHistoryRequest>(),
-            Self::DiffDefinition => schema_name::<WorkflowDefinitionDiffRequest>(),
-            Self::HandoffIssue => schema_name::<TaskHandoffIssueRequest>(),
-            Self::HandoffRedeem => schema_name::<TaskHandoffRedeemRequest>(),
-            Self::StartRun => schema_name::<WorkflowRunStartRequest>(),
-            Self::PauseRun => schema_name::<WorkflowRunPauseRequest>(),
-            Self::ResumeRun => schema_name::<WorkflowRunResumeRequest>(),
-            Self::CancelRun => schema_name::<WorkflowRunCancelRequest>(),
-            Self::GetRun => schema_name::<WorkflowRunGetRequest>(),
-        }
-    }
-
-    pub fn result_schema_name(self) -> Cow<'static, str> {
-        match self {
-            Self::RegisterDefinition => schema_name::<WorkflowDefinition>(),
-            Self::ActivateDefinition | Self::RetireDefinition | Self::RejectDefinition => {
-                schema_name::<WorkflowDefinitionDisposition>()
-            }
-            Self::ValidateDefinition => schema_name::<WorkflowDefinitionValidation>(),
-            Self::GetDefinition => schema_name::<WorkflowDefinition>(),
-            Self::ListDefinitions | Self::DefinitionHistory => {
-                schema_name::<Vec<WorkflowDefinition>>()
-            }
-            Self::DiffDefinition => schema_name::<WorkflowDefinitionDiff>(),
-            Self::HandoffIssue => schema_name::<TaskHandoffGrant>(),
-            Self::HandoffRedeem => schema_name::<TaskHandoffRedeemed>(),
-            Self::StartRun | Self::PauseRun | Self::ResumeRun | Self::CancelRun | Self::GetRun => {
-                schema_name::<WorkflowRunProjection>()
-            }
-        }
-    }
-
-    pub fn from_route_segment(segment: &str) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|operation| operation.route_segment() == segment)
     }
 }
 
@@ -219,37 +110,21 @@ async fn operation<O>(
 where
     O: WorkflowApplicationOwner,
 {
-    let match_result = {
-        let _span = tracing::trace_span!("api.http.admission").entered();
-        {
-            match WorkflowOperation::from_route_segment(&segment) {
-                None => Err(adapter_problem_response(
-                    request_id,
-                    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-                )),
-                Some(operation) => match body {
-                    Ok(Json(body)) => Ok(WorkflowHttpRequest {
-                        operation,
-                        request_id,
-                        controls,
-                        body,
-                    }),
-                    Err(_) => Err(invalid_request_response(
-                        request_id,
-                        "workflow.invalid_body",
-                        "The Workflow request body is invalid or exceeds the configured limit",
-                    )),
-                },
-            }
-        }
-    };
-    let request = match match_result {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-    tracing::Instrument::instrument(
-        async move { owner.invoke_workflow(request).await },
-        tracing::trace_span!("api.http.handler"),
+    dispatch_json_operation(
+        WorkflowOperation::from_route_segment(&segment),
+        request_id,
+        body,
+        (
+            "workflow.invalid_body",
+            "The Workflow request body is invalid or exceeds the configured limit",
+        ),
+        |operation, request_id, body| WorkflowHttpRequest {
+            operation,
+            request_id,
+            controls,
+            body,
+        },
+        |request| owner.invoke_workflow(request),
     )
     .await
 }

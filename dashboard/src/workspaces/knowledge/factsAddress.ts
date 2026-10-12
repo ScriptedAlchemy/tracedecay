@@ -19,9 +19,9 @@ import { useSearchParams } from 'react-router';
 import { scopeKey, useScope } from '../../data/scope/store.ts';
 import { asFactSort, type FactSort } from './ledger.ts';
 
-export const FACT_PARAM = 'fact';
-export const QUERY_PARAM = 'q';
-export const SORT_PARAM = 'sort';
+const FACT_PARAM = 'fact';
+const QUERY_PARAM = 'q';
+const SORT_PARAM = 'sort';
 
 export function useFactsAddress(): {
   selectedFactId: string | null;

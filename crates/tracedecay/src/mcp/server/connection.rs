@@ -561,6 +561,7 @@ impl McpServer {
 #[cfg(test)]
 mod cancellable_queue_tests {
     use super::*;
+    use crate::test_support::git::git;
 
     static DELAYED_ROUTE_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -585,17 +586,11 @@ mod cancellable_queue_tests {
                 std::fs::create_dir_all(root.join("src")).expect("fixture source directory");
                 std::fs::write(root.join("src/lib.rs"), "pub fn route_fixture() {}\n")
                     .expect("fixture source");
-                super::super::writer_test_support::git(root, &["init", "-q", "-b", "main"]);
-                super::super::writer_test_support::git(
-                    root,
-                    &["config", "user.email", "route@test.invalid"],
-                );
-                super::super::writer_test_support::git(
-                    root,
-                    &["config", "user.name", "Route Test"],
-                );
-                super::super::writer_test_support::git(root, &["add", "."]);
-                super::super::writer_test_support::git(root, &["commit", "-q", "-m", "fixture"]);
+                git(root, &["init", "-q", "-b", "main"]);
+                git(root, &["config", "user.email", "route@test.invalid"]);
+                git(root, &["config", "user.name", "Route Test"]);
+                git(root, &["add", "."]);
+                git(root, &["commit", "-q", "-m", "fixture"]);
             }
             let harness = crate::daemon::ProductionProjectCompositionHarnessV1::open(
                 isolation.path(),
@@ -1082,14 +1077,11 @@ mod cancellable_queue_tests {
             std::fs::create_dir_all(root.join("src")).expect("fixture source directory");
             std::fs::write(root.join("src/lib.rs"), "pub fn route_fixture() {}\n")
                 .expect("fixture source");
-            super::super::writer_test_support::git(root, &["init", "-q", "-b", "main"]);
-            super::super::writer_test_support::git(
-                root,
-                &["config", "user.email", "route@test.invalid"],
-            );
-            super::super::writer_test_support::git(root, &["config", "user.name", "Route Test"]);
-            super::super::writer_test_support::git(root, &["add", "."]);
-            super::super::writer_test_support::git(root, &["commit", "-q", "-m", "fixture"]);
+            git(root, &["init", "-q", "-b", "main"]);
+            git(root, &["config", "user.email", "route@test.invalid"]);
+            git(root, &["config", "user.name", "Route Test"]);
+            git(root, &["add", "."]);
+            git(root, &["commit", "-q", "-m", "fixture"]);
         }
         let harness = crate::daemon::ProductionProjectCompositionHarnessV1::open(
             isolation.path(),

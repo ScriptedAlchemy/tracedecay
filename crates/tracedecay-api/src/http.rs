@@ -230,50 +230,12 @@ pub type HttpApplicationInvocationFuture = Pin<
     >,
 >;
 
-/// Concrete application owners mounted behind the HTTP adapter.
+/// The application owner mounted behind the HTTP adapter.
 ///
-/// Each method delegates to the corresponding application owner family. The
-/// adapter performs only extraction, owner selection, and canonical encoding.
+/// The adapter performs only extraction, owner admission, and canonical
+/// encoding; every admitted operation is delegated through [`Self::invoke`].
 pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
-    fn exposes_operation(
-        &self,
-        operation: ApplicationSurfaceOperation,
-    ) -> Result<bool, ApplicationContractError> {
-        is_http_application_operation_exposed(operation)
-    }
-
-    fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
-
-    fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
-
-    fn invoke_callable_code(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_primitive(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
-
-    fn invoke_observatory(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_configuration(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_context_scout(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_native_integration(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture;
-
-    fn invoke_retained(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
+    fn invoke(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
 }
 
 impl<F, Fut> HttpApplicationOwners for F
@@ -283,54 +245,7 @@ where
         + Send
         + 'static,
 {
-    fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_callable_code(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_primitive(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_observatory(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_configuration(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_context_scout(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_native_integration(
-        &self,
-        request: HttpApplicationRequest,
-    ) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_retained(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
+    fn invoke(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
         Box::pin((self)(request))
     }
 }
@@ -445,6 +360,48 @@ pub(crate) fn invalid_request_response(
     }
 }
 
+/// Admission shared by the JSON operation families mounted beside the
+/// application router. An operation this build does not mount is concealed
+/// the same way an unauthorised one is, so probing a path cannot reveal what
+/// exists; an unreadable body is the family's `invalid_body` problem.
+pub(crate) async fn dispatch_json_operation<Operation, Request, Invocation>(
+    operation: Option<Operation>,
+    request_id: RequestId,
+    body: Result<Json<Value>, JsonRejection>,
+    invalid_body: (&'static str, &'static str),
+    admit: impl FnOnce(Operation, RequestId, Value) -> Request,
+    invoke: impl FnOnce(Request) -> Invocation,
+) -> Response
+where
+    Invocation: Future<Output = Response>,
+{
+    let admitted = {
+        let _span = tracing::trace_span!("api.http.admission").entered();
+        match (operation, body) {
+            (None, _) => Err(adapter_problem_response(
+                request_id,
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+            )),
+            (Some(operation), Ok(Json(body))) => Ok(admit(operation, request_id, body)),
+            (Some(_), Err(_)) => Err(invalid_request_response(
+                request_id,
+                invalid_body.0,
+                invalid_body.1,
+            )),
+        }
+    };
+    match admitted {
+        Ok(request) => {
+            tracing::Instrument::instrument(
+                invoke(request),
+                tracing::trace_span!("api.http.handler"),
+            )
+            .await
+        }
+        Err(response) => response,
+    }
+}
+
 /// Build the catalog-advertised application routes at relative paths.
 ///
 /// The executable nests this router at its root-owned prefix behind
@@ -525,8 +482,16 @@ fn parse_git_read_operation(operation: &str) -> Option<ApplicationSurfaceOperati
     )
 }
 
+/// The closed set of feedback reads the dashboard binds through
+/// [`feedback_application_router`].
 fn parse_feedback_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
-    crate::feedback::feedback_read_operation(operation)
+    match operation {
+        "get" => Some(ApplicationSurfaceOperation::FeedbackGet),
+        "expand" => Some(ApplicationSurfaceOperation::FeedbackExpand),
+        "list" => Some(ApplicationSurfaceOperation::FeedbackList),
+        "proximity" => Some(ApplicationSurfaceOperation::FeedbackProximity),
+        _ => None,
+    }
 }
 
 fn parse_public_feedback_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
@@ -644,7 +609,7 @@ async fn invoke_route<O>(
 where
     O: HttpApplicationOwners,
 {
-    match owners.exposes_operation(operation) {
+    match is_http_application_operation_exposed(operation) {
         Ok(true) => {}
         Ok(false) => {
             return adapter_problem_response(
@@ -662,23 +627,13 @@ where
         Ok(request) => request,
         Err(response) => return *response,
     };
-    let Some(owner_kind) = http_application_owner_kind(request.operation) else {
+    if http_application_owner_kind(request.operation).is_none() {
         return adapter_problem_response(
             request.request_id,
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
         );
-    };
-    let invocation = match owner_kind {
-        HttpApplicationOwnerKind::Git => owners.invoke_git(request),
-        HttpApplicationOwnerKind::Feedback => owners.invoke_feedback(request),
-        HttpApplicationOwnerKind::CallableCode => owners.invoke_callable_code(request),
-        HttpApplicationOwnerKind::Primitive => owners.invoke_primitive(request),
-        HttpApplicationOwnerKind::Observatory => owners.invoke_observatory(request),
-        HttpApplicationOwnerKind::Configuration => owners.invoke_configuration(request),
-        HttpApplicationOwnerKind::ContextScout => owners.invoke_context_scout(request),
-        HttpApplicationOwnerKind::NativeIntegration => owners.invoke_native_integration(request),
-        HttpApplicationOwnerKind::Retained => owners.invoke_retained(request),
-    };
+    }
+    let invocation = owners.invoke(request);
     match tracing::Instrument::instrument(invocation, tracing::trace_span!("api.http.handler"))
         .await
     {

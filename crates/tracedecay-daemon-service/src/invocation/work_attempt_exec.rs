@@ -78,7 +78,7 @@ use tracedecay_sessions::runtime::hosts::codex_app_server::{
 };
 
 use tracedecay_configuration::config::work_executable_binding::{
-    WorkExecutableBindingError, WorkExecutableBindingResolver,
+    PinnedWorkExecutableBindingResolver, WorkExecutableBindingError,
 };
 
 use super::types::RegisteredWorkRuntime;
@@ -694,8 +694,8 @@ fn provider_arguments(
 }
 
 /// The preference gate proper, over an already-built binding authority.
-fn select_with_resolver<R: WorkExecutableBindingResolver>(
-    resolver: &R,
+fn select_with_resolver(
+    resolver: &PinnedWorkExecutableBindingResolver,
     attempt: &WorkAttemptV1,
 ) -> Result<ProviderSelection, ProviderDenial> {
     let snapshot = attempt.execution().execution_snapshot();
@@ -753,8 +753,8 @@ fn select_with_resolver<R: WorkExecutableBindingResolver>(
 
 /// Probes one pinned binding: capability admission, path canonicalization,
 /// and a byte-exact digest match against the snapshot's pinned artifact.
-fn resolve_binding<R: WorkExecutableBindingResolver>(
-    resolver: &R,
+fn resolve_binding(
+    resolver: &PinnedWorkExecutableBindingResolver,
     executable: &WorkExecutableReference,
     backend: WorkProviderBackendV1,
     protocol: WorkProviderProtocol,

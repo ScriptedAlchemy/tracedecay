@@ -115,18 +115,6 @@ fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
     message
 }
 
-pub(super) async fn drain_hermes_projections_with_admission(
-    facade: &dyn HostAdmission,
-    scope: &ObservationScopeV1,
-) -> Result<(), String> {
-    drain_hermes_projections_with_admission_and_cancellation(
-        facade,
-        scope,
-        &ObservationCancellation::default(),
-    )
-    .await
-}
-
 pub(super) async fn drain_hermes_projections_with_admission_and_cancellation(
     facade: &dyn HostAdmission,
     scope: &ObservationScopeV1,
@@ -153,28 +141,6 @@ pub(super) async fn drain_hermes_projections_with_admission_and_cancellation(
             return Ok(());
         }
     }
-}
-
-pub(super) async fn admit_rows_with_admission(
-    facade: &dyn HostAdmission,
-    rows: &[HermesRow],
-    scope: ObservationScopeV1,
-    generation: ObservationSourceGenerationV1,
-    file_identity: u64,
-    resume_fingerprint: u64,
-    route: impl Fn(&HermesRow) -> Option<HermesProjectionMetadata>,
-) -> Result<TranscriptIngestStats, String> {
-    admit_rows_with_admission_and_cancellation(
-        facade,
-        rows,
-        scope,
-        generation,
-        file_identity,
-        resume_fingerprint,
-        route,
-        &ObservationCancellation::default(),
-    )
-    .await
 }
 
 #[allow(clippy::too_many_arguments)]

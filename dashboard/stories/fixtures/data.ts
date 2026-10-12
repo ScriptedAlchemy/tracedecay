@@ -2258,7 +2258,7 @@ function analyticsSubagentTreePayload(): Record<string, unknown> {
  * Select it with `?fixture=dense-fanout` on the route, or through
  * `subagentTreeFixture('dense-fanout')`; the default tree never changes.
  */
-export type SubagentTreeScenario = 'default' | 'dense-fanout';
+type SubagentTreeScenario = 'default' | 'dense-fanout';
 
 const DENSE_WORKSTREAMS = [
   'ingest',
@@ -4573,7 +4573,7 @@ const COST_DESCRIPTOR = 'accounting-cost.v1';
  * superseded-generation read without inventing query parameters the API does
  * not accept.
  */
-export const CODE_INDEX_FRESHNESS_FIXTURES = {
+const CODE_INDEX_FRESHNESS_FIXTURES = {
   active: codeIndexFreshnessEnvelope(codeIndexBuildProgressFixture()),
   unavailable_rate: codeIndexFreshnessEnvelope(
     codeIndexBuildProgressFixture({

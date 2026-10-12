@@ -314,13 +314,3 @@ pub fn registry_context_candidate_roots(context: &ProjectRegistryContext) -> Vec
     );
     candidates
 }
-
-/// One complete, bounded snapshot of the registered checkout roots that may
-/// still own derived storage for a project.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct RegisteredProjectRootInventoryV1 {
-    pub project_id: String,
-    pub roots: std::collections::BTreeSet<String>,
-    pub terminal_root_count: u64,
-    pub inventory_digest: tracedecay_domain::ManifestDigest,
-}

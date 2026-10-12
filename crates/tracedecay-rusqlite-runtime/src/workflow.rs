@@ -6,11 +6,10 @@ use tracedecay_contracts::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
     TaskHandoffGrant, TaskHandoffScope, WorkHandoffFrontierV1, WorkflowDefinitionAuthorityError,
     WorkflowDefinitionAuthorityPort, WorkflowDefinitionDisposition,
-    WorkflowDefinitionLifecycleCommand, WorkflowDefinitionTransitionEntry,
-    WorkflowDefinitionTransitionOutcome, WorkflowEffectAuthorityErrorV1,
-    WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1, WorkflowEffectJournalRecordV1,
-    WorkflowEffectJournalStateV1, WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1,
-    WorkflowEffectProblemV1, WorkflowEffectTerminalV1,
+    WorkflowDefinitionLifecycleCommand, WorkflowDefinitionTransitionOutcome,
+    WorkflowEffectAuthorityErrorV1, WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1,
+    WorkflowEffectJournalRecordV1, WorkflowEffectJournalStateV1, WorkflowEffectOutcomeV1,
+    WorkflowEffectPreparedV1, WorkflowEffectProblemV1, WorkflowEffectTerminalV1,
 };
 use tracedecay_domain::{
     ManifestDigest, UtcMicros, WorkflowDefinition, WorkflowDefinitionId, canonical_sha256,
@@ -18,7 +17,7 @@ use tracedecay_domain::{
 
 use crate::exact_sql::{
     ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction,
-    ExactSqlValue,
+    ExactSqlValue, integer_column as sql_integer, text_column as sql_text,
 };
 use crate::repository::RetainedExactSqlCapability;
 mod census;
@@ -250,24 +249,6 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
             .map_err(|_| definition_authority_unavailable())?;
         Ok(outcome)
     }
-
-    fn transition_history(
-        &self,
-        definition_id: &WorkflowDefinitionId,
-        definition_version: u64,
-    ) -> Result<Vec<WorkflowDefinitionTransitionEntry>, WorkflowDefinitionAuthorityError> {
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| definition_authority_unavailable())?;
-        let entries =
-            disposition::transition_history_tx(&transaction, definition_id, definition_version)
-                .map_err(|_| definition_authority_unavailable())?;
-        transaction
-            .commit()
-            .map_err(|_| definition_authority_unavailable())?;
-        Ok(entries)
-    }
 }
 
 fn decode_definition_source_row(
@@ -427,16 +408,11 @@ fn workflow_effect_codec_unavailable() -> WorkflowEffectAuthorityErrorV1 {
     )
 }
 
-fn statement(sql: &str, params: Vec<ExactSqlValue>) -> Result<ExactSqlStatement, ExactSqlError> {
+pub(crate) fn statement(
+    sql: &str,
+    params: Vec<ExactSqlValue>,
+) -> Result<ExactSqlStatement, ExactSqlError> {
     ExactSqlStatement::new(sql.to_owned(), params)
-}
-
-fn sql_text(values: &[ExactSqlValue], index: usize) -> Option<&str> {
-    crate::exact_sql::text_column(values, index)
-}
-
-fn sql_integer(values: &[ExactSqlValue], index: usize) -> Option<i64> {
-    crate::exact_sql::integer_column(values, index)
 }
 
 fn version_i64(version: u64) -> Result<i64, ()> {
@@ -459,7 +435,7 @@ fn decode_json<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, ()> {
     crate::exact_sql::decode_json(payload, |_| ())
 }
 
-fn query_tx(
+pub(crate) fn query_tx(
     transaction: &ExactSqlTransaction,
     sql: &str,
     params: Vec<ExactSqlValue>,
@@ -467,7 +443,7 @@ fn query_tx(
     transaction.query(statement(sql, params)?)
 }
 
-fn execute_tx(
+pub(crate) fn execute_tx(
     transaction: &ExactSqlTransaction,
     sql: &str,
     params: Vec<ExactSqlValue>,

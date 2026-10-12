@@ -71,13 +71,12 @@ pub use code_intelligence::{
     SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, TestAttributionEvidenceClassV1,
     UnmodeledImportShapeV1, UnresolvedRef, ValidatedCodeFileV1, Visibility,
     classify_technical_token, code_reused_partition_arc_share_digest, code_reused_partition_digest,
-    code_reused_partition_digest_refs, code_source_parent_delta_digest, exact_search_canonical,
-    generate_node_id, generate_node_id_at, is_cli_flag_token, is_commit_hash,
-    is_commit_identifier_token, is_compiler_error_code_token, is_configuration_key_token,
-    is_identifier_token, is_path_shape, is_path_token, is_qualified_name_token,
-    is_runtime_error_code_token, is_technical_token_char, is_tool_name_token, path_matches_scope,
-    projection_batch_publication_digest, repository_path_matches_scope, split_subtokens,
-    technical_tokens, validate_code_logical_path,
+    code_source_parent_delta_digest, exact_search_canonical, generate_node_id, generate_node_id_at,
+    is_cli_flag_token, is_commit_hash, is_commit_identifier_token, is_compiler_error_code_token,
+    is_configuration_key_token, is_identifier_token, is_path_shape, is_path_token,
+    is_qualified_name_token, is_runtime_error_code_token, is_technical_token_char,
+    is_tool_name_token, path_matches_scope, projection_batch_publication_digest,
+    repository_path_matches_scope, split_subtokens, technical_tokens, validate_code_logical_path,
 };
 pub use configuration::{
     ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY,
@@ -189,7 +188,6 @@ pub use feedback::{
     ProximityRelationStrengthV1, ProximityRiskInputsV1, ProximityTierV1, ProximityWarningClassV1,
     derive_feedback_finding_id, derive_overlay_feedback_finding_id,
 };
-pub use framed_log::{CHECKSUM_BYTES, checksum, partial_tail_matches_prefix};
 pub use git::{
     BranchGraphPublicationEpochV1, GIT_INDEX_PREVIEW_DIGEST_DOMAIN_V1,
     GIT_INDEX_RECEIPT_DIGEST_DOMAIN_V1, GIT_INDEX_SNAPSHOT_DIGEST_DOMAIN_V1,
@@ -209,15 +207,13 @@ pub use git::{
     full_hunk_selection_bitmap, parse_hunk_header,
 };
 pub use integration::{
-    HOST_INTEGRATION_CATALOG_SCHEMA_VERSION_V1, HostActivationPolicyV1, HostAssetRenderPolicyV1,
-    HostCapabilityRecordV1, HostCapabilityStateV1, HostCapabilityUnavailableReasonV1,
-    HostCapabilityV1, HostCapabilityViewV1, HostComponentV1, HostDescriptorV1, HostHookMappingV1,
-    HostIntegrationCatalogV1, HostIntegrationIdV1, HostKindV1, HostProjectRegistrationPathV1,
+    HOST_INTEGRATION_CATALOG_SCHEMA_VERSION_V1, HostCapabilityRecordV1, HostCapabilityStateV1,
+    HostCapabilityUnavailableReasonV1, HostCapabilityV1, HostCapabilityViewV1, HostComponentV1,
+    HostDescriptorV1, HostIntegrationCatalogV1, HostIntegrationIdV1, HostKindV1,
     IntegrationCapabilityV1, IntegrationCatalogError, IntegrationDaemonActionV1,
     IntegrationDaemonApiV1, IntegrationDaemonRequirementV1, IntegrationEffectClassV1,
     IntegrationPrivacyClassV1, NativeHostIdentityV1, StockHostCapabilityViewV1,
-    TraceDecayProfileBindingV1, host_descriptor_v1, host_descriptors_v1,
-    host_integration_catalog_v1, stock_host_capabilities,
+    TraceDecayProfileBindingV1, host_integration_catalog_v1, stock_host_capabilities,
 };
 pub use memory::{
     FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactCurationActionV1, FactEvidenceRefV1,
@@ -249,7 +245,7 @@ pub use observability::{
     ObservabilityPayloadV1, ObservabilityRetentionClassV1, ObservabilityTerminalResultV1,
     ObservedTernaryV1, OperationActivationOutcomeV1, OperationAvailabilityV1,
     OperationPhaseTimingV1, OperationPhaseV1, OperationReadinessV1, OperationResourceObservedV1,
-    OperationStageTimingV1, OperationStageV1, PerformanceDispositionV1, ProviderAttemptTerminalV1,
+    OperationStageTimingV1, OperationStageV1, ProviderAttemptTerminalV1,
     ProviderReliabilityObservedV1, QuantityEvidenceClassV1, QueueDepthBucketV1,
     RejectedArgumentErrorClassV1, RejectedArgumentNameV1, RejectedArgumentObservedV1,
     RejectedArgumentSurfaceV1, RelianceDecisionV1, RelianceVerificationV1,
@@ -305,11 +301,11 @@ pub use research::{
     AuthorizedAnchorResolution, BlobId, BoundedVec, BrainId, BrainNodeId, BrainNodeRoleV1,
     BranchStackEdgeV1, BranchStackId, BranchStackNodeV1, BranchStackRevisionId,
     BranchStackRevisionV1, BranchStackSourceV1, CapabilityId, CatalogGenerationId,
-    CatalogSnapshotRefV1, CheckSnapshotAnchorRefV1, CommitId, ComponentVersion, Confidence,
-    ConflictEvidenceAnchorRefV1, CoverageReportV1, CoverageUniverseKnowledgeV1, DataVersionDigest,
-    DomainError, EntityId, EntityKind, EntityRef, EntityVersionId, EvidenceClass,
-    EvidenceRetentionWatermark, FactAssertionId, FactEventId, FactEvidenceId, FactId,
-    FrozenBranchStackSnapshotV1, FrozenIndependentBranchSelectionV1, FrozenWatermarkResolutionV1,
+    CheckSnapshotAnchorRefV1, CommitId, ComponentVersion, Confidence, ConflictEvidenceAnchorRefV1,
+    CoverageReportV1, CoverageUniverseKnowledgeV1, DataVersionDigest, DomainError, EntityId,
+    EntityKind, EntityRef, EntityVersionId, EvidenceClass, EvidenceRetentionWatermark,
+    FactAssertionId, FactEventId, FactEvidenceId, FactId, FrozenBranchStackSnapshotV1,
+    FrozenIndependentBranchSelectionV1, FrozenWatermarkResolutionV1,
     GitHubStackCapabilitySnapshotV1, GitHubStackCapabilityStateV1, GitHubStackLayerSnapshotV1,
     GitHubStackSnapshotV1, GitTopologyAnchorTargetV1, GitTopologyGenerationRefV1,
     GitTopologySourceRoleV1, HostInstanceId, IntegrationReceiptAnchorRefV1, LocatorDigest,

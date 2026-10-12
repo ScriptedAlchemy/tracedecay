@@ -15,7 +15,7 @@ export type RouteChunkLoader = () => Promise<{ default: ComponentType }>;
 const CHUNK_LOAD_MESSAGE =
   /Loading chunk|Failed to fetch dynamically imported module|error loading dynamically imported module/i;
 
-export function isChunkLoadFailure(error: unknown): boolean {
+function isChunkLoadFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return error.name === 'ChunkLoadError' || CHUNK_LOAD_MESSAGE.test(error.message);
 }

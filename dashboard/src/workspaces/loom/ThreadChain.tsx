@@ -35,7 +35,7 @@ import {
  * the store's `ordinal` and presented as a sequence unless timestamps are
  * actually present, no elapsed times are inferred from ordinal positions.
  */
-export interface ThreadRelations {
+interface ThreadRelations {
   commits: readonly LoomCommitV1[];
   editedFiles: readonly LoomEditedFileV1[];
   branchSpans: readonly LoomBranchSpanV1[];

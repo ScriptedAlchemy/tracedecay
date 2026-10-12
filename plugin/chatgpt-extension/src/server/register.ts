@@ -21,15 +21,13 @@ export type RegisterOptions = {
   readonly server: McpServer;
   readonly bridge: DaemonBridge;
   readonly html: string;
-  readonly iconSvg: string;
 };
 
 function toolResult(view: ViewState): CallToolResult {
   return { content: [{ type: "text", text: viewText(view) }], structuredContent: view };
 }
 
-export function registerTraceDecayExtension({ server, bridge, html, iconSvg }: RegisterOptions): void {
-  const icon = { src: `data:image/svg+xml,${encodeURIComponent(iconSvg)}`, mimeType: "image/svg+xml", sizes: ["any"] };
+export function registerTraceDecayExtension({ server, bridge, html }: RegisterOptions): void {
   const ui = (entrypoints: readonly unknown[] = []) => ({
     ui: { resourceUri: UI_RESOURCE_URI },
     "openai/ui": { entrypoints },

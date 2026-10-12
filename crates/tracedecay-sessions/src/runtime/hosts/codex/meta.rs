@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 
 use serde_json::Value;
+use tracedecay_capture::codex::{nested_string_field, string_field};
 
 use crate::runtime::source::{MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader};
 
@@ -280,22 +281,6 @@ fn session_meta_with_provenance_from_record(
         native_thread_id,
         source_frame_bytes: 0,
     })
-}
-
-pub(super) fn string_field(payload: &Value, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-pub(super) fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
-    payload
-        .pointer(pointer)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
 }
 
 /// Context recorded on a `turn_context` line. Real rollouts use this for the

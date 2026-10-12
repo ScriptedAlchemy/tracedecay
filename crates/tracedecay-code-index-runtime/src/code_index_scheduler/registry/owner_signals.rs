@@ -586,19 +586,9 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<Result<bool, CodeIndexSchedulerErrorV1>> {
-        let canonical = canonical_existing_identity(project_root).ok()?;
-        let owner = {
-            let mounted = self.mounted.lock().await;
-            mounted.get(&canonical)?.historical_generation_owner.clone()
-        };
-        Some(
-            tokio::task::spawn_blocking(move || owner.has_active_publication())
-                .await
-                .unwrap_or_else(|error| {
-                    Err(CodeIndexSchedulerErrorV1::Identity(format!(
-                        "publication pointer read task failed: {error}"
-                    )))
-                }),
-        )
+        self.historical_owner_read(project_root, "publication pointer", |owner| {
+            owner.has_active_publication()
+        })
+        .await
     }
 }

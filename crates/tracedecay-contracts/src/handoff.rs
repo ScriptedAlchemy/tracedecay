@@ -208,10 +208,6 @@ impl HandoffOpenContextV1 {
         &self.scope_digest
     }
 
-    pub fn issuer_actor_id(&self) -> &ActorId {
-        &self.issuer_actor_id
-    }
-
     pub fn recipient_actor_id(&self) -> &ActorId {
         &self.recipient_actor_id
     }

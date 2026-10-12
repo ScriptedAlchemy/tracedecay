@@ -36,57 +36,6 @@ impl TraceDecay {
         )
     }
 
-    /// Opens the canonical project graph with an exact branch provenance scope.
-    ///
-    /// Returns an error if the branch is not tracked or the project DB does
-    /// not exist.
-    pub async fn open_branch(project_root: &Path, branch_name: &str) -> Result<Self> {
-        Self::open_branch_with_options(project_root, branch_name, TraceDecayOpenOptions::default())
-            .await
-    }
-
-    pub async fn open_branch_with_options(
-        project_root: &Path,
-        branch_name: &str,
-        open_options: TraceDecayOpenOptions,
-    ) -> Result<Self> {
-        #[cfg(any(test, feature = "test-transport"))]
-        {
-            Self::open_branch_with_options_for_test(project_root, branch_name, open_options).await
-        }
-        #[cfg(not(any(test, feature = "test-transport")))]
-        {
-            let maintenance =
-                Self::standalone_maintenance_scope(&open_options, "direct branch open")?;
-            let mut graph = Self::open_branch_with_exclusive_maintenance(
-                project_root,
-                branch_name,
-                open_options,
-                maintenance.lifecycle(),
-            )
-            .await?;
-            graph._standalone_maintenance_scope = Some(maintenance);
-            Ok(graph)
-        }
-    }
-
-    /// [`Self::open_branch_with_options`] through the shared registered test
-    /// runtime; see [`Self::init_with_options_for_test`].
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn open_branch_with_options_for_test(
-        project_root: &Path,
-        branch_name: &str,
-        open_options: TraceDecayOpenOptions,
-    ) -> Result<Self> {
-        let open_options = Self::standalone_test_open_options(project_root, open_options);
-        let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
-        let mut graph = runtime
-            .open_project_branch_for_test(project_root, branch_name, open_options)
-            .await?;
-        graph.test_runtime_guard = Some(runtime);
-        Ok(graph)
-    }
-
     /// Opens a tracked branch through the canonical registered runtime while
     /// the caller holds the exact profile's exclusive maintenance lease.
     #[tracing::instrument(name = "lifecycle.open_branch.exclusive", level = "trace", skip_all)]

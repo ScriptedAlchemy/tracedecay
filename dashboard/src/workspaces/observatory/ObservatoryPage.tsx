@@ -29,8 +29,8 @@ import { useObservatoryReads, type ObservatoryReads } from './useObservatoryRead
 /** The address of the selection: which authority is open in the inspector,
  * and, for the two Doctor-backed sources, which finding row. Replaced, not
  * pushed, so panning across eleven panels is not eleven places to go back to. */
-export const OBSERVATORY_INSPECT_PARAM = 'inspect';
-export const OBSERVATORY_FINDING_PARAM = 'finding';
+const OBSERVATORY_INSPECT_PARAM = 'inspect';
+const OBSERVATORY_FINDING_PARAM = 'finding';
 
 /**
  * Observatory: system evidence from independent authorities on one time

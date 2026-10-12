@@ -10,7 +10,7 @@ use tracedecay_contracts::branch_snapshots::{
     LocalBranchReadControlV1, LocalBranchRevisionV1, LocalBranchSnapshotErrorV1,
 };
 use tracedecay_contracts::retrieval::{
-    SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
+    SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarResultV1,
 };
 use tracedecay_dashboard_api::code_read_api::{
     DashboardCodeReadErrorV1, DashboardCodeReadPortV1, DashboardRevisionPairReadFuture,
@@ -231,7 +231,7 @@ fn shared_family_result(
     {
         return Err(DashboardCodeReadErrorV1::NotFound);
     }
-    let source = similar_occurrence(&result.source.occurrence);
+    let source = result.source.occurrence.similar_occurrence();
     let representative_payload_digest = result.source.payload.payload_digest.clone();
     let mut complete = true;
     let families = result
@@ -254,7 +254,7 @@ fn shared_family_result(
                     member.occurrence.project_id == scope.project_id
                         && member.occurrence.repository_id == scope.repository_id
                 })
-                .map(|member| similar_occurrence(&member.occurrence))
+                .map(|member| member.occurrence.similar_occurrence())
                 .collect::<Vec<_>>();
             let family_complete = group.complete && members.len() == unfiltered_member_count;
             complete &= family_complete;
@@ -304,21 +304,6 @@ fn shared_family_result(
         coverage,
         freshness: None,
     })
-}
-
-fn similar_occurrence(
-    occurrence: &tracedecay_code_index::clones::CloneBodyOccurrenceV1,
-) -> SimilarOccurrenceV1 {
-    SimilarOccurrenceV1 {
-        project_id: occurrence.project_id.clone(),
-        repository_id: occurrence.repository_id.clone(),
-        worktree_id: occurrence.worktree_id.clone(),
-        source_generation: occurrence.source_generation.clone(),
-        snapshot_digest: occurrence.snapshot_digest.clone(),
-        symbol_occurrence_id: occurrence.symbol_occurrence_id.clone(),
-        path: occurrence.path.clone(),
-        body_span: occurrence.body_span,
-    }
 }
 
 struct PairSlot<T> {

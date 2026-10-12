@@ -44,12 +44,6 @@ pub fn resolved_analyzer_settings(
     }
 }
 
-/// Exposes the exact selection set the typed registry uses before any operator
-/// publishes a replacement: no analyzer is configured for any language.
-pub fn default_analyzer_settings() -> AnalyzerSettingsV1 {
-    AnalyzerSettingsV1::empty()
-}
-
 /// The one operator-published selection for `language`, if the resolved
 /// settings carry it. `AnalyzerSettingsV1::validate` already rejects duplicate
 /// or unordered language ids, so at most one selection can match.
@@ -137,7 +131,7 @@ mod tests {
             resolve_configuration(&registry, &[project_layer(published.clone())]).unwrap();
         let resolved = resolved_analyzer_settings(&resolution.snapshot).unwrap();
         assert_eq!(*resolved, published);
-        assert_ne!(*resolved, default_analyzer_settings());
+        assert_ne!(*resolved, AnalyzerSettingsV1::empty());
         assert_eq!(
             resolved.compute_digest().unwrap(),
             published.compute_digest().unwrap()

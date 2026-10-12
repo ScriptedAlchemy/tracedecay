@@ -3,12 +3,12 @@
 version = 4
 
 [[package]]
+name = "fixture-provenance"
+version = "0.1.0"
+
+[[package]]
 name = "identity-fixture"
 version = "0.1.0"
 dependencies = [
- "provenance-json",
+ "fixture-provenance",
 ]
-
-[[package]]
-name = "provenance-json"
-version = "0.1.0"

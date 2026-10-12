@@ -434,7 +434,7 @@ impl ReconcileFaultInjectionV1 {
                 panic!("injected reconcile panic (pass {})", seen + 1)
             }
             ReconcileFaultKindV1::TransientCapacity => Err(super::CodeIndexSchedulerErrorV1::GraphProjection(
-                crate::code_index::graph_projection::CodeGraphProjectionError::BudgetExhausted {
+                tracedecay_code_index::graph_projection::CodeGraphProjectionError::BudgetExhausted {
                     budget: tracedecay_graph_db::GraphBudgetKind::Capacity.as_str().to_owned(),
                     limit: 1_000,
                 },
@@ -461,14 +461,14 @@ impl ReconcileFaultInjectionV1 {
                 ))
             }
             ReconcileFaultKindV1::Cancelled => Err(
-                crate::code_index::production::CodeIndexProductionErrorV1::Interrupted(
-                    crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+                tracedecay_code_index::production::CodeIndexProductionErrorV1::Interrupted(
+                    tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
                 )
                 .into(),
             ),
             ReconcileFaultKindV1::DeadlineExceeded => Err(
-                crate::code_index::production::CodeIndexProductionErrorV1::Interrupted(
-                    crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+                tracedecay_code_index::production::CodeIndexProductionErrorV1::Interrupted(
+                    tracedecay_code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
                 )
                 .into(),
             ),
@@ -476,8 +476,8 @@ impl ReconcileFaultInjectionV1 {
                 "injected permanent reconcile refusal".to_owned(),
             )),
             ReconcileFaultKindV1::PublicationCorruption => Err(
-                crate::code_index::production::CodeIndexProductionErrorV1::Publication(
-                    crate::code_index::production::CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(
+                tracedecay_code_index::production::CodeIndexProductionErrorV1::Publication(
+                    tracedecay_code_index::production::CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(
                         "injected corrupt publication authority".to_owned(),
                     ),
                 )

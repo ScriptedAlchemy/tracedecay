@@ -230,7 +230,7 @@ async fn refuse_sessionless_request(
          (protocolVersion and clientCapabilities)"
             .to_owned(),
     );
-    write_json_rpc_response(transport, &response).await
+    write_daemon_response(transport, &response).await
 }
 
 /// Answer an unparseable handshake with one typed refusal frame and drain
@@ -344,7 +344,7 @@ async fn refuse_warming_profile_identity(
         .and_then(|request| request.id.clone())
         .unwrap_or(serde_json::Value::Null);
     let response = project_open_error_response(request_id, error);
-    write_json_rpc_response(transport, &response).await
+    write_daemon_response(transport, &response).await
 }
 
 async fn write_refusal_and_drain(
@@ -687,20 +687,6 @@ fn settle_daemon_work_delivery(
     result
 }
 
-async fn write_daemon_delivery_ack_response(
-    transport: &mut impl McpTransport,
-    response: &tracedecay_daemon_protocol::DaemonInvocationDeliveryAckResponse,
-) -> Result<()> {
-    let payload = {
-        let _span = tracing::trace_span!("daemon.engine.transport.serialize").entered();
-        serde_json::to_string(response)
-    }?;
-    transport.write_line(&payload).await?;
-    transport.write_line("\n").await?;
-    transport.flush().await?;
-    Ok(())
-}
-
 enum DaemonDeliveryAckWait {
     Line(Option<String>),
     Deadline,
@@ -932,7 +918,7 @@ async fn drive_retained_invocation_responses<'a>(
         } else {
             None
         };
-        let write_result = write_daemon_invocation_response(transport, &response).await;
+        let write_result = write_daemon_response(transport, &response).await;
         if let Err(error) = write_result {
             let recorder = service
                 .delivery_settlement_recorder(handshake.project_path.as_deref())
@@ -1027,7 +1013,7 @@ async fn drive_retained_invocation_responses<'a>(
                                 )
                             }
                         };
-                        write_daemon_delivery_ack_response(transport, &ack_response).await?;
+                        write_daemon_response(transport, &ack_response).await?;
                         if let Err(reason) = settlement_result {
                             return Err(TraceDecayError::Config {
                                 message: format!(
@@ -1394,7 +1380,7 @@ fn serve_broker_socket_client_inner(
                             Err(error) => project_open_error_response(request.id.clone(), &error),
                         };
                         drop(setup_activity);
-                        write_json_rpc_response(&mut transport, &response).await?;
+                        write_daemon_response(&mut transport, &response).await?;
                         Ok(())
                     })
                     .await;
@@ -1520,7 +1506,7 @@ fn serve_broker_socket_client_inner(
                                 return Err(error);
                             }
                             if let Some(response) = response {
-                                write_json_rpc_response(&mut transport, &response).await?;
+                                write_daemon_response(&mut transport, &response).await?;
                             }
                             return Ok::<_, TraceDecayError>(true);
                         }
@@ -1735,7 +1721,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     let first_request = AuthenticatedFirstRequest::new(first_request_line);
     if let Some(response) = daemon_shutdown_response(&first_request) {
         lifecycle.begin_draining();
-        write_json_rpc_response(&mut transport, &response).await?;
+        write_daemon_response(&mut transport, &response).await?;
         drop(setup_activity);
         return Ok(());
     }
@@ -1925,7 +1911,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             Err(error) => project_open_error_response(request.id.clone(), &error),
         };
         drop(setup_activity);
-        write_json_rpc_response(&mut transport, &response).await?;
+        write_daemon_response(&mut transport, &response).await?;
         return Ok(());
     }
     if let Some(invocation_request) = parse_daemon_invocation_request(first_request.raw()) {
@@ -2054,7 +2040,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             }
             drop(setup_activity);
             if let Some(response) = response {
-                write_json_rpc_response(&mut transport, &response).await?;
+                write_daemon_response(&mut transport, &response).await?;
             }
             return Ok(());
         }

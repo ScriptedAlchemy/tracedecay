@@ -44,7 +44,7 @@ export const WORK_PROJECTIONS: readonly WorkProjectionKind[] = [
 
 /** The query parameter that positions the camera, so a projection survives a
  * reload and can be linked to. */
-export const VIEW_PARAM = 'view';
+const VIEW_PARAM = 'view';
 
 export function projectionLabel(kind: WorkProjectionKind): string {
   switch (kind) {

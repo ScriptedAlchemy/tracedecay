@@ -230,8 +230,7 @@ fn launch_independent_doctor_checks(
         project_files: spawn_doctor_check(move || {
             collect_quiet(|dc| {
                 check_inert_project_config(dc, &project_for_files);
-                check_pr_autotrack_state(dc, &profile_root_for_files, &project_for_files);
-                check_automation_effect_resets(dc, &profile_root_for_files, &project_for_files);
+                check_persisted_state_resets(dc, &profile_root_for_files, &project_for_files);
             })
         }),
         daemon_status: tokio::spawn(async move {
@@ -1136,19 +1135,26 @@ fn pr_autotrack_state_findings(data_root: &Path) -> std::result::Result<Vec<Stri
     }
 }
 
-fn check_pr_autotrack_state(dc: &mut DoctorCounters, profile_root: &Path, project_path: &Path) {
+/// Reports PR auto-tracking state and refused automation effect journals for
+/// the project's persisted layout, when it has one.
+fn check_persisted_state_resets(dc: &mut DoctorCounters, profile_root: &Path, project_path: &Path) {
     let Ok(Some(layout)) =
         tracedecay_runtime_core::storage::resolve_persisted_layout(project_path, profile_root)
     else {
         return;
     };
-    match pr_autotrack_state_findings(&layout.data_root) {
-        Ok(warnings) => {
-            for warning in warnings {
-                dc.warn(&warning);
+    for findings in [
+        pr_autotrack_state_findings(&layout.data_root),
+        automation_effect_reset_findings(&layout.dashboard_root),
+    ] {
+        match findings {
+            Ok(warnings) => {
+                for warning in warnings {
+                    dc.warn(&warning);
+                }
             }
+            Err(failure) => dc.fail(&failure),
         }
-        Err(failure) => dc.fail(&failure),
     }
 }
 
@@ -1175,26 +1181,6 @@ fn automation_effect_reset_findings(
             ),
         })
         .collect())
-}
-
-fn check_automation_effect_resets(
-    dc: &mut DoctorCounters,
-    profile_root: &Path,
-    project_path: &Path,
-) {
-    let Ok(Some(layout)) =
-        tracedecay_runtime_core::storage::resolve_persisted_layout(project_path, profile_root)
-    else {
-        return;
-    };
-    match automation_effect_reset_findings(&layout.dashboard_root) {
-        Ok(warnings) => {
-            for warning in warnings {
-                dc.warn(&warning);
-            }
-        }
-        Err(failure) => dc.fail(&failure),
-    }
 }
 
 #[tracing::instrument(name = "doctor.config.upload", level = "trace", skip_all)]

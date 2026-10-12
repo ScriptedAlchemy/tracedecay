@@ -41,7 +41,7 @@ use tracedecay_runtime_core::resident_memory::{
     release_process_allocator_memory_v1,
 };
 
-use crate::code_index::{
+use tracedecay_code_index::{
     chunks::content_digest,
     production::{
         CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
@@ -964,7 +964,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 .is_some_and(|(_, control)| control.is_cancelled())
         {
             return Err(CodeIndexProductionErrorV1::Interrupted(
-                crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+                tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
             ));
         }
         Ok(())
@@ -3031,7 +3031,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         let manifest_bytes = match manifest_bytes {
             Ok(bytes) => bytes,
             Err(CodeIndexProductionErrorV1::Interrupted(
-                crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+                tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
             )) => {
                 evidence_pack.rollback_unattached(&self.segments_root)?;
                 return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);

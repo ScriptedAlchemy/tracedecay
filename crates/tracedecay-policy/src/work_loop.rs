@@ -448,10 +448,6 @@ pub struct WorkProposalDecisionV1 {
     pub route_plan: Option<WorkRoutePlanV1>,
 }
 
-pub trait WorkProposalEvaluator {
-    fn evaluate(&self, input: &WorkProposalPolicyInputV1) -> WorkProposalDecisionV1;
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkProposalEvaluatorV1 {
     evaluator_id: PolicyIdentifierV1,
@@ -927,9 +923,9 @@ const fn comparison_reason(comparison: WorkFrontierComparisonV1) -> WorkProposal
     }
 }
 
-impl WorkProposalEvaluator for WorkProposalEvaluatorV1 {
+impl WorkProposalEvaluatorV1 {
     #[tracing::instrument(name = "policy.work_loop.evaluate", level = "trace", skip_all)]
-    fn evaluate(&self, input: &WorkProposalPolicyInputV1) -> WorkProposalDecisionV1 {
+    pub fn evaluate(&self, input: &WorkProposalPolicyInputV1) -> WorkProposalDecisionV1 {
         if !input.is_valid() {
             return self.decision(
                 input,

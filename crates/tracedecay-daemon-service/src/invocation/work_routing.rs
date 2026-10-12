@@ -1,9 +1,7 @@
 //! Pinned configuration authority for Work proposal routes.
 
 use tracedecay_configuration::config::PinnedRuntimeConfiguration;
-use tracedecay_configuration::config::work_executable_binding::{
-    PinnedWorkExecutableBindingResolver, WorkExecutableBindingResolver,
-};
+use tracedecay_configuration::config::work_executable_binding::PinnedWorkExecutableBindingResolver;
 use tracedecay_contracts::{
     CapabilityGrantSnapshot, RequestContext, ResolvedScope, WORK_APPLICATION_OPERATION_IDS_V1,
     WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1,

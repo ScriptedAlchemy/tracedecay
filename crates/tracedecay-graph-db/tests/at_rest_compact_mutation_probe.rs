@@ -1,4 +1,4 @@
-// Its own test binary, not a graph_db_suite module: a `graph-disk-tier` probe
+// Its own test binary, not a graph_db_suite module: a grafeo `compact()` probe
 // that is run explicitly by name and needs no `test-helpers` fixture.
 //! Whether a compacted store survives being written to afterwards.
 //!
@@ -35,16 +35,14 @@
 //! # Running it
 //!
 //! ```text
-//! cargo test -p tracedecay-graph-db --features test-helpers,graph-disk-tier \
-//!   --test at_rest_compact_mutation_probe -- --ignored --nocapture
+//! bazel test //crates/tracedecay-graph-db:at_rest_compact_mutation_probe \
+//!   --test_arg=--ignored --test_arg=--nocapture --test_output=streamed
 //! ```
 //!
 //! It asserts the behaviour that *should* hold, so it fails while the defect is
 //! present. Re-run it after a grafeo bump: when it passes, this blocker is
 //! cleared and the seal-time compaction in `docs/graph-at-rest/README.md` phase
 //! 2 becomes implementable.
-
-#![cfg(feature = "graph-disk-tier")]
 
 use grafeo_common::types::Value;
 use grafeo_core::graph::GraphStore;

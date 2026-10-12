@@ -61,10 +61,10 @@ export const TRACE_BUDGET = Object.freeze({
 /* ---- wire shapes -------------------------------------------------------- */
 
 /** Neighbour symbol row as the generated neighbors contract serves it. */
-export type NeighborRow = GraphNodeV1;
+type NeighborRow = GraphNodeV1;
 
 /** Neighbourhood edge row as the generated neighbors contract serves it. */
-export type NeighborEdgeRow = GraphEdgeV1;
+type NeighborEdgeRow = GraphEdgeV1;
 
 /** The neighbors payload is the generated contract, not a hand-written mirror. */
 export type NeighborsPayload = GraphNeighborsPayloadV1;

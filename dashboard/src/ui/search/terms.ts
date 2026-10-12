@@ -18,7 +18,7 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-export interface Segment {
+interface Segment {
   readonly text: string;
   readonly hit: boolean;
 }

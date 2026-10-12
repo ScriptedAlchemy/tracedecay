@@ -143,17 +143,6 @@ fn canonical_unavailable_operations(
         .collect()
 }
 
-const fn unavailable_disposition(disposition: ExecutableUnavailableDispositionV1) -> &'static str {
-    match disposition {
-        ExecutableUnavailableDispositionV1::ServiceNotRegistered => "service_not_registered",
-        ExecutableUnavailableDispositionV1::SchemaUnavailable => "schema_unavailable",
-        ExecutableUnavailableDispositionV1::CodecUnavailable => "codec_unavailable",
-        ExecutableUnavailableDispositionV1::RouteUnavailable => "route_unavailable",
-        ExecutableUnavailableDispositionV1::CapabilityDisabled => "capability_disabled",
-        ExecutableUnavailableDispositionV1::HostUnsupported => "host_unsupported",
-    }
-}
-
 fn operation_from_binding(binding: &SdkExecutableBindingV1) -> Result<Operation, Box<dyn Error>> {
     let operation_id = binding.operation_id().as_str();
     let sdk_contract = operation_id
@@ -875,7 +864,7 @@ fn render_operations(
             "  {{ operation: {}, operationId: {}, availability: \"unavailable\", disposition: {} }},",
             quote(&operation.name),
             quote(&operation.operation_id),
-            quote(unavailable_disposition(operation.disposition))
+            serde_json::to_string(&operation.disposition)?
         );
     }
     out.push_str(

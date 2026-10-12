@@ -17,7 +17,7 @@ export interface UsageRow {
   events: number;
 }
 
-export interface Dominance {
+interface Dominance {
   /** Sum of every row's events, the denominator the shares are taken against. */
   total: number;
   leader: UsageRow | null;
@@ -75,7 +75,7 @@ export function percent(share: number | null | undefined): number | null {
   return Math.round(share * 100);
 }
 
-export interface EventWindow {
+interface EventWindow {
   /** How many events the endpoint actually counted. */
   events: number | null;
   /** Whether that count is the endpoint's own cap rather than the true total. */
@@ -131,7 +131,7 @@ export interface FamilyRow {
   underused?: boolean | undefined;
 }
 
-export interface FamilyNote {
+interface FamilyNote {
   /** Which tools count as this family, per `record_tool_family`. */
   covers: string;
   /**
@@ -169,9 +169,9 @@ export const FAMILY_NOTES: Readonly<Record<string, FamilyNote>> = {
   },
 };
 
-export type FamilyState = 'underused' | 'covered' | 'unmeasurable' | 'idle';
+type FamilyState = 'underused' | 'covered' | 'unmeasurable' | 'idle';
 
-export interface FamilyVerdict {
+interface FamilyVerdict {
   state: FamilyState;
   /** One line a reader can act on, or decide not to. */
   line: string;

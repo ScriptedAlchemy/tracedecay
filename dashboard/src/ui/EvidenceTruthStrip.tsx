@@ -5,11 +5,11 @@ import { EvidencePattern, type EvidenceQuality } from './EvidencePattern.tsx';
 /** The subset of the generated `DashboardCoverageV1` contract the strip
  * renders. Doctor coverage statements are assignable too: their completeness
  * variants are a subset of the dashboard completeness enum. */
-export type EvidenceStripCoverage = Partial<
+type EvidenceStripCoverage = Partial<
   Pick<DashboardCoverageV1, 'completeness' | 'eligible' | 'examined'>
 >;
 
-export interface EvidenceFreshness {
+interface EvidenceFreshness {
   state?: string;
   observed_at?: string;
 }

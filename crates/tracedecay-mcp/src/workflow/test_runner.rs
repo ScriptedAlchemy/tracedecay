@@ -556,7 +556,6 @@ fn terminate_and_reap(child: &mut Child, process_group: u32) {
     {
         let _ = child.kill();
         let _ = child.wait();
-        return;
     }
     #[cfg(unix)]
     {
@@ -1278,7 +1277,7 @@ mod tests {
             return std::io::Error::last_os_error().raw_os_error() != Some(ERROR_INVALID_PARAMETER);
         }
         let mut exit_code = 0_u32;
-        let read = unsafe { get_exit_code_process(process, &mut exit_code) };
+        let read = unsafe { get_exit_code_process(process, &raw mut exit_code) };
         let _ = unsafe { close_handle(process) };
         read == 0 || exit_code == STILL_ACTIVE
     }

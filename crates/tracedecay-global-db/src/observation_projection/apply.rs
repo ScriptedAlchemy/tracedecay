@@ -1748,7 +1748,7 @@ fn provider_usage_rows_from_envelope(
         .collect()
 }
 
-fn provider_usage_scope(scope: &ObservationScopeV1) -> (&'static str, Option<&str>) {
+pub(crate) fn provider_usage_scope(scope: &ObservationScopeV1) -> (&'static str, Option<&str>) {
     match scope {
         ObservationScopeV1::Profile => ("profile", None),
         ObservationScopeV1::Project { project_id } => ("project", Some(project_id.as_str())),

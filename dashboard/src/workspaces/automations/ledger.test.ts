@@ -12,7 +12,6 @@ import {
   formatDuration,
   formatUtc,
   integrityTone,
-  jobIdFromTaskKey,
   jobScheduleWord,
   jobTaskKey,
   latestRunForKey,
@@ -256,10 +255,6 @@ describe('exact-identity joins', () => {
     expect(latestRunForKey(rows, jobTaskKey('nightly'))?.run_id).toBe('newest-nightly');
     // A pre-`task_key` user-job row belongs to no job.
     expect(latestRunForKey(rows, jobTaskKey('legacy'))).toBeUndefined();
-    expect(jobIdFromTaskKey('user_job:nightly')).toBe('nightly');
-    expect(jobIdFromTaskKey('memory_curator')).toBeNull();
-    expect(jobIdFromTaskKey('user_job:')).toBeNull();
-    expect(jobIdFromTaskKey(null)).toBeNull();
   });
 
   it('joins a built-in task on its task key, falling back to the task word only for keyless rows', () => {

@@ -14,7 +14,7 @@ use tracedecay_contracts::retrieval::{
     AdminCliRegistryContextV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
 };
 
-use super::daemon::{admin_cli_result, admin_cli_result_mismatch};
+use super::daemon::{admin_cli_result, admin_cli_result_mismatch, registry_context};
 
 /// Bounds the wait for the profile lifecycle lease after the managed daemon
 /// service is stopped. The stop itself is separately bounded by the service
@@ -447,6 +447,47 @@ mod wipe_safety_tests {
         }
     }
 
+    #[test]
+    fn restore_failures_keep_each_wording() {
+        let failed = |message: &str| -> tracedecay_domain::errors::Result<()> {
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: message.to_owned(),
+            })
+        };
+        let joined = |wording, outcome| {
+            join_outcome_and_restore(wording, "op", outcome, failed("restore"))
+                .unwrap_err()
+                .to_string()
+        };
+        for (wording, outcome, expected) in [
+            (
+                RestoreWording::ManagedService,
+                Ok(()),
+                "config error: op completed, but the managed daemon service state could not be \
+                 restored: config error: restore",
+            ),
+            (
+                RestoreWording::ManagedService,
+                failed("boom"),
+                "config error: config error: boom; additionally the managed daemon service state \
+                 could not be restored: config error: restore",
+            ),
+            (RestoreWording::DaemonState, Ok(()), "config error: restore"),
+            (
+                RestoreWording::DaemonState,
+                failed("boom"),
+                "config error: op failed: config error: boom; daemon state restoration also \
+                 failed: config error: restore",
+            ),
+        ] {
+            assert_eq!(joined(wording, outcome), expected);
+        }
+        assert_eq!(
+            join_outcome_and_restore(RestoreWording::DaemonState, "op", Ok(7), Ok(())).unwrap(),
+            7
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn complete_wipe_rejects_a_leaf_symlink() {
@@ -538,7 +579,7 @@ fn handle_wipe_inner(
         )
         .await;
         let restore = profile_offline.finish();
-        join_outcome_and_restore("wipe", outcome, restore)
+        join_outcome_and_restore(RestoreWording::ManagedService, "wipe", outcome, restore)
     })
 }
 
@@ -581,31 +622,41 @@ pub(crate) fn process_error_text(error: tracedecay_domain::errors::TraceDecayErr
     annotate_reset_required(error, None).to_string()
 }
 
-/// Combines a destructive command's outcome with the daemon-restore outcome
-/// so neither failure can shadow the other.
-pub(crate) fn join_outcome_and_restore(
+/// How [`join_outcome_and_restore`] words a failed daemon restore.
+#[derive(Clone, Copy)]
+pub(crate) enum RestoreWording {
+    /// Destructive profile commands: always name the managed service state.
+    ManagedService,
+    /// Update and restart: a lone restore error passes through unchanged.
+    DaemonState,
+}
+
+/// Combines a command's outcome with the daemon-restore outcome so neither
+/// failure can shadow the other.
+pub(crate) fn join_outcome_and_restore<T>(
+    wording: RestoreWording,
     operation: &str,
-    outcome: tracedecay_domain::errors::Result<()>,
+    outcome: tracedecay_domain::errors::Result<T>,
     restore: tracedecay_domain::errors::Result<()>,
-) -> tracedecay_domain::errors::Result<()> {
-    match (outcome, restore) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Ok(()), Err(restore_error)) => Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "{operation} completed, but the managed daemon service state could not be \
-                 restored: {restore_error}"
-            ),
-        }),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(restore_error)) => {
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "{error}; additionally the managed daemon service state could not be \
-                     restored: {restore_error}"
-                ),
-            })
-        }
-    }
+) -> tracedecay_domain::errors::Result<T> {
+    let Err(restore_error) = restore else {
+        return outcome;
+    };
+    let message = match (wording, outcome) {
+        (RestoreWording::ManagedService, Ok(_)) => format!(
+            "{operation} completed, but the managed daemon service state could not be \
+             restored: {restore_error}"
+        ),
+        (RestoreWording::ManagedService, Err(error)) => format!(
+            "{error}; additionally the managed daemon service state could not be \
+             restored: {restore_error}"
+        ),
+        (RestoreWording::DaemonState, Ok(_)) => return Err(restore_error),
+        (RestoreWording::DaemonState, Err(operation_error)) => format!(
+            "{operation} failed: {operation_error}; daemon state restoration also failed: {restore_error}"
+        ),
+    };
+    Err(tracedecay_domain::errors::TraceDecayError::Config { message })
 }
 
 /// Non-terminal wipe must not read stdin. Irreversible deletion still requires
@@ -793,21 +844,9 @@ fn handle_list_inner(
             if location.status == global::ProjectStorageStatus::Stale
                 && let Some(profile_root) = home_tracedecay.as_deref()
             {
-                let stores = match admin_cli_result(
-                    profile,
-                    None,
-                    AdminCliSurfaceRequestV1::RegistryContext {
-                        project_arg: Some(path.clone()),
-                    },
-                )
-                .await?
-                {
-                    AdminCliResultV1::RegistryContext(AdminCliRegistryContextV1::Ok {
-                        stores,
-                        ..
-                    }) => stores,
-                    AdminCliResultV1::RegistryContext(_) => Vec::new(),
-                    _ => return Err(admin_cli_result_mismatch("registry_context")),
+                let stores = match registry_context(profile, path.clone()).await? {
+                    AdminCliRegistryContextV1::Ok { stores, .. } => stores,
+                    _ => Vec::new(),
                 };
                 if let Some(store) =
                     stores
@@ -818,7 +857,11 @@ fn handle_list_inner(
                                 == Some("code_project")
                         })
                     && let Some(registry_location) =
-                        global::classify_registry_storage_value(path, profile_root, store)
+                        tracedecay_runtime_core::storage::classify_registry_storage_value(
+                            path,
+                            profile_root,
+                            store,
+                        )
                 {
                     location = registry_location;
                 }

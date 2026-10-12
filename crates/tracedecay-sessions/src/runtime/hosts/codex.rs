@@ -101,10 +101,8 @@ pub use observation::codex_observation_source_v2;
 pub(crate) use observation::try_admit_codex_jsonl_observations_for_project_window;
 pub use observation::{
     CODEX_HOOK_MAX_NEW_BYTES, CodexJsonlAdmissionProgress,
-    try_admit_codex_jsonl_observations_for_profile,
     try_admit_codex_jsonl_observations_for_profile_with_admission,
     try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation,
-    try_admit_codex_jsonl_observations_for_project,
     try_admit_codex_jsonl_observations_for_project_with_admission,
     try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation,
 };

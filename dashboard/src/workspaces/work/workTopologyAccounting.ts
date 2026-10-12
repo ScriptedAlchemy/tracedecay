@@ -22,7 +22,6 @@ import {
 import {
   unavailableCard,
   type WorkAccountingCard,
-  type WorkAttemptPageV1,
   type WorkTopologyAccountingReading,
 } from './workAccountingModel.ts';
 

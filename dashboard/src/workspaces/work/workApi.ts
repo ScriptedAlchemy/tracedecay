@@ -14,7 +14,7 @@ import {
   type OperationTermination,
   type ApplicationHttpOperationId,
 } from '../../contracts/application.ts';
-import { decodeJsonBody, UNDECODABLE } from '../../data/query/responseBody.ts';
+import { decodeJsonBody, isRecord, UNDECODABLE } from '../../data/query/responseBody.ts';
 import { readOnlyScopeRefusal } from '../../data/scope/store.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 
@@ -60,10 +60,6 @@ const PROBLEM_STATE: Readonly<Record<ApplicationProblemKind, DomainStateKind>> =
 
 function refused(state: DomainStateKind, detail: string): WorkResult<never> {
   return { outcome: 'refused', state, detail };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export function workResultInvalidatesReads(result: WorkResult<unknown>): boolean {

@@ -15,7 +15,7 @@
  * where it read as decoration.
  */
 
-export interface HubRow {
+interface HubRow {
   id?: string | undefined;
   name?: string | null | undefined;
   qualified_name?: string | null | undefined;
@@ -24,7 +24,7 @@ export interface HubRow {
   degree?: number | null | undefined;
 }
 
-export interface AnnotatedHub<T extends HubRow> {
+interface AnnotatedHub<T extends HubRow> {
   hub: T;
   /** The name shown as the card's headline. */
   display: string;
@@ -97,7 +97,7 @@ export function ambiguityNote<T extends HubRow>(
   return `${rows} of these ${annotated.length} share a name (${names}), the file under each one is what tells them apart.`;
 }
 
-export interface SubgraphMeta {
+interface SubgraphMeta {
   mode?: string | undefined;
   seed_id?: string | null | undefined;
   nodes: readonly unknown[];
@@ -106,7 +106,7 @@ export interface SubgraphMeta {
   limits?: { nodes?: number; edges?: number } | undefined;
 }
 
-export interface SubgraphCaption {
+interface SubgraphCaption {
   /** "80 of 118,672 symbols · 120 edges". */
   scale: string;
   /** The endpoint's actual selection rule, in a sentence. */

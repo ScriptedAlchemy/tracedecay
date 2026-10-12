@@ -47,7 +47,7 @@ export interface JsonSchema {
   ["x-generic-ref"]?: string;
 }
 
-export interface GeneratedContracts {
+interface GeneratedContracts {
   /** Map of relative output path -> file content. */
   files: Record<string, string>;
 }

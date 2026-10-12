@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use tracedecay_contracts::execution_topology_metrics::worse_state;
 use tracedecay_contracts::{MetricValueV1, ObservabilityHorizonV1};
 use tracedecay_domain::{
     AutomationFunnelObservedV1, AutomationTerminalV1, CoverageStateV1, ObservabilityEnvelopeV1,
@@ -255,16 +256,16 @@ fn automation_metric(
     let mut state = observations
         .iter()
         .fold(CoverageStateV1::Known, |state, value| {
-            weaker_coverage(state, value.ledger_coverage)
+            worse_state(state, value.ledger_coverage)
         });
     if payload_unknown > 0 && state == CoverageStateV1::Known {
         state = CoverageStateV1::Partial;
     }
     if !source_complete {
-        state = weaker_coverage(state, CoverageStateV1::Partial);
+        state = worse_state(state, CoverageStateV1::Partial);
     }
     if source_unknown > 0 {
-        state = weaker_coverage(state, CoverageStateV1::Partial);
+        state = worse_state(state, CoverageStateV1::Partial);
     }
     let reason = match state {
         CoverageStateV1::Known => None,
@@ -292,25 +293,6 @@ fn automation_metric(
         horizon,
         watermark,
     )
-}
-
-const fn coverage_rank(state: CoverageStateV1) -> u8 {
-    match state {
-        CoverageStateV1::Known => 0,
-        CoverageStateV1::Sampled => 1,
-        CoverageStateV1::Capped => 2,
-        CoverageStateV1::Partial => 3,
-        CoverageStateV1::Stale => 4,
-        CoverageStateV1::Unknown => 5,
-    }
-}
-
-const fn weaker_coverage(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
-    if coverage_rank(left) >= coverage_rank(right) {
-        left
-    } else {
-        right
-    }
 }
 
 fn task_intelligence_metrics(

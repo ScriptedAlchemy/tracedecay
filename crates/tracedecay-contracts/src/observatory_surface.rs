@@ -19,6 +19,7 @@ use tracedecay_tool_catalog::{
 use crate::capability_manifest::{
     ApplicationCapabilityManifestInput, application_capability_manifest,
 };
+use crate::handlers::capability_executable_schema;
 use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
 use crate::{
     ApplicationContractError, ApplicationHandlerDescriptor, ApplicationOperation, CostsReadModelV1,
@@ -175,22 +176,13 @@ pub fn observatory_read_result_schema() -> Result<SchemaRef, ApplicationContract
 fn observatory_read_executable_schema(
     contribution: &CatalogContributionV1,
 ) -> Result<ExecutableSchemaAuthority, ApplicationContractError> {
-    let capability_id = CapabilityId::new(CAPABILITY_ID)?;
-    let manifest = contribution
-        .capabilities()
-        .iter()
-        .find(|manifest| manifest.capability_id() == &capability_id)
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "observatory read executable capability",
-        })?;
-    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
-        ObservatoryReadRequestV1,
-        ObservatoryReadResultV1,
-    >(
-        manifest,
+    capability_executable_schema::<ObservatoryReadRequestV1, ObservatoryReadResultV1>(
+        contribution,
+        &CapabilityId::new(CAPABILITY_ID)?,
+        "observatory read executable capability",
         "tracedecay_contracts::observatory_surface::ObservatoryReadRequestV1",
         "tracedecay_contracts::observatory_surface::ObservatoryReadResultV1",
-    )?)
+    )
 }
 
 const fn default_window_days() -> u16 {

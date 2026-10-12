@@ -7,7 +7,6 @@ use tracedecay_application::{
         BoundedObservabilityProducerV1, GitHubStackDriftObservationResultV1,
         GitHubStackDriftObservationUnavailableV1, GitHubStackProbeOwnerV1,
         ObservabilityProducerIdentityV1, RegisteredObservabilityPortV1, record_github_stack_drifts,
-        recover_open_github_stack_drifts,
     },
     stack_coordinator::{
         DaemonGitHubStackCoordinatorV1, GitHubStackDriftObservationV1,
@@ -352,34 +351,4 @@ async fn coordinator_drift_is_durable_closed_monotone_and_scope_denial_writes_no
         .expect("durable closed stack-drift rollup cell");
     assert_eq!(cell.value.value, Some(5.0));
     assert_eq!(cell.value.denominator, "observed_stack_drifts");
-
-    let _ = port;
-    drop(database);
-    drop(runtime);
-    let restarted_runtime = RegisteredGlobalDbTestRuntime::project(
-        profile_dir.path().to_path_buf(),
-        project.path(),
-        scope.project_id.clone(),
-    )
-    .await
-    .expect("restart registered runtime");
-    let restarted_database = restarted_runtime
-        .project_database_arc()
-        .expect("restarted project database");
-    let recovered =
-        recover_open_github_stack_drifts(restarted_database.as_ref(), &scope, UtcMicros(10_000))
-            .await
-            .expect("canonical recovery projection after database restart");
-    assert_eq!(
-        recovered,
-        vec![surviving_open],
-        "closed intervals stay closed while the one latest-open interval survives"
-    );
-    let restarted = DaemonGitHubStackCoordinatorV1::default();
-    restarted
-        .register_scope(&scope, GitHubStackedPullRequestPolicyV1::Disabled)
-        .expect("register restarted scope");
-    restarted
-        .restore_open_drift_interval(&scope, &recovered[0])
-        .expect("restore exact open interval after restart");
 }

@@ -159,45 +159,18 @@ pub async fn costs_read_model(
             upper_observation_sequence: None,
         },
     };
-    costs_read_model_with_provider_usage_and_observability(
-        savings_db,
-        Some(savings_db),
-        scope_ref,
-        scope_ref,
-        since_seconds,
-        &provider_usage,
-    )
-    .await
+    costs_read_model_with_provider_usage(savings_db, scope_ref, since_seconds, &provider_usage)
+        .await
 }
 
 /// Builds the costs projection from an already-pinned provider-usage read.
 /// Dashboard composite reads use this to avoid rescanning the same immutable
-/// observation frontier for sibling panels.
+/// observation frontier for sibling panels. Provider latency is read from the
+/// same registered authority over the exact horizon, with its own watermark
+/// and provenance.
 pub async fn costs_read_model_with_provider_usage(
     db: &RegisteredGlobalDb,
     scope_ref: Option<&str>,
-    since_seconds: i64,
-    provider_usage: &ProviderUsageAggregateV1,
-) -> CostsReadModelV1 {
-    costs_read_model_with_provider_usage_and_observability(
-        db,
-        Some(db),
-        scope_ref,
-        scope_ref,
-        since_seconds,
-        provider_usage,
-    )
-    .await
-}
-
-/// Builds the Costs projection from pinned provider usage and the same
-/// registered observability authority. The two reads share the exact horizon
-/// but retain separate watermarks and provenance.
-pub async fn costs_read_model_with_provider_usage_and_observability(
-    db: &RegisteredGlobalDb,
-    observability_db: Option<&RegisteredGlobalDb>,
-    scope_ref: Option<&str>,
-    observability_scope_ref: Option<&str>,
     since_seconds: i64,
     provider_usage: &ProviderUsageAggregateV1,
 ) -> CostsReadModelV1 {
@@ -209,13 +182,8 @@ pub async fn costs_read_model_with_provider_usage_and_observability(
     let pricing = load_table();
     let cost_summary = price_provider_usage(provider_usage, pricing, since_seconds);
     let read_horizon = horizon(since_seconds, observed_at_micros);
-    let latency = provider_latency_read_model(
-        observability_db,
-        observability_scope_ref,
-        &read_horizon,
-        provider_usage,
-    )
-    .await;
+    let latency =
+        provider_latency_read_model(Some(db), scope_ref, &read_horizon, provider_usage).await;
     let provider_cost = cost_summary.total_cost_usd;
     let priced_usage = cost_summary
         .usage_events

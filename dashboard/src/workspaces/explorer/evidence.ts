@@ -7,9 +7,9 @@
  * never a confidence figure, and no visual treatment upgrades one.
  */
 import type { ExplorerLaneReadModel } from './laneModel.ts';
-import type { Hit, SourceLaneId } from './model.ts';
+import type { Hit } from './model.ts';
 
-export type EvidenceGrade =
+type EvidenceGrade =
   | 'EXACT'
   | 'EXPLICIT'
   | 'INFERRED'
@@ -18,15 +18,9 @@ export type EvidenceGrade =
   | 'UNAVAILABLE';
 
 /** Where a record was persisted or observed. Orthogonal to grade. */
-export type SourceClass = 'GRAPH' | 'TRANSCRIPT' | 'FACT';
+type SourceClass = 'GRAPH' | 'TRANSCRIPT' | 'FACT';
 
-export const SOURCE_CLASS: Record<SourceLaneId, SourceClass> = {
-  code: 'GRAPH',
-  sessions: 'TRANSCRIPT',
-  knowledge: 'FACT',
-};
-
-export interface HitEvidence {
+interface HitEvidence {
   readonly sourceClass: SourceClass;
   /** The grade of the row's identity: which record this is. */
   readonly identity: EvidenceGrade;

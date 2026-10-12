@@ -80,7 +80,7 @@ export function elideStart(path: string | null | undefined, max = 34): string {
 }
 
 /** Byte magnitudes with the unit split out for the same reason. */
-export function splitBytes(bytes: number | null | undefined): {
+function splitBytes(bytes: number | null | undefined): {
   value: string;
   unit?: string;
 } {

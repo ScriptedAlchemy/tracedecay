@@ -50,43 +50,39 @@ use tracedecay_runtime_core::resident_memory::{
     release_process_allocator_memory_v1,
 };
 
-use crate::{
-    code_index::{
-        graph_projection::{
-            CodeGraphEvidenceReader, CodeGraphProjectionStore, CodeGraphServingWarmthV1,
-        },
-        production::{
-            CodeIndexExecutionControlV1, CodeIndexProductionErrorV1,
-            CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-            SealedGenerationSegmentReadV1, VerifiedSealedLexicalCursorRestoreErrorV1,
-            VerifiedSealedLexicalPageBatchBoundsV1, VerifiedSealedLexicalPageBatchReadV1,
-            VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalSourceReceiptV1,
-            VerifiedSealedTextGenerationMetadataV1,
-        },
+use tracedecay_code_index::{
+    graph_projection::{
+        CodeGraphEvidenceReader, CodeGraphProjectionStore, CodeGraphServingWarmthV1,
     },
-    query::retrieval::{
-        exact::{
-            CentralExactAdmissionAuthorityV1, ExactLane, ExactLaneEvidence, ExactLaneRequest,
-            ExactLaneRetriever,
-        },
-        graph::{GraphLane, production_code_index_freshness},
-        lexical::{
-            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
-            CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
-            CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
-            CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
-            CodeLexicalArtifactRestoreWitnessV1, CodeLexicalCloneIndexCensusV1,
-            CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, LexicalLane,
-            LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever,
-            PreparedCodeLexicalArtifactPageV1, code_lexical_artifact_build_memory_budget_for,
-            code_lexical_artifact_content_key,
-        },
-        ports::{
-            RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError, TEXT_ARTIFACT_BASE_BATCH_BYTES_V1,
-            TEXT_ARTIFACT_BASE_BATCH_PAGES_V1, TEXT_ARTIFACT_PAGE_BYTES_V1,
-            TEXT_ARTIFACT_PAGE_CHUNKS_V1,
-        },
+    production::{
+        CodeIndexExecutionControlV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
+        CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
+        VerifiedSealedLexicalCursorRestoreErrorV1, VerifiedSealedLexicalPageBatchBoundsV1,
+        VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
+        VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
+    },
+};
+use tracedecay_query::retrieval::{
+    exact::{
+        CentralExactAdmissionAuthorityV1, ExactLane, ExactLaneEvidence, ExactLaneRequest,
+        ExactLaneRetriever,
+    },
+    graph::{GraphLane, production_code_index_freshness},
+    lexical::{
+        CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
+        CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
+        CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
+        CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
+        CodeLexicalArtifactRestoreWitnessV1, CodeLexicalCloneIndexCensusV1,
+        CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence,
+        LexicalLaneRequest, LexicalLaneRetriever, PreparedCodeLexicalArtifactPageV1,
+        code_lexical_artifact_build_memory_budget_for, code_lexical_artifact_content_key,
+    },
+    ports::{
+        RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError, TEXT_ARTIFACT_BASE_BATCH_BYTES_V1,
+        TEXT_ARTIFACT_BASE_BATCH_PAGES_V1, TEXT_ARTIFACT_PAGE_BYTES_V1,
+        TEXT_ARTIFACT_PAGE_CHUNKS_V1,
     },
 };
 
@@ -820,10 +816,10 @@ pub(super) enum TextHeadOpenOutcomeV1 {
 fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortError {
     match error {
         CodeLexicalArtifactErrorV1::Interrupted(
-            crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+            tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
         ) => RetrievalPortError::Cancelled,
         CodeLexicalArtifactErrorV1::Interrupted(
-            crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+            tracedecay_code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
         ) => RetrievalPortError::BudgetExceeded,
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
@@ -851,10 +847,10 @@ pub(super) fn map_sealed_page_source_error(
 ) -> RetrievalPortError {
     match error {
         CodeIndexProductionErrorV1::Interrupted(
-            crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+            tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
         ) => RetrievalPortError::Cancelled,
         CodeIndexProductionErrorV1::Interrupted(
-            crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+            tracedecay_code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
         ) => RetrievalPortError::BudgetExceeded,
         CodeIndexProductionErrorV1::Contract(detail)
         | CodeIndexProductionErrorV1::Publication(
@@ -2003,8 +1999,8 @@ impl LatestCompleteCodeIndexV1 {
     pub fn exact(
         &self,
     ) -> Result<
-        Arc<Vec<crate::code_index::chunks::ExtractionAdmittedCodeSearchChunkV1>>,
-        crate::code_index::chunks::ChunkingFailureV1,
+        Arc<Vec<tracedecay_code_index::chunks::ExtractionAdmittedCodeSearchChunkV1>>,
+        tracedecay_code_index::chunks::ChunkingFailureV1,
     > {
         self.generation.admitted_chunks()
     }

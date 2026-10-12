@@ -70,16 +70,19 @@ import json
 import re
 import subprocess
 import sys
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypeVar
 
 TRACEDECAY_TOOL = re.compile(r"(?:^|__)(tracedecay(?:_[a-z0-9]+)+)$")
 PATH = re.compile(r"(?<![\w.@+-])/?(?:[\w.@+-]+/)+[\w@+-][\w.@+-]*\.[A-Za-z][A-Za-z0-9]{0,7}(?![\w/])")
 SYMBOL = re.compile(r"(?<![\w:])[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*")
 MIN_SYMBOL = 6
 MIN_QUOTE = 24
-PAGE_SIZES = (25, 10, 4, 1)
+PAGE_SIZE = 25
 
 
 # ---------------------------------------------------------------- matching --
@@ -374,7 +377,11 @@ class TraceDecay:
         if "problem" in structured:
             problem = structured["problem"]
             raise ToolProblem(problem.get("code", "unknown"), problem.get("message", ""))
-        return structured["outcome"]["value"]["payload"]
+        # Application tools wrap their payload in an outcome envelope;
+        # tracedecay_retrieve serves its page as the structuredContent itself.
+        if "outcome" in structured:
+            return structured["outcome"]["value"]["payload"]
+        return structured
 
 
 def discover(client: TraceDecay, refs: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
@@ -411,26 +418,17 @@ def all_refs(repo: str) -> list[tuple[str, str]]:
 
 def load_messages(client: TraceDecay, provider: str, session: str, scope: str) -> list[dict]:
     """Every stored message of one session; raises ToolProblem when unreadable."""
-    last: ToolProblem | None = None
-    for page in PAGE_SIZES:
-        messages: list[dict] = []
-        cursor = None
-        try:
-            while True:
-                arguments = {"session_id": session, "provider": provider, "storage_scope": scope, "limit": page, "content_limit": 20000}
-                if cursor:
-                    arguments["cursor"] = cursor
-                payload = client.call("tracedecay_lcm_load_session", arguments)
-                messages += payload["messages"]
-                cursor = payload["temporal"].get("next_cursor")
-                if not cursor or not payload["messages"]:
-                    return messages
-        except ToolProblem as problem:
-            last = problem
-            if problem.code != "application.retained.budget-refused":
-                raise
-    assert last is not None
-    raise last
+    messages: list[dict] = []
+    cursor = None
+    while True:
+        arguments = {"session_id": session, "provider": provider, "storage_scope": scope, "limit": PAGE_SIZE, "content_limit": 20000}
+        if cursor:
+            arguments["cursor"] = cursor
+        payload = client.call("tracedecay_lcm_load_session", arguments)
+        messages += payload["messages"]
+        cursor = payload["temporal"].get("next_cursor")
+        if not cursor or not payload["messages"]:
+            return messages
 
 
 def message_order(indexed: tuple[int, dict]) -> tuple:
@@ -654,6 +652,28 @@ def sum_rows(rows: list[dict], sessions: int) -> dict:
     return dict(total, **optional, tool="**all**", sessions=sessions)
 
 
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+def in_order(load: Callable[[T], R], keys: Iterable[T], jobs: int) -> Iterator[tuple[T, R]]:
+    """(key, load(key)) in key order, at most `jobs` loads running or awaiting the consumer.
+
+    Executor.map would submit every key up front and hold each finished session
+    until a slow earlier one is consumed, so memory would grow with the run.
+    """
+    window: deque[tuple[T, Future[R]]] = deque()
+    with ThreadPoolExecutor(jobs) as pool:
+        for key in keys:
+            window.append((key, pool.submit(load, key)))
+            if len(window) >= jobs:
+                head, future = window.popleft()
+                yield head, future.result()
+        while window:
+            head, future = window.popleft()
+            yield head, future.result()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--binary", default="tracedecay")
@@ -666,6 +686,7 @@ def main() -> int:
     parser.add_argument("--providers", help="comma-separated provider filter, e.g. claude,codex,kimi")
     parser.add_argument("--storage-scope", default="project", choices=("project", "user"))
     parser.add_argument("--max-sessions", type=int, default=0, help="0 = no limit")
+    parser.add_argument("--jobs", type=int, default=4, help="sessions loaded concurrently (each load is a chain of CLI calls)")
     parser.add_argument("--json", type=Path, help="write aggregate rows and coverage as JSON")
     parser.add_argument("--examples", type=int, default=0, help="print N sanitized scored calls per tool (path/symbol keys only; no source quotes)")
     args = parser.parse_args()
@@ -687,16 +708,20 @@ def main() -> int:
     if args.max_sessions:
         ordered = ordered[: args.max_sessions]
 
+    def load(key: tuple[str, str]) -> list[dict] | ToolProblem:
+        try:
+            return load_messages(client, key[0], key[1], args.storage_scope)
+        except ToolProblem as problem:
+            return problem
+
     coverage: Counter = Counter()
     by_provider: dict[str, Counter] = defaultdict(Counter)
     reports: list[CallReport] = []
-    for number, (provider, session) in enumerate(ordered, 1):
+    for number, ((provider, session), messages) in enumerate(in_order(load, ordered, max(1, args.jobs)), 1):
         stats = by_provider[provider]
         stats["discovered"] += 1
-        try:
-            messages = load_messages(client, provider, session, args.storage_scope)
-        except ToolProblem as problem:
-            stats["unreadable:" + problem.code.rsplit(".", 1)[-1]] += 1
+        if isinstance(messages, ToolProblem):
+            stats["unreadable:" + messages.code.rsplit(".", 1)[-1]] += 1
             continue
         if not messages:
             stats["empty"] += 1

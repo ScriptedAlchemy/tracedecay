@@ -165,7 +165,8 @@ pub(super) fn validate_day(day_start_seconds: i64) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn merge_coverage(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
+/// The less trustworthy of two coverage claims.
+pub fn merge_coverage(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
     const fn rank(state: CoverageStateV1) -> u8 {
         match state {
             CoverageStateV1::Known => 0,

@@ -2,13 +2,18 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tracedecay_contracts::ApplicationProblemRecord;
+use tracedecay_api::HttpApplicationControls;
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::{
+    ApplicationProblemRecord, CancellationSignal, Deadline, RequestId, now_micros,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{
-    CursorBindingMismatchV1, CursorBindingV1, decode_bound_cursor, encode_bound_cursor,
+    CursorBindingMismatchV1, CursorBindingV1, UtcMicros, decode_bound_cursor, encode_bound_cursor,
 };
 
 use crate::ToolResult;
@@ -91,6 +96,52 @@ pub fn owner_envelope_result(payload: &Value) -> Result<ToolResult> {
     problem_tool_result(&payload.to_string(), &problem)
 }
 
+/// The fallback request id an owner adapter (`owner` is `Work` or
+/// `Workflow`) mints when the protocol supplied none.
+pub(crate) fn mint_owner_request_id(owner: &str) -> Result<RequestId> {
+    mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
+        message: format!("could not allocate a {owner} request id"),
+    })
+}
+
+/// Bounds the protocol deadline by the owner binding's maximum and adopts the
+/// protocol cancellation, minting either one the protocol did not supply.
+pub(crate) fn owner_request_controls(
+    owner: &str,
+    maximum_millis: u64,
+    request_id: &RequestId,
+    protocol_deadline: Option<Deadline>,
+    protocol_cancellation: Option<CancellationSignal>,
+) -> Result<HttpApplicationControls> {
+    let maximum_micros =
+        i64::try_from(Duration::from_millis(maximum_millis).as_micros()).map_err(|_| {
+            TraceDecayError::project_route(
+                format!("{}.deadline_unavailable", owner.to_ascii_lowercase()),
+                false,
+                format!("The canonical {owner} deadline exceeds the domain clock"),
+            )
+        })?;
+    let maximum_deadline = UtcMicros(now_micros().0.saturating_add(maximum_micros));
+    let deadline = protocol_deadline
+        .filter(|deadline| deadline.expires_at <= maximum_deadline)
+        .map_or_else(|| Deadline::new(maximum_deadline), Ok)
+        .map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+    let cancellation = protocol_cancellation
+        .map_or_else(
+            || CancellationSignal::active(format!("cancellation.{}", request_id.as_str())),
+            Ok,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+    Ok(HttpApplicationControls {
+        deadline,
+        cancellation,
+    })
+}
+
 /// A compact JSON payload rendered as the tool's text content.
 pub fn json_result(value: &Value) -> ToolResult {
     text_tool_result(&value.to_string(), Vec::new()).with_structured_result(value.clone())
@@ -101,16 +152,6 @@ pub fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
         json!({ "content": [{ "type": "text", "text": text }] }),
         touched_files,
     )
-}
-
-/// [`rendered_tool_result`] for handlers that touch no files.
-pub fn tool_json_with_md<F: FnOnce() -> String>(
-    response_handle_root: Option<&Path>,
-    args: &Value,
-    value: &Value,
-    md: F,
-) -> ToolResult {
-    rendered_tool_result(response_handle_root, args, value, Vec::new(), md)
 }
 
 /// [`rendered_tool_result`] for handlers that don't need a custom markdown
@@ -197,12 +238,6 @@ pub fn require_positive_limit(limit: usize, tool_name: &str) -> Result<()> {
         });
     }
     Ok(())
-}
-
-/// Returns the user-provided `path` argument, falling back to the scope
-/// prefix when the argument is absent.
-pub fn effective_path<'a>(args: &'a Value, scope_prefix: Option<&'a str>) -> Option<&'a str> {
-    args.get("path").and_then(|v| v.as_str()).or(scope_prefix)
 }
 
 pub fn unique_file_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {

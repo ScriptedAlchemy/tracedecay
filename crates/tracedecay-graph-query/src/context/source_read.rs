@@ -7,6 +7,7 @@ use super::read_modes::{
     LineRange, ReadMode, render_lines, render_map, render_signatures, render_symbol_context,
 };
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::Database;
@@ -150,7 +151,7 @@ pub async fn read_source(
     .map_err(|_| TraceDecayError::Config {
         message: "source-read token count exceeds u32".to_owned(),
     })?;
-    let digest = read_cache::digest_bytes(body.as_bytes());
+    let digest = sha256_hex(body.as_bytes());
     if !read_only {
         read_cache::put(
             database,

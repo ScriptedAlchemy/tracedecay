@@ -1516,20 +1516,6 @@ pub fn stop_service(profile: &ProfileRoot, expected_version: &str) -> Result<()>
 /// `TraceDecay` protocol request from the socket configured in their installed
 /// unit and identify as the current installed version; stopped or missing
 /// services must remain quiescent.
-#[tracing::instrument(name = "daemon.service.wait_state", level = "trace", skip_all)]
-pub fn wait_for_installed_service_state(
-    profile: &ProfileRoot,
-    expected: DaemonServiceState,
-    expected_version: &str,
-) -> Result<()> {
-    wait_for_installed_service_state_with_runner(
-        profile,
-        &ServiceRunner::current(profile)?,
-        expected,
-        expected_version,
-    )
-}
-
 fn wait_for_installed_service_state_with_runner(
     profile: &ProfileRoot,
     runner: &ServiceRunner,

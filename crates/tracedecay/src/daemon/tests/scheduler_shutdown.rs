@@ -788,7 +788,7 @@ async fn engine_shutdown_with_code_index_reconcile_in_flight_stays_inside_term_g
     let home = home.path().canonicalize().expect("canonical home");
     let repository = home.join("repository");
     std::fs::create_dir_all(repository.join("src")).expect("create repository");
-    super::bootstrap::run_git(&repository, &["init", "-b", "main", "--quiet"]);
+    super::git(&repository, &["init", "-b", "main", "--quiet"]);
     for file in 0..24 {
         std::fs::write(
             repository.join(format!("src/module_{file}.rs")),
@@ -796,8 +796,8 @@ async fn engine_shutdown_with_code_index_reconcile_in_flight_stays_inside_term_g
         )
         .expect("fixture source");
     }
-    super::bootstrap::run_git(&repository, &["add", "."]);
-    super::bootstrap::run_git(&repository, &["commit", "-m", "fixture", "--quiet"]);
+    super::git(&repository, &["add", "."]);
+    super::git(&repository, &["commit", "-m", "fixture", "--quiet"]);
 
     let handshake = DaemonHandshake {
         project_path: Some(repository.clone()),

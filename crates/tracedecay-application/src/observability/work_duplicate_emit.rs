@@ -6,8 +6,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityEmissionOutcomeV1,
-    ObservabilityProducerIdentityV1, WorkOwnerObservationResultV1, execution_owner_fact_envelope,
+    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityProducerIdentityV1,
+    WorkOwnerObservationResultV1, execution_owner_fact_envelope,
 };
 
 /// Offers one exact durable adjudication receipt to the long-lived producer.
@@ -32,13 +32,7 @@ pub fn record_work_duplicate_observation(
     ) else {
         return WorkOwnerObservationResultV1::Unavailable;
     };
-    match producer.try_emit_owner_fact(envelope) {
-        Ok(ObservabilityEmissionOutcomeV1::Enqueued) => WorkOwnerObservationResultV1::Enqueued,
-        Ok(ObservabilityEmissionOutcomeV1::DroppedAtCapacity) => {
-            WorkOwnerObservationResultV1::DroppedAtCapacity
-        }
-        Err(_) => WorkOwnerObservationResultV1::Unavailable,
-    }
+    super::work_retry_leak_emit::offer(producer, envelope)
 }
 
 pub(crate) fn work_duplicate_observation_envelope(

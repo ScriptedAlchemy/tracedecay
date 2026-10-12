@@ -24,13 +24,13 @@ export interface PlateFocusMeta {
   readonly endLine: number | null;
 }
 
-export interface PlateField {
+interface PlateField {
   readonly label: string;
   readonly value: string;
   readonly absent: boolean;
 }
 
-export interface PlateColumn {
+interface PlateColumn {
   readonly side: 'up' | 'down';
   readonly hop: 1 | 2;
   readonly x0: number;
@@ -43,7 +43,7 @@ export interface PlateColumn {
   readonly notes: readonly { y: number; text: string }[];
 }
 
-export interface PlateRow {
+interface PlateRow {
   readonly node: TraceNode;
   readonly column: PlateColumn;
   readonly y: number;
@@ -57,7 +57,7 @@ export interface PlateRow {
 }
 
 /** One call link, caller row port to callee row port. */
-export interface PlateConnector {
+interface PlateConnector {
   readonly key: string;
   readonly d: string;
   /** x of each vertical run: the corridors this link shares with others. */
@@ -83,7 +83,7 @@ export interface PlateLayout {
 }
 
 /** Below this width the columns stack above and below the plate. */
-export const PLATE_STACK_BELOW = 700;
+const PLATE_STACK_BELOW = 700;
 export const PLATE_ROW = 44;
 const MARGIN = 12;
 const TITLE_H = 30;
@@ -106,7 +106,7 @@ function distinctRows(list: NeighborsPayload['callers']): { distinct: number; si
   return { distinct: new Set(rows.map((row) => row.id)).size, sites: rows.length };
 }
 
-export function plateFields(
+function plateFields(
   model: TraceModel,
   root: NeighborsPayload,
   meta: PlateFocusMeta,

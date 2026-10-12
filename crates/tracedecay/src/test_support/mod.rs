@@ -45,6 +45,28 @@ pub async fn hold_before_route_bind_for_test() -> Result<()> {
     hold_for_test("TRACEDECAY_TEST_HOLD_BEFORE_ROUTE_BIND", b"bind").await
 }
 
+/// Park a route-bind eviction's detached retirement before it waits out the
+/// in-flight opens and retires the evicted graph's process owners, when
+/// `TRACEDECAY_TEST_HOLD_BEFORE_EVICTED_OWNER_RETIRE` names a file.
+pub async fn hold_before_evicted_owner_retire_for_test() -> Result<()> {
+    hold_for_test(
+        "TRACEDECAY_TEST_HOLD_BEFORE_EVICTED_OWNER_RETIRE",
+        b"evicted-owner-retire",
+    )
+    .await
+}
+
+/// Park unserved-owner retirement after its served check found no published
+/// server and before it removes the process owners, when
+/// `TRACEDECAY_TEST_HOLD_AFTER_UNSERVED_OWNER_CHECK` names a file.
+pub async fn hold_after_unserved_owner_check_for_test() -> Result<()> {
+    hold_for_test(
+        "TRACEDECAY_TEST_HOLD_AFTER_UNSERVED_OWNER_CHECK",
+        b"unserved-owner-check",
+    )
+    .await
+}
+
 /// Releases `store`'s interactive catalog once nothing holds it. `Busy` means
 /// ask again later: after a test drops its own readers, a background catalog
 /// warm or residency pass can still hold the catalog for a moment.

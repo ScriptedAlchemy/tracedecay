@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use super::super::locking::acquire_code_generation_store_lock_checked;
+use super::super::locking::{acquire_code_generation_store_lock_checked, store_lock_park_count};
 use super::*;
 
 fn ensure_replay_pool(pool_root: &std::path::Path) {
@@ -241,21 +241,21 @@ fn segment_sweep_marks_a_replay_unlink_while_staged() {
 fn checked_acquire_returns_cancelled_without_waiting_out_the_budget() {
     let (_root, pool) = isolated_pool();
     let publisher = hold_replay_pool(&pool);
-    let started = Instant::now();
+    reset_graph_replay_pool_acquire_observation();
     let error = match acquire_graph_replay_pool_lock_checked(
         &pool,
         Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
-        &|| true,
+        &|| graph_replay_pool_acquire_observation().0 >= 1,
     ) {
         Ok(_) => panic!("cancellation must win a held-pool wait"),
         Err(error) => error,
     };
-    let elapsed = started.elapsed();
 
     assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
-    assert!(
-        elapsed < Duration::from_millis(20),
-        "cancelled acquire must not poll the budget, took {elapsed:?}"
+    assert_eq!(
+        graph_replay_pool_acquire_observation(),
+        (1, 0),
+        "a cancel raised after the contended try must stop before the park slice"
     );
     drop(publisher);
 }
@@ -268,23 +268,22 @@ fn execute_cancels_held_pool_acquire_before_any_exposure() {
     let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
         .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
-    let checks = AtomicUsize::new(0);
-    let started = Instant::now();
+    reset_graph_replay_pool_acquire_observation();
     let error = execute_code_generation_retention_cancellable(
         store.path(),
         plan,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(121),
         Some(&pool_root),
-        &|| checks.fetch_add(1, Ordering::SeqCst) >= 2,
+        &|| graph_replay_pool_acquire_observation().0 >= 1,
     )
     .expect_err("cancellation during pool wait must abort execute");
-    let elapsed = started.elapsed();
 
     assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
-    assert!(
-        elapsed < Duration::from_millis(20),
-        "cancelled execute must not wait out the acquire budget, took {elapsed:?}"
+    assert_eq!(
+        graph_replay_pool_acquire_observation(),
+        (1, 0),
+        "cancelled execute must stop before the acquire parks"
     );
     assert!(
         !transaction_path(store.path()).exists(),
@@ -327,21 +326,22 @@ fn checked_acquire_returns_busy_when_the_carried_deadline_has_elapsed() {
 fn store_lock_returns_cancelled_without_waiting_out_the_budget() {
     let (_root, store) = isolated_pool();
     let holder = hold_replay_pool(&store);
-    let started = Instant::now();
+    let consults = AtomicUsize::new(0);
+    let parks = store_lock_park_count();
     let error = match acquire_code_generation_store_lock_checked(
         &store,
         Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
-        &|| true,
+        &|| consults.fetch_add(1, Ordering::SeqCst) >= 1,
     ) {
         Ok(_) => panic!("cancellation must win a held store lock"),
         Err(error) => error,
     };
 
     assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
-    assert!(
-        started.elapsed() < Duration::from_millis(20),
-        "cancelled store lock must not poll the budget, took {:?}",
-        started.elapsed()
+    assert_eq!(
+        store_lock_park_count(),
+        parks,
+        "a cancel raised while the store lock is contended must stop before the park slice"
     );
     drop(holder);
 }
@@ -350,7 +350,7 @@ fn store_lock_returns_cancelled_without_waiting_out_the_budget() {
 fn store_lock_returns_busy_when_the_carried_deadline_has_elapsed() {
     let (_root, store) = isolated_pool();
     let holder = hold_replay_pool(&store);
-    let started = Instant::now();
+    let parks = store_lock_park_count();
     let error = match acquire_code_generation_store_lock_checked(&store, Instant::now(), &|| false)
     {
         Ok(_) => panic!("an elapsed deadline must defer a held store lock"),
@@ -361,10 +361,10 @@ fn store_lock_returns_busy_when_the_carried_deadline_has_elapsed() {
         error,
         CodeGenerationRetentionErrorV1::GenerationStoreBusy
     ));
-    assert!(
-        started.elapsed() < Duration::from_millis(20),
-        "an expired held store lock must not poll, took {:?}",
-        started.elapsed()
+    assert_eq!(
+        store_lock_park_count(),
+        parks,
+        "an expired held store lock must not poll"
     );
     drop(holder);
 }

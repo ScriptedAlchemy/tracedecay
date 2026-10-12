@@ -420,16 +420,6 @@ pub struct LcmConfigStatus {
     pub compression_boundary_cooldown_seconds: i64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmNoiseClassificationConfig {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ignore_session_patterns: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stateless_session_patterns: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ignore_message_patterns: Vec<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmGcConfig {
     #[serde(

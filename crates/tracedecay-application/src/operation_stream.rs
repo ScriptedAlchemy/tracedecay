@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 
 use schemars::JsonSchema;
@@ -19,18 +19,16 @@ use tokio_stream::Stream;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tracedecay_contracts::{
-    ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, CancellationContext,
-    CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, InvocationTarget,
-    LegalAction, OperationReceipt, ProblemOwningLayer, RequestContext, RequestId, ResolvedScope,
-    ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind,
-    StreamFrontier, StreamGap, StreamTermination, now_micros,
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    InvocationTarget, OperationReceipt, RequestContext, RequestId, ResolvedScope, ResumeToken,
+    StreamEvent, StreamEventKind, StreamFrontier, StreamGap, StreamTermination, now_micros,
 };
 use tracedecay_domain::{
     ActorId, CursorBindingMismatchV1, CursorBindingV1, ProjectId, RetrievalGrainV1,
     SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
     UtcMicros, canonical_sha256,
 };
-use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use tracedecay_temporal_query::cursor::InMemoryCursorAuthenticator;
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
@@ -44,17 +42,6 @@ use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 const RESUME_KEY_RANDOM_BYTES: usize = 16;
 const RESUME_KEY_MATERIAL_BYTES: usize = 32;
-
-/// Every operation-event problem shares this contract, so its schema identity
-/// is validated once per process instead of on each envelope conversion.
-static OPERATION_EVENT_PROBLEM_CONTRACT: LazyLock<ResultContractRef> = LazyLock::new(|| {
-    ResultContractRef::new(
-        SchemaId::new("schema.tracedecay.operation-event.problem.v1")
-            .unwrap_or_else(|_| panic!("the operation-event problem schema id is static")),
-        1,
-    )
-    .unwrap_or_else(|_| panic!("the operation-event problem contract is static"))
-});
 
 /// Stable operation identity. The originating authorized request owns the
 /// identity; paths, labels, and client-selected payloads never participate.
@@ -178,10 +165,6 @@ impl OperationBinding {
         &self.operation_id
     }
 
-    pub fn originating_request_id(&self) -> &RequestId {
-        &self.originating_request_id
-    }
-
     pub const fn operation(&self) -> OperationKind {
         self.operation
     }
@@ -247,85 +230,6 @@ pub enum OperationEventError {
     InvalidTestRunEvent,
     #[error("{0}")]
     CursorRefused(CursorBindingMismatchV1),
-}
-
-impl OperationEventError {
-    /// Converts runtime stream failures into the one canonical application
-    /// problem envelope used by every transport.
-    pub fn into_problem_envelope(
-        self,
-        request_id: RequestId,
-    ) -> Result<ApplicationProblemEnvelope, ApplicationContractError> {
-        let saturated = matches!(self, Self::Saturated);
-        let problem = match self {
-            Self::NotFoundOrNotAuthorized => {
-                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
-            }
-            Self::CursorRefused(mismatch) => ApplicationProblem::cursor_refused(&mismatch),
-            Self::FrontierExpired | Self::ResumeExpired => ApplicationProblem::Stale {
-                diagnostic: SafeDiagnostic::new(
-                    "operation_event.resume_expired",
-                    "The operation-event resume frontier has expired",
-                )?,
-                retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![LegalAction::Refresh],
-                detail: None,
-            },
-            Self::InvalidFrontier => ApplicationProblem::conflict(
-                "operation_event.invalid_frontier",
-                "The requested operation-event frontier is invalid",
-            ),
-            Self::RequestNotAdmitted => ApplicationProblem::timed_out_before_admission(),
-            Self::Saturated => ApplicationProblem::saturated(
-                "operation_event.saturated",
-                "Operation-event capacity is temporarily saturated",
-            ),
-            // Permanently invalid input: the same request can never succeed, so
-            // the client must correct it rather than retry.
-            Self::InvalidContext(_)
-            | Self::InvalidProgress
-            | Self::InvalidTerminal(_)
-            | Self::InvalidTestRunEvent => ApplicationProblem::invalid_request(
-                "operation_event.invalid_request",
-                "The operation-event request is invalid",
-            ),
-            // Idempotency facts: the identity or terminal receipt is already
-            // published, so the client re-reads current state instead of
-            // retrying the same publish.
-            Self::AlreadyBound | Self::TerminalAlreadyPublished => ApplicationProblem::conflict(
-                "operation_event.already_published",
-                "The operation-event identity is already published",
-            ),
-            // A misconfigured authority is a deterministic, process-lifetime
-            // failure. It is not the caller's request that is wrong and no
-            // amount of retrying will change the outcome.
-            Self::InvalidConfiguration => ApplicationProblem::Unsupported {
-                diagnostic: SafeDiagnostic::new(
-                    "operation_event.unsupported",
-                    "The operation-event authority is not configured for this operation",
-                )?,
-                retry: RetryDirective::Never,
-                legal_actions: vec![LegalAction::ContactAdministrator],
-                detail: None,
-            },
-            // Genuinely transient: the resume-token authority could not answer.
-            Self::ResumeUnavailable => ApplicationProblem::unavailable(SafeDiagnostic::new(
-                "operation_event.unavailable",
-                "The operation-event service is unavailable",
-            )?),
-        };
-        let envelope = ApplicationProblemEnvelope::new(
-            OPERATION_EVENT_PROBLEM_CONTRACT.clone(),
-            request_id,
-            problem,
-        )?
-        .with_owning_layer(ProblemOwningLayer::Runtime);
-        if saturated {
-            envelope.with_retry_after_millis(Some(250))
-        } else {
-            Ok(envelope)
-        }
-    }
 }
 
 /// What the live stream reports about a managed run it is still executing.
@@ -1485,35 +1389,13 @@ fn operation_resume_verification_error(error: CursorError) -> OperationEventErro
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_contracts::{
-        ApplicationProblemKind, Deadline, OperationBudgetUsage, OperationReceipt, RequestId,
-    };
+    use tracedecay_contracts::{Deadline, OperationBudgetUsage, OperationReceipt, RequestId};
     use tracedecay_domain::UtcMicros;
 
     use super::{
         ManagedTestRunProgress, OperationCancelOutcome, OperationEventAuthority,
-        OperationEventError, OperationEventItem, OperationId, StreamEventKind,
+        OperationEventItem, OperationId, StreamEventKind,
     };
-
-    #[test]
-    fn operation_stream_errors_use_canonical_problem_envelopes() {
-        let saturated = OperationEventError::Saturated
-            .into_problem_envelope(
-                RequestId::new("request.operation.saturated").expect("request id"),
-            )
-            .expect("saturated problem envelope");
-        assert_eq!(saturated.problem.kind(), ApplicationProblemKind::Saturated);
-        assert_eq!(saturated.problem.retry_after_millis, Some(250));
-
-        let expired = OperationEventError::ResumeExpired
-            .into_problem_envelope(RequestId::new("request.operation.expired").expect("request id"))
-            .expect("expired problem envelope");
-        assert_eq!(expired.problem.kind(), ApplicationProblemKind::Stale);
-        assert_eq!(
-            expired.problem.code,
-            "operation_event.resume_expired".to_owned()
-        );
-    }
 
     #[tokio::test]
     async fn a_live_managed_run_reports_progress_until_its_terminal_receipt() {

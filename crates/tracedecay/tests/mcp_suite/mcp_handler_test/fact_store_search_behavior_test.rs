@@ -316,7 +316,7 @@ async fn open_cross_project() -> CrossProject {
     let target_root = isolation.path().join("target");
     initialize_fact_project(&active_root);
     initialize_fact_project(&target_root);
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    let harness = Box::pin(crate::support::seeded_composition::open(
         isolation.path(),
         vec![active_root.clone(), target_root.clone()],
     ))

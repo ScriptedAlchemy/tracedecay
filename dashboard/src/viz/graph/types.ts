@@ -37,35 +37,3 @@ export interface GraphCanvasEdge {
   target: string;
   kind?: string;
 }
-
-export interface GraphCanvasEncoding {
-  /** What one circular body represents on this field. */
-  body: string;
-  /** The measurement mapped to body area. */
-  size: string;
-  /** The categorical measurement mapped to hue. */
-  hue: string;
-  /** The live or decaying measurement mapped to glow. */
-  signal: string;
-  /** What one drawn line represents. */
-  relation: string;
-}
-
-export const DEFAULT_ENCODING: GraphCanvasEncoding = {
-  body: 'one symbol',
-  size: 'connectedness',
-  hue: 'symbol kind',
-  signal: 'activation or supplied vitality',
-  relation: 'one real graph edge',
-};
-
-/** The frame a measured field is drawn in, in the caller's own coordinates.
- * Only meaningful alongside placed nodes. Without it the camera frames the
- * bodies that happen to exist, so a field with an empty region, no dormant
- * projects, say, silently loses that region and the reader is never shown
- * the absence. With it, an empty part of the axis stays empty on screen,
- * which is the finding. */
-export interface FieldExtent {
-  x: [number, number];
-  y: [number, number];
-}

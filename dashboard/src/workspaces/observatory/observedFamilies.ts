@@ -69,7 +69,7 @@ export const DIAGNOSTICS_WINDOW_ROWS = 10_000;
  * exists to stop small cells identifying anyone. Censored means the window the
  * daemon read could not have contained the answer either way.
  */
-export type FamilyReading =
+type FamilyReading =
   | { kind: 'observed'; count: number }
   | { kind: 'suppressed'; floor: number; reason: string }
   | { kind: 'censored'; reason: string }
@@ -77,7 +77,7 @@ export type FamilyReading =
 
 /** What a diagnostics read said about its own completeness, carried forward so
  * an absent family can be read against it. */
-export interface WindowTruth {
+interface WindowTruth {
   /** The daemon's own completeness word, printed verbatim and never softened. */
   completeness: string;
   /** True only for `complete`. Any other word leaves absence unprovable. */
@@ -145,7 +145,7 @@ export function readFamily(
 
 /** The state chip a family reading carries. A withheld cell is not an error and
  * not an outage: the daemon answered and the answer may not be shown. */
-export function familyState(reading: FamilyReading): DomainStateKind {
+function familyState(reading: FamilyReading): DomainStateKind {
   switch (reading.kind) {
     case 'observed':
       return 'ready';
@@ -218,8 +218,6 @@ export const ADOPTION_FUNNEL_STAGES = [
   'RepeatUseful',
 ] as const;
 
-export type AdoptionFunnelStage = (typeof ADOPTION_FUNNEL_STAGES)[number];
-
 export interface FunnelStageCount {
   stage: string;
   count: number | null;
@@ -239,7 +237,7 @@ export interface FunnelStageCount {
  * so two measured stages with an unmeasured one between them are still
  * comparable.
  */
-export type FunnelConsistency =
+type FunnelConsistency =
   | { kind: 'not_evaluable'; measured: number; reason: string }
   | { kind: 'consistent'; measured: number }
   | { kind: 'contradiction'; earlier: string; later: string; reason: string };

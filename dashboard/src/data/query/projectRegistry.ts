@@ -33,7 +33,7 @@ import type { WireSchema } from './wireSchema.ts';
 
 /** The prefix every registry query key starts with, and the one the daemon's
  * `project_registry_changed` invalidation names. */
-export const PROJECT_REGISTRY_ROOT = 'projects';
+const PROJECT_REGISTRY_ROOT = 'projects';
 
 /** `status` on a 404 from `GET /api/projects/{id}`: the registry was read and
  * holds no project under that id. Verbatim from `src/dashboard/projects.rs`. */

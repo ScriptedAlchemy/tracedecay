@@ -83,39 +83,26 @@ export type EvidenceState =
   | 'failed'
   | 'unavailable';
 
-export const EVIDENCE_STATES: readonly EvidenceState[] = [
-  'measured',
-  'empty',
-  'partial',
-  'stale',
-  'building',
-  'loading',
-  'restricted',
-  'denied',
-  'failed',
-  'unavailable',
-];
-
-export interface EvidenceCoverage {
+interface EvidenceCoverage {
   completeness: DashboardCoverageCompletenessV1;
   examined: number | null;
   denominator: number | null;
   unit: string | null;
 }
 
-export interface EvidenceFreshness {
+interface EvidenceFreshness {
   state: string;
   observedAtMicros: number | null;
   watermark: string | null;
 }
 
-export interface EvidenceScope {
+interface EvidenceScope {
   projectId: string | null;
   storageMode: string;
   storeRoot: string;
 }
 
-export interface DeclaredAction {
+interface DeclaredAction {
   kind: string;
   operation: string;
 }
@@ -774,7 +761,7 @@ export function diagnosticsWindowWord(
 
 // Timeline
 
-export interface TimelineMark {
+interface TimelineMark {
   id: EvidenceSourceId;
   title: string;
   state: EvidenceState;
@@ -795,7 +782,7 @@ export interface TimelineCluster {
   newestMicros: number;
 }
 
-export interface TimelineModel {
+interface TimelineModel {
   marks: readonly TimelineMark[];
   clusters: readonly TimelineCluster[];
   /** Sources whose authority published no observation time. Typed absence,

@@ -31,14 +31,12 @@
 //! is process-wide and monotonic.
 //!
 //! ```text
-//! TRACEDECAY_ATREST_MODE=replay  TRACEDECAY_ATREST_ROWS=500000 \
-//!   cargo test -p tracedecay-graph-db --features test-helpers,graph-disk-tier \
-//!   --test at_rest_grafeo_probe -- --ignored --nocapture --exact grafeo_at_rest_probe
-//!
-//! TRACEDECAY_ATREST_MODE=compact TRACEDECAY_ATREST_ROWS=500000 \
-//!   cargo test -p tracedecay-graph-db --features test-helpers,graph-disk-tier \
-//!   --test at_rest_grafeo_probe -- --ignored --nocapture --exact grafeo_at_rest_probe
+//! bazel test //crates/tracedecay-graph-db:at_rest_grafeo_probe \
+//!   --test_env=TRACEDECAY_ATREST_MODE=replay --test_env=TRACEDECAY_ATREST_ROWS=500000 \
+//!   --test_arg=--ignored --test_arg=--nocapture --test_output=streamed
 //! ```
+//!
+//! `TRACEDECAY_ATREST_MODE=compact` runs the columnar side.
 
 use std::time::{Duration, Instant};
 
@@ -170,8 +168,6 @@ fn grafeo_at_rest_probe() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("probe.grafeo");
 
-    // `compact()` takes `&mut self`, and only exists under `graph-disk-tier`.
-    #[cfg_attr(not(feature = "graph-disk-tier"), allow(unused_mut))]
     let mut database = GrafeoDB::with_config(config(&path)).unwrap();
 
     let started = Instant::now();
@@ -180,15 +176,8 @@ fn grafeo_at_rest_probe() {
 
     let mut compact_error = None;
     let compact_started = Instant::now();
-    if compact {
-        #[cfg(feature = "graph-disk-tier")]
-        if let Err(error) = database.compact() {
-            compact_error = Some(error.to_string());
-        }
-        #[cfg(not(feature = "graph-disk-tier"))]
-        {
-            compact_error = Some("graph-disk-tier feature is off".to_owned());
-        }
+    if compact && let Err(error) = database.compact() {
+        compact_error = Some(error.to_string());
     }
     let compact_wall = compact_started.elapsed();
 

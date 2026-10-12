@@ -71,15 +71,6 @@ pub enum WorkExecutableBindingError {
     Unavailable { executable_id: String },
 }
 
-pub trait WorkExecutableBindingResolver {
-    fn resolve(
-        &self,
-        reference: &WorkExecutableReference,
-        backend: WorkProviderBackendV1,
-        protocol: WorkProviderProtocol,
-    ) -> Result<ResolvedWorkExecutableBinding, WorkExecutableBindingError>;
-}
-
 #[derive(Clone, Debug)]
 pub struct PinnedWorkExecutableBindingResolver {
     bindings: BTreeMap<String, WorkExecutableBindingV1>,
@@ -114,10 +105,8 @@ impl PinnedWorkExecutableBindingResolver {
             configuration_snapshot_id: configuration.snapshot().snapshot_id.clone(),
         })
     }
-}
 
-impl WorkExecutableBindingResolver for PinnedWorkExecutableBindingResolver {
-    fn resolve(
+    pub fn resolve(
         &self,
         reference: &WorkExecutableReference,
         backend: WorkProviderBackendV1,
@@ -229,10 +218,7 @@ mod tests {
     };
     use tracedecay_runtime_core::test_executable::write_executable_script;
 
-    use super::{
-        PinnedWorkExecutableBindingResolver, WorkExecutableBindingError,
-        WorkExecutableBindingResolver, digest_file,
-    };
+    use super::{PinnedWorkExecutableBindingResolver, WorkExecutableBindingError, digest_file};
     use crate::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 
     fn digest(bytes: &[u8]) -> ManifestDigest {
