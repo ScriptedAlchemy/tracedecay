@@ -288,7 +288,7 @@ async fn production_mcp_cancel_refuses_bad_handles_and_keeps_a_finished_receipt(
         ],
     );
 
-    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+    let harness = crate::support::seeded_composition::open_for_session_retrieval(
         &isolation,
         [project.clone()],
     )

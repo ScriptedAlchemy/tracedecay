@@ -63,7 +63,7 @@ async fn mount_daemon_without_remote_plane() -> MountedDaemon {
         assert!(status.success(), "git must succeed for {project:?}");
     }
     let harness = Box::pin(
-        ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        crate::support::seeded_composition::open_for_session_retrieval(
             isolation.path(),
             [project.clone()],
         ),
