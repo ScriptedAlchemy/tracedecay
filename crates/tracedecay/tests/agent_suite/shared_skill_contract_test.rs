@@ -45,6 +45,11 @@ fn generated_cursor_agents_are_present_and_clean() {
                 "{file}: must teach only opaque session continuation cursors"
             ));
         }
+        if file == "agents/code-explorer.md" && raw.contains("exclude_node_ids") {
+            violations.push(format!(
+                "{file}: tracedecay_context rejects exclude_node_ids as an unknown field"
+            ));
+        }
     }
     assert_no_violations("generated cursor agents", &violations);
 }
