@@ -106,11 +106,8 @@ pub(super) struct InteractiveCatalogCache {
     /// read turns every later catalog lookup into the typed warming answer
     /// the reader could not have waited out.
     readers: std::sync::atomic::AtomicUsize,
-    /// One-shot retry a park release armed when a live read answered Busy:
-    /// without it the catalog and engine it could not free would stay
-    /// resident until an unrelated release ran. The last reader's lease drop
-    /// takes and runs it; while armed it is also the drain of record, so an
-    /// arm that lands after the drain would strand nothing newer.
+    /// One-shot retry of a park release a live read answered Busy, taken and
+    /// run by the last reader's lease drop.
     park_release_on_reads_drain: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     clock: Arc<WarmClock>,
 }
@@ -216,25 +213,23 @@ impl InteractiveCatalogCache {
         }
     }
 
-    /// Arm `release` for the moment the last live reader drops, when a park
-    /// release that answered `Busy` under this cache's reads runs again.
-    /// With no reader live there is no drain to wait on, so the armed
-    /// release is handed back for the caller to run now; either way exactly
-    /// one run happens and the slot is free for the next arm.
+    /// Arm `release` to run when the last live reader drops. `false` when no
+    /// reader is live: the read that answered Busy has already drained.
+    /// Checked under the slot lock, so a drain either sees the arm or the arm
+    /// sees the drain.
     pub(super) fn park_release_after_reads_drain(
         &self,
         release: Arc<dyn Fn() + Send + Sync>,
-    ) -> Option<Arc<dyn Fn() + Send + Sync>> {
+    ) -> bool {
         let mut armed = self
             .park_release_on_reads_drain
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *armed = Some(release);
         if self.readers.load(std::sync::atomic::Ordering::Acquire) == 0 {
-            armed.take()
-        } else {
-            None
+            return false;
         }
+        *armed = Some(release);
+        true
     }
 
     pub(super) fn residency(&self) -> CatalogResidency {

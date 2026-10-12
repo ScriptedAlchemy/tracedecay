@@ -823,32 +823,6 @@ impl CodeIndexSchedulerRegistryV1 {
             .release_decode_when_parked(&self.resident_owners);
     }
 
-    /// The owner-headroom epochs other owners advanced, as this worktree's
-    /// parked headroom reader sees them now. A park release announced as the
-    /// waiting refresh's retry grows it; this worktree's own releases do not.
-    #[cfg(test)]
-    pub async fn park_headroom_released_by_others_for_test(&self, project_root: &Path) -> u64 {
-        let project_root = canonical_existing_identity(project_root).expect("canonical root");
-        let mounted = self.mounted.lock().await;
-        let worktree = mounted.get(&project_root).expect("mounted worktree");
-        let mut headroom = self.resident_owners.subscribe_headroom();
-        worktree
-            .residency
-            .park_headroom
-            .released_by_others(&mut headroom)
-    }
-
-    /// Pin the refresh's resident-memory refusal bookkeeping. A reconcile
-    /// pass rewrites it on every pass, so a test exercising the park-release
-    /// announce under it sets it while holding the pass authority.
-    #[cfg(test)]
-    pub async fn set_refresh_waits_for_memory_for_test(&self, project_root: &Path, waits: bool) {
-        let project_root = canonical_existing_identity(project_root).expect("canonical root");
-        let mounted = self.mounted.lock().await;
-        let worktree = mounted.get(&project_root).expect("mounted worktree");
-        worktree.residency.set_refresh_waits_for_memory(waits);
-    }
-
     /// Drop only the decoded seat, as a deferred serving decode does once a
     /// published graph head serves from the text owner.
     #[cfg(test)]

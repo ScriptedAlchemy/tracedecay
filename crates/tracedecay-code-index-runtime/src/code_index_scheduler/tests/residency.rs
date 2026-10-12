@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use tracedecay_contracts::code_index_freshness::{
-    CodeGraphServingReadinessV1, CodeIndexStalenessStateV1,
+    CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexStalenessStateV1,
 };
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -1695,16 +1695,11 @@ async fn a_refused_refresh_waits_for_a_release_without_passive_reads_holding_its
     registry.shutdown().await;
 }
 
-/// An open read holds the serving graph's catalog and engine Busy through a
-/// park release while a refresh waits on resident memory, so nothing
-/// announces while it reads. The drain retry armed on that Busy runs when
-/// the read's last lease drops, frees the owners, and announces their
-/// release as headroom other owners gave back — the parked headroom reader
-/// counts it as the waiting refresh's retry rather than the worktree's own
-/// release (issue #3588 follow-up: the decode the retry reloads stays the
-/// worktree's own).
+/// A read holding the serving graph through a refresh's memory refusal keeps
+/// both the refusal's yield and the park release from freeing it. The read
+/// ending is what frees that graph, so it must retry the refresh.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_parked_serving_graph_release_retries_the_refresh_waiting_on_it() {
+async fn a_refresh_refused_while_a_read_holds_the_graph_retries_when_the_read_ends() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
@@ -1726,7 +1721,7 @@ async fn a_parked_serving_graph_release_retries_the_refresh_waiting_on_it() {
         .expect("installed graph store");
     graph_store
         .warm_serving_engine()
-        .expect("pin the serving engine so park has it to release");
+        .expect("pin the serving engine");
     let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     while text.code_graph_serving_readiness() != CodeGraphServingReadinessV1::Ready {
         assert!(
@@ -1735,73 +1730,51 @@ async fn a_parked_serving_graph_release_retries_the_refresh_waiting_on_it() {
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    // An open interactive reader holds the serving catalog the way a graph
-    // read holds it Busy to the refused refresh's yield.
-    let generation = text.metadata().manifest().generation_id.clone();
     let reader = graph_store
         .interactive_reader(
-            &generation,
+            &text.metadata().manifest().generation_id,
             &tracedecay_contracts::CancellationSignal::active("cancel.test.graph-reader")
                 .expect("graph cancellation"),
         )
-        .expect("an interactive reader holds the serving catalog");
+        .expect("an open graph read");
+    let blocker = ledger_leaving_one_mib(&resident_memory, "test-other-worktree-build");
+    refresh_refused_for_memory(&registry, &fixture).await;
+    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+    let refused_passes = || async {
+        registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("mounted worktree freshness")
+            .parked
+            .filter(|parked| {
+                parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+            })
+            .expect("the refresh is parked on resident memory")
+            .observed_passes
+    };
+    let before = refused_passes().await;
 
-    // A reconcile pass owns the refused-refresh flag; hold the pass
-    // authority and pin it so the release announces under the waiting
-    // refresh's bookkeeping while the serving text stays ready.
+    // A read can end off the runtime (a catalog re-warm thread holds the
+    // last lease) and while a pass runs.
     let pass = registry
         .hold_reconcile_pass_for_test(fixture.path())
         .await
         .expect("mounted worktree");
-    registry
-        .set_refresh_waits_for_memory_for_test(fixture.path(), true)
-        .await;
+    std::thread::spawn(move || drop(reader))
+        .join()
+        .expect("ending a graph read off the runtime must not panic");
     drop(pass);
 
-    // The open read holds the catalog and engine Busy through the park
-    // release, so nothing is freed or announced while it reads: the armed
-    // drain retry is what lets their release reach the refused refresh.
-    let released_by_others = registry
-        .park_headroom_released_by_others_for_test(fixture.path())
-        .await;
-    registry
-        .release_decode_when_parked_for_test(fixture.path())
-        .await;
-    for _ in 0..4 {
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        assert_eq!(
-            registry
-                .park_headroom_released_by_others_for_test(fixture.path())
-                .await,
-            released_by_others,
-            "the read still holds the graph owners Busy, so no release announces"
-        );
-    }
-
-    // The read ending drains its holds into the armed retry: the park
-    // release it resumes frees the serving graph and announces it as
-    // headroom other owners gave back — the refused refresh's retry.
-    drop(reader);
-    let announce_deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let seen = registry
-            .park_headroom_released_by_others_for_test(fixture.path())
-            .await;
-        if seen > released_by_others {
-            assert_eq!(
-                seen,
-                released_by_others + 1,
-                "the serving graph's park release is headroom other owners gave back"
-            );
-            break;
-        }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while refused_passes().await == before {
         assert!(
-            Instant::now() <= announce_deadline,
-            "the serving graph's park release is headroom other owners gave back"
+            Instant::now() <= deadline,
+            "the graph the ended read freed is the refused refresh's retry"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
+    drop(blocker);
     registry.shutdown().await;
 }
 

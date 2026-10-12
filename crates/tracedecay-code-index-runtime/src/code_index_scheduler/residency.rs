@@ -76,10 +76,7 @@ pub(super) struct WorktreeResidencyV1 {
 /// again, so its own release cannot help it (issue #3588). Waiters subtract
 /// these epochs from the shared epoch and wake only on what other owners gave
 /// back. Coalesced epochs stay countable: another owner's release that lands
-/// beside this worktree's own still leaves the difference ahead. A serving
-/// graph freed while `refresh_waits_for_memory` holds is announced as shared
-/// headroom instead: a refused refresh replaces that graph rather than
-/// re-decoding it, so the release is its retry.
+/// beside this worktree's own still leaves the difference ahead.
 #[derive(Default)]
 pub(super) struct ParkHeadroomV1(AtomicU64);
 
@@ -150,8 +147,6 @@ impl WorktreeResidencyV1 {
     /// waiting on. An engine a graph read holds answers busy and stays, so
     /// only the gaps between requests are taken; graph reads meanwhile answer
     /// warming, as after an idle release. A release is announced as headroom.
-    /// An owner still busy here but freed by the parked worker later is
-    /// announced as this refresh's headroom by `release_decode_when_parked`.
     pub(super) fn yield_serving_graph_to_refresh(self: &Arc<Self>, owners: &ResidentOwnersV1) {
         let released = [
             (
@@ -201,12 +196,7 @@ impl WorktreeResidencyV1 {
     /// next graph read reseats them. Do not clear `complete_generation_requested`: a demand that
     /// arrives during the take must still wake a successor pass to
     /// re-decode. The decode is announced as this worktree's own park
-    /// release: a retry re-decodes it (issue #3588). The serving graph is
-    /// announced the same way unless a refresh waits on memory; that pass
-    /// replaces the graph rather than re-decoding it, so its release is the
-    /// refresh's headroom. A graph owner a live read holds Busy arms a
-    /// one-shot retry on that read's drain, so the release it finally makes
-    /// still announces instead of stranding the refresh.
+    /// release: a retry re-decodes it (issue #3588).
     pub(super) fn release_decode_when_parked(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
         if self.busy() {
             self.arm_park_release_after_pass_settles(owners);
@@ -293,7 +283,7 @@ impl WorktreeResidencyV1 {
                 return;
             }
         }
-        let mut graph_released = Vec::new();
+        let mut graph_released = false;
         let mut graph_busy = false;
         for (kind, release) in [
             (
@@ -317,7 +307,7 @@ impl WorktreeResidencyV1 {
                         bytes = bytes.measured(),
                         "a parked worktree gave back its catalog or engine; the next graph read reseats it"
                     );
-                    graph_released.push(bytes);
+                    graph_released = true;
                 }
                 ResidentOwnerReleaseV1::Busy => {
                     graph_busy = true;
@@ -328,13 +318,10 @@ impl WorktreeResidencyV1 {
         if !decode_released.is_empty() {
             self.park_headroom.note(owners);
         }
-        // An owner a read held Busy here is freed by that read's drain
-        // instead; without the armed retry its release would never announce,
-        // stranding a refresh parked on memory until unrelated headroom came.
         if graph_busy {
             self.arm_park_release_after_graph_reads_drain(owners);
         }
-        if graph_released.is_empty() {
+        if !graph_released {
             return;
         }
         // A refresh waiting on memory replaces this serving graph instead of
@@ -348,17 +335,20 @@ impl WorktreeResidencyV1 {
         }
     }
 
-    /// A release attempt found a graph owner Busy under a live read: arm a
-    /// one-shot retry for when that read's last lease drops, on the serving
-    /// store and on the held predecessor the outgoing owner reads Busy from.
-    /// The retry re-reads the current serving text, so a stale generation's
-    /// drain cannot misroute it, and it routes through the same
-    /// `refresh_waits_for_memory` classification as the release it resumes.
-    /// With no live reader on either store the Busy was a stale read or a
-    /// non-reader hold: one immediate retry covers the first, and the
-    /// retrying flag keeps the second from recursing.
+    /// A graph owner a live read holds Busy is freed only when that read
+    /// ends, and nothing else would retry the release then. The read's last
+    /// lease drops on whatever thread ends it, possibly off the runtime, so
+    /// the armed retry is spawned rather than run there. With no read live
+    /// the Busy already drained and the release runs again now; the
+    /// `retrying` flag stops a hold that is not a read from recursing.
     fn arm_park_release_after_graph_reads_drain(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
-        let Some(text) = self.serving_text() else {
+        let Some(store) = self
+            .serving_text()
+            .and_then(|text| text.interactive_graph_store().ok())
+        else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
         if self
@@ -368,20 +358,17 @@ impl WorktreeResidencyV1 {
             return;
         }
         let residency = Arc::downgrade(self);
-        let owners = Arc::downgrade(owners);
-        let retry: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            if let (Some(residency), Some(owners)) = (residency.upgrade(), owners.upgrade()) {
-                residency.release_decode_when_parked(&owners);
-            }
-        });
-        if let Ok(store) = text.interactive_graph_store() {
-            store.park_release_after_reads_drain(Arc::clone(&retry));
-        }
-        if let Some(store) = text
-            .held_graph_predecessor()
-            .and_then(|held| held.interactive_graph_store().ok())
-        {
-            store.park_release_after_reads_drain(retry);
+        let weak_owners = Arc::downgrade(owners);
+        let armed = store.park_release_after_reads_drain(Arc::new(move || {
+            let (residency, owners) = (Weak::clone(&residency), Weak::clone(&weak_owners));
+            drop(runtime.spawn(async move {
+                if let (Some(residency), Some(owners)) = (residency.upgrade(), owners.upgrade()) {
+                    residency.release_decode_when_parked(&owners);
+                }
+            }));
+        }));
+        if !armed {
+            self.release_decode_when_parked(owners);
         }
         self.park_release_after_reads_drain_retrying
             .store(false, Ordering::Release);
