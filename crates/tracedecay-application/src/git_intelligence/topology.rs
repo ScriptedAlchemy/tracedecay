@@ -18,13 +18,6 @@ use super::{
 };
 
 impl NativeGitIntelligence {
-    pub fn topology_ref_watermark(&self) -> Result<ManifestDigest, GitIntelligenceError> {
-        let authority =
-            GitRepositoryAuthority::discover(&self.repo_root).map_err(map_repository_error)?;
-        let (_, _, watermark) = self.topology_ref_snapshot(&authority)?;
-        Ok(watermark)
-    }
-
     pub fn topology_projection(
         &self,
         max_count: u32,

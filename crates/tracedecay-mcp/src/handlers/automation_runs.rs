@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use serde_json::Value;
+use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_automation_runtime::automation::run_ledger::{
     find_run_record, load_run_records_page, read_run_artifact_payload,
 };
@@ -30,12 +31,6 @@ fn ledger_unavailable(operation: &str, error: TraceDecayError) -> TraceDecayErro
         true,
         format!("automation run ledger is unavailable during {operation}: {error}"),
     )
-}
-
-fn config_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
-    }
 }
 
 #[tracing::instrument(name = "mcp.automation.run_list.total", level = "trace", skip_all)]

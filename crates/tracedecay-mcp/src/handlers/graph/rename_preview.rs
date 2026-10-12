@@ -16,7 +16,7 @@ use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::McpToolContext;
-use crate::handlers::bounded_search::CancelSearchOnDrop;
+use crate::handlers::bounded_search::SetFlagOnDrop;
 use crate::handlers::support::{decode_primitive_request, unique_file_paths};
 use crate::server::{DispatchSettlement, dispatch_cancelled_error};
 use crate::tools::dispatch_ceiling::{tool_dispatch_budget, tool_dispatch_deadline_error};
@@ -354,7 +354,7 @@ pub async fn compute_rename_preview(
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
 
     let cancelled = Arc::new(AtomicBool::new(false));
-    let cancel_on_drop = CancelSearchOnDrop::new(Arc::clone(&cancelled));
+    let cancel_on_drop = SetFlagOnDrop::new(Arc::clone(&cancelled));
     let budget = tool_dispatch_budget("tracedecay_rename_preview", ctx.deadline())
         .ok_or_else(|| tool_dispatch_deadline_error("tracedecay_rename_preview", Duration::ZERO))?;
     let control = PreviewWalkControl {
