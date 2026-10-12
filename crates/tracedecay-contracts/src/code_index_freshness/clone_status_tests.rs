@@ -14,15 +14,10 @@ fn observation() -> CodeCloneIndexObservationV1 {
             source_bodies: Some(0),
             eligible_source_bodies: Some(0),
             conservative_normalized_bodies: Some(0),
-            near_fingerprint_bodies: Some(0),
             ..Default::default()
         },
         budgets: CodeCloneIndexBudgetsV1 {
-            posting_rows: 16_384,
-            candidate_bodies: 256,
-            verification_bodies: 64,
-            verification_token_work: 2_000_000,
-            ..Default::default()
+            minimum_body_tokens: 30,
         },
         resources: CodeCloneIndexResourcesV1 {
             bytes_on_disk: Some(4_096),
@@ -42,7 +37,7 @@ fn clone_readiness_preserves_all_states_and_a_complete_zero() {
         },
         CodeCloneIndexStatusV1::Partial {
             observation: sample.clone(),
-            omission_reasons: vec!["positional fingerprints missing".to_owned()],
+            omission_reasons: vec!["conservative postings missing".to_owned()],
         },
         CodeCloneIndexStatusV1::Ready {
             observation: sample.clone(),
@@ -72,13 +67,7 @@ fn clone_readiness_preserves_all_states_and_a_complete_zero() {
         ready["observation"]["coverage"]["eligible_source_bodies"],
         0
     );
-    assert_eq!(ready["observation"]["budgets"]["posting_rows"], 16_384);
-    assert_eq!(ready["observation"]["budgets"]["candidate_bodies"], 256);
-    assert_eq!(ready["observation"]["budgets"]["verification_bodies"], 64);
-    assert_eq!(
-        ready["observation"]["budgets"]["verification_token_work"],
-        2_000_000
-    );
+    assert_eq!(ready["observation"]["budgets"]["minimum_body_tokens"], 30);
     assert_eq!(
         ready["observation"]["resources"]["peak_scratch_memory_bytes"],
         512

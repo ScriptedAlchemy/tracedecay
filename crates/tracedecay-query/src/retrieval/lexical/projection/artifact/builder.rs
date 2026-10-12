@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::num::NonZeroUsize;
@@ -32,14 +32,12 @@ use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 
 use super::clone_census::read_clone_index_census;
 use super::clone_codec::{digest_from_key, digest_key};
-use super::fingerprints::CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1;
 use super::format::{
     BASE_SECTION_NAMES, CodeLexicalArtifactSectionDigestV1, CodeLexicalSourceSummaryV1,
     PostingListDecoderV1, PostingListEncoderV1, RECEIPT_RESERVATION_BYTES, SECTION_NAMES,
     SERVING_INDEX_STEP_COUNT_V11, STATISTICS_STEP_COUNT_V11, VerifiedCodeLexicalArtifactV1,
     absorb_page_base_sections_receipt, content_metadata_bytes, contract_number,
-    decode_fingerprint_postings, decode_padded_receipt_with_control,
-    decode_page_base_sections_receipt, encode_fingerprint_postings, encode_term_lists,
+    decode_padded_receipt_with_control, decode_page_base_sections_receipt, encode_term_lists,
     finish_base_section_receipt_fold, hash_bytes, initial_base_section_receipt_fold,
     metadata_digest, new_verified_receipt, padded_receipt, receipt_artifact_digest,
     stored_metadata_digest, verify_artifact_table_layout,
@@ -315,47 +313,6 @@ const CLONE_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
         "INSERT",
     ),
 ];
-const CLONE_FINGERPRINT_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 1] = [(
-    "builder_gate_clone_fingerprint_postings_insert",
-    "clone_fingerprint_postings",
-    "INSERT",
-)];
-/// Revision 16 stages fingerprint postings per batch in arrival order
-/// (`clone_fingerprint_postings_pages`) under the same private-builder gate
-/// and immutability guards as the row dictionary pages; finalization sorts
-/// them once into the keyed `clone_fingerprint_postings` tree and drops the
-/// staging table.
-const CLONE_FINGERPRINT_PAGES_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
-    (
-        "builder_gate_clone_fingerprint_postings_pages_insert",
-        "clone_fingerprint_postings_pages",
-        "INSERT",
-    ),
-    (
-        "builder_gate_clone_fingerprint_postings_pages_update",
-        "clone_fingerprint_postings_pages",
-        "UPDATE",
-    ),
-    (
-        "builder_gate_clone_fingerprint_postings_pages_delete",
-        "clone_fingerprint_postings_pages",
-        "DELETE",
-    ),
-];
-const CLONE_FINGERPRINT_PAGES_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 2] = [
-    (
-        "immutable_clone_fingerprint_postings_pages_update",
-        "clone_fingerprint_postings_pages",
-        "UPDATE",
-        "immutable clone fingerprint posting pages",
-    ),
-    (
-        "immutable_clone_fingerprint_postings_pages_delete",
-        "clone_fingerprint_postings_pages",
-        "DELETE",
-        "immutable clone fingerprint posting pages",
-    ),
-];
 const CLONE_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 6] = [
     (
         "immutable_clone_body_payloads_update",
@@ -392,20 +349,6 @@ const CLONE_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 6] = [
         "clone_exact_postings",
         "DELETE",
         "immutable clone exact postings",
-    ),
-];
-const CLONE_FINGERPRINT_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 2] = [
-    (
-        "immutable_clone_fingerprint_postings_update",
-        "clone_fingerprint_postings",
-        "UPDATE",
-        "immutable clone fingerprint postings",
-    ),
-    (
-        "immutable_clone_fingerprint_postings_delete",
-        "clone_fingerprint_postings",
-        "DELETE",
-        "immutable clone fingerprint postings",
     ),
 ];
 const IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 4] = [
@@ -592,11 +535,10 @@ enum FinalizationSectionV1 {
     CloneOccurrences,
     CloneExactPostings,
     CloneBodyPayloads,
-    CloneFingerprintPostings,
 }
 
 impl FinalizationSectionV1 {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 11] = [
         Self::SourcePages,
         Self::DocumentIntegrity,
         Self::Rows,
@@ -608,7 +550,6 @@ impl FinalizationSectionV1 {
         Self::CloneOccurrences,
         Self::CloneExactPostings,
         Self::CloneBodyPayloads,
-        Self::CloneFingerprintPostings,
     ];
 
     fn from_ordinal(ordinal: usize) -> Result<Self, CodeLexicalArtifactErrorV1> {
@@ -630,7 +571,6 @@ impl FinalizationSectionV1 {
             Self::CloneOccurrences => "clone_occurrences",
             Self::CloneExactPostings => "clone_exact_postings",
             Self::CloneBodyPayloads => "clone_body_payloads",
-            Self::CloneFingerprintPostings => "clone_fingerprint_postings",
             Self::FieldStatistics => "field_stats",
             Self::Vocabulary => "vocabulary",
         }
@@ -651,9 +591,6 @@ impl FinalizationSectionV1 {
             ),
             Self::CloneBodyPayloads => Some(
                 "SELECT ordinal, payload_digest, payload FROM clone_body_payloads ORDER BY ordinal",
-            ),
-            Self::CloneFingerprintPostings => Some(
-                "SELECT language, class, normalization_revision, fingerprint, posting_count, postings FROM clone_fingerprint_postings ORDER BY language, class, normalization_revision, fingerprint",
             ),
             Self::FieldStatistics => {
                 Some("SELECT field, total_length FROM field_stats ORDER BY field")
@@ -708,12 +645,6 @@ impl FinalizationSectionV1 {
             (Self::CloneBodyPayloads, true) => Some(
                 "SELECT ordinal, payload_digest, payload FROM clone_body_payloads WHERE ordinal > ?1 ORDER BY ordinal LIMIT ?2",
             ),
-            (Self::CloneFingerprintPostings, false) => Some(
-                "SELECT language, class, normalization_revision, fingerprint, posting_count, postings FROM clone_fingerprint_postings ORDER BY language, class, normalization_revision, fingerprint LIMIT ?1",
-            ),
-            (Self::CloneFingerprintPostings, true) => Some(
-                "SELECT language, class, normalization_revision, fingerprint, posting_count, postings FROM clone_fingerprint_postings WHERE (language, class, normalization_revision, fingerprint) > (?1, ?2, ?3, ?4) ORDER BY language, class, normalization_revision, fingerprint LIMIT ?5",
-            ),
             (
                 Self::DocumentIntegrity
                 | Self::Rows
@@ -747,12 +678,6 @@ enum PersistedFinalizationKeyV1 {
         digest: Vec<u8>,
         occurrence_ordinal: i64,
     },
-    Fingerprint {
-        language: String,
-        class: i64,
-        normalization_revision: i64,
-        fingerprint: i64,
-    },
 }
 
 impl PersistedFinalizationKeyV1 {
@@ -769,10 +694,6 @@ impl PersistedFinalizationKeyV1 {
                 | (
                     Self::ClonePosting { .. },
                     FinalizationSectionV1::CloneExactPostings
-                )
-                | (
-                    Self::Fingerprint { .. },
-                    FinalizationSectionV1::CloneFingerprintPostings
                 )
         )
     }
@@ -1005,18 +926,6 @@ impl CodeLexicalArtifactBuilderV1 {
         {
             return Err(CodeLexicalArtifactErrorV1::Incompatible(
                 "lexical artifact was staged without incremental field statistics".to_owned(),
-            ));
-        }
-        // Likewise, a staging file still accepting pages must carry the
-        // fingerprint staging table; one without it is refused as
-        // incompatible so the scheduler discards and restages it instead of
-        // retrying an `Io`.
-        if receipt.is_none()
-            && finalization.is_none()
-            && !table_exists(&connection, "clone_fingerprint_postings_pages")?
-        {
-            return Err(CodeLexicalArtifactErrorV1::Incompatible(
-                "lexical artifact was staged without fingerprint posting pages".to_owned(),
             ));
         }
         validate_contiguous_pages(&connection, control)?;
@@ -1692,19 +1601,7 @@ impl CodeLexicalArtifactBuilderV1 {
             };
             let transaction = self.connection.transaction().map_err(sqlite_error)?;
             verify_staged_source_chain(&transaction, source, control)?;
-            // The sorted pass and the count aggregation are the heaviest
-            // sorter statements in finalization; run them under the same
-            // sorter CPU admission as the pre-digest index wakes.
-            super::with_builder_sorter_cpu_admission(&transaction, || {
-                let _span = tracing::trace_span!(
-                    "query.artifact.finalization.derive_clone_fingerprint_postings"
-                )
-                .entered();
-                with_cancellable_sqlite_statement(&transaction, control, || {
-                    derive_clone_fingerprint_postings(&transaction, &self.mutation_gate, control)
-                })
-            })??;
-            let content_epoch = authenticated_authority_epoch(&transaction, source, control)?;
+            let content_epoch = authenticated_authority_epoch(&transaction, source)?;
             install_base_freeze(&transaction)?;
             store_finalization_state(
                 &transaction,
@@ -1869,11 +1766,7 @@ impl CodeLexicalArtifactBuilderV1 {
         verify_final_sections_against_source(&sections, &summary)?;
         let clone_index_census = {
             let _span = tracing::trace_span!("query.artifact.finalization.clone_census").entered();
-            read_clone_index_census(
-                &transaction,
-                CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
-                control,
-            )
+            read_clone_index_census(&transaction, control)
         }?;
         // The resume state binds the building worktree's source; the sealed
         // file keeps none of it, not even the space its row occupied.
@@ -3742,7 +3635,7 @@ fn append_prepared_clone_bodies(
         }
         posting_insert.finish()?;
     }
-    append_prepared_clone_fingerprints(transaction, pages, control)
+    Ok(())
 }
 
 /// The key `clone_body_payloads.payload_digest` stores for `digest`.
@@ -3751,138 +3644,6 @@ pub(super) fn stored_digest_key(digest: &str) -> Result<[u8; 32], CodeLexicalArt
         &ManifestDigest::new(digest.to_owned())
             .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
     )
-}
-
-fn append_prepared_clone_fingerprints(
-    transaction: &Transaction<'_>,
-    pages: &[PreparedCodeLexicalArtifactPageV1],
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    if !pages.iter().any(|page| {
-        page.clone_bodies
-            .iter()
-            .any(|body| body.fingerprint_stream.is_some())
-    }) {
-        return Ok(());
-    }
-    // Staged in arrival order, not into the keyed tree: fingerprints are
-    // hashes, so a direct insert lands every row on a random leaf of
-    // `clone_fingerprint_postings` and each batch commit rewrites (and
-    // journals) most of that tree. Measured on the 1,560-file bench corpus:
-    // 273k postings, 78 MiB final table, 2.1 GiB written through 28 commits
-    // (27x amplification); staged and sorted once at finalization, 0.4 GiB.
-    // Postings name their occurrence by its stored ordinal, which the
-    // occurrence rows of this batch were just assigned.
-    let mut ordinal = transaction
-        .prepare_cached("SELECT ordinal FROM clone_occurrences WHERE symbol_key = ?1")
-        .map_err(sqlite_error)?;
-    let mut insert = MultiRowInsertV1::new(
-        transaction,
-        "clone_fingerprint_postings_pages(language, class, normalization_revision, fingerprint, occurrence_ordinal, token_position)",
-        6,
-        sqlite_error,
-    )?;
-    for body in pages.iter().flat_map(|page| &page.clone_bodies) {
-        checkpoint(control)?;
-        let Some(stream) = &body.fingerprint_stream else {
-            continue;
-        };
-        let occurrence: i64 = ordinal
-            .query_row([stored_symbol_key(&body.symbol_occurrence_id)], |row| {
-                row.get(0)
-            })
-            .map_err(sqlite_error)?;
-        for position in &stream.positions {
-            insert.push([
-                sql_text(&stream.language),
-                sql_integer(i64::from(stream.class as u8)),
-                sql_integer(i64::from(stream.normalization_revision)),
-                sql_integer(i64::try_from(position.fingerprint).map_err(contract_number)?),
-                sql_integer(occurrence),
-                sql_integer(i64::from(position.token_position)),
-            ])?;
-        }
-    }
-    insert.finish()
-}
-
-/// `(language, class, normalization revision, fingerprint)` of one sealed
-/// fingerprint list.
-type FingerprintKeyV1 = (String, i64, i64, i64);
-
-/// Merge the staged fingerprint postings into one sealed list per
-/// `(language, class, normalization revision, fingerprint)` in a single
-/// sorted pass, so the keyed tree is written sequentially once, then drop the
-/// staging table. The keyed table keeps its private-builder insert gate, so
-/// the pass holds the mutation authority exactly as a batch append does.
-fn derive_clone_fingerprint_postings(
-    transaction: &Transaction<'_>,
-    mutation_gate: &Arc<AtomicU8>,
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let _mutation_authority = BuilderMutationGuardV1::enter(mutation_gate)?;
-    let mut select = transaction
-        .prepare(
-            "SELECT language, class, normalization_revision, fingerprint, occurrence_ordinal, token_position
-             FROM clone_fingerprint_postings_pages
-             ORDER BY language, class, normalization_revision, fingerprint, occurrence_ordinal, token_position",
-        )
-        .map_err(sqlite_error)?;
-    let mut insert = transaction
-        .prepare(
-            "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, posting_count, postings) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .map_err(sqlite_error)?;
-    let mut seal = |(language, class, revision, fingerprint): &FingerprintKeyV1,
-                    postings: &[(u32, u32)]|
-     -> Result<(), CodeLexicalArtifactErrorV1> {
-        insert
-            .execute(params![
-                language,
-                class,
-                revision,
-                fingerprint,
-                i64::try_from(postings.len()).map_err(contract_number)?,
-                encode_fingerprint_postings(postings)?,
-            ])
-            .map_err(sqlite_error)?;
-        Ok(())
-    };
-    let mut rows = select.query([]).map_err(sqlite_error)?;
-    let mut current: Option<(FingerprintKeyV1, Vec<(u32, u32)>)> = None;
-    let mut visited = 0usize;
-    while let Some(row) = rows.next().map_err(sqlite_error)? {
-        if visited.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
-            checkpoint(control)?;
-        }
-        visited += 1;
-        let key = (
-            row.get::<_, String>(0).map_err(sqlite_error)?,
-            row.get::<_, i64>(1).map_err(sqlite_error)?,
-            row.get::<_, i64>(2).map_err(sqlite_error)?,
-            row.get::<_, i64>(3).map_err(sqlite_error)?,
-        );
-        let occurrence =
-            u32::try_from(row.get::<_, i64>(4).map_err(sqlite_error)?).map_err(contract_number)?;
-        let position =
-            u32::try_from(row.get::<_, i64>(5).map_err(sqlite_error)?).map_err(contract_number)?;
-        if let Some((sealed, postings)) = current.take_if(|(current, _)| *current != key) {
-            seal(&sealed, &postings)?;
-        }
-        current
-            .get_or_insert_with(|| (key, Vec::new()))
-            .1
-            .push((occurrence, position));
-    }
-    if let Some((sealed, postings)) = current {
-        seal(&sealed, &postings)?;
-    }
-    drop(rows);
-    drop(select);
-    drop(insert);
-    transaction
-        .execute_batch("DROP TABLE clone_fingerprint_postings_pages;")
-        .map_err(sqlite_error)
 }
 
 /// Append one posting list per `(term, field)` and per `(exact term, field)`
@@ -4309,31 +4070,6 @@ fn create_schema(connection: &Connection) -> Result<(), CodeLexicalArtifactError
                 CREATE TRIGGER immutable_clone_occurrences_delete BEFORE DELETE ON clone_occurrences BEGIN SELECT RAISE(ABORT, 'immutable clone occurrences'); END;
                 CREATE TRIGGER immutable_clone_exact_postings_update BEFORE UPDATE ON clone_exact_postings BEGIN SELECT RAISE(ABORT, 'immutable clone exact postings'); END;
                 CREATE TRIGGER immutable_clone_exact_postings_delete BEFORE DELETE ON clone_exact_postings BEGIN SELECT RAISE(ABORT, 'immutable clone exact postings'); END;
-                CREATE TABLE clone_fingerprint_postings (
-                    language TEXT NOT NULL,
-                    class INTEGER NOT NULL,
-                    normalization_revision INTEGER NOT NULL,
-                    fingerprint INTEGER NOT NULL,
-                    posting_count INTEGER NOT NULL CHECK(posting_count > 0),
-                    postings BLOB NOT NULL,
-                    PRIMARY KEY(language, class, normalization_revision, fingerprint)
-                ) WITHOUT ROWID;
-                CREATE TABLE clone_fingerprint_postings_pages (
-                    language TEXT NOT NULL,
-                    class INTEGER NOT NULL,
-                    normalization_revision INTEGER NOT NULL,
-                    fingerprint INTEGER NOT NULL,
-                    occurrence_ordinal INTEGER NOT NULL,
-                    token_position INTEGER NOT NULL
-                );
-                CREATE TRIGGER builder_gate_clone_fingerprint_postings_insert BEFORE INSERT ON clone_fingerprint_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-                CREATE TRIGGER builder_gate_clone_fingerprint_postings_pages_insert BEFORE INSERT ON clone_fingerprint_postings_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-                CREATE TRIGGER builder_gate_clone_fingerprint_postings_pages_update BEFORE UPDATE ON clone_fingerprint_postings_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-                CREATE TRIGGER builder_gate_clone_fingerprint_postings_pages_delete BEFORE DELETE ON clone_fingerprint_postings_pages WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-                CREATE TRIGGER immutable_clone_fingerprint_postings_update BEFORE UPDATE ON clone_fingerprint_postings BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint postings'); END;
-                CREATE TRIGGER immutable_clone_fingerprint_postings_delete BEFORE DELETE ON clone_fingerprint_postings BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint postings'); END;
-                CREATE TRIGGER immutable_clone_fingerprint_postings_pages_update BEFORE UPDATE ON clone_fingerprint_postings_pages BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint posting pages'); END;
-                CREATE TRIGGER immutable_clone_fingerprint_postings_pages_delete BEFORE DELETE ON clone_fingerprint_postings_pages BEGIN SELECT RAISE(ABORT, 'immutable clone fingerprint posting pages'); END;
                 ",
         )
         .map_err(sqlite_error)
@@ -4373,10 +4109,8 @@ fn verify_layout_dependent_triggers(
     let has_term_posting_runs = table_exists(connection, "term_posting_runs")?;
     let has_exact_posting_runs = table_exists(connection, "exact_posting_runs")?;
     let has_clone_index = table_exists(connection, "clone_body_payloads")?;
-    let has_clone_fingerprints = table_exists(connection, "clone_fingerprint_postings")?;
-    let has_clone_fingerprint_pages = table_exists(connection, "clone_fingerprint_postings_pages")?;
     let has_source_page_cursors = table_exists(connection, "source_page_cursors")?;
-    let gated_layouts: [(bool, &[GateTriggerLayoutV1]); 10] = [
+    let gated_layouts: [(bool, &[GateTriggerLayoutV1]); 8] = [
         (
             has_source_page_cursors,
             &SOURCE_PAGE_CURSORS_BUILDER_GATE_TRIGGER_LAYOUT,
@@ -4406,16 +4140,8 @@ fn verify_layout_dependent_triggers(
             &EXACT_POSTING_RUNS_BUILDER_GATE_TRIGGER_LAYOUT,
         ),
         (has_clone_index, &CLONE_BUILDER_GATE_TRIGGER_LAYOUT),
-        (
-            has_clone_fingerprints,
-            &CLONE_FINGERPRINT_BUILDER_GATE_TRIGGER_LAYOUT,
-        ),
-        (
-            has_clone_fingerprint_pages,
-            &CLONE_FINGERPRINT_PAGES_BUILDER_GATE_TRIGGER_LAYOUT,
-        ),
     ];
-    let immutable_layouts: [(bool, &[ImmutableTriggerLayoutV1]); 7] = [
+    let immutable_layouts: [(bool, &[ImmutableTriggerLayoutV1]); 5] = [
         (true, &IMMUTABLE_TRIGGER_LAYOUT),
         (
             has_source_page_cursors,
@@ -4430,14 +4156,6 @@ fn verify_layout_dependent_triggers(
             &ROW_DICTIONARY_PAGES_IMMUTABLE_TRIGGER_LAYOUT,
         ),
         (has_clone_index, &CLONE_IMMUTABLE_TRIGGER_LAYOUT),
-        (
-            has_clone_fingerprints,
-            &CLONE_FINGERPRINT_IMMUTABLE_TRIGGER_LAYOUT,
-        ),
-        (
-            has_clone_fingerprint_pages,
-            &CLONE_FINGERPRINT_PAGES_IMMUTABLE_TRIGGER_LAYOUT,
-        ),
     ];
     verify_trigger_layouts(
         connection,
@@ -4553,7 +4271,6 @@ fn install_base_freeze(transaction: &Transaction<'_>) -> Result<(), CodeLexicalA
             CREATE TRIGGER frozen_clone_body_payloads_insert BEFORE INSERT ON clone_body_payloads BEGIN SELECT RAISE(ABORT, 'frozen clone body payloads'); END;
             CREATE TRIGGER frozen_clone_occurrences_insert BEFORE INSERT ON clone_occurrences BEGIN SELECT RAISE(ABORT, 'frozen clone occurrences'); END;
             CREATE TRIGGER frozen_clone_exact_postings_insert BEFORE INSERT ON clone_exact_postings BEGIN SELECT RAISE(ABORT, 'frozen clone exact postings'); END;
-            CREATE TRIGGER frozen_clone_fingerprint_postings_insert BEFORE INSERT ON clone_fingerprint_postings BEGIN SELECT RAISE(ABORT, 'frozen clone fingerprint postings'); END;
             ",
         )
         .map_err(sqlite_error)
@@ -4562,7 +4279,6 @@ fn install_base_freeze(transaction: &Transaction<'_>) -> Result<(), CodeLexicalA
 fn authenticated_authority_epoch(
     transaction: &Transaction<'_>,
     source: &VerifiedSealedLexicalSourceReceiptV1,
-    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<i64, CodeLexicalArtifactErrorV1> {
     verify_builder_mutation_gate_schema(transaction)?;
     let (pages, documents): (i64, i64) = transaction
@@ -4588,7 +4304,7 @@ fn authenticated_authority_epoch(
             "lexical artifact authenticated authority disagrees with its source receipt".to_owned(),
         ));
     }
-    verify_clone_rows(transaction, source, control)?;
+    verify_clone_rows(transaction, source)?;
     Ok(actual_epoch)
 }
 
@@ -4624,7 +4340,6 @@ fn admitted_documents(connection: &Connection) -> Result<u64, CodeLexicalArtifac
 fn verify_clone_rows(
     connection: &Connection,
     source: &VerifiedSealedLexicalSourceReceiptV1,
-    control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let (occurrences, missing_payloads, orphan_payloads, dangling_postings): (
         i64,
@@ -4650,46 +4365,6 @@ fn verify_clone_rows(
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "clone rows disagree with their source receipt or payload bindings".to_owned(),
         ));
-    }
-    // Every fingerprint posting names a stored occurrence, and each list's
-    // stored count is its length. The read path re-derives each candidate's
-    // selected positions from its canonical payload before trusting one.
-    let mut occurrence_ordinals = HashSet::new();
-    let mut statement = connection
-        .prepare("SELECT ordinal FROM clone_occurrences")
-        .map_err(sqlite_error)?;
-    let mut rows = statement.query([]).map_err(sqlite_error)?;
-    while let Some(row) = rows.next().map_err(sqlite_error)? {
-        occurrence_ordinals.insert(row.get::<_, i64>(0).map_err(sqlite_error)?);
-    }
-    drop(rows);
-    drop(statement);
-    let mut statement = connection
-        .prepare("SELECT posting_count, postings FROM clone_fingerprint_postings")
-        .map_err(sqlite_error)?;
-    let mut rows = statement.query([]).map_err(sqlite_error)?;
-    let mut visited = 0usize;
-    while let Some(row) = rows.next().map_err(sqlite_error)? {
-        if visited.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
-            checkpoint(control)?;
-        }
-        visited += 1;
-        let count: i64 = row.get(0).map_err(sqlite_error)?;
-        let encoded = row
-            .get_ref(1)
-            .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
-            .map_err(sqlite_corrupt)?;
-        let postings = decode_fingerprint_postings(encoded)?;
-        if usize::try_from(count).ok() != Some(postings.len())
-            || postings
-                .iter()
-                .any(|(occurrence, _)| !occurrence_ordinals.contains(&i64::from(*occurrence)))
-        {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "clone fingerprint postings disagree with their occurrences or stored counts"
-                    .to_owned(),
-            ));
-        }
     }
     Ok(())
 }
@@ -5820,7 +5495,6 @@ fn advance_section_rows(
         FinalizationSectionV1::CloneOccurrences
             | FinalizationSectionV1::CloneExactPostings
             | FinalizationSectionV1::CloneBodyPayloads
-            | FinalizationSectionV1::CloneFingerprintPostings
     ) {
         return advance_clone_section_rows(
             transaction,
@@ -5884,8 +5558,7 @@ fn advance_clone_section_rows(
         (
             FinalizationSectionV1::CloneOccurrences
             | FinalizationSectionV1::CloneExactPostings
-            | FinalizationSectionV1::CloneBodyPayloads
-            | FinalizationSectionV1::CloneFingerprintPostings,
+            | FinalizationSectionV1::CloneBodyPayloads,
             None,
         ) => advance_native_section_rows(
             transaction,
@@ -5925,22 +5598,6 @@ fn advance_clone_section_rows(
                 occurrence_ordinal,
                 limit
             ],
-            state,
-            control,
-        ),
-        (
-            FinalizationSectionV1::CloneFingerprintPostings,
-            Some(PersistedFinalizationKeyV1::Fingerprint {
-                language,
-                class,
-                normalization_revision,
-                fingerprint,
-            }),
-        ) => advance_native_section_rows(
-            transaction,
-            section,
-            section.walked_query(true)?,
-            params![language, class, normalization_revision, fingerprint, limit],
             state,
             control,
         ),
@@ -6027,7 +5684,6 @@ fn native_row_key(
         FinalizationSectionV1::CloneOccurrences
             | FinalizationSectionV1::CloneExactPostings
             | FinalizationSectionV1::CloneBodyPayloads
-            | FinalizationSectionV1::CloneFingerprintPostings
     ) {
         return clone_row_key(section, row);
     }
@@ -6045,12 +5701,9 @@ fn native_row_key(
         | FinalizationSectionV1::NgramPostings => Err(base_section_walk_error()),
         FinalizationSectionV1::CloneOccurrences
         | FinalizationSectionV1::CloneExactPostings
-        | FinalizationSectionV1::CloneBodyPayloads
-        | FinalizationSectionV1::CloneFingerprintPostings => {
-            Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "clone row key bypassed its dedicated decoder".to_owned(),
-            ))
-        }
+        | FinalizationSectionV1::CloneBodyPayloads => Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "clone row key bypassed its dedicated decoder".to_owned(),
+        )),
     }
 }
 
@@ -6074,23 +5727,9 @@ fn clone_row_key(
             occurrence_ordinal: row.get(3).map_err(sqlite_error)?,
         });
     }
-    let language = row.get(0).map_err(sqlite_error)?;
-    let class = row.get(1).map_err(sqlite_error)?;
-    let normalization_revision = row.get(2).map_err(sqlite_error)?;
-    let fingerprint = row.get(3).map_err(sqlite_error)?;
-    match section {
-        FinalizationSectionV1::CloneFingerprintPostings => {
-            Ok(PersistedFinalizationKeyV1::Fingerprint {
-                language,
-                class,
-                normalization_revision,
-                fingerprint,
-            })
-        }
-        _ => Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "non-fingerprint section requested a fingerprint row key".to_owned(),
-        )),
-    }
+    Err(CodeLexicalArtifactErrorV1::Corrupt(
+        "non-clone section requested a clone row key".to_owned(),
+    ))
 }
 
 fn initial_section_accumulator(name: &str) -> Result<[u8; 32], CodeLexicalArtifactErrorV1> {
@@ -6514,7 +6153,6 @@ pub(super) fn compute_section_digests(
         FinalizationSectionV1::CloneOccurrences,
         FinalizationSectionV1::CloneExactPostings,
         FinalizationSectionV1::CloneBodyPayloads,
-        FinalizationSectionV1::CloneFingerprintPostings,
     ] {
         sections.push(digest_query(connection, section, control)?);
     }
@@ -6728,12 +6366,7 @@ fn verify_finalized_artifact(
             "finalized lexical artifact content digest does not verify".to_owned(),
         ));
     }
-    if &read_clone_index_census(
-        connection,
-        CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
-        control,
-    )? != receipt.clone_index_census()
-    {
+    if &read_clone_index_census(connection, control)? != receipt.clone_index_census() {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "finalized lexical artifact clone census does not verify".to_owned(),
         ));
@@ -6905,7 +6538,6 @@ mod tests {
                 body_start: 0,
                 body_end: 1,
                 exact_keys: Vec::new(),
-                fingerprint_stream: None,
             })
             .collect();
         for body in &bodies {
@@ -6968,103 +6600,6 @@ mod tests {
             register_builder_mutation_gate(connection).expect("register builder mutation gate");
         create_schema(connection).expect("create artifact schema");
         BuilderMutationGuardV1::enter(&gate).expect("enter test builder mutation authority")
-    }
-
-    /// Fingerprint postings are appended to an arrival-ordered staging table
-    /// and reach the keyed tree only through the sorted finalization pass:
-    /// the staging table is gated like every other builder table, the pass
-    /// seals one list per fingerprint holding every posting in key order, and
-    /// nothing of the staging table survives it (so a finalized artifact
-    /// verifies without it).
-    #[test]
-    fn fingerprint_postings_stage_in_arrival_order_and_seal_one_list_per_fingerprint() {
-        let mut connection = Connection::open_in_memory().expect("fingerprint database");
-        let gate =
-            register_builder_mutation_gate(&connection).expect("register builder mutation gate");
-        create_schema(&connection).expect("create artifact schema");
-        verify_builder_mutation_gate_schema(&connection).expect("staging triggers present");
-
-        let refused = connection.execute(
-            "INSERT INTO clone_fingerprint_postings_pages(language, class, normalization_revision, fingerprint, occurrence_ordinal, token_position) VALUES ('rust', 1, 1, 9, 2, 0)",
-            [],
-        );
-        assert!(
-            refused
-                .expect_err("ungated staging insert must be refused")
-                .to_string()
-                .contains("private lexical builder mutation required")
-        );
-
-        // Arrival order deliberately disagrees with key order.
-        let arrivals = [
-            ("rust", 9_i64, 2_i64, 3_i64),
-            ("rust", 2, 2, 1),
-            ("go", 5, 1, 0),
-            ("rust", 2, 1, 7),
-            ("rust", 2, 1, 4),
-        ];
-        {
-            let _authority = BuilderMutationGuardV1::enter(&gate).expect("enter authority");
-            for (language, fingerprint, occurrence, position) in arrivals {
-                connection
-                    .execute(
-                        "INSERT INTO clone_fingerprint_postings_pages(language, class, normalization_revision, fingerprint, occurrence_ordinal, token_position) VALUES (?1, 1, 1, ?2, ?3, ?4)",
-                        params![language, fingerprint, occurrence, position],
-                    )
-                    .expect("stage fingerprint posting");
-            }
-        }
-        let keyed_before: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM clone_fingerprint_postings",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count keyed rows");
-        assert_eq!(keyed_before, 0, "appends must not touch the keyed tree");
-
-        let transaction = connection.transaction().expect("finalization transaction");
-        derive_clone_fingerprint_postings(&transaction, &gate, &ActiveControl)
-            .expect("sorted pass");
-        transaction.commit().expect("commit sorted pass");
-
-        assert!(
-            !table_exists(&connection, "clone_fingerprint_postings_pages").expect("table probe"),
-            "staging table must not survive finalization"
-        );
-        verify_builder_mutation_gate_schema(&connection)
-            .expect("finalized layout verifies without the staging table");
-        let mut statement = connection
-            .prepare(
-                "SELECT language, fingerprint, posting_count, postings FROM clone_fingerprint_postings ORDER BY language, class, normalization_revision, fingerprint",
-            )
-            .expect("prepare keyed read");
-        let sealed = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                ))
-            })
-            .expect("read keyed rows")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("collect keyed rows")
-            .into_iter()
-            .map(|(language, fingerprint, count, postings)| {
-                let postings = decode_fingerprint_postings(&postings).expect("canonical postings");
-                (language, fingerprint, count, postings)
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            sealed,
-            vec![
-                ("go".to_owned(), 5, 1, vec![(1, 0)]),
-                ("rust".to_owned(), 2, 3, vec![(1, 4), (1, 7), (2, 1)]),
-                ("rust".to_owned(), 9, 1, vec![(2, 3)]),
-            ]
-        );
     }
 
     #[test]
@@ -7169,38 +6704,6 @@ mod tests {
                 &ActiveControl,
             ) {
                 Ok(_) => panic!("resume must not seal statistics without staged totals"),
-                Err(error) => error,
-            };
-        assert!(matches!(error, CodeLexicalArtifactErrorV1::Incompatible(_)));
-    }
-
-    /// A revision-16 staging file written by the builder that inserted
-    /// fingerprint postings straight into the keyed tree has no staging table;
-    /// resuming it must be a typed incompatibility (discard and restage), not
-    /// a missing-table `Io` the scheduler would retry forever.
-    #[test]
-    fn resume_refuses_staging_without_fingerprint_posting_pages() {
-        let directory = tempfile::tempdir().expect("artifact tempdir");
-        let path = directory.path().join("no-fingerprint-staging.sqlite");
-        let metadata = test_metadata();
-        drop(
-            CodeLexicalArtifactBuilderV1::create(&path, metadata.clone())
-                .expect("create current staging artifact"),
-        );
-        let connection = Connection::open(&path).expect("open staging artifact for fixture setup");
-        connection
-            .execute_batch("DROP TABLE clone_fingerprint_postings_pages;")
-            .expect("install pre-staging fingerprint layout");
-        drop(connection);
-
-        let error =
-            match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
-                &path,
-                metadata,
-                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-                &ActiveControl,
-            ) {
-                Ok(_) => panic!("resume must not accept a staging file without fingerprint pages"),
                 Err(error) => error,
             };
         assert!(matches!(error, CodeLexicalArtifactErrorV1::Incompatible(_)));
@@ -7340,12 +6843,8 @@ mod tests {
         drop(reader);
 
         let connection = Connection::open(&path).expect("reopen for verification");
-        let error = read_clone_index_census(
-            &connection,
-            CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
-            &ActiveControl,
-        )
-        .expect_err("verification recomputes the census and refuses the payload");
+        let error = read_clone_index_census(&connection, &ActiveControl)
+            .expect_err("verification recomputes the census and refuses the payload");
         assert!(
             matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)),
             "expected a corruption refusal, got {error:?}"

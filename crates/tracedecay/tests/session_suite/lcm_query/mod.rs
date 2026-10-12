@@ -1,10 +1,8 @@
 use tempfile::TempDir;
 use tracedecay_lcm::{
     LCM_SCHEMA_VERSION, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmError,
-    LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest,
-    LcmGrepSort, LcmLifecycleUpdate, LcmLoadSessionRequest, LcmMaintenanceDebt, LcmScope,
-    LcmSessionReplayRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
-    MAX_DERIVED_SNIPPET_CHARS,
+    LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmLifecycleUpdate, LcmLoadSessionRequest,
+    LcmMaintenanceDebt, LcmSessionReplayRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
 };
 use tracedecay_project::test_support::host_admission::{
     HostAdmissionTestRuntimeV1, LcmLineageFaultForTest,
@@ -22,8 +20,6 @@ async fn registered_lcm_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
 }
 
 trait ProfileLcmFixture {
-    async fn upsert_session(&self, session: &SessionRecord) -> bool;
-
     async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool;
 
     async fn seed_session_messages(
@@ -46,12 +42,6 @@ trait ProfileLcmFixture {
 }
 
 impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
-    async fn upsert_session(&self, session: &SessionRecord) -> bool {
-        self.upsert_session_for_test(HostAdmissionScope::Profile, session)
-            .await
-            .unwrap_or(false)
-    }
-
     async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
         self.upsert_session_message_for_test(HostAdmissionScope::Profile, message)
             .await
@@ -210,10 +200,8 @@ fn summary_draft(
 
 mod describe;
 mod expand;
-mod expand_query;
-mod grep;
-mod grep_ranking;
 mod load_session;
 mod sessions;
 mod status;
+mod stored_body;
 mod visibility;

@@ -25,8 +25,7 @@
 //!    batches and finalize it, which is `query.artifact.append_pages` and
 //!    `query.artifact.finalization.advance_wake`;
 //! 7. with `--clone-envelope`, reopen the artifact, time first-reader and warm
-//!    exact-clone reads, record fingerprint accounting, cancel one read, and
-//!    reopen again.
+//!    exact-clone reads, and reopen again.
 //!
 //! Hermeticity is a hard requirement, not a nicety: a profiling run that
 //! touches a socket, the network, or the operator profile measures the
@@ -63,12 +62,11 @@ use std::time::{Duration, Instant};
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::clones::{CloneBodyEligibilityV1, CloneNormalizationClassV1};
 use tracedecay_code_index::production::{
-    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexExecutionControlV1,
-    CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1, CodeIndexPublishedBuildV1,
-    CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
-    MemorySealedPublicationStoreV1, PhysicalCodeArtifactPoolStatsV1,
-    UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1,
+    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionConfigV1,
+    CodeIndexProductionOwnerV1, CodeIndexPublishedBuildV1, CodeIndexPublishedGenerationV1,
+    CodeIndexRepositoryParseIdentityV1, MemorySealedPublicationStoreV1,
+    PhysicalCodeArtifactPoolStatsV1, UninterruptibleCodeIndexControlV1,
+    VerifiedSealedLexicalPageV1, VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_domain::{
     ChunkerRevision, ComponentRevision, ContentDigest, FileOccurrenceId, FreshnessCompatibilityV1,
@@ -79,14 +77,10 @@ use tracedecay_domain::{
     SourceNamespace, SymbolOccurrenceId, TreeId, UtcMicros,
 };
 use tracedecay_query::retrieval::lexical::{
-    CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
-    CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1, CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1,
-    CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1, CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneExactArtifactMemberV1,
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1,
     CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1,
-    MAX_CLONE_EXACT_PAGE_MEMBERS_V1, MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
-    VerifiedCodeLexicalArtifactV1,
+    MAX_CLONE_EXACT_PAGE_MEMBERS_V1, VerifiedCodeLexicalArtifactV1,
 };
 use tracedecay_query::retrieval::ports::{
     TEXT_ARTIFACT_BASE_BATCH_BYTES_V1, TEXT_ARTIFACT_BASE_BATCH_PAGES_V1,
@@ -428,17 +422,6 @@ fn build_body_refresh(
     ))
 }
 
-struct CancelledControl;
-
-impl CodeIndexExecutionControlV1 for CancelledControl {
-    fn is_cancelled(&self) -> bool {
-        true
-    }
-
-    fn is_deadline_exceeded(&self) -> bool {
-        false
-    }
-}
 // Workload
 
 struct GenerationRun {
@@ -942,77 +925,6 @@ fn measure_clone_queries(
         .map(|member| member.occurrence.path.clone())
         .collect::<Vec<_>>();
 
-    // Fingerprint authority must come from the artifact (serving-stamped), not
-    // the sealed page's extraction-provenance occurrence.
-    let artifact_source = reader
-        .clone_body(&source.occurrence.symbol_occurrence_id)
-        .map_err(|error| format!("read clone body for fingerprint authority: {error}"))?
-        .ok_or_else(|| {
-            format!(
-                "clone body {} is unavailable for fingerprint authority",
-                source.occurrence.symbol_occurrence_id.as_str()
-            )
-        })?;
-
-    let fingerprint = {
-        let read = reader
-            .clone_fingerprint_page(
-                &artifact_source.occurrence,
-                &artifact_source.payload,
-                None,
-                MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
-                control,
-            )
-            .map_err(|error| format!("read clone fingerprints: {error}"))?;
-        let cancelled = reader
-            .clone_fingerprint_page(
-                &artifact_source.occurrence,
-                &artifact_source.payload,
-                None,
-                MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
-                &CancelledControl,
-            )
-            .map_err(|error| format!("cancel clone fingerprints: {error}"))?;
-        let samples = read
-            .page
-            .members
-            .iter()
-            .take(10)
-            .filter_map(|candidate| {
-                candidate.occurrences.first().map(|occurrence| {
-                    serde_json::json!({
-                        "path": occurrence.path,
-                        "source_coverage_millionths": candidate.source_coverage_millionths,
-                        "candidate_coverage_millionths": candidate.candidate_coverage_millionths,
-                    })
-                })
-            })
-            .collect::<Vec<_>>();
-        serde_json::json!({
-            "state": "available",
-            "members": read.page.members.len(),
-            "has_more": read.page.next_cursor.is_some(),
-            "rejected_candidates": read.accounting.candidate_bodies_compared.saturating_sub(read.accounting.pairs_verified),
-            "samples": samples,
-            "partial_reasons": read.partial_reasons.iter().map(|reason| format!("{reason:?}")).collect::<Vec<_>>(),
-            "accounting": {
-                "postings_read": read.accounting.posting_rows_examined,
-                "hot_postings_skipped": read.accounting.hot_postings_skipped,
-                "hot_posting_rows_skipped": read.accounting.hot_posting_rows_skipped,
-                "candidates_admitted": read.accounting.candidates_admitted,
-                "candidate_bodies_compared": read.accounting.candidate_bodies_compared,
-                "pairs_verified": read.accounting.pairs_verified,
-                "token_work": read.accounting.token_work,
-                "elapsed_micros": read.accounting.elapsed_micros,
-            },
-            "cancelled": {
-                "coverage_unknown": cancelled.coverage.unknown,
-                "partial_reasons": cancelled.partial_reasons.iter().map(|reason| format!("{reason:?}")).collect::<Vec<_>>(),
-                "point": cancelled.accounting.cancellation_point.map(|point| format!("{point:?}")),
-            },
-        })
-    };
-
     drop(reader);
     let restart_started = Instant::now();
     let restarted = CodeLexicalArtifactReaderV1::open_with_control(
@@ -1050,18 +962,9 @@ fn measure_clone_queries(
             "family_has_more": family.has_more,
             "family_sample_paths": family_sample_paths,
         },
-        "fingerprint": fingerprint,
         "restart": {
             "open_micros": restart_open_micros,
             "members": restart.members.len(),
-        },
-        "policy": {
-            "posting_row_budget": CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1,
-            "candidate_body_budget": CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1,
-            "hot_posting_threshold": CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
-            "body_comparison_budget": CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1,
-            "token_work_budget": CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1,
-            "minimum_coverage_millionths": CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1,
         },
     }))
 }

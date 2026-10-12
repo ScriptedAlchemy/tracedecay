@@ -1,4 +1,4 @@
-//! Configuration receipts and outbox effects through the production registry.
+//! Configuration receipts through the production registry.
 //!
 //! Every journey publishes a profile store with `open_registered_test_database_fixture`
 //! (the registry and schema installer production admission uses) and submits
@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use serde_json::{Value as Json, json};
+use serde_json::json;
 use tracedecay_domain::configuration::{
     ConfigurationAuditEvent, ConfigurationAuditEventKindV1, ConfigurationIdempotencyKey,
     ConfigurationReceiptId, ConfigurationRevisionId,
@@ -17,11 +17,10 @@ use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
     ConfigurationCommitV1, ConfigurationMutationReceiptV1, ConfigurationRevisionRecordV1,
-    ConfigurationRevisionStore, OutboxEffectStateV1, RepositoryOperationEnvelopeV1,
-    RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1, RuntimeRequestControlV1,
-    RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
+    ConfigurationRevisionStore, RepositoryOperationEnvelopeV1, RepositoryWritePayloadV1,
+    RuntimeBatchCompatibilityV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
+    RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
     RuntimeTransactionScopeV1, StoreOperationMetadataV1, StoreRuntimeBindingV1,
-    TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
 
 use super::super::revision::insert_revision;
@@ -523,193 +522,6 @@ async fn repository_and_store_configuration_commits_replay_exactly() {
     assert!(
         matches!(conflict, Err(ConfigurationStoreError::IdempotencyConflict)),
         "a different commit under the same idempotency key conflicts, got {conflict:?}"
-    );
-}
-
-fn outbox_entry(binding: &StoreRuntimeBindingV1, effect_id: &str) -> TransactionalOutboxEntryV1 {
-    let mut target = serde_json::to_value(&binding.shard_id).expect("shard json");
-    target["scope"] = json!({ "kind": "project_sessions", "project_id": "project.outbox" });
-    serde_json::from_value(json!({
-        "identity": {
-            "effect_id": effect_id,
-            "command_digest": format!("sha256:{}", "e".repeat(64)),
-            "ordering_key": "parity.ordering",
-            "source_watermark": {
-                "shard_id": binding.shard_id,
-                "incarnation": binding.incarnation,
-                "authority_epoch": binding.authority_epoch,
-                "commit_sequence": 0
-            },
-            "target_watermark": {
-                "shard_id": target,
-                "incarnation": binding.incarnation,
-                "authority_epoch": binding.authority_epoch,
-                "commit_sequence": 0
-            }
-        },
-        "effect": "publish_observation",
-        "state": "pending",
-        "acknowledgement": null,
-        "enqueued_at": 1_000,
-        "updated_at": 1_000
-    }))
-    .expect("outbox entry")
-}
-
-fn inbox_receipt(entry: &TransactionalOutboxEntryV1) -> TransactionalInboxReceiptV1 {
-    let identity = serde_json::to_value(&entry.identity).expect("effect identity");
-    let mut target_watermark = identity["target_watermark"].clone();
-    target_watermark["commit_sequence"] = json!(1);
-    serde_json::from_value(json!({
-        "identity": identity,
-        "disposition": "applied",
-        "target_commit_watermark": target_watermark,
-        "committed_at": 2_000
-    }))
-    .expect("inbox receipt")
-}
-
-#[tokio::test]
-async fn outbox_transitions_without_an_enqueued_row_name_that_cause() {
-    let (_directory, db, _owner) = publish_profile("profile-outbox-missing.db").await;
-    let pending = outbox_entry(db.binding(), "effect.parity.missing");
-    let mut dispatched = pending.clone();
-    dispatched
-        .transition(OutboxEffectStateV1::Dispatched, UtcMicros(2_000))
-        .expect("dispatch transition");
-    let transitions = [
-        (
-            "operation.outbox.missing.dispatch",
-            RepositoryWritePayloadV1::EnqueueOutbox(Box::new(dispatched)),
-        ),
-        (
-            "operation.outbox.missing.acknowledge",
-            RepositoryWritePayloadV1::AcknowledgeOutbox(Box::new(inbox_receipt(&pending))),
-        ),
-    ];
-    for (operation_id, payload) in transitions {
-        let request = submit_request(db.binding(), operation_id, operation_id, 2_000, payload);
-        let error = dispatch(&db, request)
-            .await
-            .expect_err("a transition of an effect that was never enqueued must fail");
-        let rendered = format!("{error:?}");
-        assert!(
-            rendered.contains("outbox effect was never enqueued"),
-            "{operation_id} without an enqueued row reported: {rendered}"
-        );
-    }
-    assert_eq!(
-        count_rows(&db, "SELECT COUNT(*) FROM td_runtime_writer_outbox_v1").await,
-        0
-    );
-}
-
-/// The repository attachment owns no effect domain, so it cannot apply an
-/// inbox effect; recording an `applied` receipt here would claim work that
-/// never ran.
-#[tokio::test]
-async fn repository_attachment_rejects_applying_an_inbox_effect() {
-    let (_directory, db, _owner) = publish_profile("profile-inbox.db").await;
-    let binding = db.binding().clone();
-    let mut source = serde_json::to_value(&binding.shard_id).expect("shard json");
-    source["scope"] = json!({ "kind": "project_sessions", "project_id": "project.inbox" });
-    let mut entry = serde_json::to_value(outbox_entry(&binding, "effect.parity.inbox"))
-        .expect("outbox entry json");
-    entry["identity"]["target_watermark"]["shard_id"] =
-        entry["identity"]["source_watermark"]["shard_id"].take();
-    entry["identity"]["source_watermark"]["shard_id"] = source;
-    entry["state"] = json!("dispatched");
-    let entry: TransactionalOutboxEntryV1 =
-        serde_json::from_value(entry).expect("inbound outbox entry");
-    let request = submit_request(
-        &binding,
-        "operation.inbox.apply",
-        "key.inbox.apply",
-        2_000,
-        RepositoryWritePayloadV1::ApplyInbox(Box::new(entry)),
-    );
-    let error = dispatch(&db, request)
-        .await
-        .expect_err("the repository attachment must not apply an inbox effect");
-    let rendered = format!("{error:?}");
-    assert!(
-        rendered.contains("repository attachment does not own apply inbox effect"),
-        "apply inbox through the repository attachment reported: {rendered}"
-    );
-    assert_eq!(
-        count_rows(&db, "SELECT COUNT(*) FROM td_runtime_writer_inbox_v1").await,
-        0
-    );
-}
-
-#[tokio::test]
-async fn outbox_enqueue_dispatch_and_acknowledge_commit_through_the_registry() {
-    let (_directory, db, _owner) = publish_profile("profile-outbox.db").await;
-    let binding = db.binding().clone();
-    let pending = outbox_entry(&binding, "effect.parity.lifecycle");
-    let effect_id = pending.identity.effect_id.as_str().to_owned();
-    let enqueue = submit_request(
-        &binding,
-        "operation.outbox.enqueue",
-        "key.outbox.enqueue",
-        1_000,
-        RepositoryWritePayloadV1::EnqueueOutbox(Box::new(pending.clone())),
-    );
-    let outcome = dispatch(&db, enqueue)
-        .await
-        .unwrap_or_else(|error| panic!("enqueue pending outbox effect failed: {error:?}"));
-    require_committed(outcome, "enqueue pending outbox effect");
-
-    let mut dispatched = pending.clone();
-    dispatched
-        .transition(OutboxEffectStateV1::Dispatched, UtcMicros(2_000))
-        .expect("dispatch transition");
-    let dispatch_request = submit_request(
-        &binding,
-        "operation.outbox.dispatch",
-        "key.outbox.dispatch",
-        2_000,
-        RepositoryWritePayloadV1::EnqueueOutbox(Box::new(dispatched)),
-    );
-    let outcome = dispatch(&db, dispatch_request)
-        .await
-        .unwrap_or_else(|error| panic!("dispatch outbox effect failed: {error:?}"));
-    require_committed(outcome, "dispatch outbox effect");
-
-    let acknowledge = submit_request(
-        &binding,
-        "operation.outbox.acknowledge",
-        "key.outbox.acknowledge",
-        3_000,
-        RepositoryWritePayloadV1::AcknowledgeOutbox(Box::new(inbox_receipt(&pending))),
-    );
-    let outcome = dispatch(&db, acknowledge)
-        .await
-        .unwrap_or_else(|error| panic!("acknowledge outbox effect failed: {error:?}"));
-    require_committed(outcome, "acknowledge outbox effect");
-
-    let state = text_cell(
-        &db,
-        "SELECT state FROM td_runtime_writer_outbox_v1 WHERE effect_id = ?1",
-        &effect_id,
-    )
-    .await;
-    assert_eq!(state, "acknowledged");
-    let entry_json = text_cell(
-        &db,
-        "SELECT entry_json FROM td_runtime_writer_outbox_v1 WHERE effect_id = ?1",
-        &effect_id,
-    )
-    .await;
-    let entry: Json = serde_json::from_str(&entry_json).expect("outbox entry json");
-    assert_eq!(entry["state"], json!("acknowledged"));
-    assert!(
-        entry["acknowledgement"].is_object(),
-        "acknowledged outbox row keeps its acknowledgement receipt: {entry}"
-    );
-    assert_eq!(
-        count_rows(&db, "SELECT COUNT(*) FROM td_runtime_writer_outbox_v1").await,
-        1
     );
 }
 

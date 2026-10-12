@@ -12,13 +12,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tracedecay_daemon_protocol::DaemonHandshake;
+use tracedecay_daemon_protocol::connection::write_daemon_handshake_preamble;
+
 use crate::code_index_journey::{
-    commit_all, exact_identity, git, initialize_tracedecay, stop_daemon_gracefully,
-    wait_for_open_phase, wait_for_terminal_generation,
+    RECEIPT_TIMEOUT, commit_all, exact_identity, git, initialize_tracedecay,
+    stop_daemon_gracefully, wait_for_open_phase, wait_for_readiness, wait_for_terminal_generation,
 };
 use crate::common::{
-    IsolatedHome, daemon_socket_path, poll_until, spawn_tracedecay_daemon_logged,
-    spawn_tracedecay_daemon_with, tracedecay_command_with_home,
+    IsolatedHome, daemon_authority_path, daemon_socket_path, poll_until,
+    spawn_tracedecay_daemon_logged, spawn_tracedecay_daemon_with, tracedecay_command_with_home,
 };
 
 const ANCHOR: &str = "shutdown_checkpoint_anchor";
@@ -247,6 +252,172 @@ async fn stop_after_independent_owners_releases_every_project_store() {
             wal_bytes(store),
             0,
             "a stop after owner registration keeps no WAL for {}",
+            store.display()
+        );
+    }
+}
+
+/// An initialized MCP session on its own daemon connection. The daemon serves
+/// it through the project's server for as long as the connection stays open,
+/// so that server is leased until [`LiveMcpSession::close`].
+struct LiveMcpSession {
+    stream: tokio::io::BufReader<tokio::net::UnixStream>,
+}
+
+impl LiveMcpSession {
+    async fn open(home: &Path, handshake: &DaemonHandshake) -> Self {
+        let project = handshake.project_path.as_deref().expect("project route");
+        let authority: Value = serde_json::from_slice(
+            &fs::read(daemon_authority_path(&home.join(".tracedecay")))
+                .expect("published daemon authority"),
+        )
+        .expect("daemon authority JSON");
+        let token = authority["auth_token"].as_str().expect("daemon token");
+        let mut stream = tokio::net::UnixStream::connect(daemon_socket_path(home))
+            .await
+            .expect("connect to the daemon");
+        write_daemon_handshake_preamble(&mut stream, token, handshake)
+            .await
+            .expect("write the daemon preamble");
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "route-eviction", "version": "1"}
+            }
+        });
+        stream
+            .write_all(format!("{initialize}\n").as_bytes())
+            .await
+            .expect("write MCP initialize");
+        let mut stream = tokio::io::BufReader::new(stream);
+        let response = tokio::time::timeout(RECEIPT_TIMEOUT, async {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let read = stream.read_line(&mut line).await.expect("read MCP frame");
+                assert!(read > 0, "the daemon closed {}", project.display());
+                let frame: Value = serde_json::from_str(&line).expect("MCP frame JSON");
+                if frame["id"] == 1 {
+                    return frame;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("initialize never answered for {}", project.display()));
+        assert!(
+            response.get("error").is_none(),
+            "initialize failed for {}: {response}",
+            project.display()
+        );
+        Self { stream }
+    }
+
+    /// Ends the session and waits for the daemon to close its side.
+    async fn close(mut self) {
+        self.stream
+            .get_mut()
+            .shutdown()
+            .await
+            .expect("end the MCP session");
+        let mut rest = Vec::new();
+        tokio::time::timeout(RECEIPT_TIMEOUT, self.stream.read_to_end(&mut rest))
+            .await
+            .expect("the daemon closes the ended session")
+            .expect("read until the daemon closes");
+    }
+}
+
+/// Every cached project has a live session when a ninth open passes capacity
+/// admission, so nothing is retired up front. One session ends before that
+/// open binds its route, and the bounded bind evicts the now-idle project. That
+/// eviction must stop the project's process-global owners, or they keep its
+/// stores leased through shutdown.
+#[tokio::test]
+async fn route_bind_eviction_releases_the_evicted_project_stores() {
+    let (environment, first) = IsolatedHome::new();
+    let mut projects = vec![first];
+    projects.extend((1..=8).map(|ordinal| environment.scratch().join(format!("p{ordinal}"))));
+    let projects = projects
+        .into_iter()
+        .map(|project| {
+            initialize_repository(&project);
+            project.canonicalize().expect("canonical fixture project")
+        })
+        .collect::<Vec<_>>();
+    let (incoming, cached) = projects.split_last().expect("nine projects");
+    let log_path = environment.scratch().join("route-bind-eviction.log");
+    let hold = environment.scratch().join("hold-before-route-bind");
+    let entered = PathBuf::from(format!("{}.entered", hold.display()));
+    let socket = daemon_socket_path(environment.home());
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
+        command.env("TRACEDECAY_TEST_HOLD_BEFORE_ROUTE_BIND", &hold);
+    });
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
+    let mut sessions = Vec::new();
+    for project in cached {
+        initialize_tracedecay(environment.home(), project);
+        let handshake = tracedecay::daemon::handshake_for_current_client(
+            environment.profile(),
+            Some(project.clone()),
+            None,
+            false,
+            false,
+        )
+        .expect("project handshake");
+        wait_for_readiness(&socket, &handshake, "ready", RECEIPT_TIMEOUT).await;
+        sessions.push(LiveMcpSession::open(environment.home(), &handshake).await);
+    }
+
+    let _ = fs::remove_file(&entered);
+    fs::write(&hold, b"hold").expect("hold file");
+    let home = environment.home().to_path_buf();
+    let incoming_project = incoming.clone();
+    let init = std::thread::spawn(move || initialize_tracedecay(&home, &incoming_project));
+    poll_until(
+        Instant::now() + RECEIPT_TIMEOUT,
+        Duration::from_millis(20),
+        || entered.is_file().then_some(()),
+        || "the ninth open never reached its route bind".to_owned(),
+    );
+    sessions.remove(0).close().await;
+    fs::remove_file(&hold).expect("release the held open");
+    init.join().expect("the ninth project initializes");
+
+    let log = fs::read_to_string(&log_path).expect("daemon log");
+    assert!(
+        !log.contains(&format!(
+            "event=project_server_warmup outcome=error project={}",
+            incoming.display()
+        )),
+        "every cached project was leased, so the ninth open must not retire one up front; log={log}"
+    );
+    assert_eq!(
+        log.matches(&format!(
+            "project={} phase=graph_admitted",
+            incoming.display()
+        ))
+        .count(),
+        1,
+        "the ninth open must evict at its route bind, not retry through capacity retirement; log={log}"
+    );
+    for session in sessions {
+        session.close().await;
+    }
+    stop_daemon_gracefully(&mut daemon);
+
+    let log = fs::read_to_string(&log_path).expect("daemon log");
+    assert_clean_shutdown_log(&log);
+    let (graph_db, sessions_db) = project_stores(environment.home(), &cached[0]);
+    for store in [&graph_db, &sessions_db] {
+        assert!(store.is_file(), "{} was mounted", store.display());
+        assert_eq!(
+            wal_bytes(store),
+            0,
+            "the evicted project keeps no WAL for {}",
             store.display()
         );
     }

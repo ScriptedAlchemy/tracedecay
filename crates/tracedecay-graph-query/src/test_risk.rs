@@ -313,7 +313,11 @@ pub fn verified_test_evidence(
         None => (
             graph.edges_among(
                 &occurrences,
-                &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Annotates],
+                &[
+                    RelationEdgeKindV1::Calls,
+                    RelationEdgeKindV1::Annotates,
+                    RelationEdgeKindV1::Contains,
+                ],
                 MAX_TEST_RISK_RELATIONS,
             )?,
             Vec::new(),
@@ -404,7 +408,7 @@ fn rust_test_module_declarers(
         .collect::<Vec<_>>();
     let edges = graph.edges_among(
         &occurrences,
-        &[RelationEdgeKindV1::Annotates],
+        &[RelationEdgeKindV1::Annotates, RelationEdgeKindV1::Contains],
         MAX_TEST_RISK_RELATIONS,
     )?;
     Ok((page.symbols, edges))
@@ -477,6 +481,21 @@ fn scoped_test_edges(
         edges.push(edge.edge);
         neighbors.push(edge.neighbor);
     }
+    // `#[cfg(test)]` containment is intra-file, so every member a gate
+    // encloses sits inside the scoped census.
+    let remaining = MAX_TEST_RISK_RELATIONS
+        .checked_sub(edges.len())
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| {
+            test_risk_graph_problem("verified test-risk relation census exceeded its budget")
+        })?;
+    let contained = graph.edges_among(occurrences, &[RelationEdgeKindV1::Contains], remaining)?;
+    if edges.len().saturating_add(contained.len()) > MAX_TEST_RISK_RELATIONS {
+        return Err(test_risk_graph_problem(
+            "verified test-risk relation census exceeded its budget",
+        ));
+    }
+    edges.extend(contained);
     Ok((edges, neighbors))
 }
 

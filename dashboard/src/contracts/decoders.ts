@@ -2258,23 +2258,11 @@ export const CapabilityIdSchema: z.ZodType<string, unknown> = z.string();
 /** Strongly typed canonical identity: `CatalogGenerationId`. */
 export const CatalogGenerationIdSchema: z.ZodType<string, unknown> = z.string();
 
-/** Fixed per-request clone candidate and verification budgets. */
+/** Fixed automatic clone-discovery limits. */
 export const CodeCloneIndexBudgetsV1Schema: z.ZodObject<{
-  candidate_bodies: z.ZodType<number, unknown>;
-  hot_posting_rows: z.ZodType<number, unknown>;
   minimum_body_tokens: z.ZodType<number, unknown>;
-  minimum_directional_coverage_millionths: z.ZodType<number, unknown>;
-  posting_rows: z.ZodType<number, unknown>;
-  verification_bodies: z.ZodType<number, unknown>;
-  verification_token_work: z.ZodType<number, unknown>;
 }> = z.object({
-  candidate_bodies: z.number().int().min(0),
-  hot_posting_rows: z.number().int().min(0),
   minimum_body_tokens: z.number().int().min(0),
-  minimum_directional_coverage_millionths: z.number().int().min(0),
-  posting_rows: z.number().int().min(0),
-  verification_bodies: z.number().int().min(0),
-  verification_token_work: z.number().int().min(0),
 });
 
 /** Coverage retained by one clone-index artifact or in-progress successor.
@@ -2289,10 +2277,6 @@ export const CodeCloneIndexCoverageV1Schema: z.ZodObject<{
   excluded_incomplete_tokenization_bodies: z.ZodType<number | null, unknown>;
   excluded_too_large_bodies: z.ZodType<number | null, unknown>;
   excluded_too_small_bodies: z.ZodType<number | null, unknown>;
-  hot_posting_rows_skipped: z.ZodType<number | null, unknown>;
-  hot_postings_skipped: z.ZodType<number | null, unknown>;
-  near_fingerprint_bodies: z.ZodType<number | null, unknown>;
-  near_fingerprint_postings: z.ZodType<number | null, unknown>;
   payloads_reused: z.ZodType<number | null, unknown>;
   rename_normalized_bodies: z.ZodType<number | null, unknown>;
   rename_partial_bodies: z.ZodType<number | null, unknown>;
@@ -2306,10 +2290,6 @@ export const CodeCloneIndexCoverageV1Schema: z.ZodObject<{
   excluded_incomplete_tokenization_bodies: z.number().int().min(0).nullable(),
   excluded_too_large_bodies: z.number().int().min(0).nullable(),
   excluded_too_small_bodies: z.number().int().min(0).nullable(),
-  hot_posting_rows_skipped: z.number().int().min(0).nullable(),
-  hot_postings_skipped: z.number().int().min(0).nullable(),
-  near_fingerprint_bodies: z.number().int().min(0).nullable(),
-  near_fingerprint_postings: z.number().int().min(0).nullable(),
   payloads_reused: z.number().int().min(0).nullable(),
   rename_normalized_bodies: z.number().int().min(0).nullable(),
   rename_partial_bodies: z.number().int().min(0).nullable(),

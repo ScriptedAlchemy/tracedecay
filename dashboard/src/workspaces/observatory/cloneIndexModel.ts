@@ -29,7 +29,7 @@ export function cloneIndexDetail(status: CodeCloneIndexStatusV1): string {
     case 'partial':
       return status.omission_reasons.join(' · ');
     case 'ready':
-      return 'exact and near-fingerprint postings are ready';
+      return 'exact clone postings are ready';
     case 'stale':
       return status.reason;
     default:

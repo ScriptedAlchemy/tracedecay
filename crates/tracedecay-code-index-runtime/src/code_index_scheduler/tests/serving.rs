@@ -951,10 +951,10 @@ fn clone_index_is_ready_when_the_artifact_first_seals() {
         (
             observation.coverage.source_bodies,
             observation.coverage.eligible_source_bodies,
-            observation.coverage.near_fingerprint_bodies,
+            observation.coverage.conservative_normalized_bodies,
         ),
         (Some(2), Some(2), Some(2)),
-        "positional fingerprints cover both eligible bodies at the first seal"
+        "conservative exact postings cover both eligible bodies at the first seal"
     );
     assert!(observation.resources.peak_scratch_memory_bytes.is_some());
     let artifact_path = active_text_artifact_path(store.path());
@@ -1118,7 +1118,7 @@ async fn dashboard_freshness_reports_the_sealed_clone_census_across_a_restart() 
             observation.coverage.source_bodies,
             observation.coverage.eligible_source_bodies,
             observation.coverage.unique_payloads,
-            observation.coverage.near_fingerprint_bodies,
+            observation.coverage.conservative_normalized_bodies,
         ));
         registry.shutdown().await;
     }

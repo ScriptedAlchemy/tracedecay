@@ -13,7 +13,6 @@
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::ops::Range;
 use std::sync::Arc;
 
 use serde::de::{SeqAccess, Visitor};
@@ -298,15 +297,6 @@ impl CloneTokenStreamV1 {
             position: 0,
             rename: 0,
         }
-    }
-
-    /// The tokens at `range` as their own stream, or `None` when the range
-    /// leaves the stream.
-    pub fn slice(&self, range: Range<usize>) -> Result<Option<Self>, CloneTokenStreamErrorV1> {
-        if range.start > range.end || range.end > self.len() {
-            return Ok(None);
-        }
-        Self::from_tokens(self.iter().skip(range.start).take(range.len())).map(Some)
     }
 
     /// Whether `other` reads this stream's token codes, as a rename stream
@@ -594,29 +584,5 @@ mod tests {
             conservative.renamed([(2, "$0")]).err(),
             Some(CloneTokenStreamErrorV1::RenameNotSyntax { position: 2 })
         );
-    }
-
-    #[test]
-    fn a_slice_is_its_own_stream_and_an_outside_range_is_none() {
-        let stream = CloneTokenStreamV1::from_tokens([
-            start("block"),
-            syntax("identifier", "a"),
-            syntax("identifier", "b"),
-            end("block"),
-        ])
-        .expect("stream")
-        .renamed([(2, "$1")])
-        .expect("rename");
-
-        assert_eq!(
-            stream
-                .slice(1..3)
-                .expect("slice")
-                .expect("inside")
-                .iter()
-                .collect::<Vec<_>>(),
-            [syntax("identifier", "a"), syntax("identifier", "$1")]
-        );
-        assert!(stream.slice(3..5).expect("slice").is_none());
     }
 }

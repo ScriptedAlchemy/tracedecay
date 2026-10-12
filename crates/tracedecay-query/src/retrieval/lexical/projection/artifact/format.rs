@@ -47,7 +47,7 @@ pub(super) use super::schema::{SERVING_INDEX_STEP_COUNT_V11, STATISTICS_STEP_COU
 // Revision 15 adds independently digested clone payload, occurrence, and
 // exact-posting sections without changing lexical document integrity.
 pub(super) const RECEIPT_RESERVATION_BYTES: usize = 16 * 1024;
-pub(super) const SECTION_NAMES: [&str; 12] = [
+pub(super) const SECTION_NAMES: [&str; 11] = [
     "source_pages",
     "document_integrity",
     "rows",
@@ -59,7 +59,6 @@ pub(super) const SECTION_NAMES: [&str; 12] = [
     "clone_occurrences",
     "clone_exact_postings",
     "clone_body_payloads",
-    "clone_fingerprint_postings",
 ];
 pub(super) const BASE_SECTION_NAMES: [&str; 5] = [
     "document_integrity",
@@ -310,7 +309,7 @@ type ColumnShapeV1 = (&'static str, &'static str, i64, i64);
 /// `(table, WITHOUT ROWID, columns)` for every table a staging or sealed
 /// artifact always carries. Staging-only append tables are dropped by
 /// finalization and carry no serving contract.
-const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
+const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 11] = [
     (
         "source_pages",
         false,
@@ -412,18 +411,6 @@ const ARTIFACT_TABLE_LAYOUT: [(&str, bool, &[ColumnShapeV1]); 12] = [
             ("normalization_revision", "INTEGER", 1, 2),
             ("digest", "BLOB", 1, 3),
             ("occurrence_ordinal", "INTEGER", 1, 4),
-        ],
-    ),
-    (
-        "clone_fingerprint_postings",
-        true,
-        &[
-            ("language", "TEXT", 1, 1),
-            ("class", "INTEGER", 1, 2),
-            ("normalization_revision", "INTEGER", 1, 3),
-            ("fingerprint", "INTEGER", 1, 4),
-            ("posting_count", "INTEGER", 1, 0),
-            ("postings", "BLOB", 1, 0),
         ],
     ),
 ];
@@ -783,94 +770,6 @@ pub(super) fn inflate_bytes(
         return Err(corrupt("does not inflate to its length"));
     }
     Ok(inflated)
-}
-
-/// One fingerprint's sealed posting list: its `(occurrence ordinal, token
-/// position)` postings sorted by ordinal then position, one group per
-/// ordinal (the varint ordinal, absolute for the first group and a non-zero
-/// delta after, the varint posting count, then the first position and each
-/// later non-zero delta).
-pub(super) fn encode_fingerprint_postings(
-    postings: &[(u32, u32)],
-) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
-    let unordered = || {
-        CodeLexicalArtifactErrorV1::Contract(
-            "clone fingerprint postings are not strictly ordered".to_owned(),
-        )
-    };
-    let mut encoded = Vec::with_capacity(postings.len() * 4);
-    let mut previous_ordinal: Option<u32> = None;
-    let mut start = 0;
-    while start < postings.len() {
-        let ordinal = postings[start].0;
-        let end = start
-            + postings[start..]
-                .iter()
-                .take_while(|(candidate, _)| *candidate == ordinal)
-                .count();
-        let delta = match previous_ordinal {
-            None => ordinal,
-            Some(previous) if ordinal > previous => ordinal - previous,
-            Some(_) => return Err(unordered()),
-        };
-        previous_ordinal = Some(ordinal);
-        encode_varint(u64::from(delta), &mut encoded);
-        encode_varint(
-            u64::try_from(end - start).map_err(contract_number)?,
-            &mut encoded,
-        );
-        let mut previous_position = None;
-        for (_, position) in &postings[start..end] {
-            let delta = match previous_position {
-                None => *position,
-                Some(previous) if *position > previous => position - previous,
-                Some(_) => return Err(unordered()),
-            };
-            encode_varint(u64::from(delta), &mut encoded);
-            previous_position = Some(*position);
-        }
-        start = end;
-    }
-    Ok(encoded)
-}
-
-/// Inverse of [`encode_fingerprint_postings`], failing closed on any
-/// non-canonical order, empty group, overflow, or truncation.
-pub(super) fn decode_fingerprint_postings(
-    mut encoded: &[u8],
-) -> Result<Vec<(u32, u32)>, CodeLexicalArtifactErrorV1> {
-    let corrupt = || {
-        CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact clone fingerprint postings are malformed".to_owned(),
-        )
-    };
-    let mut postings = Vec::new();
-    let mut ordinal: Option<u32> = None;
-    while !encoded.is_empty() {
-        let delta = u32::try_from(take_varint(&mut encoded)?).map_err(|_| corrupt())?;
-        let next = match ordinal {
-            None => delta,
-            Some(_) if delta == 0 => return Err(corrupt()),
-            Some(previous) => previous.checked_add(delta).ok_or_else(corrupt)?,
-        };
-        ordinal = Some(next);
-        let count = take_varint(&mut encoded)?;
-        if count == 0 || count > encoded.len() as u64 {
-            return Err(corrupt());
-        }
-        let mut position: Option<u32> = None;
-        for _ in 0..count {
-            let delta = u32::try_from(take_varint(&mut encoded)?).map_err(|_| corrupt())?;
-            let value = match position {
-                None => delta,
-                Some(_) if delta == 0 => return Err(corrupt()),
-                Some(previous) => previous.checked_add(delta).ok_or_else(corrupt)?,
-            };
-            position = Some(value);
-            postings.push((next, value));
-        }
-    }
-    Ok(postings)
 }
 
 /// One term's sealed `term_postings.lists`: for each field in strictly
@@ -1681,9 +1580,8 @@ mod tests {
 
     use super::{
         DOCUMENT_SET_BITSET, DOCUMENT_SET_DEFLATED, DOCUMENT_SET_DELTAS, PostingListDecoderV1,
-        PostingListEncoderV1, decode_document_set, decode_fingerprint_postings,
-        decode_ngram_bitmap, decode_term_lists, encode_document_set, encode_fingerprint_postings,
-        encode_ngram_bitmap, encode_term_lists, term_lists_bytes,
+        PostingListEncoderV1, decode_document_set, decode_ngram_bitmap, decode_term_lists,
+        encode_document_set, encode_ngram_bitmap, encode_term_lists, term_lists_bytes,
     };
 
     #[test]
@@ -1768,32 +1666,6 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .is_err()
         );
-    }
-
-    #[test]
-    fn fingerprint_postings_round_trip_and_refuse_non_canonical_order() {
-        let postings = [(0u32, 4u32), (0, 9), (3, 1), (300, 0), (300, 70_000)];
-        let encoded = encode_fingerprint_postings(&postings).expect("encode");
-        assert_eq!(
-            decode_fingerprint_postings(&encoded).expect("decode"),
-            postings
-        );
-        assert!(
-            encoded.len() < postings.len() * 4,
-            "ordinal deltas stay compact"
-        );
-        assert!(encode_fingerprint_postings(&[(2, 1), (1, 1)]).is_err());
-        assert!(encode_fingerprint_postings(&[(1, 1), (1, 1)]).is_err());
-        for malformed in [
-            vec![0x01, 0x00],
-            vec![0x01, 0x02, 0x05],
-            vec![0x01, 0x01, 0x00, 0x00, 0x01, 0x00],
-        ] {
-            assert!(
-                decode_fingerprint_postings(&malformed).is_err(),
-                "accepted malformed fingerprint postings {malformed:?}"
-            );
-        }
     }
 
     #[test]

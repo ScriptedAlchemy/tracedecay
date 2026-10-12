@@ -37,7 +37,7 @@ use tracedecay_store::{
 };
 
 use crate::runtime_test_support::{
-    Probe, TestDatabase, outbox_request, read_request, reader_locator, run, verified_locator,
+    Probe, TestDatabase, diagnostics_request, read_request, reader_locator, run, verified_locator,
     writer_locator, writer_runtime_fixture,
 };
 
@@ -86,14 +86,7 @@ fn publication(
     name: &str,
     records: usize,
 ) -> RuntimeSubmitRequestV1 {
-    let target = writer_runtime_fixture().target_binding;
-    let base = outbox_request(
-        binding,
-        &target,
-        name,
-        &format!("effect.{name}"),
-        "contention",
-    );
+    let base = diagnostics_request(binding, name);
     let mut envelope = base.envelope().clone();
     let records: Vec<_> = (0..records).map(|ordinal| record(name, ordinal)).collect();
     let command_bytes =

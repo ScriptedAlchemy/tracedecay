@@ -11,7 +11,7 @@ use tracedecay_store::{
     RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
     RuntimeSubmitRequestV1, RuntimeTransactionIdV1, RuntimeTransactionScopeV1,
-    StoreOperationMetadataV1, TransactionalOutboxEntryV1, VerifiedStoreLocatorV1,
+    SanitizedCleanDiagnosticSnapshotV1, StoreOperationMetadataV1, VerifiedStoreLocatorV1,
 };
 
 const MARKER_TABLE: &str = "td_runtime_actor_marker";
@@ -88,36 +88,6 @@ pub(crate) fn request(
         "admitted_at": 1
     }))
     .expect("valid actor metadata");
-    let source_shard = serde_json::to_value(&metadata.shard_id).unwrap();
-    let outbox: TransactionalOutboxEntryV1 = serde_json::from_value(serde_json::json!({
-        "identity": {
-            "effect_id": format!("effect.{operation_id}"),
-            "command_digest": digest('e'),
-            "ordering_key": format!("{}.actor", binding.project),
-            "source_watermark": {
-                "shard_id": source_shard,
-                "incarnation": binding.incarnation,
-                "authority_epoch": binding.authority_epoch,
-                "commit_sequence": 0
-            },
-            "target_watermark": {
-                "shard_id": {
-                    "brain_id": "brain.actor",
-                    "profile_id": "profile.actor",
-                    "scope": { "kind": "project_sessions", "project_id": binding.project }
-                },
-                "incarnation": binding.incarnation,
-                "authority_epoch": binding.authority_epoch,
-                "commit_sequence": 0
-            }
-        },
-        "effect": "publish_observation",
-        "state": "pending",
-        "acknowledgement": null,
-        "enqueued_at": 1,
-        "updated_at": 1
-    }))
-    .expect("valid actor outbox");
     let transaction_scope = RuntimeTransactionScopeV1 {
         transaction_id: RuntimeTransactionIdV1::new(format!("transaction.{operation_id}")).unwrap(),
         compatibility: RuntimeBatchCompatibilityV1::from_operation(&metadata).unwrap(),
@@ -135,7 +105,13 @@ pub(crate) fn request(
     RuntimeSubmitRequestV1::new(
         RepositoryOperationEnvelopeV1 {
             metadata,
-            payload: RepositoryWritePayloadV1::EnqueueOutbox(Box::new(outbox)),
+            payload: RepositoryWritePayloadV1::Diagnostics(Box::new(
+                SanitizedCleanDiagnosticSnapshotV1::new(
+                    tracedecay_domain::CodeGenerationId::new("generation.actor").unwrap(),
+                    Vec::new(),
+                )
+                .unwrap(),
+            )),
         },
         transaction_scope,
         control,

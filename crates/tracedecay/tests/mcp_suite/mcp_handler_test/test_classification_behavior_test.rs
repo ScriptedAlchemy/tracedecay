@@ -2,15 +2,19 @@
 //! share one test classification over the indexed generation.
 //!
 //! Production code whose name or directory merely starts with `test` stays
-//! visible: `test_connection` and `testimony` in `src/lib.rs`, and `connect`
-//! in `src/testnet/client.rs`. Test code is what a path marker, a test
-//! annotation, or `#[cfg(test)]` proves: the `tests/` directory, `#[test]` and
-//! `#[tokio::test]`, the inline `#[cfg(test)] mod tests`, and the out-of-line
-//! `#[cfg(test)] mod gated;` in `src/gated.rs`.
+//! visible: `test_connection` and `testimony` in `src/lib.rs`, `connect` in
+//! `src/testnet/client.rs`, and `same_line`, the sibling sharing a line with
+//! `#[cfg(test)] fn cfg_only`. Test code is what a path marker, a test
+//! annotation, or `#[cfg(test)]` proves: the `tests/` directory, `#[test]`
+//! and `#[tokio::test]`, `cfg_only`, the inline `#[cfg(test)] mod tests`,
+//! and the out-of-line `#[cfg(test)] mod gated;` in `src/gated.rs`.
 //!
 //! Each report keeps its own handling of that classification. Test risk leaves
 //! all test code out of its census. Dead code and health treat only actual
-//! tests as entrypoints, so an uncalled test helper is still dead code.
+//! tests as entrypoints, so an uncalled test helper is still dead code —
+//! including `test_helper`, a `test*` name in a Rust test file, which the
+//! Rust runner never invokes without `#[test]`. Runners that discover tests
+//! by name need the runner's file form and, for methods, a test-case owner.
 
 #![cfg(feature = "test-transport")]
 
@@ -36,6 +40,9 @@ fn testimony() -> i32 {
 
 /// skip-test-coverage
 pub fn skipped_on_purpose() {}
+
+#[cfg(test)]
+fn cfg_only() {} fn same_line() {}
 
 #[cfg(test)]
 mod gated;
@@ -74,7 +81,7 @@ fn write_sources(project: &Path) {
     fs::write(project.join("src/gated.rs"), "fn gated_helper() {}\n").unwrap();
     fs::write(
         project.join("tests/integration.rs"),
-        "fn integration_helper() {}\n\n#[test]\nfn runs_integration() {}\n",
+        "fn integration_helper() {}\n\nfn test_helper() {}\n\n#[test]\nfn runs_integration() {}\n",
     )
     .unwrap();
 }
@@ -160,10 +167,11 @@ async fn reports_share_one_classification_and_keep_production_test_names_visible
         json!({
             "rows": [
                 {"name": "connect", "file": "src/testnet/client.rs", "attribution_method": "none"},
+                {"name": "same_line", "file": "src/lib.rs", "attribution_method": "none"},
                 {"name": "test_connection", "file": "src/lib.rs", "attribution_method": "closure"},
                 {"name": "testimony", "file": "src/lib.rs", "attribution_method": "none"},
             ],
-            "total_functions": 3,
+            "total_functions": 4,
             "tested": 1,
             "skipped": 1,
             "excluded": 0,
@@ -211,9 +219,12 @@ async fn reports_share_one_classification_and_keep_production_test_names_visible
 
     let dead = call_json(&fixture, "tracedecay_dead_code", json!({"format": "json"})).await;
     let expected_private_dead = json!([
+        {"name": "cfg_only", "file": "src/lib.rs"},
         {"name": "connect", "file": "src/testnet/client.rs"},
         {"name": "gated_helper", "file": "src/gated.rs"},
         {"name": "integration_helper", "file": "tests/integration.rs"},
+        {"name": "same_line", "file": "src/lib.rs"},
+        {"name": "test_helper", "file": "tests/integration.rs"},
         {"name": "testimony", "file": "src/lib.rs"},
     ]);
     assert_eq!(
@@ -230,10 +241,13 @@ async fn reports_share_one_classification_and_keep_production_test_names_visible
     assert_eq!(
         dead_code_census(&dead_with_public),
         json!([
+            {"name": "cfg_only", "file": "src/lib.rs"},
             {"name": "connect", "file": "src/testnet/client.rs"},
             {"name": "gated_helper", "file": "src/gated.rs"},
             {"name": "integration_helper", "file": "tests/integration.rs"},
+            {"name": "same_line", "file": "src/lib.rs"},
             {"name": "skipped_on_purpose", "file": "src/lib.rs"},
+            {"name": "test_helper", "file": "tests/integration.rs"},
             {"name": "testimony", "file": "src/lib.rs"},
         ]),
         "include_public adds the uncalled public function and still no actual test: {dead_with_public}"
@@ -258,8 +272,8 @@ async fn reports_share_one_classification_and_keep_production_test_names_visible
     .await;
     assert_eq!(
         redundancy(&health),
-        json!({"dead_count": 4, "total_fns": 10}),
-        "health counts every function and the same four dead functions: {health}"
+        json!({"dead_count": 7, "total_fns": 13}),
+        "health counts every function and the same seven dead functions: {health}"
     );
     let gated_health = call_json(
         &fixture,
@@ -271,6 +285,93 @@ async fn reports_share_one_classification_and_keep_production_test_names_visible
         redundancy(&gated_health),
         json!({"dead_count": 1, "total_fns": 1}),
         "{gated_health}"
+    );
+
+    fixture.harness.shutdown().await;
+}
+
+/// One file per name-discovering runner, each holding a runner-discovered
+/// test beside a same-named helper the runner never invokes.
+fn write_runner_sources(project: &Path) {
+    for (path, source) in [
+        (
+            "pkg/client_test.go",
+            "package pkg\n\nimport \"testing\"\n\nfunc TestConnect(t *testing.T) {}\n\nfunc helper() {}\n",
+        ),
+        ("tests/helper.go", "package tests\n\nfunc TestHelper() {}\n"),
+        (
+            "tests/test_client.py",
+            "import unittest\n\n\ndef test_runs():\n    pass\n\n\nclass ClientTest(unittest.TestCase):\n    def testConnect(self):\n        pass\n\n\nclass Client:\n    def test_connects(self):\n        pass\n",
+        ),
+        ("tests/helper.py", "def test_helper():\n    pass\n"),
+        (
+            "app/tests.py",
+            "from django.test import TestCase\n\n\nclass BookTests(TestCase):\n    def test_creates(self):\n        pass\n",
+        ),
+        (
+            "src/test/java/FormatTest.java",
+            "public class FormatTest extends junit.framework.TestCase {\n    public void testFormat() {}\n}\n",
+        ),
+        (
+            "src/test/java/FormatHelper.java",
+            "public class FormatHelper {\n    public void testFormat() {}\n}\n",
+        ),
+        (
+            "tests/SaveTest.php",
+            "<?php\n\nclass SaveTest extends TestCase\n{\n    public function testSaves() {}\n}\n\nclass SaveHelper\n{\n    public function testSaves() {}\n}\n",
+        ),
+        (
+            "test/save_test.rb",
+            "class SaveTest < Minitest::Test\n  def test_saves\n  end\nend\n\nclass Saver\n  def test_saves\n  end\nend\n",
+        ),
+        (
+            "Tests/AppTests/AppTests.swift",
+            "import XCTest\n\nclass AppTests: XCTestCase {\n    func testLaunch() {}\n}\n\nclass Launcher {\n    func testLaunch() {}\n}\n",
+        ),
+        (
+            "Tests/LegacyTests.m",
+            "@implementation LegacyTests\n- (void)testLaunch {}\n@end\n\n@implementation LegacyLauncher\n- (void)testLaunch {}\n@end\n",
+        ),
+    ] {
+        let path = project.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, source).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn runners_discover_tests_by_file_and_owner_not_name_alone() {
+    let fixture = production_composition_fixture_with_sources(write_runner_sources).await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production runner server");
+    wait_for_current_graph(&server).await;
+
+    let dead = call_json(
+        &fixture,
+        "tracedecay_dead_code",
+        json!({
+            "format": "json",
+            "include_public": true,
+            "kinds": ["function", "method", "struct_method"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        dead_code_census(&dead),
+        json!([
+            {"name": "TestHelper", "file": "tests/helper.go"},
+            {"name": "helper", "file": "pkg/client_test.go"},
+            {"name": "testFormat", "file": "src/test/java/FormatHelper.java"},
+            {"name": "testLaunch", "file": "Tests/AppTests/AppTests.swift"},
+            {"name": "testLaunch", "file": "Tests/LegacyTests.m"},
+            {"name": "testSaves", "file": "tests/SaveTest.php"},
+            {"name": "test_connects", "file": "tests/test_client.py"},
+            {"name": "test_helper", "file": "tests/helper.py"},
+            {"name": "test_saves", "file": "test/save_test.rb"},
+        ]),
+        "only the helpers each runner skips are dead: {dead}"
     );
 
     fixture.harness.shutdown().await;

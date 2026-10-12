@@ -731,7 +731,7 @@ async fn nested_media_placeholder_remains_inside_structured_active_content() {
 }
 
 #[tokio::test]
-async fn structured_active_content_replay_preserves_shape_while_grep_snippet_stays_bounded() {
+async fn structured_active_content_replay_preserves_shape_while_stored_snippet_stays_bounded() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_session(&db, "cursor", "session-bounded").await;
@@ -757,27 +757,14 @@ async fn structured_active_content_replay_preserves_shape_while_grep_snippet_sta
     .await;
     assert_eq!(response.replay_messages[0]["content"], content);
 
-    let hits = db
-        .lcm_grep(LcmGrepRequest {
-            provider: "cursor".into(),
-            query: "bounded-structured-canary".into(),
-            scope: LcmScope::Session,
-            session_id: Some("session-bounded".into()),
-            include_summaries: false,
-            limit: 10,
-            sort: LcmGrepSort::Recency,
-            source: None,
-            role: None,
-            start_time: None,
-            end_time: None,
-            git_filter: Default::default(),
-        })
+    let (snippet, _) = db
+        .lcm_raw_message_search_fields("cursor", "structured-bounded")
         .await
         .unwrap()
-        .hits;
-    assert_eq!(hits.len(), 1);
-    assert!(hits[0].snippet.chars().count() <= MAX_DERIVED_SNIPPET_CHARS);
-    assert!(!hits[0].snippet.contains("::structured-tail"));
+        .expect("structured message should store a derived snippet");
+    assert!(snippet.contains("bounded-structured-canary"));
+    assert!(snippet.chars().count() <= MAX_DERIVED_SNIPPET_CHARS);
+    assert!(!snippet.contains("::structured-tail"));
 }
 
 // Mirrors hermes-lcm `_assemble_context` loading all uncondensed DAG nodes:

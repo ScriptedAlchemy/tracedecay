@@ -770,6 +770,82 @@ fn unresolvable_active_tree_falls_back_to_full_capture() {
     );
 }
 
+/// A checkout cannot read a symlink that loops or runs through a file, the
+/// same as a dangling one. Disk capture records it as absent instead of
+/// failing the capture of every other path in the repository.
+#[cfg(unix)]
+#[test]
+fn unfollowable_committed_source_links_are_absent_from_disk_capture() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn kept() -> u32 { 1 }\n")]);
+    for (target, link) in [
+        ("loop_b.rs", "src/loop_a.rs"),
+        ("loop_a.rs", "src/loop_b.rs"),
+        ("lib.rs/inner.rs", "src/through_file.rs"),
+    ] {
+        std::os::unix::fs::symlink(target, fixture.path().join(link)).expect("source symlink");
+    }
+    fixture.commit_all("unfollowable links");
+    let store = TempDir::new().expect("store root");
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+
+    let captured = scheduler
+        .capture_authoritative_snapshot_without_active_generation_reuse(None)
+        .expect("capture a checkout holding unfollowable links");
+
+    assert_eq!(
+        captured
+            .snapshot
+            .files
+            .iter()
+            .map(|file| file.logical_path.as_str())
+            .collect::<Vec<_>>(),
+        ["src/lib.rs"]
+    );
+}
+
+/// Git stores a committed source symlink as its target path, while the
+/// worktree reads through it. Sealing the link text from HEAD's tree left the
+/// first post-publication sweep disproving an unchanged checkout, so every
+/// mount rebuilt once and served the rebuild as dirty.
+#[cfg(unix)]
+#[test]
+fn committed_source_symlink_publishes_a_current_clean_generation() {
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", "pub mod pricing;\n"),
+        ("src/pricing.rs", "pub fn total() -> u64 { 1 }\n"),
+    ]);
+    std::os::unix::fs::symlink("pricing.rs", fixture.path().join("src/pricing_alias.rs"))
+        .expect("source symlink");
+    fixture.commit_all("alias pricing");
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+
+    assert!(
+        !scheduler.request_fresh_now_background(),
+        "the sweep after publication must find the unchanged checkout current"
+    );
+    assert_eq!(
+        scheduler
+            .latest_complete()
+            .expect("published generation")
+            .generation
+            .snapshot()
+            .source_revision
+            .as_ref(),
+        scheduler.identity.head_commit(),
+        "a clean checkout's generation must carry HEAD's revision"
+    );
+}
+
 #[test]
 fn reverted_dirty_file_is_recaptured_from_clean_content() {
     let committed = "pub fn alpha() -> u32 { 1 }\n";
@@ -1038,8 +1114,7 @@ async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
     assert_eq!(observation.coverage.source_bodies, Some(1));
     assert_eq!(observation.coverage.eligible_source_bodies, Some(0));
     assert_eq!(observation.coverage.conservative_normalized_bodies, Some(0));
-    assert_eq!(observation.coverage.near_fingerprint_bodies, Some(0));
-    assert_eq!(observation.budgets.posting_rows, 16_384);
+    assert_eq!(observation.budgets.minimum_body_tokens, 30);
     assert!(observation.resources.bytes_on_disk.is_some());
     assert!(observation.resources.peak_scratch_memory_bytes.is_some());
 
@@ -9108,6 +9183,10 @@ async fn serving_seat_wake_arrives_only_after_the_slot_is_seated() {
         )
         .await
         .expect("mount scheduler");
+    // Releasing a seat also advances the counter, and a parked worker gives an
+    // undemanded seat straight back. Demand it before the first pass can seat,
+    // so the only advance this wait can observe is the install.
+    assert!(registry.request_complete_generation(fixture.path()).await);
     tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, seats.changed())
         .await
         .expect("seating wakes its waiters instead of leaving them to poll")
@@ -10639,6 +10718,9 @@ async fn resident_memory_graph_refusal_serves_text_and_retries_when_memory_is_gi
         fixture.path(),
         SERVING_SEAT_FAILURE_CEILING,
         || async {
+            // The worker parks right after the seat and, undemanded, gives
+            // the decode straight back before this probe can read it.
+            registry.request_complete_generation(fixture.path()).await;
             registry
                 .latest_complete_serving_for_scope(&scope)
                 .await
