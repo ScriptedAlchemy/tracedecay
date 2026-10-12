@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
+use tracedecay_code_index_runtime::code_index_scheduler::sealed_source_bytes;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     RenamePreviewNodeV1, RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
@@ -14,6 +15,7 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::{ContentDigest, LanguageId};
 
 use crate::McpToolContext;
 use crate::handlers::bounded_search::CancelSearchOnDrop;
@@ -29,11 +31,6 @@ use super::{
 struct PreviewSource {
     text: String,
     line_starts: Vec<usize>,
-    /// Line starts in the byte space the index captured when commit-time
-    /// normalization folded every `\r\n` into `\n`; empty when the text has
-    /// no `\r` to fold.
-    folded_starts: Vec<usize>,
-    folded_len: usize,
 }
 
 struct PreviewWalkControl {
@@ -77,30 +74,7 @@ impl PreviewSource {
             control.check()?;
             line_starts.push(offset + 1);
         }
-        let mut folded_starts = Vec::new();
-        let mut folded_len = 0usize;
-        if text.as_bytes().contains(&b'\r') {
-            folded_starts.reserve(line_starts.len());
-            let mut folded = 0usize;
-            for (index, &start) in line_starts.iter().enumerate() {
-                folded_starts.push(folded);
-                let terminated = index + 1 < line_starts.len();
-                let end = if terminated {
-                    line_starts[index + 1] - 1
-                } else {
-                    text.len()
-                };
-                folded += (end - start) + usize::from(terminated)
-                    - usize::from(terminated && end > start && text.as_bytes()[end - 1] == b'\r');
-            }
-            folded_len = folded;
-        }
-        Ok(Self {
-            text,
-            line_starts,
-            folded_starts,
-            folded_len,
-        })
+        Ok(Self { text, line_starts })
     }
 
     fn line(&self, index: usize) -> Option<&str> {
@@ -120,86 +94,20 @@ impl PreviewSource {
         })
     }
 
-    #[cfg(test)]
     fn line_for_byte_offset(&self, byte_offset: u64) -> Result<u32> {
-        self.line_in_space(byte_offset, EvidenceSpace::Worktree)
-    }
-
-    /// The byte space this file's evidence was captured in, decided by the
-    /// declaration anchors of the edges' source nodes: each caller's
-    /// `source_span.start_byte` and `start_line` live in the captured
-    /// space, so a space under which an anchor byte maps to the anchor line
-    /// is the space every evidence offset in the file shares. Only a
-    /// folded-only verification is decisive — an anchor before the first
-    /// `\r\n` verifies under both spaces. Without one the file keeps the
-    /// worktree reading: raw captures and files whose two spaces are
-    /// identical map correctly there (the unmodified behavior).
-    fn evidence_space(&self, anchors: &[(u64, u32)]) -> EvidenceSpace {
-        let folded = anchors.iter().any(|&(start_byte, start_line)| {
-            usize::try_from(start_byte).is_ok_and(|offset| {
-                self.line_at(offset).ok() != Some(start_line)
-                    && self.folded_line_at(offset) == Some(start_line)
-            })
-        });
-        if folded {
-            EvidenceSpace::Folded
-        } else {
-            EvidenceSpace::Worktree
-        }
-    }
-
-    /// Maps a graph evidence byte offset to a line in the file's capture
-    /// space. The index records offsets in the byte space of the captured
-    /// source, which loses one byte per `\r\n` that commit-time
-    /// normalization folded into `\n`.
-    fn line_in_space(&self, byte_offset: u64, space: EvidenceSpace) -> Result<u32> {
         let offset = usize::try_from(byte_offset).map_err(|_| {
             graph_symbol_corrupt("graph evidence byte offset exceeds this platform".to_owned())
         })?;
-        match space {
-            EvidenceSpace::Worktree => {
-                if offset > self.text.len() {
-                    return Err(graph_symbol_corrupt(format!(
-                        "graph evidence byte offset {offset} exceeds source length {}",
-                        self.text.len()
-                    )));
-                }
-                self.line_at(offset)
-            }
-            EvidenceSpace::Folded => self.folded_line_at(offset).ok_or_else(|| {
-                graph_symbol_corrupt(format!(
-                    "graph evidence byte offset {offset} exceeds captured source length {}",
-                    self.folded_len
-                ))
-            }),
+        if offset > self.text.len() {
+            return Err(graph_symbol_corrupt(format!(
+                "graph evidence byte offset {offset} exceeds source length {}",
+                self.text.len()
+            )));
         }
-    }
-
-    fn line_at(&self, offset: usize) -> Result<u32> {
         let line = self.line_starts.partition_point(|start| *start <= offset) - 1;
         u32::try_from(line)
             .map_err(|_| graph_symbol_corrupt("graph evidence line exceeds u32".to_owned()))
     }
-
-    /// The line `offset` lands on in the folded (`\r\n` -> `\n`) capture
-    /// space. `None` when the text has nothing to fold or the offset falls
-    /// past the captured end.
-    fn folded_line_at(&self, offset: usize) -> Option<u32> {
-        if self.folded_starts.is_empty() || offset > self.folded_len {
-            return None;
-        }
-        let index = self.folded_starts.partition_point(|start| *start <= offset) - 1;
-        u32::try_from(index).ok()
-    }
-}
-
-/// Which byte space a file's graph evidence is recorded in: raw worktree
-/// bytes, or the folded (`\r\n` -> `\n`) bytes committed under
-/// normalization.
-#[derive(Clone, Copy)]
-enum EvidenceSpace {
-    Worktree,
-    Folded,
 }
 
 /// Trims and length-caps a source line for use as a preview snippet.
@@ -264,11 +172,6 @@ struct RenameReferenceSiteInput {
     edge_kind: String,
     file: String,
     evidence_start_byte: u64,
-    /// The calling symbol's own declaration anchor — its captured span start
-    /// byte and start line. One file's evidence offsets all live in the same
-    /// captured byte space, so this anchor decides which of the two
-    /// candidate spaces that is.
-    anchor: Option<(u64, u32)>,
 }
 
 struct PreviewFileWalk {
@@ -276,6 +179,7 @@ struct PreviewFileWalk {
     declaration_line: u32,
     result: RenamePreviewPrimitiveResultV1,
     reference_inputs: Vec<RenameReferenceSiteInput>,
+    sealed_files: HashMap<String, (LanguageId, ContentDigest)>,
     graph_counts: HashMap<String, usize>,
     touched_files: Vec<String>,
     control: PreviewWalkControl,
@@ -307,23 +211,45 @@ impl PreviewFileWalk {
                 Err(_) => continue,
             };
             let source = PreviewSource::new(text, &self.control)?;
+            // Evidence offsets index the bytes the generation sealed. A
+            // checkout whose git clean filters rewrite the file (CRLF under
+            // `core.autocrlf=true`) still holds them; once the file changes
+            // after the seal only its current text remains to map against.
+            let sealed = match self.sealed_files.get(&file) {
+                Some((language, digest)) => sealed_source_bytes(
+                    &self.project_root,
+                    &file,
+                    language,
+                    digest,
+                )
+                .map_err(|error| {
+                    TraceDecayError::project_route(
+                        "verified-reference-source-unavailable",
+                        true,
+                        format!(
+                            "cannot read the bytes the indexed graph sealed for '{file}': {error}"
+                        ),
+                    )
+                })?,
+                None => None,
+            };
+            let evidence = sealed
+                .map(|bytes| {
+                    let text = String::from_utf8(bytes).map_err(|_| {
+                        graph_symbol_corrupt(format!("the sealed source of '{file}' is not UTF-8"))
+                    })?;
+                    PreviewSource::new(text, &self.control)
+                })
+                .transpose()?;
+            let evidence = evidence.as_ref().unwrap_or(&source);
             if file == self.result.node.file {
                 decl_snippet = source
                     .line(self.declaration_line as usize)
                     .map(snippet_text);
             }
-            let mut file_inputs = Vec::new();
             while let Some(input) = reference_inputs.next_if(|input| input.file == file) {
-                file_inputs.push(input);
-            }
-            let anchors: Vec<(u64, u32)> = file_inputs
-                .iter()
-                .filter_map(|input| input.anchor)
-                .collect();
-            let space = source.evidence_space(&anchors);
-            for input in file_inputs {
                 self.control.check()?;
-                let line = source.line_in_space(input.evidence_start_byte, space)?;
+                let line = evidence.line_for_byte_offset(input.evidence_start_byte)?;
                 let snippet = reference_line_snippet(&source, Some(line), &self.result.symbol);
                 references.push((
                     input.ordinal,
@@ -397,7 +323,7 @@ pub async fn compute_rename_preview(
     let mut touched: Vec<String> = Vec::new();
     // Graph phase: extract owned declaration fields and per-reference-site
     // inputs so the blocking file walk below needs no graph value at all.
-    let (declaration, declaration_line, symbol_name, reference_inputs) = {
+    let (declaration, declaration_line, symbol_name, reference_inputs, sealed_files) = {
         let _span = tracing::trace_span!("mcp.graph.rename_preview.graph").entered();
         {
             let Some(node) = graph.symbol_summary(&occurrence)? else {
@@ -434,12 +360,24 @@ pub async fn compute_rename_preview(
             )?)?;
             let mut reference_inputs =
                 Vec::<RenameReferenceSiteInput>::with_capacity(incoming.len());
+            let mut sealed_files = HashMap::new();
             for (ordinal, edge) in incoming.into_iter().enumerate() {
                 let source_node = edge.neighbor;
                 let source_metadata = required_graph_metadata(&source_node)?;
                 let source_file = required_graph_file_path(&source_node)?;
                 touched.push(source_file.to_owned());
                 *graph_counts.entry(source_file.to_owned()).or_default() += 1;
+                if !sealed_files.contains_key(source_file) {
+                    let sealed = graph
+                        .file_by_logical_path(source_file)?
+                        .and_then(|file| Some((file.language?, file.content_digest)))
+                        .ok_or_else(|| {
+                            graph_symbol_corrupt(format!(
+                                "graph references name '{source_file}' but the graph has no sealed source record for it"
+                            ))
+                        })?;
+                    sealed_files.insert(source_file.to_owned(), sealed);
+                }
                 reference_inputs.push(RenameReferenceSiteInput {
                     ordinal,
                     from_node_id: source_node.occurrence.as_str().to_owned(),
@@ -448,11 +386,6 @@ pub async fn compute_rename_preview(
                     edge_kind: edge.edge.kind.as_str().to_owned(),
                     file: source_file.to_owned(),
                     evidence_start_byte: edge.edge.evidence_span.start_byte,
-                    anchor: source_node
-                        .binding
-                        .as_ref()
-                        .and_then(|binding| binding.source_span.as_ref())
-                        .map(|span| (span.start_byte, source_metadata.start_line)),
                 });
             }
             (
@@ -460,6 +393,7 @@ pub async fn compute_rename_preview(
                 node_metadata.start_line,
                 symbol_name,
                 reference_inputs,
+                sealed_files,
             )
         }
     };
@@ -497,6 +431,7 @@ pub async fn compute_rename_preview(
         declaration_line,
         result,
         reference_inputs,
+        sealed_files,
         graph_counts,
         touched_files: touched_files.clone(),
         control,
@@ -516,7 +451,7 @@ pub async fn compute_rename_preview(
 
 #[cfg(test)]
 mod tests {
-    use super::{EvidenceSpace, PreviewSource, PreviewWalkControl};
+    use super::{PreviewSource, PreviewWalkControl};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -556,62 +491,5 @@ mod tests {
                 assert!(source.line_for_byte_offset(offset).is_err());
             }
         }
-    }
-
-    #[test]
-    fn folded_starts_survive_an_empty_first_line() {
-        let control = PreviewWalkControl {
-            cancelled: Arc::new(AtomicBool::new(false)),
-            cancellation: None,
-            deadline: None,
-            budget: crate::tools::dispatch_ceiling::TOOL_DISPATCH_CEILING,
-        };
-        // A `\n` closing an empty first line gives it end == 0: the folded
-        // scan must not underflow `end - 1`.
-        let source = PreviewSource::new("\nblank\r\nlast\r\n".to_owned(), &control).unwrap();
-        assert_eq!(source.line_starts, vec![0, 1, 8, 14]);
-        assert_eq!(source.folded_starts, vec![0, 1, 7, 12]);
-        assert_eq!(source.folded_len, 12);
-    }
-
-    #[test]
-    fn the_caller_anchor_decides_the_evidence_byte_space() {
-        let control = PreviewWalkControl {
-            cancelled: Arc::new(AtomicBool::new(false)),
-            cancellation: None,
-            deadline: None,
-            budget: crate::tools::dispatch_ceiling::TOOL_DISPATCH_CEILING,
-        };
-        // Identical call lines make folded offsets coincide with earlier raw
-        // positions: the capture space comes from the caller's declaration
-        // anchor, not from what an offset happens to point at.
-        let text = "fn decl() {}\r\n".to_owned() + &"    reserve_stock();\r\n".repeat(30);
-        let folded = text.replace("\r\n", "\n");
-        let source = PreviewSource::new(text.clone(), &control).unwrap();
-        // A caller declared on line 25 verifies only under the folded space,
-        // so every evidence offset in the file maps there — including the
-        // call-site offset that reads as line 24 in raw bytes.
-        let anchor = folded.match_indices("reserve_stock").nth(24).unwrap().0 as u64;
-        assert!(matches!(
-            source.evidence_space(&[(anchor, 25)]),
-            EvidenceSpace::Folded
-        ));
-        assert_eq!(
-            source.line_in_space(anchor, EvidenceSpace::Folded).unwrap(),
-            25
-        );
-        assert_eq!(source.line_at(anchor as usize).unwrap(), 24);
-        // A caller anchor that verifies only in worktree bytes (a raw
-        // capture) or in neither space (a drifted capture) keeps the
-        // worktree reading.
-        let raw_anchor = text.match_indices("reserve_stock").nth(25).unwrap().0 as u64;
-        assert!(matches!(
-            source.evidence_space(&[(raw_anchor, 26)]),
-            EvidenceSpace::Worktree
-        ));
-        assert!(matches!(
-            source.evidence_space(&[(2, 9)]),
-            EvidenceSpace::Worktree
-        ));
     }
 }
