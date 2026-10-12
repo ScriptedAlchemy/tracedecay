@@ -236,10 +236,13 @@ fn synthetic_candidate_tree_is_streamed_in_order_before_object_memory_drops() {
                 );
                 let mut paths = Vec::new();
                 candidate
-                    .visit_blobs(|path, _bytes| {
-                        paths.push(String::from_utf8(path.to_vec()).expect("UTF-8 test path"));
-                        Ok::<(), std::convert::Infallible>(())
-                    })
+                    .visit_blobs(
+                        |_| false,
+                        |path, _bytes| {
+                            paths.push(String::from_utf8(path.to_vec()).expect("UTF-8 test path"));
+                            Ok::<(), std::convert::Infallible>(())
+                        },
+                    )
                     .expect("visit candidate blobs");
                 Ok::<_, std::convert::Infallible>(paths)
             },
@@ -271,10 +274,13 @@ fn synthetic_candidate_tree_is_streamed_in_order_before_object_memory_drops() {
         &cancelled,
         |_, candidate| {
             candidate
-                .visit_blobs(|_, _| {
-                    cancelled.cancel();
-                    Ok::<(), std::convert::Infallible>(())
-                })
+                .visit_blobs(
+                    |_| false,
+                    |_, _| {
+                        cancelled.cancel();
+                        Ok::<(), std::convert::Infallible>(())
+                    },
+                )
                 .map_err(|_| "cancelled candidate traversal")
         },
     );
@@ -284,6 +290,68 @@ fn synthetic_candidate_tree_is_streamed_in_order_before_object_memory_drops() {
             "cancelled candidate traversal"
         ))
     ));
+}
+
+/// Git stores a symlink as its target path. A link the caller reads through
+/// is visited with the bytes of the blob it names, or skipped when it names
+/// none; any other link is visited with its link text.
+#[cfg(unix)]
+#[test]
+fn candidate_tree_reads_accepted_symlinks_through_to_their_blobs() {
+    let fixture = RepositoryFixture::new();
+    fixture.write("shared.txt", "base\n");
+    fixture.commit("base");
+    fixture.git(&["branch", "feature"]);
+    fixture.write("main.txt", "main\n");
+    let destination = GitOidV1::new(fixture.commit("main")).unwrap();
+    fixture.git(&["switch", "--quiet", "feature"]);
+    for (target, link) in [
+        ("shared.txt", "alias.rs"),
+        ("missing.txt", "dangling.rs"),
+        ("shared.txt", "plain.link"),
+    ] {
+        std::os::unix::fs::symlink(target, fixture.path().join(link)).expect("symlink");
+    }
+    let source = GitOidV1::new(fixture.commit("links")).unwrap();
+
+    let (_, visited) = GitRepositoryAuthority::discover(fixture.path())
+        .unwrap()
+        .preflight_native_integration_with_candidate(
+            "refs/heads/feature",
+            "refs/heads/main",
+            &source,
+            &destination,
+            GitNativeIntegrationMode::TwoParentMerge,
+            &CancellationToken::new(),
+            |_, candidate| {
+                let mut visited = Vec::new();
+                candidate
+                    .visit_blobs(
+                        |path| path.ends_with(b".rs"),
+                        |path, bytes| {
+                            visited.push((
+                                String::from_utf8(path.to_vec()).expect("UTF-8 test path"),
+                                String::from_utf8(bytes.to_vec()).expect("UTF-8 test bytes"),
+                            ));
+                            Ok::<(), std::convert::Infallible>(())
+                        },
+                    )
+                    .expect("visit candidate blobs");
+                Ok::<_, std::convert::Infallible>(visited)
+            },
+        )
+        .expect("preflight and capture");
+
+    assert_eq!(
+        visited.expect("eligible capture"),
+        [
+            ("alias.rs", "base\n"),
+            ("main.txt", "main\n"),
+            ("plain.link", "shared.txt"),
+            ("shared.txt", "base\n"),
+        ]
+        .map(|(path, bytes)| (path.to_owned(), bytes.to_owned()))
+    );
 }
 
 #[test]

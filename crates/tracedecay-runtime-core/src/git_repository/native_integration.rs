@@ -8,7 +8,7 @@
 use gix::bstr::ByteSlice as _;
 use tracedecay_domain::git::GitOidV1;
 
-use super::{GitRepositoryAuthority, GitRepositoryError, operation};
+use super::{GitRepositoryAuthority, GitRepositoryError, operation, resolve_tree_link};
 use crate::cancellation::CancellationToken;
 
 const MAX_INTEGRATION_COMMITS: usize = 256;
@@ -73,9 +73,12 @@ impl GitNativeCandidateTreeV1<'_> {
     }
 
     /// Visit every non-tree, non-submodule entry in stable path order, with
-    /// its raw Git path bytes.
+    /// its raw Git path bytes. A symlink whose path `read_through` accepts is
+    /// visited with the bytes of the blob it names in this tree, and skipped
+    /// when it names none; every other symlink is visited with its link text.
     pub fn visit_blobs<E>(
         &self,
+        read_through: impl Fn(&[u8]) -> bool,
         mut visitor: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
     ) -> Result<(), GitNativeCandidateTreeVisitError<E>> {
         let tree = self
@@ -99,10 +102,21 @@ impl GitNativeCandidateTreeV1<'_> {
             if entry.mode.is_tree() || entry.mode.is_commit() {
                 continue;
             }
-            let blob = self
+            let mut blob = self
                 .repository
                 .find_blob(entry.oid)
                 .map_err(|error| repository_visit_error("native candidate blob", error))?;
+            if entry.mode.is_link() && read_through(entry.filepath.as_ref()) {
+                let Some(target) = resolve_tree_link(&tree, entry.filepath.as_ref(), &blob.data)
+                    .map_err(GitNativeCandidateTreeVisitError::Repository)?
+                else {
+                    continue;
+                };
+                blob = self
+                    .repository
+                    .find_blob(target)
+                    .map_err(|error| repository_visit_error("native candidate blob", error))?;
+            }
             visitor(entry.filepath.as_ref(), &blob.data)
                 .map_err(GitNativeCandidateTreeVisitError::Visitor)?;
         }
