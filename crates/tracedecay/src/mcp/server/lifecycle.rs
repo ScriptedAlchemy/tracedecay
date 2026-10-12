@@ -242,12 +242,14 @@ impl McpServer {
     }
 
     /// Polls until at least one branch reopen has completed past `after`, or
-    /// until `timeout` elapses. Returns `true` if one landed.
-    ///
-    /// Reopens do not block requests, so tests (and any caller that genuinely
-    /// needs the post-swap state rather than an answer) observe completion here.
-    #[doc(hidden)]
-    pub async fn wait_for_branch_reopen(&self, after: u64, timeout: std::time::Duration) -> bool {
+    /// until `timeout` elapses. Returns `true` if one landed. Reopens do not
+    /// block requests, so tests observe completion here.
+    #[cfg(test)]
+    pub(crate) async fn wait_for_branch_reopen(
+        &self,
+        after: u64,
+        timeout: std::time::Duration,
+    ) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         while self.branch_reopen_completions.load(Ordering::Acquire) <= after {
             if tokio::time::Instant::now() >= deadline {
@@ -259,8 +261,8 @@ impl McpServer {
     }
 
     /// Number of branch reopens that have completed so far.
-    #[doc(hidden)]
-    pub fn branch_reopens_completed(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn branch_reopens_completed(&self) -> u64 {
         self.branch_reopen_completions.load(Ordering::Acquire)
     }
 

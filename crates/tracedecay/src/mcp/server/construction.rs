@@ -377,60 +377,32 @@ impl McpServerConstructionContext {
             delivery_settlement_authority,
             delivery_settlement_recorder,
         } = authority;
-        let registry = databases.registry;
-        let project_session_refresh_wake = share_refresh_wake(project_session_refresh_wake);
-        let user_session_refresh_wake = share_refresh_wake(user_session_refresh_wake);
-        Self {
-            cg: cg.into(),
+        let mut server = Self::daemon_owned_core(
+            cg,
             scope_prefix,
-            profile: Some(profile),
-            profile_identity: Some(wrap_profile_identity(profile_identity)),
-            global_db: Some(registry.clone()),
-            accounting_db: databases.accounting,
-            registry_db: Some(registry),
-            project_session_db: Some(databases.project_sessions),
-            profile_session_db: Some(databases.profile_sessions),
-            session_sync_service: Some(session_sync_service),
-            host_admission_broker,
-            background_cpu: Some(background_cpu),
-            project_session_refresh_wake: Some(project_session_refresh_wake),
-            user_session_refresh_wake: Some(user_session_refresh_wake),
-            own_project_host_admission_replay: true,
-            startup_catch_up_enabled: true,
-            automation_scheduler_reconciler: None,
-            database_owner_reconciler: Some(database_owner_reconciler),
-            dashboard_automation_writer: writers.dashboard_automation,
-            remote_operational_status: None,
-            dashboard_code_index_freshness_reader: None,
-            code_index_readiness_waiter: None,
-            dashboard_feedback_status_reader: None,
-            dashboard_pr_autotrack_reader: None,
-            diagnostics_lsp: None,
-            background_refresh_writer: writers.background_refresh,
-            code_index_hook_sink: None,
-            code_index_reconcile_sink: None,
-            code_index_freshness_probe_sink: None,
-            code_index_publication_identity: None,
-            code_index_search_executor: None,
-            code_index_similar_executor: None,
-            code_index_redundancy_executor: None,
-            code_index_branch_diff_executor: None,
-            code_graph_projection_read_port: None,
-            code_graph_read_admission_port: None,
-            verified_graph_query_port: None,
-            code_index_ignored_dependency_admission: None,
-            code_index_search_authority: None,
-            admitted_project_scope: None,
-            retained_project_server_resolver: None,
-            project_routes,
-            application_invocation_executor: None,
-            daemon_invocation_service: None,
-            delivery_settlement_authority: Some(delivery_settlement_authority),
-            delivery_settlement_recorder: Some(delivery_settlement_recorder),
-            project_server_live: None,
-            #[cfg(any(test, feature = "test-transport"))]
-            host_admission_test_runtime: None,
-        }
+            McpServerDaemonCoreAuthority {
+                profile,
+                profile_identity,
+                accounting: databases.accounting,
+                registry: databases.registry,
+                database_owner_reconciler,
+                project_routes,
+                writers,
+            },
+        );
+        server.project_session_db = Some(databases.project_sessions);
+        server.profile_session_db = Some(databases.profile_sessions);
+        server.session_sync_service = Some(session_sync_service);
+        server.host_admission_broker = host_admission_broker;
+        server.background_cpu = Some(background_cpu);
+        server.project_session_refresh_wake =
+            Some(share_refresh_wake(project_session_refresh_wake));
+        server.user_session_refresh_wake = Some(share_refresh_wake(user_session_refresh_wake));
+        server.own_project_host_admission_replay = true;
+        server.startup_catch_up_enabled = true;
+        server.delivery_settlement_authority = Some(delivery_settlement_authority);
+        server.delivery_settlement_recorder = Some(delivery_settlement_recorder);
+        server
     }
 
     pub(crate) fn daemon_owned_core(
