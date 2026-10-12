@@ -79,7 +79,7 @@ PATH = re.compile(r"(?<![\w.@+-])/?(?:[\w.@+-]+/)+[\w@+-][\w.@+-]*\.[A-Za-z][A-Z
 SYMBOL = re.compile(r"(?<![\w:])[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*")
 MIN_SYMBOL = 6
 MIN_QUOTE = 24
-PAGE_SIZES = (25, 10, 4, 1)
+PAGE_SIZE = 25
 
 
 # ---------------------------------------------------------------- matching --
@@ -411,26 +411,17 @@ def all_refs(repo: str) -> list[tuple[str, str]]:
 
 def load_messages(client: TraceDecay, provider: str, session: str, scope: str) -> list[dict]:
     """Every stored message of one session; raises ToolProblem when unreadable."""
-    last: ToolProblem | None = None
-    for page in PAGE_SIZES:
-        messages: list[dict] = []
-        cursor = None
-        try:
-            while True:
-                arguments = {"session_id": session, "provider": provider, "storage_scope": scope, "limit": page, "content_limit": 20000}
-                if cursor:
-                    arguments["cursor"] = cursor
-                payload = client.call("tracedecay_lcm_load_session", arguments)
-                messages += payload["messages"]
-                cursor = payload["temporal"].get("next_cursor")
-                if not cursor or not payload["messages"]:
-                    return messages
-        except ToolProblem as problem:
-            last = problem
-            if problem.code != "application.retained.budget-refused":
-                raise
-    assert last is not None
-    raise last
+    messages: list[dict] = []
+    cursor = None
+    while True:
+        arguments = {"session_id": session, "provider": provider, "storage_scope": scope, "limit": PAGE_SIZE, "content_limit": 20000}
+        if cursor:
+            arguments["cursor"] = cursor
+        payload = client.call("tracedecay_lcm_load_session", arguments)
+        messages += payload["messages"]
+        cursor = payload["temporal"].get("next_cursor")
+        if not cursor or not payload["messages"]:
+            return messages
 
 
 def message_order(indexed: tuple[int, dict]) -> tuple:
